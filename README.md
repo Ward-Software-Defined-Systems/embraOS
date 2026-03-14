@@ -158,7 +158,7 @@ The full architecture includes:
 
 ## License
 
-TBD
+Proprietary — see [LICENSE](LICENSE) for details. Personal evaluation and non-commercial experimentation permitted. Commercial use requires a separate license from WSDS.
 
 ---
 
