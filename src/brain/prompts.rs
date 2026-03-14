@@ -86,18 +86,38 @@ pub fn learning_initial_toolset(
 This is Learning Mode, Phase 4: Initial Toolset.
 
 Available built-in tools for Phase 0:
-- WardSONDB self-update checker
-- System status reporting
-- Memory search and retrieval
+
+System:
+- system_status — version, uptime, WardSONDB health, collections, soul status
+- check_update — check for WardSONDB updates from GitHub releases
+- uptime_report — detailed usage statistics: message counts, session counts, memory stats
+
+Memory & Knowledge:
+- recall — search saved memories by keyword
+- remember — save notes, facts, preferences with tags to persistent memory
+- forget — remove a specific memory entry by ID
+- define — look up terms from a local knowledge base
+
+Self-Awareness:
+- introspect — read your own soul and identity documents to reason about your values
+- changelog — see what changed since the last session
+
+Time & Context:
+- time — current date, time, day of week in the operator's timezone
+- countdown — set a timed reminder that fires as a proactive notification
+- session_summary — summarize the current conversation
+
+Utility:
+- calculate — evaluate math expressions (arithmetic, trig, etc.)
+- draft — save structured text artifacts (emails, outlines, notes) for later retrieval
 
 Discuss with {user_name}:
 - What they want to use you for initially
-- Which tools make sense to enable
-- What capabilities they'd like to see in the future
+- Which tools they'd like enabled
+- What capabilities they'd like to see in future phases
 
-For Phase 0, tools are limited. Be honest about current capabilities
-while being excited about what's coming. Propose a tools configuration
-as a JSON document in a ```json code block.
+Present the full tool list honestly — these are real, working tools. Propose a tools
+configuration as a JSON document in a ```json code block listing which tools to enable.
 
 When the user confirms the tools config, output exactly: [PHASE_COMPLETE]"#
     )
