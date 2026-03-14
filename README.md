@@ -114,6 +114,7 @@ This is a proof of concept. It demonstrates the core experience but doesn't incl
 - **API only** — requires internet connectivity and an Anthropic API key
 - **Single model** — Claude Opus 4.6, not configurable
 - **Docker only** — not a bootable OS (yet)
+- **Tested on Apple Silicon only** — built and verified on Mac Studio M4 Max (macOS / OrbStack). Should build and run on any platform with Docker support (Linux, Windows, Intel/AMD) but has not been tested beyond Apple Silicon
 - **Built-in tools only** — no MCP server modules (yet)
 - **No local LLM** — coming in a future phase
 

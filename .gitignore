@@ -24,3 +24,13 @@ ARCHITECTURE.md
 
 # Docker
 *.tar
+
+# Data / runtime
+data/
+*.db
+*.log
+
+# Cargo
+
+# Claude Code
+.claude/
