@@ -12,7 +12,7 @@ mod tools;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
+    // Initialize tracing (log to file to avoid polluting TUI)
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
@@ -20,6 +20,10 @@ async fn main() -> Result<()> {
                 .add_directive("wardsondb=warn".parse()?),
         )
         .with_target(false)
+        .with_writer(|| {
+            // Write logs to stderr so they don't interfere with TUI
+            std::io::stderr()
+        })
         .init();
 
     tools::init_start_time();
@@ -47,22 +51,11 @@ async fn main() -> Result<()> {
         .await
         .unwrap_or(false);
 
-    // 3. If first run: config wizard → learning mode
-    if is_first_run {
-        let cfg = config::run_config_wizard().await?;
-        config::save_config(&db, &cfg).await?;
-        learning::run_learning_mode(&db, &cfg).await?;
-    }
-
-    // 4. Load configuration
-    let cfg = config::load_config(&db).await?;
-    info!("{} loaded, entering operational mode", cfg.name);
-
-    // 5. Start proactive engine (background task)
+    // 3. Start proactive engine (background task)
     let notification_rx = proactive::start_proactive_engine(&db);
 
-    // 6. Enter conversational terminal (main loop)
-    terminal::run_terminal(&db, &cfg, notification_rx).await?;
+    // 4. Enter TUI — handles setup, learning, and operational modes
+    terminal::run_terminal(&db, is_first_run, notification_rx).await?;
 
     info!("embraOS shutting down gracefully");
     Ok(())

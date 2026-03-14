@@ -70,6 +70,24 @@ pub fn start_proactive_engine(
         }
     });
 
+    // Reminder checks every 15 seconds
+    let tx_reminders = tx.clone();
+    let db_reminders = db.clone();
+    tokio::spawn(async move {
+        // Initial delay
+        tokio::time::sleep(Duration::from_secs(10)).await;
+
+        loop {
+            let fired = crate::tools::check_reminders(&db_reminders).await;
+            for msg in fired {
+                let _ = tx_reminders
+                    .send(Notification::new(Priority::Normal, msg))
+                    .await;
+            }
+            tokio::time::sleep(Duration::from_secs(15)).await;
+        }
+    });
+
     // Update checks every hour
     let tx_update = tx;
     tokio::spawn(async move {

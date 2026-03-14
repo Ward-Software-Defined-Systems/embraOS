@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use super::AppState;
+use super::{AppMode, AppState};
 use crate::learning;
 use crate::sessions::SessionState;
 
@@ -10,7 +10,14 @@ pub async fn handle_command(input: &str, app: &mut AppState) -> Result<Option<St
     let arg = parts.get(1).map(|s| s.trim());
 
     match command {
-        "/help" => Ok(Some(help_text(&app.config.name))),
+        "/help" => {
+            let name = app
+                .config
+                .as_ref()
+                .map(|c| c.name.as_str())
+                .unwrap_or("Embra");
+            Ok(Some(help_text(name)))
+        }
 
         "/status" => {
             let status = crate::tools::system_status(&app.db).await;
@@ -18,13 +25,18 @@ pub async fn handle_command(input: &str, app: &mut AppState) -> Result<Option<St
         }
 
         "/sessions" => {
-            let sessions = app.session_manager.list().await?;
+            let sm = match app.session_manager {
+                Some(ref sm) => sm,
+                None => return Ok(Some("Session manager not available.".into())),
+            };
+            let sessions = sm.list().await?;
             if sessions.is_empty() {
                 return Ok(Some("No sessions.".into()));
             }
+            let active_name = sm.active_session.as_deref();
             let mut output = String::from("Sessions:\n");
             for s in &sessions {
-                let marker = if app.session_manager.active_session.as_deref() == Some(&s.name) {
+                let marker = if active_name == Some(&s.name) {
                     "*"
                 } else {
                     " "
@@ -47,31 +59,55 @@ pub async fn handle_command(input: &str, app: &mut AppState) -> Result<Option<St
 
         "/new" => {
             let name = arg.unwrap_or("unnamed");
-            app.session_manager.create(name).await?;
-            app.messages.clear();
-            Ok(Some(format!("Created and switched to session '{}'", name)))
+            if let Some(ref mut sm) = app.session_manager {
+                sm.create(name).await?;
+                app.messages.clear();
+                app.mode = AppMode::Operational {
+                    session_name: name.to_string(),
+                };
+                Ok(Some(format!("Created and switched to session '{}'", name)))
+            } else {
+                Ok(Some("Session manager not available.".into()))
+            }
         }
 
         "/switch" => {
             if let Some(name) = arg {
-                let history = app.session_manager.reattach(name).await?;
-                app.messages = history
-                    .iter()
-                    .map(|m| super::DisplayMessage::new(&m.role, &m.content))
-                    .collect();
-                Ok(Some(format!("Switched to session '{}'", name)))
+                if let Some(ref mut sm) = app.session_manager {
+                    let history = sm.reattach(name).await?;
+                    app.messages = history
+                        .iter()
+                        .map(|m| {
+                            let role = if m.role == "user" { "You" } else { &m.role };
+                            super::DisplayMessage::new(role, &m.content)
+                        })
+                        .collect();
+                    app.mode = AppMode::Operational {
+                        session_name: name.to_string(),
+                    };
+                    Ok(Some(format!("Switched to session '{}'", name)))
+                } else {
+                    Ok(Some("Session manager not available.".into()))
+                }
             } else {
                 Ok(Some("Usage: /switch <session_name>".into()))
             }
         }
 
         "/close" => {
-            if let Some(name) = app.session_manager.active_session.clone() {
-                app.session_manager.close(&name).await?;
-                app.messages.clear();
-                Ok(Some(format!("Closed session '{}'. Use /new or /switch.", name)))
+            if let Some(ref mut sm) = app.session_manager {
+                if let Some(name) = sm.active_session.clone() {
+                    sm.close(&name).await?;
+                    app.messages.clear();
+                    Ok(Some(format!(
+                        "Closed session '{}'. Use /new or /switch.",
+                        name
+                    )))
+                } else {
+                    Ok(Some("No active session to close.".into()))
+                }
             } else {
-                Ok(Some("No active session to close.".into()))
+                Ok(Some("Session manager not available.".into()))
             }
         }
 
@@ -103,10 +139,16 @@ pub async fn handle_command(input: &str, app: &mut AppState) -> Result<Option<St
             } else {
                 "unsealed"
             };
-            Ok(Some(format!("Mode: Operational | Soul: {}", soul_status)))
+            Ok(Some(format!(
+                "Mode: Operational | Soul: {}",
+                soul_status
+            )))
         }
 
-        _ => Ok(Some(format!("Unknown command: {}. Type /help for help.", command))),
+        _ => Ok(Some(format!(
+            "Unknown command: {}. Type /help for help.",
+            command
+        ))),
     }
 }
 

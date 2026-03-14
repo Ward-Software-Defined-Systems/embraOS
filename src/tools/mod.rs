@@ -1,6 +1,69 @@
+use chrono::{TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::db::WardsonDbClient;
+
+// ── Startup Time ──
+
+static START_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+pub fn init_start_time() {
+    START_TIME.get_or_init(std::time::Instant::now);
+}
+
+fn uptime_secs() -> u64 {
+    START_TIME.get().map(|t| t.elapsed().as_secs()).unwrap_or(0)
+}
+
+// ── Tool Dispatch ──
+
+/// Parse a `[TOOL:name]` or `[TOOL:name param...]` tag and execute the tool.
+/// Returns `(tool_name, result_string)` or None if not a recognized tool.
+pub async fn dispatch(
+    tag: &str,
+    db: &WardsonDbClient,
+    config_tz: &str,
+    session_name: &str,
+) -> Option<String> {
+    // Strip brackets: "[TOOL:recall hello world]" -> "recall hello world"
+    let inner = tag
+        .strip_prefix("[TOOL:")
+        .and_then(|s| s.strip_suffix(']'))?;
+
+    let (name, param) = match inner.find(' ') {
+        Some(pos) => (&inner[..pos], inner[pos + 1..].trim()),
+        None => (inner, ""),
+    };
+
+    let result = match name {
+        "system_status" => {
+            let status = system_status(db).await;
+            serde_json::to_string_pretty(&status).unwrap_or_default()
+        }
+        "check_update" => match check_wardsondb_update().await {
+            Some(info) => format!("WardSONDB update available: v{} (current: v{})", info.version, info.current_version),
+            None => "WardSONDB is up to date.".into(),
+        },
+        "recall" => recall(db, param).await,
+        "remember" => remember(db, param, session_name).await,
+        "forget" => forget(db, param).await,
+        "uptime_report" => uptime_report(db).await,
+        "introspect" => introspect(db, param).await,
+        "changelog" => changelog(db, session_name).await,
+        "time" => time_now(config_tz),
+        "countdown" => countdown(db, param).await,
+        "session_summary" => session_summary(db, session_name).await,
+        "calculate" => calculate(param),
+        "define" => define(db, param).await,
+        "draft" => draft(db, param, session_name).await,
+        "search_memory" => recall(db, param).await, // alias
+        _ => return None,
+    };
+
+    Some(result)
+}
+
+// ── Existing Tools ──
 
 #[derive(Debug, Serialize)]
 pub struct SystemStatus {
@@ -12,49 +75,30 @@ pub struct SystemStatus {
     pub soul_status: String,
 }
 
+pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
+    let healthy = db.health().await.unwrap_or(false);
+    let collections = db.list_collections().await.unwrap_or_default();
+    let soul_status = if db.collection_exists("soul.invariant").await.unwrap_or(false) {
+        "sealed"
+    } else {
+        "unsealed"
+    };
+
+    SystemStatus {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        uptime_seconds: uptime_secs(),
+        wardsondb_healthy: healthy,
+        wardsondb_collections: collections,
+        memory_usage_mb: get_memory_usage_mb(),
+        soul_status: soul_status.into(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateInfo {
     pub version: String,
     pub current_version: String,
     pub download_url: String,
-}
-
-static START_TIME: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
-
-pub fn init_start_time() {
-    START_TIME.get_or_init(std::time::Instant::now);
-}
-
-pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
-    let uptime = START_TIME
-        .get()
-        .map(|t| t.elapsed().as_secs())
-        .unwrap_or(0);
-
-    let healthy = db.health().await.unwrap_or(false);
-
-    let collections = db.list_collections().await.unwrap_or_default();
-
-    let soul_status = if db
-        .collection_exists("soul.invariant")
-        .await
-        .unwrap_or(false)
-    {
-        "sealed".to_string()
-    } else {
-        "unsealed".to_string()
-    };
-
-    let memory_usage_mb = get_memory_usage_mb();
-
-    SystemStatus {
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        uptime_seconds: uptime,
-        wardsondb_healthy: healthy,
-        wardsondb_collections: collections,
-        memory_usage_mb,
-        soul_status,
-    }
 }
 
 pub async fn check_wardsondb_update() -> Option<UpdateInfo> {
@@ -65,18 +109,13 @@ pub async fn check_wardsondb_update() -> Option<UpdateInfo> {
         .send()
         .await
         .ok()?;
-
     if !resp.status().is_success() {
         return None;
     }
-
     let data: serde_json::Value = resp.json().await.ok()?;
     let latest_tag = data.get("tag_name")?.as_str()?;
     let latest_version = latest_tag.trim_start_matches('v');
-
-    // Compare with current (we'd need to query the running WardSONDB for its version)
-    let current_version = "0.1.0"; // Hardcoded for Phase 0
-
+    let current_version = "0.1.0";
     if latest_version != current_version {
         let download_url = data
             .get("assets")
@@ -86,7 +125,6 @@ pub async fn check_wardsondb_update() -> Option<UpdateInfo> {
             .and_then(|u| u.as_str())
             .unwrap_or("")
             .to_string();
-
         Some(UpdateInfo {
             version: latest_version.to_string(),
             current_version: current_version.to_string(),
@@ -95,6 +133,524 @@ pub async fn check_wardsondb_update() -> Option<UpdateInfo> {
     } else {
         None
     }
+}
+
+// ── Memory & Knowledge Tools ──
+
+async fn ensure_collection(db: &WardsonDbClient, name: &str) {
+    if !db.collection_exists(name).await.unwrap_or(true) {
+        let _ = db.create_collection(name).await;
+    }
+}
+
+async fn recall(db: &WardsonDbClient, query: &str) -> String {
+    ensure_collection(db, "memory.entries").await;
+
+    let results = db
+        .query("memory.entries", &serde_json::json!({}))
+        .await
+        .unwrap_or_default();
+
+    if results.is_empty() {
+        return "No memory entries found.".into();
+    }
+
+    let query_lower = query.to_lowercase();
+    let matching: Vec<&serde_json::Value> = if query.is_empty() {
+        // Return all (latest first, up to 20)
+        results.iter().rev().take(20).collect()
+    } else {
+        results
+            .iter()
+            .filter(|doc| {
+                let content = doc
+                    .get("content")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let tags = doc
+                    .get("tags")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                content.to_lowercase().contains(&query_lower)
+                    || tags.to_lowercase().contains(&query_lower)
+            })
+            .collect()
+    };
+
+    if matching.is_empty() {
+        return format!("No memory entries matching '{}'.", query);
+    }
+
+    let mut output = format!("Found {} matching entries:\n", matching.len());
+    for doc in matching.iter().take(10) {
+        let id = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()).unwrap_or("?");
+        let content = doc.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        let ts = doc.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+        let tags = doc.get("tags").and_then(|v| v.as_str()).unwrap_or("");
+        output.push_str(&format!("  [{}] {} (tags: {}) — {}\n", id, content, tags, ts));
+    }
+    output
+}
+
+async fn remember(db: &WardsonDbClient, content: &str, session: &str) -> String {
+    if content.is_empty() {
+        return "Nothing to remember. Provide content after [TOOL:remember ...].".into();
+    }
+
+    ensure_collection(db, "memory.entries").await;
+
+    // Parse optional tags: "content text #tag1 #tag2"
+    let mut tags = Vec::new();
+    let mut text_parts = Vec::new();
+    for word in content.split_whitespace() {
+        if word.starts_with('#') {
+            tags.push(word.trim_start_matches('#'));
+        } else {
+            text_parts.push(word);
+        }
+    }
+    let text = text_parts.join(" ");
+    let tags_str = tags.join(", ");
+
+    let doc = serde_json::json!({
+        "content": text,
+        "tags": tags_str,
+        "session": session,
+        "created_at": Utc::now().to_rfc3339(),
+    });
+
+    match db.write("memory.entries", &doc).await {
+        Ok(id) => format!("Remembered. Entry ID: {}", id),
+        Err(e) => format!("Failed to save memory: {}", e),
+    }
+}
+
+async fn forget(db: &WardsonDbClient, id: &str) -> String {
+    if id.is_empty() {
+        return "Provide the entry ID to forget: [TOOL:forget <id>]".into();
+    }
+
+    match db.delete("memory.entries", id.trim()).await {
+        Ok(()) => format!("Memory entry {} has been removed.", id.trim()),
+        Err(e) => format!("Failed to remove entry: {}", e),
+    }
+}
+
+// ── Self-Awareness Tools ──
+
+async fn uptime_report(db: &WardsonDbClient) -> String {
+    let uptime = uptime_secs();
+    let hours = uptime / 3600;
+    let mins = (uptime % 3600) / 60;
+
+    let collections = db.list_collections().await.unwrap_or_default();
+
+    // Count sessions
+    let session_count = collections
+        .iter()
+        .filter(|c| c.starts_with("sessions.") && c.ends_with(".meta"))
+        .count();
+
+    // Count memory entries
+    let memory_count = db
+        .query("memory.entries", &serde_json::json!({}))
+        .await
+        .map(|v| v.len())
+        .unwrap_or(0);
+
+    // Count total messages across all session histories
+    let mut total_messages = 0u64;
+    for col in &collections {
+        if col.starts_with("sessions.") && col.ends_with(".history") {
+            if let Ok(docs) = db.query(col, &serde_json::json!({})).await {
+                for doc in &docs {
+                    if let Some(turns) = doc.get("turns").and_then(|v| v.as_array()) {
+                        total_messages += turns.len() as u64;
+                    }
+                }
+            }
+        }
+    }
+
+    let healthy = db.health().await.unwrap_or(false);
+    let soul_sealed = db.collection_exists("soul.invariant").await.unwrap_or(false);
+
+    format!(
+        "Uptime Report:\n\
+         Uptime: {}h {}m\n\
+         WardSONDB: {}\n\
+         Collections: {}\n\
+         Sessions created: {}\n\
+         Total messages exchanged: {}\n\
+         Memory entries stored: {}\n\
+         Soul: {}",
+        hours,
+        mins,
+        if healthy { "healthy" } else { "unhealthy" },
+        collections.len(),
+        session_count,
+        total_messages,
+        memory_count,
+        if soul_sealed { "sealed" } else { "unsealed" }
+    )
+}
+
+async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
+    let mut output = String::new();
+
+    // Load soul
+    if focus.is_empty() || focus.contains("soul") || focus.contains("purpose") || focus.contains("ethics") || focus.contains("constraints") {
+        let soul_docs = db.query("soul.invariant", &serde_json::json!({})).await.unwrap_or_default();
+        if let Some(doc) = soul_docs.into_iter().next() {
+            let soul = doc.get("soul").unwrap_or(&doc);
+            output.push_str("=== SOUL (IMMUTABLE) ===\n");
+            output.push_str(&serde_json::to_string_pretty(soul).unwrap_or_default());
+            output.push('\n');
+        }
+    }
+
+    // Load identity
+    if focus.is_empty() || focus.contains("identity") || focus.contains("personality") || focus.contains("traits") {
+        let id_docs = db.query("memory.identity", &serde_json::json!({})).await.unwrap_or_default();
+        if let Some(doc) = id_docs.into_iter().next() {
+            output.push_str("\n=== IDENTITY ===\n");
+            output.push_str(&serde_json::to_string_pretty(&doc).unwrap_or_default());
+            output.push('\n');
+        }
+    }
+
+    // Load user profile
+    if focus.is_empty() || focus.contains("user") || focus.contains("operator") {
+        let user_docs = db.query("memory.user", &serde_json::json!({})).await.unwrap_or_default();
+        if let Some(doc) = user_docs.into_iter().next() {
+            output.push_str("\n=== USER PROFILE ===\n");
+            output.push_str(&serde_json::to_string_pretty(&doc).unwrap_or_default());
+            output.push('\n');
+        }
+    }
+
+    if output.is_empty() {
+        "No documents found for the requested focus area.".into()
+    } else {
+        output
+    }
+}
+
+async fn changelog(db: &WardsonDbClient, current_session: &str) -> String {
+    // Find the current session's creation time
+    let meta_col = format!("sessions.{}.meta", current_session);
+    let session_start = db
+        .query(&meta_col, &serde_json::json!({}))
+        .await
+        .ok()
+        .and_then(|docs| docs.into_iter().next())
+        .and_then(|doc| doc.get("created_at").and_then(|v| v.as_str()).map(|s| s.to_string()));
+
+    let mut output = String::from("Changes since last session:\n");
+
+    // Recent memory entries
+    let entries = db
+        .query("memory.entries", &serde_json::json!({}))
+        .await
+        .unwrap_or_default();
+
+    let recent_entries: Vec<_> = if let Some(ref start) = session_start {
+        entries
+            .iter()
+            .filter(|doc| {
+                doc.get("created_at")
+                    .and_then(|v| v.as_str())
+                    .map(|ts| ts > start.as_str())
+                    .unwrap_or(false)
+            })
+            .collect()
+    } else {
+        entries.iter().rev().take(5).collect()
+    };
+
+    if recent_entries.is_empty() {
+        output.push_str("  No new memory entries.\n");
+    } else {
+        output.push_str(&format!("  {} new memory entries:\n", recent_entries.len()));
+        for entry in recent_entries.iter().take(5) {
+            let content = entry.get("content").and_then(|v| v.as_str()).unwrap_or("?");
+            output.push_str(&format!("    - {}\n", content));
+        }
+    }
+
+    // List sessions
+    let collections = db.list_collections().await.unwrap_or_default();
+    let sessions: Vec<_> = collections
+        .iter()
+        .filter(|c| c.starts_with("sessions.") && c.ends_with(".meta") && !c.contains("learning"))
+        .collect();
+    output.push_str(&format!("  Total sessions: {}\n", sessions.len()));
+
+    output
+}
+
+// ── Time & Context Tools ──
+
+fn time_now(config_tz: &str) -> String {
+    let now = Utc::now();
+
+    // Try to parse the configured timezone
+    if let Ok(tz) = config_tz.parse::<chrono_tz::Tz>() {
+        let local = now.with_timezone(&tz);
+        format!(
+            "Current time: {} ({})\nDay: {}\nUnix timestamp: {}",
+            local.format("%Y-%m-%d %H:%M:%S %Z"),
+            config_tz,
+            local.format("%A"),
+            now.timestamp()
+        )
+    } else {
+        // Fallback to UTC with timezone label
+        format!(
+            "Current time: {} (configured tz: {})\nDay: {}\nUnix timestamp: {}",
+            now.format("%Y-%m-%d %H:%M:%S UTC"),
+            config_tz,
+            now.format("%A"),
+            now.timestamp()
+        )
+    }
+}
+
+async fn countdown(db: &WardsonDbClient, param: &str) -> String {
+    if param.is_empty() {
+        return "Usage: [TOOL:countdown <duration> <message>]\nExample: [TOOL:countdown 5m Check the build]".into();
+    }
+
+    // Parse: "5m Check the build" or "20 minutes reminder text"
+    let parts: Vec<&str> = param.splitn(2, ' ').collect();
+    let (duration_str, message) = if parts.len() == 2 {
+        (parts[0], parts[1])
+    } else {
+        (parts[0], "Reminder")
+    };
+
+    let seconds = parse_duration(duration_str);
+    if seconds == 0 {
+        return format!("Could not parse duration '{}'. Use formats like: 5m, 30s, 1h, '20 minutes'", duration_str);
+    }
+
+    let trigger_at = Utc::now() + chrono::Duration::seconds(seconds as i64);
+
+    ensure_collection(db, "reminders").await;
+
+    let doc = serde_json::json!({
+        "message": message,
+        "trigger_at": trigger_at.to_rfc3339(),
+        "created_at": Utc::now().to_rfc3339(),
+        "fired": false,
+    });
+
+    match db.write("reminders", &doc).await {
+        Ok(id) => format!(
+            "Reminder set. Will fire at {} (in {}s).\nID: {}",
+            trigger_at.format("%H:%M:%S UTC"),
+            seconds,
+            id
+        ),
+        Err(e) => format!("Failed to set reminder: {}", e),
+    }
+}
+
+/// Check for due reminders. Called by the proactive engine.
+pub async fn check_reminders(db: &WardsonDbClient) -> Vec<String> {
+    let reminders = db
+        .query("reminders", &serde_json::json!({}))
+        .await
+        .unwrap_or_default();
+
+    let now = Utc::now().to_rfc3339();
+    let mut fired = Vec::new();
+
+    for doc in &reminders {
+        let already_fired = doc.get("fired").and_then(|v| v.as_bool()).unwrap_or(true);
+        if already_fired {
+            continue;
+        }
+
+        let trigger = doc
+            .get("trigger_at")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        if !trigger.is_empty() && trigger <= now.as_str() {
+            let message = doc
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Reminder");
+
+            fired.push(format!("Reminder: {}", message));
+
+            // Mark as fired
+            if let Some(id) = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()) {
+                let mut updated = doc.clone();
+                updated["fired"] = serde_json::json!(true);
+                let _ = db.update("reminders", id, &updated).await;
+            }
+        }
+    }
+
+    fired
+}
+
+async fn session_summary(db: &WardsonDbClient, session_name: &str) -> String {
+    let collection = format!("sessions.{}.history", session_name);
+    let results = db
+        .query(&collection, &serde_json::json!({}))
+        .await
+        .unwrap_or_default();
+
+    if let Some(doc) = results.into_iter().next() {
+        if let Some(turns) = doc.get("turns").and_then(|v| v.as_array()) {
+            let total = turns.len();
+            let user_msgs = turns.iter().filter(|t| t.get("role").and_then(|r| r.as_str()) == Some("user")).count();
+            let ai_msgs = total - user_msgs;
+
+            let mut output = format!(
+                "Session '{}' summary:\nTotal messages: {} ({} from user, {} from assistant)\n\nConversation:\n",
+                session_name, total, user_msgs, ai_msgs
+            );
+
+            // Include the last 20 messages for context
+            let recent = if turns.len() > 20 {
+                &turns[turns.len() - 20..]
+            } else {
+                turns
+            };
+
+            for turn in recent {
+                let role = turn.get("role").and_then(|r| r.as_str()).unwrap_or("?");
+                let content = turn.get("content").and_then(|c| c.as_str()).unwrap_or("");
+                // Truncate long messages
+                let preview = if content.len() > 200 {
+                    format!("{}...", &content[..200])
+                } else {
+                    content.to_string()
+                };
+                output.push_str(&format!("[{}]: {}\n", role, preview));
+            }
+
+            return output;
+        }
+    }
+
+    format!("No conversation history found for session '{}'.", session_name)
+}
+
+// ── Utility Tools ──
+
+fn calculate(expression: &str) -> String {
+    if expression.is_empty() {
+        return "Usage: [TOOL:calculate <expression>]\nExample: [TOOL:calculate 1024 * 1024]".into();
+    }
+
+    match meval::eval_str(expression) {
+        Ok(result) => {
+            // Format nicely: no trailing zeros for whole numbers
+            if result == result.floor() && result.abs() < 1e15 {
+                format!("{} = {}", expression, result as i64)
+            } else {
+                format!("{} = {}", expression, result)
+            }
+        }
+        Err(e) => format!("Could not evaluate '{}': {}", expression, e),
+    }
+}
+
+async fn define(db: &WardsonDbClient, term: &str) -> String {
+    if term.is_empty() {
+        return "Usage: [TOOL:define <term>]".into();
+    }
+
+    ensure_collection(db, "knowledge.definitions").await;
+
+    let term_lower = term.to_lowercase();
+    let results = db
+        .query("knowledge.definitions", &serde_json::json!({}))
+        .await
+        .unwrap_or_default();
+
+    for doc in &results {
+        let doc_term = doc
+            .get("term")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if doc_term.to_lowercase() == term_lower {
+            let definition = doc
+                .get("definition")
+                .and_then(|v| v.as_str())
+                .unwrap_or("(no definition)");
+            return format!("{}: {}", doc_term, definition);
+        }
+    }
+
+    // Not found — offer to add
+    format!(
+        "No local definition found for '{}'. You can add one with:\n[TOOL:remember {} — <definition> #definition]",
+        term, term
+    )
+}
+
+async fn draft(db: &WardsonDbClient, param: &str, session: &str) -> String {
+    if param.is_empty() {
+        return "Usage: [TOOL:draft <title> | <content>]\nSeparate title and content with ' | '.\nExample: [TOOL:draft Meeting Notes | Key decisions: ...]".into();
+    }
+
+    ensure_collection(db, "drafts").await;
+
+    // Parse "title | content" or just treat entire param as content with auto-title
+    let (title, content) = if let Some(pos) = param.find(" | ") {
+        (&param[..pos], &param[pos + 3..])
+    } else {
+        ("Untitled Draft", param)
+    };
+
+    let doc = serde_json::json!({
+        "title": title,
+        "content": content,
+        "session": session,
+        "created_at": Utc::now().to_rfc3339(),
+    });
+
+    match db.write("drafts", &doc).await {
+        Ok(id) => format!("Draft saved: '{}' (ID: {})", title, id),
+        Err(e) => format!("Failed to save draft: {}", e),
+    }
+}
+
+// ── Helpers ──
+
+fn parse_duration(s: &str) -> u64 {
+    let s = s.trim().to_lowercase();
+
+    // Try "5m", "30s", "1h" patterns
+    if let Some(num) = s.strip_suffix('s') {
+        return num.parse().unwrap_or(0);
+    }
+    if let Some(num) = s.strip_suffix('m') {
+        return num.parse::<u64>().unwrap_or(0) * 60;
+    }
+    if let Some(num) = s.strip_suffix('h') {
+        return num.parse::<u64>().unwrap_or(0) * 3600;
+    }
+
+    // Try "5 minutes", "30 seconds", "1 hour"
+    if let Some(num) = s.strip_suffix("minutes").or(s.strip_suffix("minute")) {
+        return num.trim().parse::<u64>().unwrap_or(0) * 60;
+    }
+    if let Some(num) = s.strip_suffix("seconds").or(s.strip_suffix("second")) {
+        return num.trim().parse::<u64>().unwrap_or(0);
+    }
+    if let Some(num) = s.strip_suffix("hours").or(s.strip_suffix("hour")) {
+        return num.trim().parse::<u64>().unwrap_or(0) * 3600;
+    }
+
+    // Try bare number as seconds
+    s.parse().unwrap_or(0)
 }
 
 fn get_memory_usage_mb() -> Option<u64> {
