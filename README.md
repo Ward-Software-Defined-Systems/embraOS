@@ -24,8 +24,18 @@ Think of it as an AI that lives somewhere and is always there when you need it.
 
 ## Quick Start
 
+### Clone & Build
+
 ```bash
-docker run -it -e ANTHROPIC_API_KEY=sk-ant-... wardsdsllc/embraos:v0.1.0-phase0
+git clone https://github.com/Ward-Software-Defined-Systems/embraOS.git
+cd embraOS
+docker build -t embraos:phase0 .
+```
+
+### Run
+
+```bash
+docker run -it -e ANTHROPIC_API_KEY=sk-ant-... embraos:phase0
 ```
 
 That's it. You'll be guided through naming the intelligence, forming its identity, and defining its soul. After that, you're in a persistent terminal session.
@@ -36,10 +46,12 @@ That's it. You'll be guided through naming the intelligence, forming its identit
 docker run -it \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   -v embra-data:/embra/data \
-  wardsdsllc/embraos:v0.1.0-phase0
+  embraos:phase0
 ```
 
 Add a Docker volume and your AI's memory, identity, and soul survive container restarts.
+
+> **Note:** Pre-built container images on Docker Hub are coming soon. For now, clone and build locally.
 
 ---
 
