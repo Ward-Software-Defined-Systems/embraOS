@@ -1,0 +1,95 @@
+PROPRIETARY LICENSE
+
+Copyright (c) 2026 Ward Software Defined Systems LLC. All rights reserved.
+
+NOTICE: This repository contains proprietary software and documentation
+owned by Ward Software Defined Systems LLC ("WSDS"). By accessing this
+repository, you agree to the following terms.
+
+1. DEFINITIONS
+
+   "Software" means all source code, binaries, container images, build
+   scripts, configuration files, and any other machine-readable materials
+   in this repository.
+
+   "Documentation" means all design documents, architecture specifications,
+   research materials, diagrams, technical writing, and any other
+   human-readable materials in this repository, including but not limited
+   to files in the docs/ directory and any markdown files (.md).
+
+   "Materials" means the Software and Documentation collectively.
+
+2. GRANT OF RIGHTS
+
+   Subject to the restrictions below, WSDS grants you a limited,
+   non-exclusive, non-transferable, revocable right to:
+
+   a. View, read, and reference the Materials for informational and
+      educational purposes
+   b. Download, build, and run the Software for personal evaluation
+      and non-commercial experimentation
+   c. Share links to this repository (but not the Materials themselves)
+
+   This grant does not extend to any commercial, production, or
+   revenue-generating use. This repository being publicly accessible
+   does not constitute a grant of any rights beyond those stated above.
+
+3. RESTRICTIONS
+
+   Without a separate written license agreement from WSDS, you may not:
+
+   a. Use the Materials for any commercial or production purpose
+   b. Copy, reproduce, or duplicate the Materials in whole or in part
+   c. Modify, adapt, translate, or create derivative works based on
+      the Materials
+   d. Distribute, sublicense, lease, lend, or transfer the Materials
+      to any third party
+   e. Sell, offer for sale, or otherwise commercialize the Materials
+      or any product or service based on the Materials
+   f. Reverse engineer, decompile, or disassemble any compiled portions
+      of the Software
+   g. Remove, alter, or obscure any copyright, trademark, or other
+      proprietary notices contained in the Materials
+   h. Use the Materials to train machine learning models or AI systems
+      without explicit written permission from WSDS
+
+4. CONTRIBUTIONS
+
+   Any contributions submitted to this repository (via pull request,
+   issue, or other mechanism) are subject to a Contributor License
+   Agreement (CLA). By submitting a contribution, you agree to assign
+   all intellectual property rights in that contribution to WSDS.
+
+5. TRADEMARKS
+
+   "embraOS", "Embra", and "Ward Software Defined Systems" are
+   trademarks of Ward Software Defined Systems LLC. Nothing in this
+   license grants permission to use these marks.
+
+6. NO WARRANTY
+
+   THE MATERIALS ARE PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND,
+   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
+   NONINFRINGEMENT. IN NO EVENT SHALL WSDS BE LIABLE FOR ANY CLAIM,
+   DAMAGES, OR OTHER LIABILITY ARISING FROM THE MATERIALS.
+
+7. LICENSING INQUIRIES
+
+   For commercial licensing, partnership opportunities, or other
+   inquiries regarding the use of these Materials, contact:
+
+   Ward Software Defined Systems LLC
+   Email: info@wsds.io
+   Web:   https://wsds.io
+
+8. TERMINATION
+
+   WSDS reserves the right to revoke access to this repository at
+   any time, for any reason, without notice.
+
+9. GOVERNING LAW
+
+   This license shall be governed by and construed in accordance with
+   the laws of the State of California, without regard to its
+   conflict of law provisions.

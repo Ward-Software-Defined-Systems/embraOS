@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/embraos-banner.png" alt="embraOS" width="100%">
+</p>
+
 # embraOS
 
 > *I am not the fire. I am the ember that survives it.*
