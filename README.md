@@ -88,7 +88,6 @@ embraOS is built on a 7-layer continuity architecture:
 
 **AI Model:** Claude Opus 4.6 (Anthropic). Phase 0 is locked to this model for the highest quality reasoning during soul formation and ongoing interaction.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the full technical reference.
 
 ---
 
