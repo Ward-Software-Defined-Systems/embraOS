@@ -105,7 +105,7 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
 
     for msg in &app.messages {
         let (color, prefix) = match msg.role.as_str() {
-            "You" => (Color::Blue, "You"),
+            "You" => (Color::LightBlue, "You"),
             "system" => (Color::White, ""),
             _ => (Color::Green, msg.role.as_str()),
         };
@@ -267,7 +267,7 @@ fn draw_input(f: &mut Frame, area: Rect, app: &AppState) {
         Block::default()
             .borders(Borders::ALL)
             .title(title)
-            .title_style(Style::default().fg(Color::Blue)),
+            .title_style(Style::default().fg(Color::LightBlue)),
     );
 
     f.render_widget(input, area);
