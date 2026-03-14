@@ -230,6 +230,20 @@ The full architecture includes:
 
 ---
 
+
+## Design Lineage
+
+embraOS evolves the agent identity model pioneered by [OpenClaw](https://github.com/AiClaw/OpenClaw) —
+the SOUL.md, MEMORY.md, IDENTITY.md, AGENTS.md, TOOLS.md, USER.md, and HEARTBEAT.md
+pattern for giving AI agents persistent identity and memory. Where OpenClaw stores these
+as markdown files read at session start, embraOS moves them into governed, queryable
+WardSONDB collections with enforced access controls — and makes the soul immutable.
+
+The OS architecture is informed by [Talos Linux](https://www.talos.dev/) — a minimal,
+immutable, API-driven Linux distribution. No Talos or OpenClaw code is used. embraOS
+is built from scratch in Rust.
+
+---
 ## Built By
 
 **Ward Software Defined Systems LLC** — AI-Augmented SDLC
