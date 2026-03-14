@@ -155,7 +155,9 @@ This is a proof of concept. It demonstrates the core experience but doesn't incl
 
 ### Default Tools
 
-Phase 0 includes three built-in tools available in operational mode:
+Phase 0 includes 15 built-in tools available in operational mode:
+
+**System**
 
 | Tool | Description |
 |---|---|
@@ -163,7 +165,41 @@ Phase 0 includes three built-in tools available in operational mode:
 | **check_update** | Check GitHub for newer WardSONDB releases and report available updates |
 | **search_memory** | Search and retrieve from the intelligence's memory stores |
 
+**Memory & Knowledge**
+
+| Tool | Description |
+|---|---|
+| **recall** | Search past conversations and saved memories by query — returns up to 10 results with IDs, content, tags, and timestamps |
+| **remember** | Save a note or fact to persistent memory with optional hashtag tags |
+| **forget** | Remove a specific memory entry by ID |
+
+**Self-Awareness**
+
+| Tool | Description |
+|---|---|
+| **uptime_report** | Rich system report — uptime, WardSONDB health, collection count, sessions, total messages, memory entries, soul status |
+| **introspect** | Reflect on soul, identity, and user documents — optional focus area filter |
+| **changelog** | What changed since the current session started — new memories, session activity |
+
+**Time & Context**
+
+| Tool | Description |
+|---|---|
+| **time** | Current date, time, and day of week in the operator's configured timezone |
+| **countdown** | Set a reminder with duration and message — proactive engine checks every 15 seconds |
+| **session_summary** | Message counts and recent conversation turns for the intelligence to summarize |
+
+**Utility**
+
+| Tool | Description |
+|---|---|
+| **calculate** | Evaluate math expressions — arithmetic, trig, and more via `meval` |
+| **define** | Look up terminology from a local knowledge base |
+| **draft** | Save structured text artifacts (drafts, outlines, notes) for later retrieval |
+
 These are internal tools invoked by the intelligence during conversation — not user-facing commands. The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
+
+> **⚠️ Testing Notice:** The default tools and slash commands are actively being tested. If you encounter bugs or unexpected behavior, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
 ---
 
