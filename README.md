@@ -116,6 +116,30 @@ You can run multiple named sessions for different contexts:
 
 All sessions share the same intelligence — same memory, same identity, same soul. But each has its own conversation history and context.
 
+### Available Commands
+
+| Command | Description |
+|---|---|
+| `/help` | Show all commands and keyboard shortcuts |
+| `/status` | System status — version, uptime, WardSONDB health, memory, soul status |
+| `/sessions` | List all sessions with state and last active time |
+| `/new <name>` | Create a new named session and switch to it |
+| `/switch <name>` | Switch to an existing session (restores full history) |
+| `/close` | Close the current session |
+| `/soul` | Display the immutable soul document |
+| `/identity` | Display the intelligence's identity document |
+| `/mode` | Show current operating mode and soul seal status |
+
+### Keyboard Shortcuts
+
+| Key | Action |
+|---|---|
+| `Enter` | Send message |
+| `Shift+Enter` | New line |
+| `Up/Down` | Scroll history |
+| `Ctrl+C` | Graceful detach |
+| `Ctrl+D` | Graceful detach |
+
 ---
 
 ## Phase 0 Limitations
@@ -128,6 +152,18 @@ This is a proof of concept. It demonstrates the core experience but doesn't incl
 - **Tested on Apple Silicon only** — built and verified on Mac Studio M4 Max (macOS / OrbStack). Should build and run on any platform with Docker support (Linux, Windows, Intel/AMD) but has not been tested beyond Apple Silicon
 - **Built-in tools only** — no MCP server modules (yet)
 - **No local LLM** — coming in a future phase
+
+### Default Tools
+
+Phase 0 includes three built-in tools available in operational mode:
+
+| Tool | Description |
+|---|---|
+| **system_status** | Report system health — uptime, WardSONDB connection, memory usage, soul status, active collections |
+| **check_update** | Check GitHub for newer WardSONDB releases and report available updates |
+| **search_memory** | Search and retrieve from the intelligence's memory stores |
+
+These are internal tools invoked by the intelligence during conversation — not user-facing commands. The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
 
 ---
 
