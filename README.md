@@ -149,7 +149,7 @@ This is a proof of concept. It demonstrates the core experience but doesn't incl
 - **API only** — requires internet connectivity and an Anthropic API key
 - **Single model** — Claude Opus 4.6, not configurable
 - **Docker only** — not a bootable OS (yet)
-- **Tested on Apple Silicon only** — built and verified on Mac Studio M4 Max (macOS / OrbStack). Should build and run on any platform with Docker support (Linux, Windows, Intel/AMD) but has not been tested beyond Apple Silicon
+- **Tested on limited platforms** — built and verified on Mac Studio M4 Max / Apple Silicon (macOS / OrbStack), MacBook Pro 2.3 GHz 8-Core Intel Core i9 (macOS / Docker Desktop), and Azure Standard B2as v2 / AMD EPYC (Ubuntu 24.04 / Docker Engine). Should work on any platform with Docker support but broader testing is ongoing
 - **Built-in tools only** — no MCP server modules (yet)
 - **No local LLM** — coming in a future phase
 
