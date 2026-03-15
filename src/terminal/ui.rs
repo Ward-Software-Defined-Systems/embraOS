@@ -172,6 +172,31 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
         styled_lines.push(vec![StyledSegment::new(String::new(), Style::default())]);
     }
 
+    // Show thinking indicator (before first token arrives)
+    if app.thinking && app.streaming_text.is_none() {
+        let name = app
+            .config
+            .as_ref()
+            .map(|c| c.name.as_str())
+            .unwrap_or("Embra");
+        // Animate dots based on elapsed time (~3 states cycling)
+        let elapsed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let dots = match (elapsed / 500) % 3 {
+            0 => ".",
+            1 => "..",
+            _ => "...",
+        };
+        styled_lines.push(vec![StyledSegment::new(
+            format!("  {} is thinking{}", name, dots),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )]);
+    }
+
     // Show streaming text if present
     if let Some(streaming) = &app.streaming_text {
         let name = app

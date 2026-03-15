@@ -135,7 +135,8 @@ All sessions share the same intelligence — same memory, same identity, same so
 | Key | Action |
 |---|---|
 | `Enter` | Send message |
-| `Shift+Enter` | New line |
+| `Shift+Enter` | New line (requires terminal support: kitty, iTerm2, WezTerm) |
+| `Alt+Enter` | New line (universal fallback for all terminals) |
 | `Up/Down` | Scroll history |
 | `Ctrl+C` | Graceful detach |
 | `Ctrl+D` | Graceful detach |
@@ -245,7 +246,7 @@ All Sprint 1 bugs have been fixed. No known critical issues at this time.
 | BUG-001 | ✅ Fixed | Tool tag scanner runaway loop | Code-block-aware extraction, line-level matching |
 | BUG-002 | ✅ Fixed | Duplicate tool result injection | Removed double history push |
 | BUG-003 | ✅ Fixed | Countdown reminders not firing | Fixed boolean logic in reminder check |
-| BUG-004 | ✅ Fixed | Introspect focus filter too broad | Key-level filtering by focus area |
+| BUG-004 | ✅ Fixed | Introspect focus filter too broad | Key-level filtering against actual JSON keys, no hardcoded keyword guard |
 | BUG-005 | ✅ Fixed | Define fallback triggering BUG-001 | Plain text fallback, no tool tags |
 | BUG-006 | ✅ Fixed | Multi-line tag parsing | Updated prompt to instruct single-line content |
 | BUG-007 | ✅ Fixed | Timezone abbreviation mismatch | IANA zone resolution for US abbreviations |

@@ -10,7 +10,10 @@ pub use ui::*;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        self, Event, KeyCode, KeyEvent, KeyModifiers, KeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags, PopKeyboardEnhancementFlags,
+    },
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
@@ -100,6 +103,7 @@ pub struct AppState {
     pub cursor_pos: usize,
     pub scroll_offset: u16,
     pub streaming_text: Option<String>,
+    pub thinking: bool, // True while waiting for first token from Brain
     pub status_message: String,
     pub should_quit: bool,
     pub soul: Option<serde_json::Value>,
@@ -149,6 +153,7 @@ pub async fn run_terminal(
         cursor_pos: 0,
         scroll_offset: 0,
         streaming_text: None,
+        thinking: false,
         status_message: "OK".into(),
         should_quit: false,
         soul: None,
@@ -240,6 +245,12 @@ pub async fn run_terminal(
     // Enter TUI mode
     terminal::enable_raw_mode()?;
     let mut stdout = io::stdout();
+    // Enable keyboard enhancement for Shift+Enter detection (supported in modern terminals)
+    let kb_enhanced = crossterm::execute!(
+        stdout,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )
+    .is_ok();
     crossterm::execute!(
         stdout,
         EnterAlternateScreen,
@@ -255,6 +266,9 @@ pub async fn run_terminal(
 
     // Cleanup
     terminal::disable_raw_mode()?;
+    if kb_enhanced {
+        let _ = crossterm::execute!(term.backend_mut(), PopKeyboardEnhancementFlags);
+    }
     crossterm::execute!(
         term.backend_mut(),
         crossterm::event::DisableBracketedPaste,
@@ -337,10 +351,37 @@ async fn run_event_loop(
             _ = async {
                 let mut rx = notification_rx.lock().await;
                 if let Some(notification) = rx.recv().await {
-                    app.messages.push(DisplayMessage::new(
-                        "system",
-                        format!("[{}] {}", notification.priority_label(), notification.message),
-                    ));
+                    let notif_text = format!("[{}] {}", notification.priority_label(), notification.message);
+                    app.messages.push(DisplayMessage::new("system", &notif_text));
+
+                    // Send reminder notifications to the Brain so it can act on them
+                    if matches!(app.mode, AppMode::Operational { .. }) {
+                        if let AppMode::Operational { ref session_name } = app.mode {
+                            let session_name = session_name.clone();
+                            let system_msg = Message::user(&format!(
+                                "[SYSTEM] Proactive notification: {}",
+                                notif_text
+                            ));
+                            if let Some(ref mut sm) = app.session_manager {
+                                let _ = sm.append_message(&session_name, &system_msg).await;
+                                if let Ok(history) = sm.load_history(&session_name).await {
+                                    if let Some(ref brain) = app.brain {
+                                        if let Ok(rx) = brain.send_message_streaming(&history).await {
+                                            let tx = stream_tx.clone();
+                                            app.thinking = true;
+                                            app.status_message = "Thinking...".into();
+                                            tokio::spawn(async move {
+                                                let mut rx = rx;
+                                                while let Some(evt) = rx.recv().await {
+                                                    let _ = tx.send(evt).await;
+                                                }
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             } => {}
 
@@ -360,6 +401,7 @@ async fn handle_stream_event(
 ) -> Result<()> {
     match event {
         StreamEvent::Token(token) => {
+            app.thinking = false; // First token clears thinking indicator
             let text = app.streaming_text.get_or_insert_with(String::new);
             text.push_str(&token);
             // Reset scroll to bottom when streaming
@@ -367,6 +409,7 @@ async fn handle_stream_event(
         }
         StreamEvent::Done(full_text) => {
             app.streaming_text = None;
+            app.thinking = false;
             app.scroll_offset = 0;
 
             // Check if we're in learning mode and need to handle phase completion
@@ -475,6 +518,7 @@ async fn handle_stream_event(
         }
         StreamEvent::Error(err) => {
             app.streaming_text = None;
+            app.thinking = false;
             app.status_message = format!("Error: {}", err);
             app.messages
                 .push(DisplayMessage::new("system", format!("Error: {}", err)));
@@ -539,22 +583,19 @@ async fn handle_key_event(
             app.should_quit = true;
         }
         KeyCode::Enter => {
-            if key.modifiers.contains(KeyModifiers::SHIFT) {
+            if key.modifiers.contains(KeyModifiers::SHIFT)
+                || key.modifiers.contains(KeyModifiers::ALT)
+            {
+                // Shift+Enter (enhanced terminals) or Alt+Enter (universal) for newline
                 app.input_buffer.push('\n');
                 app.cursor_pos += 1;
             } else {
-                // Gather input: combine text buffer with any pasted lines
+                // Gather input: pasted lines already include any prior input_buffer
+                // (folded in at paste time), so just join them directly.
                 let input = if let Some(pasted) = app.pasted_lines.take() {
-                    let mut full = pasted.join("\n");
-                    if !app.input_buffer.is_empty() {
-                        if !full.is_empty() {
-                            full.push('\n');
-                        }
-                        full.push_str(&app.input_buffer);
-                    }
                     app.input_buffer.clear();
                     app.cursor_pos = 0;
-                    full
+                    pasted.join("\n")
                 } else if !app.input_buffer.is_empty() {
                     let input = app.input_buffer.clone();
                     app.input_buffer.clear();
@@ -638,15 +679,24 @@ async fn handle_key_event(
 
 fn handle_paste(text: String, app: &mut AppState) {
     let line_count = text.lines().count();
-    if line_count > 1 {
-        // Multi-line paste: store for preview, send on Enter
-        let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
+    if line_count > 1 || text.len() > 200 {
+        // Multi-line or long paste: store for preview, send on Enter.
+        // Fold any existing input_buffer content into the pasted lines so
+        // it is visible in the preview and not silently merged on send.
+        let mut lines: Vec<String> = Vec::new();
+        if !app.input_buffer.is_empty() {
+            lines.push(app.input_buffer.clone());
+            app.input_buffer.clear();
+            app.cursor_pos = 0;
+        }
+        // Append to any existing pasted content (multiple pastes stack)
+        if let Some(existing) = app.pasted_lines.take() {
+            lines.extend(existing);
+        }
+        lines.extend(text.lines().map(|l| l.to_string()));
         app.pasted_lines = Some(lines);
-    } else if text.len() > 200 {
-        // FEATURE-001: Long single-line paste — store for preview
-        app.pasted_lines = Some(vec![text]);
     } else {
-        // Single-line paste: insert inline at cursor
+        // Short single-line paste: insert inline at cursor
         let byte_pos = char_to_byte_pos(&app.input_buffer, app.cursor_pos);
         app.input_buffer.insert_str(byte_pos, &text);
         app.cursor_pos += text.chars().count();
@@ -945,6 +995,7 @@ async fn send_learning_kickoff(
         lm.awaiting_response = true;
 
         app.status_message = "Thinking...".into();
+        app.thinking = true;
 
         // Send to brain
         if let Some(ref brain) = app.brain {
@@ -990,6 +1041,7 @@ async fn handle_learning_input(
         }
 
         app.status_message = "Thinking...".into();
+        app.thinking = true;
 
         if let Some(ref brain) = app.brain {
             let rx = brain
@@ -1097,6 +1149,7 @@ async fn handle_operational_input(
 
     app.messages.push(DisplayMessage::new("You", input));
     app.status_message = "Thinking...".into();
+    app.thinking = true;
 
     // Save user message
     let msg = Message::user(input);

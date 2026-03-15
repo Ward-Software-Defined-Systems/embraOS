@@ -316,41 +316,46 @@ async fn uptime_report(db: &WardsonDbClient) -> String {
 
 async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
     let mut output = String::new();
+    let focus_lower = focus.to_lowercase();
 
-    // Load soul
-    if focus.is_empty() || focus.contains("soul") || focus.contains("purpose") || focus.contains("ethics") || focus.contains("constraints") {
-        let soul_docs = db.query("soul.invariant", &serde_json::json!({})).await.unwrap_or_default();
-        if let Some(doc) = soul_docs.into_iter().next() {
-            let soul = doc.get("soul").unwrap_or(&doc);
+    // Load soul — always load when focus is empty OR when focus might match a soul key.
+    // We try the soul section for any focus and let key filtering decide what to show.
+    let soul_docs = db.query("soul.invariant", &serde_json::json!({})).await.unwrap_or_default();
+    if let Some(doc) = soul_docs.into_iter().next() {
+        let soul = doc.get("soul").unwrap_or(&doc);
+
+        if focus.is_empty() {
+            // No focus — show full soul
             output.push_str("=== SOUL (IMMUTABLE) ===\n");
-
-            // BUG-004: If focus is specific (not empty, not just "soul"), filter to matching keys
-            let focus_lower = focus.to_lowercase();
-            if !focus.is_empty() && focus_lower != "soul" {
-                if let Some(obj) = soul.as_object() {
-                    let filtered: serde_json::Map<String, serde_json::Value> = obj
-                        .iter()
-                        .filter(|(k, _)| k.to_lowercase().contains(&focus_lower))
-                        .map(|(k, v)| (k.clone(), v.clone()))
-                        .collect();
-                    if !filtered.is_empty() {
-                        output.push_str(&serde_json::to_string_pretty(&filtered).unwrap_or_default());
-                    } else {
-                        // No keys matched — fall back to full document
-                        output.push_str(&serde_json::to_string_pretty(soul).unwrap_or_default());
-                    }
-                } else {
-                    output.push_str(&serde_json::to_string_pretty(soul).unwrap_or_default());
-                }
-            } else {
-                output.push_str(&serde_json::to_string_pretty(soul).unwrap_or_default());
-            }
+            output.push_str(&serde_json::to_string_pretty(soul).unwrap_or_default());
             output.push('\n');
+        } else {
+            // Focus specified — filter soul keys by focus term
+            if let Some(obj) = soul.as_object() {
+                let filtered: serde_json::Map<String, serde_json::Value> = obj
+                    .iter()
+                    .filter(|(k, _)| k.to_lowercase().contains(&focus_lower))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if !filtered.is_empty() {
+                    output.push_str("=== SOUL (IMMUTABLE) ===\n");
+                    output.push_str(&serde_json::to_string_pretty(&filtered).unwrap_or_default());
+                    output.push('\n');
+                }
+                // If no keys matched, soul section is simply omitted (not an error)
+            } else {
+                // Soul isn't an object — show it fully if focus matches "soul"
+                if focus_lower.contains("soul") {
+                    output.push_str("=== SOUL (IMMUTABLE) ===\n");
+                    output.push_str(&serde_json::to_string_pretty(soul).unwrap_or_default());
+                    output.push('\n');
+                }
+            }
         }
     }
 
     // Load identity
-    if focus.is_empty() || focus.contains("identity") || focus.contains("personality") || focus.contains("traits") {
+    if focus.is_empty() || focus_lower.contains("identity") || focus_lower.contains("personality") || focus_lower.contains("traits") {
         let id_docs = db.query("memory.identity", &serde_json::json!({})).await.unwrap_or_default();
         if let Some(doc) = id_docs.into_iter().next() {
             output.push_str("\n=== IDENTITY ===\n");
@@ -360,7 +365,7 @@ async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
     }
 
     // Load user profile
-    if focus.is_empty() || focus.contains("user") || focus.contains("operator") {
+    if focus.is_empty() || focus_lower.contains("user") || focus_lower.contains("operator") {
         let user_docs = db.query("memory.user", &serde_json::json!({})).await.unwrap_or_default();
         if let Some(doc) = user_docs.into_iter().next() {
             output.push_str("\n=== USER PROFILE ===\n");
