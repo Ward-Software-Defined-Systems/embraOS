@@ -201,6 +201,25 @@ These are internal tools invoked by the intelligence during conversation — not
 
 > **⚠️ Testing Notice:** The default tools and slash commands are actively being tested. If you encounter bugs or unexpected behavior, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
+
+---
+
+## Known Issues (Sprint 1)
+
+Active bugs discovered during Phase 0 testing. Tracked in priority order — fixes in progress.
+
+| ID | Severity | Issue | Impact |
+|---|---|---|---|
+| BUG-001 | 🔴 Critical | Tool tag scanner parses full conversation history — literal `[TOOL:]` text in results triggers phantom execution loops | Runaway writes, requires container restart |
+| BUG-002 | 🟡 Medium | Tool result blocks injected into conversation twice | Wasted context tokens, cluttered output |
+| BUG-003 | 🟡 Medium | Countdown reminders do not fire | Proactive engine notification pipeline broken |
+| BUG-007 | 🟡 Medium | Timezone stores abbreviation ("PST") instead of IANA identifier | Display shows "PDT" when config says "PST" |
+| BUG-004 | 🟢 Low | `introspect` focus filter returns full document instead of relevant subset | Minor — output is verbose but correct |
+| BUG-005 | 🟢 Low | `define` fallback suggests tool tag as literal text, triggering BUG-001 | Compounds critical bug |
+| BUG-006 | 🟢 Low | Hashtag parser fails on multi-line `remember` content | Tags silently dropped |
+
+> **BUG-001 is the critical path.** It must be fixed first — other bugs compound on it. See the sprint task file for full reproduction steps and fix specifications.
+
 ---
 
 ## Roadmap
@@ -208,11 +227,22 @@ These are internal tools invoked by the intelligence during conversation — not
 | Phase | Description | Status |
 |---|---|---|
 | **Phase 0** | Proof of concept — Docker container, Anthropic API, core UX | **Current** |
+| **Phase 0 — Sprint 1** | Bug fixes (7), design improvements (4), new tool categories (security, engineering) | **In Progress** |
 | **Phase 1** | Core OS — embrad (Rust PID 1), embra-apid, immutable rootfs | Planned |
 | **Phase 2** | Terminal & Sessions — full TUI, multi-session, embractl CLI | Planned |
 | **Phase 3** | Module System — MCP servers, embra-guardian, containerd | Planned |
 | **Phase 4** | Image Factory — ISO builds, bare metal deployment | Planned |
 | **Phase 5** | Local LLM — offline operation, sovereign intelligence | Planned |
+
+### Phase 0 Sprint 1 Scope
+
+**Bug Fixes:** Tool tag scanner runaway loop (critical), duplicate tool result injection, countdown reminder pipeline, timezone handling, introspect filtering, define fallback text, multi-line tag parsing.
+
+**Design Improvements:** Draft upsert, ID-based document retrieval (`get` tool), `define` write path, JSON/markdown formatting in conversation UI.
+
+**New Tools:** Security checkpoint (`security_check`, `port_scan`), software engineering (`git_status`, `git_log`, `plan`, `tasks`, `task_add`, `task_done`). Post-sprint tool count: ~25.
+
+**Target:** Stabilize the core tool system, then expand capabilities.
 
 ---
 
