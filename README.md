@@ -246,11 +246,17 @@ is built from scratch in Rust.
 ---
 ## Built By
 
-**Ward Software Defined Systems LLC** — AI-Augmented SDLC
+**[Ward Software Defined Systems LLC](https://wsds.io)** — Vibe Engineering
 
-- Phase 1 (Research & Design): Claude.ai
-- Phase 2 (Implementation): Claude Code
-- Phase 3 (Testing & Ops): Axiom, OpenClaw, Claude Opus
+embraOS is built using WSDS's AI-Augmented SDLC — human steers direction, AI architects, builds, and operates. Every phase from research to production is AI-accelerated with human-in-the-loop oversight.
+
+<p align="center">
+  <img src="assets/vibe-engineering.png" alt="Vibe Engineering — The AI-Augmented SDLC" width="100%">
+</p>
+
+<p align="center">
+  <img src="assets/ai-sdlc-2x.png" alt="WSDS AI-Augmented SDLC — From Concept to Production" width="80%">
+</p>
 
 ---
 
