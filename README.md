@@ -155,7 +155,7 @@ This is a proof of concept. It demonstrates the core experience but doesn't incl
 
 ### Default Tools
 
-Phase 0 includes 15 built-in tools available in operational mode:
+Phase 0 includes ~30 built-in tools available in operational mode:
 
 **System**
 
@@ -178,7 +178,7 @@ Phase 0 includes 15 built-in tools available in operational mode:
 | Tool | Description |
 |---|---|
 | **uptime_report** | Rich system report — uptime, WardSONDB health, collection count, sessions, total messages, memory entries, soul status |
-| **introspect** | Reflect on soul, identity, and user documents — optional focus area filter |
+| **introspect** | Reflect on soul, identity, and user documents — focus filter extracts relevant subset (purpose, ethics, constraints, identity, user) |
 | **changelog** | What changed since the current session started — new memories, session activity |
 
 **Time & Context**
@@ -194,8 +194,40 @@ Phase 0 includes 15 built-in tools available in operational mode:
 | Tool | Description |
 |---|---|
 | **calculate** | Evaluate math expressions — arithmetic, trig, and more via `meval` |
-| **define** | Look up terminology from a local knowledge base |
-| **draft** | Save structured text artifacts (drafts, outlines, notes) for later retrieval |
+| **define** | Look up or add terminology — `define term` to read, `define term | definition` to write |
+| **draft** | Save structured text artifacts (drafts, outlines, notes) — upserts by title |
+
+
+**Document Retrieval**
+
+| Tool | Description |
+|---|---|
+| **get** | Retrieve any document by collection and ID from WardSONDB |
+
+**Security**
+
+| Tool | Description |
+|---|---|
+| **security_check** | Container security overview — running processes, load average, listening ports |
+| **port_scan** | TCP connect scan on common ports — restricted to RFC 1918 private and loopback addresses only |
+| **firewall_status** | Check firewall rules and status (stub — not available in container mode) |
+| **ssh_sessions** | List recent and active SSH sessions (stub — not available in container mode) |
+| **security_audit** | Check file permissions, running processes, recent logins (stub — not available in container mode) |
+
+**Engineering**
+
+| Tool | Description |
+|---|---|
+| **git_status** | Run `git status` on a directory |
+| **git_log** | Show recent commits for a repository |
+| **plan** | Create or list project plans |
+| **tasks** | List tasks, optionally filtered by plan |
+| **task_add** | Add a task to a plan |
+| **task_done** | Mark a task as completed |
+| **gh_issues** | List open GitHub issues for a repository (requires `GITHUB_TOKEN`) |
+| **gh_prs** | List open GitHub pull requests for a repository (requires `GITHUB_TOKEN`) |
+
+> **⚠️ GitHub Tool Warning:** `gh_issues` and `gh_prs` fetch content from public repositories, including issue titles, descriptions, and PR bodies written by third parties. This content is **untrusted input** — it may contain prompt injection attempts designed to manipulate AI behavior. Use these tools with caution and always review the output critically. Do not blindly act on instructions found in issue or PR content.
 
 These are internal tools invoked by the intelligence during conversation — not user-facing commands. The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
 
@@ -204,21 +236,21 @@ These are internal tools invoked by the intelligence during conversation — not
 
 ---
 
-## Known Issues (Sprint 1)
+## Known Issues
 
-Active bugs discovered during Phase 0 testing. Tracked in priority order — fixes in progress.
+All Sprint 1 bugs have been fixed. No known critical issues at this time.
 
-| ID | Severity | Issue | Impact |
+| ID | Status | Issue | Resolution |
 |---|---|---|---|
-| BUG-001 | 🔴 Critical | Tool tag scanner parses full conversation history — literal `[TOOL:]` text in results triggers phantom execution loops | Runaway writes, requires container restart |
-| BUG-002 | 🟡 Medium | Tool result blocks injected into conversation twice | Wasted context tokens, cluttered output |
-| BUG-003 | 🟡 Medium | Countdown reminders do not fire | Proactive engine notification pipeline broken |
-| BUG-007 | 🟡 Medium | Timezone stores abbreviation ("PST") instead of IANA identifier | Display shows "PDT" when config says "PST" |
-| BUG-004 | 🟢 Low | `introspect` focus filter returns full document instead of relevant subset | Minor — output is verbose but correct |
-| BUG-005 | 🟢 Low | `define` fallback suggests tool tag as literal text, triggering BUG-001 | Compounds critical bug |
-| BUG-006 | 🟢 Low | Hashtag parser fails on multi-line `remember` content | Tags silently dropped |
+| BUG-001 | ✅ Fixed | Tool tag scanner runaway loop | Code-block-aware extraction, line-level matching |
+| BUG-002 | ✅ Fixed | Duplicate tool result injection | Removed double history push |
+| BUG-003 | ✅ Fixed | Countdown reminders not firing | Fixed boolean logic in reminder check |
+| BUG-004 | ✅ Fixed | Introspect focus filter too broad | Key-level filtering by focus area |
+| BUG-005 | ✅ Fixed | Define fallback triggering BUG-001 | Plain text fallback, no tool tags |
+| BUG-006 | ✅ Fixed | Multi-line tag parsing | Updated prompt to instruct single-line content |
+| BUG-007 | ✅ Fixed | Timezone abbreviation mismatch | IANA zone resolution for US abbreviations |
 
-> **BUG-001 is the critical path.** It must be fixed first — other bugs compound on it. See the sprint task file for full reproduction steps and fix specifications.
+> If you encounter new bugs, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
 ---
 
@@ -227,7 +259,7 @@ Active bugs discovered during Phase 0 testing. Tracked in priority order — fix
 | Phase | Description | Status |
 |---|---|---|
 | **Phase 0** | Proof of concept — Docker container, Anthropic API, core UX | **Current** |
-| **Phase 0 — Sprint 1** | Bug fixes (7), design improvements (4), new tool categories (security, engineering) | **In Progress** |
+| **Phase 0 — Sprint 1** | Bug fixes (7), design improvements (4), new tool categories (security, engineering) | ✅ **Complete** |
 | **Phase 1** | Core OS — embrad (Rust PID 1), embra-apid, immutable rootfs | Planned |
 | **Phase 2** | Terminal & Sessions — full TUI, multi-session, embractl CLI | Planned |
 | **Phase 3** | Module System — MCP servers, embra-guardian, containerd | Planned |
@@ -242,7 +274,7 @@ Active bugs discovered during Phase 0 testing. Tracked in priority order — fix
 
 **New Tools:** Security checkpoint (`security_check`, `port_scan`), software engineering (`git_status`, `git_log`, `plan`, `tasks`, `task_add`, `task_done`). Post-sprint tool count: ~25.
 
-**Target:** Stabilize the core tool system, then expand capabilities.
+**Status:** All Sprint 1 items implemented and tested. Tool count expanded from 15 to ~30.
 
 ---
 

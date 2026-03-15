@@ -2,10 +2,11 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph},
     Frame,
 };
 
+use super::render::{self, StyledLine, StyledSegment};
 use super::{AppMode, AppState, SetupStep};
 
 pub fn draw(f: &mut Frame, app: &AppState) {
@@ -100,8 +101,8 @@ fn draw_header(f: &mut Frame, area: Rect, app: &AppState) {
 }
 
 fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
-    // Collect all logical lines with their styles
-    let mut styled_lines: Vec<(String, Style)> = Vec::new();
+    // Collect all logical lines as multi-segment styled lines (DESIGN-004)
+    let mut styled_lines: Vec<StyledLine> = Vec::new();
 
     for msg in &app.messages {
         let (color, prefix) = match msg.role.as_str() {
@@ -110,25 +111,46 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
             _ => (Color::Green, msg.role.as_str()),
         };
 
+        let base_style = Style::default().fg(color);
+
         if msg.role == "system" {
             let style = Style::default().fg(Color::White);
             for line in msg.content.lines() {
-                styled_lines.push((format!("  {}", line), style));
+                styled_lines.push(render::parse_styled_line(&format!("  {}", line), style));
             }
         } else {
+            // Header line
             let header = format!("[{}] {}: ", msg.timestamp, prefix);
-            styled_lines.push((
+            styled_lines.push(vec![StyledSegment::new(
                 header,
-                Style::default()
-                    .fg(color)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            let style = Style::default().fg(color);
+                base_style.add_modifier(Modifier::BOLD),
+            )]);
+
+            // Content lines with rich rendering
+            let mut in_json_block = false;
             for line in msg.content.lines() {
-                styled_lines.push((format!("  {}", line), style));
+                let prefixed = format!("  {}", line);
+                if line.trim_start().starts_with("```json") || line.trim_start().starts_with("```JSON") {
+                    in_json_block = true;
+                    styled_lines.push(vec![StyledSegment::new(prefixed, Style::default().fg(Color::Gray))]);
+                    continue;
+                }
+                if line.trim_start().starts_with("```") && in_json_block {
+                    in_json_block = false;
+                    styled_lines.push(vec![StyledSegment::new(prefixed, Style::default().fg(Color::Gray))]);
+                    continue;
+                }
+                if in_json_block {
+                    // JSON syntax highlighting
+                    let mut json_segments = vec![StyledSegment::new("  ".to_string(), base_style)];
+                    json_segments.extend(render::parse_json_line(line));
+                    styled_lines.push(json_segments);
+                } else {
+                    styled_lines.push(render::parse_styled_line(&prefixed, base_style));
+                }
             }
         }
-        styled_lines.push((String::new(), Style::default()));
+        styled_lines.push(vec![StyledSegment::new(String::new(), Style::default())]);
     }
 
     // Show selector if active
@@ -145,9 +167,9 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
             } else {
                 ("  ", Style::default().fg(Color::Gray))
             };
-            styled_lines.push((format!("  {}{}", marker, option), style));
+            styled_lines.push(vec![StyledSegment::new(format!("  {}{}", marker, option), style)]);
         }
-        styled_lines.push((String::new(), Style::default()));
+        styled_lines.push(vec![StyledSegment::new(String::new(), Style::default())]);
     }
 
     // Show streaming text if present
@@ -157,26 +179,25 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
             .as_ref()
             .map(|c| c.name.as_str())
             .unwrap_or("Embra");
-        styled_lines.push((
+        styled_lines.push(vec![StyledSegment::new(
             format!("{}: ", name),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
-        ));
+        )]);
         let style = Style::default().fg(Color::Green);
         for line in streaming.lines() {
-            styled_lines.push((format!("  {}", line), style));
+            styled_lines.push(render::parse_styled_line(&format!("  {}", line), style));
         }
-        styled_lines.push((
+        styled_lines.push(vec![StyledSegment::new(
             "  ▊".to_string(),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::SLOW_BLINK),
-        ));
+        )]);
     }
 
     // Manually wrap lines and render from the bottom up.
-    // This avoids any mismatch with ratatui's internal scroll calculation.
     let content_width = area.width.saturating_sub(2) as usize; // 1px border each side
     let visible_rows = area.height as usize;
 
@@ -184,20 +205,50 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
         return;
     }
 
-    // Wrap all logical lines into visual rows: (text_segment, style)
-    let mut visual_rows: Vec<(String, Style)> = Vec::new();
-    for (text, style) in &styled_lines {
-        if text.is_empty() {
-            visual_rows.push((String::new(), *style));
+    // Wrap multi-segment lines into visual rows
+    let mut visual_rows: Vec<Vec<Span>> = Vec::new();
+    for styled_line in &styled_lines {
+        // Calculate total text length for this line
+        let total_len: usize = styled_line.iter().map(|s| s.text.chars().count()).sum();
+
+        if total_len == 0 {
+            visual_rows.push(vec![Span::raw("")]);
+        } else if total_len <= content_width {
+            // Fits in one row — convert segments to spans directly
+            let spans: Vec<Span> = styled_line
+                .iter()
+                .map(|seg| Span::styled(seg.text.clone(), seg.style))
+                .collect();
+            visual_rows.push(spans);
         } else {
-            // Character-level wrapping
-            let chars: Vec<char> = text.chars().collect();
-            let mut pos = 0;
-            while pos < chars.len() {
-                let end = (pos + content_width).min(chars.len());
-                let segment: String = chars[pos..end].iter().collect();
-                visual_rows.push((segment, *style));
-                pos = end;
+            // Need to wrap: flatten all chars with styles, then chunk
+            let mut flat_chars: Vec<(char, Style)> = Vec::new();
+            for seg in styled_line {
+                for ch in seg.text.chars() {
+                    flat_chars.push((ch, seg.style));
+                }
+            }
+            for chunk in flat_chars.chunks(content_width) {
+                // Group consecutive chars with same style into spans
+                let mut spans: Vec<Span> = Vec::new();
+                let mut current_text = String::new();
+                let mut current_style = chunk[0].1;
+                for &(ch, style) in chunk {
+                    if style == current_style {
+                        current_text.push(ch);
+                    } else {
+                        if !current_text.is_empty() {
+                            spans.push(Span::styled(current_text.clone(), current_style));
+                            current_text.clear();
+                        }
+                        current_style = style;
+                        current_text.push(ch);
+                    }
+                }
+                if !current_text.is_empty() {
+                    spans.push(Span::styled(current_text, current_style));
+                }
+                visual_rows.push(spans);
             }
         }
     }
@@ -213,7 +264,7 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
     // Build ratatui Lines from our pre-wrapped rows
     let lines: Vec<Line> = visible_slice
         .iter()
-        .map(|(text, style)| Line::from(Span::styled(text.clone(), *style)))
+        .map(|spans| Line::from(spans.clone()))
         .collect();
 
     // Render without Wrap (we already wrapped manually) and without scroll
@@ -252,10 +303,21 @@ fn draw_input(f: &mut Frame, area: Rect, app: &AppState) {
         AppMode::Operational { .. } => ("Type a message...", " You "),
     };
 
-    // Show paste indicator or normal input
+    // Show paste indicator or normal input (FEATURE-001: improved previews)
     let (input_text, style) = if let Some(ref pasted) = app.pasted_lines {
-        let line_count = pasted.len();
-        let preview = format!("[{} lines pasted] press Enter to send", line_count);
+        let total_chars: usize = pasted.iter().map(|l| l.len()).sum::<usize>() + pasted.len().saturating_sub(1);
+        let preview = if pasted.len() == 1 && total_chars > 200 {
+            // Long single-line paste
+            format!("[{} chars pasted] press Enter to send", total_chars)
+        } else if pasted.len() > 2 {
+            // Multi-line: show first 2 lines + count
+            let first_two: String = pasted.iter().take(2).map(|l| {
+                if l.len() > 60 { format!("{}...", &l[..57]) } else { l.clone() }
+            }).collect::<Vec<_>>().join(" | ");
+            format!("{} ... and {} more lines", first_two, pasted.len() - 2)
+        } else {
+            format!("[{} lines pasted] press Enter to send", pasted.len())
+        };
         (preview, Style::default().fg(Color::Yellow))
     } else if app.input_buffer.is_empty() {
         (placeholder.to_string(), Style::default().fg(Color::DarkGray))

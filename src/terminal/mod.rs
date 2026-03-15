@@ -454,8 +454,8 @@ async fn handle_stream_event(
                         ));
                         if let Some(ref mut sm) = app.session_manager {
                             sm.append_message(&session_name, &tool_msg).await?;
-                            let mut history = sm.load_history(&session_name).await?;
-                            history.push(tool_msg);
+                            // load_history already includes the tool_msg we just appended (BUG-002 fix)
+                            let history = sm.load_history(&session_name).await?;
                             if let Some(ref brain) = app.brain {
                                 let rx = brain.send_message_streaming(&history).await?;
                                 let tx2 = stream_tx.clone();
@@ -642,6 +642,9 @@ fn handle_paste(text: String, app: &mut AppState) {
         // Multi-line paste: store for preview, send on Enter
         let lines: Vec<String> = text.lines().map(|l| l.to_string()).collect();
         app.pasted_lines = Some(lines);
+    } else if text.len() > 200 {
+        // FEATURE-001: Long single-line paste — store for preview
+        app.pasted_lines = Some(vec![text]);
     } else {
         // Single-line paste: insert inline at cursor
         let byte_pos = char_to_byte_pos(&app.input_buffer, app.cursor_pos);
@@ -817,8 +820,10 @@ fn advance_to_timezone(app: &mut AppState) {
 }
 
 fn advance_setup_timezone(app: &mut AppState, tz: &str) {
+    // Resolve abbreviations to IANA names (BUG-007)
+    let resolved = tools::resolve_timezone(tz);
     if let AppMode::Setup(ref mut setup) = app.mode {
-        setup.timezone = Some(tz.to_string());
+        setup.timezone = Some(resolved);
         setup.step = SetupStep::Confirm;
     }
 
@@ -1125,22 +1130,13 @@ async fn handle_tool_calls(
     let mut display_text = text.to_string();
     let mut tool_results = String::new();
 
-    // Find all [TOOL:...] tags in the text
-    let mut search = text;
-    while let Some(start) = search.find("[TOOL:") {
-        if let Some(end) = search[start..].find(']') {
-            let tag = &search[start..start + end + 1];
-
-            // Execute the tool
-            if let Some(result) = tools::dispatch(tag, db, config_tz, session_name).await {
-                display_text = display_text.replace(tag, "");
-                tool_results.push_str(&result);
-                tool_results.push('\n');
-            }
-
-            search = &search[start + end + 1..];
-        } else {
-            break;
+    // Use safe tag extraction that ignores code blocks and inline code (BUG-001 fix)
+    let tags = tools::extract_tool_tags(text);
+    for tag in &tags {
+        if let Some(result) = tools::dispatch(tag, db, config_tz, session_name).await {
+            display_text = display_text.replace(tag, "");
+            tool_results.push_str(&result);
+            tool_results.push('\n');
         }
     }
 

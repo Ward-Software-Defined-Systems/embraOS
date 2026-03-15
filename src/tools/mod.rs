@@ -1,7 +1,10 @@
-use chrono::{TimeZone, Utc};
+use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::db::WardsonDbClient;
+
+pub mod engineering;
+pub mod security;
 
 // ── Startup Time ──
 
@@ -56,7 +59,23 @@ pub async fn dispatch(
         "calculate" => calculate(param),
         "define" => define(db, param).await,
         "draft" => draft(db, param, session_name).await,
+        "get" => get(db, param).await,
         "search_memory" => recall(db, param).await, // alias
+        // Security tools (FEATURE-003)
+        "security_check" => security::security_check().await,
+        "port_scan" => security::port_scan(param).await,
+        "firewall_status" => security::firewall_status(),
+        "ssh_sessions" => security::ssh_sessions(),
+        "security_audit" => security::security_audit(),
+        // Engineering tools (FEATURE-004)
+        "git_status" => engineering::git_status(param).await,
+        "git_log" => engineering::git_log(param).await,
+        "plan" => engineering::plan(db, param).await,
+        "tasks" => engineering::tasks(db, param).await,
+        "task_add" => engineering::task_add(db, param).await,
+        "task_done" => engineering::task_done(db, param).await,
+        "gh_issues" => engineering::gh_issues(param).await,
+        "gh_prs" => engineering::gh_prs(param).await,
         _ => return None,
     };
 
@@ -304,7 +323,28 @@ async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
         if let Some(doc) = soul_docs.into_iter().next() {
             let soul = doc.get("soul").unwrap_or(&doc);
             output.push_str("=== SOUL (IMMUTABLE) ===\n");
-            output.push_str(&serde_json::to_string_pretty(soul).unwrap_or_default());
+
+            // BUG-004: If focus is specific (not empty, not just "soul"), filter to matching keys
+            let focus_lower = focus.to_lowercase();
+            if !focus.is_empty() && focus_lower != "soul" {
+                if let Some(obj) = soul.as_object() {
+                    let filtered: serde_json::Map<String, serde_json::Value> = obj
+                        .iter()
+                        .filter(|(k, _)| k.to_lowercase().contains(&focus_lower))
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect();
+                    if !filtered.is_empty() {
+                        output.push_str(&serde_json::to_string_pretty(&filtered).unwrap_or_default());
+                    } else {
+                        // No keys matched — fall back to full document
+                        output.push_str(&serde_json::to_string_pretty(soul).unwrap_or_default());
+                    }
+                } else {
+                    output.push_str(&serde_json::to_string_pretty(soul).unwrap_or_default());
+                }
+            } else {
+                output.push_str(&serde_json::to_string_pretty(soul).unwrap_or_default());
+            }
             output.push('\n');
         }
     }
@@ -394,6 +434,10 @@ async fn changelog(db: &WardsonDbClient, current_session: &str) -> String {
 fn time_now(config_tz: &str) -> String {
     let now = Utc::now();
 
+    // Resolve abbreviations to IANA names before parsing (BUG-007)
+    let resolved = resolve_timezone(config_tz);
+    let config_tz = &resolved;
+
     // Try to parse the configured timezone
     if let Ok(tz) = config_tz.parse::<chrono_tz::Tz>() {
         let local = now.with_timezone(&tz);
@@ -467,10 +511,12 @@ pub async fn check_reminders(db: &WardsonDbClient) -> Vec<String> {
     let mut fired = Vec::new();
 
     for doc in &reminders {
-        let already_fired = doc.get("fired").and_then(|v| v.as_bool()).unwrap_or(true);
+        // Missing `fired` field means not yet fired (BUG-003 fix)
+        let already_fired = doc.get("fired").and_then(|v| v.as_bool()).unwrap_or(false);
         if already_fired {
             continue;
         }
+        tracing::debug!("Checking reminder: {:?}", doc.get("message"));
 
         let trigger = doc
             .get("trigger_at")
@@ -561,13 +607,58 @@ fn calculate(expression: &str) -> String {
     }
 }
 
-async fn define(db: &WardsonDbClient, term: &str) -> String {
-    if term.is_empty() {
-        return "Usage: [TOOL:define <term>]".into();
+async fn define(db: &WardsonDbClient, param: &str) -> String {
+    if param.is_empty() {
+        return "Usage: [TOOL:define <term>] to look up, or [TOOL:define <term> | <definition>] to add".into();
     }
 
     ensure_collection(db, "knowledge.definitions").await;
 
+    // DESIGN-003: If param contains ` | `, split into term + definition and write
+    if let Some(pipe_pos) = param.find(" | ") {
+        let term = param[..pipe_pos].trim();
+        let definition = param[pipe_pos + 3..].trim();
+
+        if term.is_empty() || definition.is_empty() {
+            return "Usage: [TOOL:define <term> | <definition>]".into();
+        }
+
+        let results = db
+            .query("knowledge.definitions", &serde_json::json!({}))
+            .await
+            .unwrap_or_default();
+
+        // Check for existing definition to upsert
+        let existing_id = results.iter().find_map(|doc| {
+            let doc_term = doc.get("term").and_then(|v| v.as_str()).unwrap_or("");
+            if doc_term.to_lowercase() == term.to_lowercase() {
+                doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()).map(|s| s.to_string())
+            } else {
+                None
+            }
+        });
+
+        let doc = serde_json::json!({
+            "term": term,
+            "definition": definition,
+            "updated_at": Utc::now().to_rfc3339(),
+        });
+
+        if let Some(id) = existing_id {
+            match db.update("knowledge.definitions", &id, &doc).await {
+                Ok(()) => return format!("Definition updated: {} — {}", term, definition),
+                Err(e) => return format!("Failed to update definition: {}", e),
+            }
+        } else {
+            match db.write("knowledge.definitions", &doc).await {
+                Ok(id) => return format!("Definition saved: {} — {} (ID: {})", term, definition, id),
+                Err(e) => return format!("Failed to save definition: {}", e),
+            }
+        }
+    }
+
+    // Lookup mode
+    let term = param;
     let term_lower = term.to_lowercase();
     let results = db
         .query("knowledge.definitions", &serde_json::json!({}))
@@ -588,9 +679,9 @@ async fn define(db: &WardsonDbClient, term: &str) -> String {
         }
     }
 
-    // Not found — offer to add
+    // Not found — offer to add (plain text, no tool tag syntax to avoid BUG-001 re-parse)
     format!(
-        "No local definition found for '{}'. You can add one with:\n[TOOL:remember {} — <definition> #definition]",
+        "No local definition found for '{}'. To add one, use: define {} | your definition here",
         term, term
     )
 }
@@ -609,16 +700,120 @@ async fn draft(db: &WardsonDbClient, param: &str, session: &str) -> String {
         ("Untitled Draft", param)
     };
 
+    // DESIGN-001: Check for existing draft with same title and upsert
+    let existing = db.query("drafts", &serde_json::json!({})).await.unwrap_or_default();
+    let existing_id = existing.iter().find_map(|doc| {
+        let doc_title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        if doc_title.eq_ignore_ascii_case(title) {
+            doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()).map(|s| s.to_string())
+        } else {
+            None
+        }
+    });
+
     let doc = serde_json::json!({
         "title": title,
         "content": content,
         "session": session,
-        "created_at": Utc::now().to_rfc3339(),
+        "updated_at": Utc::now().to_rfc3339(),
     });
 
-    match db.write("drafts", &doc).await {
-        Ok(id) => format!("Draft saved: '{}' (ID: {})", title, id),
-        Err(e) => format!("Failed to save draft: {}", e),
+    if let Some(id) = existing_id {
+        match db.update("drafts", &id, &doc).await {
+            Ok(()) => format!("Draft updated: '{}' (ID: {})", title, id),
+            Err(e) => format!("Failed to update draft: {}", e),
+        }
+    } else {
+        let mut doc = doc;
+        doc["created_at"] = serde_json::json!(Utc::now().to_rfc3339());
+        match db.write("drafts", &doc).await {
+            Ok(id) => format!("Draft created: '{}' (ID: {})", title, id),
+            Err(e) => format!("Failed to save draft: {}", e),
+        }
+    }
+}
+
+// ── Get Tool (DESIGN-002) ──
+
+async fn get(db: &WardsonDbClient, param: &str) -> String {
+    if param.is_empty() {
+        return "Usage: [TOOL:get <collection> <id>]\nExample: [TOOL:get memory.entries abc123]".into();
+    }
+
+    let parts: Vec<&str> = param.splitn(2, ' ').collect();
+    if parts.len() < 2 {
+        return "Usage: [TOOL:get <collection> <id>]".into();
+    }
+
+    let (collection, id) = (parts[0], parts[1].trim());
+
+    match db.read(collection, id).await {
+        Ok(doc) => serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "Failed to format document".into()),
+        Err(e) => format!("Failed to read {}/{}: {}", collection, id, e),
+    }
+}
+
+// ── Tool Tag Extraction ──
+
+/// Extract `[TOOL:...]` tags from AI output safely.
+/// Strips fenced code blocks and inline code first so that examples/documentation
+/// are never mis-parsed as real tool invocations (BUG-001 fix).
+/// Only lines whose trimmed content is exactly one `[TOOL:...]` tag are matched.
+pub fn extract_tool_tags(text: &str) -> Vec<String> {
+    // Step 1: Strip fenced code blocks (``` ... ```)
+    let mut stripped = String::with_capacity(text.len());
+    let mut in_fence = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            stripped.push('\n');
+            continue;
+        }
+        if in_fence {
+            stripped.push('\n');
+        } else {
+            stripped.push_str(line);
+            stripped.push('\n');
+        }
+    }
+
+    // Step 2: Strip inline backtick spans
+    let mut no_inline = String::with_capacity(stripped.len());
+    let mut in_backtick = false;
+    for ch in stripped.chars() {
+        if ch == '`' {
+            in_backtick = !in_backtick;
+        } else if !in_backtick {
+            no_inline.push(ch);
+        }
+    }
+
+    // Step 3: Match lines that are exactly one [TOOL:...] tag
+    let mut tags = Vec::new();
+    for line in no_inline.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("[TOOL:") && trimmed.ends_with(']') && trimmed.matches("[TOOL:").count() == 1 {
+            tags.push(trimmed.to_string());
+        }
+    }
+
+    tags
+}
+
+// ── Timezone Resolution ──
+
+/// Map common timezone abbreviations to IANA names.
+/// Passes through anything that doesn't match a known abbreviation.
+pub fn resolve_timezone(input: &str) -> String {
+    match input.trim().to_uppercase().as_str() {
+        "PST" | "PDT" => "America/Los_Angeles".into(),
+        "EST" | "EDT" => "America/New_York".into(),
+        "CST" | "CDT" => "America/Chicago".into(),
+        "MST" | "MDT" => "America/Denver".into(),
+        "AKST" | "AKDT" => "America/Anchorage".into(),
+        "HST" => "Pacific/Honolulu".into(),
+        "UTC" | "GMT" => "Etc/UTC".into(),
+        _ => input.trim().to_string(),
     }
 }
 

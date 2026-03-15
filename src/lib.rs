@@ -2,6 +2,7 @@ pub mod brain;
 pub mod config;
 pub mod db;
 pub mod learning;
+pub mod migrations;
 pub mod proactive;
 pub mod sessions;
 pub mod terminal;

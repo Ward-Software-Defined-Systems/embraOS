@@ -5,6 +5,7 @@ mod brain;
 mod config;
 mod db;
 mod learning;
+mod migrations;
 mod proactive;
 mod sessions;
 mod terminal;
@@ -45,16 +46,21 @@ async fn main() -> Result<()> {
     // Keep child process alive by holding it
     let _db_child = db_process.child;
 
-    // 2. Check if this is first run (no soul documents exist)
+    // 2. Run schema migrations (FEATURE-002)
+    if let Err(e) = migrations::run_migrations(&db).await {
+        error!("Migration error (non-fatal): {}", e);
+    }
+
+    // 3. Check if this is first run (no soul documents exist)
     let is_first_run = !db
         .collection_exists("soul.invariant")
         .await
         .unwrap_or(false);
 
-    // 3. Start proactive engine (background task)
+    // 4. Start proactive engine (background task)
     let notification_rx = proactive::start_proactive_engine(&db);
 
-    // 4. Enter TUI — handles setup, learning, and operational modes
+    // 5. Enter TUI — handles setup, learning, and operational modes
     terminal::run_terminal(&db, is_first_run, notification_rx).await?;
 
     info!("embraOS shutting down gracefully");

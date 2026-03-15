@@ -14,7 +14,7 @@ RUN cargo build --release
 
 # Stage 3: Runtime
 FROM debian:trixie-slim
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y ca-certificates iproute2 procps git && rm -rf /var/lib/apt/lists/*
 
 COPY --from=wardsondb-builder /build/target/release/wardsondb /usr/local/bin/
 COPY --from=embra-builder /build/target/release/embrad /usr/local/bin/
