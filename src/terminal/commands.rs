@@ -175,12 +175,10 @@ pub async fn handle_command(input: &str, app: &mut AppState) -> Result<Option<St
                 text.push('\n');
             }
 
-            // Use OSC 52 escape sequence to copy to system clipboard
+            // Queue OSC 52 escape sequence for the event loop to write
+            // through the terminal backend (avoids corrupting ratatui state)
             let encoded = base64_encode(text.as_bytes());
-            // Write OSC 52: \x1b]52;c;<base64>\x07
-            let osc = format!("\x1b]52;c;{}\x07", encoded);
-            let _ = std::io::Write::write_all(&mut std::io::stdout(), osc.as_bytes());
-            let _ = std::io::Write::flush(&mut std::io::stdout());
+            app.pending_clipboard = Some(format!("\x1b]52;c;{}\x07", encoded));
 
             let msg_count = slice.len();
             Ok(Some(format!(

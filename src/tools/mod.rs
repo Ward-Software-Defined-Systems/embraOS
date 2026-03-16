@@ -352,27 +352,17 @@ fn filter_soul_keys(soul: &serde_json::Value, focus: &str) -> serde_json::Map<St
         k.contains(focus)
     };
 
-    // Filter: keep keys that match at top level OR have matching sub-keys
+    // Filter: keep keys whose NAME matches at top level OR whose sub-keys match.
+    // Only match on key names, never on values (values often contain the focus
+    // term in prose, which would cause every key to match).
     obj.iter()
         .filter(|(k, v)| {
             if matches_any_pattern(k) {
                 return true;
             }
-            // Check one level deeper
+            // Check sub-object key names (one level deep)
             if let Some(sub_obj) = v.as_object() {
                 return sub_obj.keys().any(|sk| matches_any_pattern(sk));
-            }
-            // Check if it's an array of objects with matching keys
-            if let Some(arr) = v.as_array() {
-                return arr.iter().any(|item| {
-                    if let Some(item_obj) = item.as_object() {
-                        item_obj.keys().any(|sk| matches_any_pattern(sk))
-                    } else if let Some(s) = item.as_str() {
-                        s.to_lowercase().contains(focus)
-                    } else {
-                        false
-                    }
-                });
             }
             false
         })

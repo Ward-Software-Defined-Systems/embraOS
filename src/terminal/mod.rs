@@ -111,6 +111,7 @@ pub struct AppState {
     pub user_profile: Option<serde_json::Value>,
     pub selector: Option<Selector>,
     pub pasted_lines: Option<Vec<String>>, // Holds multi-line paste content
+    pub pending_clipboard: Option<String>, // OSC 52 payload to write after next draw
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +162,7 @@ pub async fn run_terminal(
         user_profile: None,
         selector: None,
         pasted_lines: None,
+        pending_clipboard: None,
     };
 
     if !is_first_run {
@@ -325,6 +327,14 @@ async fn run_event_loop(
 
     loop {
         terminal.draw(|f| ui::draw(f, app))?;
+
+        // Write pending OSC 52 clipboard data through the terminal backend
+        if let Some(osc_payload) = app.pending_clipboard.take() {
+            use std::io::Write;
+            let backend = terminal.backend_mut();
+            let _ = backend.write_all(osc_payload.as_bytes());
+            let _ = backend.flush();
+        }
 
         if app.should_quit {
             break;
