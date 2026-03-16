@@ -211,16 +211,31 @@ pub fn parse_json_line(line: &str) -> StyledLine {
             segments.push(StyledSegment::new(num, Style::default().fg(Color::Yellow)));
             continue; // don't increment i again
         }
-        // Boolean/null keywords
-        else if line[i..].starts_with("true") || line[i..].starts_with("false") || line[i..].starts_with("null") {
+        // Boolean/null keywords — check from chars array, not byte-indexed line slice
+        else if i + 4 <= len && matches!(
+            (chars[i], chars.get(i+1), chars.get(i+2), chars.get(i+3)),
+            ('t', Some('r'), Some('u'), Some('e'))
+            | ('n', Some('u'), Some('l'), Some('l'))
+        ) {
             if !current.is_empty() {
                 segments.push(StyledSegment::new(current.clone(), base_style));
                 current.clear();
             }
-            let word_len = if line[i..].starts_with("false") { 5 } else if line[i..].starts_with("true") { 4 } else { 4 };
-            let word: String = chars[i..i + word_len].iter().collect();
+            let word: String = chars[i..i + 4].iter().collect();
             segments.push(StyledSegment::new(word, Style::default().fg(Color::Yellow)));
-            i += word_len;
+            i += 4;
+            continue;
+        }
+        else if i + 5 <= len && (chars[i], chars.get(i+1), chars.get(i+2), chars.get(i+3), chars.get(i+4))
+            == ('f', Some(&'a'), Some(&'l'), Some(&'s'), Some(&'e'))
+        {
+            if !current.is_empty() {
+                segments.push(StyledSegment::new(current.clone(), base_style));
+                current.clear();
+            }
+            let word: String = chars[i..i + 5].iter().collect();
+            segments.push(StyledSegment::new(word, Style::default().fg(Color::Yellow)));
+            i += 5;
             continue;
         } else {
             current.push(ch);

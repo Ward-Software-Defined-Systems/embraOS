@@ -318,8 +318,16 @@ async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
     let mut output = String::new();
     let focus_lower = focus.to_lowercase();
 
-    // Load soul — always load when focus is empty OR when focus might match a soul key.
-    // We try the soul section for any focus and let key filtering decide what to show.
+    // Keyword mapping: focus terms → soul key substrings to match (searches one level deep)
+    let soul_key_mappings: &[(&str, &[&str])] = &[
+        ("ethics", &["ethical", "boundaries", "non_negotiable"]),
+        ("purpose", &["invariant", "declaration", "core_truths", "purpose"]),
+        ("constraints", &["boundaries", "operational", "continuity_protocol", "constraint"]),
+        ("values", &["non_negotiable", "core_truths", "values"]),
+        ("soul", &[]),  // empty = show full soul
+    ];
+
+    // Load soul
     let soul_docs = db.query("soul.invariant", &serde_json::json!({})).await.unwrap_or_default();
     if let Some(doc) = soul_docs.into_iter().next() {
         let soul = doc.get("soul").unwrap_or(&doc);
@@ -329,27 +337,75 @@ async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
             output.push_str("=== SOUL (IMMUTABLE) ===\n");
             output.push_str(&serde_json::to_string_pretty(soul).unwrap_or_default());
             output.push('\n');
-        } else {
-            // Focus specified — filter soul keys by focus term
-            if let Some(obj) = soul.as_object() {
-                let filtered: serde_json::Map<String, serde_json::Value> = obj
-                    .iter()
-                    .filter(|(k, _)| k.to_lowercase().contains(&focus_lower))
+        } else if let Some(obj) = soul.as_object() {
+            // Resolve focus to a set of key substrings via keyword mapping
+            let mapped_terms: Vec<&str> = soul_key_mappings
+                .iter()
+                .filter(|(keyword, _)| focus_lower.contains(keyword))
+                .flat_map(|(_, terms)| terms.iter().copied())
+                .collect();
+
+            let filtered: serde_json::Map<String, serde_json::Value> = if mapped_terms.is_empty() {
+                // No keyword mapping matched — fall back to direct key name matching
+                // Also search one level deep: match if any sub-key contains the focus
+                obj.iter()
+                    .filter(|(k, v)| {
+                        let k_lower = k.to_lowercase();
+                        if k_lower.contains(&focus_lower) {
+                            return true;
+                        }
+                        // Search one level deeper into sub-objects
+                        if let Some(sub_obj) = v.as_object() {
+                            sub_obj.keys().any(|sk| sk.to_lowercase().contains(&focus_lower))
+                        } else {
+                            false
+                        }
+                    })
                     .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                if !filtered.is_empty() {
-                    output.push_str("=== SOUL (IMMUTABLE) ===\n");
-                    output.push_str(&serde_json::to_string_pretty(&filtered).unwrap_or_default());
-                    output.push('\n');
-                }
-                // If no keys matched, soul section is simply omitted (not an error)
+                    .collect()
+            } else if mapped_terms.is_empty() {
+                // "soul" keyword with empty terms → show full document
+                obj.clone()
             } else {
-                // Soul isn't an object — show it fully if focus matches "soul"
-                if focus_lower.contains("soul") {
-                    output.push_str("=== SOUL (IMMUTABLE) ===\n");
-                    output.push_str(&serde_json::to_string_pretty(soul).unwrap_or_default());
-                    output.push('\n');
-                }
+                // Use mapped terms to find matching keys (one level deep)
+                obj.iter()
+                    .filter(|(k, v)| {
+                        let k_lower = k.to_lowercase();
+                        let key_matches = mapped_terms.iter().any(|term| k_lower.contains(term));
+                        if key_matches {
+                            return true;
+                        }
+                        // Also check sub-object keys
+                        if let Some(sub_obj) = v.as_object() {
+                            sub_obj.keys().any(|sk| {
+                                let sk_lower = sk.to_lowercase();
+                                mapped_terms.iter().any(|term| sk_lower.contains(term))
+                            })
+                        } else {
+                            false
+                        }
+                    })
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect()
+            };
+
+            // Check if focus is exactly "soul" — show full document
+            if focus_lower == "soul" {
+                output.push_str("=== SOUL (IMMUTABLE) ===\n");
+                output.push_str(&serde_json::to_string_pretty(soul).unwrap_or_default());
+                output.push('\n');
+            } else if !filtered.is_empty() {
+                output.push_str(&format!("=== SOUL — {} ===\n", focus));
+                output.push_str(&serde_json::to_string_pretty(&filtered).unwrap_or_default());
+                output.push('\n');
+            }
+            // If nothing matched, soul section omitted (not an error)
+        } else {
+            // Soul isn't an object — show fully if focus is "soul"
+            if focus_lower == "soul" {
+                output.push_str("=== SOUL (IMMUTABLE) ===\n");
+                output.push_str(&serde_json::to_string_pretty(soul).unwrap_or_default());
+                output.push('\n');
             }
         }
     }

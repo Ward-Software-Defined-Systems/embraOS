@@ -246,7 +246,7 @@ All Sprint 1 bugs have been fixed. No known critical issues at this time.
 | BUG-001 | ✅ Fixed | Tool tag scanner runaway loop | Code-block-aware extraction, line-level matching |
 | BUG-002 | ✅ Fixed | Duplicate tool result injection | Removed double history push |
 | BUG-003 | ✅ Fixed | Countdown reminders not firing | Fixed boolean logic in reminder check |
-| BUG-004 | ✅ Fixed | Introspect focus filter too broad | Key-level filtering against actual JSON keys, no hardcoded keyword guard |
+| BUG-004 | ✅ Fixed | Introspect focus filter too broad | Keyword mapping (ethics, purpose, constraints, values, soul) with deep sub-object search and direct key fallback |
 | BUG-005 | ✅ Fixed | Define fallback triggering BUG-001 | Plain text fallback, no tool tags |
 | BUG-006 | ✅ Fixed | Multi-line tag parsing | Updated prompt to instruct single-line content |
 | BUG-007 | ✅ Fixed | Timezone abbreviation mismatch | IANA zone resolution for US abbreviations |
