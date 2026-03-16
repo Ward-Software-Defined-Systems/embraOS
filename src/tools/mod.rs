@@ -377,7 +377,18 @@ async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
     // Load soul
     let soul_docs = db.query("soul.invariant", &serde_json::json!({})).await.unwrap_or_default();
     if let Some(doc) = soul_docs.into_iter().next() {
-        let soul = doc.get("soul").unwrap_or(&doc);
+        let mut soul = doc.get("soul").unwrap_or(&doc);
+
+        // Unwrap double-wrapped soul: if the Brain proposed {"soul": {...}},
+        // seal_soul wraps it again as {"soul": {"soul": {...}}}.
+        // Keep unwrapping until we reach the actual content keys.
+        while let Some(inner) = soul.get("soul") {
+            if inner.is_object() {
+                soul = inner;
+            } else {
+                break;
+            }
+        }
 
         if focus.is_empty() || focus_lower == "soul" {
             // No focus or "soul" → show full soul document
