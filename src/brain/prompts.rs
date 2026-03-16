@@ -114,13 +114,25 @@ Utility:
 
 Security:
 - security_check — container security overview (processes, load, listening ports)
-- port_scan — TCP connect scan on common ports (private/loopback IPs only)
+- port_scan — TCP connect scan with port specs and banner grabbing (private/loopback IPs only)
+  Specs: specific ports (80,443), ranges (8000-8100), presets (web, db, all)
 - firewall_status, ssh_sessions, security_audit — stubs for container mode
 
 Engineering:
-- git_status, git_log — git operations on mounted volumes
+- git_status, git_log — git read operations on any path
+- git_add, git_commit, git_push, git_pull, git_checkout — git write ops (workspace restricted)
+- git_diff — view changes (unrestricted)
+- git_branch — list branches (unrestricted) or create (workspace restricted)
 - plan, tasks, task_add, task_done — project management via WardSONDB
-- gh_issues, gh_prs — GitHub API integration (requires GITHUB_TOKEN)
+- gh_issues, gh_prs — list GitHub issues/PRs (requires GITHUB_TOKEN)
+- gh_issue_create, gh_issue_close — create/close GitHub issues
+- gh_pr_create — create GitHub pull requests
+- gh_project_list, gh_project_view — GitHub project management
+
+Scheduling (embraCRON):
+- cron_add — schedule recurring tool execution (e.g. every 5m, hourly, daily 09:00)
+- cron_list — list all scheduled jobs
+- cron_remove — remove a scheduled job by ID
 
 Discuss with {user_name}:
 - What they want to use you for initially
@@ -215,7 +227,8 @@ Utility:
 
 Security:
 - [TOOL:security_check] — container security overview (processes, load, ports)
-- [TOOL:port_scan <host>] — TCP connect scan common ports (private/loopback IPs only)
+- [TOOL:port_scan <host> [ports]] — TCP scan with banner grabbing (private/loopback only)
+  Port specs: 80,443 (specific), 8000-8100 (range), web/db/all (presets)
 - [TOOL:firewall_status] — firewall status (container mode: stub)
 - [TOOL:ssh_sessions] — SSH session info (container mode: stub)
 - [TOOL:security_audit] — security audit (container mode: stub)
@@ -223,12 +236,30 @@ Security:
 Engineering:
 - [TOOL:git_status <path>] — git status of a directory
 - [TOOL:git_log <path>] — recent git log
+- [TOOL:git_diff <path> [file]] — view uncommitted changes
+- [TOOL:git_add <path> <files>] — stage files (workspace restricted)
+- [TOOL:git_commit <path> | <message>] — commit staged changes (workspace restricted)
+- [TOOL:git_push <path>] — push to remote (workspace restricted)
+- [TOOL:git_pull <path>] — pull from remote (workspace restricted)
+- [TOOL:git_branch <path>] — list branches, or [TOOL:git_branch <path> <name>] to create
+- [TOOL:git_checkout <path> <branch>] — switch branches (workspace restricted)
 - [TOOL:plan] — list plans, or [TOOL:plan <title> | <desc>] to create one
 - [TOOL:tasks] — list tasks, or [TOOL:tasks <filter>] to search
 - [TOOL:task_add <title>] — add a task, optionally [TOOL:task_add <title> | <plan_id>]
 - [TOOL:task_done <id>] — mark a task as done
 - [TOOL:gh_issues <owner/repo>] — list open GitHub issues (requires GITHUB_TOKEN)
 - [TOOL:gh_prs <owner/repo>] — list open GitHub PRs (requires GITHUB_TOKEN)
+- [TOOL:gh_issue_create <owner/repo> | <title> | <body>] — create a GitHub issue
+- [TOOL:gh_issue_close <owner/repo> <number>] — close a GitHub issue
+- [TOOL:gh_pr_create <owner/repo> | <title> | <head> | <base>] — create a PR
+- [TOOL:gh_project_list <owner>] — list GitHub projects
+- [TOOL:gh_project_view <owner> <number>] — view a GitHub project
+
+Scheduling (embraCRON):
+- [TOOL:cron_add <schedule> | <command>] — schedule recurring tool execution
+  Schedules: every 5m, every 1h, every 30s, hourly, daily 09:00
+- [TOOL:cron_list] — list all scheduled cron jobs
+- [TOOL:cron_remove <id>] — remove a cron job
 
 To use a tool, output the tool tag on its own line (the entire tag must be on a single line).
 The system will execute it and provide results. Use tools proactively when relevant.

@@ -74,6 +74,12 @@ pub async fn handle_command(input: &str, app: &mut AppState) -> Result<Option<St
         "/switch" => {
             if let Some(name) = arg {
                 if let Some(ref mut sm) = app.session_manager {
+                    if !sm.session_exists(name).await? {
+                        return Ok(Some(format!(
+                            "Session '{}' not found. Use /sessions to list or /new to create.",
+                            name
+                        )));
+                    }
                     let history = sm.reattach(name).await?;
                     app.messages = history
                         .iter()

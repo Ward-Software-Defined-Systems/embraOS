@@ -40,6 +40,11 @@ impl SessionManager {
         }
     }
 
+    pub async fn session_exists(&self, name: &str) -> Result<bool> {
+        let meta = format!("sessions.{}.meta", name);
+        self.db.collection_exists(&meta).await
+    }
+
     pub async fn create(&mut self, name: &str) -> Result<SessionMeta> {
         let meta_collection = format!("sessions.{}.meta", name);
         let history_collection = format!("sessions.{}.history", name);

@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::db::WardsonDbClient;
 
+pub mod cron;
 pub mod engineering;
 pub mod security;
 
@@ -76,6 +77,22 @@ pub async fn dispatch(
         "task_done" => engineering::task_done(db, param).await,
         "gh_issues" => engineering::gh_issues(param).await,
         "gh_prs" => engineering::gh_prs(param).await,
+        "git_add" => engineering::git_add(param).await,
+        "git_commit" => engineering::git_commit(param).await,
+        "git_push" => engineering::git_push(param).await,
+        "git_pull" => engineering::git_pull(param).await,
+        "git_diff" => engineering::git_diff(param).await,
+        "git_branch" => engineering::git_branch(param).await,
+        "git_checkout" => engineering::git_checkout(param).await,
+        "gh_issue_create" => engineering::gh_issue_create(param).await,
+        "gh_issue_close" => engineering::gh_issue_close(param).await,
+        "gh_pr_create" => engineering::gh_pr_create(param).await,
+        "gh_project_list" => engineering::gh_project_list(param).await,
+        "gh_project_view" => engineering::gh_project_view(param).await,
+        // Scheduling tools (embraCRON)
+        "cron_add" => cron::cron_add(db, param).await,
+        "cron_list" => cron::cron_list(db).await,
+        "cron_remove" => cron::cron_remove(db, param).await,
         _ => return None,
     };
 
@@ -876,7 +893,7 @@ pub fn resolve_timezone(input: &str) -> String {
 
 // ── Helpers ──
 
-fn parse_duration(s: &str) -> u64 {
+pub fn parse_duration(s: &str) -> u64 {
     let s = s.trim().to_lowercase();
 
     // Try "5m", "30s", "1h" patterns

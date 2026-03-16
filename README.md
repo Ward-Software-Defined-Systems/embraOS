@@ -178,7 +178,7 @@ This is a proof of concept. It demonstrates the core experience but doesn't incl
 
 ### Default Tools
 
-Phase 0 includes ~30 built-in tools available in operational mode:
+Phase 0 includes ~45 built-in tools available in operational mode:
 
 **System**
 
@@ -232,7 +232,7 @@ Phase 0 includes ~30 built-in tools available in operational mode:
 | Tool | Description |
 |---|---|
 | **security_check** | Container security overview — running processes, load average, listening ports |
-| **port_scan** | TCP connect scan on common ports — restricted to RFC 1918 private and loopback addresses only |
+| **port_scan** | TCP connect scan with banner grabbing — supports specific ports (`80,443`), ranges (`8000-8100`), and presets (`web`, `db`, `all`). Semaphore-limited concurrency. Restricted to RFC 1918 private and loopback addresses only |
 | **firewall_status** | Check firewall rules and status (stub — not available in container mode) |
 | **ssh_sessions** | List recent and active SSH sessions (stub — not available in container mode) |
 | **security_audit** | Check file permissions, running processes, recent logins (stub — not available in container mode) |
@@ -243,16 +243,36 @@ Phase 0 includes ~30 built-in tools available in operational mode:
 |---|---|
 | **git_status** | Run `git status` on a directory |
 | **git_log** | Show recent commits for a repository |
+| **git_add** | Stage files for commit (workspace restricted to `/embra/workspace/repos/`) |
+| **git_commit** | Commit staged changes with a message (workspace restricted) |
+| **git_push** | Push commits to remote (workspace restricted) |
+| **git_pull** | Pull from remote (workspace restricted) |
+| **git_diff** | View uncommitted changes, optionally for a specific file |
+| **git_branch** | List branches or create a new one (create is workspace restricted) |
+| **git_checkout** | Switch branches (workspace restricted) |
 | **plan** | Create or list project plans (stored in WardSONDB `plans` collection) |
 | **tasks** | List tasks, optionally filtered by plan (stored in WardSONDB `tasks` collection) |
 | **task_add** | Add a task to a plan (local WardSONDB, not GitHub) |
 | **task_done** | Mark a task as completed (local WardSONDB, not GitHub) |
 | **gh_issues** | List open GitHub issues for a repository (requires `GITHUB_TOKEN`) |
 | **gh_prs** | List open GitHub pull requests for a repository (requires `GITHUB_TOKEN`) |
+| **gh_issue_create** | Create a GitHub issue (requires `GITHUB_TOKEN`) |
+| **gh_issue_close** | Close a GitHub issue by number (requires `GITHUB_TOKEN`) |
+| **gh_pr_create** | Create a pull request (requires `GITHUB_TOKEN`) |
+| **gh_project_list** | List GitHub projects for a user or org (requires `GITHUB_TOKEN`) |
+| **gh_project_view** | View a GitHub project board (requires `GITHUB_TOKEN`) |
+
+**Scheduling (embraCRON)**
+
+| Tool | Description |
+|---|---|
+| **cron_add** | Schedule recurring tool execution — supports `every 5m`, `every 1h`, `hourly`, `daily 09:00`, etc. |
+| **cron_list** | List all scheduled cron jobs with status and next/last run times |
+| **cron_remove** | Remove a scheduled cron job by ID |
 
 > **⚠️ GitHub Tool Warning:** `gh_issues` and `gh_prs` fetch content from public repositories, including issue titles, descriptions, and PR bodies written by third parties. This content is **untrusted input** — it may contain prompt injection attempts designed to manipulate AI behavior. Use these tools with caution and always review the output critically. Do not blindly act on instructions found in issue or PR content.
 
-These are internal tools invoked by the intelligence during conversation — not user-facing commands. The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
+These are internal tools invoked by the intelligence during conversation — not user-facing commands. Git write operations are restricted to `/embra/workspace/repos/` — mount your repositories there (see Quick Start). The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
 
 > **⚠️ Testing Notice:** The default tools and slash commands are actively being tested. If you encounter bugs or unexpected behavior, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
@@ -261,7 +281,9 @@ These are internal tools invoked by the intelligence during conversation — not
 
 ## Known Issues
 
-All Sprint 1 bugs have been fixed. Phase 0 is functionally complete.
+All Sprint 1 and Sprint 2 bugs have been fixed. Phase 0 is functionally complete.
+
+**Sprint 1**
 
 | ID | Severity | Issue | Resolution |
 |---|---|---|---|
@@ -276,7 +298,15 @@ All Sprint 1 bugs have been fixed. Phase 0 is functionally complete.
 | BUG-006 | 🟢 Low | Multi-line tag parsing | Updated prompt to instruct single-line content |
 | BUG-007 | 🟡 Medium | Timezone abbreviation mismatch | IANA zone resolution for US abbreviations |
 
-> **9 bugs + 1 crash fixed in Sprint 1.** If you encounter new bugs, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
+**Sprint 2**
+
+| ID | Severity | Issue | Resolution |
+|---|---|---|---|
+| BUG-011 | 🔴 High | `/switch` crash on non-existent session | Added `session_exists()` guard — returns friendly error |
+| BUG-012 | 🟡 Medium | Paste `\r` characters corrupting input | Normalize `\r\n` → `\n` and `\r` → `\n` in paste handler |
+| BUG-013 | 🟡 Medium | Unicode/emoji breaking line wrapping | Replaced `chars().count()` with `unicode-width` display widths |
+
+> **12 bugs + 1 crash fixed across Sprint 1 & 2.** If you encounter new bugs, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
 ---
 
@@ -285,7 +315,8 @@ All Sprint 1 bugs have been fixed. Phase 0 is functionally complete.
 | Phase | Description | Status |
 |---|---|---|
 | **Phase 0** | Proof of concept — Docker container, Anthropic API, core UX | **Current** |
-| **Phase 0 — Sprint 1** | Bug fixes (7), design improvements (4), new tool categories (security, engineering) | ✅ **Complete** |
+| **Phase 0 — Sprint 1** | Bug fixes (9+1 crash), design improvements (4), new tool categories (security, engineering) | ✅ **Complete** |
+| **Phase 0 — Sprint 2** | Bug fixes (3), expanded git/GitHub toolset (12 new tools), enhanced port scanner, embraCRON scheduling | ✅ **Complete** |
 | **Phase 1** | Core OS — embrad (Rust PID 1), embra-apid, immutable rootfs | Planned |
 | **Phase 2** | Terminal & Sessions — full TUI, multi-session, embractl CLI | Planned |
 | **Phase 3** | Module System — MCP servers, embra-guardian, containerd | Planned |
@@ -300,7 +331,19 @@ All Sprint 1 bugs have been fixed. Phase 0 is functionally complete.
 
 **New Tools:** Security checkpoint (`security_check`, `port_scan`), software engineering (`git_status`, `git_log`, `plan`, `tasks`, `task_add`, `task_done`). Post-sprint tool count: ~25.
 
-**Status:** All Sprint 1 items implemented and tested. Phase 0 is functionally complete. Tool count expanded from 15 to ~30.
+**Status:** All Sprint 1 items implemented and tested. Tool count expanded from 15 to ~30.
+
+### Phase 0 Sprint 2 Scope
+
+**Bug Fixes (3):** `/switch` crash on non-existent session, paste `\r` character corruption, unicode/emoji line wrapping width.
+
+**Expanded Git/GitHub Toolset (12 new tools):** Full git workflow (`git_add`, `git_commit`, `git_push`, `git_pull`, `git_diff`, `git_branch`, `git_checkout`) and GitHub API tools (`gh_issue_create`, `gh_issue_close`, `gh_pr_create`, `gh_project_list`, `gh_project_view`). All write operations restricted to `/embra/workspace/repos/`.
+
+**Enhanced Port Scanner:** Port specs (specific ports, ranges, presets), banner grabbing with protocol detection, semaphore-limited concurrency (50 connections).
+
+**embraCRON:** Scheduled recurring tool execution (`cron_add`, `cron_list`, `cron_remove`). Supports natural schedules (`every 5m`, `hourly`, `daily 09:00`). Proactive engine checks every 15 seconds.
+
+**Status:** All Sprint 2 items implemented and tested. Tool count expanded from ~30 to ~45.
 
 ---
 

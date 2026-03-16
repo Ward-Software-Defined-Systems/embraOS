@@ -58,7 +58,16 @@ async fn main() -> Result<()> {
         .unwrap_or(false);
 
     // 4. Start proactive engine (background task)
-    let notification_rx = proactive::start_proactive_engine(&db);
+    // Load timezone from config if available, default to UTC
+    let config_tz = if !is_first_run {
+        config::load_config(&db)
+            .await
+            .map(|c| c.timezone.clone())
+            .unwrap_or_else(|_| "UTC".into())
+    } else {
+        "UTC".into()
+    };
+    let notification_rx = proactive::start_proactive_engine(&db, &config_tz);
 
     // 5. Enter TUI — handles setup, learning, and operational modes
     terminal::run_terminal(&db, is_first_run, notification_rx).await?;

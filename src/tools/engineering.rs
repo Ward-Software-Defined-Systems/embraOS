@@ -2,6 +2,19 @@ use chrono::Utc;
 
 use crate::db::WardsonDbClient;
 
+const WORKSPACE_ROOT: &str = "/embra/workspace/repos";
+
+fn validate_workspace_path(path: &str) -> Result<String, String> {
+    let dir = if path.is_empty() { WORKSPACE_ROOT } else { path };
+    if !dir.starts_with(WORKSPACE_ROOT) {
+        return Err(format!(
+            "Denied: path '{}' is not under {}",
+            dir, WORKSPACE_ROOT
+        ));
+    }
+    Ok(dir.to_string())
+}
+
 /// Run `git status` on a path.
 pub async fn git_status(path: &str) -> String {
     let dir = if path.is_empty() { "." } else { path };
@@ -312,6 +325,473 @@ pub async fn gh_prs(param: &str) -> String {
             output
         }
         Err(e) => format!("Failed to fetch PRs: {}", e),
+    }
+}
+
+/// Run `git add` on files. Write operation — workspace restricted.
+/// Param format: `<path> <files>`
+pub async fn git_add(param: &str) -> String {
+    let parts: Vec<&str> = param.splitn(2, ' ').collect();
+    if parts.len() < 2 {
+        return "Usage: [TOOL:git_add <path> <files>]\nExample: [TOOL:git_add /embra/workspace/repos/myrepo file.txt]".into();
+    }
+    let dir = match validate_workspace_path(parts[0]) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    let files = parts[1];
+
+    let file_args: Vec<&str> = files.split_whitespace().collect();
+    let mut args = vec!["-C", &dir, "add"];
+    args.extend(file_args.iter());
+
+    match tokio::process::Command::new("git")
+        .args(&args)
+        .output()
+        .await
+    {
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if !out.status.success() {
+                return format!("git add failed: {}", stderr.trim());
+            }
+            format!("Staged files in {}: {}", dir, files)
+        }
+        Err(e) => format!("Failed to run git: {}", e),
+    }
+}
+
+/// Run `git commit`. Write operation — workspace restricted.
+/// Param format: `<path> | <message>`
+pub async fn git_commit(param: &str) -> String {
+    let parts: Vec<&str> = param.splitn(2, " | ").collect();
+    if parts.len() < 2 {
+        return "Usage: [TOOL:git_commit <path> | <message>]".into();
+    }
+    let dir = match validate_workspace_path(parts[0].trim()) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    let message = parts[1].trim();
+
+    match tokio::process::Command::new("git")
+        .args(["-C", &dir, "commit", "-m", message])
+        .output()
+        .await
+    {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if !out.status.success() {
+                return format!("git commit failed: {}", stderr.trim());
+            }
+            format!("Committed in {}:\n{}", dir, stdout.trim())
+        }
+        Err(e) => format!("Failed to run git: {}", e),
+    }
+}
+
+/// Run `git push`. Write operation — workspace restricted.
+/// Param format: `<path>`
+pub async fn git_push(param: &str) -> String {
+    let dir = match validate_workspace_path(param.trim()) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+
+    match tokio::process::Command::new("git")
+        .args(["-C", &dir, "push"])
+        .output()
+        .await
+    {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if !out.status.success() {
+                return format!("git push failed: {}", stderr.trim());
+            }
+            let output = if stdout.trim().is_empty() {
+                stderr.trim().to_string()
+            } else {
+                stdout.trim().to_string()
+            };
+            format!("Pushed from {}:\n{}", dir, output)
+        }
+        Err(e) => format!("Failed to run git: {}", e),
+    }
+}
+
+/// Run `git pull`. Write operation — workspace restricted.
+/// Param format: `<path>`
+pub async fn git_pull(param: &str) -> String {
+    let dir = match validate_workspace_path(param.trim()) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+
+    match tokio::process::Command::new("git")
+        .args(["-C", &dir, "pull"])
+        .output()
+        .await
+    {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if !out.status.success() {
+                return format!("git pull failed: {}", stderr.trim());
+            }
+            format!("Pulled in {}:\n{}", dir, stdout.trim())
+        }
+        Err(e) => format!("Failed to run git: {}", e),
+    }
+}
+
+/// Run `git diff`. Read-only — unrestricted.
+/// Param format: `<path> [file]`
+pub async fn git_diff(param: &str) -> String {
+    let parts: Vec<&str> = param.split_whitespace().collect();
+    let (dir, file) = if parts.is_empty() {
+        (".", None)
+    } else if parts.len() == 1 {
+        (parts[0], None)
+    } else {
+        (parts[0], Some(parts[1]))
+    };
+
+    let mut args = vec!["-C", dir, "diff"];
+    if let Some(f) = file {
+        args.push("--");
+        args.push(f);
+    }
+
+    match tokio::process::Command::new("git")
+        .args(&args)
+        .output()
+        .await
+    {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if !out.status.success() {
+                return format!("git diff failed: {}", stderr.trim());
+            }
+            if stdout.trim().is_empty() {
+                format!("No changes in {}", dir)
+            } else {
+                format!("=== git diff ({}) ===\n{}", dir, stdout)
+            }
+        }
+        Err(e) => format!("Failed to run git: {}", e),
+    }
+}
+
+/// Run `git branch`. Read-only for listing, write for creating — workspace restricted for create.
+/// Param format: `<path> [name]`
+pub async fn git_branch(param: &str) -> String {
+    let parts: Vec<&str> = param.split_whitespace().collect();
+    let (dir, branch_name) = if parts.is_empty() {
+        (".", None)
+    } else if parts.len() == 1 {
+        (parts[0], None)
+    } else {
+        (parts[0], Some(parts[1]))
+    };
+
+    if let Some(name) = branch_name {
+        // Creating a branch — workspace restricted
+        if let Err(e) = validate_workspace_path(dir) {
+            return e;
+        }
+        match tokio::process::Command::new("git")
+            .args(["-C", dir, "branch", name])
+            .output()
+            .await
+        {
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if !out.status.success() {
+                    return format!("git branch failed: {}", stderr.trim());
+                }
+                format!("Created branch '{}' in {}", name, dir)
+            }
+            Err(e) => format!("Failed to run git: {}", e),
+        }
+    } else {
+        // Listing branches — unrestricted
+        match tokio::process::Command::new("git")
+            .args(["-C", dir, "branch", "-a"])
+            .output()
+            .await
+        {
+            Ok(out) => {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if !out.status.success() {
+                    return format!("git branch failed: {}", stderr.trim());
+                }
+                format!("=== Branches ({}) ===\n{}", dir, stdout)
+            }
+            Err(e) => format!("Failed to run git: {}", e),
+        }
+    }
+}
+
+/// Run `git checkout`. Write operation — workspace restricted.
+/// Param format: `<path> <branch>`
+pub async fn git_checkout(param: &str) -> String {
+    let parts: Vec<&str> = param.split_whitespace().collect();
+    if parts.len() < 2 {
+        return "Usage: [TOOL:git_checkout <path> <branch>]".into();
+    }
+    let dir = match validate_workspace_path(parts[0]) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    let branch = parts[1];
+
+    match tokio::process::Command::new("git")
+        .args(["-C", &dir, "checkout", branch])
+        .output()
+        .await
+    {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if !out.status.success() {
+                return format!("git checkout failed: {}", stderr.trim());
+            }
+            let output = if stdout.trim().is_empty() {
+                stderr.trim().to_string()
+            } else {
+                stdout.trim().to_string()
+            };
+            format!("Checked out '{}' in {}:\n{}", branch, dir, output)
+        }
+        Err(e) => format!("Failed to run git: {}", e),
+    }
+}
+
+/// Create a GitHub issue.
+/// Param format: `<owner/repo> | <title> | <body>`
+pub async fn gh_issue_create(param: &str) -> String {
+    let token = match std::env::var("GITHUB_TOKEN") {
+        Ok(t) if !t.is_empty() => t,
+        _ => return "GITHUB_TOKEN environment variable not set.".into(),
+    };
+
+    let parts: Vec<&str> = param.splitn(3, " | ").collect();
+    if parts.len() < 2 {
+        return "Usage: [TOOL:gh_issue_create <owner/repo> | <title> | <body>]".into();
+    }
+
+    let repo = parts[0].trim();
+    let title = parts[1].trim();
+    let body = if parts.len() > 2 { parts[2].trim() } else { "" };
+
+    let url = format!("https://api.github.com/repos/{}/issues", repo);
+    let payload = serde_json::json!({
+        "title": title,
+        "body": body,
+    });
+
+    let client = reqwest::Client::new();
+    match client
+        .post(&url)
+        .header("User-Agent", "embraOS/0.1.0")
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&payload)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return format!("GitHub API error {}: {}", status, body);
+            }
+            let issue: serde_json::Value = resp.json().await.unwrap_or_default();
+            let number = issue.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
+            let html_url = issue.get("html_url").and_then(|v| v.as_str()).unwrap_or("");
+            format!("Issue #{} created: {}\n{}", number, title, html_url)
+        }
+        Err(e) => format!("Failed to create issue: {}", e),
+    }
+}
+
+/// Close a GitHub issue.
+/// Param format: `<owner/repo> <number>`
+pub async fn gh_issue_close(param: &str) -> String {
+    let token = match std::env::var("GITHUB_TOKEN") {
+        Ok(t) if !t.is_empty() => t,
+        _ => return "GITHUB_TOKEN environment variable not set.".into(),
+    };
+
+    let parts: Vec<&str> = param.split_whitespace().collect();
+    if parts.len() < 2 {
+        return "Usage: [TOOL:gh_issue_close <owner/repo> <number>]".into();
+    }
+
+    let repo = parts[0];
+    let number = parts[1];
+
+    let url = format!("https://api.github.com/repos/{}/issues/{}", repo, number);
+    let payload = serde_json::json!({ "state": "closed" });
+
+    let client = reqwest::Client::new();
+    match client
+        .patch(&url)
+        .header("User-Agent", "embraOS/0.1.0")
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&payload)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                return format!("GitHub API error: {}", resp.status());
+            }
+            format!("Issue #{} closed in {}", number, repo)
+        }
+        Err(e) => format!("Failed to close issue: {}", e),
+    }
+}
+
+/// Create a GitHub pull request.
+/// Param format: `<owner/repo> | <title> | <head> | <base>`
+pub async fn gh_pr_create(param: &str) -> String {
+    let token = match std::env::var("GITHUB_TOKEN") {
+        Ok(t) if !t.is_empty() => t,
+        _ => return "GITHUB_TOKEN environment variable not set.".into(),
+    };
+
+    let parts: Vec<&str> = param.splitn(4, " | ").collect();
+    if parts.len() < 4 {
+        return "Usage: [TOOL:gh_pr_create <owner/repo> | <title> | <head> | <base>]".into();
+    }
+
+    let repo = parts[0].trim();
+    let title = parts[1].trim();
+    let head = parts[2].trim();
+    let base = parts[3].trim();
+
+    let url = format!("https://api.github.com/repos/{}/pulls", repo);
+    let payload = serde_json::json!({
+        "title": title,
+        "head": head,
+        "base": base,
+    });
+
+    let client = reqwest::Client::new();
+    match client
+        .post(&url)
+        .header("User-Agent", "embraOS/0.1.0")
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&payload)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return format!("GitHub API error {}: {}", status, body);
+            }
+            let pr: serde_json::Value = resp.json().await.unwrap_or_default();
+            let number = pr.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
+            let html_url = pr.get("html_url").and_then(|v| v.as_str()).unwrap_or("");
+            format!("PR #{} created: {}\n{}", number, title, html_url)
+        }
+        Err(e) => format!("Failed to create PR: {}", e),
+    }
+}
+
+/// List GitHub projects for a user.
+/// Param format: `<owner>`
+pub async fn gh_project_list(param: &str) -> String {
+    let token = match std::env::var("GITHUB_TOKEN") {
+        Ok(t) if !t.is_empty() => t,
+        _ => return "GITHUB_TOKEN environment variable not set.".into(),
+    };
+
+    if param.is_empty() {
+        return "Usage: [TOOL:gh_project_list <owner>]".into();
+    }
+
+    let owner = param.trim();
+    let url = format!("https://api.github.com/users/{}/projects", owner);
+
+    let client = reqwest::Client::new();
+    match client
+        .get(&url)
+        .header("User-Agent", "embraOS/0.1.0")
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                return format!("GitHub API error: {}", resp.status());
+            }
+            let projects: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
+            if projects.is_empty() {
+                return format!("No projects found for {}.", owner);
+            }
+            let mut output = format!("=== Projects: {} ({}) ===\n", owner, projects.len());
+            for proj in &projects {
+                let id = proj.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+                let name = proj.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                let state = proj.get("state").and_then(|v| v.as_str()).unwrap_or("?");
+                output.push_str(&format!("  #{} {} ({})\n", id, name, state));
+            }
+            output
+        }
+        Err(e) => format!("Failed to fetch projects: {}", e),
+    }
+}
+
+/// View a specific GitHub project.
+/// Param format: `<owner> <number>`
+pub async fn gh_project_view(param: &str) -> String {
+    let token = match std::env::var("GITHUB_TOKEN") {
+        Ok(t) if !t.is_empty() => t,
+        _ => return "GITHUB_TOKEN environment variable not set.".into(),
+    };
+
+    let parts: Vec<&str> = param.split_whitespace().collect();
+    if parts.len() < 2 {
+        return "Usage: [TOOL:gh_project_view <owner> <number>]".into();
+    }
+
+    let owner = parts[0];
+    let number = parts[1];
+
+    // Use the REST API for classic projects — get user projects and find by number
+    let url = format!("https://api.github.com/users/{}/projects", owner);
+
+    let client = reqwest::Client::new();
+    match client
+        .get(&url)
+        .header("User-Agent", "embraOS/0.1.0")
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                return format!("GitHub API error: {}", resp.status());
+            }
+            let projects: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
+            // Find the project by number
+            let target_num: u64 = number.parse().unwrap_or(0);
+            if let Some(proj) = projects.iter().find(|p| {
+                p.get("number").and_then(|v| v.as_u64()).unwrap_or(0) == target_num
+            }) {
+                serde_json::to_string_pretty(proj).unwrap_or_else(|_| "Failed to format project".into())
+            } else {
+                format!("Project #{} not found for {}", number, owner)
+            }
+        }
+        Err(e) => format!("Failed to fetch project: {}", e),
     }
 }
 

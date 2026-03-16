@@ -688,6 +688,7 @@ async fn handle_key_event(
 // ── Paste Handler ──
 
 fn handle_paste(text: String, app: &mut AppState) {
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
     let line_count = text.lines().count();
     if line_count > 1 || text.len() > 200 {
         // Multi-line or long paste: store for preview, send on Enter.

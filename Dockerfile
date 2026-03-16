@@ -19,8 +19,8 @@ RUN apt-get update && apt-get install -y ca-certificates iproute2 procps git && 
 COPY --from=wardsondb-builder /build/target/release/wardsondb /usr/local/bin/
 COPY --from=embra-builder /build/target/release/embrad /usr/local/bin/
 
-# Data directory for WardSONDB
-RUN mkdir -p /embra/data /embra/config
+# Data directory for WardSONDB and workspace
+RUN mkdir -p /embra/data /embra/config /embra/workspace/repos
 
 # Default environment
 ENV EMBRA_DATA_DIR=/embra/data

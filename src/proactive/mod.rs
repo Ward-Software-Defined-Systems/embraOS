@@ -53,9 +53,11 @@ impl Notification {
 
 pub fn start_proactive_engine(
     db: &WardsonDbClient,
+    config_tz: &str,
 ) -> mpsc::Receiver<Notification> {
     let (tx, rx) = mpsc::channel(64);
     let db = db.clone();
+    let config_tz = config_tz.to_string();
 
     // Normal health checks every 5 minutes
     let tx_health = tx.clone();
@@ -81,6 +83,25 @@ pub fn start_proactive_engine(
             let fired = crate::tools::check_reminders(&db_reminders).await;
             for msg in fired {
                 let _ = tx_reminders
+                    .send(Notification::new(Priority::Normal, msg))
+                    .await;
+            }
+            tokio::time::sleep(Duration::from_secs(15)).await;
+        }
+    });
+
+    // Cron checks every 15 seconds
+    let tx_cron = tx.clone();
+    let db_cron = db.clone();
+    let config_tz_cron = config_tz;
+    tokio::spawn(async move {
+        // Initial delay
+        tokio::time::sleep(Duration::from_secs(15)).await;
+
+        loop {
+            let fired = crate::tools::cron::check_crons(&db_cron, &config_tz_cron).await;
+            for msg in fired {
+                let _ = tx_cron
                     .send(Notification::new(Priority::Normal, msg))
                     .await;
             }

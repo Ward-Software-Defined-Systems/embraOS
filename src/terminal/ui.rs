@@ -1,3 +1,5 @@
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -241,8 +243,8 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
     // Wrap multi-segment lines into visual rows
     let mut visual_rows: Vec<Vec<Span>> = Vec::new();
     for styled_line in &styled_lines {
-        // Calculate total text length for this line
-        let total_len: usize = styled_line.iter().map(|s| s.text.chars().count()).sum();
+        // Calculate total display width for this line (unicode-aware)
+        let total_len: usize = styled_line.iter().map(|s| UnicodeWidthStr::width(s.text.as_str())).sum();
 
         if total_len == 0 {
             visual_rows.push(vec![Span::raw("")]);
@@ -254,19 +256,38 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
                 .collect();
             visual_rows.push(spans);
         } else {
-            // Need to wrap: flatten all chars with styles, then chunk
+            // Need to wrap: flatten all chars with styles, then chunk by display width
             let mut flat_chars: Vec<(char, Style)> = Vec::new();
             for seg in styled_line {
                 for ch in seg.text.chars() {
                     flat_chars.push((ch, seg.style));
                 }
             }
-            for chunk in flat_chars.chunks(content_width) {
+
+            // Break into rows respecting character display widths
+            let mut i = 0;
+            while i < flat_chars.len() {
+                let mut row_width = 0usize;
+                let mut row_chars: Vec<(char, Style)> = Vec::new();
+                while i < flat_chars.len() {
+                    let (ch, style) = flat_chars[i];
+                    let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                    if row_width + char_width > content_width && !row_chars.is_empty() {
+                        break;
+                    }
+                    row_chars.push((ch, style));
+                    row_width += char_width;
+                    i += 1;
+                }
+
                 // Group consecutive chars with same style into spans
+                if row_chars.is_empty() {
+                    break;
+                }
                 let mut spans: Vec<Span> = Vec::new();
                 let mut current_text = String::new();
-                let mut current_style = chunk[0].1;
-                for &(ch, style) in chunk {
+                let mut current_style = row_chars[0].1;
+                for &(ch, style) in &row_chars {
                     if style == current_style {
                         current_text.push(ch);
                     } else {
