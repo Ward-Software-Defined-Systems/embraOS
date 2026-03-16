@@ -237,7 +237,7 @@ Phase 0 includes ~45 built-in tools available in operational mode:
 | **ssh_sessions** | List recent and active SSH sessions (stub — not available in container mode) |
 | **security_audit** | Check file permissions, running processes, recent logins (stub — not available in container mode) |
 
-**Engineering**
+**Engineering — Git**
 
 | Tool | Description |
 |---|---|
@@ -250,17 +250,27 @@ Phase 0 includes ~45 built-in tools available in operational mode:
 | **git_diff** | View uncommitted changes, optionally for a specific file |
 | **git_branch** | List branches or create a new one (create is workspace restricted) |
 | **git_checkout** | Switch branches (workspace restricted) |
+
+**Engineering — GitHub** (requires `GITHUB_TOKEN`)
+
+| Tool | Description |
+|---|---|
+| **gh_issues** | List open GitHub issues for a repository |
+| **gh_prs** | List open GitHub pull requests for a repository |
+| **gh_issue_create** | Create a GitHub issue |
+| **gh_issue_close** | Close a GitHub issue by number |
+| **gh_pr_create** | Create a pull request |
+| **gh_project_list** | List GitHub projects for a user or org |
+| **gh_project_view** | View a GitHub project board |
+
+**Engineering — WardSONDB**
+
+| Tool | Description |
+|---|---|
 | **plan** | Create or list project plans (stored in WardSONDB `plans` collection) |
 | **tasks** | List tasks, optionally filtered by plan (stored in WardSONDB `tasks` collection) |
 | **task_add** | Add a task to a plan (local WardSONDB, not GitHub) |
 | **task_done** | Mark a task as completed (local WardSONDB, not GitHub) |
-| **gh_issues** | List open GitHub issues for a repository (requires `GITHUB_TOKEN`) |
-| **gh_prs** | List open GitHub pull requests for a repository (requires `GITHUB_TOKEN`) |
-| **gh_issue_create** | Create a GitHub issue (requires `GITHUB_TOKEN`) |
-| **gh_issue_close** | Close a GitHub issue by number (requires `GITHUB_TOKEN`) |
-| **gh_pr_create** | Create a pull request (requires `GITHUB_TOKEN`) |
-| **gh_project_list** | List GitHub projects for a user or org (requires `GITHUB_TOKEN`) |
-| **gh_project_view** | View a GitHub project board (requires `GITHUB_TOKEN`) |
 
 **Scheduling (embraCRON)**
 
