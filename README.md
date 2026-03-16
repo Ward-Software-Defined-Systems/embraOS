@@ -129,7 +129,6 @@ All sessions share the same intelligence — same memory, same identity, same so
 | `/soul` | Display the immutable soul document |
 | `/identity` | Display the intelligence's identity document |
 | `/mode` | Show current operating mode and soul seal status |
-| `/copy` | Copy conversation to clipboard via OSC 52 — `/copy 5` for last 5 messages |
 
 ### Keyboard Shortcuts
 
@@ -240,19 +239,22 @@ These are internal tools invoked by the intelligence during conversation — not
 
 ## Known Issues
 
-All Sprint 1 bugs have been fixed. No known critical issues at this time.
+All Sprint 1 bugs have been fixed. Phase 0 is functionally complete.
 
-| ID | Status | Issue | Resolution |
+| ID | Severity | Issue | Resolution |
 |---|---|---|---|
-| BUG-001 | ✅ Fixed | Tool tag scanner runaway loop | Code-block-aware extraction, line-level matching |
-| BUG-002 | ✅ Fixed | Duplicate tool result injection | Removed double history push |
-| BUG-003 | ✅ Fixed | Countdown reminders not firing | Fixed boolean logic in reminder check |
-| BUG-004 | ✅ Fixed | Introspect focus filter too broad | Keyword mapping (ethics, purpose, constraints, values, soul) with deep sub-object search and direct key fallback |
-| BUG-005 | ✅ Fixed | Define fallback triggering BUG-001 | Plain text fallback, no tool tags |
-| BUG-006 | ✅ Fixed | Multi-line tag parsing | Updated prompt to instruct single-line content |
-| BUG-007 | ✅ Fixed | Timezone abbreviation mismatch | IANA zone resolution for US abbreviations |
+| BUG-001 | 🔴 Critical | Tool tag scanner runaway loop | Code-block-aware extraction, line-level matching |
+| CRASH-001 | 🔴 High | UTF-8 byte/char index panic in renderer | Char-array indexing instead of byte-slicing |
+| BUG-002 | 🟡 Medium | Duplicate tool result injection | Removed double history push |
+| BUG-003 | 🟡 Medium | Countdown notifications not reaching Brain | Reclassified as DESIGN-004; system message injection into Brain |
+| BUG-008 | 🟡 Medium | Paste handling losing input buffer content | Input buffer folds into pasted lines, multiple pastes stack |
+| BUG-010 | 🟡 Medium | `/copy` corrupting TUI rendering | OSC 52 writes through terminal backend after draw (disabled pending further testing) |
+| BUG-004 | 🟢 Low | Introspect focus filter too broad | Recursive soul unwrap + key-name-only filtering + keyword mapping |
+| BUG-005 | 🟢 Low | Define fallback triggering BUG-001 | Plain text fallback, no tool tags |
+| BUG-006 | 🟢 Low | Multi-line tag parsing | Updated prompt to instruct single-line content |
+| BUG-007 | 🟡 Medium | Timezone abbreviation mismatch | IANA zone resolution for US abbreviations |
 
-> If you encounter new bugs, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
+> **9 bugs + 1 crash fixed in Sprint 1.** If you encounter new bugs, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
 ---
 
@@ -270,13 +272,13 @@ All Sprint 1 bugs have been fixed. No known critical issues at this time.
 
 ### Phase 0 Sprint 1 Scope
 
-**Bug Fixes:** Tool tag scanner runaway loop (critical), duplicate tool result injection, countdown reminder pipeline, timezone handling, introspect filtering, define fallback text, multi-line tag parsing.
+**Bug Fixes (9 + 1 crash):** Tool tag scanner runaway loop (critical), UTF-8 render crash, duplicate tool result injection, countdown-to-Brain notifications, paste handling, `/copy` TUI corruption, introspect focus filtering, define fallback text, multi-line tag parsing, timezone handling.
 
-**Design Improvements:** Draft upsert, ID-based document retrieval (`get` tool), `define` write path, JSON/markdown formatting in conversation UI.
+**Design Improvements (4):** Draft upsert, ID-based document retrieval (`get` tool), `define` write path, proactive engine → Brain notification injection. Plus: JSON/markdown syntax highlighting, dynamic multi-line input, thinking indicator, Shift/Alt+Enter newline support.
 
 **New Tools:** Security checkpoint (`security_check`, `port_scan`), software engineering (`git_status`, `git_log`, `plan`, `tasks`, `task_add`, `task_done`). Post-sprint tool count: ~25.
 
-**Status:** All Sprint 1 items implemented and tested. Tool count expanded from 15 to ~30.
+**Status:** All Sprint 1 items implemented and tested. Phase 0 is functionally complete. Tool count expanded from 15 to ~30.
 
 ---
 

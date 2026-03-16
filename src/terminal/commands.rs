@@ -146,45 +146,7 @@ pub async fn handle_command(input: &str, app: &mut AppState) -> Result<Option<St
         }
 
         "/copy" => {
-            let count = arg
-                .and_then(|a| a.parse::<usize>().ok())
-                .unwrap_or(0); // 0 = all
-
-            // Build raw conversation text without TUI borders
-            let messages: &[super::DisplayMessage] = &app.messages;
-            let slice = if count > 0 && count < messages.len() {
-                &messages[messages.len() - count..]
-            } else {
-                messages
-            };
-
-            let mut text = String::new();
-            for msg in slice {
-                match msg.role.as_str() {
-                    "system" => {
-                        text.push_str(&msg.content);
-                        text.push('\n');
-                    }
-                    "You" => {
-                        text.push_str(&format!("[{}] You: {}\n", msg.timestamp, msg.content));
-                    }
-                    _ => {
-                        text.push_str(&format!("[{}] {}: {}\n", msg.timestamp, msg.role, msg.content));
-                    }
-                }
-                text.push('\n');
-            }
-
-            // Queue OSC 52 escape sequence for the event loop to write
-            // through the terminal backend (avoids corrupting ratatui state)
-            let encoded = base64_encode(text.as_bytes());
-            app.pending_clipboard = Some(format!("\x1b]52;c;{}\x07", encoded));
-
-            let msg_count = slice.len();
-            Ok(Some(format!(
-                "Copied {} messages to clipboard.",
-                msg_count
-            )))
+            Ok(Some("Currently disabled — Expected availability Phase 0 Sprint 2".into()))
         }
 
         _ => Ok(Some(format!(
