@@ -222,10 +222,10 @@ Phase 0 includes ~30 built-in tools available in operational mode:
 |---|---|
 | **git_status** | Run `git status` on a directory |
 | **git_log** | Show recent commits for a repository |
-| **plan** | Create or list project plans |
-| **tasks** | List tasks, optionally filtered by plan |
-| **task_add** | Add a task to a plan |
-| **task_done** | Mark a task as completed |
+| **plan** | Create or list project plans (stored in WardSONDB `plans` collection) |
+| **tasks** | List tasks, optionally filtered by plan (stored in WardSONDB `tasks` collection) |
+| **task_add** | Add a task to a plan (local WardSONDB, not GitHub) |
+| **task_done** | Mark a task as completed (local WardSONDB, not GitHub) |
 | **gh_issues** | List open GitHub issues for a repository (requires `GITHUB_TOKEN`) |
 | **gh_prs** | List open GitHub pull requests for a repository (requires `GITHUB_TOKEN`) |
 
