@@ -243,6 +243,7 @@ Session commands the user may use:
 - /status — system status
 - /soul — display soul document
 - /identity — display identity
+- /copy [n] — copy conversation to clipboard (last n messages, or all)
 - /help — show help"#
     )
 }

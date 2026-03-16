@@ -10,13 +10,21 @@ use super::render::{self, StyledLine, StyledSegment};
 use super::{AppMode, AppState, SetupStep};
 
 pub fn draw(f: &mut Frame, app: &AppState) {
+    // Dynamic input height: 3 rows base, grows with newlines (max 10)
+    let input_lines = if app.pasted_lines.is_some() {
+        1
+    } else {
+        app.input_buffer.chars().filter(|c| *c == '\n').count() + 1
+    };
+    let input_height = (input_lines as u16 + 2).min(10); // +2 for border
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),  // Header
-            Constraint::Min(5),    // Conversation
-            Constraint::Length(3), // Input
-            Constraint::Length(1), // Status bar
+            Constraint::Length(1),            // Header
+            Constraint::Min(5),              // Conversation
+            Constraint::Length(input_height), // Input (dynamic)
+            Constraint::Length(1),            // Status bar
         ])
         .split(f.area());
 
@@ -361,14 +369,16 @@ fn draw_input(f: &mut Frame, area: Rect, app: &AppState) {
 
     // Position cursor (only for text input, not paste or selector)
     if app.pasted_lines.is_none() && !app.input_buffer.is_empty() {
-        // Calculate display width of chars before cursor for correct positioning
-        let display_offset: u16 = app
-            .input_buffer
+        // For multi-line input, find which line the cursor is on and the offset within that line
+        let before_cursor: String = app.input_buffer.chars().take(app.cursor_pos).collect();
+        let cursor_line = before_cursor.chars().filter(|c| *c == '\n').count() as u16;
+        let last_newline_pos = before_cursor.rfind('\n').map(|p| p + 1).unwrap_or(0);
+        let line_text = &before_cursor[last_newline_pos..];
+        let display_offset: u16 = line_text
             .chars()
-            .take(app.cursor_pos)
             .map(|c| if c.is_ascii() { 1u16 } else { 2u16 })
             .sum();
-        f.set_cursor_position((area.x + display_offset + 1, area.y + 1));
+        f.set_cursor_position((area.x + display_offset + 1, area.y + 1 + cursor_line));
     }
 }
 

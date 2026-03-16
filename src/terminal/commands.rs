@@ -145,6 +145,50 @@ pub async fn handle_command(input: &str, app: &mut AppState) -> Result<Option<St
             )))
         }
 
+        "/copy" => {
+            let count = arg
+                .and_then(|a| a.parse::<usize>().ok())
+                .unwrap_or(0); // 0 = all
+
+            // Build raw conversation text without TUI borders
+            let messages: &[super::DisplayMessage] = &app.messages;
+            let slice = if count > 0 && count < messages.len() {
+                &messages[messages.len() - count..]
+            } else {
+                messages
+            };
+
+            let mut text = String::new();
+            for msg in slice {
+                match msg.role.as_str() {
+                    "system" => {
+                        text.push_str(&msg.content);
+                        text.push('\n');
+                    }
+                    "You" => {
+                        text.push_str(&format!("[{}] You: {}\n", msg.timestamp, msg.content));
+                    }
+                    _ => {
+                        text.push_str(&format!("[{}] {}: {}\n", msg.timestamp, msg.role, msg.content));
+                    }
+                }
+                text.push('\n');
+            }
+
+            // Use OSC 52 escape sequence to copy to system clipboard
+            let encoded = base64_encode(text.as_bytes());
+            // Write OSC 52: \x1b]52;c;<base64>\x07
+            let osc = format!("\x1b]52;c;{}\x07", encoded);
+            let _ = std::io::Write::write_all(&mut std::io::stdout(), osc.as_bytes());
+            let _ = std::io::Write::flush(&mut std::io::stdout());
+
+            let msg_count = slice.len();
+            Ok(Some(format!(
+                "Copied {} messages to clipboard.",
+                msg_count
+            )))
+        }
+
         _ => Ok(Some(format!(
             "Unknown command: {}. Type /help for help.",
             command
@@ -152,25 +196,51 @@ pub async fn handle_command(input: &str, app: &mut AppState) -> Result<Option<St
     }
 }
 
+/// Simple base64 encoder (avoids adding a dependency for this one use)
+fn base64_encode(input: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut result = String::with_capacity((input.len() + 2) / 3 * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
+        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
+        result.push(CHARS[((triple >> 12) & 0x3F) as usize] as char);
+        if chunk.len() > 1 {
+            result.push(CHARS[((triple >> 6) & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+        if chunk.len() > 2 {
+            result.push(CHARS[(triple & 0x3F) as usize] as char);
+        } else {
+            result.push('=');
+        }
+    }
+    result
+}
+
 fn help_text(name: &str) -> String {
     format!(
         r#"{name} — embraOS Phase 0 Commands:
 
-  /help        Show this help
-  /status      System status
-  /sessions    List all sessions
-  /new <name>  Create new session
-  /switch <n>  Switch to session
-  /close       Close current session
-  /soul        Display soul document
-  /identity    Display identity
-  /mode        Show current mode
+  /help         Show this help
+  /status       System status
+  /sessions     List all sessions
+  /new <name>   Create new session
+  /switch <n>   Switch to session
+  /close        Close current session
+  /soul         Display soul document
+  /identity     Display identity
+  /mode         Show current mode
+  /copy [n]     Copy conversation to clipboard (last n messages, or all)
 
 Keyboard:
-  Enter        Send message
-  Shift+Enter  New line
-  Up/Down      Scroll history
-  Ctrl+C       Graceful detach
-  Ctrl+D       Graceful detach"#
+  Enter         Send message
+  Alt+Enter     New line (Shift+Enter in supported terminals)
+  Up/Down       Scroll history
+  Ctrl+C        Graceful detach
+  Ctrl+D        Graceful detach"#
     )
 }
