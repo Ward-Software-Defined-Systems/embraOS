@@ -795,6 +795,113 @@ pub async fn gh_project_view(param: &str) -> String {
     }
 }
 
+/// Read a file's contents. Unrestricted path.
+/// Returns up to 64KB to avoid overwhelming the conversation context.
+pub async fn file_read(path: &str) -> String {
+    if path.is_empty() {
+        return "Usage: [TOOL:file_read <path>]\nExample: [TOOL:file_read /embra/workspace/repos/myrepo/README.md]".into();
+    }
+
+    let path = path.trim();
+    let file_path = std::path::Path::new(path);
+
+    if !file_path.exists() {
+        return format!("File not found: {}", path);
+    }
+    if file_path.is_dir() {
+        // List directory contents instead
+        match tokio::fs::read_dir(path).await {
+            Ok(mut entries) => {
+                let mut listing = format!("=== Directory: {} ===\n", path);
+                let mut count = 0u32;
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let is_dir = entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false);
+                    let suffix = if is_dir { "/" } else { "" };
+                    listing.push_str(&format!("  {}{}\n", name, suffix));
+                    count += 1;
+                    if count >= 200 {
+                        listing.push_str("  ... (truncated at 200 entries)\n");
+                        break;
+                    }
+                }
+                if count == 0 {
+                    listing.push_str("  (empty directory)\n");
+                }
+                listing
+            }
+            Err(e) => format!("Failed to read directory: {}", e),
+        }
+    } else {
+        // Read file with size limit
+        match tokio::fs::metadata(path).await {
+            Ok(meta) => {
+                let size = meta.len();
+                if size > 65536 {
+                    // Read first 64KB only
+                    match tokio::fs::read(path).await {
+                        Ok(bytes) => {
+                            let content = String::from_utf8_lossy(&bytes[..65536]);
+                            format!(
+                                "=== {} ({} bytes, showing first 64KB) ===\n{}",
+                                path, size, content
+                            )
+                        }
+                        Err(e) => format!("Failed to read file: {}", e),
+                    }
+                } else {
+                    match tokio::fs::read_to_string(path).await {
+                        Ok(content) => {
+                            format!("=== {} ({} bytes) ===\n{}", path, size, content)
+                        }
+                        Err(_) => {
+                            // Might be binary
+                            format!("{} is a binary file ({} bytes)", path, size)
+                        }
+                    }
+                }
+            }
+            Err(e) => format!("Failed to stat file: {}", e),
+        }
+    }
+}
+
+/// Write content to a file. Workspace restricted.
+/// Param format: `<path> | <content>`
+/// Creates parent directories if they don't exist.
+pub async fn file_write(param: &str) -> String {
+    if param.is_empty() {
+        return "Usage: [TOOL:file_write <path> | <content>]\nExample: [TOOL:file_write /embra/workspace/repos/myrepo/notes.txt | Hello world]".into();
+    }
+
+    let parts: Vec<&str> = param.splitn(2, " | ").collect();
+    if parts.len() < 2 {
+        return "Usage: [TOOL:file_write <path> | <content>]".into();
+    }
+
+    let path = parts[0].trim();
+    let content = parts[1];
+
+    if let Err(e) = validate_workspace_path(path) {
+        return e;
+    }
+
+    // Create parent directories if needed
+    let file_path = std::path::Path::new(path);
+    if let Some(parent) = file_path.parent() {
+        if !parent.exists() {
+            if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                return format!("Failed to create directory {}: {}", parent.display(), e);
+            }
+        }
+    }
+
+    match tokio::fs::write(path, content).await {
+        Ok(()) => format!("Written {} bytes to {}", content.len(), path),
+        Err(e) => format!("Failed to write file: {}", e),
+    }
+}
+
 async fn ensure_collection(db: &WardsonDbClient, name: &str) {
     if !db.collection_exists(name).await.unwrap_or(true) {
         let _ = db.create_collection(name).await;

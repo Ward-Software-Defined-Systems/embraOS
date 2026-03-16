@@ -89,6 +89,8 @@ pub async fn dispatch(
         "gh_pr_create" => engineering::gh_pr_create(param).await,
         "gh_project_list" => engineering::gh_project_list(param).await,
         "gh_project_view" => engineering::gh_project_view(param).await,
+        "file_read" => engineering::file_read(param).await,
+        "file_write" => engineering::file_write(param).await,
         // Scheduling tools (embraCRON)
         "cron_add" => cron::cron_add(db, param).await,
         "cron_list" => cron::cron_list(db).await,

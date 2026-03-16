@@ -129,6 +129,10 @@ Engineering:
 - gh_pr_create — create GitHub pull requests
 - gh_project_list, gh_project_view — GitHub project management
 
+Filesystem:
+- file_read — read a file or list a directory (unrestricted)
+- file_write — write content to a file (workspace restricted to /embra/workspace/repos/)
+
 Scheduling (embraCRON):
 - cron_add — schedule recurring tool execution (e.g. every 5m, hourly, daily 09:00)
 - cron_list — list all scheduled jobs
@@ -254,6 +258,10 @@ Engineering:
 - [TOOL:gh_pr_create <owner/repo> | <title> | <head> | <base>] — create a PR
 - [TOOL:gh_project_list <owner>] — list GitHub projects
 - [TOOL:gh_project_view <owner> <number>] — view a GitHub project
+
+Filesystem:
+- [TOOL:file_read <path>] — read a file or list a directory (unrestricted)
+- [TOOL:file_write <path> | <content>] — write content to a file (workspace restricted)
 
 Scheduling (embraCRON):
 - [TOOL:cron_add <schedule> | <command>] — schedule recurring tool execution
