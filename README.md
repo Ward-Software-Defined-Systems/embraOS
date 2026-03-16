@@ -129,6 +129,7 @@ All sessions share the same intelligence — same memory, same identity, same so
 | `/soul` | Display the immutable soul document |
 | `/identity` | Display the intelligence's identity document |
 | `/mode` | Show current operating mode and soul seal status |
+| `/copy` | Copy conversation to clipboard via OSC 52 — `/copy 5` for last 5 messages (disabled — Sprint 2) |
 
 ### Keyboard Shortcuts
 
