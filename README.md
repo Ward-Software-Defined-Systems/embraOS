@@ -178,7 +178,7 @@ This is a proof of concept. It demonstrates the core experience but doesn't incl
 
 ### Default Tools
 
-Phase 0 includes ~45 built-in tools available in operational mode:
+Phase 0 includes ~47 built-in tools available in operational mode:
 
 **System**
 
@@ -236,6 +236,13 @@ Phase 0 includes ~45 built-in tools available in operational mode:
 | **firewall_status** | Check firewall rules and status (stub — not available in container mode) |
 | **ssh_sessions** | List recent and active SSH sessions (stub — not available in container mode) |
 | **security_audit** | Check file permissions, running processes, recent logins (stub — not available in container mode) |
+
+**Filesystem**
+
+| Tool | Description |
+|---|---|
+| **file_read** | Read file contents (up to 64KB) or list directory entries (up to 200). Unrestricted path. Handles binary files gracefully |
+| **file_write** | Write content to a file, creating parent directories automatically (workspace restricted to `/embra/workspace/repos/`) |
 
 **Engineering — Git**
 
@@ -353,7 +360,7 @@ All Sprint 1 and Sprint 2 bugs have been fixed. Phase 0 is functionally complete
 
 **embraCRON:** Scheduled recurring tool execution (`cron_add`, `cron_list`, `cron_remove`). Supports natural schedules (`every 5m`, `hourly`, `daily 09:00`). Proactive engine checks every 15 seconds.
 
-**Status:** All Sprint 2 items implemented and tested. Tool count expanded from ~30 to ~45.
+**Status:** All Sprint 2 items implemented and tested. Tool count expanded from ~30 to ~47.
 
 ---
 
