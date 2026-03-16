@@ -51,6 +51,19 @@ docker run -it \
 
 Add a Docker volume and your AI's memory, identity, and soul survive container restarts.
 
+### With Persistence + GitHub + Local Repos
+
+```bash
+docker run -it \
+  -e ANTHROPIC_API_KEY=sk-ant-... \
+  -e GITHUB_TOKEN=ghp_... \
+  -v embra-data:/embra/data \
+  -v /path/to/repos:/embra/workspace/repos \
+  embraos:phase0
+```
+
+Mount your cloned repositories to give the intelligence access to `git_status`, `git_log`, and other engineering tools. The `GITHUB_TOKEN` enables `gh_issues` and `gh_prs` for querying GitHub directly.
+
 > **Note:** Pre-built container images on Docker Hub are coming soon. For now, clone and build locally.
 
 ---
