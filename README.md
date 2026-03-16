@@ -40,21 +40,29 @@ docker run -it -e ANTHROPIC_API_KEY=sk-ant-... embraos:phase0
 
 That's it. You'll be guided through naming the intelligence, forming its identity, and defining its soul. After that, you're in a persistent terminal session.
 
-### With Persistence
+Your data and sessions persist within the container across stops and restarts — as long as the container is not destroyed. To reconnect after stopping:
 
 ```bash
-docker run -it \
+docker start -ai embra
+```
+
+> **Tip:** Name your container with `--name embra` on first run (see examples below) so you can easily reconnect.
+
+### With Persistence (Recommended)
+
+```bash
+docker run -it --name embra \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   -v embra-data:/embra/data \
   embraos:phase0
 ```
 
-Add a Docker volume and your AI's memory, identity, and soul survive container restarts.
+Add a Docker volume and your AI's memory, identity, and soul survive even if the container is destroyed and recreated.
 
 ### With Persistence + GitHub + Local Repos
 
 ```bash
-docker run -it \
+docker run -it --name embra \
   -e ANTHROPIC_API_KEY=sk-ant-... \
   -e GITHUB_TOKEN=ghp_... \
   -v embra-data:/embra/data \
