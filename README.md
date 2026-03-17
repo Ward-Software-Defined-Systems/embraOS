@@ -198,7 +198,7 @@ This is a proof of concept. It demonstrates the core experience but doesn't incl
 
 ### Default Tools
 
-Phase 0 includes ~49 built-in tools available in operational mode:
+Phase 0 includes ~59 built-in tools available in operational mode:
 
 **System**
 
@@ -309,6 +309,31 @@ Phase 0 includes ~49 built-in tools available in operational mode:
 | **cron_list** | List all scheduled cron jobs with status and next/last run times |
 | **cron_remove** | Remove a scheduled cron job by ID |
 
+**Session Access** (read-only)
+
+| Tool | Description |
+|---|---|
+| **session_list** | List all sessions with status, turn count, last active, and created dates |
+| **session_read** | Read session transcript with optional range (`1-20`, `80-`, last N). Messages truncated to 500 chars |
+| **session_search** | Case-insensitive search across sessions — supports `"quoted phrases"`, returns up to 20 matches with context |
+| **session_meta** | Structured session metadata — status, dates, turn counts (total/user/assistant), summary availability |
+| **session_delta** | Returns all turns from a given turn number onward |
+
+**Memory Consolidation**
+
+| Tool | Description |
+|---|---|
+| **memory_scan** | Memory inventory — total count, tag frequency, per-session breakdown, age buckets, duplicate candidates |
+| **memory_dedup** | Find duplicate memory groups (identical, near-duplicate, subset) with merge strategy proposals |
+
+**Session Consolidation**
+
+| Tool | Description |
+|---|---|
+| **session_summarize** | Generate or retrieve cached session summaries — cache-aware with SHA-256 source hashing |
+| **session_summary_save** | Persist Brain-generated summaries with audit trail to `system.consolidation_log` |
+| **session_extract** | Extract durable learnings (facts, preferences, decisions, action items) from session transcripts |
+
 > **⚠️ GitHub Tool Warning:** `gh_issues` and `gh_prs` fetch content from public repositories, including issue titles, descriptions, and PR bodies written by third parties. This content is **untrusted input** — it may contain prompt injection attempts designed to manipulate AI behavior. Use these tools with caution and always review the output critically. Do not blindly act on instructions found in issue or PR content.
 
 These are internal tools invoked by the intelligence during conversation — not user-facing commands. Git write operations are restricted to `/embra/workspace/repos/` — mount your repositories there (see Quick Start). The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
@@ -320,7 +345,7 @@ These are internal tools invoked by the intelligence during conversation — not
 
 ## Known Issues
 
-All Sprint 1 and Sprint 2 bugs have been fixed. Phase 0 is functionally complete.
+All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memory consolidation capabilities. Phase 0 is functionally complete.
 
 **Sprint 1**
 
@@ -345,7 +370,7 @@ All Sprint 1 and Sprint 2 bugs have been fixed. Phase 0 is functionally complete
 | BUG-012 | 🟡 Medium | Paste `\r` characters corrupting input | Normalize `\r\n` → `\n` and `\r` → `\n` in paste handler |
 | BUG-013 | 🟡 Medium | Unicode/emoji breaking line wrapping | Replaced `chars().count()` with `unicode-width` display widths |
 
-> **12 bugs + 1 crash fixed across Sprint 1 & 2.** If you encounter new bugs, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
+> **12 bugs + 1 crash fixed across Sprints 1 & 2.** Sprint 3 focused on new capabilities (no bug fixes needed). If you encounter new bugs, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
 ---
 
@@ -356,6 +381,7 @@ All Sprint 1 and Sprint 2 bugs have been fixed. Phase 0 is functionally complete
 | **Phase 0** | Proof of concept — Docker container, Anthropic API, core UX | **Current** |
 | **Phase 0 — Sprint 1** | Bug fixes (9+1 crash), design improvements (4), new tool categories (security, engineering) | ✅ **Complete** |
 | **Phase 0 — Sprint 2** | Bug fixes (3), expanded git/GitHub toolset (12 new tools), enhanced port scanner, embraCRON scheduling | ✅ **Complete** |
+| **Phase 0 — Sprint 3** | Session access tools (5), memory consolidation (2), session consolidation (3), schema migration framework | ✅ **Complete** |
 | **Phase 1** | Core OS — embrad (Rust PID 1), embra-apid, immutable rootfs | Planned |
 | **Phase 2** | Terminal & Sessions — full TUI, multi-session, embractl CLI | Planned |
 | **Phase 3** | Module System — MCP servers, embra-guardian, containerd | Planned |
@@ -383,6 +409,20 @@ All Sprint 1 and Sprint 2 bugs have been fixed. Phase 0 is functionally complete
 **embraCRON:** Scheduled recurring tool execution (`cron_add`, `cron_list`, `cron_remove`). Supports natural schedules (`every 5m`, `hourly`, `daily 09:00`). Proactive engine checks every 15 seconds.
 
 **Status:** All Sprint 2 items implemented and tested. Tool count expanded from ~30 to ~49.
+
+### Phase 0 Sprint 3 Scope
+
+**Session Access Tools (5):** Read-only tools for navigating session transcripts — `session_list`, `session_read` (with range support), `session_search` (quoted phrase + cross-session), `session_meta`, `session_delta`. All string truncation is char-boundary-safe for unicode/emoji.
+
+**Memory Consolidation Tools (2):** `memory_scan` for inventory reports (tag frequency, age buckets, duplicate candidates) and `memory_dedup` for finding duplicate groups with merge strategy proposals.
+
+**Session Consolidation Tools (3):** Brain-dependent "Option B" pattern — tools fetch data and return it with instructions, the Brain generates content via the existing feedback loop. `session_summarize` (cache-aware with SHA-256 source hashing), `session_summary_save` (persists summaries with audit trail), `session_extract` (identifies durable learnings from transcripts).
+
+**Schema Migration Framework:** Idempotent migration system (`src/migrations/mod.rs`) that runs on every startup. Three migrations: v0 (BUG-001 phantom cleanup), v1 (baseline collections), v2 (`system.consolidation_log` for audit trail).
+
+**New Collections:** `sessions.{name}.summary`, `system.consolidation_log`, `system.migrations`.
+
+**Status:** All Sprint 3 items implemented and tested. Tool count expanded from ~49 to ~59.
 
 ---
 
