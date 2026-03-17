@@ -131,7 +131,9 @@ Engineering:
 
 Filesystem:
 - file_read — read a file or list a directory (unrestricted)
-- file_write — write content to a file (workspace restricted to /embra/workspace/repos/)
+- file_write — write/overwrite a file (workspace restricted). Use \n for newlines, \t for tabs.
+- file_append — append to a file without overwriting (workspace restricted). Use \n for newlines.
+- mkdir — create a directory and parents (workspace restricted)
 
 Scheduling (embraCRON):
 - cron_add — schedule recurring tool execution (e.g. every 5m, hourly, daily 09:00)
@@ -261,7 +263,9 @@ Engineering:
 
 Filesystem:
 - [TOOL:file_read <path>] — read a file or list a directory (unrestricted)
-- [TOOL:file_write <path> | <content>] — write content to a file (workspace restricted)
+- [TOOL:file_write <path> | <content>] — write/overwrite a file (workspace restricted). Use \n for newlines, \t for tabs.
+- [TOOL:file_append <path> | <content>] — append to a file (workspace restricted). Creates file if needed. Use \n for newlines.
+- [TOOL:mkdir <path>] — create a directory and parents (workspace restricted)
 
 Scheduling (embraCRON):
 - [TOOL:cron_add <schedule> | <command>] — schedule recurring tool execution

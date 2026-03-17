@@ -178,7 +178,7 @@ This is a proof of concept. It demonstrates the core experience but doesn't incl
 
 ### Default Tools
 
-Phase 0 includes ~47 built-in tools available in operational mode:
+Phase 0 includes ~49 built-in tools available in operational mode:
 
 **System**
 
@@ -242,7 +242,9 @@ Phase 0 includes ~47 built-in tools available in operational mode:
 | Tool | Description |
 |---|---|
 | **file_read** | Read file contents (up to 64KB) or list directory entries (up to 200). Unrestricted path. Handles binary files gracefully |
-| **file_write** | Write content to a file, creating parent directories automatically (workspace restricted to `/embra/workspace/repos/`) |
+| **file_write** | Write content to a file with escape support (`\n`, `\t`, `\\`), creating parent directories automatically (workspace restricted to `/embra/workspace/repos/`) |
+| **file_append** | Append content to a file with escape support. Creates the file and parent directories if they don't exist (workspace restricted) |
+| **mkdir** | Create a directory and all parent directories (workspace restricted) |
 
 **Engineering — Git**
 
@@ -360,7 +362,7 @@ All Sprint 1 and Sprint 2 bugs have been fixed. Phase 0 is functionally complete
 
 **embraCRON:** Scheduled recurring tool execution (`cron_add`, `cron_list`, `cron_remove`). Supports natural schedules (`every 5m`, `hourly`, `daily 09:00`). Proactive engine checks every 15 seconds.
 
-**Status:** All Sprint 2 items implemented and tested. Tool count expanded from ~30 to ~47.
+**Status:** All Sprint 2 items implemented and tested. Tool count expanded from ~30 to ~49.
 
 ---
 

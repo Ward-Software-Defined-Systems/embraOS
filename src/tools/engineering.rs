@@ -866,12 +866,52 @@ pub async fn file_read(path: &str) -> String {
     }
 }
 
-/// Write content to a file. Workspace restricted.
+/// Expand escape sequences in tool content: `\\n` → newline, `\\t` → tab, `\\\\` → backslash.
+fn expand_escapes(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            match chars.next() {
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some('\\') => result.push('\\'),
+                Some(other) => {
+                    result.push('\\');
+                    result.push(other);
+                }
+                None => result.push('\\'),
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
+/// Ensure parent directories exist for a path. Workspace restricted.
+async fn ensure_parent_dirs(path: &str) -> Result<(), String> {
+    let file_path = std::path::Path::new(path);
+    if let Some(parent) = file_path.parent() {
+        if !parent.exists() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
+        }
+    }
+    Ok(())
+}
+
+/// Write content to a file (overwrite). Workspace restricted.
 /// Param format: `<path> | <content>`
+/// Supports `\n` for newlines and `\t` for tabs in content.
 /// Creates parent directories if they don't exist.
 pub async fn file_write(param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:file_write <path> | <content>]\nExample: [TOOL:file_write /embra/workspace/repos/myrepo/notes.txt | Hello world]".into();
+        return "Usage: [TOOL:file_write <path> | <content>]\n\
+                Use \\n for newlines, \\t for tabs.\n\
+                Example: [TOOL:file_write /embra/workspace/repos/myrepo/notes.txt | line 1\\nline 2\\nline 3]"
+            .into();
     }
 
     let parts: Vec<&str> = param.splitn(2, " | ").collect();
@@ -880,25 +920,89 @@ pub async fn file_write(param: &str) -> String {
     }
 
     let path = parts[0].trim();
-    let content = parts[1];
+    let content = expand_escapes(parts[1]);
 
     if let Err(e) = validate_workspace_path(path) {
         return e;
     }
 
-    // Create parent directories if needed
-    let file_path = std::path::Path::new(path);
-    if let Some(parent) = file_path.parent() {
-        if !parent.exists() {
-            if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                return format!("Failed to create directory {}: {}", parent.display(), e);
-            }
-        }
+    if let Err(e) = ensure_parent_dirs(path).await {
+        return e;
     }
 
-    match tokio::fs::write(path, content).await {
-        Ok(()) => format!("Written {} bytes to {}", content.len(), path),
+    match tokio::fs::write(path, &content).await {
+        Ok(()) => {
+            let line_count = content.lines().count();
+            format!("Written {} bytes ({} lines) to {}", content.len(), line_count, path)
+        }
         Err(e) => format!("Failed to write file: {}", e),
+    }
+}
+
+/// Append content to a file. Workspace restricted.
+/// Param format: `<path> | <content>`
+/// Supports `\n` for newlines and `\t` for tabs in content.
+/// Creates the file (and parent directories) if it doesn't exist.
+pub async fn file_append(param: &str) -> String {
+    if param.is_empty() {
+        return "Usage: [TOOL:file_append <path> | <content>]\n\
+                Use \\n for newlines, \\t for tabs.\n\
+                Example: [TOOL:file_append /embra/workspace/repos/myrepo/log.txt | New entry\\n]"
+            .into();
+    }
+
+    let parts: Vec<&str> = param.splitn(2, " | ").collect();
+    if parts.len() < 2 {
+        return "Usage: [TOOL:file_append <path> | <content>]".into();
+    }
+
+    let path = parts[0].trim();
+    let content = expand_escapes(parts[1]);
+
+    if let Err(e) = validate_workspace_path(path) {
+        return e;
+    }
+
+    if let Err(e) = ensure_parent_dirs(path).await {
+        return e;
+    }
+
+    use tokio::io::AsyncWriteExt;
+    let result = tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await;
+
+    match result {
+        Ok(mut file) => match file.write_all(content.as_bytes()).await {
+            Ok(()) => format!("Appended {} bytes to {}", content.len(), path),
+            Err(e) => format!("Failed to append: {}", e),
+        },
+        Err(e) => format!("Failed to open file for append: {}", e),
+    }
+}
+
+/// Create a directory (and parents). Workspace restricted.
+/// Param format: `<path>`
+pub async fn mkdir(param: &str) -> String {
+    if param.is_empty() {
+        return "Usage: [TOOL:mkdir <path>]\nExample: [TOOL:mkdir /embra/workspace/repos/myrepo/src/utils]".into();
+    }
+
+    let path = param.trim();
+
+    if let Err(e) = validate_workspace_path(path) {
+        return e;
+    }
+
+    if std::path::Path::new(path).exists() {
+        return format!("Directory already exists: {}", path);
+    }
+
+    match tokio::fs::create_dir_all(path).await {
+        Ok(()) => format!("Created directory: {}", path),
+        Err(e) => format!("Failed to create directory: {}", e),
     }
 }
 
