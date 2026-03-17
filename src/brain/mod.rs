@@ -43,8 +43,12 @@ impl Brain {
         let body = json!({
             "model": EMBRA_MODEL,
             "max_tokens": EMBRA_MAX_TOKENS,
-            "system": self.system_prompt,
-            "messages": messages,
+            "system": [{
+                "type": "text",
+                "text": self.system_prompt,
+                "cache_control": {"type": "ephemeral"}
+            }],
+            "messages": build_cached_messages(messages),
         });
 
         for (attempt, &delay) in RETRY_DELAYS.iter().enumerate() {
@@ -102,8 +106,12 @@ impl Brain {
         let body = json!({
             "model": EMBRA_MODEL,
             "max_tokens": EMBRA_MAX_TOKENS,
-            "system": self.system_prompt,
-            "messages": messages,
+            "system": [{
+                "type": "text",
+                "text": self.system_prompt,
+                "cache_control": {"type": "ephemeral"}
+            }],
+            "messages": build_cached_messages(messages),
             "stream": true,
         });
 
@@ -145,6 +153,35 @@ impl Brain {
 
         Ok(rx)
     }
+}
+
+/// Build messages array with prompt caching.
+/// Places a cache breakpoint on the second-to-last message so all prior
+/// conversation history is cached. The system prompt is cached separately.
+fn build_cached_messages(messages: &[Message]) -> Vec<serde_json::Value> {
+    let len = messages.len();
+    messages
+        .iter()
+        .enumerate()
+        .map(|(i, msg)| {
+            if len >= 2 && i == len - 2 {
+                // Cache breakpoint: caches all messages up to this point
+                json!({
+                    "role": msg.role,
+                    "content": [{
+                        "type": "text",
+                        "text": msg.content,
+                        "cache_control": {"type": "ephemeral"}
+                    }]
+                })
+            } else {
+                json!({
+                    "role": msg.role,
+                    "content": msg.content,
+                })
+            }
+        })
+        .collect()
 }
 
 fn extract_text(response: &ApiResponse) -> String {

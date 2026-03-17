@@ -122,6 +122,8 @@ embraOS is built on a 7-layer continuity architecture:
 
 **AI Model:** Claude Opus 4.6 (Anthropic). Phase 0 is locked to this model for the highest quality reasoning during soul formation and ongoing interaction.
 
+**Prompt Caching:** embraOS uses Anthropic's ephemeral prompt caching to minimize token costs during conversation. The system prompt is cached on first call, and a rolling cache breakpoint on conversation history ensures that prior messages are served from cache on subsequent calls. As long as messages are sent within the 5-minute TTL, the system prompt and all but the most recent exchange are cache hits — dramatically reducing input token costs for longer sessions.
+
 
 ---
 
