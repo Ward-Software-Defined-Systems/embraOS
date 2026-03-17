@@ -72,6 +72,19 @@ docker run -it --name embra \
 
 Mount your cloned repositories to give the intelligence access to `git_status`, `git_log`, and other engineering tools. The `GITHUB_TOKEN` enables `gh_issues` and `gh_prs` for querying GitHub directly.
 
+> **Git Setup Required:** After the container is running, configure git from your host terminal:
+>
+> ```bash
+> docker exec embra git config --global --add safe.directory '*'
+> docker exec embra git config --global push.autoSetupRemote true
+> docker exec embra git config --global user.email "<your-email>"
+> docker exec embra git config --global user.name "<your-name>"
+> docker exec embra git config --global credential.helper \
+>   '!f() { echo "password=$GITHUB_TOKEN"; echo "username=<your-github-username>"; }; f'
+> ```
+>
+> This will be automated in a future update.
+
 > **Note:** Pre-built container images on Docker Hub are coming soon. For now, clone and build locally.
 
 ---
