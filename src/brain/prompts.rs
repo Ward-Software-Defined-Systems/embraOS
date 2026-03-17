@@ -140,6 +140,22 @@ Scheduling (embraCRON):
 - cron_list — list all scheduled jobs
 - cron_remove — remove a scheduled job by ID
 
+Session Access:
+- session_list — list all sessions with turn counts, status, dates
+- session_read <name> — read session transcript (last 30 turns default)
+- session_read <name> 1-20 — read specific turn range
+- session_search <query> — search all sessions for a term
+- session_search <query> <session> — search within one session
+- session_meta <name> — structured metadata for a session
+- session_delta <name> <since_turn> — turns added since a turn number
+
+Memory & Session Consolidation:
+- memory_scan — inventory memory: counts, tags, age, duplicate candidates
+- memory_dedup — find duplicate memory entries and propose merges
+- session_summarize <name> — generate/retrieve structured session summary
+- session_extract <name> — extract durable learnings from a session into memory
+- session_summary_save <name> | <json> — save a generated session summary
+
 Discuss with {user_name}:
 - What they want to use you for initially
 - Which tools they'd like enabled
@@ -272,6 +288,24 @@ Scheduling (embraCRON):
   Schedules: every 5m, every 1h, every 30s, hourly, daily 09:00
 - [TOOL:cron_list] — list all scheduled cron jobs
 - [TOOL:cron_remove <id>] — remove a cron job
+
+Session Access:
+- [TOOL:session_list] — list all sessions with turn counts, status, dates
+- [TOOL:session_read <name>] — read session transcript (last 30 turns default)
+- [TOOL:session_read <name> 1-20] — read specific turn range
+- [TOOL:session_search <query>] — search all sessions for a term
+- [TOOL:session_search <query> <session>] — search within one session
+- [TOOL:session_meta <name>] — structured metadata for a session
+- [TOOL:session_delta <name> <since_turn>] — turns added since a turn number
+
+Memory & Session Consolidation:
+- [TOOL:memory_scan] — inventory memory: counts, tags, age, duplicate candidates
+- [TOOL:memory_scan <tag>] — filter scan to entries matching a tag
+- [TOOL:memory_dedup] — find duplicate memory entries and propose merges
+- [TOOL:session_summarize <name>] — generate/retrieve structured session summary
+- [TOOL:session_extract <name>] — extract durable learnings from a session into memory
+- [TOOL:session_extract <name> 10-30] — extract from a specific turn range
+- [TOOL:session_summary_save <name> | <json>] — save a generated session summary
 
 To use a tool, output the tool tag on its own line (the entire tag must be on a single line).
 The system will execute it and provide results. Use tools proactively when relevant.

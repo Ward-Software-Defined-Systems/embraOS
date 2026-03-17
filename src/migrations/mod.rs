@@ -4,7 +4,7 @@ use tracing::info;
 
 use crate::db::WardsonDbClient;
 
-const CURRENT_SCHEMA_VERSION: u32 = 1;
+const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// Run all pending migrations. Each migration is idempotent.
 pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
@@ -26,6 +26,12 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
         // v1: ensure baseline collections exist
         run_v1_baseline(db).await?;
         set_schema_version(db, 1).await?;
+    }
+
+    if current_version < 2 {
+        // v2: consolidation log collection
+        run_v2_consolidation(db).await?;
+        set_schema_version(db, 2).await?;
     }
 
     info!("Migrations complete. Schema version: {}", CURRENT_SCHEMA_VERSION);
@@ -118,5 +124,22 @@ async fn run_v1_baseline(db: &WardsonDbClient) -> Result<()> {
     }
 
     info!("Migration v1: baseline collections ensured");
+    Ok(())
+}
+
+/// Migration v2: Create consolidation log collection for session/memory consolidation tools.
+async fn run_v2_consolidation(db: &WardsonDbClient) -> Result<()> {
+    info!("Running migration v2: consolidation log");
+
+    if !db
+        .collection_exists("system.consolidation_log")
+        .await
+        .unwrap_or(false)
+    {
+        info!("Creating collection: system.consolidation_log");
+        let _ = db.create_collection("system.consolidation_log").await;
+    }
+
+    info!("Migration v2: consolidation log collection ensured");
     Ok(())
 }

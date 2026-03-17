@@ -17,6 +17,7 @@ const EMBRA_MODEL: &str = "claude-opus-4-6";
 const EMBRA_MAX_TOKENS: u32 = 4096;
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
+const ANTHROPIC_BETA: &str = "prompt-caching-2024-07-31";
 
 const RETRY_DELAYS: &[u64] = &[1, 2, 4, 8, 16, 32, 60];
 
@@ -57,6 +58,7 @@ impl Brain {
                 .post(ANTHROPIC_API_URL)
                 .header("x-api-key", &self.api_key)
                 .header("anthropic-version", ANTHROPIC_API_VERSION)
+                .header("anthropic-beta", ANTHROPIC_BETA)
                 .header("content-type", "application/json")
                 .json(&body)
                 .send()
@@ -120,6 +122,7 @@ impl Brain {
             .post(ANTHROPIC_API_URL)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", ANTHROPIC_API_VERSION)
+            .header("anthropic-beta", ANTHROPIC_BETA)
             .header("content-type", "application/json")
             .json(&body);
 

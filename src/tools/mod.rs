@@ -6,6 +6,7 @@ use crate::db::WardsonDbClient;
 pub mod cron;
 pub mod engineering;
 pub mod security;
+pub mod sessions;
 
 // ── Startup Time ──
 
@@ -97,6 +98,17 @@ pub async fn dispatch(
         "cron_add" => cron::cron_add(db, param).await,
         "cron_list" => cron::cron_list(db).await,
         "cron_remove" => cron::cron_remove(db, param).await,
+        // Session access & consolidation tools (Sprint 3)
+        "session_list" => sessions::session_list(db).await,
+        "session_read" => sessions::session_read(db, param).await,
+        "session_search" => sessions::session_search(db, param).await,
+        "session_meta" => sessions::session_meta(db, param).await,
+        "session_delta" => sessions::session_delta(db, param).await,
+        "memory_scan" => sessions::memory_scan(db, param).await,
+        "memory_dedup" => sessions::memory_dedup(db, param).await,
+        "session_summarize" => sessions::session_summarize(db, param).await,
+        "session_summary_save" => sessions::session_summary_save(db, param).await,
+        "session_extract" => sessions::session_extract(db, param).await,
         _ => return None,
     };
 
