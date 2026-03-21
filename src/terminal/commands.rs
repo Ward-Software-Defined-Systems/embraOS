@@ -81,11 +81,12 @@ pub async fn handle_command(input: &str, app: &mut AppState) -> Result<Option<St
                         )));
                     }
                     let history = sm.reattach(name).await?;
+                    let tz = app.config.as_ref().map(|c| c.timezone.as_str()).unwrap_or("UTC");
                     app.messages = history
                         .iter()
                         .map(|m| {
                             let role = if m.role == "user" { "You" } else { &m.role };
-                            super::DisplayMessage::new(role, &m.content)
+                            super::DisplayMessage::new_with_tz(role, &m.content, tz)
                         })
                         .collect();
                     app.mode = AppMode::Operational {
@@ -152,7 +153,7 @@ pub async fn handle_command(input: &str, app: &mut AppState) -> Result<Option<St
         }
 
         "/copy" => {
-            Ok(Some("Currently disabled — Expected availability Phase 0 Sprint 2".into()))
+            Ok(Some("Currently disabled — Expected availability Phase 0 Sprint 5".into()))
         }
 
         _ => Ok(Some(format!(

@@ -114,6 +114,21 @@ pub struct AppState {
     pub pending_clipboard: Option<String>, // OSC 52 payload to write after next draw
 }
 
+impl AppState {
+    /// Get the configured timezone string, falling back to "UTC".
+    fn tz(&self) -> &str {
+        self.config
+            .as_ref()
+            .map(|c| c.timezone.as_str())
+            .unwrap_or("UTC")
+    }
+
+    /// Create a DisplayMessage using the configured timezone.
+    fn msg(&self, role: impl Into<String>, content: impl Into<String>) -> DisplayMessage {
+        DisplayMessage::new_with_tz(role, content, self.tz())
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DisplayMessage {
     pub role: String,
@@ -123,10 +138,20 @@ pub struct DisplayMessage {
 
 impl DisplayMessage {
     pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self::new_with_tz(role, content, "UTC")
+    }
+
+    pub fn new_with_tz(role: impl Into<String>, content: impl Into<String>, tz: &str) -> Self {
+        let resolved = tools::resolve_timezone(tz);
+        let timestamp = if let Ok(tz) = resolved.parse::<chrono_tz::Tz>() {
+            chrono::Utc::now().with_timezone(&tz).format("%b %d %H:%M").to_string()
+        } else {
+            chrono::Utc::now().format("%b %d %H:%M").to_string()
+        };
         Self {
             role: role.into(),
             content: content.into(),
-            timestamp: chrono::Utc::now().format("%H:%M").to_string(),
+            timestamp,
         }
     }
 }
@@ -189,7 +214,7 @@ pub async fn run_terminal(
                     let role = if m.role == "user" { "You" } else { &m.role };
                     app_state
                         .messages
-                        .push(DisplayMessage::new(role, &m.content));
+                        .push(DisplayMessage::new_with_tz(role, &m.content, &config.timezone));
                 }
                 let briefing = crate::brain::reconnection_briefing(
                     &config.name,
@@ -197,7 +222,7 @@ pub async fn run_terminal(
                 );
                 app_state
                     .messages
-                    .push(DisplayMessage::new("system", briefing));
+                    .push(DisplayMessage::new_with_tz("system", briefing, &config.timezone));
                 existing.name
             } else {
                 session_manager.create("main").await?;
@@ -348,12 +373,63 @@ async fn run_event_loop(
             }
 
             Some(term_event) = term_rx.recv() => {
-                match term_event {
-                    TermEvent::Key(key) => {
-                        handle_key_event(key, app, &stream_tx).await?;
+                // Drain all pending events from the channel into a batch.
+                // When bracketed paste isn't available (e.g. inside `screen`),
+                // pasted text arrives as a burst of Key events. By draining
+                // the channel we can detect multiple Enter-separated lines
+                // and coalesce them into a single paste before processing.
+                let mut batch = vec![term_event];
+                while let Ok(evt) = term_rx.try_recv() {
+                    batch.push(evt);
+                }
+
+                // Detect unbracketd paste: if the batch contains 2+ Enter
+                // keys with Char events between them, it's a paste.
+                let enter_count = batch.iter().filter(|e| matches!(
+                    e,
+                    TermEvent::Key(k) if k.code == KeyCode::Enter
+                        && !k.modifiers.contains(KeyModifiers::SHIFT)
+                        && !k.modifiers.contains(KeyModifiers::ALT)
+                )).count();
+                let has_chars = batch.iter().any(|e| matches!(
+                    e,
+                    TermEvent::Key(k) if matches!(k.code, KeyCode::Char(_))
+                ));
+
+                if enter_count >= 2 && has_chars {
+                    // Coalesce the batch into a synthetic paste: replay all
+                    // Char events, converting Enter into newline.
+                    let mut text = String::new();
+                    for evt in &batch {
+                        match evt {
+                            TermEvent::Key(k) => match k.code {
+                                KeyCode::Char(c) => text.push(c),
+                                KeyCode::Enter => text.push('\n'),
+                                _ => {}
+                            },
+                            TermEvent::Paste(t) => {
+                                if !text.is_empty() {
+                                    text.push('\n');
+                                }
+                                text.push_str(t);
+                            }
+                        }
                     }
-                    TermEvent::Paste(text) => {
-                        handle_paste(text, app);
+                    // Trim trailing newline (the final Enter should send, not
+                    // add a blank line).
+                    let text = text.trim_end_matches('\n').to_string();
+                    handle_paste(text, app);
+                } else {
+                    // Normal event processing — no paste detected.
+                    for evt in batch {
+                        match evt {
+                            TermEvent::Key(key) => {
+                                handle_key_event(key, app, &stream_tx).await?;
+                            }
+                            TermEvent::Paste(text) => {
+                                handle_paste(text, app);
+                            }
+                        }
                     }
                 }
             }
@@ -362,7 +438,7 @@ async fn run_event_loop(
                 let mut rx = notification_rx.lock().await;
                 if let Some(notification) = rx.recv().await {
                     let notif_text = format!("[{}] {}", notification.priority_label(), notification.message);
-                    app.messages.push(DisplayMessage::new("system", &notif_text));
+                    app.messages.push(app.msg("system", &notif_text));
 
                     // Send reminder notifications to the Brain so it can act on them
                     if matches!(app.mode, AppMode::Operational { .. }) {
@@ -455,7 +531,7 @@ async fn handle_stream_event(
                 .unwrap_or_else(|| "Embra".into());
 
             if !display_text.is_empty() {
-                app.messages.push(DisplayMessage::new(&name, &display_text));
+                app.messages.push(app.msg(&name, &display_text));
             }
 
             if is_learning {
@@ -480,7 +556,7 @@ async fn handle_stream_event(
                         } else {
                             // Start next phase
                             let phase_label = learning::phase_label(&lm.state.phase);
-                            app.messages.push(DisplayMessage::new(
+                            app.messages.push(app.msg(
                                 "system",
                                 format!("── Phase: {} ──", phase_label),
                             ));
@@ -531,7 +607,7 @@ async fn handle_stream_event(
             app.thinking = false;
             app.status_message = format!("Error: {}", err);
             app.messages
-                .push(DisplayMessage::new("system", format!("Error: {}", err)));
+                .push(app.msg("system", format!("Error: {}", err)));
             if let AppMode::Learning(ref mut lm) = app.mode {
                 lm.awaiting_response = false;
             }
@@ -955,7 +1031,7 @@ async fn finalize_setup(
     crate::config::save_config(&app.db, &config).await?;
     app.config = Some(config.clone());
 
-    app.messages.push(DisplayMessage::new(
+    app.messages.push(app.msg(
         "system",
         format!(
             "Configuration saved.\n\n\
@@ -976,7 +1052,7 @@ async fn finalize_setup(
     let brain = Brain::new(config.api_key.clone(), String::new());
     app.brain = Some(brain);
 
-    app.messages.push(DisplayMessage::new(
+    app.messages.push(app.msg(
         "system",
         "── Phase: User Configuration ──",
     ));
@@ -1038,7 +1114,7 @@ async fn handle_learning_input(
     }
 
     app.messages
-        .push(DisplayMessage::new("You", input.to_string()));
+        .push(app.msg("You", input.to_string()));
 
     if let AppMode::Learning(ref mut lm) = app.mode {
         lm.state.conversation_history.push(Message::user(input));
@@ -1091,7 +1167,7 @@ async fn transition_to_operational(
     let config = app.config.as_ref().unwrap();
     let name = config.name.clone();
 
-    app.messages.push(DisplayMessage::new(
+    app.messages.push(app.msg(
         "system",
         format!(
             "═══ {} Learning Mode Complete ═══\n\
@@ -1147,7 +1223,7 @@ async fn handle_operational_input(
     if input.starts_with('/') {
         let result = commands::handle_command(input, app).await?;
         if let Some(msg) = result {
-            app.messages.push(DisplayMessage::new("system", msg));
+            app.messages.push(app.msg("system", msg));
         }
         return Ok(());
     }
@@ -1158,7 +1234,7 @@ async fn handle_operational_input(
         return Ok(());
     };
 
-    app.messages.push(DisplayMessage::new("You", input));
+    app.messages.push(app.msg("You", input));
     app.status_message = "Thinking...".into();
     app.thinking = true;
 

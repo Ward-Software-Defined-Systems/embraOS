@@ -69,6 +69,10 @@ pub async fn dispatch(
         "firewall_status" => security::firewall_status(),
         "ssh_sessions" => security::ssh_sessions(),
         "security_audit" => security::security_audit(),
+        "ssh_remote_admin" => security::ssh_remote_admin(param).await,
+        "ssh_session_start" => security::ssh_session_start(param).await,
+        "ssh_session_exec" => security::ssh_session_exec(param).await,
+        "ssh_session_end" => security::ssh_session_end().await,
         // Engineering tools (FEATURE-004)
         "git_status" => engineering::git_status(param).await,
         "git_log" => engineering::git_log(param).await,
@@ -207,7 +211,7 @@ async fn recall(db: &WardsonDbClient, query: &str) -> String {
         return "No memory entries found.".into();
     }
 
-    let query_lower = query.to_lowercase();
+    let query_lower = query.trim_start_matches('#').to_lowercase();
     let matching: Vec<&serde_json::Value> = if query.is_empty() {
         // Return all (latest first, up to 20)
         results.iter().rev().take(20).collect()

@@ -459,7 +459,7 @@ pub async fn memory_scan(db: &WardsonDbClient, param: &str) -> String {
     let tag_filter = if param.is_empty() {
         None
     } else {
-        Some(param.to_lowercase())
+        Some(param.trim_start_matches('#').to_lowercase())
     };
 
     // Filter entries by tag if specified

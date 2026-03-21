@@ -85,6 +85,15 @@ Mount your cloned repositories to give the intelligence access to `git_status`, 
 >
 > This will be automated in a future update.
 
+> **SSH Setup Required:** The SSH remote admin tools (`ssh_remote_admin`, `ssh_session_start`) require key-based authentication — password authentication is disabled to prevent password prompts from interfering with the TUI. From your host terminal:
+>
+> ```bash
+> docker exec embra ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N ""
+> docker exec -it embra ssh-copy-id -i /root/.ssh/id_ed25519.pub user@<target-host>
+> ```
+>
+> SSH tools are restricted to RFC 1918 private addresses and loopback only.
+
 > **Note:** Pre-built container images on Docker Hub are coming soon. For now, clone and build locally.
 
 ---
@@ -170,7 +179,7 @@ All sessions share the same intelligence — same memory, same identity, same so
 | `/soul` | Display the immutable soul document |
 | `/identity` | Display the intelligence's identity document |
 | `/mode` | Show current operating mode and soul seal status |
-| `/copy` | Copy conversation to clipboard via OSC 52 — `/copy 5` for last 5 messages (disabled — Sprint 2) |
+| `/copy` | Copy conversation to clipboard via OSC 52 — `/copy 5` for last 5 messages (disabled — Sprint 5) |
 
 ### Keyboard Shortcuts
 
@@ -198,7 +207,7 @@ This is a proof of concept. It demonstrates the core experience but doesn't incl
 
 ### Default Tools
 
-Phase 0 includes ~59 built-in tools available in operational mode:
+Phase 0 includes ~63 built-in tools available in operational mode:
 
 **System**
 
@@ -292,6 +301,17 @@ Phase 0 includes ~59 built-in tools available in operational mode:
 | **gh_project_list** | List GitHub projects for a user or org |
 | **gh_project_view** | View a GitHub project board |
 
+**Engineering — SSH** (EXPERIMENTAL — private/loopback IPs only)
+
+| Tool | Description |
+|---|---|
+| **ssh_remote_admin** | Execute a single command on a remote host via SSH — `ssh_remote_admin host command` or `ssh_remote_admin user@host command`. 30s timeout, 10KB output truncation |
+| **ssh_session_start** | Open a persistent SSH session — connection validated before returning success. One session at a time |
+| **ssh_session_exec** | Run a command in the open SSH session — sentinel-based output capture, 30s timeout |
+| **ssh_session_end** | Close the open SSH session |
+
+> **⚠️ SSH Security:** SSH tools are restricted to RFC 1918 private addresses (10.x, 172.16-31.x, 192.168.x) and loopback (127.x, localhost). Public IP targets are denied. Connections use `StrictHostKeyChecking=accept-new` (auto-accepts first-time hosts, rejects changed keys). These tools are marked EXPERIMENTAL — use at your own risk.
+
 **Engineering — WardSONDB**
 
 | Tool | Description |
@@ -345,7 +365,7 @@ These are internal tools invoked by the intelligence during conversation — not
 
 ## Known Issues
 
-All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memory consolidation capabilities. Phase 0 is functionally complete.
+All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memory consolidation capabilities. Sprint 4 added SSH remote admin, tag filtering fix, and timezone-aware timestamps. Phase 0 is functionally complete.
 
 **Sprint 1**
 
@@ -370,7 +390,14 @@ All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memor
 | BUG-012 | 🟡 Medium | Paste `\r` characters corrupting input | Normalize `\r\n` → `\n` and `\r` → `\n` in paste handler |
 | BUG-013 | 🟡 Medium | Unicode/emoji breaking line wrapping | Replaced `chars().count()` with `unicode-width` display widths |
 
-> **12 bugs + 1 crash fixed across Sprints 1 & 2.** Sprint 3 focused on new capabilities (no bug fixes needed). If you encounter new bugs, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
+**Sprint 4**
+
+| ID | Severity | Issue | Resolution |
+|---|---|---|---|
+| BUG-014 | 🟡 Medium | `recall`/`memory_scan` can't find `#tagged` queries | Strip leading `#` before matching (remember already strips on store) |
+| BUG-015 | 🟡 Medium | Multi-line paste sends each line separately inside `screen` | **Open.** `screen` strips bracketed paste escapes, so crossterm receives pasted lines as individual key events. Batch-drain mitigation in event loop attempted but not sufficient — `screen` may deliver events across multiple poll cycles. Workaround: use `tmux` instead of `screen`, or paste into a terminal without `screen`. |
+
+> **13 bugs + 1 crash fixed across Sprints 1–4.** BUG-015 is open. If you encounter new bugs, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
 ---
 
@@ -382,6 +409,7 @@ All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memor
 | **Phase 0 — Sprint 1** | Bug fixes (9+1 crash), design improvements (4), new tool categories (security, engineering) | ✅ **Complete** |
 | **Phase 0 — Sprint 2** | Bug fixes (3), expanded git/GitHub toolset (12 new tools), enhanced port scanner, embraCRON scheduling | ✅ **Complete** |
 | **Phase 0 — Sprint 3** | Session access tools (5), memory consolidation (2), session consolidation (3), schema migration framework | ✅ **Complete** |
+| **Phase 0 — Sprint 4** | SSH remote admin (4 tools), tag filter fix, timezone-aware timestamps, `/copy` deferred | ✅ **Complete** |
 | **Phase 1** | Core OS — embrad (Rust PID 1), embra-apid, immutable rootfs | Planned |
 | **Phase 2** | Terminal & Sessions — full TUI, multi-session, embractl CLI | Planned |
 | **Phase 3** | Module System — MCP servers, embra-guardian, containerd | Planned |
@@ -423,6 +451,18 @@ All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memor
 **New Collections:** `sessions.{name}.summary`, `system.consolidation_log`, `system.migrations`.
 
 **Status:** All Sprint 3 items implemented and tested. Tool count expanded from ~49 to ~59.
+
+### Phase 0 Sprint 4 Scope
+
+**SSH Remote Admin (4 tools, EXPERIMENTAL):** `ssh_remote_admin` for single command execution, `ssh_session_start` / `ssh_session_exec` / `ssh_session_end` for persistent interactive sessions. All restricted to RFC 1918 private + loopback addresses. Connection probe validates SSH sessions are live before reporting success. 30s timeouts, 10KB output truncation, one session at a time.
+
+**Tag Filter Fix:** `recall` and `memory_scan` now strip leading `#` from queries before matching. The `remember` tool already strips `#` when storing tags, so searching for `#worldstate` now correctly finds entries tagged `worldstate`.
+
+**Timezone-Aware Timestamps:** Conversation messages now display date+time in the operator's configured timezone (e.g., `Mar 20 14:30`) instead of UTC-only time. Uses `chrono_tz` for conversion. Early setup messages before config is available fall back to UTC.
+
+**`/copy` Deferred:** Updated availability message from Sprint 2 to Sprint 5.
+
+**Status:** All Sprint 4 items implemented and tested. Tool count expanded from ~59 to ~63.
 
 ---
 

@@ -117,6 +117,8 @@ Security:
 - port_scan — TCP connect scan with port specs and banner grabbing (private/loopback IPs only)
   Specs: specific ports (80,443), ranges (8000-8100), presets (web, db, all)
 - firewall_status, ssh_sessions, security_audit — stubs for container mode
+- ssh_remote_admin — SSH remote command execution (EXPERIMENTAL, private/loopback IPs only, use at your own risk)
+- ssh_session_start/ssh_session_exec/ssh_session_end — persistent SSH session (EXPERIMENTAL)
 
 Engineering:
 - git_status, git_log — git read operations on any path
@@ -254,6 +256,11 @@ Security:
 - [TOOL:firewall_status] — firewall status (container mode: stub)
 - [TOOL:ssh_sessions] — SSH session info (container mode: stub)
 - [TOOL:security_audit] — security audit (container mode: stub)
+- [TOOL:ssh_remote_admin <host> <command>] — execute single command on remote host via SSH (EXPERIMENTAL — private/loopback IPs only, use at your own risk)
+- [TOOL:ssh_remote_admin user@host <command>] — SSH as specific user
+- [TOOL:ssh_session_start <user@host>] — open persistent SSH session (EXPERIMENTAL — private/loopback only)
+- [TOOL:ssh_session_exec <command>] — run command in open SSH session
+- [TOOL:ssh_session_end] — close SSH session
 
 Engineering:
 - [TOOL:git_status <path>] — git status of a directory
