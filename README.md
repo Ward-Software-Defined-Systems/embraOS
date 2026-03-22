@@ -410,11 +410,11 @@ All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memor
 | **Phase 0 — Sprint 2** | Bug fixes (3), expanded git/GitHub toolset (12 new tools), enhanced port scanner, embraCRON scheduling | ✅ **Complete** |
 | **Phase 0 — Sprint 3** | Session access tools (5), memory consolidation (2), session consolidation (3), schema migration framework | ✅ **Complete** |
 | **Phase 0 — Sprint 4** | SSH remote admin (4 tools), tag filter fix, timezone-aware timestamps, `/copy` deferred | ✅ **Complete** |
-| **Phase 1** | Core OS — embrad (Rust PID 1), embra-apid, immutable rootfs | Planned |
-| **Phase 2** | Terminal & Sessions — full TUI, multi-session, embractl CLI | Planned |
-| **Phase 3** | Module System — MCP servers, embra-guardian, containerd | Planned |
-| **Phase 4** | Image Factory — ISO builds, bare metal deployment | Planned |
-| **Phase 5** | Local LLM — offline operation, sovereign intelligence | Planned |
+| **Phase 1** | Core OS — `embrad` as Rust PID 1, `embra-apid` gRPC+REST gateway, `embra-trustd` PKI, immutable SquashFS rootfs, LUKS-encrypted STATE/DATA partitions | Planned |
+| **Phase 2** | Terminal & Sessions — full TUI rewrite, `embractl` management CLI (the `talosctl` equivalent), LLM-driven Continuity Engine feedback loop | Planned |
+| **Phase 3** | Module System — MCP server modules via `embra-guardian` governance proxy, containerd runtime, governed capability expansion | Planned |
+| **Phase 4** | Image Factory — bootable ISO builds, A/B partition scheme with automatic rollback, bare metal and Kubernetes deployment | Planned |
+| **Phase 5** | Sovereign Intelligence — local LLM inference, offline operation, zero external dependencies | Planned |
 
 ### Phase 0 Sprint 1 Scope
 
@@ -464,19 +464,47 @@ All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memor
 
 **Status:** All Sprint 4 items implemented and tested. Tool count expanded from ~59 to ~63.
 
+### Phase 1 — Core OS
+
+embraOS stops being a Docker application and starts being an operating system. `embrad` becomes a true Rust PID 1 init (replacing systemd entirely), `embra-apid` provides gRPC + REST API gateway with mTLS, and `embra-trustd` handles PKI and soul verification. The rootfs becomes a read-only SquashFS — no package manager, no shell, no SSH. Disk partitions include LUKS-encrypted STATE (soul + governance + PKI) and DATA (WardSONDB). **Boot invariant:** if soul validation fails, the system halts. Follows [Talos Linux](https://www.talos.dev/) architectural patterns directly — same philosophy (immutable, API-only), different mission (hosting a mind instead of running Kubernetes).
+
+### Phase 2 — Terminal & Sessions
+
+`embractl` becomes the sole operator management CLI — the `talosctl` equivalent for embraOS. Full TUI rewrite resolves Phase 0 workarounds (including BUG-015 paste handling). The Continuity Engine gains its LLM-driven feedback loop: continuous risk assessment, resilience scoring, and goal-progress evaluation against soul objectives.
+
+### Phase 3 — Module System
+
+The intelligence can extend its own capabilities through governed, sandboxed MCP server modules. `embra-guardian` intercepts all module operations with pre-write rule evaluation, image allowlist enforcement, and audit trail. Modules run via containerd (bare metal) or Kubernetes API, abstracted by a pluggable `ModuleRuntime` trait. The tool registry becomes dynamic and governance-gated.
+
+### Phase 4 — Image Factory
+
+embraOS becomes a bootable operating system. ISO build pipeline produces images for bare metal and VM deployment. A/B partition scheme — new OS images written to the inactive slot, automatic rollback on boot failure. WardSONDB DATA partition is never touched by OS updates.
+
+### Phase 5 — Sovereign Intelligence
+
+The endgame: fully offline, zero external dependencies. Local LLM inference replaces the Anthropic API. Model updates go through embra-guardian's governance pipeline. Multi-model routing lets the Brain select inference targets by task type. The full 7-layer continuity architecture operates without network access.
+
 ---
 
 ## The Vision
 
-embraOS is designed to eventually be a real operating system — a minimal, immutable, API-driven Linux distribution purpose-built for running an AI intelligence. Deployable on bare metal or as a Kubernetes-managed container. Informed by the architecture of [Talos Linux](https://www.talos.dev/) (no SSH, no shell, no package manager, API-only) but purpose-built for a completely different mission: not running containers, but hosting a mind.
+embraOS is designed to eventually be a real operating system — a minimal, immutable, API-driven Linux distribution purpose-built for running an AI intelligence. Deployable on bare metal or as a Kubernetes-managed container.
+
+The OS architecture is modeled after [Talos Linux](https://www.talos.dev/) — same philosophy (immutable rootfs, PID 1 init replacing systemd, no SSH, no shell, API-only management, mTLS everywhere), completely different mission: not running Kubernetes, but hosting a mind. Every Talos design pattern was evaluated and either adopted directly, modified for embraOS's use case, or deliberately rejected.
 
 The full architecture includes:
-- Immutable SquashFS root filesystem
-- A/B partition scheme with automatic rollback
-- mTLS on all management interfaces
-- WardSONDB as a native OS-level data store
-- Pluggable module runtime (containerd for bare metal, Kubernetes API for K8s)
-- Self-update through conversational governance
+- **Immutable SquashFS rootfs** — read-only, no package manager, no interpreters
+- **Rust PID 1 init (`embrad`)** — mounts filesystems, validates soul, starts services, enters reconciliation loop
+- **A/B partition scheme** with automatic rollback on boot failure
+- **mTLS on all interfaces** — full PKI, soul signing key separate from OS PKI
+- **WardSONDB as a native OS-level data store** — soul, memory, governance, state
+- **`embractl` management CLI** — the `talosctl` equivalent, all management via API
+- **Pluggable module runtime** — containerd for bare metal, Kubernetes API for K8s
+- **Self-modification gradient** — OS image and soul are immutable; governance rules are human-only; identity, memory, and modules are intelligence-writable within governance constraints
+- **Anti-self-replication constraint** — the intelligence cannot deploy another instance of itself (enforced at Ring 0)
+- **7-level restart protocol** — from module restart (L0) through seed restart from 5 minimum viable state artifacts (L6)
+
+**Why Rust:** WardSONDB is Rust. All core OS services are Rust. One language, one toolchain for the entire OS. [Bottlerocket](https://github.com/bottlerocket-os/bottlerocket) (AWS) validates this approach at production scale. Rust's ownership model provides memory safety without garbage collection pauses competing with LLM inference.
 
 ---
 
@@ -489,9 +517,11 @@ pattern for giving AI agents persistent identity and memory. Where OpenClaw stor
 as markdown files read at session start, embraOS moves them into governed, queryable
 WardSONDB collections with enforced access controls — and makes the soul immutable.
 
-The OS architecture is informed by [Talos Linux](https://www.talos.dev/) — a minimal,
-immutable, API-driven Linux distribution. No Talos or OpenClaw code is used. embraOS
+The OS architecture is modeled after [Talos Linux](https://www.talos.dev/) — a minimal,
+immutable, API-driven Linux distribution. Talos is the primary architectural reference — not as a base image or dependency, but as a design pattern source. No Talos or OpenClaw code is used. embraOS
 is built from scratch in Rust.
+
+The continuity architecture (7-layer model, soul immutability, feedback loops, True AI Criteria) originates from the Embra design document series (v1–v5, 2026).
 
 ---
 ## Built By
