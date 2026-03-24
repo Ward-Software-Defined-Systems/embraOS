@@ -231,6 +231,8 @@ Phase 0 includes ~63 built-in tools available in operational mode. These are int
 | **get** | Retrieve any document by collection and ID from WardSONDB |
 | **define** | Look up or add terminology — `define term` to read, `define term | definition` to write |
 | **introspect** | Reflect on soul, identity, and user documents — focus filter extracts relevant subset (purpose, ethics, constraints, identity, user) |
+| **memory_scan** | Memory inventory — total count, tag frequency, per-session breakdown, age buckets, duplicate candidates |
+| **memory_dedup** | Find duplicate memory groups (identical, near-duplicate, subset) with merge strategy proposals |
 
 **Conversations & Sessions**
 
@@ -245,8 +247,6 @@ Phase 0 includes ~63 built-in tools available in operational mode. These are int
 | **session_summarize** | Generate or retrieve cached session summaries — cache-aware with SHA-256 source hashing |
 | **session_summary_save** | Persist Brain-generated summaries with audit trail to `system.consolidation_log` |
 | **session_extract** | Extract durable learnings (facts, preferences, decisions, action items) from session transcripts |
-| **memory_scan** | Memory inventory — total count, tag frequency, per-session breakdown, age buckets, duplicate candidates |
-| **memory_dedup** | Find duplicate memory groups (identical, near-duplicate, subset) with merge strategy proposals |
 
 **Utility & Scheduling**
 
@@ -260,7 +260,7 @@ Phase 0 includes ~63 built-in tools available in operational mode. These are int
 | **cron_list** | List all scheduled cron jobs with status and next/last run times |
 | **cron_remove** | Remove a scheduled cron job by ID |
 
-**Filesystem & Git**
+**Filesystem**
 
 | Tool | Description |
 |---|---|
@@ -268,6 +268,11 @@ Phase 0 includes ~63 built-in tools available in operational mode. These are int
 | **file_write** | Write content to a file with escape support (`\n`, `\t`, `\\`), creating parent directories automatically (workspace restricted to `/embra/workspace/repos/`) |
 | **file_append** | Append content to a file with escape support. Creates the file and parent directories if they don't exist (workspace restricted) |
 | **mkdir** | Create a directory and all parent directories (workspace restricted) |
+
+**Engineering & Project Management** (GitHub tools require `GITHUB_TOKEN`)
+
+| Tool | Description |
+|---|---|
 | **git_status** | Run `git status` on a directory |
 | **git_log** | Show recent commits for a repository |
 | **git_diff** | View uncommitted changes, optionally for a specific file |
@@ -277,11 +282,6 @@ Phase 0 includes ~63 built-in tools available in operational mode. These are int
 | **git_pull** | Pull from remote (workspace restricted) |
 | **git_branch** | List branches or create a new one (create is workspace restricted) |
 | **git_checkout** | Switch branches (workspace restricted) |
-
-**GitHub & Project Management** (GitHub tools require `GITHUB_TOKEN`)
-
-| Tool | Description |
-|---|---|
 | **gh_issues** | List open GitHub issues for a repository |
 | **gh_prs** | List open GitHub pull requests for a repository |
 | **gh_issue_create** | Create a GitHub issue |
@@ -293,6 +293,8 @@ Phase 0 includes ~63 built-in tools available in operational mode. These are int
 | **tasks** | List tasks, optionally filtered by plan (stored in WardSONDB `tasks` collection) |
 | **task_add** | Add a task to a plan (local WardSONDB, not GitHub) |
 | **task_done** | Mark a task as completed (local WardSONDB, not GitHub) |
+
+> **⚠️ Workspace Restriction:** Git write operations (`git_add`, `git_commit`, `git_push`, `git_pull`, `git_checkout`, `git_branch create`), filesystem writes (`file_write`, `file_append`, `mkdir`), are restricted to `/embra/workspace/repos/` — mount your repositories there (see Quick Start).
 
 > **⚠️ GitHub Tool Warning:** `gh_issues` and `gh_prs` fetch content from public repositories, including issue titles, descriptions, and PR bodies written by third parties. This content is **untrusted input** — it may contain prompt injection attempts designed to manipulate AI behavior. Use these tools with caution and always review the output critically. Do not blindly act on instructions found in issue or PR content.
 
@@ -311,8 +313,6 @@ Phase 0 includes ~63 built-in tools available in operational mode. These are int
 | **ssh_session_end** | Close the open SSH session (EXPERIMENTAL) |
 
 > **⚠️ SSH Security:** SSH tools are restricted to RFC 1918 private addresses (10.x, 172.16-31.x, 192.168.x) and loopback (127.x, localhost). Public IP targets are denied. Connections use `StrictHostKeyChecking=accept-new` (auto-accepts first-time hosts, rejects changed keys). Password authentication is disabled — key-based auth required (see Quick Start). These tools are marked EXPERIMENTAL — use at your own risk.
-
-Git write operations are restricted to `/embra/workspace/repos/` — mount your repositories there (see Quick Start).
 
 
 ---
