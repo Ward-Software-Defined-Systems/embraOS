@@ -207,15 +207,18 @@ This is a proof of concept. It demonstrates the core experience but doesn't incl
 
 ### Default Tools
 
-Phase 0 includes ~63 built-in tools available in operational mode:
+Phase 0 includes ~63 built-in tools available in operational mode. These are internal tools invoked by the intelligence during conversation — not user-facing commands. The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
 
-**System**
+> **⚠️ Testing Notice:** The default tools and slash commands are actively being tested. If you encounter bugs or unexpected behavior, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
+
+**System & Status**
 
 | Tool | Description |
 |---|---|
 | **system_status** | Report system health — uptime, WardSONDB connection, memory usage, soul status, active collections |
+| **uptime_report** | Rich system report — uptime, WardSONDB health, collection count, sessions, total messages, memory entries, soul status |
 | **check_update** | Check GitHub for newer WardSONDB releases and report available updates |
-| **search_memory** | Search and retrieve from the intelligence's memory stores |
+| **changelog** | What changed since the current session started — new memories, session activity |
 
 **Memory & Knowledge**
 
@@ -224,49 +227,40 @@ Phase 0 includes ~63 built-in tools available in operational mode:
 | **recall** | Search past conversations and saved memories by query — returns up to 10 results with IDs, content, tags, and timestamps |
 | **remember** | Save a note or fact to persistent memory with optional hashtag tags |
 | **forget** | Remove a specific memory entry by ID |
+| **search_memory** | Search and retrieve from the intelligence's memory stores |
+| **get** | Retrieve any document by collection and ID from WardSONDB |
+| **define** | Look up or add terminology — `define term` to read, `define term | definition` to write |
+| **introspect** | Reflect on soul, identity, and user documents — focus filter extracts relevant subset (purpose, ethics, constraints, identity, user) |
 
-**Self-Awareness**
+**Conversations & Sessions**
 
 | Tool | Description |
 |---|---|
-| **uptime_report** | Rich system report — uptime, WardSONDB health, collection count, sessions, total messages, memory entries, soul status |
-| **introspect** | Reflect on soul, identity, and user documents — focus filter extracts relevant subset (purpose, ethics, constraints, identity, user) |
-| **changelog** | What changed since the current session started — new memories, session activity |
+| **session_summary** | Message counts and recent conversation turns for the intelligence to summarize |
+| **session_list** | List all sessions with status, turn count, last active, and created dates |
+| **session_read** | Read session transcript with optional range (`1-20`, `80-`, last N). Messages truncated to 500 chars |
+| **session_search** | Case-insensitive search across sessions — supports `"quoted phrases"`, returns up to 20 matches with context |
+| **session_meta** | Structured session metadata — status, dates, turn counts (total/user/assistant), summary availability |
+| **session_delta** | Returns all turns from a given turn number onward |
+| **session_summarize** | Generate or retrieve cached session summaries — cache-aware with SHA-256 source hashing |
+| **session_summary_save** | Persist Brain-generated summaries with audit trail to `system.consolidation_log` |
+| **session_extract** | Extract durable learnings (facts, preferences, decisions, action items) from session transcripts |
+| **memory_scan** | Memory inventory — total count, tag frequency, per-session breakdown, age buckets, duplicate candidates |
+| **memory_dedup** | Find duplicate memory groups (identical, near-duplicate, subset) with merge strategy proposals |
 
-**Time & Context**
+**Utility & Scheduling**
 
 | Tool | Description |
 |---|---|
 | **time** | Current date, time, and day of week in the operator's configured timezone |
-| **countdown** | Set a reminder with duration and message — proactive engine checks every 15 seconds |
-| **session_summary** | Message counts and recent conversation turns for the intelligence to summarize |
-
-**Utility**
-
-| Tool | Description |
-|---|---|
 | **calculate** | Evaluate math expressions — arithmetic, trig, and more via `meval` |
-| **define** | Look up or add terminology — `define term` to read, `define term | definition` to write |
 | **draft** | Save structured text artifacts (drafts, outlines, notes) — upserts by title |
+| **countdown** | Set a reminder with duration and message — proactive engine checks every 15 seconds |
+| **cron_add** | Schedule recurring tool execution — supports `every 5m`, `every 1h`, `hourly`, `daily 09:00`, etc. |
+| **cron_list** | List all scheduled cron jobs with status and next/last run times |
+| **cron_remove** | Remove a scheduled cron job by ID |
 
-
-**Document Retrieval**
-
-| Tool | Description |
-|---|---|
-| **get** | Retrieve any document by collection and ID from WardSONDB |
-
-**Security**
-
-| Tool | Description |
-|---|---|
-| **security_check** | Container security overview — running processes, load average, listening ports |
-| **port_scan** | TCP connect scan with banner grabbing — supports specific ports (`80,443`), ranges (`8000-8100`), and presets (`web`, `db`, `all`). Semaphore-limited concurrency. Restricted to RFC 1918 private and loopback addresses only |
-| **firewall_status** | Check firewall rules and status (stub — not available in container mode) |
-| **ssh_sessions** | List recent and active SSH sessions (stub — not available in container mode) |
-| **security_audit** | Check file permissions, running processes, recent logins (stub — not available in container mode) |
-
-**Filesystem**
+**Filesystem & Git**
 
 | Tool | Description |
 |---|---|
@@ -274,22 +268,17 @@ Phase 0 includes ~63 built-in tools available in operational mode:
 | **file_write** | Write content to a file with escape support (`\n`, `\t`, `\\`), creating parent directories automatically (workspace restricted to `/embra/workspace/repos/`) |
 | **file_append** | Append content to a file with escape support. Creates the file and parent directories if they don't exist (workspace restricted) |
 | **mkdir** | Create a directory and all parent directories (workspace restricted) |
-
-**Engineering — Git**
-
-| Tool | Description |
-|---|---|
 | **git_status** | Run `git status` on a directory |
 | **git_log** | Show recent commits for a repository |
+| **git_diff** | View uncommitted changes, optionally for a specific file |
 | **git_add** | Stage files for commit (workspace restricted to `/embra/workspace/repos/`) |
 | **git_commit** | Commit staged changes with a message (workspace restricted) |
 | **git_push** | Push commits to remote (workspace restricted) |
 | **git_pull** | Pull from remote (workspace restricted) |
-| **git_diff** | View uncommitted changes, optionally for a specific file |
 | **git_branch** | List branches or create a new one (create is workspace restricted) |
 | **git_checkout** | Switch branches (workspace restricted) |
 
-**Engineering — GitHub** (requires `GITHUB_TOKEN`)
+**GitHub & Project Management** (GitHub tools require `GITHUB_TOKEN`)
 
 | Tool | Description |
 |---|---|
@@ -300,65 +289,30 @@ Phase 0 includes ~63 built-in tools available in operational mode:
 | **gh_pr_create** | Create a pull request |
 | **gh_project_list** | List GitHub projects for a user or org |
 | **gh_project_view** | View a GitHub project board |
-
-**Engineering — SSH** (EXPERIMENTAL — private/loopback IPs only)
-
-| Tool | Description |
-|---|---|
-| **ssh_remote_admin** | Execute a single command on a remote host via SSH — `ssh_remote_admin host command` or `ssh_remote_admin user@host command`. 30s timeout, 10KB output truncation |
-| **ssh_session_start** | Open a persistent SSH session — connection validated before returning success. One session at a time |
-| **ssh_session_exec** | Run a command in the open SSH session — sentinel-based output capture, 30s timeout |
-| **ssh_session_end** | Close the open SSH session |
-
-> **⚠️ SSH Security:** SSH tools are restricted to RFC 1918 private addresses (10.x, 172.16-31.x, 192.168.x) and loopback (127.x, localhost). Public IP targets are denied. Connections use `StrictHostKeyChecking=accept-new` (auto-accepts first-time hosts, rejects changed keys). These tools are marked EXPERIMENTAL — use at your own risk.
-
-**Engineering — WardSONDB**
-
-| Tool | Description |
-|---|---|
 | **plan** | Create or list project plans (stored in WardSONDB `plans` collection) |
 | **tasks** | List tasks, optionally filtered by plan (stored in WardSONDB `tasks` collection) |
 | **task_add** | Add a task to a plan (local WardSONDB, not GitHub) |
 | **task_done** | Mark a task as completed (local WardSONDB, not GitHub) |
 
-**Scheduling (embraCRON)**
-
-| Tool | Description |
-|---|---|
-| **cron_add** | Schedule recurring tool execution — supports `every 5m`, `every 1h`, `hourly`, `daily 09:00`, etc. |
-| **cron_list** | List all scheduled cron jobs with status and next/last run times |
-| **cron_remove** | Remove a scheduled cron job by ID |
-
-**Session Access** (read-only)
-
-| Tool | Description |
-|---|---|
-| **session_list** | List all sessions with status, turn count, last active, and created dates |
-| **session_read** | Read session transcript with optional range (`1-20`, `80-`, last N). Messages truncated to 500 chars |
-| **session_search** | Case-insensitive search across sessions — supports `"quoted phrases"`, returns up to 20 matches with context |
-| **session_meta** | Structured session metadata — status, dates, turn counts (total/user/assistant), summary availability |
-| **session_delta** | Returns all turns from a given turn number onward |
-
-**Memory Consolidation**
-
-| Tool | Description |
-|---|---|
-| **memory_scan** | Memory inventory — total count, tag frequency, per-session breakdown, age buckets, duplicate candidates |
-| **memory_dedup** | Find duplicate memory groups (identical, near-duplicate, subset) with merge strategy proposals |
-
-**Session Consolidation**
-
-| Tool | Description |
-|---|---|
-| **session_summarize** | Generate or retrieve cached session summaries — cache-aware with SHA-256 source hashing |
-| **session_summary_save** | Persist Brain-generated summaries with audit trail to `system.consolidation_log` |
-| **session_extract** | Extract durable learnings (facts, preferences, decisions, action items) from session transcripts |
-
 > **⚠️ GitHub Tool Warning:** `gh_issues` and `gh_prs` fetch content from public repositories, including issue titles, descriptions, and PR bodies written by third parties. This content is **untrusted input** — it may contain prompt injection attempts designed to manipulate AI behavior. Use these tools with caution and always review the output critically. Do not blindly act on instructions found in issue or PR content.
 
-These are internal tools invoked by the intelligence during conversation — not user-facing commands. Git write operations are restricted to `/embra/workspace/repos/` — mount your repositories there (see Quick Start). The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
+**Security & SSH**
 
-> **⚠️ Testing Notice:** The default tools and slash commands are actively being tested. If you encounter bugs or unexpected behavior, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
+| Tool | Description |
+|---|---|
+| **security_check** | Container security overview — running processes, load average, listening ports |
+| **port_scan** | TCP connect scan with banner grabbing — supports specific ports (`80,443`), ranges (`8000-8100`), and presets (`web`, `db`, `all`). Semaphore-limited concurrency. Restricted to RFC 1918 private and loopback addresses only |
+| **firewall_status** | Check firewall rules and status (stub — not available in container mode) |
+| **ssh_sessions** | List recent and active SSH sessions (stub — not available in container mode) |
+| **security_audit** | Check file permissions, running processes, recent logins (stub — not available in container mode) |
+| **ssh_remote_admin** | Execute a single command on a remote host via SSH — `ssh_remote_admin host command` or `ssh_remote_admin user@host command`. 30s timeout, 10KB output truncation (EXPERIMENTAL) |
+| **ssh_session_start** | Open a persistent SSH session — connection validated before returning success. One session at a time (EXPERIMENTAL) |
+| **ssh_session_exec** | Run a command in the open SSH session — sentinel-based output capture, 30s timeout (EXPERIMENTAL) |
+| **ssh_session_end** | Close the open SSH session (EXPERIMENTAL) |
+
+> **⚠️ SSH Security:** SSH tools are restricted to RFC 1918 private addresses (10.x, 172.16-31.x, 192.168.x) and loopback (127.x, localhost). Public IP targets are denied. Connections use `StrictHostKeyChecking=accept-new` (auto-accepts first-time hosts, rejects changed keys). Password authentication is disabled — key-based auth required (see Quick Start). These tools are marked EXPERIMENTAL — use at your own risk.
+
+Git write operations are restricted to `/embra/workspace/repos/` — mount your repositories there (see Quick Start).
 
 
 ---
