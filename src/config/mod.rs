@@ -73,12 +73,30 @@ pub async fn save_config(db: &WardsonDbClient, config: &SystemConfig) -> Result<
     if !db.collection_exists("config.system").await? {
         db.create_collection("config.system").await?;
     }
-    let doc = serde_json::to_value(config)?;
-    db.write("config.system", &doc).await?;
-    Ok(())
+    let mut doc = serde_json::to_value(config)?;
+    if let Some(obj) = doc.as_object_mut() {
+        obj.insert("_id".into(), serde_json::json!("config"));
+    }
+    match db.write("config.system", &doc).await {
+        Ok(_) => Ok(()),
+        Err(_) => {
+            // 409 conflict means doc already exists — update instead
+            db.update("config.system", "config", &doc).await?;
+            Ok(())
+        }
+    }
 }
 
 pub async fn load_config(db: &WardsonDbClient) -> Result<SystemConfig> {
+    // Try direct GET by well-known ID first
+    match db.read("config.system", "config").await {
+        Ok(doc) => {
+            let config: SystemConfig = serde_json::from_value(doc)?;
+            return Ok(config);
+        }
+        Err(_) => {}
+    }
+    // Fallback: query pattern (pre-migration data)
     let results = db
         .query("config.system", &serde_json::json!({}))
         .await?;

@@ -125,10 +125,34 @@ pub fn start_proactive_engine(
 }
 
 async fn run_health_checks(db: &WardsonDbClient, tx: &mpsc::Sender<Notification>) {
-    // Check WardSONDB health
-    match db.health().await {
-        Ok(true) => {}
-        Ok(false) => {
+    // Check WardSONDB health with degradation awareness
+    match db.health_detailed().await {
+        Ok(detail) if detail.up => {
+            if detail.status == "degraded" {
+                warn!("WardSONDB storage engine degraded");
+                let warning_msg = detail
+                    .warning
+                    .unwrap_or_else(|| "Storage engine degraded".into());
+                let _ = tx
+                    .send(Notification::new(
+                        Priority::Critical,
+                        format!(
+                            "CRITICAL: WardSONDB storage engine is degraded — {}. Memory and session writes may be failing silently.",
+                            warning_msg
+                        ),
+                    ))
+                    .await;
+            }
+            if detail.write_pressure.as_deref() == Some("high") {
+                let _ = tx
+                    .send(Notification::new(
+                        Priority::Normal,
+                        "WardSONDB write pressure is high — compaction in progress, non-essential queries may be slow.",
+                    ))
+                    .await;
+            }
+        }
+        Ok(_) => {
             warn!("WardSONDB health check failed");
             let _ = tx
                 .send(Notification::new(

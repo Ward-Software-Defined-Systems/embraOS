@@ -40,6 +40,24 @@ struct HealthResponse {
 }
 
 #[derive(Debug, Deserialize)]
+struct HealthData {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    write_pressure: Option<String>,
+    #[serde(default)]
+    warning: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct HealthDetail {
+    pub up: bool,
+    pub status: String,
+    pub write_pressure: Option<String>,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct QueryResponse {
     data: Vec<serde_json::Value>,
 }
@@ -228,7 +246,10 @@ impl WardsonDbClient {
     }
 
     pub async fn disk_usage(&self) -> Result<serde_json::Value> {
-        // Use stats endpoint for overall storage info
+        self.stats().await
+    }
+
+    pub async fn stats(&self) -> Result<serde_json::Value> {
         let resp = self
             .http_client
             .get(format!("{}/_stats", self.base_url))
@@ -237,7 +258,126 @@ impl WardsonDbClient {
         if !resp.status().is_success() {
             return Ok(serde_json::json!({"error": "unavailable"}));
         }
-        let stats: serde_json::Value = resp.json().await?;
-        Ok(stats)
+        let envelope: WardsonEnvelope<serde_json::Value> = resp.json().await?;
+        Ok(envelope.data)
+    }
+
+    pub async fn health_detailed(&self) -> Result<HealthDetail> {
+        let resp = self
+            .http_client
+            .get(format!("{}/_health", self.base_url))
+            .send()
+            .await;
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                let envelope: WardsonEnvelope<HealthData> = r.json().await?;
+                Ok(HealthDetail {
+                    up: true,
+                    status: envelope.data.status.unwrap_or_else(|| "healthy".into()),
+                    write_pressure: envelope.data.write_pressure,
+                    warning: envelope.data.warning,
+                })
+            }
+            Ok(_) => Ok(HealthDetail {
+                up: false,
+                status: "unreachable".into(),
+                write_pressure: None,
+                warning: None,
+            }),
+            Err(_) => Ok(HealthDetail {
+                up: false,
+                status: "unreachable".into(),
+                write_pressure: None,
+                warning: None,
+            }),
+        }
+    }
+
+    pub async fn patch_document(
+        &self,
+        collection: &str,
+        id: &str,
+        patch: &serde_json::Value,
+    ) -> Result<()> {
+        let resp = self
+            .http_client
+            .patch(format!("{}/{}/docs/{}", self.base_url, collection, id))
+            .json(patch)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(WardsonDbError::Api { status, body }.into());
+        }
+        Ok(())
+    }
+
+    pub async fn delete_by_query(
+        &self,
+        collection: &str,
+        filter: &serde_json::Value,
+    ) -> Result<u64> {
+        let url = format!("{}/{}/docs/_delete_by_query", self.base_url, collection);
+        let body = serde_json::json!({"filter": filter});
+        let resp = self
+            .http_client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(WardsonDbError::Api { status, body: body_text }.into());
+        }
+        let envelope: WardsonEnvelope<serde_json::Value> = resp.json().await?;
+        Ok(envelope
+            .data
+            .get("deleted")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0))
+    }
+
+    pub async fn set_ttl(
+        &self,
+        collection: &str,
+        retention_days: u64,
+        field: &str,
+    ) -> Result<()> {
+        let url = format!("{}/{}/ttl", self.base_url, collection);
+        let body = serde_json::json!({"retention_days": retention_days, "field": field});
+        let resp = self
+            .http_client
+            .put(&url)
+            .json(&body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body_text = resp.text().await.unwrap_or_default();
+            return Err(WardsonDbError::Api { status, body: body_text }.into());
+        }
+        Ok(())
+    }
+
+    pub async fn query_with_options(
+        &self,
+        collection: &str,
+        query_body: &serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        let resp = self
+            .http_client
+            .post(format!("{}/{}/query", self.base_url, collection))
+            .json(query_body)
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(WardsonDbError::Api { status, body }.into());
+        }
+        let envelope: WardsonEnvelope<serde_json::Value> = resp.json().await?;
+        Ok(envelope.data)
     }
 }

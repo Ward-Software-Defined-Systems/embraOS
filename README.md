@@ -267,6 +267,9 @@ Phase 0 includes ~63 built-in tools available in operational mode. These are int
 | **file_read** | Read file contents (up to 64KB) or list directory entries (up to 200). Unrestricted path. Handles binary files gracefully |
 | **file_write** | Write content to a file with escape support (`\n`, `\t`, `\\`), creating parent directories automatically (workspace restricted to `/embra/workspace/repos/`) |
 | **file_append** | Append content to a file with escape support. Creates the file and parent directories if they don't exist (workspace restricted) |
+| **file_delete** | Delete a file (workspace restricted, files only — not directories) |
+| **file_move** / **file_rename** | Move or rename a file or directory. Both source and destination must be under workspace (workspace restricted) |
+| **dir_delete** / **rmdir** | Remove a directory — empty by default, `--force` to remove with contents (workspace restricted) |
 | **mkdir** | Create a directory and all parent directories (workspace restricted) |
 
 **Engineering & Project Management** (GitHub tools require `GITHUB_TOKEN`)
@@ -282,6 +285,8 @@ Phase 0 includes ~63 built-in tools available in operational mode. These are int
 | **git_pull** | Pull from remote (workspace restricted) |
 | **git_branch** | List branches or create a new one (create is workspace restricted) |
 | **git_checkout** | Switch branches (workspace restricted) |
+| **git_rm** | Stage a file removal with `git rm` (workspace restricted) |
+| **git_mv** | Move or rename tracked files with `git mv` — handles case-sensitive renames on case-insensitive filesystems (workspace restricted) |
 | **gh_issues** | List open GitHub issues for a repository |
 | **gh_prs** | List open GitHub pull requests for a repository |
 | **gh_issue_create** | Create a GitHub issue |
@@ -294,7 +299,7 @@ Phase 0 includes ~63 built-in tools available in operational mode. These are int
 | **task_add** | Add a task to a plan (local WardSONDB, not GitHub) |
 | **task_done** | Mark a task as completed (local WardSONDB, not GitHub) |
 
-> **⚠️ Workspace Restriction:** Git write operations (`git_add`, `git_commit`, `git_push`, `git_pull`, `git_checkout`, `git_branch create`), filesystem writes (`file_write`, `file_append`, `mkdir`), are restricted to `/embra/workspace/repos/` — mount your repositories there (see Quick Start).
+> **⚠️ Workspace Restriction:** Git write operations (`git_add`, `git_commit`, `git_push`, `git_pull`, `git_checkout`, `git_branch create`, `git_rm`, `git_mv`), filesystem writes (`file_write`, `file_append`, `file_delete`, `file_move`/`file_rename`, `dir_delete`/`rmdir`, `mkdir`), are restricted to `/embra/workspace/repos/` — mount your repositories there (see Quick Start).
 
 > **⚠️ GitHub Tool Warning:** `gh_issues` and `gh_prs` fetch content from public repositories, including issue titles, descriptions, and PR bodies written by third parties. This content is **untrusted input** — it may contain prompt injection attempts designed to manipulate AI behavior. Use these tools with caution and always review the output critically. Do not blindly act on instructions found in issue or PR content.
 
@@ -308,9 +313,9 @@ Phase 0 includes ~63 built-in tools available in operational mode. These are int
 | **ssh_sessions** | List recent and active SSH sessions (stub — not available in container mode) |
 | **security_audit** | Check file permissions, running processes, recent logins (stub — not available in container mode) |
 | **ssh_remote_admin** | Execute a single command on a remote host via SSH — `ssh_remote_admin host command` or `ssh_remote_admin user@host command`. 30s timeout, 10KB output truncation (EXPERIMENTAL) |
-| **ssh_session_start** | Open a persistent SSH session — connection validated before returning success. One session at a time (EXPERIMENTAL) |
-| **ssh_session_exec** | Run a command in the open SSH session — sentinel-based output capture, 30s timeout (EXPERIMENTAL) |
-| **ssh_session_end** | Close the open SSH session (EXPERIMENTAL) |
+| **ssh_session_start** | Open a persistent SSH session via ControlMaster — connection validated with probe command. One session at a time (EXPERIMENTAL) |
+| **ssh_session_exec** | Run a command in the open SSH session — each command gets a clean process lifecycle via ControlMaster socket. 30s timeout, 10KB truncation (EXPERIMENTAL) |
+| **ssh_session_end** | Close SSH session and tear down ControlMaster connection (EXPERIMENTAL) |
 
 > **⚠️ SSH Security:** SSH tools are restricted to RFC 1918 private addresses (10.x, 172.16-31.x, 192.168.x) and loopback (127.x, localhost). Public IP targets are denied. Connections use `StrictHostKeyChecking=accept-new` (auto-accepts first-time hosts, rejects changed keys). Password authentication is disabled — key-based auth required (see Quick Start). These tools are marked EXPERIMENTAL — use at your own risk.
 
@@ -319,7 +324,7 @@ Phase 0 includes ~63 built-in tools available in operational mode. These are int
 
 ## Known Issues
 
-All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memory consolidation capabilities. Sprint 4 added SSH remote admin, tag filtering fix, and timezone-aware timestamps. Phase 0 is functionally complete.
+All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memory consolidation capabilities. Sprint 4 added SSH remote admin, tag filtering fix, and timezone-aware timestamps. Sprint 5 refactored SSH persistent sessions to use ControlMaster multiplexing, upgraded the Brain to full Opus 4.6 capabilities (128K output, adaptive thinking, 1M context), and hardened WardSONDB integration (new API methods, custom singleton IDs, TTL policies, health degradation detection, query optimization). Phase 0 is functionally complete.
 
 **Sprint 1**
 
@@ -364,6 +369,7 @@ All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memor
 | **Phase 0 — Sprint 2** | Bug fixes (3), expanded git/GitHub toolset (12 new tools), enhanced port scanner, embraCRON scheduling | ✅ **Complete** |
 | **Phase 0 — Sprint 3** | Session access tools (5), memory consolidation (2), session consolidation (3), schema migration framework | ✅ **Complete** |
 | **Phase 0 — Sprint 4** | SSH remote admin (4 tools), tag filter fix, timezone-aware timestamps, `/copy` deferred | ✅ **Complete** |
+| **Phase 0 — Sprint 5** | SSH ControlMaster refactor, Brain API upgrade (128K output, adaptive thinking, 1M context), WardSONDB integration upgrades, new filesystem/git tools (file_delete, file_move, dir_delete, git_rm, git_mv) | ✅ **Complete** |
 | **Phase 1** | Core OS — `embrad` as Rust PID 1, `embra-apid` gRPC+REST gateway, `embra-trustd` PKI, immutable SquashFS rootfs, LUKS-encrypted STATE/DATA partitions | Planned |
 | **Phase 2** | Terminal & Sessions — full TUI rewrite, `embractl` management CLI (the `talosctl` equivalent), LLM-driven Continuity Engine feedback loop | Planned |
 | **Phase 3** | Module System — MCP server modules via `embra-guardian` governance proxy, containerd runtime, governed capability expansion | Planned |
@@ -400,7 +406,7 @@ All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memor
 
 **Session Consolidation Tools (3):** Brain-dependent "Option B" pattern — tools fetch data and return it with instructions, the Brain generates content via the existing feedback loop. `session_summarize` (cache-aware with SHA-256 source hashing), `session_summary_save` (persists summaries with audit trail), `session_extract` (identifies durable learnings from transcripts).
 
-**Schema Migration Framework:** Idempotent migration system (`src/migrations/mod.rs`) that runs on every startup. Three migrations: v0 (BUG-001 phantom cleanup), v1 (baseline collections), v2 (`system.consolidation_log` for audit trail).
+**Schema Migration Framework:** Idempotent migration system (`src/migrations/mod.rs`) that runs on every startup. Initial migrations: v0 (BUG-001 phantom cleanup), v1 (baseline collections), v2 (`system.consolidation_log` for audit trail). Extended in Sprint 5 with v3 (singleton `_id` migration) and v4 (TTL policies).
 
 **New Collections:** `sessions.{name}.summary`, `system.consolidation_log`, `system.migrations`.
 
@@ -408,7 +414,7 @@ All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memor
 
 ### Phase 0 Sprint 4 Scope
 
-**SSH Remote Admin (4 tools, EXPERIMENTAL):** `ssh_remote_admin` for single command execution, `ssh_session_start` / `ssh_session_exec` / `ssh_session_end` for persistent interactive sessions. All restricted to RFC 1918 private + loopback addresses. Connection probe validates SSH sessions are live before reporting success. 30s timeouts, 10KB output truncation, one session at a time.
+**SSH Remote Admin (4 tools, EXPERIMENTAL):** `ssh_remote_admin` for single command execution, `ssh_session_start` / `ssh_session_exec` / `ssh_session_end` for persistent interactive sessions. All restricted to RFC 1918 private + loopback addresses. 30s timeouts, 10KB output truncation, one session at a time. *(Persistent session internals refactored in Sprint 5 — see below.)*
 
 **Tag Filter Fix:** `recall` and `memory_scan` now strip leading `#` from queries before matching. The `remember` tool already strips `#` when storing tags, so searching for `#worldstate` now correctly finds entries tagged `worldstate`.
 
@@ -417,6 +423,33 @@ All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memor
 **`/copy` Deferred:** Updated availability message from Sprint 2 to Sprint 5.
 
 **Status:** All Sprint 4 items implemented and tested. Tool count expanded from ~59 to ~63.
+
+### Phase 0 Sprint 5 Scope
+
+**SSH ControlMaster Refactor:** Replaced the pipe+sentinel architecture in persistent SSH sessions with SSH ControlMaster multiplexing. `ssh_session_start` now spawns a background ControlMaster connection (`ssh -MNf`) with a unique Unix socket. `ssh_session_exec` runs each command as a discrete SSH process through the ControlMaster socket — giving every command a clean process lifecycle identical to `ssh_remote_admin`, but without re-authentication overhead. This eliminates sentinel detection, stdin/stdout piping, byte-level reads, PTY workarounds, and the `timeout` wrapper. Resolves the curl/wget hang bug where commands that held connections open would prevent sentinel detection and cause 30s timeouts.
+
+**Brain API Upgrade — Full Opus 4.6 Capabilities:**
+- Max output tokens: 4,096 → 128,000 — removes artificial truncation of Brain responses
+- Adaptive thinking: `thinking: {type: "adaptive"}` — model decides when and how much to reason internally. Thinking tokens consumed from output budget; thinking content not displayed to user or stored in session history
+- 1M context window: GA, no beta header required — conversations effectively never hit the context limit in Phase 0
+- Universal streaming: SSE streaming in all modes (operational + Learning Mode). Streaming parser updated to handle `thinking_delta` (silently consumed) and `signature_delta` (ignored) alongside existing `text_delta` events
+- Thinking indicator naturally stays visible during thinking phase (no `Token` events emitted until text begins)
+
+**WardSONDB Integration Upgrades:**
+- New client methods: `patch_document` (RFC 7396 merge patch), `delete_by_query` (atomic bulk delete), `set_ttl` (auto-cleanup policies), `stats` (expanded server statistics), `health_detailed` (degraded status + write pressure detection), `query_with_options` (projection + count_only)
+- Custom `_id` for singleton documents: `config.system` → `"config"`, `soul.invariant` → `"soul"`, `memory.identity` → `"identity"`, `memory.user` → `"user"`. Enables direct GET by ID instead of query-then-take-first
+- Migration v3: Singleton `_id` migration with 6-state classification (empty/migrated/needs-migration/crash-recovery/unexpected), system field stripping, 409 conflict handling, and SHA-256 soul integrity verification with automatic rollback
+- Migration v4: TTL policies — 7-day retention on `reminders`, 90-day retention on `system.consolidation_log`
+- Migration v0 refactored: atomic `_delete_by_query` replaces query-then-loop pattern
+- File descriptor limit: `libc::setrlimit` raises `RLIMIT_NOFILE` to 65536 before spawning WardSONDB (fjall requires >= 4096)
+- Health degradation: proactive engine detects `status: "degraded"` (Critical notification) and `write_pressure: "high"` (Normal notification)
+- `session_summary_save` uses PATCH+insert upsert (eliminates delete-then-insert race window)
+- Query projection: `recall`, `memory_scan`, `session_list`, `changelog` use `fields` parameter to fetch only needed fields
+- Count-only queries: `uptime_report` memory count uses `count_only: true` instead of loading all documents
+- Error type: `WardsonDbError` gains `is_conflict()` (409) and `is_not_found()` (404) convenience methods
+- Reusable soul hash: `compute_soul_hash()` shared between startup validation and migration v3
+
+**Status:** All Sprint 5 items implemented and tested. ~68 tools total (added file_delete, file_move/file_rename, dir_delete/rmdir, git_rm, git_mv). Schema version 2 → 4. Builds clean.
 
 ### Phase 1 — Core OS
 

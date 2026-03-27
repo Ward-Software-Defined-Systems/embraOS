@@ -124,7 +124,10 @@ pub async fn session_list(db: &WardsonDbClient) -> String {
     for name in &names {
         let meta_col = format!("sessions.{}.meta", name);
         let meta_docs = db
-            .query(&meta_col, &serde_json::json!({}))
+            .query(
+                &meta_col,
+                &serde_json::json!({"fields": ["session_name", "state", "status", "last_active", "created_at", "message_count"]}),
+            )
             .await
             .unwrap_or_default();
 
@@ -448,7 +451,10 @@ pub async fn memory_scan(db: &WardsonDbClient, param: &str) -> String {
     ensure_collection(db, "memory.entries").await;
 
     let entries = db
-        .query("memory.entries", &serde_json::json!({}))
+        .query(
+            "memory.entries",
+            &serde_json::json!({"fields": ["content", "tags", "session", "created_at"]}),
+        )
         .await
         .unwrap_or_default();
 
@@ -959,23 +965,29 @@ pub async fn session_summary_save(db: &WardsonDbClient, param: &str) -> String {
     let summary_col = format!("sessions.{}.summary", name);
     ensure_collection(db, &summary_col).await;
 
-    // Upsert: delete existing docs first, then write
-    let existing = db
-        .query(&summary_col, &serde_json::json!({}))
-        .await
-        .unwrap_or_default();
-
-    for existing_doc in &existing {
-        if let Some(id) = existing_doc
-            .get("_id")
-            .or_else(|| existing_doc.get("id"))
-            .and_then(|v| v.as_str())
-        {
-            let _ = db.delete(&summary_col, id).await;
+    // Upsert: try PATCH if exists, otherwise insert with well-known _id
+    let doc_with_id = {
+        let mut d = doc.clone();
+        if let Some(obj) = d.as_object_mut() {
+            obj.insert("_id".into(), serde_json::json!("summary"));
         }
-    }
+        d
+    };
 
-    match db.write(&summary_col, &doc).await {
+    let write_result = match db.read(&summary_col, "summary").await {
+        Ok(_) => {
+            // Document exists — patch it
+            db.patch_document(&summary_col, "summary", &doc)
+                .await
+                .map(|_| "summary".to_string())
+        }
+        Err(_) => {
+            // Document doesn't exist — insert with well-known _id
+            db.write(&summary_col, &doc_with_id).await
+        }
+    };
+
+    match write_result {
         Ok(id) => {
             // Write to consolidation log
             ensure_collection(db, "system.consolidation_log").await;

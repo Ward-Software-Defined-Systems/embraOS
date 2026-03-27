@@ -136,7 +136,7 @@ pub async fn handle_phase_complete(
         LearningPhase::UserConfiguration => {
             if let Some(profile) = doc {
                 state.user_profile = Some(profile.clone());
-                persist_document(db, "memory.user", &profile).await?;
+                persist_document(db, "memory.user", &profile, Some("user")).await?;
                 tracing::info!("User profile persisted");
             }
             state.phase = LearningPhase::IdentityFormation;
@@ -144,7 +144,7 @@ pub async fn handle_phase_complete(
         LearningPhase::IdentityFormation => {
             if let Some(identity) = doc {
                 state.identity = Some(identity.clone());
-                persist_document(db, "memory.identity", &identity).await?;
+                persist_document(db, "memory.identity", &identity, Some("identity")).await?;
                 tracing::info!("Identity persisted");
             }
             state.phase = LearningPhase::SoulDefinition;
@@ -152,7 +152,7 @@ pub async fn handle_phase_complete(
         LearningPhase::SoulDefinition => {
             if let Some(soul) = doc {
                 state.soul = Some(soul.clone());
-                // Soul gets sealed — written and marked immutable
+                // Soul gets sealed — written and marked immutable (seal_soul sets _id: "soul")
                 super::seal_soul(db, &soul).await?;
                 tracing::info!("Soul sealed");
             }
@@ -161,7 +161,7 @@ pub async fn handle_phase_complete(
         LearningPhase::InitialToolset => {
             if let Some(tools) = doc {
                 state.tools_config = Some(tools.clone());
-                persist_document(db, "tools.registry", &tools).await?;
+                persist_document(db, "tools.registry", &tools, None).await?;
                 tracing::info!("Tools config persisted");
             }
             state.phase = LearningPhase::Confirmation;
@@ -180,11 +180,16 @@ async fn persist_document(
     db: &WardsonDbClient,
     collection: &str,
     doc: &serde_json::Value,
+    doc_id: Option<&str>,
 ) -> Result<()> {
     if !db.collection_exists(collection).await? {
         db.create_collection(collection).await?;
     }
-    db.write(collection, doc).await?;
+    let mut write_doc = doc.clone();
+    if let (Some(id), Some(obj)) = (doc_id, write_doc.as_object_mut()) {
+        obj.insert("_id".into(), serde_json::json!(id));
+    }
+    db.write(collection, &write_doc).await?;
     Ok(())
 }
 

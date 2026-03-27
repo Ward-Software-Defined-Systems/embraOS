@@ -1006,6 +1006,202 @@ pub async fn mkdir(param: &str) -> String {
     }
 }
 
+/// Delete a file. Workspace restricted.
+/// Param format: `<path>`
+pub async fn file_delete(param: &str) -> String {
+    if param.is_empty() {
+        return "Usage: [TOOL:file_delete <path>]\nExample: [TOOL:file_delete /embra/workspace/repos/myrepo/old_file.txt]".into();
+    }
+
+    let path = param.trim();
+
+    if let Err(e) = validate_workspace_path(path) {
+        return e;
+    }
+
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        return format!("File not found: {}", path);
+    }
+
+    if p.is_dir() {
+        return format!("Cannot delete directory with file_delete (use a shell command for recursive removal): {}", path);
+    }
+
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => format!("Deleted: {}", path),
+        Err(e) => format!("Failed to delete {}: {}", path, e),
+    }
+}
+
+/// Move or rename a file or directory. Workspace restricted (both source and destination).
+/// Param format: `<source> | <destination>`
+pub async fn file_move(param: &str) -> String {
+    let parts: Vec<&str> = param.splitn(2, '|').collect();
+    if parts.len() < 2 {
+        return "Usage: [TOOL:file_move <source> | <destination>]\nExample: [TOOL:file_move /embra/workspace/repos/myrepo/old.rs | /embra/workspace/repos/myrepo/new.rs]".into();
+    }
+
+    let src = parts[0].trim();
+    let dst = parts[1].trim();
+
+    if let Err(e) = validate_workspace_path(src) {
+        return e;
+    }
+    if let Err(e) = validate_workspace_path(dst) {
+        return e;
+    }
+
+    if !std::path::Path::new(src).exists() {
+        return format!("Source not found: {}", src);
+    }
+
+    if std::path::Path::new(dst).exists() {
+        return format!("Destination already exists: {}", dst);
+    }
+
+    // Ensure parent directory of destination exists
+    if let Err(e) = ensure_parent_dirs(dst).await {
+        return e;
+    }
+
+    match tokio::fs::rename(src, dst).await {
+        Ok(()) => format!("Moved: {} → {}", src, dst),
+        Err(e) => format!("Failed to move {} → {}: {}", src, dst, e),
+    }
+}
+
+/// Stage a file removal with git rm. Workspace restricted.
+/// Param format: `<path> <files>`
+pub async fn git_rm(param: &str) -> String {
+    let parts: Vec<&str> = param.splitn(2, char::is_whitespace).collect();
+    if parts.len() < 2 {
+        return "Usage: [TOOL:git_rm <repo_path> <files>]\nExample: [TOOL:git_rm /embra/workspace/repos/myrepo old_file.txt]".into();
+    }
+
+    let dir = match validate_workspace_path(parts[0]) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+
+    let files = parts[1];
+    let file_args: Vec<&str> = files.split_whitespace().collect();
+
+    match tokio::process::Command::new("git")
+        .args(&["-C", &dir, "rm"])
+        .args(&file_args)
+        .output()
+        .await
+    {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if output.status.success() {
+                format!(
+                    "Removed and staged in {}:\n{}",
+                    dir,
+                    if stdout.is_empty() {
+                        stderr.to_string()
+                    } else {
+                        stdout.to_string()
+                    }
+                )
+            } else {
+                format!("git rm failed in {}:\n{}", dir, stderr)
+            }
+        }
+        Err(e) => format!("Failed to run git rm: {}", e),
+    }
+}
+
+/// Move or rename a tracked file with git mv. Workspace restricted.
+/// Handles case-sensitive renames on case-insensitive filesystems (e.g. File.rs → file.rs)
+/// that plain `file_move` + `git_add` cannot.
+/// Param format: `<repo_path> <source> <destination>`
+pub async fn git_mv(param: &str) -> String {
+    let parts: Vec<&str> = param.splitn(3, char::is_whitespace).collect();
+    if parts.len() < 3 {
+        return "Usage: [TOOL:git_mv <repo_path> <source> <destination>]\nExample: [TOOL:git_mv /embra/workspace/repos/myrepo src/Old.rs src/old.rs]".into();
+    }
+
+    let dir = match validate_workspace_path(parts[0]) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+
+    let src = parts[1];
+    let dst = parts[2];
+
+    match tokio::process::Command::new("git")
+        .args(["-C", &dir, "mv", src, dst])
+        .output()
+        .await
+    {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if output.status.success() {
+                format!("git mv: {} → {} in {}", src, dst, dir)
+            } else {
+                format!("git mv failed in {}:\n{}{}", dir, stdout, stderr)
+            }
+        }
+        Err(e) => format!("Failed to run git mv: {}", e),
+    }
+}
+
+/// Remove a directory. Workspace restricted.
+/// Removes empty directories by default; use `--force` suffix to remove non-empty directories.
+/// Param format: `<path>` or `<path> --force`
+pub async fn dir_delete(param: &str) -> String {
+    if param.is_empty() {
+        return "Usage: [TOOL:dir_delete <path>] or [TOOL:dir_delete <path> --force]\nWithout --force, only empty directories are removed.".into();
+    }
+
+    let (path, force) = if param.trim_end().ends_with("--force") {
+        (param.trim_end().trim_end_matches("--force").trim(), true)
+    } else {
+        (param.trim(), false)
+    };
+
+    if let Err(e) = validate_workspace_path(path) {
+        return e;
+    }
+
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        return format!("Directory not found: {}", path);
+    }
+
+    if !p.is_dir() {
+        return format!("Not a directory (use file_delete for files): {}", path);
+    }
+
+    if force {
+        match tokio::fs::remove_dir_all(path).await {
+            Ok(()) => format!("Deleted directory and all contents: {}", path),
+            Err(e) => format!("Failed to delete directory {}: {}", path, e),
+        }
+    } else {
+        match tokio::fs::remove_dir(path).await {
+            Ok(()) => format!("Deleted empty directory: {}", path),
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::DirectoryNotEmpty
+                    || e.to_string().contains("not empty")
+                    || e.to_string().contains("Directory not empty")
+                {
+                    format!(
+                        "Directory is not empty: {}. Use [TOOL:dir_delete {} --force] to remove with contents.",
+                        path, path
+                    )
+                } else {
+                    format!("Failed to delete directory {}: {}", path, e)
+                }
+            }
+        }
+    }
+}
+
 async fn ensure_collection(db: &WardsonDbClient, name: &str) {
     if !db.collection_exists(name).await.unwrap_or(true) {
         let _ = db.create_collection(name).await;

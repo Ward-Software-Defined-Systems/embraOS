@@ -1,10 +1,10 @@
 use anyhow::Result;
 use chrono::Utc;
-use tracing::info;
+use tracing::{error, info, warn};
 
-use crate::db::WardsonDbClient;
+use crate::db::{WardsonDbClient, WardsonDbError};
 
-const CURRENT_SCHEMA_VERSION: u32 = 2;
+const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 /// Run all pending migrations. Each migration is idempotent.
 pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
@@ -32,6 +32,18 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
         // v2: consolidation log collection
         run_v2_consolidation(db).await?;
         set_schema_version(db, 2).await?;
+    }
+
+    if current_version < 3 {
+        // v3: migrate singleton documents to well-known _id values
+        run_v3_singleton_ids(db).await?;
+        set_schema_version(db, 3).await?;
+    }
+
+    if current_version < 4 {
+        // v4: TTL policies for auto-cleanup
+        run_v4_ttl_policies(db).await?;
+        set_schema_version(db, 4).await?;
     }
 
     info!("Migrations complete. Schema version: {}", CURRENT_SCHEMA_VERSION);
@@ -71,32 +83,18 @@ async fn run_v0_cleanup(db: &WardsonDbClient) -> Result<()> {
         return Ok(());
     }
 
-    let reminders = db
-        .query("reminders", &serde_json::json!({}))
-        .await
-        .unwrap_or_default();
-
     let cutoff = (Utc::now() - chrono::Duration::hours(24)).to_rfc3339();
-    let mut deleted = 0u32;
+    let filter = serde_json::json!({
+        "$and": [
+            {"fired": false},
+            {"created_at": {"$lt": cutoff}}
+        ]
+    });
 
-    for doc in &reminders {
-        let fired = doc.get("fired").and_then(|v| v.as_bool()).unwrap_or(false);
-        if fired {
-            continue;
-        }
-
-        let created = doc
-            .get("created_at")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-        if !created.is_empty() && created < cutoff.as_str() {
-            if let Some(id) = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()) {
-                let _ = db.delete("reminders", id).await;
-                deleted += 1;
-            }
-        }
-    }
+    let deleted = db
+        .delete_by_query("reminders", &filter)
+        .await
+        .unwrap_or(0);
 
     info!("Migration v0: deleted {} stale phantom reminders", deleted);
     Ok(())
@@ -141,5 +139,256 @@ async fn run_v2_consolidation(db: &WardsonDbClient) -> Result<()> {
     }
 
     info!("Migration v2: consolidation log collection ensured");
+    Ok(())
+}
+
+/// Migration v3: Migrate singleton documents to well-known `_id` values.
+/// Enables direct GET by ID instead of query-then-take-first.
+///
+/// Handles crash recovery (State D: two docs after partial migration) and
+/// performs soul integrity verification after copying `soul.invariant`.
+async fn run_v3_singleton_ids(db: &WardsonDbClient) -> Result<()> {
+    info!("Running migration v3: singleton document IDs");
+
+    // Process soul.invariant last — most critical document
+    let singletons: &[(&str, &str)] = &[
+        ("config.system", "config"),
+        ("memory.identity", "identity"),
+        ("memory.user", "user"),
+        ("soul.invariant", "soul"),
+    ];
+
+    for (collection, well_known_id) in singletons {
+        if !db.collection_exists(collection).await.unwrap_or(false) {
+            info!("Migration v3: {} does not exist, skipping", collection);
+            continue;
+        }
+
+        // Step 1: Query all documents (limit 10 — should be 0, 1, or 2)
+        let docs = db
+            .query(collection, &serde_json::json!({"limit": 10}))
+            .await
+            .unwrap_or_default();
+
+        // Step 2: Classify the state
+        let has_wellknown = docs.iter().any(|d| {
+            d.get("_id")
+                .or_else(|| d.get("id"))
+                .and_then(|v| v.as_str())
+                == Some(well_known_id)
+        });
+        let uuid_docs: Vec<&serde_json::Value> = docs
+            .iter()
+            .filter(|d| {
+                d.get("_id")
+                    .or_else(|| d.get("id"))
+                    .and_then(|v| v.as_str())
+                    != Some(well_known_id)
+            })
+            .collect();
+
+        match (docs.len(), has_wellknown, uuid_docs.len()) {
+            // State A: empty collection
+            (0, _, _) => {
+                info!("Migration v3: {} is empty, skipping", collection);
+            }
+            // State B: already migrated
+            (1, true, 0) => {
+                info!(
+                    "Migration v3: {} already has well-known _id, skipping",
+                    collection
+                );
+            }
+            // State C: normal migration needed
+            (1, false, 1) => {
+                let original = uuid_docs[0];
+                let original_id = original
+                    .get("_id")
+                    .or_else(|| original.get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+
+                // Step 3: Copy with well-known _id, stripping system fields
+                let mut new_doc = original.clone();
+                if let Some(obj) = new_doc.as_object_mut() {
+                    for key in &[
+                        "_id",
+                        "_rev",
+                        "_created_at",
+                        "_updated_at",
+                        "_received_at",
+                        "id",
+                    ] {
+                        obj.remove(*key);
+                    }
+                    obj.insert("_id".into(), serde_json::json!(well_known_id));
+                }
+
+                let insert_ok = match db.write(collection, &new_doc).await {
+                    Ok(_) => true,
+                    Err(e) => {
+                        // Check if it's a 409 conflict (well-known doc created by another process)
+                        if let Some(db_err) = e.downcast_ref::<WardsonDbError>() {
+                            if db_err.is_conflict() {
+                                info!(
+                                    "Migration v3: {} well-known doc already exists (409), proceeding to cleanup",
+                                    collection
+                                );
+                                true
+                            } else {
+                                error!(
+                                    "Migration v3: failed to insert {}/{}: {}",
+                                    collection, well_known_id, e
+                                );
+                                false
+                            }
+                        } else {
+                            error!(
+                                "Migration v3: failed to insert {}/{}: {}",
+                                collection, well_known_id, e
+                            );
+                            false
+                        }
+                    }
+                };
+
+                if !insert_ok {
+                    continue; // Leave original intact
+                }
+
+                // Step 4: Verify the copy
+                let copied = match db.read(collection, well_known_id).await {
+                    Ok(doc) => doc,
+                    Err(e) => {
+                        error!(
+                            "Migration v3: failed to read back {}/{} after insert: {}",
+                            collection, well_known_id, e
+                        );
+                        continue; // Leave original intact
+                    }
+                };
+
+                // Soul-specific integrity check
+                if *collection == "soul.invariant" {
+                    if let (Some(soul_obj), Some(stored_hash)) = (
+                        copied.get("soul"),
+                        copied.get("sha256").and_then(|v| v.as_str()),
+                    ) {
+                        match crate::learning::compute_soul_hash(soul_obj) {
+                            Ok(computed) if computed == stored_hash => {
+                                info!("Migration v3: soul integrity check passed");
+                            }
+                            Ok(computed) => {
+                                error!(
+                                    "Migration v3: SOUL INTEGRITY CHECK FAILED after copy. \
+                                     Computed={}, Stored={}. Rolling back.",
+                                    computed, stored_hash
+                                );
+                                let _ = db.delete(collection, well_known_id).await;
+                                continue; // Leave original intact
+                            }
+                            Err(e) => {
+                                error!(
+                                    "Migration v3: soul hash computation failed: {}. Rolling back.",
+                                    e
+                                );
+                                let _ = db.delete(collection, well_known_id).await;
+                                continue;
+                            }
+                        }
+                    } else {
+                        error!(
+                            "Migration v3: soul document missing 'soul' or 'sha256' field. Rolling back."
+                        );
+                        let _ = db.delete(collection, well_known_id).await;
+                        continue;
+                    }
+                }
+
+                // Step 5: Delete old UUID document
+                match db.delete(collection, original_id).await {
+                    Ok(_) => {
+                        info!(
+                            "Migration v3: {} migrated _id={} → _id={}",
+                            collection, original_id, well_known_id
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Migration v3: {} copied but failed to delete old doc {}: {}. \
+                             Will retry on next startup (State D recovery).",
+                            collection, original_id, e
+                        );
+                    }
+                }
+            }
+            // State D: crash recovery — well-known exists + UUID leftover
+            (2, true, 1) => {
+                let stale_id = uuid_docs[0]
+                    .get("_id")
+                    .or_else(|| uuid_docs[0].get("id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                match db.delete(collection, stale_id).await {
+                    Ok(_) => {
+                        info!(
+                            "Migration v3: {} crash recovery — deleted stale doc _id={}",
+                            collection, stale_id
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Migration v3: {} crash recovery delete failed for {}: {}",
+                            collection, stale_id, e
+                        );
+                    }
+                }
+            }
+            // State E/F: unexpected document count
+            _ => {
+                error!(
+                    "Migration v3: {} has unexpected document count={} \
+                     (well_known={}, uuid={}). Skipping — manual inspection required.",
+                    collection,
+                    docs.len(),
+                    has_wellknown,
+                    uuid_docs.len()
+                );
+            }
+        }
+    }
+
+    info!("Migration v3: singleton IDs migration complete");
+    Ok(())
+}
+
+/// Migration v4: Set TTL policies for auto-cleanup of ephemeral collections.
+async fn run_v4_ttl_policies(db: &WardsonDbClient) -> Result<()> {
+    info!("Running migration v4: TTL policies");
+
+    // 7-day retention on reminders (fired reminders cleaned up automatically)
+    if db.collection_exists("reminders").await.unwrap_or(false) {
+        match db.set_ttl("reminders", 7, "created_at").await {
+            Ok(_) => info!("Migration v4: set 7-day TTL on reminders"),
+            Err(e) => info!("Migration v4: TTL on reminders skipped: {}", e),
+        }
+    }
+
+    // 90-day retention on consolidation log
+    if db
+        .collection_exists("system.consolidation_log")
+        .await
+        .unwrap_or(false)
+    {
+        match db
+            .set_ttl("system.consolidation_log", 90, "timestamp")
+            .await
+        {
+            Ok(_) => info!("Migration v4: set 90-day TTL on system.consolidation_log"),
+            Err(e) => info!("Migration v4: TTL on consolidation_log skipped: {}", e),
+        }
+    }
+
+    info!("Migration v4: TTL policies complete");
     Ok(())
 }

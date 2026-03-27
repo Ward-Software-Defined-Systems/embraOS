@@ -122,7 +122,7 @@ Security:
 
 Engineering:
 - git_status, git_log — git read operations on any path
-- git_add, git_commit, git_push, git_pull, git_checkout — git write ops (workspace restricted)
+- git_add, git_commit, git_push, git_pull, git_checkout, git_rm, git_mv — git write ops (workspace restricted)
 - git_diff — view changes (unrestricted)
 - git_branch — list branches (unrestricted) or create (workspace restricted)
 - plan, tasks, task_add, task_done — project management via WardSONDB
@@ -135,6 +135,9 @@ Filesystem:
 - file_read — read a file or list a directory (unrestricted)
 - file_write — write/overwrite a file (workspace restricted). Use \n for newlines, \t for tabs.
 - file_append — append to a file without overwriting (workspace restricted). Use \n for newlines.
+- file_delete — delete a file (workspace restricted, files only)
+- file_move / file_rename — move or rename a file or directory (workspace restricted, both source and destination)
+- dir_delete / rmdir — remove a directory (workspace restricted). Empty dirs by default; use --force for non-empty.
 - mkdir — create a directory and parents (workspace restricted)
 
 Scheduling (embraCRON):
@@ -259,8 +262,8 @@ Security:
 - [TOOL:ssh_remote_admin <host> <command>] — execute single command on remote host via SSH (EXPERIMENTAL — private/loopback IPs only, use at your own risk)
 - [TOOL:ssh_remote_admin user@host <command>] — SSH as specific user
 - [TOOL:ssh_session_start <user@host>] — open persistent SSH session (EXPERIMENTAL — private/loopback only)
-- [TOOL:ssh_session_exec <command>] — run command in open SSH session
-- [TOOL:ssh_session_end] — close SSH session
+- [TOOL:ssh_session_exec <command>] — run command in open SSH session. Each command gets a clean process lifecycle. 30s timeout, 10KB truncation.
+- [TOOL:ssh_session_end] — close SSH session and tear down connection
 
 Engineering:
 - [TOOL:git_status <path>] — git status of a directory
@@ -272,6 +275,8 @@ Engineering:
 - [TOOL:git_pull <path>] — pull from remote (workspace restricted)
 - [TOOL:git_branch <path>] — list branches, or [TOOL:git_branch <path> <name>] to create
 - [TOOL:git_checkout <path> <branch>] — switch branches (workspace restricted)
+- [TOOL:git_rm <path> <files>] — stage file removal (workspace restricted)
+- [TOOL:git_mv <path> <source> <destination>] — git mv for tracked moves and case-sensitive renames (workspace restricted)
 - [TOOL:plan] — list plans, or [TOOL:plan <title> | <desc>] to create one
 - [TOOL:tasks] — list tasks, or [TOOL:tasks <filter>] to search
 - [TOOL:task_add <title>] — add a task, optionally [TOOL:task_add <title> | <plan_id>]
@@ -288,6 +293,10 @@ Filesystem:
 - [TOOL:file_read <path>] — read a file or list a directory (unrestricted)
 - [TOOL:file_write <path> | <content>] — write/overwrite a file (workspace restricted). Use \n for newlines, \t for tabs.
 - [TOOL:file_append <path> | <content>] — append to a file (workspace restricted). Creates file if needed. Use \n for newlines.
+- [TOOL:file_delete <path>] — delete a file (workspace restricted, files only)
+- [TOOL:file_move <source> | <destination>] — move or rename a file or directory (workspace restricted). Also available as file_rename.
+- [TOOL:dir_delete <path>] — remove an empty directory (workspace restricted). Also available as rmdir.
+- [TOOL:dir_delete <path> --force] — remove a directory and all contents (workspace restricted)
 - [TOOL:mkdir <path>] — create a directory and parents (workspace restricted)
 
 Scheduling (embraCRON):

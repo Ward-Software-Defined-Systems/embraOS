@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use tokio::process::{Child, Command};
 use tokio::time::{sleep, timeout};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use super::client::WardsonDbClient;
 use super::error::WardsonDbError;
@@ -26,6 +26,22 @@ pub async fn start_wardsondb() -> Result<WardsonDbProcess> {
 
     // Ensure data directory exists
     tokio::fs::create_dir_all(&data_dir).await?;
+
+    // Raise file descriptor limit for WardSONDB (fjall needs >= 4096, recommends 65536)
+    #[cfg(unix)]
+    {
+        let rlim = libc::rlimit {
+            rlim_cur: 65536,
+            rlim_max: 65536,
+        };
+        let result = unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &rlim) };
+        if result == 0 {
+            info!("Set file descriptor limit to 65536");
+        } else {
+            warn!("Failed to set file descriptor limit (errno: {}), WardSONDB may hit 'too many open files'",
+                  std::io::Error::last_os_error());
+        }
+    }
 
     let child = Command::new("wardsondb")
         .args([

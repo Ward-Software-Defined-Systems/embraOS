@@ -1,95 +1,19 @@
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 
-/// Strip ANSI escape sequences and OSC sequences from a string.
-/// Covers CSI sequences (\x1b[...X), OSC sequences (\x1b]...BEL), and
-/// simple two-byte escapes (\x1b followed by one character).
-fn strip_ansi(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            match chars.peek() {
-                Some('[') => {
-                    // CSI sequence: consume until a letter
-                    chars.next(); // skip '['
-                    while let Some(&c) = chars.peek() {
-                        chars.next();
-                        if c.is_ascii_alphabetic() || c == '~' {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    // OSC sequence: consume until BEL (\x07) or ST (\x1b\\)
-                    chars.next(); // skip ']'
-                    while let Some(&c) = chars.peek() {
-                        if c == '\x07' {
-                            chars.next();
-                            break;
-                        }
-                        if c == '\x1b' {
-                            chars.next();
-                            if chars.peek() == Some(&'\\') {
-                                chars.next();
-                            }
-                            break;
-                        }
-                        chars.next();
-                    }
-                }
-                Some(_) => {
-                    // Simple two-byte escape
-                    chars.next();
-                }
-                None => {}
-            }
-        } else {
-            out.push(ch);
-        }
+/// Truncate a string to at most `max_bytes`, snapping to a char boundary.
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
     }
-    out
-}
-
-/// Clean SSH session output: strip ANSI escapes, remove prompt echo lines,
-/// and trim carriage returns.
-fn clean_ssh_output(raw: &str, command: &str) -> String {
-    let stripped = strip_ansi(raw);
-    let cmd_trimmed = command.trim();
-    stripped
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim();
-            // Skip empty lines that are just whitespace/CR remnants
-            if trimmed.is_empty() {
-                return false;
-            }
-            // Skip lines that are just the echoed command (with or without prompt)
-            if trimmed == cmd_trimmed || trimmed.ends_with(&format!("$ {}", cmd_trimmed)) {
-                return false;
-            }
-            // Skip bare prompt lines (e.g. "user@host:~$")
-            if trimmed.ends_with('$') && !trimmed.contains(' ') {
-                return false;
-            }
-            // Skip prompt lines like "user@host:~$ echo ..."
-            if trimmed.contains("$ echo ___EMBRA_") {
-                return false;
-            }
-            // Skip any leaked probe/drain sentinels from ssh_session_start
-            if trimmed.contains("___EMBRA_SSH_PROBE_OK___")
-                || trimmed.contains("___EMBRA_DRAIN_DONE___")
-            {
-                return false;
-            }
-            true
-        })
-        .map(|line| line.trim_end_matches('\r'))
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Run a basic security/system check by reading container info.
@@ -428,12 +352,8 @@ pub fn security_audit() -> String {
 // ── SSH Remote Admin (EXPERIMENTAL) ──
 
 struct SshSession {
-    child: tokio::process::Child,
-    stdin: tokio::process::ChildStdin,
-    stdout: BufReader<tokio::process::ChildStdout>,
-    host: String,
-    user: String,
-    cmd_counter: u64,
+    user_host: String,      // "user@host"
+    control_path: String,   // "/tmp/embra-ssh-{uuid}"
 }
 
 fn ssh_session_lock() -> &'static tokio::sync::Mutex<Option<SshSession>> {
@@ -493,14 +413,14 @@ pub async fn ssh_remote_admin(param: &str) -> String {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let code = output.status.code().unwrap_or(-1);
 
-            // Truncate to 10KB
+            // Truncate to 10KB (char-boundary safe)
             let stdout_trunc = if stdout.len() > 10240 {
-                format!("{}... (truncated)", &stdout[..10240])
+                format!("{}\n[OUTPUT TRUNCATED AT 10KB]", truncate_str(&stdout, 10240))
             } else {
                 stdout.to_string()
             };
             let stderr_trunc = if stderr.len() > 10240 {
-                format!("{}... (truncated)", &stderr[..10240])
+                format!("{}\n[OUTPUT TRUNCATED AT 10KB]", truncate_str(&stderr, 10240))
             } else {
                 stderr.to_string()
             };
@@ -532,7 +452,7 @@ pub async fn ssh_remote_admin(param: &str) -> String {
     }
 }
 
-/// Open a persistent SSH session (EXPERIMENTAL).
+/// Open a persistent SSH session via ControlMaster (EXPERIMENTAL).
 /// Param: `<user@host>` or `<host>` (default user: root)
 pub async fn ssh_session_start(param: &str) -> String {
     if param.is_empty() {
@@ -554,234 +474,210 @@ pub async fn ssh_session_start(param: &str) -> String {
         return "An SSH session is already open. Use ssh_session_end first.".into();
     }
 
-    let mut child = match tokio::process::Command::new("ssh")
-        .arg("-tt")
-        .arg("-o").arg("StrictHostKeyChecking=accept-new")
-        .arg("-o").arg("ConnectTimeout=10")
-        .arg("-o").arg("BatchMode=yes")
-        .arg("-o").arg("PasswordAuthentication=no")
-        .arg(format!("{}@{}", user, host))
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => return format!("[EXPERIMENTAL] Failed to start SSH session: {}", e),
-    };
+    let user_host = format!("{}@{}", user, host);
+    let control_path = format!("/tmp/embra-ssh-{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
-    let mut stdin = child.stdin.take().unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let mut stderr = child.stderr.take().unwrap();
-    let mut stdout_reader = BufReader::new(stdout);
-
-    // Validate the connection is actually live by sending a probe command
-    // and waiting for its output before declaring success.
-    let probe_sentinel = "___EMBRA_SSH_PROBE_OK___";
-    let probe_cmd = format!("echo {}\n", probe_sentinel);
-    if let Err(e) = stdin.write_all(probe_cmd.as_bytes()).await {
-        let _ = child.kill().await;
-        return format!("[EXPERIMENTAL] Failed to write to SSH session: {}", e);
-    }
-    if let Err(e) = stdin.flush().await {
-        let _ = child.kill().await;
-        return format!("[EXPERIMENTAL] Failed to flush SSH stdin: {}", e);
-    }
-
-    // Wait for the sentinel to appear in stdout (with ConnectTimeout + buffer)
-    let probe_result = tokio::time::timeout(Duration::from_secs(15), async {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match stdout_reader.read_line(&mut line).await {
-                Ok(0) => return Err("Connection closed before probe completed".to_string()),
-                Ok(_) => {
-                    if line.contains(probe_sentinel) {
-                        return Ok(());
-                    }
-                }
-                Err(e) => return Err(format!("Read error: {}", e)),
-            }
-        }
-    })
+    // Start ControlMaster in background (-MNf): authenticates, then backgrounds itself
+    let master_result = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio::process::Command::new("ssh")
+            .arg("-MNf")
+            .arg("-o").arg(format!("ControlPath={}", control_path))
+            .arg("-o").arg("ControlPersist=no")
+            .arg("-o").arg("StrictHostKeyChecking=accept-new")
+            .arg("-o").arg("ConnectTimeout=10")
+            .arg("-o").arg("BatchMode=yes")
+            .arg("-o").arg("ServerAliveInterval=15")
+            .arg("-o").arg("ServerAliveCountMax=3")
+            .arg(&user_host)
+            .output(),
+    )
     .await;
 
-    match probe_result {
-        Ok(Ok(())) => {
-            // Drain any remaining MOTD/banner lines from the buffer after the
-            // probe sentinel. We do this by sending a *second* sentinel and
-            // consuming everything up to it, which guarantees the buffer is
-            // clean for the first ssh_session_exec call.
-            let drain_sentinel = "___EMBRA_DRAIN_DONE___";
-            let drain_cmd = format!("echo {}\n", drain_sentinel);
-            let _ = stdin.write_all(drain_cmd.as_bytes()).await;
-            let _ = stdin.flush().await;
-            let drain_result = tokio::time::timeout(Duration::from_secs(5), async {
-                let mut line = String::new();
-                loop {
-                    line.clear();
-                    match stdout_reader.read_line(&mut line).await {
-                        Ok(0) => break,
-                        Ok(_) => {
-                            if strip_ansi(&line).contains(drain_sentinel) {
-                                break;
-                            }
-                        }
-                        Err(_) => break,
-                    }
-                }
-            })
+    match master_result {
+        Ok(Ok(output)) if output.status.success() => {
+            // ControlMaster backgrounded successfully — validate with a probe command
+            let probe_result = tokio::time::timeout(
+                Duration::from_secs(10),
+                tokio::process::Command::new("ssh")
+                    .arg("-o").arg(format!("ControlPath={}", control_path))
+                    .arg(&user_host)
+                    .arg("echo embra_probe_ok")
+                    .output(),
+            )
             .await;
 
-            if drain_result.is_err() {
-                let _ = child.kill().await;
-                return format!("[EXPERIMENTAL] SSH connection to {}@{} failed: buffer drain timed out", user, host);
+            match probe_result {
+                Ok(Ok(probe_out)) => {
+                    let stdout = String::from_utf8_lossy(&probe_out.stdout);
+                    if stdout.contains("embra_probe_ok") {
+                        *lock = Some(SshSession {
+                            user_host: user_host.clone(),
+                            control_path,
+                        });
+                        format!(
+                            "[EXPERIMENTAL] SSH session opened to {}. Use ssh_session_exec to run commands, ssh_session_end to close.",
+                            user_host
+                        )
+                    } else {
+                        // Probe didn't return expected output — tear down
+                        let _ = tokio::process::Command::new("ssh")
+                            .arg("-O").arg("exit")
+                            .arg("-o").arg(format!("ControlPath={}", control_path))
+                            .arg(&user_host)
+                            .output().await;
+                        let _ = std::fs::remove_file(&control_path);
+                        let stderr = String::from_utf8_lossy(&probe_out.stderr);
+                        format!(
+                            "[EXPERIMENTAL] SSH connection to {} failed: probe returned unexpected output. {}",
+                            user_host, stderr.trim()
+                        )
+                    }
+                }
+                Ok(Err(e)) => {
+                    let _ = std::fs::remove_file(&control_path);
+                    format!("[EXPERIMENTAL] SSH connection to {} failed: {}", user_host, e)
+                }
+                Err(_) => {
+                    let _ = tokio::process::Command::new("ssh")
+                        .arg("-O").arg("exit")
+                        .arg("-o").arg(format!("ControlPath={}", control_path))
+                        .arg(&user_host)
+                        .output().await;
+                    let _ = std::fs::remove_file(&control_path);
+                    format!("[EXPERIMENTAL] SSH connection to {} failed: probe timed out", user_host)
+                }
             }
-
-            // Connection verified and buffer clean
-            *lock = Some(SshSession {
-                child,
-                stdin,
-                stdout: stdout_reader,
-                host: host.clone(),
-                user: user.clone(),
-                cmd_counter: 0,
-            });
-
-            format!(
-                "[EXPERIMENTAL] SSH session opened to {}@{}. Use ssh_session_exec to run commands, ssh_session_end to close.",
-                user, host
-            )
+        }
+        Ok(Ok(output)) => {
+            // ControlMaster exited with non-zero — connection failed
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let _ = std::fs::remove_file(&control_path);
+            format!("[EXPERIMENTAL] SSH connection to {} failed: {}", user_host, stderr.trim())
         }
         Ok(Err(e)) => {
-            // Probe failed — read stderr for the real error message
-            let mut err_buf = vec![0u8; 4096];
-            let stderr_msg = match tokio::time::timeout(Duration::from_secs(1), stderr.read(&mut err_buf)).await {
-                Ok(Ok(n)) if n > 0 => String::from_utf8_lossy(&err_buf[..n]).trim().to_string(),
-                _ => e.clone(),
-            };
-            let _ = child.kill().await;
-            format!("[EXPERIMENTAL] SSH connection to {}@{} failed: {}", user, host, stderr_msg)
+            format!("[EXPERIMENTAL] Failed to start SSH session: {}", e)
         }
         Err(_) => {
-            // Timeout — read stderr for clues
-            let mut err_buf = vec![0u8; 4096];
-            let stderr_msg = match tokio::time::timeout(Duration::from_secs(1), stderr.read(&mut err_buf)).await {
-                Ok(Ok(n)) if n > 0 => String::from_utf8_lossy(&err_buf[..n]).trim().to_string(),
-                _ => "connection timed out".to_string(),
-            };
-            let _ = child.kill().await;
-            format!("[EXPERIMENTAL] SSH connection to {}@{} failed: {}", user, host, stderr_msg)
+            let _ = std::fs::remove_file(&control_path);
+            format!("[EXPERIMENTAL] SSH connection to {} failed: connection timed out", user_host)
         }
     }
 }
 
 /// Run a command in the open SSH session (EXPERIMENTAL).
+/// Each command runs as a discrete SSH process through the ControlMaster socket.
 /// Param: command to execute
 pub async fn ssh_session_exec(param: &str) -> String {
     if param.is_empty() {
         return "Usage: [TOOL:ssh_session_exec <command>]".into();
     }
 
-    let mut lock = ssh_session_lock().lock().await;
-    let session = match lock.as_mut() {
+    let lock = ssh_session_lock().lock().await;
+    let session = match lock.as_ref() {
         Some(s) => s,
         None => return "No SSH session open. Use ssh_session_start first.".into(),
     };
 
-    // Use a unique sentinel per command so we never match a stale sentinel
-    // from a previous call or the PTY echoing back the command line.
-    session.cmd_counter += 1;
-    let sentinel = format!("___EMBRA_DONE_{}___", session.cmd_counter);
-    // Chain the sentinel echo on the same line so the shell executes it
-    // after the command completes. The sentinel output line will be:
-    //   ___EMBRA_DONE_N___
-    // The PTY will also echo back the command line itself, which contains
-    // the sentinel string — we distinguish them by checking that the
-    // stripped line is *exactly* the sentinel (not part of a longer line).
-    let full_cmd = format!("{} ; echo {}\n", param, sentinel);
-
-    if let Err(e) = session.stdin.write_all(full_cmd.as_bytes()).await {
-        return format!("[EXPERIMENTAL] Failed to write to SSH session: {}", e);
-    }
-    if let Err(e) = session.stdin.flush().await {
-        return format!("[EXPERIMENTAL] Failed to flush SSH stdin: {}", e);
-    }
-
-    // Read stdout until the sentinel output line appears. The PTY echoes
-    // back the full command line (which contains the sentinel string), so we
-    // must distinguish the echo from the actual sentinel output:
-    //   - Echo line: "command ; echo ___EMBRA_DONE_N___"  (contains more than just sentinel)
-    //   - Sentinel output: "___EMBRA_DONE_N___"            (stripped line IS the sentinel)
-    let mut raw_output = String::new();
-    let read_result = tokio::time::timeout(Duration::from_secs(30), async {
-        let mut line = String::new();
-        loop {
-            line.clear();
-            match session.stdout.read_line(&mut line).await {
-                Ok(0) => break, // EOF
-                Ok(_) => {
-                    let stripped = strip_ansi(&line);
-                    let trimmed = stripped.trim();
-                    // The actual sentinel output line is *exactly* the sentinel
-                    // (possibly with whitespace). The echoed command line will
-                    // have extra text (the command itself, `echo`, etc).
-                    if trimmed == sentinel {
-                        break;
-                    }
-                    // Skip the echoed command line (contains the sentinel as
-                    // part of a longer string like "cmd ; echo ___EMBRA_...")
-                    if trimmed.contains(&sentinel) {
-                        continue;
-                    }
-                    raw_output.push_str(&line);
-                    if raw_output.len() > 10240 {
-                        raw_output.truncate(10240);
-                        raw_output.push_str("... (truncated)");
-                        break;
-                    }
-                }
-                Err(e) => {
-                    raw_output.push_str(&format!("\n[read error: {}]", e));
-                    break;
-                }
-            }
-        }
-    })
-    .await;
-
-    // Clean ANSI escapes, prompt echoes, and carriage returns
-    let cleaned = clean_ssh_output(&raw_output, param);
-
-    if read_result.is_err() {
+    // Check that the ControlMaster socket still exists
+    if !std::path::Path::new(&session.control_path).exists() {
         return format!(
-            "[EXPERIMENTAL] SSH session exec on {}@{}\n\
-             Command: {}\n\
-             Error: timed out after 30 seconds\n\n\
-             Partial output:\n{}",
-            session.user, session.host, param, cleaned.trim()
+            "[EXPERIMENTAL] SSH session to {} lost — control socket missing. \
+             Use ssh_session_end and start a new session.",
+            session.user_host
         );
     }
 
-    format!(
-        "[EXPERIMENTAL] SSH session exec on {}@{}\n\
-         Command: {}\n\n\
-         --- output ---\n{}",
-        session.user, session.host, param, cleaned.trim()
+    // Run command as a discrete SSH process through the ControlMaster socket
+    let result = tokio::time::timeout(
+        Duration::from_secs(30),
+        tokio::process::Command::new("ssh")
+            .arg("-o").arg(format!("ControlPath={}", session.control_path))
+            .arg("-o").arg("ConnectTimeout=10")
+            .arg(&session.user_host)
+            .arg(param)
+            .output(),
     )
+    .await;
+
+    match result {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let code = output.status.code().unwrap_or(-1);
+
+            // Combine stdout + stderr
+            let mut combined = if stdout.len() > 10240 {
+                format!("{}\n[OUTPUT TRUNCATED AT 10KB]", truncate_str(&stdout, 10240))
+            } else {
+                stdout.to_string()
+            };
+
+            if !stderr.trim().is_empty() {
+                let stderr_trunc = if stderr.len() > 10240 {
+                    format!("{}\n[OUTPUT TRUNCATED AT 10KB]", truncate_str(&stderr, 10240))
+                } else {
+                    stderr.to_string()
+                };
+                combined.push_str(&format!("\n[stderr]:\n{}", stderr_trunc.trim()));
+            }
+
+            if code != 0 {
+                combined.push_str(&format!("\n[exit code: {}]", code));
+            }
+
+            format!(
+                "[EXPERIMENTAL] SSH session exec on {}\n\
+                 Command: {}\n\n\
+                 --- output ---\n{}",
+                session.user_host, param, combined.trim()
+            )
+        }
+        Ok(Err(e)) => format!(
+            "[EXPERIMENTAL] SSH session exec on {}\n\
+             Command: {}\n\
+             Error: {}",
+            session.user_host, param, e
+        ),
+        Err(_) => format!(
+            "[EXPERIMENTAL] SSH session exec on {}\n\
+             Command: {}\n\
+             Error: timed out after 30 seconds",
+            session.user_host, param
+        ),
+    }
 }
 
 /// Close the open SSH session (EXPERIMENTAL).
+/// Tears down the ControlMaster connection and cleans up the socket file.
 pub async fn ssh_session_end() -> String {
     let mut lock = ssh_session_lock().lock().await;
     match lock.take() {
-        Some(mut session) => {
-            let _ = session.child.kill().await;
-            let _ = session.child.wait().await;
-            format!(
-                "[EXPERIMENTAL] SSH session to {}@{} closed.",
-                session.user, session.host
+        Some(session) => {
+            // Send exit signal to ControlMaster
+            let exit_result = tokio::time::timeout(
+                Duration::from_secs(5),
+                tokio::process::Command::new("ssh")
+                    .arg("-O").arg("exit")
+                    .arg("-o").arg(format!("ControlPath={}", session.control_path))
+                    .arg(&session.user_host)
+                    .output(),
             )
+            .await;
+
+            // Best-effort socket cleanup
+            let _ = std::fs::remove_file(&session.control_path);
+
+            match exit_result {
+                Ok(Ok(_)) => format!(
+                    "[EXPERIMENTAL] SSH session to {} closed.",
+                    session.user_host
+                ),
+                _ => format!(
+                    "[EXPERIMENTAL] SSH session to {} closed (forced cleanup).",
+                    session.user_host
+                ),
+            }
         }
         None => "No SSH session is open.".into(),
     }

@@ -41,9 +41,18 @@ pub async fn process_sse_stream(
                     match event_type {
                         "content_block_delta" => {
                             if let Some(delta) = event.get("delta") {
-                                if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
-                                    full_text.push_str(text);
-                                    let _ = tx.send(StreamEvent::Token(text.to_string())).await;
+                                let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                                match delta_type {
+                                    "text_delta" => {
+                                        if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                                            full_text.push_str(text);
+                                            let _ = tx.send(StreamEvent::Token(text.to_string())).await;
+                                        }
+                                    }
+                                    "thinking_delta" | "signature_delta" => {
+                                        // Adaptive thinking internals — skip silently
+                                    }
+                                    _ => {}
                                 }
                             }
                         }

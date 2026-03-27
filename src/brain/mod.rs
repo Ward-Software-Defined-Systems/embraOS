@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tracing::{error, warn};
 
 const EMBRA_MODEL: &str = "claude-opus-4-6";
-const EMBRA_MAX_TOKENS: u32 = 4096;
+const EMBRA_MAX_TOKENS: u32 = 128_000;
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
 const ANTHROPIC_BETA: &str = "prompt-caching-2024-07-31";
@@ -44,6 +44,7 @@ impl Brain {
         let body = json!({
             "model": EMBRA_MODEL,
             "max_tokens": EMBRA_MAX_TOKENS,
+            "thinking": {"type": "adaptive"},
             "system": [{
                 "type": "text",
                 "text": self.system_prompt,
@@ -108,6 +109,7 @@ impl Brain {
         let body = json!({
             "model": EMBRA_MODEL,
             "max_tokens": EMBRA_MAX_TOKENS,
+            "thinking": {"type": "adaptive"},
             "system": [{
                 "type": "text",
                 "text": self.system_prompt,

@@ -1289,6 +1289,21 @@ async fn load_document(db: &WardsonDbClient, collection: &str) -> Result<serde_j
     if !db.collection_exists(collection).await? {
         return Ok(serde_json::json!({}));
     }
+    // Map collection to well-known _id for direct GET
+    let well_known_id = match collection {
+        "config.system" => Some("config"),
+        "soul.invariant" => Some("soul"),
+        "memory.identity" => Some("identity"),
+        "memory.user" => Some("user"),
+        _ => None,
+    };
+    // Try direct GET by well-known ID
+    if let Some(id) = well_known_id {
+        if let Ok(doc) = db.read(collection, id).await {
+            return Ok(doc);
+        }
+    }
+    // Fallback: query pattern (pre-migration data or non-singleton collections)
     let results = db.query(collection, &serde_json::json!({})).await?;
     Ok(results.into_iter().next().unwrap_or(serde_json::json!({})))
 }

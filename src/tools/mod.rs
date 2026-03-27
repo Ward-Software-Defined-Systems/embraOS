@@ -97,7 +97,12 @@ pub async fn dispatch(
         "file_read" => engineering::file_read(param).await,
         "file_write" => engineering::file_write(param).await,
         "file_append" => engineering::file_append(param).await,
+        "file_delete" => engineering::file_delete(param).await,
+        "file_move" | "file_rename" => engineering::file_move(param).await,
+        "dir_delete" | "rmdir" => engineering::dir_delete(param).await,
         "mkdir" => engineering::mkdir(param).await,
+        "git_rm" => engineering::git_rm(param).await,
+        "git_mv" => engineering::git_mv(param).await,
         // Scheduling tools (embraCRON)
         "cron_add" => cron::cron_add(db, param).await,
         "cron_list" => cron::cron_list(db).await,
@@ -129,6 +134,16 @@ pub struct SystemStatus {
     pub wardsondb_collections: Vec<String>,
     pub memory_usage_mb: Option<u64>,
     pub soul_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_poisoned: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifetime_requests: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifetime_inserts: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifetime_queries: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifetime_deletes: Option<u64>,
 }
 
 pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
@@ -140,6 +155,14 @@ pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
         "unsealed"
     };
 
+    // Fetch expanded stats
+    let stats = db.stats().await.ok();
+    let storage_poisoned = stats
+        .as_ref()
+        .and_then(|s| s.get("storage_poisoned"))
+        .and_then(|v| v.as_bool());
+    let lifetime = stats.as_ref().and_then(|s| s.get("lifetime"));
+
     SystemStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_seconds: uptime_secs(),
@@ -147,6 +170,19 @@ pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
         wardsondb_collections: collections,
         memory_usage_mb: get_memory_usage_mb(),
         soul_status: soul_status.into(),
+        storage_poisoned,
+        lifetime_requests: lifetime
+            .and_then(|l| l.get("requests"))
+            .and_then(|v| v.as_u64()),
+        lifetime_inserts: lifetime
+            .and_then(|l| l.get("inserts"))
+            .and_then(|v| v.as_u64()),
+        lifetime_queries: lifetime
+            .and_then(|l| l.get("queries"))
+            .and_then(|v| v.as_u64()),
+        lifetime_deletes: lifetime
+            .and_then(|l| l.get("deletes"))
+            .and_then(|v| v.as_u64()),
     }
 }
 
@@ -203,7 +239,10 @@ async fn recall(db: &WardsonDbClient, query: &str) -> String {
     ensure_collection(db, "memory.entries").await;
 
     let results = db
-        .query("memory.entries", &serde_json::json!({}))
+        .query(
+            "memory.entries",
+            &serde_json::json!({"fields": ["content", "tags", "session", "created_at"]}),
+        )
         .await
         .unwrap_or_default();
 
@@ -307,12 +346,13 @@ async fn uptime_report(db: &WardsonDbClient) -> String {
         .filter(|c| c.starts_with("sessions.") && c.ends_with(".meta"))
         .count();
 
-    // Count memory entries
+    // Count memory entries using count_only
     let memory_count = db
-        .query("memory.entries", &serde_json::json!({}))
+        .query_with_options("memory.entries", &serde_json::json!({"count_only": true}))
         .await
-        .map(|v| v.len())
-        .unwrap_or(0);
+        .ok()
+        .and_then(|v| v.get("count").and_then(|c| c.as_u64()))
+        .unwrap_or(0) as usize;
 
     // Count total messages across all session histories
     let mut total_messages = 0u64;
@@ -411,9 +451,13 @@ async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
     let mut output = String::new();
     let focus_lower = focus.to_lowercase();
 
-    // Load soul
-    let soul_docs = db.query("soul.invariant", &serde_json::json!({})).await.unwrap_or_default();
-    if let Some(doc) = soul_docs.into_iter().next() {
+    // Load soul (direct GET, fallback to query)
+    let soul_doc = db.read("soul.invariant", "soul").await.ok().or_else(|| None);
+    let soul_doc = match soul_doc {
+        Some(doc) => Some(doc),
+        None => db.query("soul.invariant", &serde_json::json!({})).await.ok().and_then(|v| v.into_iter().next()),
+    };
+    if let Some(doc) = soul_doc {
         let mut soul = doc.get("soul").unwrap_or(&doc);
 
         // Unwrap double-wrapped soul: if the Brain proposed {"soul": {...}},
@@ -443,20 +487,28 @@ async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
         }
     }
 
-    // Load identity
+    // Load identity (direct GET, fallback to query)
     if focus.is_empty() || focus_lower.contains("identity") || focus_lower.contains("personality") || focus_lower.contains("traits") {
-        let id_docs = db.query("memory.identity", &serde_json::json!({})).await.unwrap_or_default();
-        if let Some(doc) = id_docs.into_iter().next() {
+        let id_doc = db.read("memory.identity", "identity").await.ok().or_else(|| None);
+        let id_doc = match id_doc {
+            Some(doc) => Some(doc),
+            None => db.query("memory.identity", &serde_json::json!({})).await.ok().and_then(|v| v.into_iter().next()),
+        };
+        if let Some(doc) = id_doc {
             output.push_str("\n=== IDENTITY ===\n");
             output.push_str(&serde_json::to_string_pretty(&doc).unwrap_or_default());
             output.push('\n');
         }
     }
 
-    // Load user profile
+    // Load user profile (direct GET, fallback to query)
     if focus.is_empty() || focus_lower.contains("user") || focus_lower.contains("operator") {
-        let user_docs = db.query("memory.user", &serde_json::json!({})).await.unwrap_or_default();
-        if let Some(doc) = user_docs.into_iter().next() {
+        let user_doc = db.read("memory.user", "user").await.ok().or_else(|| None);
+        let user_doc = match user_doc {
+            Some(doc) => Some(doc),
+            None => db.query("memory.user", &serde_json::json!({})).await.ok().and_then(|v| v.into_iter().next()),
+        };
+        if let Some(doc) = user_doc {
             output.push_str("\n=== USER PROFILE ===\n");
             output.push_str(&serde_json::to_string_pretty(&doc).unwrap_or_default());
             output.push('\n');
@@ -482,9 +534,12 @@ async fn changelog(db: &WardsonDbClient, current_session: &str) -> String {
 
     let mut output = String::from("Changes since last session:\n");
 
-    // Recent memory entries
+    // Recent memory entries (with projection)
     let entries = db
-        .query("memory.entries", &serde_json::json!({}))
+        .query(
+            "memory.entries",
+            &serde_json::json!({"fields": ["content", "tags", "created_at"]}),
+        )
         .await
         .unwrap_or_default();
 

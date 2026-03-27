@@ -315,6 +315,7 @@ dependencies = [
  "crossterm",
  "futures",
  "futures-util",
+ "libc",
  "meval",
  "ratatui",
  "reqwest",
