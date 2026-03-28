@@ -551,7 +551,9 @@ version = "0.2.0-phase1"
 dependencies = [
  "anyhow",
  "embra-common",
+ "libc",
  "nix",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
