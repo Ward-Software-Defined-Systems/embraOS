@@ -1,0 +1,22 @@
+[package]
+name = "embra-console"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+embra-common = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+unicode-width = "0.2"
+
+[build-dependencies]
+tonic-build = { workspace = true }

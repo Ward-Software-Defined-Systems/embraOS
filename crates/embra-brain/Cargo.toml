@@ -1,0 +1,27 @@
+[package]
+name = "embra-brain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+embra-common = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+chrono = { workspace = true }
+chrono-tz = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+meval = "0.2"
+uuid = { version = "1", features = ["v7"] }
+
+[build-dependencies]
+tonic-build = { workspace = true }

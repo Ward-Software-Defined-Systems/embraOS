@@ -1,0 +1,22 @@
+[package]
+name = "embra-apid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+embra-common = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+axum = "0.8"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+tonic-build = { workspace = true }

@@ -19,8 +19,10 @@ Thumbs.db
 *.key
 
 # Internal working documents (Claude Code instructions & architecture research)
+.claude/
 CLAUDE.md
 ARCHITECTURE.md
+embraOS-Phase1-Implementation/
 
 # Docker
 *.tar

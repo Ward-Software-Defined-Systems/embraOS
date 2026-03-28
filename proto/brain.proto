@@ -1,0 +1,199 @@
+syntax = "proto3";
+package embra.brain;
+
+import "common.proto";
+
+service BrainService {
+  // Conversation — bidirectional streaming
+  // Client sends user messages, server streams AI responses (token by token)
+  rpc Converse(stream ConversationRequest) returns (stream ConversationResponse);
+
+  // Session management
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc SwitchSession(SwitchSessionRequest) returns (SwitchSessionResponse);
+  rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+  rpc GetSessionMeta(GetSessionMetaRequest) returns (GetSessionMetaResponse);
+
+  // System
+  rpc GetSystemStatus(GetSystemStatusRequest) returns (GetSystemStatusResponse);
+  rpc GetSoulDocument(GetSoulDocumentRequest) returns (GetSoulDocumentResponse);
+  rpc GetIdentity(GetIdentityRequest) returns (GetIdentityResponse);
+
+  // Lifecycle
+  rpc GetMode(GetModeRequest) returns (GetModeResponse);
+
+  // Health
+  rpc HealthCheck(embra.common.HealthCheckRequest) returns (embra.common.HealthCheckResponse);
+}
+
+// --- Conversation ---
+
+message ConversationRequest {
+  oneof request_type {
+    UserMessage user_message = 1;
+    SlashCommand slash_command = 2;
+    SessionAttach session_attach = 3;  // Initial message to attach to a session
+  }
+}
+
+message UserMessage {
+  string content = 1;
+  embra.common.Timestamp timestamp = 2;
+}
+
+message SlashCommand {
+  string command = 1;  // e.g., "/status", "/help", "/soul"
+  string args = 2;
+}
+
+message SessionAttach {
+  string session_name = 1;  // Empty = restore most recent active session
+}
+
+message ConversationResponse {
+  oneof response_type {
+    StreamToken token = 1;           // Single token from AI response
+    StreamDone done = 2;             // AI response complete
+    SystemMessage system = 3;        // System notification (proactive engine, etc.)
+    ToolExecution tool = 4;          // Tool being executed
+    ThinkingState thinking = 5;      // Thinking indicator state
+    ModeTransition mode_change = 6;  // Learning → Operational transition
+    SetupPrompt setup = 7;          // Config wizard prompt (first run)
+  }
+}
+
+message StreamToken {
+  string text = 1;
+}
+
+message StreamDone {
+  string full_response = 1;  // Complete assembled response
+}
+
+message SystemMessage {
+  string content = 1;
+  SystemMessageType msg_type = 2;
+}
+
+enum SystemMessageType {
+  SYSTEM_MESSAGE_TYPE_UNSPECIFIED = 0;
+  SYSTEM_MESSAGE_TYPE_INFO = 1;
+  SYSTEM_MESSAGE_TYPE_WARNING = 2;
+  SYSTEM_MESSAGE_TYPE_ERROR = 3;
+  SYSTEM_MESSAGE_TYPE_NOTIFICATION = 4;    // Proactive engine (reminders, etc.)
+  SYSTEM_MESSAGE_TYPE_RECONNECTION = 5;    // Reconnection briefing
+}
+
+message ToolExecution {
+  string tool_name = 1;
+  string input = 2;
+  string result = 3;
+  bool success = 4;
+}
+
+message ThinkingState {
+  bool is_thinking = 1;
+  string name = 2;  // AI name for "X is thinking..."
+}
+
+message ModeTransition {
+  OperatingMode from_mode = 1;
+  OperatingMode to_mode = 2;
+  string message = 3;
+}
+
+message SetupPrompt {
+  SetupFieldType field_type = 1;
+  string prompt = 2;
+  repeated string options = 3;  // For selector fields
+  string default_value = 4;
+}
+
+enum SetupFieldType {
+  SETUP_FIELD_TYPE_UNSPECIFIED = 0;
+  SETUP_FIELD_TYPE_TEXT = 1;      // Free text input
+  SETUP_FIELD_TYPE_SELECTOR = 2;  // Arrow-key selector
+  SETUP_FIELD_TYPE_CONFIRM = 3;   // Yes/no confirmation
+}
+
+// --- Sessions ---
+
+message ListSessionsRequest {}
+message ListSessionsResponse {
+  repeated SessionInfo sessions = 1;
+}
+
+message SessionInfo {
+  string name = 1;
+  string state = 2;
+  uint32 turn_count = 3;
+  embra.common.Timestamp created_at = 4;
+  embra.common.Timestamp last_active = 5;
+  bool has_summary = 6;
+}
+
+message CreateSessionRequest {
+  string name = 1;
+}
+message CreateSessionResponse {
+  SessionInfo session = 1;
+}
+
+message SwitchSessionRequest {
+  string name = 1;
+}
+message SwitchSessionResponse {
+  SessionInfo session = 1;
+  string reconnection_briefing = 2;
+}
+
+message CloseSessionRequest {}
+message CloseSessionResponse {
+  string closed_session = 1;
+  string switched_to = 2;
+}
+
+message GetSessionMetaRequest {
+  string name = 1;
+}
+message GetSessionMetaResponse {
+  SessionInfo session = 1;
+  string summary = 2;
+}
+
+// --- System ---
+
+message GetSystemStatusRequest {}
+message GetSystemStatusResponse {
+  string version = 1;
+  uint64 uptime_seconds = 2;
+  embra.common.SoulStatus soul = 3;
+  string wardsondb_status = 4;
+  map<string, string> services = 5;
+}
+
+message GetSoulDocumentRequest {}
+message GetSoulDocumentResponse {
+  string soul_json = 1;  // Full soul.invariant document as JSON
+  string sha256 = 2;
+  bool sealed = 3;
+}
+
+message GetIdentityRequest {}
+message GetIdentityResponse {
+  string identity_json = 1;  // Full memory.identity document as JSON
+}
+
+message GetModeRequest {}
+message GetModeResponse {
+  OperatingMode mode = 1;
+  string soul_status = 2;
+}
+
+enum OperatingMode {
+  OPERATING_MODE_UNSPECIFIED = 0;
+  OPERATING_MODE_SETUP = 1;
+  OPERATING_MODE_LEARNING = 2;
+  OPERATING_MODE_OPERATIONAL = 3;
+}

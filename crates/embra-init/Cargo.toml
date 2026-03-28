@@ -1,0 +1,10 @@
+[package]
+name = "embra-init"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# embra-init is a static binary — minimal dependencies
+# No tokio, no async — this runs before the OS is fully up
+[dependencies]
+nix = { version = "0.29", features = ["mount", "fs", "process", "signal"] }

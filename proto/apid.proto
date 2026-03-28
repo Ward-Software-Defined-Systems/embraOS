@@ -1,0 +1,91 @@
+syntax = "proto3";
+package embra.apid;
+
+import "common.proto";
+
+service EmbraAPI {
+  // --- Proxied Brain methods ---
+  rpc Converse(stream ConversationRequest) returns (stream ConversationResponse);
+  rpc ListSessions(ListSessionsRequest) returns (ListSessionsResponse);
+  rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
+  rpc SwitchSession(SwitchSessionRequest) returns (SwitchSessionResponse);
+  rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+
+  // --- Proxied Trust methods ---
+  rpc VerifySoul(VerifySoulRequest) returns (VerifySoulResponse);
+  rpc GetSoulStatus(GetSoulStatusRequest) returns (GetSoulStatusResponse);
+
+  // --- System management ---
+  rpc SystemHealth(SystemHealthRequest) returns (SystemHealthResponse);
+  rpc ListServices(ListServicesRequest) returns (ListServicesResponse);
+  rpc GetVersion(GetVersionRequest) returns (GetVersionResponse);
+
+  // --- Gateway health ---
+  rpc HealthCheck(embra.common.HealthCheckRequest) returns (embra.common.HealthCheckResponse);
+}
+
+// --- Proxied types (same as brain.proto) ---
+message ConversationRequest {
+  oneof request_type {
+    UserMessage user_message = 1;
+    SlashCommand slash_command = 2;
+    SessionAttach session_attach = 3;
+  }
+}
+message UserMessage { string content = 1; }
+message SlashCommand { string command = 1; string args = 2; }
+message SessionAttach { string session_name = 1; }
+
+message ConversationResponse {
+  bytes payload = 1;  // Serialized embra.brain.ConversationResponse (pass-through)
+}
+
+message ListSessionsRequest {}
+message ListSessionsResponse { bytes payload = 1; }
+message CreateSessionRequest { string name = 1; }
+message CreateSessionResponse { bytes payload = 1; }
+message SwitchSessionRequest { string name = 1; }
+message SwitchSessionResponse { bytes payload = 1; }
+message CloseSessionRequest {}
+message CloseSessionResponse { bytes payload = 1; }
+
+// --- Proxied trust types ---
+message VerifySoulRequest { string expected_hash = 1; }
+message VerifySoulResponse { bool valid = 1; string error = 2; }
+message GetSoulStatusRequest {}
+message GetSoulStatusResponse { bytes payload = 1; }
+
+// --- System management ---
+message SystemHealthRequest {}
+message SystemHealthResponse {
+  embra.common.HealthStatus overall = 1;
+  repeated ServiceHealth services = 2;
+}
+
+message ServiceHealth {
+  string name = 1;
+  embra.common.HealthStatus status = 2;
+  uint64 uptime_seconds = 3;
+  string pid = 4;
+}
+
+message ListServicesRequest {}
+message ListServicesResponse {
+  repeated ServiceInfo services = 1;
+}
+
+message ServiceInfo {
+  string name = 1;
+  string state = 2;  // "running", "stopped", "failed"
+  uint32 pid = 3;
+  uint64 uptime_seconds = 4;
+  string health_endpoint = 5;
+}
+
+message GetVersionRequest {}
+message GetVersionResponse {
+  string embraos_version = 1;
+  string embrad_version = 2;
+  string wardsondb_version = 3;
+  string kernel_version = 4;
+}

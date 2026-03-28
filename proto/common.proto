@@ -1,0 +1,38 @@
+syntax = "proto3";
+package embra.common;
+
+// Timestamp with timezone awareness
+message Timestamp {
+  string iso8601 = 1;  // ISO 8601 UTC string (e.g., "2026-03-28T14:30:00Z")
+}
+
+// Generic key-value metadata
+message Metadata {
+  map<string, string> fields = 1;
+}
+
+// Service health status
+enum HealthStatus {
+  HEALTH_STATUS_UNSPECIFIED = 0;
+  HEALTH_STATUS_HEALTHY = 1;
+  HEALTH_STATUS_DEGRADED = 2;
+  HEALTH_STATUS_UNHEALTHY = 3;
+}
+
+message HealthCheckRequest {}
+
+message HealthCheckResponse {
+  HealthStatus status = 1;
+  string service_name = 2;
+  string version = 3;
+  uint64 uptime_seconds = 4;
+  map<string, string> details = 5;
+}
+
+// Soul status
+message SoulStatus {
+  bool sealed = 1;
+  string sha256 = 2;
+  Timestamp sealed_at = 3;
+  bool verified = 4;
+}

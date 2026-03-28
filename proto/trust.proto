@@ -1,0 +1,63 @@
+syntax = "proto3";
+package embra.trust;
+
+import "common.proto";
+
+service TrustService {
+  // Soul operations
+  rpc VerifySoul(VerifySoulRequest) returns (VerifySoulResponse);
+  rpc GetSoulStatus(GetSoulStatusRequest) returns (GetSoulStatusResponse);
+
+  // PKI operations
+  rpc GenerateCertificate(GenerateCertRequest) returns (GenerateCertResponse);
+  rpc GetCACertificate(GetCARequest) returns (GetCAResponse);
+
+  // Health
+  rpc HealthCheck(embra.common.HealthCheckRequest) returns (embra.common.HealthCheckResponse);
+}
+
+message VerifySoulRequest {
+  // If empty, reads soul from WardSONDB and verifies against STATE-stored hash
+  // If provided, verifies the given hash against STATE-stored hash
+  string expected_hash = 1;
+}
+
+message VerifySoulResponse {
+  bool valid = 1;
+  string computed_hash = 2;
+  string stored_hash = 3;
+  string error = 4;  // Non-empty if verification failed
+}
+
+message GetSoulStatusRequest {}
+
+message GetSoulStatusResponse {
+  embra.common.SoulStatus status = 1;
+}
+
+message GenerateCertRequest {
+  string common_name = 1;          // e.g., "embra-apid", "embra-brain"
+  repeated string san_dns = 2;     // DNS SANs (e.g., "localhost")
+  repeated string san_ip = 3;      // IP SANs (e.g., "127.0.0.1")
+  CertRole role = 4;
+}
+
+enum CertRole {
+  CERT_ROLE_UNSPECIFIED = 0;
+  CERT_ROLE_SERVER = 1;
+  CERT_ROLE_CLIENT = 2;
+  CERT_ROLE_PEER = 3;  // Both server and client
+}
+
+message GenerateCertResponse {
+  bytes cert_pem = 1;
+  bytes key_pem = 2;
+  string serial = 3;
+  string expires_at = 4;
+}
+
+message GetCARequest {}
+
+message GetCAResponse {
+  bytes ca_cert_pem = 1;
+}
