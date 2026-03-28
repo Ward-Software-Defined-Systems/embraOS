@@ -17,6 +17,7 @@ crossterm = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 unicode-width = "0.2"
+tokio-stream = "0.1"
 
 [build-dependencies]
 tonic-build = { workspace = true }

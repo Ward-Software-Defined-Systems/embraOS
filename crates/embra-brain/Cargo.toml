@@ -22,6 +22,7 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 meval = "0.2"
 uuid = { version = "1", features = ["v7"] }
+tokio-stream = "0.1"
 
 [build-dependencies]
 tonic-build = { workspace = true }
