@@ -125,7 +125,7 @@ fn boot() -> Result<(), Box<dyn std::error::Error>> {
     let old_root = format!("{}/mnt/initramfs", NEWROOT);
     std::fs::create_dir_all(&old_root)?;
 
-    nix::unistd::pivot_root(NEWROOT, &old_root)?;
+    nix::unistd::pivot_root(NEWROOT, old_root.as_str())?;
     chdir("/")?;
 
     // Unmount old root
