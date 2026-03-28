@@ -1,0 +1,39 @@
+# embraOS x86_64 Buildroot defconfig
+# Base: QEMU x86_64
+
+BR2_x86_64=y
+BR2_TOOLCHAIN_BUILDROOT_MUSL=y
+
+# Kernel — use Buildroot's default config
+BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_USE_DEFCONFIG=y
+BR2_LINUX_KERNEL_DEFCONFIG="x86_64"
+
+# SquashFS support in kernel
+BR2_LINUX_KERNEL_CONFIG_FRAGMENT_FILES="$(BR2_EXTERNAL_EMBRAOS_PATH)/board/embraos/linux.fragment"
+
+# Filesystem — we build our own images
+BR2_TARGET_ROOTFS_SQUASHFS=y
+BR2_TARGET_ROOTFS_SQUASHFS4_XZ=y
+
+# No default init — embrad is PID 1
+BR2_INIT_NONE=y
+
+# No default /etc skeleton
+BR2_ROOTFS_SKELETON_DEFAULT=y
+
+# Post-build and post-image scripts
+BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_EMBRAOS_PATH)/board/embraos/post_build.sh"
+BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_EMBRAOS_PATH)/board/embraos/post_image.sh"
+
+# Image tools
+BR2_PACKAGE_HOST_GENIMAGE=y
+BR2_PACKAGE_HOST_MTOOLS=y
+
+# embraOS packages
+BR2_PACKAGE_EMBRAD=y
+BR2_PACKAGE_EMBRA_APID=y
+BR2_PACKAGE_EMBRA_TRUSTD=y
+BR2_PACKAGE_EMBRA_BRAIN=y
+BR2_PACKAGE_EMBRA_CONSOLE=y
+BR2_PACKAGE_WARDSONDB=y

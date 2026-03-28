@@ -1,0 +1,6 @@
+source "$BR2_EXTERNAL_EMBRAOS_PATH/package/embrad/Config.in"
+source "$BR2_EXTERNAL_EMBRAOS_PATH/package/embra-apid/Config.in"
+source "$BR2_EXTERNAL_EMBRAOS_PATH/package/embra-trustd/Config.in"
+source "$BR2_EXTERNAL_EMBRAOS_PATH/package/embra-brain/Config.in"
+source "$BR2_EXTERNAL_EMBRAOS_PATH/package/embra-console/Config.in"
+source "$BR2_EXTERNAL_EMBRAOS_PATH/package/wardsondb/Config.in"

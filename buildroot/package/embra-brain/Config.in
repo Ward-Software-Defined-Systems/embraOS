@@ -1,0 +1,4 @@
+config BR2_PACKAGE_EMBRA_BRAIN
+	bool "embra-brain"
+	help
+	  embraOS headless AI runtime service.

@@ -1,0 +1,4 @@
+config BR2_PACKAGE_EMBRA_CONSOLE
+	bool "embra-console"
+	help
+	  embraOS TUI client for serial console.

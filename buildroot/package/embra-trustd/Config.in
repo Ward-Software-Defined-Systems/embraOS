@@ -1,0 +1,4 @@
+config BR2_PACKAGE_EMBRA_TRUSTD
+	bool "embra-trustd"
+	help
+	  embraOS PKI and soul verification service.

@@ -1,0 +1,4 @@
+config BR2_PACKAGE_EMBRA_APID
+	bool "embra-apid"
+	help
+	  embraOS gRPC + REST API gateway.

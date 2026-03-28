@@ -1,0 +1,4 @@
+config BR2_PACKAGE_WARDSONDB
+	bool "wardsondb"
+	help
+	  WardSONDB JSON document database for embraOS.
