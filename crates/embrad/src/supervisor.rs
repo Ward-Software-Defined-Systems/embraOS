@@ -213,8 +213,13 @@ impl Supervisor {
         for (key, val) in &svc.def.env {
             cmd.env(key, val);
         }
-        cmd.stdout(Stdio::null());
-        cmd.stderr(Stdio::piped());
+        // Log service output to ephemeral directory for debugging
+        let log_path = format!("/embra/ephemeral/{}.log", svc.def.name);
+        let log_file = std::fs::File::create(&log_path)
+            .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+        let log_file2 = log_file.try_clone().unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+        cmd.stdout(Stdio::from(log_file));
+        cmd.stderr(Stdio::from(log_file2));
         cmd.kill_on_drop(true);
 
         let child = cmd.spawn().map_err(|e| {
@@ -265,7 +270,15 @@ impl Supervisor {
         }
 
         // Wait for health check
-        self.wait_for_health(index).await?;
+        if let Err(e) = self.wait_for_health(index).await {
+            // Dump the service log for debugging
+            let log_path = format!("/embra/ephemeral/{}.log", self.services[index].def.name);
+            if let Ok(log_content) = std::fs::read_to_string(&log_path) {
+                let tail: String = log_content.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+                error!("{} log tail:\n{}", self.services[index].def.name, tail);
+            }
+            return Err(e);
+        }
 
         self.services[index].status = ServiceStatus::Running;
         info!("Service {} is healthy", self.services[index].def.name);
