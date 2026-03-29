@@ -76,7 +76,7 @@ fn bring_up_loopback_ioctl() {
         std::ptr::copy_nonoverlapping(name.as_ptr(), ifr.ifr_name.as_mut_ptr() as *mut u8, name.len());
 
         // Get current flags
-        if libc::ioctl(sock, libc::SIOCGIFFLAGS, &mut ifr) < 0 {
+        if libc::ioctl(sock, libc::SIOCGIFFLAGS as _, &mut ifr) < 0 {
             tracing::error!("Failed to get loopback flags");
             libc::close(sock);
             return;
@@ -84,7 +84,7 @@ fn bring_up_loopback_ioctl() {
 
         // Set IFF_UP
         ifr.ifr_ifru.ifru_flags |= libc::IFF_UP as i16;
-        if libc::ioctl(sock, libc::SIOCSIFFLAGS, &ifr) < 0 {
+        if libc::ioctl(sock, libc::SIOCSIFFLAGS as _, &ifr) < 0 {
             tracing::error!("Failed to set loopback UP");
         } else {
             info!("Loopback interface up (via ioctl)");
