@@ -350,15 +350,28 @@ async fn handle_request(
             })).await;
 
             // Call Brain streaming
-            let mut brain_rx = brain.send_message_streaming(&messages).await
-                .map_err(|e| anyhow::anyhow!("Brain call failed: {}", e))?;
+            eprintln!("[embra-brain] Calling Anthropic API with {} messages", messages.len());
+            let mut brain_rx = match brain.send_message_streaming(&messages).await {
+                Ok(rx) => {
+                    eprintln!("[embra-brain] Brain streaming started");
+                    rx
+                }
+                Err(e) => {
+                    eprintln!("[embra-brain] Brain call FAILED: {}", e);
+                    return Err(anyhow::anyhow!("Brain call failed: {}", e));
+                }
+            };
 
             // Stream Brain tokens to gRPC
             let mut full_response = String::new();
             let mut first_token = true;
+            eprintln!("[embra-brain] Waiting for Brain stream events...");
             while let Some(event) = brain_rx.recv().await {
                 match event {
                     StreamEvent::Token(text) => {
+                        if first_token {
+                            eprintln!("[embra-brain] First token received");
+                        }
                         if first_token {
                             // Clear thinking on first token
                             let _ = tx.send(Ok(ConversationResponse {
@@ -384,6 +397,7 @@ async fn handle_request(
                         })).await;
                     }
                     StreamEvent::Error(err) => {
+                        eprintln!("[embra-brain] StreamEvent::Error: {}", err);
                         let _ = tx.send(Ok(ConversationResponse {
                             response_type: Some(conversation_response::ResponseType::System(
                                 SystemMessage {
