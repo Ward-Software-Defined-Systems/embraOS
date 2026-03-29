@@ -8,7 +8,7 @@
 
 **embraOS** is a continuity-preserving AI operating system. It's not a chatbot. It's not an agent framework. It's an intelligence that remembers, evolves, and maintains itself across time — with a soul it can never modify and a memory it writes itself.
 
-**Current Status:** Phase 0 — Proof of Concept
+**Current Status:** Phase 1 — Core OS (In Progress) | Phase 0 — Stable
 
 ---
 
@@ -24,77 +24,98 @@ Think of it as an AI that lives somewhere and is always there when you need it.
 
 ## Quick Start
 
-### Clone & Build
+### Phase 1 — Build from Source (QEMU Bootable Image)
+
+Phase 1 builds a QEMU-bootable x86_64 disk image with an immutable SquashFS rootfs, service supervision, and soul verification at boot.
+
+#### Ubuntu 24.04 (Recommended — Full Build Pipeline)
 
 ```bash
+# Install dependencies
+sudo apt-get update && sudo apt-get install -y \
+  build-essential gcc g++ unzip bc cpio rsync wget python3 file \
+  protobuf-compiler musl-tools qemu-system-x86
+
+# Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+rustup target add x86_64-unknown-linux-musl
+```
+
+```bash
+# Clone and configure
 git clone https://github.com/Ward-Software-Defined-Systems/embraOS.git
 cd embraOS
+git checkout phase1-arch-rework
+
+# Configure musl linker
+mkdir -p .cargo
+cat > .cargo/config.toml << 'EOF'
+[target.x86_64-unknown-linux-musl]
+linker = "musl-gcc"
+EOF
+```
+
+```bash
+# Build and run
+./scripts/build-image.sh                    # Full pipeline: Rust → initramfs → Buildroot → disk image
+./scripts/run-qemu.sh                       # Boot in QEMU with serial console
+```
+
+On first boot, embrad starts all services, detects no soul, and enters Learning Mode. You'll be guided through naming the intelligence, forming its identity, and defining its soul.
+
+> **Port Forwarding:** QEMU forwards ports 50000 (gRPC) and 8443 (REST) to the host. Test with:
+> ```bash
+> curl http://localhost:8443/health
+> grpcurl -plaintext localhost:50000 embra.apid.EmbraAPI/HealthCheck
+> ```
+
+#### macOS (Cross-Compilation Only)
+
+macOS can cross-compile all Rust binaries but cannot run Buildroot (which requires a Linux host to compile the kernel and assemble the disk image). Use an Ubuntu VM or Docker for the full build.
+
+```bash
+# Install dependencies
+brew install protobuf
+brew install filosottile/musl-cross/musl-cross
+brew install qemu grpcurl
+rustup target add x86_64-unknown-linux-musl
+```
+
+```bash
+# Clone and configure
+git clone https://github.com/Ward-Software-Defined-Systems/embraOS.git
+cd embraOS
+git checkout phase1-arch-rework
+
+# Configure musl-cross linker (adjust path if Homebrew prefix differs)
+mkdir -p .cargo
+cat > .cargo/config.toml << 'EOF'
+[target.x86_64-unknown-linux-musl]
+linker = "/usr/local/Cellar/musl-cross/0.9.11/libexec/bin/x86_64-linux-musl-gcc"
+EOF
+```
+
+```bash
+# Cross-compile all binaries (static Linux ELFs)
+cargo build --release --target x86_64-unknown-linux-musl --workspace
+
+# Create initramfs (works on macOS)
+./scripts/create_initramfs.sh
+
+# Buildroot step requires Linux — run on Ubuntu VM or via Docker:
+# ./scripts/build-image.sh --buildroot-only
+```
+
+### Phase 0 — Docker
+
+Phase 0 (proof of concept) runs as a Docker container and is still fully functional. The Phase 0 source is in `src/` and the Docker build is unchanged. For full Phase 0 documentation including persistence, GitHub integration, and SSH setup, see the [README on the main branch](https://github.com/Ward-Software-Defined-Systems/embraOS/tree/main).
+
+```bash
+git checkout main
 docker build -t embraos:phase0 .
+docker run -it --name embra -e ANTHROPIC_API_KEY=sk-ant-... -v embra-data:/embra/data embraos:phase0
 ```
-
-### Run
-
-```bash
-docker run -it -e ANTHROPIC_API_KEY=sk-ant-... embraos:phase0
-```
-
-That's it. You'll be guided through naming the intelligence, forming its identity, and defining its soul. After that, you're in a persistent terminal session.
-
-Your data and sessions persist within the container across stops and restarts — as long as the container is not destroyed. To reconnect after stopping:
-
-```bash
-docker start -ai embra
-```
-
-> **Tip:** Name your container with `--name embra` on first run (see examples below) so you can easily reconnect.
-
-### With Persistence (Recommended)
-
-```bash
-docker run -it --name embra \
-  -e ANTHROPIC_API_KEY=sk-ant-... \
-  -v embra-data:/embra/data \
-  embraos:phase0
-```
-
-Add a Docker volume and your AI's memory, identity, and soul survive even if the container is destroyed and recreated.
-
-### With Persistence + GitHub + Local Repos
-
-```bash
-docker run -it --name embra \
-  -e ANTHROPIC_API_KEY=sk-ant-... \
-  -e GITHUB_TOKEN=ghp_... \
-  -v embra-data:/embra/data \
-  -v /path/to/repos:/embra/workspace/repos \
-  embraos:phase0
-```
-
-Mount your cloned repositories to give the intelligence access to `git_status`, `git_log`, and other engineering tools. The `GITHUB_TOKEN` enables `gh_issues` and `gh_prs` for querying GitHub directly.
-
-> **Git Setup Required:** After the container is running, configure git from your host terminal:
->
-> ```bash
-> docker exec embra git config --global --add safe.directory '*'
-> docker exec embra git config --global push.autoSetupRemote true
-> docker exec embra git config --global user.email "<your-email>"
-> docker exec embra git config --global user.name "<your-name>"
-> docker exec embra git config --global credential.helper \
->   '!f() { echo "password=$GITHUB_TOKEN"; echo "username=<your-github-username>"; }; f'
-> ```
->
-> This will be automated in a future update.
-
-> **SSH Setup Required:** The SSH remote admin tools (`ssh_remote_admin`, `ssh_session_start`) require key-based authentication — password authentication is disabled to prevent password prompts from interfering with the TUI. From your host terminal:
->
-> ```bash
-> docker exec embra ssh-keygen -t ed25519 -f /root/.ssh/id_ed25519 -N ""
-> docker exec -it embra ssh-copy-id -i /root/.ssh/id_ed25519.pub user@<target-host>
-> ```
->
-> SSH tools are restricted to RFC 1918 private addresses and loopback only.
-
-> **Note:** Pre-built container images on Docker Hub are coming soon. For now, clone and build locally.
 
 ---
 
@@ -196,12 +217,12 @@ All sessions share the same intelligence — same memory, same identity, same so
 
 ## Phase 0 Limitations
 
-This is a proof of concept. It demonstrates the core experience but doesn't include the full OS:
+Phase 0 is a proof of concept. It demonstrates the core experience but doesn't include the full OS:
 
 - **API only** — requires internet connectivity and an Anthropic API key
 - **Single model** — Claude Opus 4.6, not configurable
-- **Docker only** — not a bootable OS (yet)
-- **Tested on limited platforms** — built and verified on Mac Studio M4 Max / Apple Silicon (macOS / OrbStack), MacBook Pro 2.3 GHz 8-Core Intel Core i9 (macOS / Docker Desktop), and Azure Standard B2as v2 / AMD EPYC (Ubuntu 24.04 / Docker Engine). Should work on any platform with Docker support but broader testing is ongoing
+- **Docker only** — not a bootable OS *(Phase 1 addresses this — QEMU-bootable image with immutable rootfs)*
+- **Tested on limited platforms** — built and verified on Mac Studio M4 Max / Apple Silicon (macOS / OrbStack), MacBook Pro 2.3 GHz 8-Core Intel Core i9 (macOS / Docker Desktop), Azure Standard B2as v2 / AMD EPYC (Ubuntu 24.04 / Docker Engine), and Ubuntu 24.04 VM (Phase 1 builds)
 - **Built-in tools only** — no MCP server modules (yet)
 - **No local LLM** — coming in a future phase
 
@@ -364,13 +385,13 @@ All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memor
 
 | Phase | Description | Status |
 |---|---|---|
-| **Phase 0** | Proof of concept — Docker container, Anthropic API, core UX | **Current** |
+| **Phase 0** | Proof of concept — Docker container, Anthropic API, core UX | ✅ **Stable** |
 | **Phase 0 — Sprint 1** | Bug fixes (9+1 crash), design improvements (4), new tool categories (security, engineering) | ✅ **Complete** |
 | **Phase 0 — Sprint 2** | Bug fixes (3), expanded git/GitHub toolset (12 new tools), enhanced port scanner, embraCRON scheduling | ✅ **Complete** |
 | **Phase 0 — Sprint 3** | Session access tools (5), memory consolidation (2), session consolidation (3), schema migration framework | ✅ **Complete** |
 | **Phase 0 — Sprint 4** | SSH remote admin (4 tools), tag filter fix, timezone-aware timestamps, `/copy` deferred | ✅ **Complete** |
 | **Phase 0 — Sprint 5** | SSH ControlMaster refactor, Brain API upgrade (128K output, adaptive thinking, 1M context), WardSONDB integration upgrades, new filesystem/git tools (file_delete, file_move, dir_delete, git_rm, git_mv) | ✅ **Complete** |
-| **Phase 1** | Core OS — `embrad` as Rust PID 1, `embra-apid` gRPC+REST gateway, `embra-trustd` PKI, immutable SquashFS rootfs, LUKS-encrypted STATE/DATA partitions | Planned |
+| **Phase 1** | Core OS — 7-crate workspace, `embrad` PID 1, `embra-trustd` PKI + soul verification, `embra-apid` gateway, Buildroot image, QEMU boot | **In Progress** |
 | **Phase 2** | Terminal & Sessions — full TUI rewrite, `embractl` management CLI (the `talosctl` equivalent), LLM-driven Continuity Engine feedback loop | Planned |
 | **Phase 3** | Module System — MCP server modules via `embra-guardian` governance proxy, containerd runtime, governed capability expansion | Planned |
 | **Phase 4** | Image Factory — bootable ISO builds, A/B partition scheme with automatic rollback, bare metal and Kubernetes deployment | Planned |
@@ -453,7 +474,25 @@ All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memor
 
 ### Phase 1 — Core OS
 
-embraOS stops being a Docker application and starts being an operating system. `embrad` becomes a true Rust PID 1 init (replacing systemd entirely), `embra-apid` provides gRPC + REST API gateway with mTLS, and `embra-trustd` handles PKI and soul verification. The rootfs becomes a read-only SquashFS — no package manager, no shell, no SSH. Disk partitions include LUKS-encrypted STATE (soul + governance + PKI) and DATA (WardSONDB). **Boot invariant:** if soul validation fails, the system halts. Follows [Talos Linux](https://www.talos.dev/) architectural patterns directly — same philosophy (immutable, API-only), different mission (hosting a mind instead of running Kubernetes).
+embraOS stops being a Docker application and starts being an operating system. Follows [Talos Linux](https://www.talos.dev/) architectural patterns directly — same philosophy (immutable, API-only, no shell), different mission (hosting a mind instead of running Kubernetes).
+
+**Initial Sprint (complete):** Cargo workspace with 7 crates, all cross-compiling to `x86_64-unknown-linux-musl` (static binaries):
+
+| Crate | Description | Status |
+|-------|-------------|--------|
+| `embra-init` | Initramfs: mount SquashFS/STATE/DATA, pivot_root, exec embrad | Implemented |
+| `embrad` | PID 1: service supervisor (5 services), soul verification, reconciliation loop | Implemented |
+| `embra-trustd` | Soul SHA-256 verification, Root CA generation, mTLS cert signing | Implemented |
+| `embra-apid` | gRPC + REST gateway, bidirectional streaming proxy | Implemented |
+| `embra-brain` | Headless AI runtime (gRPC scaffolding, Phase 0 extraction pending) | Scaffolded |
+| `embra-console` | TUI client over serial/gRPC (Phase 0 TUI adaptation pending) | Scaffolded |
+| `embra-common` | Shared protobuf types (tonic codegen) | Implemented |
+
+Plus: 4 protobuf definitions, Buildroot external tree with 7 package recipes, build/launch/test scripts, GPT disk image (boot + SquashFS rootfs + STATE ext4 + DATA ext4).
+
+**Boot invariant:** if soul verification fails, the system halts. First boot (no soul) is allowed — enters Learning Mode.
+
+**Deferred to sub-sprints:** LUKS encryption, mTLS enforcement, A/B boot, embractl, custom kernel, ZFS, aarch64.
 
 ### Phase 2 — Terminal & Sessions
 
