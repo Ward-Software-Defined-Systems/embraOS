@@ -32,8 +32,66 @@ pub fn mount_pseudofs() -> Result<()> {
     // /run (tmpfs — runtime state)
     mount_if_needed("tmpfs", "/run", "tmpfs", MsFlags::MS_NOSUID | MsFlags::MS_NODEV)?;
 
+    // Bring up loopback interface (required for 127.0.0.1 connectivity)
+    bring_up_loopback();
+
     info!("Pseudo-filesystems mounted");
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn bring_up_loopback() {
+    use std::process::Command;
+    // Use ip command if available, fall back to ifconfig
+    let result = Command::new("ip")
+        .args(["link", "set", "lo", "up"])
+        .status()
+        .or_else(|_| Command::new("ifconfig").args(["lo", "up"]).status());
+    match result {
+        Ok(status) if status.success() => info!("Loopback interface up"),
+        Ok(status) => {
+            // ip/ifconfig may not exist in minimal rootfs — try raw ioctl
+            tracing::warn!("Failed to bring up loopback via ip/ifconfig (status={}), trying ioctl", status);
+            bring_up_loopback_ioctl();
+        }
+        Err(_) => {
+            tracing::warn!("ip/ifconfig not found, trying ioctl");
+            bring_up_loopback_ioctl();
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn bring_up_loopback_ioctl() {
+    // Bring up lo via raw ioctl — works without any userspace tools
+    unsafe {
+        let sock = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
+        if sock < 0 {
+            tracing::error!("Failed to create socket for loopback setup");
+            return;
+        }
+
+        let mut ifr: libc::ifreq = std::mem::zeroed();
+        let name = b"lo\0";
+        std::ptr::copy_nonoverlapping(name.as_ptr(), ifr.ifr_name.as_mut_ptr() as *mut u8, name.len());
+
+        // Get current flags
+        if libc::ioctl(sock, libc::SIOCGIFFLAGS, &mut ifr) < 0 {
+            tracing::error!("Failed to get loopback flags");
+            libc::close(sock);
+            return;
+        }
+
+        // Set IFF_UP
+        ifr.ifr_ifru.ifru_flags |= libc::IFF_UP as i16;
+        if libc::ioctl(sock, libc::SIOCSIFFLAGS, &ifr) < 0 {
+            tracing::error!("Failed to set loopback UP");
+        } else {
+            info!("Loopback interface up (via ioctl)");
+        }
+
+        libc::close(sock);
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
