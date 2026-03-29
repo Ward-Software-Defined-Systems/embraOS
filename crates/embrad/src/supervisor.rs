@@ -223,13 +223,20 @@ impl Supervisor {
         for (key, val) in &svc.def.env {
             cmd.env(key, val);
         }
-        // Log service output to ephemeral directory for debugging
-        let log_path = format!("/embra/ephemeral/{}.log", svc.def.name);
-        let log_file = std::fs::File::create(&log_path)
-            .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
-        let log_file2 = log_file.try_clone().unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
-        cmd.stdout(Stdio::from(log_file));
-        cmd.stderr(Stdio::from(log_file2));
+        // embra-console gets direct access to the serial console (stdin/stdout/stderr)
+        // All other services log to ephemeral directory
+        if svc.def.name == "embra-console" {
+            cmd.stdin(Stdio::inherit());
+            cmd.stdout(Stdio::inherit());
+            cmd.stderr(Stdio::inherit());
+        } else {
+            let log_path = format!("/embra/ephemeral/{}.log", svc.def.name);
+            let log_file = std::fs::File::create(&log_path)
+                .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+            let log_file2 = log_file.try_clone().unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+            cmd.stdout(Stdio::from(log_file));
+            cmd.stderr(Stdio::from(log_file2));
+        }
         cmd.kill_on_drop(true);
 
         let child = cmd.spawn().map_err(|e| {
