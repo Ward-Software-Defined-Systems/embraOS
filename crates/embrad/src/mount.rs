@@ -35,6 +35,9 @@ pub fn mount_pseudofs() -> Result<()> {
     // Bring up loopback interface (required for 127.0.0.1 connectivity)
     bring_up_loopback();
 
+    // Bring up eth0 for QEMU SLIRP networking (required for port forwarding and outbound)
+    bring_up_eth0();
+
     info!("Pseudo-filesystems mounted");
     Ok(())
 }
@@ -92,6 +95,89 @@ fn bring_up_loopback_ioctl() {
 
         libc::close(sock);
     }
+}
+
+#[cfg(target_os = "linux")]
+fn bring_up_eth0() {
+    // QEMU SLIRP assigns 10.0.2.15/24 with gateway 10.0.2.2 and DNS 10.0.2.3
+    // We configure this statically since there's no DHCP client in the minimal rootfs
+    unsafe {
+        let sock = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
+        if sock < 0 {
+            tracing::error!("Failed to create socket for eth0 setup");
+            return;
+        }
+
+        let mut ifr: libc::ifreq = std::mem::zeroed();
+        let name = b"eth0\0";
+        std::ptr::copy_nonoverlapping(name.as_ptr(), ifr.ifr_name.as_mut_ptr() as *mut u8, name.len());
+
+        // Set IP address 10.0.2.15
+        let addr: *mut libc::sockaddr_in = &mut ifr.ifr_ifru.ifru_addr as *mut _ as *mut _;
+        (*addr).sin_family = libc::AF_INET as u16;
+        (*addr).sin_addr.s_addr = u32::from_ne_bytes([10, 0, 2, 15]);
+        if libc::ioctl(sock, libc::SIOCSIFADDR as _, &ifr) < 0 {
+            tracing::warn!("Failed to set eth0 address (may not exist)");
+            libc::close(sock);
+            return;
+        }
+
+        // Set netmask 255.255.255.0
+        let mask: *mut libc::sockaddr_in = &mut ifr.ifr_ifru.ifru_netmask as *mut _ as *mut _;
+        (*mask).sin_family = libc::AF_INET as u16;
+        (*mask).sin_addr.s_addr = u32::from_ne_bytes([255, 255, 255, 0]);
+        if libc::ioctl(sock, libc::SIOCSIFNETMASK as _, &ifr) < 0 {
+            tracing::warn!("Failed to set eth0 netmask");
+        }
+
+        // Bring interface up
+        if libc::ioctl(sock, libc::SIOCGIFFLAGS as _, &mut ifr) >= 0 {
+            ifr.ifr_ifru.ifru_flags |= libc::IFF_UP as i16 | libc::IFF_RUNNING as i16;
+            if libc::ioctl(sock, libc::SIOCSIFFLAGS as _, &ifr) < 0 {
+                tracing::warn!("Failed to bring eth0 UP");
+            } else {
+                info!("eth0 up (10.0.2.15/24)");
+            }
+        }
+
+        libc::close(sock);
+
+        // Add default route via 10.0.2.2 (QEMU SLIRP gateway)
+        // This requires a routing socket — use a simpler approach via /proc
+        let route_entry = "10.0.2.2\t0.0.0.0\t0.0.0.0\tUG\t0\t0\t0\teth0\n";
+        // Actually, use the rtentry ioctl
+        let route_sock = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
+        if route_sock >= 0 {
+            let mut rt: libc::rtentry = std::mem::zeroed();
+            let dst: *mut libc::sockaddr_in = &mut rt.rt_dst as *mut _ as *mut _;
+            (*dst).sin_family = libc::AF_INET as u16;
+            (*dst).sin_addr.s_addr = 0; // 0.0.0.0
+
+            let gw: *mut libc::sockaddr_in = &mut rt.rt_gateway as *mut _ as *mut _;
+            (*gw).sin_family = libc::AF_INET as u16;
+            (*gw).sin_addr.s_addr = u32::from_ne_bytes([10, 0, 2, 2]);
+
+            let mask_rt: *mut libc::sockaddr_in = &mut rt.rt_genmask as *mut _ as *mut _;
+            (*mask_rt).sin_family = libc::AF_INET as u16;
+            (*mask_rt).sin_addr.s_addr = 0; // 0.0.0.0
+
+            rt.rt_flags = libc::RTF_UP as u16 | libc::RTF_GATEWAY as u16;
+
+            if libc::ioctl(route_sock, libc::SIOCADDRT as _, &rt) < 0 {
+                tracing::warn!("Failed to add default route (may already exist)");
+            } else {
+                info!("Default route via 10.0.2.2 (QEMU SLIRP gateway)");
+            }
+            libc::close(route_sock);
+        }
+
+        let _ = route_entry; // suppress unused warning
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn bring_up_eth0() {
+    tracing::warn!("eth0 setup: not on Linux, skipping");
 }
 
 #[cfg(not(target_os = "linux"))]
