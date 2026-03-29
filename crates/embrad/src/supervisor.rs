@@ -314,14 +314,30 @@ impl Supervisor {
         match check {
             HealthCheck::Http { url, timeout } => {
                 let deadline = Instant::now() + *timeout;
-                let client = reqwest::Client::builder()
-                    .timeout(Duration::from_secs(2))
-                    .build()?;
+
+                // Parse host:port from URL for raw TCP health check
+                // Avoids reqwest/rustls issues in minimal rootfs
+                let addr = url.replace("http://", "").split('/').next().unwrap_or("127.0.0.1:8090").to_string();
+                let path = url.find("/_").map(|i| &url[i..]).unwrap_or("/_health");
 
                 while Instant::now() < deadline {
-                    match client.get(url).send().await {
-                        Ok(resp) if resp.status().is_success() => return Ok(()),
-                        _ => tokio::time::sleep(Duration::from_millis(500)).await,
+                    // Try raw HTTP request over TCP
+                    match tokio::net::TcpStream::connect(&addr).await {
+                        Ok(mut stream) => {
+                            use tokio::io::{AsyncWriteExt, AsyncReadExt};
+                            let req = format!("GET {} HTTP/1.0\r\nHost: {}\r\n\r\n", path, addr);
+                            if stream.write_all(req.as_bytes()).await.is_ok() {
+                                let mut buf = vec![0u8; 4096];
+                                if let Ok(n) = stream.read(&mut buf).await {
+                                    let response = String::from_utf8_lossy(&buf[..n]);
+                                    if response.contains("200") {
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                        }
+                        Err(_) => tokio::time::sleep(Duration::from_millis(500)).await,
                     }
                 }
                 bail!("{} failed health check (HTTP {} did not respond within {:?})",
