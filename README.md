@@ -34,7 +34,7 @@ Phase 1 builds a QEMU-bootable x86_64 disk image with an immutable SquashFS root
 # Install dependencies
 sudo apt-get update && sudo apt-get install -y \
   build-essential gcc g++ unzip bc cpio rsync wget python3 file \
-  protobuf-compiler musl-tools qemu-system-x86 libelf-dev libssl-dev
+  protobuf-compiler musl-tools qemu-system-x86 libelf-dev libssl-dev genext2fs
 
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
