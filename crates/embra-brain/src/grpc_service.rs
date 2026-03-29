@@ -1,13 +1,14 @@
 //! gRPC service implementation for embra-brain.
 //!
-//! Bridges the Phase 0 Brain + tools + sessions into a gRPC streaming interface.
+//! Bridges Phase 0 Brain + tools + sessions into a gRPC streaming interface.
 
-use crate::brain;
-use crate::tools;
+use crate::brain::{Brain, Message, StreamEvent};
+use crate::config;
+use crate::db::WardsonDbClient;
+use crate::learning;
+use crate::proactive::Notification;
 use crate::sessions::SessionManager;
-use crate::proactive::ProactiveEngine;
-use crate::db::client::WardsonClient;
-use crate::config::BrainConfig;
+use crate::tools;
 
 use embra_common::proto::brain::brain_service_server::BrainService;
 use embra_common::proto::brain::*;
@@ -15,37 +16,37 @@ use embra_common::proto::common;
 
 use std::pin::Pin;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{info, debug, error, warn};
 
 pub struct BrainGrpcService {
-    db: Arc<WardsonClient>,
+    db: Arc<WardsonDbClient>,
     session_manager: Arc<RwLock<SessionManager>>,
-    proactive: Arc<ProactiveEngine>,
-    _config: BrainConfig,
+    config_tz: String,
+    proactive_rx: Arc<Mutex<mpsc::Receiver<Notification>>>,
     start_time: std::time::Instant,
 }
 
 impl BrainGrpcService {
-    pub async fn new(db: WardsonClient, config: BrainConfig) -> anyhow::Result<Self> {
+    pub fn new(
+        db: WardsonDbClient,
+        config_tz: String,
+        proactive_rx: mpsc::Receiver<Notification>,
+    ) -> Self {
         let db = Arc::new(db);
         let session_manager = Arc::new(RwLock::new(
-            SessionManager::new(db.clone()).await?
+            SessionManager::new((*db).clone())
         ));
-        let proactive = Arc::new(ProactiveEngine::new(db.clone()));
 
-        // Start proactive engine background tasks
-        proactive.start().await;
-
-        Ok(Self {
+        Self {
             db,
             session_manager,
-            proactive,
-            _config: config,
+            config_tz,
+            proactive_rx: Arc::new(Mutex::new(proactive_rx)),
             start_time: std::time::Instant::now(),
-        })
+        }
     }
 }
 
@@ -59,26 +60,24 @@ impl BrainService for BrainGrpcService {
     ) -> Result<Response<Self::ConverseStream>, Status> {
         let mut incoming = request.into_inner();
 
-        // Create output channel — this replaces the Phase 0 TUI channel
         let (tx, rx) = mpsc::channel::<Result<ConversationResponse, Status>>(100);
 
         let db = self.db.clone();
         let session_mgr = self.session_manager.clone();
-        let proactive = self.proactive.clone();
+        let config_tz = self.config_tz.clone();
+        let proactive_rx = self.proactive_rx.clone();
 
-        // Spawn a task to process incoming messages
         tokio::spawn(async move {
-            // Subscribe to proactive notifications
-            let mut proactive_rx = proactive.subscribe();
+            // Try to get proactive notifications (only one Converse stream gets them)
+            let mut proactive = proactive_rx.try_lock().ok();
 
             loop {
                 tokio::select! {
-                    // Handle incoming client messages
                     msg = incoming.next() => {
                         match msg {
                             Some(Ok(req)) => {
                                 if let Err(e) = handle_request(
-                                    req, &tx, &db, &session_mgr
+                                    req, &tx, &db, &session_mgr, &config_tz
                                 ).await {
                                     error!("Error handling request: {}", e);
                                     let _ = tx.send(Ok(ConversationResponse {
@@ -101,13 +100,20 @@ impl BrainService for BrainGrpcService {
                             }
                         }
                     }
-                    // Forward proactive notifications
-                    notification = proactive_rx.recv() => {
-                        if let Ok(notif) = notification {
+                    // Forward proactive notifications if we hold the lock
+                    notif = async {
+                        if let Some(ref mut rx) = proactive {
+                            rx.recv().await
+                        } else {
+                            // No lock, just pend forever
+                            std::future::pending().await
+                        }
+                    } => {
+                        if let Some(notif) = notif {
                             let _ = tx.send(Ok(ConversationResponse {
                                 response_type: Some(conversation_response::ResponseType::System(
                                     SystemMessage {
-                                        content: notif,
+                                        content: format!("[{}] {}", notif.priority_label(), notif.message),
                                         msg_type: SystemMessageType::Notification as i32,
                                     }
                                 )),
@@ -132,11 +138,11 @@ impl BrainService for BrainGrpcService {
         Ok(Response::new(ListSessionsResponse {
             sessions: sessions.into_iter().map(|s| SessionInfo {
                 name: s.name,
-                state: s.state,
-                turn_count: s.turn_count,
-                created_at: Some(common::Timestamp { iso8601: s.created_at }),
-                last_active: Some(common::Timestamp { iso8601: s.last_active }),
-                has_summary: s.has_summary,
+                state: format!("{:?}", s.state),
+                turn_count: 0, // SessionMeta doesn't track turn count directly
+                created_at: Some(common::Timestamp { iso8601: s.created_at.to_rfc3339() }),
+                last_active: Some(common::Timestamp { iso8601: s.last_active.to_rfc3339() }),
+                has_summary: false,
             }).collect(),
         }))
     }
@@ -150,10 +156,10 @@ impl BrainService for BrainGrpcService {
         Ok(Response::new(CreateSessionResponse {
             session: Some(SessionInfo {
                 name: session.name,
-                state: session.state,
+                state: format!("{:?}", session.state),
                 turn_count: 0,
-                created_at: Some(common::Timestamp { iso8601: session.created_at }),
-                last_active: Some(common::Timestamp { iso8601: session.last_active }),
+                created_at: Some(common::Timestamp { iso8601: session.created_at.to_rfc3339() }),
+                last_active: Some(common::Timestamp { iso8601: session.last_active.to_rfc3339() }),
                 has_summary: false,
             }),
         }))
@@ -162,14 +168,23 @@ impl BrainService for BrainGrpcService {
     async fn switch_session(&self, request: Request<SwitchSessionRequest>) -> Result<Response<SwitchSessionResponse>, Status> {
         let name = request.into_inner().name;
         let mut mgr = self.session_manager.write().await;
-        let session = mgr.switch(&name).await
+
+        // Detach current session if any
+        if let Some(ref current) = mgr.active_session.clone() {
+            let _ = mgr.detach(current).await;
+        }
+
+        let history = mgr.reattach(&name).await
             .map_err(|e| Status::internal(format!("{}", e)))?;
+
         Ok(Response::new(SwitchSessionResponse {
             session: Some(SessionInfo {
-                name: session.name, state: session.state, turn_count: session.turn_count,
-                created_at: Some(common::Timestamp { iso8601: session.created_at }),
-                last_active: Some(common::Timestamp { iso8601: session.last_active }),
-                has_summary: session.has_summary,
+                name: name.clone(),
+                state: "Active".to_string(),
+                turn_count: history.len() as u32,
+                created_at: None,
+                last_active: None,
+                has_summary: false,
             }),
             reconnection_briefing: String::new(),
         }))
@@ -177,11 +192,13 @@ impl BrainService for BrainGrpcService {
 
     async fn close_session(&self, _req: Request<CloseSessionRequest>) -> Result<Response<CloseSessionResponse>, Status> {
         let mut mgr = self.session_manager.write().await;
-        let result = mgr.close_current().await
-            .map_err(|e| Status::internal(format!("{}", e)))?;
+        let closed = mgr.active_session.clone().unwrap_or_default();
+        if !closed.is_empty() {
+            let _ = mgr.close(&closed).await;
+        }
         Ok(Response::new(CloseSessionResponse {
-            closed_session: result.closed,
-            switched_to: result.switched_to,
+            closed_session: closed,
+            switched_to: String::new(),
         }))
     }
 
@@ -194,23 +211,51 @@ impl BrainService for BrainGrpcService {
             version: "0.2.0-phase1".to_string(),
             uptime_seconds: self.start_time.elapsed().as_secs(),
             soul: None,
-            wardsondb_status: "healthy".to_string(),
+            wardsondb_status: if self.db.health().await.unwrap_or(false) { "healthy" } else { "unhealthy" }.to_string(),
             services: std::collections::HashMap::new(),
         }))
     }
 
     async fn get_soul_document(&self, _req: Request<GetSoulDocumentRequest>) -> Result<Response<GetSoulDocumentResponse>, Status> {
-        Err(Status::unimplemented("GetSoulDocument not yet implemented"))
+        match learning::load_soul(&**&self.db).await {
+            Ok(Some(soul)) => {
+                let hash = learning::compute_soul_hash(&soul).unwrap_or_default();
+                Ok(Response::new(GetSoulDocumentResponse {
+                    soul_json: serde_json::to_string_pretty(&soul).unwrap_or_default(),
+                    sha256: hash,
+                    sealed: true,
+                }))
+            }
+            Ok(None) => Ok(Response::new(GetSoulDocumentResponse {
+                soul_json: String::new(),
+                sha256: String::new(),
+                sealed: false,
+            })),
+            Err(e) => Err(Status::internal(format!("Failed to load soul: {}", e))),
+        }
     }
 
     async fn get_identity(&self, _req: Request<GetIdentityRequest>) -> Result<Response<GetIdentityResponse>, Status> {
-        Err(Status::unimplemented("GetIdentity not yet implemented"))
+        match self.db.read("memory.identity", "identity").await {
+            Ok(doc) => Ok(Response::new(GetIdentityResponse {
+                identity_json: serde_json::to_string_pretty(&doc).unwrap_or_default(),
+            })),
+            Err(_) => Ok(Response::new(GetIdentityResponse {
+                identity_json: String::new(),
+            })),
+        }
     }
 
     async fn get_mode(&self, _req: Request<GetModeRequest>) -> Result<Response<GetModeResponse>, Status> {
+        let is_sealed = learning::is_soul_sealed(&**&self.db).await.unwrap_or(false);
+        let mode = if is_sealed {
+            OperatingMode::Operational
+        } else {
+            OperatingMode::Learning
+        };
         Ok(Response::new(GetModeResponse {
-            mode: OperatingMode::Operational as i32,
-            soul_status: "sealed".to_string(),
+            mode: mode as i32,
+            soul_status: if is_sealed { "sealed" } else { "unsealed" }.to_string(),
         }))
     }
 
@@ -229,74 +274,116 @@ impl BrainService for BrainGrpcService {
 async fn handle_request(
     req: ConversationRequest,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
-    db: &Arc<WardsonClient>,
+    db: &Arc<WardsonDbClient>,
     session_mgr: &Arc<RwLock<SessionManager>>,
+    config_tz: &str,
 ) -> anyhow::Result<()> {
     match req.request_type {
         Some(conversation_request::RequestType::UserMessage(msg)) => {
+            // Get active session name
+            let session_name = {
+                let mgr = session_mgr.read().await;
+                mgr.active_session.clone().unwrap_or_else(|| "default".to_string())
+            };
+
+            // Load config for Brain
+            let config = config::load_config(db).await.unwrap_or_else(|_| config::SystemConfig {
+                name: "Embra".to_string(),
+                api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
+                timezone: config_tz.to_string(),
+                deployment_mode: "phase1".to_string(),
+                created_at: String::new(),
+                version: "0.2.0-phase1".to_string(),
+            });
+
+            if config.api_key.is_empty() {
+                let _ = tx.send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage {
+                            content: "No Anthropic API key configured. Set ANTHROPIC_API_KEY or run config wizard.".to_string(),
+                            msg_type: SystemMessageType::Error as i32,
+                        }
+                    )),
+                })).await;
+                return Ok(());
+            }
+
+            // Build system prompt
+            let system_prompt = if learning::is_soul_sealed(&**db).await.unwrap_or(false) {
+                // Operational mode — build full system prompt
+                let soul = learning::load_soul(&**db).await.ok().flatten()
+                    .map(|s| serde_json::to_string_pretty(&s).unwrap_or_default())
+                    .unwrap_or_default();
+                let user_profile = db.read("memory.user", "user").await.ok()
+                    .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
+                    .unwrap_or_default();
+                let identity = db.read("memory.identity", "identity").await.ok()
+                    .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
+                    .unwrap_or_default();
+                let session_context = format!("Session: {}, Timezone: {}", session_name, config.timezone);
+                crate::brain::operational_mode(
+                    &config.name, &soul, &identity, &user_profile, &session_context,
+                )
+            } else {
+                // Learning mode — use phase-specific prompt
+                "You are in Learning Mode. The system prompt will be set once the soul is defined.".to_string()
+            };
+
+            // Create Brain and send message
+            let brain = Brain::new(config.api_key.clone(), system_prompt);
+
+            // Load session history
+            let history = {
+                let mgr = session_mgr.read().await;
+                mgr.load_history(&session_name).await.unwrap_or_default()
+            };
+
+            // Add current message to history for the Brain call
+            let mut messages = history.clone();
+            messages.push(Message::user(&msg.content));
+
             // Send thinking indicator
             let _ = tx.send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::Thinking(
-                    ThinkingState { is_thinking: true, name: "Embra".to_string() }
+                    ThinkingState { is_thinking: true, name: config.name.clone() }
                 )),
             })).await;
 
-            // Create a channel for the Brain's SSE tokens
-            let (brain_tx, mut brain_rx) = mpsc::channel(100);
-
-            // Spawn Brain call
-            let brain_handle = {
-                let _db = db.clone();
-                let _session_mgr = session_mgr.clone();
-                let _input = msg.content.clone();
-                tokio::spawn(async move {
-                    // TODO: Wire up Phase 0 brain module here
-                    brain_tx.send(brain::StreamEvent::Done(
-                        "embra-brain Phase 1 stub ��� Brain not yet wired to Anthropic API".to_string()
-                    )).await.ok();
-                })
-            };
+            // Call Brain streaming
+            let mut brain_rx = brain.send_message_streaming(&messages).await
+                .map_err(|e| anyhow::anyhow!("Brain call failed: {}", e))?;
 
             // Stream Brain tokens to gRPC
+            let mut full_response = String::new();
+            let mut first_token = true;
             while let Some(event) = brain_rx.recv().await {
                 match event {
-                    brain::StreamEvent::Token(text) => {
-                        let _ = tx.send(Ok(ConversationResponse {
-                            response_type: Some(conversation_response::ResponseType::Thinking(
-                                ThinkingState { is_thinking: false, name: String::new() }
-                            )),
-                        })).await;
-
+                    StreamEvent::Token(text) => {
+                        if first_token {
+                            // Clear thinking on first token
+                            let _ = tx.send(Ok(ConversationResponse {
+                                response_type: Some(conversation_response::ResponseType::Thinking(
+                                    ThinkingState { is_thinking: false, name: String::new() }
+                                )),
+                            })).await;
+                            first_token = false;
+                        }
+                        full_response.push_str(&text);
                         let _ = tx.send(Ok(ConversationResponse {
                             response_type: Some(conversation_response::ResponseType::Token(
                                 StreamToken { text }
                             )),
                         })).await;
                     }
-                    brain::StreamEvent::Done(full_response) => {
+                    StreamEvent::Done(full) => {
+                        full_response = full;
                         let _ = tx.send(Ok(ConversationResponse {
                             response_type: Some(conversation_response::ResponseType::Done(
                                 StreamDone { full_response: full_response.clone() }
                             )),
                         })).await;
-
-                        // Check for tool tags in the response
-                        let tool_tags = tools::extract_tool_tags(&full_response);
-                        for tag in tool_tags {
-                            let result = tools::dispatch(&tag, db, session_mgr).await;
-                            let _ = tx.send(Ok(ConversationResponse {
-                                response_type: Some(conversation_response::ResponseType::Tool(
-                                    ToolExecution {
-                                        tool_name: tag.name.clone(),
-                                        input: tag.input.clone(),
-                                        result: result.output.clone(),
-                                        success: result.success,
-                                    }
-                                )),
-                            })).await;
-                        }
                     }
-                    brain::StreamEvent::Error(err) => {
+                    StreamEvent::Error(err) => {
                         let _ = tx.send(Ok(ConversationResponse {
                             response_type: Some(conversation_response::ResponseType::System(
                                 SystemMessage {
@@ -309,12 +396,86 @@ async fn handle_request(
                 }
             }
 
-            brain_handle.await?;
+            // Tool feedback loop — extract tags, dispatch, feed results back
+            let mut tool_results = String::new();
+            let tags = tools::extract_tool_tags(&full_response);
+            for tag in &tags {
+                if let Some(result) = tools::dispatch(tag, db, config_tz, &session_name).await {
+                    let _ = tx.send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::Tool(
+                            ToolExecution {
+                                tool_name: tag.clone(),
+                                input: String::new(),
+                                result: result.clone(),
+                                success: true,
+                            }
+                        )),
+                    })).await;
+                    tool_results.push_str(&result);
+                    tool_results.push('\n');
+                }
+            }
+
+            // Save to session history
+            {
+                let mgr = session_mgr.read().await;
+                let _ = mgr.append_message(&session_name, &Message::user(&msg.content)).await;
+                let _ = mgr.append_message(&session_name, &Message::assistant(&full_response)).await;
+            }
+
+            // If tools produced results, feed back to Brain for continuation
+            if !tool_results.is_empty() {
+                let feedback = format!("[SYSTEM] Tool results:\n{}", tool_results);
+                messages.push(Message::assistant(&full_response));
+                messages.push(Message::user(&feedback));
+
+                let mut brain_rx2 = brain.send_message_streaming(&messages).await
+                    .map_err(|e| anyhow::anyhow!("Brain continuation failed: {}", e))?;
+
+                let mut continuation = String::new();
+                while let Some(event) = brain_rx2.recv().await {
+                    match event {
+                        StreamEvent::Token(text) => {
+                            continuation.push_str(&text);
+                            let _ = tx.send(Ok(ConversationResponse {
+                                response_type: Some(conversation_response::ResponseType::Token(
+                                    StreamToken { text }
+                                )),
+                            })).await;
+                        }
+                        StreamEvent::Done(full) => {
+                            continuation = full;
+                            let _ = tx.send(Ok(ConversationResponse {
+                                response_type: Some(conversation_response::ResponseType::Done(
+                                    StreamDone { full_response: continuation.clone() }
+                                )),
+                            })).await;
+                        }
+                        StreamEvent::Error(err) => {
+                            let _ = tx.send(Ok(ConversationResponse {
+                                response_type: Some(conversation_response::ResponseType::System(
+                                    SystemMessage {
+                                        content: format!("Brain error: {}", err),
+                                        msg_type: SystemMessageType::Error as i32,
+                                    }
+                                )),
+                            })).await;
+                        }
+                    }
+                }
+
+                // Save continuation
+                {
+                    let mgr = session_mgr.read().await;
+                    let _ = mgr.append_message(&session_name, &Message::assistant(&continuation)).await;
+                }
+            }
+
             Ok(())
         }
 
         Some(conversation_request::RequestType::SlashCommand(cmd)) => {
-            let output = handle_slash_command(&cmd.command, &cmd.args).await;
+            let output = handle_slash_command(&cmd.command, &cmd.args, db, session_mgr, config_tz).await;
             let _ = tx.send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::System(
                     SystemMessage {
@@ -326,11 +487,24 @@ async fn handle_request(
             Ok(())
         }
 
-        Some(conversation_request::RequestType::SessionAttach(_attach)) => {
+        Some(conversation_request::RequestType::SessionAttach(attach)) => {
+            let session_name = if attach.session_name.is_empty() {
+                "default".to_string()
+            } else {
+                attach.session_name.clone()
+            };
+
+            // Ensure session exists
+            let mut mgr = session_mgr.write().await;
+            if !mgr.session_exists(&session_name).await.unwrap_or(false) {
+                let _ = mgr.create(&session_name).await;
+            }
+            mgr.active_session = Some(session_name.clone());
+
             let _ = tx.send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::System(
                     SystemMessage {
-                        content: "Session attached".to_string(),
+                        content: format!("Session '{}' attached", session_name),
                         msg_type: SystemMessageType::Reconnection as i32,
                     }
                 )),
@@ -342,10 +516,89 @@ async fn handle_request(
     }
 }
 
-async fn handle_slash_command(command: &str, _args: &str) -> String {
+async fn handle_slash_command(
+    command: &str,
+    args: &str,
+    db: &Arc<WardsonDbClient>,
+    session_mgr: &Arc<RwLock<SessionManager>>,
+    config_tz: &str,
+) -> String {
     match command {
-        "/help" => "Available commands: /sessions, /switch <n>, /new <n>, /close, /status, /soul, /identity, /mode, /help".to_string(),
-        "/status" => "TODO: system_status".to_string(),
+        "/help" => "Available commands: /sessions, /switch <name>, /new <name>, /close, /status, /soul, /identity, /mode, /help".to_string(),
+        "/status" => {
+            let status = tools::system_status(db).await;
+            serde_json::to_string_pretty(&status).unwrap_or_else(|_| "Failed to get status".to_string())
+        }
+        "/sessions" => {
+            let mgr = session_mgr.read().await;
+            match mgr.list().await {
+                Ok(sessions) => {
+                    if sessions.is_empty() {
+                        "No sessions.".to_string()
+                    } else {
+                        sessions.iter().map(|s| {
+                            format!("  {} [{:?}] last active: {}", s.name, s.state, s.last_active.format("%Y-%m-%d %H:%M"))
+                        }).collect::<Vec<_>>().join("\n")
+                    }
+                }
+                Err(e) => format!("Error listing sessions: {}", e),
+            }
+        }
+        "/new" => {
+            if args.is_empty() {
+                "Usage: /new <session-name>".to_string()
+            } else {
+                let mut mgr = session_mgr.write().await;
+                match mgr.create(args).await {
+                    Ok(s) => {
+                        mgr.active_session = Some(s.name.clone());
+                        format!("Created and switched to session '{}'", s.name)
+                    }
+                    Err(e) => format!("Error creating session: {}", e),
+                }
+            }
+        }
+        "/switch" => {
+            if args.is_empty() {
+                "Usage: /switch <session-name>".to_string()
+            } else {
+                let mut mgr = session_mgr.write().await;
+                if mgr.session_exists(args).await.unwrap_or(false) {
+                    let _ = mgr.reattach(args).await;
+                    mgr.active_session = Some(args.to_string());
+                    format!("Switched to session '{}'", args)
+                } else {
+                    format!("Session '{}' does not exist", args)
+                }
+            }
+        }
+        "/close" => {
+            let mut mgr = session_mgr.write().await;
+            if let Some(ref name) = mgr.active_session.clone() {
+                let _ = mgr.close(name).await;
+                mgr.active_session = None;
+                format!("Closed session '{}'", name)
+            } else {
+                "No active session".to_string()
+            }
+        }
+        "/soul" => {
+            match learning::load_soul(&**db).await {
+                Ok(Some(soul)) => serde_json::to_string_pretty(&soul).unwrap_or_default(),
+                Ok(None) => "No soul sealed yet.".to_string(),
+                Err(e) => format!("Error loading soul: {}", e),
+            }
+        }
+        "/identity" => {
+            match db.read("memory.identity", "identity").await {
+                Ok(doc) => serde_json::to_string_pretty(&doc).unwrap_or_default(),
+                Err(_) => "No identity document found.".to_string(),
+            }
+        }
+        "/mode" => {
+            let sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
+            if sealed { "Operational (soul sealed)".to_string() } else { "Learning (soul not sealed)".to_string() }
+        }
         _ => format!("Unknown command: {}. Type /help for available commands.", command),
     }
 }

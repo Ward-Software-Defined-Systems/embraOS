@@ -24,3 +24,7 @@ mkdir -p "${TARGET_DIR}/sys"
 # Required for embra-brain to reach api.anthropic.com
 mkdir -p "${TARGET_DIR}/etc"
 echo "nameserver 10.0.2.3" > "${TARGET_DIR}/etc/resolv.conf"
+
+# Workspace directory for git/file tool operations (writable, on DATA partition)
+# This is a placeholder — in production, embrad creates this as a bind mount from DATA
+mkdir -p "${TARGET_DIR}/embra/workspace/repos"
