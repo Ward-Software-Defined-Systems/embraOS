@@ -224,11 +224,19 @@ impl Supervisor {
             cmd.env(key, val);
         }
         // embra-console gets direct access to the serial console (stdin/stdout/stderr)
+        // embra-brain also logs to console temporarily for debugging
         // All other services log to ephemeral directory
         if svc.def.name == "embra-console" {
             cmd.stdin(Stdio::inherit());
             cmd.stdout(Stdio::inherit());
             cmd.stderr(Stdio::inherit());
+        } else if svc.def.name == "embra-brain" {
+            // Temporarily log brain to both file and console for debugging
+            let log_path = format!("/embra/ephemeral/{}.log", svc.def.name);
+            let log_file = std::fs::File::create(&log_path)
+                .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+            cmd.stdout(Stdio::from(log_file));
+            cmd.stderr(Stdio::inherit()); // Brain errors visible on serial
         } else {
             let log_path = format!("/embra/ephemeral/{}.log", svc.def.name);
             let log_file = std::fs::File::create(&log_path)
