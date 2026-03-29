@@ -22,6 +22,9 @@ BR2_INIT_NONE=y
 # No default /etc skeleton
 BR2_ROOTFS_SKELETON_DEFAULT=y
 
+# Rootfs overlay (resolv.conf, mount points, workspace dir)
+BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_EMBRAOS_PATH)/board/embraos/rootfs_overlay"
+
 # Post-build and post-image scripts
 BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_EMBRAOS_PATH)/board/embraos/post_build.sh"
 BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_EMBRAOS_PATH)/board/embraos/post_image.sh"
