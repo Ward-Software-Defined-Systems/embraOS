@@ -32,7 +32,7 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn boot() -> Result<(), Box<dyn std::error::Error>> {
-    use nix::mount::{mount, umount2, MsFlags, MntFlags};
+    use nix::mount::{mount, MsFlags};
     use nix::unistd::{chdir, execv};
     use std::ffi::CString;
     use std::path::Path;
@@ -120,16 +120,15 @@ fn boot() -> Result<(), Box<dyn std::error::Error>> {
     mount(Some("/sys"), new_sys.as_str(), None::<&str>, MsFlags::MS_MOVE, None::<&str>)?;
     mount(Some("/dev"), new_dev.as_str(), None::<&str>, MsFlags::MS_MOVE, None::<&str>)?;
 
-    // Step 7: pivot_root
-    eprintln!("[embra-init] Pivoting root to {}", NEWROOT);
-    let old_root = format!("{}/mnt/initramfs", NEWROOT);
-    std::fs::create_dir_all(&old_root)?;
-
-    nix::unistd::pivot_root(NEWROOT, old_root.as_str())?;
+    // Step 7: Switch root
+    // pivot_root fails with EINVAL from initramfs (rootfs). The standard
+    // approach is to chdir to the new root, mount --move it to /, chroot,
+    // then exec init. This is what busybox switch_root does.
+    eprintln!("[embra-init] Switching root to {}", NEWROOT);
+    chdir(NEWROOT)?;
+    mount(Some("."), "/", None::<&str>, MsFlags::MS_MOVE, None::<&str>)?;
+    nix::unistd::chroot(".")?;
     chdir("/")?;
-
-    // Unmount old root
-    let _ = umount2("/mnt/initramfs", MntFlags::MNT_DETACH);
 
     // Step 8: exec embrad
     eprintln!("[embra-init] Executing /sbin/embrad");
