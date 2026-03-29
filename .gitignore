@@ -37,7 +37,8 @@ output/
 initramfs.cpio.gz
 buildroot-src/
 
-# Cargo
+# Cargo (linker config is per-machine, lives in ~/.cargo/config.toml)
+.cargo/
 
 # Claude Code
 .claude/

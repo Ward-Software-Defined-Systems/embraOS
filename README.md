@@ -48,9 +48,8 @@ git clone https://github.com/Ward-Software-Defined-Systems/embraOS.git
 cd embraOS
 git checkout phase1-arch-rework
 
-# Configure musl linker
-mkdir -p .cargo
-cat > .cargo/config.toml << 'EOF'
+# Configure musl linker (per-machine, only needed once)
+cat >> ~/.cargo/config.toml << 'EOF'
 [target.x86_64-unknown-linux-musl]
 linker = "musl-gcc"
 EOF
@@ -96,9 +95,8 @@ git clone https://github.com/Ward-Software-Defined-Systems/embraOS.git
 cd embraOS
 git checkout phase1-arch-rework
 
-# Configure musl-cross linker (adjust path if Homebrew prefix differs)
-mkdir -p .cargo
-cat > .cargo/config.toml << 'EOF'
+# Configure musl-cross linker (per-machine, only needed once — adjust path if Homebrew prefix differs)
+cat >> ~/.cargo/config.toml << 'EOF'
 [target.x86_64-unknown-linux-musl]
 linker = "/usr/local/Cellar/musl-cross/0.9.11/libexec/bin/x86_64-linux-musl-gcc"
 EOF
