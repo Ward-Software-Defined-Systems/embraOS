@@ -32,6 +32,11 @@ data/
 *.db
 *.log
 
+# Build outputs (disk images, initramfs, Buildroot)
+output/
+initramfs.cpio.gz
+buildroot-src/
+
 # Cargo
 
 # Claude Code

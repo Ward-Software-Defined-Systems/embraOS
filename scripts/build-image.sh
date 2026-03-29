@@ -1,31 +1,68 @@
 #!/bin/bash
 # Full build: Rust binaries → initramfs → Buildroot → disk image
+#
+# NOTE: Steps 1-3 (Rust cross-compilation + initramfs) work on macOS.
+#       Step 4 (Buildroot) requires a Linux host. On macOS, use Docker:
+#
+#   docker run --rm -v "$PWD":/work -w /work ubuntu:24.04 bash -c \
+#     "apt-get update && apt-get install -y build-essential gcc g++ \
+#      unzip bc cpio rsync wget python3 file && \
+#      ./scripts/build-image.sh --buildroot-only"
 
 set -euo pipefail
 
-echo "=== Step 1: Build Rust binaries (musl static) ==="
-rustup target add x86_64-unknown-linux-musl
+# macOS-compatible nproc
+nproc_compat() {
+    if command -v nproc &>/dev/null; then
+        nproc
+    else
+        sysctl -n hw.ncpu
+    fi
+}
 
-# Build all workspace binaries
-cargo build --release --target x86_64-unknown-linux-musl
-
-echo "=== Step 2: Build WardSONDB (from separate repo) ==="
-# Assumes WardSONDB is at ../WardSONDB or specified by WARDSONDB_DIR
-WARDSONDB_DIR="${WARDSONDB_DIR:-../WardSONDB}"
-if [ -d "$WARDSONDB_DIR" ]; then
-    (cd "$WARDSONDB_DIR" && cargo build --release --target x86_64-unknown-linux-musl)
-    cp "$WARDSONDB_DIR/target/x86_64-unknown-linux-musl/release/wardsondb" \
-       target/x86_64-unknown-linux-musl/release/wardsondb
-else
-    echo "WARNING: WardSONDB directory not found at $WARDSONDB_DIR"
-    echo "Set WARDSONDB_DIR to the WardSONDB repository path"
+BUILDROOT_ONLY=false
+if [ "${1:-}" = "--buildroot-only" ]; then
+    BUILDROOT_ONLY=true
+    shift
 fi
 
-echo "=== Step 3: Create initramfs ==="
-./scripts/create_initramfs.sh
+if [ "$BUILDROOT_ONLY" = false ]; then
+    echo "=== Step 1: Build Rust binaries (musl static) ==="
+    rustup target add x86_64-unknown-linux-musl
+    cargo build --release --target x86_64-unknown-linux-musl
+
+    echo "=== Step 2: Build WardSONDB (from separate repo) ==="
+    WARDSONDB_DIR="${WARDSONDB_DIR:-../WardSONDB}"
+    if [ -d "$WARDSONDB_DIR" ]; then
+        (cd "$WARDSONDB_DIR" && cargo build --release --target x86_64-unknown-linux-musl)
+        cp "$WARDSONDB_DIR/target/x86_64-unknown-linux-musl/release/wardsondb" \
+           target/x86_64-unknown-linux-musl/release/wardsondb
+    else
+        echo "WARNING: WardSONDB directory not found at $WARDSONDB_DIR"
+        echo "Set WARDSONDB_DIR to the WardSONDB repository path"
+    fi
+
+    echo "=== Step 3: Create initramfs ==="
+    ./scripts/create_initramfs.sh
+fi
 
 echo "=== Step 4: Buildroot ==="
-# Clone Buildroot if not present
+# Buildroot requires a Linux host (compiles Linux kernel, uses Linux-specific tools)
+if [ "$(uname)" = "Darwin" ]; then
+    echo "ERROR: Buildroot cannot build natively on macOS."
+    echo ""
+    echo "Steps 1-3 (Rust cross-compilation + initramfs) completed successfully."
+    echo "To build the disk image, run Buildroot in Docker:"
+    echo ""
+    echo "  docker run --rm -v \"\$PWD\":/work -w /work ubuntu:24.04 bash -c \\"
+    echo "    \"apt-get update && apt-get install -y build-essential gcc g++ \\"
+    echo "     unzip bc cpio rsync wget python3 file && \\"
+    echo "     ./scripts/build-image.sh --buildroot-only\""
+    echo ""
+    echo "Or run this script on a Linux machine."
+    exit 1
+fi
+
 BUILDROOT_DIR="${BUILDROOT_DIR:-buildroot-src}"
 if [ ! -d "$BUILDROOT_DIR" ]; then
     git clone https://github.com/buildroot/buildroot.git "$BUILDROOT_DIR"
@@ -35,7 +72,7 @@ fi
 # Configure and build
 (cd "$BUILDROOT_DIR" && \
     make BR2_EXTERNAL="$(pwd)/../buildroot" embraos_x86_64_defconfig && \
-    make -j$(nproc))
+    make -j$(nproc_compat))
 
 echo "=== Step 5: Copy outputs ==="
 mkdir -p output/images

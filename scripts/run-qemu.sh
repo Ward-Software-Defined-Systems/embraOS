@@ -1,5 +1,5 @@
 #!/bin/bash
-# Launch embraOS in QEMU on macOS (HVF acceleration)
+# Launch embraOS in QEMU with hardware acceleration (auto-detected)
 
 set -euo pipefail
 
@@ -13,16 +13,22 @@ if [ ! -f "$IMAGE" ]; then
     exit 1
 fi
 
-# Detect macOS HVF support
+# Auto-detect best acceleration
 ACCEL=""
+ACCEL_NAME="none (TCG software emulation)"
 if [ "$(uname)" = "Darwin" ]; then
     ACCEL="-accel hvf"
+    ACCEL_NAME="HVF (macOS)"
+elif [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+    ACCEL="-accel kvm"
+    ACCEL_NAME="KVM (Linux)"
 fi
 
 echo "Starting embraOS in QEMU..."
 echo "  Image: $IMAGE"
 echo "  Memory: $MEMORY"
 echo "  CPUs: $CPUS"
+echo "  Acceleration: $ACCEL_NAME"
 echo "  Serial console: this terminal"
 echo "  Port forwards: 50000→50000 (gRPC), 8443→8443 (REST)"
 echo ""
