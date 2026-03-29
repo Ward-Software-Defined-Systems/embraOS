@@ -3,15 +3,42 @@
 
 set -euo pipefail
 
-IMAGE="${1:-output/images/embraos.img}"
-MEMORY="2G"
-CPUS="2"
-
-if [ ! -f "$IMAGE" ]; then
-    echo "ERROR: Image not found: $IMAGE"
+# Find image — check buildroot output first (always freshest), then output/images
+if [ -n "${1:-}" ]; then
+    IMAGE="$1"
+elif [ -f "buildroot-src/output/images/embraos.img" ]; then
+    IMAGE="buildroot-src/output/images/embraos.img"
+elif [ -f "output/images/embraos.img" ]; then
+    IMAGE="output/images/embraos.img"
+else
+    echo "ERROR: No disk image found."
     echo "Build it first with: ./scripts/build-image.sh"
     exit 1
 fi
+
+# Find kernel and initramfs alongside the image
+IMAGE_DIR="$(dirname "$IMAGE")"
+KERNEL="${IMAGE_DIR}/bzImage"
+if [ ! -f "$KERNEL" ]; then
+    # Fall back to other known locations
+    for k in buildroot-src/output/images/bzImage output/images/bzImage; do
+        if [ -f "$k" ]; then KERNEL="$k"; break; fi
+    done
+fi
+
+INITRD="initramfs.cpio.gz"
+if [ ! -f "$INITRD" ]; then
+    echo "ERROR: initramfs.cpio.gz not found. Run ./scripts/create_initramfs.sh first."
+    exit 1
+fi
+
+if [ ! -f "$KERNEL" ]; then
+    echo "ERROR: bzImage not found. Build with ./scripts/build-image.sh first."
+    exit 1
+fi
+
+MEMORY="2G"
+CPUS="2"
 
 # Auto-detect best acceleration
 ACCEL=""
@@ -26,6 +53,8 @@ fi
 
 echo "Starting embraOS in QEMU..."
 echo "  Image: $IMAGE"
+echo "  Kernel: $KERNEL"
+echo "  Initrd: $INITRD"
 echo "  Memory: $MEMORY"
 echo "  CPUs: $CPUS"
 echo "  Acceleration: $ACCEL_NAME"
@@ -40,8 +69,8 @@ qemu-system-x86_64 \
     -m "$MEMORY" \
     -smp "$CPUS" \
     -drive file="$IMAGE",format=raw,if=virtio \
-    -kernel output/images/bzImage \
-    -initrd initramfs.cpio.gz \
+    -kernel "$KERNEL" \
+    -initrd "$INITRD" \
     -append "console=ttyS0 root=/dev/vda2 ro quiet" \
     -nographic \
     -serial mon:stdio \
