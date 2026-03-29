@@ -34,7 +34,7 @@ Phase 1 builds a QEMU-bootable x86_64 disk image with an immutable SquashFS root
 # Install dependencies
 sudo apt-get update && sudo apt-get install -y \
   build-essential gcc g++ unzip bc cpio rsync wget python3 file \
-  protobuf-compiler musl-tools qemu-system-x86
+  protobuf-compiler musl-tools qemu-system-x86 libelf-dev libssl-dev
 
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
@@ -54,6 +54,14 @@ cat > .cargo/config.toml << 'EOF'
 [target.x86_64-unknown-linux-musl]
 linker = "musl-gcc"
 EOF
+
+# Build WardSONDB (separate repo, required dependency)
+cd ..
+git clone https://github.com/Ward-Software-Defined-Systems/wardsondb.git WardSONDB
+cd WardSONDB
+cargo build --release --target x86_64-unknown-linux-musl
+cp target/x86_64-unknown-linux-musl/release/wardsondb ../embraOS/target/x86_64-unknown-linux-musl/release/
+cd ../embraOS
 ```
 
 ```bash
