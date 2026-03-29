@@ -19,3 +19,8 @@ mkdir -p "${TARGET_DIR}/run"
 mkdir -p "${TARGET_DIR}/dev"
 mkdir -p "${TARGET_DIR}/proc"
 mkdir -p "${TARGET_DIR}/sys"
+
+# DNS resolution — QEMU SLIRP provides DNS at 10.0.2.3
+# Required for embra-brain to reach api.anthropic.com
+mkdir -p "${TARGET_DIR}/etc"
+echo "nameserver 10.0.2.3" > "${TARGET_DIR}/etc/resolv.conf"
