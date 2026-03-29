@@ -60,6 +60,8 @@ async fn main() -> Result<()> {
     supervisor.start_all().await.map_err(|e| {
         error!("Service startup failed: {}", e);
         if pid == 1 {
+            // Give tracing time to flush to serial before halting
+            std::thread::sleep(std::time::Duration::from_secs(2));
             halt_system("Service startup failure");
         }
         e
