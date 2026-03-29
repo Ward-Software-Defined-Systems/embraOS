@@ -271,11 +271,28 @@ impl Supervisor {
 
         // Wait for health check
         if let Err(e) = self.wait_for_health(index).await {
+            let name = self.services[index].def.name.clone();
             // Dump the service log for debugging
-            let log_path = format!("/embra/ephemeral/{}.log", self.services[index].def.name);
-            if let Ok(log_content) = std::fs::read_to_string(&log_path) {
-                let tail: String = log_content.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
-                error!("{} log tail:\n{}", self.services[index].def.name, tail);
+            let log_path = format!("/embra/ephemeral/{}.log", name);
+            match std::fs::read_to_string(&log_path) {
+                Ok(log_content) if !log_content.is_empty() => {
+                    let tail: String = log_content.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+                    error!("{} log tail:\n{}", name, tail);
+                }
+                Ok(_) => {
+                    error!("{} log file is empty — service produced no output", name);
+                }
+                Err(log_err) => {
+                    error!("{} could not read log file {}: {}", name, log_path, log_err);
+                }
+            }
+            // Also check if process is still alive
+            if let Some(ref mut child) = self.services[index].child {
+                match child.try_wait() {
+                    Ok(Some(status)) => error!("{} process exited with: {:?}", name, status),
+                    Ok(None) => error!("{} process is still running but not responding on health endpoint", name),
+                    Err(e2) => error!("{} could not check process status: {}", name, e2),
+                }
             }
             return Err(e);
         }
