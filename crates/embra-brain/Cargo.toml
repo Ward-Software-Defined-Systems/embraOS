@@ -21,8 +21,11 @@ chrono-tz = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 meval = "0.2"
-uuid = { version = "1", features = ["v7"] }
+uuid = { version = "1", features = ["v4"] }
 tokio-stream = "0.1"
+futures = "0.3"
+futures-util = "0.3"
+libc = "0.2"
 
 [build-dependencies]
 tonic-build = { workspace = true }

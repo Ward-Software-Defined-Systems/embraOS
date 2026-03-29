@@ -18,6 +18,11 @@ chrono = { workspace = true }
 chrono-tz = { workspace = true }
 unicode-width = "0.2"
 tokio-stream = "0.1"
+futures = "0.3"
+futures-util = "0.3"
+serde = { workspace = true }
+serde_json = { workspace = true }
+libc = "0.2"
 
 [build-dependencies]
 tonic-build = { workspace = true }
