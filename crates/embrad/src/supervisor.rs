@@ -143,13 +143,23 @@ impl Supervisor {
         });
 
         // 4. embra-brain — depends on wardsondb, embra-apid
+        // API key: read from /embra/state/api_key file or ANTHROPIC_API_KEY env
+        let api_key = std::fs::read_to_string("/embra/state/api_key")
+            .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
+            .unwrap_or_default()
+            .trim().to_string();
+        let mut brain_args = vec![
+            "--port".to_string(), "50002".to_string(),
+            "--wardsondb-url".to_string(), "http://127.0.0.1:8090".to_string(),
+        ];
+        if !api_key.is_empty() {
+            brain_args.push("--api-key".to_string());
+            brain_args.push(api_key);
+        }
         self.add_service(ServiceDef {
             name: "embra-brain".to_string(),
             binary: "/usr/bin/embra-brain".to_string(),
-            args: vec![
-                "--port".to_string(), "50002".to_string(),
-                "--wardsondb-url".to_string(), "http://127.0.0.1:8090".to_string(),
-            ],
+            args: brain_args,
             env: vec![],
             health_check: HealthCheck::Grpc {
                 port: 50002,

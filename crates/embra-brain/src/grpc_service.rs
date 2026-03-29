@@ -25,6 +25,7 @@ pub struct BrainGrpcService {
     db: Arc<WardsonDbClient>,
     session_manager: Arc<RwLock<SessionManager>>,
     config_tz: String,
+    api_key: String,
     proactive_rx: Arc<Mutex<mpsc::Receiver<Notification>>>,
     start_time: std::time::Instant,
 }
@@ -33,6 +34,7 @@ impl BrainGrpcService {
     pub fn new(
         db: WardsonDbClient,
         config_tz: String,
+        api_key: String,
         proactive_rx: mpsc::Receiver<Notification>,
     ) -> Self {
         let db = Arc::new(db);
@@ -44,6 +46,7 @@ impl BrainGrpcService {
             db,
             session_manager,
             config_tz,
+            api_key,
             proactive_rx: Arc::new(Mutex::new(proactive_rx)),
             start_time: std::time::Instant::now(),
         }
@@ -65,6 +68,7 @@ impl BrainService for BrainGrpcService {
         let db = self.db.clone();
         let session_mgr = self.session_manager.clone();
         let config_tz = self.config_tz.clone();
+        let api_key = self.api_key.clone();
         let proactive_rx = self.proactive_rx.clone();
 
         tokio::spawn(async move {
@@ -77,7 +81,7 @@ impl BrainService for BrainGrpcService {
                         match msg {
                             Some(Ok(req)) => {
                                 if let Err(e) = handle_request(
-                                    req, &tx, &db, &session_mgr, &config_tz
+                                    req, &tx, &db, &session_mgr, &config_tz, &api_key
                                 ).await {
                                     error!("Error handling request: {}", e);
                                     let _ = tx.send(Ok(ConversationResponse {
@@ -277,6 +281,7 @@ async fn handle_request(
     db: &Arc<WardsonDbClient>,
     session_mgr: &Arc<RwLock<SessionManager>>,
     config_tz: &str,
+    api_key: &str,
 ) -> anyhow::Result<()> {
     match req.request_type {
         Some(conversation_request::RequestType::UserMessage(msg)) => {
@@ -286,17 +291,12 @@ async fn handle_request(
                 mgr.active_session.clone().unwrap_or_else(|| "default".to_string())
             };
 
-            // Load config for Brain
-            let config = config::load_config(db).await.unwrap_or_else(|_| config::SystemConfig {
-                name: "Embra".to_string(),
-                api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
-                timezone: config_tz.to_string(),
-                deployment_mode: "phase1".to_string(),
-                created_at: String::new(),
-                version: "0.2.0-phase1".to_string(),
-            });
+            // Load config — api_key comes from --api-key flag or env, not WardSONDB
+            let config_name = config::load_config(db).await
+                .map(|c| c.name)
+                .unwrap_or_else(|_| "Embra".to_string());
 
-            if config.api_key.is_empty() {
+            if api_key.is_empty() {
                 let _ = tx.send(Ok(ConversationResponse {
                     response_type: Some(conversation_response::ResponseType::System(
                         SystemMessage {
@@ -320,9 +320,9 @@ async fn handle_request(
                 let identity = db.read("memory.identity", "identity").await.ok()
                     .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
                     .unwrap_or_default();
-                let session_context = format!("Session: {}, Timezone: {}", session_name, config.timezone);
+                let session_context = format!("Session: {}, Timezone: {}", session_name, config_tz);
                 crate::brain::operational_mode(
-                    &config.name, &soul, &identity, &user_profile, &session_context,
+                    &config_name, &soul, &identity, &user_profile, &session_context,
                 )
             } else {
                 // Learning mode — use phase-specific prompt
@@ -330,7 +330,7 @@ async fn handle_request(
             };
 
             // Create Brain and send message
-            let brain = Brain::new(config.api_key.clone(), system_prompt);
+            let brain = Brain::new(api_key.to_string(), system_prompt);
 
             // Load session history
             let history = {
@@ -345,7 +345,7 @@ async fn handle_request(
             // Send thinking indicator
             let _ = tx.send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::Thinking(
-                    ThinkingState { is_thinking: true, name: config.name.clone() }
+                    ThinkingState { is_thinking: true, name: config_name.clone() }
                 )),
             })).await;
 

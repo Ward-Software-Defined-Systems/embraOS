@@ -25,7 +25,7 @@ use grpc_service::BrainGrpcService;
 
 use embra_common::proto::brain::brain_service_server::BrainServiceServer;
 use tonic::transport::Server;
-use tracing::info;
+use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -35,14 +35,26 @@ async fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().collect();
     let mut port = 50002u16;
     let mut wardsondb_url = "http://127.0.0.1:8090".to_string();
+    let mut api_key: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--port" => { port = args[i+1].parse().expect("Invalid port"); i += 2; }
             "--wardsondb-url" => { wardsondb_url = args[i+1].clone(); i += 2; }
+            "--api-key" => { api_key = Some(args[i+1].clone()); i += 2; }
             _ => { i += 1; }
         }
+    }
+
+    // API key: --api-key flag > ANTHROPIC_API_KEY env var > WardSONDB config
+    let api_key = api_key
+        .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+        .unwrap_or_default();
+    if api_key.is_empty() {
+        warn!("No API key provided (--api-key or ANTHROPIC_API_KEY). Brain calls will fail until config wizard runs.");
+    } else {
+        info!("API key configured ({}...)", &api_key[..std::cmp::min(10, api_key.len())]);
     }
 
     info!("embra-brain starting on port {}", port);
@@ -81,7 +93,7 @@ async fn main() -> anyhow::Result<()> {
     let proactive_rx = proactive::start_proactive_engine(&db, &config_tz);
 
     // Create the gRPC service
-    let service = BrainGrpcService::new(db, config_tz, proactive_rx);
+    let service = BrainGrpcService::new(db, config_tz, api_key, proactive_rx);
 
     let addr = format!("0.0.0.0:{}", port).parse()?;
     info!("embra-brain listening on {}", addr);
