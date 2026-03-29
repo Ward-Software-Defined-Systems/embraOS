@@ -230,6 +230,40 @@ impl Supervisor {
 
         info!("Spawned {} (pid={:?})", svc.def.name, pid);
 
+        // Give the process a moment to start (or crash)
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        // Check if it already exited (crash on startup)
+        if let Some(ref mut child) = svc.child {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    // Read stderr for error details
+                    let stderr_output = if let Some(stderr) = child.stderr.take() {
+                        use tokio::io::AsyncReadExt;
+                        let mut buf = Vec::new();
+                        let mut reader = tokio::io::BufReader::new(stderr);
+                        let _ = reader.read_to_end(&mut buf).await;
+                        String::from_utf8_lossy(&buf).to_string()
+                    } else {
+                        String::new()
+                    };
+                    let msg = format!("{} exited immediately with status: {:?}", svc.def.name, status);
+                    if !stderr_output.is_empty() {
+                        error!("{}\nstderr: {}", msg, stderr_output);
+                    } else {
+                        error!("{}", msg);
+                    }
+                    svc.status = ServiceStatus::Failed(msg.clone());
+                    svc.child = None;
+                    return Err(anyhow::anyhow!(msg));
+                }
+                Ok(None) => {} // Still running, good
+                Err(e) => {
+                    warn!("Could not check {} status: {}", svc.def.name, e);
+                }
+            }
+        }
+
         // Wait for health check
         self.wait_for_health(index).await?;
 
