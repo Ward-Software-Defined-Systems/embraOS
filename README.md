@@ -69,12 +69,21 @@ cd ../embraOS
 ./scripts/run-qemu.sh                       # Boot in QEMU with serial console
 ```
 
-On first boot, embrad starts all services, detects no soul, and enters Learning Mode. You'll be guided through naming the intelligence, forming its identity, and defining its soul.
+On first boot, the Config Wizard runs — name your intelligence, enter your Anthropic API key, set your timezone. After setup, you're in a full TUI conversation with styled text, thinking indicators, and tool execution.
+
+> **Terminal Size:** The TUI automatically inherits your SSH terminal size via the QEMU kernel command line. For best results, maximize your terminal before running `run-qemu.sh`. The size is detected once at boot — resizing the terminal after launch won't update the TUI layout.
+
+> **Clean First Boot:** To reset and trigger the Config Wizard again (e.g., to change API key):
+> ```bash
+> LOOPDEV=$(sudo losetup --find --show --partscan buildroot-src/output/images/embraos.img)
+> sudo mkfs.ext4 -L STATE "${LOOPDEV}p3"
+> sudo mkfs.ext4 -L DATA "${LOOPDEV}p4"
+> sudo losetup -d "$LOOPDEV"
+> ```
 
 > **Port Forwarding:** QEMU forwards ports 50000 (gRPC) and 8443 (REST) to the host. Test with:
 > ```bash
 > curl http://localhost:8443/health
-> grpcurl -plaintext localhost:50000 embra.apid.EmbraAPI/HealthCheck
 > ```
 
 #### macOS (Cross-Compilation Only)
