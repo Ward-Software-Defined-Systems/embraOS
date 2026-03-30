@@ -170,12 +170,23 @@ impl Supervisor {
         });
 
         // 5. embra-console — depends on embra-brain
+        // Detect terminal size before embra-console takes over
+        let (term_cols, term_rows) = unsafe {
+            let mut ws: libc::winsize = std::mem::zeroed();
+            if libc::ioctl(0, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
+                (ws.ws_col, ws.ws_row)
+            } else {
+                (80u16, 24u16)
+            }
+        };
         self.add_service(ServiceDef {
             name: "embra-console".to_string(),
             binary: "/usr/bin/embra-console".to_string(),
             args: vec![
                 "--apid-addr".to_string(), "http://127.0.0.1:50000".to_string(),
                 "--device".to_string(), "/dev/ttyS0".to_string(),
+                "--columns".to_string(), term_cols.to_string(),
+                "--rows".to_string(), term_rows.to_string(),
             ],
             env: vec![],
             health_check: HealthCheck::ProcessAlive,
