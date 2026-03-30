@@ -81,14 +81,13 @@ impl SoulVerifier {
         // Extract the "soul" field — hash only the soul content, not metadata
         let soul_content = &soul_json["soul"];
 
-        // Canonical JSON: sorted keys, no extra whitespace
-        // This matches Phase 0's approach in soul hash verification
-        let canonical = serde_json::to_string(soul_content)
+        // Use to_string_pretty to match embra-brain's seal_soul() serialization
+        let canonical = serde_json::to_string_pretty(soul_content)
             .unwrap_or_default();
 
         let mut hasher = Sha256::new();
         hasher.update(canonical.as_bytes());
-        hex::encode(hasher.finalize())
+        format!("{:x}", hasher.finalize())
     }
 
     fn read_stored_hash(&self) -> Result<String> {
