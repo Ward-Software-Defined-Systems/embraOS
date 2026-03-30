@@ -69,6 +69,13 @@ if [ ! -d "$BUILDROOT_DIR" ]; then
     (cd "$BUILDROOT_DIR" && git checkout 2024.02)  # Use a stable release
 fi
 
+# Clean stale Buildroot package caches so fresh binaries are picked up
+(cd "$BUILDROOT_DIR" && \
+    for pkg in embrad embra-apid embra-trustd embra-brain embra-console wardsondb; do
+        make "${pkg}-dirclean" 2>/dev/null || true
+    done && \
+    rm -f output/images/rootfs.squashfs output/images/embraos.img)
+
 # Configure and build
 (cd "$BUILDROOT_DIR" && \
     make BR2_EXTERNAL="$(pwd)/../buildroot" embraos_x86_64_defconfig && \
