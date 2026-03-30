@@ -69,6 +69,14 @@ async fn main() -> Result<()> {
 
     info!("All services started. Entering reconciliation loop.");
 
+    // Redirect embrad's own stderr to a log file now that embra-console owns the terminal
+    if pid == 1 {
+        if let Ok(log) = std::fs::File::create("/embra/ephemeral/embrad.log") {
+            use std::os::unix::io::AsRawFd;
+            unsafe { libc::dup2(log.as_raw_fd(), 2); } // stderr = fd 2
+        }
+    }
+
     // Step 4: Reconciliation loop (runs forever)
     reconcile::run(&mut supervisor).await;
 
