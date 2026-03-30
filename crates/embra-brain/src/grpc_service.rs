@@ -127,10 +127,36 @@ impl BrainService for BrainGrpcService {
                 }
             }
 
+            // Stage 2: Learning Mode (if soul not sealed)
+            let soul_sealed = learning::is_soul_sealed(&**&db).await.unwrap_or(false);
+            if !soul_sealed {
+                info!("Soul not sealed — entering Learning Mode");
+                let loaded_config = config::load_config(&**&db).await.unwrap_or_else(|_| config::SystemConfig {
+                    name: "Embra".to_string(),
+                    api_key: api_key.clone(),
+                    timezone: config_tz.clone(),
+                    deployment_mode: "phase1".into(),
+                    created_at: String::new(),
+                    version: env!("CARGO_PKG_VERSION").into(),
+                });
+                match run_learning_loop(&tx, &mut incoming, &db, &loaded_config, &api_key).await {
+                    Ok(()) => {
+                        info!("Learning Mode complete — transitioning to Operational");
+                        // Reload config in case it was updated
+                        if let Ok(cfg) = config::load_config(&**&db).await {
+                            config_tz = cfg.timezone;
+                        }
+                    }
+                    Err(e) => {
+                        error!("Learning Mode failed: {}", e);
+                    }
+                }
+            }
+
             // Try to get proactive notifications (only one Converse stream gets them)
             let mut proactive = proactive_rx.try_lock().ok();
 
-            // Main conversation loop
+            // Stage 3: Main conversation loop (Operational mode)
             loop {
                 tokio::select! {
                     msg = incoming.next() => {
@@ -657,5 +683,267 @@ async fn handle_slash_command(
             if sealed { "Operational (soul sealed)".to_string() } else { "Learning (soul not sealed)".to_string() }
         }
         _ => format!("Unknown command: {}. Type /help for available commands.", command),
+    }
+}
+
+/// Drive the 6-phase Learning Mode over gRPC.
+/// Creates LearningState, runs each phase with Brain calls, detects [PHASE_COMPLETE],
+/// persists extracted documents, and transitions to Operational when complete.
+async fn run_learning_loop(
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    incoming: &mut Streaming<ConversationRequest>,
+    db: &Arc<WardsonDbClient>,
+    config: &config::SystemConfig,
+    api_key: &str,
+) -> anyhow::Result<()> {
+    let mut state = learning::LearningState::new();
+
+    // Resume support: load any previously persisted documents
+    if let Ok(profile) = db.read("memory.user", "user").await {
+        state.user_profile = Some(profile);
+        state.phase = learning::LearningPhase::IdentityFormation;
+    }
+    if let Ok(identity) = db.read("memory.identity", "identity").await {
+        state.identity = Some(identity);
+        state.phase = learning::LearningPhase::SoulDefinition;
+    }
+    // If soul is sealed, we shouldn't be here — but check anyway
+    if learning::is_soul_sealed(&**db).await.unwrap_or(false) {
+        return Ok(());
+    }
+
+    // Send mode transition
+    let _ = tx.send(Ok(ConversationResponse {
+        response_type: Some(conversation_response::ResponseType::ModeChange(
+            ModeTransition {
+                from_mode: OperatingMode::Setup as i32,
+                to_mode: OperatingMode::Learning as i32,
+                message: format!("Learning Mode — Phase: {}", learning::phase_label(&state.phase)),
+            }
+        )),
+    })).await;
+
+    loop {
+        if state.phase == learning::LearningPhase::Complete {
+            break;
+        }
+
+        // Build system prompt for current phase
+        let system_prompt = learning::system_prompt_for_phase(&state, config);
+        let brain = Brain::new(api_key.to_string(), system_prompt);
+
+        // Send phase kickoff as first message
+        let kickoff = learning::phase_kickoff(&state.phase);
+        if !kickoff.is_empty() {
+            let _ = tx.send(Ok(ConversationResponse {
+                response_type: Some(conversation_response::ResponseType::System(
+                    SystemMessage {
+                        content: kickoff.clone(),
+                        msg_type: SystemMessageType::Info as i32,
+                    }
+                )),
+            })).await;
+        }
+
+        // Add kickoff as user message to conversation history and call Brain
+        state.conversation_history.push(Message::user(&kickoff));
+
+        // Send thinking indicator
+        let _ = tx.send(Ok(ConversationResponse {
+            response_type: Some(conversation_response::ResponseType::Thinking(
+                ThinkingState { is_thinking: true, name: config.name.clone() }
+            )),
+        })).await;
+
+        // Call Brain with conversation history
+        let mut brain_rx = brain.send_message_streaming(&state.conversation_history).await
+            .map_err(|e| anyhow::anyhow!("Brain call failed in learning: {}", e))?;
+
+        let full_response = stream_brain_to_grpc(&mut brain_rx, tx, &config.name).await;
+
+        // Check for [PHASE_COMPLETE]
+        let phase_complete = full_response.contains("[PHASE_COMPLETE]");
+        let clean_response = full_response.replace("[PHASE_COMPLETE]", "").trim().to_string();
+
+        // Add to conversation history (without marker)
+        state.conversation_history.push(Message::assistant(&clean_response));
+
+        if phase_complete {
+            // Persist extracted documents and advance phase
+            if let Err(e) = learning::handle_phase_complete(&mut state, &**db, config).await {
+                error!("Phase complete handling failed: {}", e);
+                let _ = tx.send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage {
+                            content: format!("Error processing phase: {}", e),
+                            msg_type: SystemMessageType::Error as i32,
+                        }
+                    )),
+                })).await;
+            }
+
+            if state.phase == learning::LearningPhase::Complete {
+                // Save learning conversation history
+                let _ = save_learning_history(db, &state.conversation_history).await;
+
+                // Transition to Operational
+                let _ = tx.send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::ModeChange(
+                        ModeTransition {
+                            from_mode: OperatingMode::Learning as i32,
+                            to_mode: OperatingMode::Operational as i32,
+                            message: "Soul sealed! Entering Operational mode.".to_string(),
+                        }
+                    )),
+                })).await;
+                break;
+            } else {
+                // Notify phase change
+                let _ = tx.send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage {
+                            content: format!("Phase complete — advancing to: {}", learning::phase_label(&state.phase)),
+                            msg_type: SystemMessageType::Info as i32,
+                        }
+                    )),
+                })).await;
+            }
+        } else {
+            // No [PHASE_COMPLETE] — wait for user input and continue conversation
+            loop {
+                match incoming.next().await {
+                    Some(Ok(req)) => {
+                        if let Some(conversation_request::RequestType::UserMessage(um)) = req.request_type {
+                            state.conversation_history.push(Message::user(&um.content));
+
+                            // Rebuild system prompt (may include newly extracted docs)
+                            let system_prompt = learning::system_prompt_for_phase(&state, config);
+                            let brain = Brain::new(api_key.to_string(), system_prompt);
+
+                            let _ = tx.send(Ok(ConversationResponse {
+                                response_type: Some(conversation_response::ResponseType::Thinking(
+                                    ThinkingState { is_thinking: true, name: config.name.clone() }
+                                )),
+                            })).await;
+
+                            let mut brain_rx = brain.send_message_streaming(&state.conversation_history).await
+                                .map_err(|e| anyhow::anyhow!("Brain call failed: {}", e))?;
+
+                            let full_response = stream_brain_to_grpc(&mut brain_rx, tx, &config.name).await;
+
+                            let phase_complete = full_response.contains("[PHASE_COMPLETE]");
+                            let clean_response = full_response.replace("[PHASE_COMPLETE]", "").trim().to_string();
+                            state.conversation_history.push(Message::assistant(&clean_response));
+
+                            if phase_complete {
+                                if let Err(e) = learning::handle_phase_complete(&mut state, &**db, config).await {
+                                    error!("Phase complete handling failed: {}", e);
+                                }
+
+                                if state.phase == learning::LearningPhase::Complete {
+                                    let _ = save_learning_history(db, &state.conversation_history).await;
+                                    let _ = tx.send(Ok(ConversationResponse {
+                                        response_type: Some(conversation_response::ResponseType::ModeChange(
+                                            ModeTransition {
+                                                from_mode: OperatingMode::Learning as i32,
+                                                to_mode: OperatingMode::Operational as i32,
+                                                message: "Soul sealed! Entering Operational mode.".to_string(),
+                                            }
+                                        )),
+                                    })).await;
+                                    return Ok(());
+                                } else {
+                                    let _ = tx.send(Ok(ConversationResponse {
+                                        response_type: Some(conversation_response::ResponseType::System(
+                                            SystemMessage {
+                                                content: format!("Phase complete — advancing to: {}", learning::phase_label(&state.phase)),
+                                                msg_type: SystemMessageType::Info as i32,
+                                            }
+                                        )),
+                                    })).await;
+                                }
+                                break; // Back to outer loop for next phase kickoff
+                            }
+                            // No phase complete — continue waiting for user input
+                        }
+                        // Ignore non-UserMessage during learning
+                    }
+                    Some(Err(e)) => { warn!("Stream error during learning: {}", e); return Err(e.into()); }
+                    None => { debug!("Client disconnected during learning"); return Ok(()); }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Stream Brain response tokens to gRPC, return the full response text.
+async fn stream_brain_to_grpc(
+    brain_rx: &mut mpsc::Receiver<StreamEvent>,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    name: &str,
+) -> String {
+    let mut full_response = String::new();
+    let mut first_token = true;
+
+    while let Some(event) = brain_rx.recv().await {
+        match event {
+            StreamEvent::Token(text) => {
+                if first_token {
+                    let _ = tx.send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::Thinking(
+                            ThinkingState { is_thinking: false, name: String::new() }
+                        )),
+                    })).await;
+                    first_token = false;
+                }
+                full_response.push_str(&text);
+                let _ = tx.send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::Token(
+                        StreamToken { text }
+                    )),
+                })).await;
+            }
+            StreamEvent::Done(full) => {
+                full_response = full.clone();
+                // Strip [PHASE_COMPLETE] from the Done message sent to client
+                let clean = full.replace("[PHASE_COMPLETE]", "").trim().to_string();
+                let _ = tx.send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::Done(
+                        StreamDone { full_response: clean }
+                    )),
+                })).await;
+            }
+            StreamEvent::Error(err) => {
+                let _ = tx.send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage {
+                            content: format!("Brain error: {}", err),
+                            msg_type: SystemMessageType::Error as i32,
+                        }
+                    )),
+                })).await;
+            }
+        }
+    }
+
+    full_response
+}
+
+/// Save learning conversation history to WardSONDB
+async fn save_learning_history(db: &Arc<WardsonDbClient>, history: &[Message]) -> anyhow::Result<()> {
+    let collection = "sessions.learning.history";
+    if !db.collection_exists(collection).await? {
+        db.create_collection(collection).await?;
+    }
+    let doc = serde_json::json!({
+        "_id": "learning",
+        "turns": history,
+        "completed_at": chrono::Utc::now().to_rfc3339(),
+    });
+    match db.write(collection, &doc).await {
+        Ok(_) => Ok(()),
+        Err(_) => db.update(collection, "learning", &doc).await.map_err(|e| e.into()),
     }
 }
