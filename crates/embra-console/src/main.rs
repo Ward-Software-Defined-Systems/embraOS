@@ -12,14 +12,24 @@ async fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut apid_addr = "http://127.0.0.1:50000".to_string();
     let mut device = None;
+    let mut columns: Option<u16> = None;
+    let mut rows: Option<u16> = None;
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--apid-addr" => { apid_addr = args[i+1].clone(); i += 2; }
             "--device" => { device = Some(args[i+1].clone()); i += 2; }
+            "--columns" => { columns = args[i+1].parse().ok(); i += 2; }
+            "--rows" => { rows = args[i+1].parse().ok(); i += 2; }
             _ => { i += 1; }
         }
+    }
+
+    // Set terminal size override via env for the TUI module
+    unsafe {
+        if let Some(c) = columns { std::env::set_var("EMBRA_COLUMNS", c.to_string()); }
+        if let Some(r) = rows { std::env::set_var("EMBRA_ROWS", r.to_string()); }
     }
 
     println!("[embra-console] connecting to {}", apid_addr);

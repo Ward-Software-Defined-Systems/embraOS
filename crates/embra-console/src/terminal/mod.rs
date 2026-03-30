@@ -30,33 +30,29 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
     let (in_tx, mut out_rx) = client.open_conversation("").await?;
     println!("[TUI] conversation opened");
 
-    // Check terminal size BEFORE raw mode
-    let (cols, rows) = terminal::size().unwrap_or((0, 0));
-    println!("[TUI] detected terminal size: {}x{}", cols, rows);
-
-    // Force terminal size for serial console — TIOCGWINSZ may return 0x0
-    let (cols, rows) = if cols == 0 || rows == 0 {
-        println!("[TUI] forcing size to 80x24");
-        let _ = crossterm::execute!(
-            stdout(),
-            crossterm::terminal::SetSize(80, 24)
-        );
-        (80u16, 24u16)
-    } else {
-        (cols, rows)
-    };
-    println!("[TUI] using size: {}x{}", cols, rows);
+    // Determine terminal size: CLI override > TIOCGWINSZ > default 80x24
+    let override_cols: Option<u16> = std::env::var("EMBRA_COLUMNS").ok().and_then(|v| v.parse().ok());
+    let override_rows: Option<u16> = std::env::var("EMBRA_ROWS").ok().and_then(|v| v.parse().ok());
+    let (detected_cols, detected_rows) = terminal::size().unwrap_or((0, 0));
+    let cols = override_cols.unwrap_or(if detected_cols > 0 { detected_cols } else { 80 });
+    let rows = override_rows.unwrap_or(if detected_rows > 0 { detected_rows } else { 24 });
+    println!("[TUI] size: {}x{} (detected: {}x{})", cols, rows, detected_cols, detected_rows);
 
     // Initialize ratatui terminal
     // Skip EnterAlternateScreen — doesn't work over QEMU serial (-nographic)
     enable_raw_mode()?;
 
+    // For serial console, always use fixed viewport since TIOCGWINSZ is unreliable
+    let use_cols = if cols > 0 { cols } else { 80 };
+    let use_rows = if rows > 0 { rows } else { 24 };
+
     let backend = CrosstermBackend::new(stdout());
-    let mut terminal_tui = Terminal::new(backend)?;
-    // If size detection failed, resize once. Otherwise ratatui uses TIOCGWINSZ on each draw.
-    if cols == 0 || rows == 0 {
-        terminal_tui.resize(ratatui::layout::Rect::new(0, 0, 80, 24))?;
-    }
+    let mut terminal_tui = Terminal::with_options(
+        backend,
+        ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, use_cols, use_rows)),
+        },
+    )?;
     terminal_tui.clear()?;
 
     let mut app = AppState::new();
