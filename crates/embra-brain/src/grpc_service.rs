@@ -144,7 +144,17 @@ impl BrainService for BrainGrpcService {
                         info!("Learning Mode complete — transitioning to Operational");
                         // Reload config in case it was updated
                         if let Ok(cfg) = config::load_config(&**&db).await {
+                            api_key = cfg.api_key;
                             config_tz = cfg.timezone;
+                        }
+                        // Ensure default session exists and is active
+                        {
+                            let mut mgr = session_mgr.write().await;
+                            if !mgr.session_exists("main").await.unwrap_or(false) {
+                                let _ = mgr.create("main").await;
+                            }
+                            mgr.active_session = Some("main".to_string());
+                            info!("Session 'main' activated for Operational mode");
                         }
                     }
                     Err(e) => {
