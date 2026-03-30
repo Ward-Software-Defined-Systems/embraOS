@@ -52,12 +52,12 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
         .unwrap_or_default();
     if api_key.is_empty() {
-        eprintln!("[embra-brain] WARNING: No API key provided (--api-key or ANTHROPIC_API_KEY)");
+        warn!("No API key provided (--api-key or ANTHROPIC_API_KEY). Brain calls will fail until config wizard runs.");
     } else {
-        eprintln!("[embra-brain] API key configured ({}...)", &api_key[..std::cmp::min(10, api_key.len())]);
+        info!("API key configured ({}...)", &api_key[..std::cmp::min(10, api_key.len())]);
     }
 
-    eprintln!("[embra-brain] starting on port {}", port);
+    info!("embra-brain starting on port {}", port);
 
     // Initialize start time for uptime tracking
     tools::init_start_time();
