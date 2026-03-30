@@ -52,12 +52,11 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
     enable_raw_mode()?;
 
     let backend = CrosstermBackend::new(stdout());
-    let mut terminal_tui = Terminal::with_options(
-        backend,
-        ratatui::TerminalOptions {
-            viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, cols, rows)),
-        },
-    )?;
+    let mut terminal_tui = Terminal::new(backend)?;
+    // If size detection failed, resize once. Otherwise ratatui uses TIOCGWINSZ on each draw.
+    if cols == 0 || rows == 0 {
+        terminal_tui.resize(ratatui::layout::Rect::new(0, 0, 80, 24))?;
+    }
     terminal_tui.clear()?;
 
     let mut app = AppState::new();

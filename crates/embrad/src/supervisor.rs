@@ -204,6 +204,21 @@ impl Supervisor {
             let name = self.services[i].def.name.clone();
             info!("Starting service: {}", name);
 
+            // Before spawning embra-console, redirect embrad's output to log file
+            // so the TUI gets clean control of the terminal
+            if name == "embra-console" && std::process::id() == 1 {
+                info!("Redirecting embrad output to log file for TUI");
+                if let Ok(log) = std::fs::File::create("/embra/ephemeral/embrad.log") {
+                    use std::os::unix::io::AsRawFd;
+                    let fd = log.as_raw_fd();
+                    unsafe {
+                        libc::dup2(fd, 1); // stdout
+                        libc::dup2(fd, 2); // stderr
+                    }
+                    std::mem::forget(log);
+                }
+            }
+
             self.start_service(i).await?;
 
             // After embra-trustd is up, verify the soul
