@@ -21,6 +21,16 @@ pub async fn seal_soul(db: &WardsonDbClient, soul: &serde_json::Value) -> Result
     });
 
     db.write("soul.invariant", &sealed_doc).await?;
+
+    // Write hash to STATE partition for boot-time verification by embra-trustd
+    let hash_path = "/embra/state/soul.sha256";
+    if let Some(parent) = std::path::Path::new(hash_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(hash_path, &hash)
+        .map_err(|e| anyhow::anyhow!("Failed to write soul hash to STATE: {}", e))?;
+    tracing::info!("Soul hash written to {}", hash_path);
+
     Ok(())
 }
 
