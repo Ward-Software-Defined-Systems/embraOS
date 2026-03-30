@@ -69,11 +69,17 @@ async fn main() -> Result<()> {
 
     info!("All services started. Entering reconciliation loop.");
 
-    // Redirect embrad's own stderr to a log file now that embra-console owns the terminal
+    // Redirect embrad's stdout AND stderr to log file so embra-console owns the terminal
     if pid == 1 {
         if let Ok(log) = std::fs::File::create("/embra/ephemeral/embrad.log") {
             use std::os::unix::io::AsRawFd;
-            unsafe { libc::dup2(log.as_raw_fd(), 2); } // stderr = fd 2
+            let fd = log.as_raw_fd();
+            unsafe {
+                libc::dup2(fd, 1); // stdout
+                libc::dup2(fd, 2); // stderr
+            }
+            // Keep log file open (don't drop it, fd would close)
+            std::mem::forget(log);
         }
     }
 
