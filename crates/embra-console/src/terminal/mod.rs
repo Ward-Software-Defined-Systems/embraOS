@@ -30,24 +30,34 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
     let (in_tx, mut out_rx) = client.open_conversation("").await?;
     println!("[TUI] conversation opened");
 
-    // Initialize ratatui terminal
-    // Skip EnterAlternateScreen — doesn't work over QEMU serial (-nographic)
-    println!("[TUI] enabling raw mode...");
-    enable_raw_mode()?;
-    println!("[TUI] raw mode enabled");
+    // Check terminal size BEFORE raw mode
+    let (cols, rows) = terminal::size().unwrap_or((0, 0));
+    println!("[TUI] detected terminal size: {}x{}", cols, rows);
 
     // Force terminal size for serial console — TIOCGWINSZ may return 0x0
-    let (cols, rows) = terminal::size().unwrap_or((80, 24));
-    if cols == 0 || rows == 0 {
-        // Set a reasonable default via crossterm
+    let (cols, rows) = if cols == 0 || rows == 0 {
+        println!("[TUI] forcing size to 80x24");
         let _ = crossterm::execute!(
             stdout(),
             crossterm::terminal::SetSize(80, 24)
         );
-    }
+        (80u16, 24u16)
+    } else {
+        (cols, rows)
+    };
+    println!("[TUI] using size: {}x{}", cols, rows);
+
+    // Initialize ratatui terminal
+    // Skip EnterAlternateScreen — doesn't work over QEMU serial (-nographic)
+    enable_raw_mode()?;
 
     let backend = CrosstermBackend::new(stdout());
-    let mut terminal_tui = Terminal::new(backend)?;
+    let mut terminal_tui = Terminal::with_options(
+        backend,
+        ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, cols, rows)),
+        },
+    )?;
     terminal_tui.clear()?;
 
     let mut app = AppState::new();
