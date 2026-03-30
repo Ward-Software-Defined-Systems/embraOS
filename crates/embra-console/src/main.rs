@@ -10,9 +10,9 @@ use grpc_client::BrainClient;
 
 #[tokio::main]
 async fn main() {
-    eprintln!("[embra-console] starting");
+    // Use println (stdout) for diagnostics since stderr goes to log file
+    println!("[embra-console] starting");
 
-    // Parse args
     let args: Vec<String> = std::env::args().collect();
     let mut apid_addr = "http://127.0.0.1:50000".to_string();
     let mut device = None;
@@ -26,33 +26,33 @@ async fn main() {
         }
     }
 
-    eprintln!("[embra-console] connecting to embra-apid at {}", apid_addr);
+    println!("[embra-console] connecting to embra-apid at {}", apid_addr);
     let client = match BrainClient::connect(&apid_addr).await {
         Ok(c) => {
-            eprintln!("[embra-console] connected to embra-apid");
+            println!("[embra-console] connected");
             c
         }
         Err(e) => {
-            eprintln!("[embra-console] FATAL: failed to connect to embra-apid: {}", e);
-            // Retry loop — apid might not be ready yet
-            eprintln!("[embra-console] retrying connection...");
+            println!("[embra-console] FATAL: failed to connect: {}", e);
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             match BrainClient::connect(&apid_addr).await {
-                Ok(c) => {
-                    eprintln!("[embra-console] connected on retry");
-                    c
-                }
+                Ok(c) => c,
                 Err(e2) => {
-                    eprintln!("[embra-console] FATAL: still can't connect: {}", e2);
-                    return;
+                    println!("[embra-console] FATAL: still can't connect: {}", e2);
+                    // Keep process alive so embrad doesn't restart-loop
+                    loop { tokio::time::sleep(std::time::Duration::from_secs(3600)).await; }
                 }
             }
         }
     };
 
-    eprintln!("[embra-console] launching terminal");
+    println!("[embra-console] launching TUI");
     match terminal::run(client, device).await {
-        Ok(()) => eprintln!("[embra-console] terminal exited cleanly"),
-        Err(e) => eprintln!("[embra-console] terminal error: {}", e),
+        Ok(()) => println!("[embra-console] exited cleanly"),
+        Err(e) => {
+            println!("[embra-console] TUI error: {}", e);
+            // Keep process alive
+            loop { tokio::time::sleep(std::time::Duration::from_secs(3600)).await; }
+        }
     }
 }
