@@ -71,6 +71,8 @@ cd ../embraOS
 
 On first boot, the Config Wizard runs — name your intelligence, enter your Anthropic API key, set your timezone. After setup, you're in a full TUI conversation with styled text, thinking indicators, and tool execution.
 
+> **Note:** Learning Mode (the guided 6-phase soul formation sequence from Phase 0) is not yet wired into Phase 1. After the Config Wizard, the system enters a general conversation mode. The structured Learning Mode flow (identity formation, soul definition, sealing) will be implemented in the next sprint. For now, you can converse freely and test tool execution.
+
 > **Terminal Size:** The TUI automatically inherits your SSH terminal size via the QEMU kernel command line. For best results, maximize your terminal before running `run-qemu.sh`. The size is detected once at boot — resizing the terminal after launch won't update the TUI layout.
 
 > **Clean First Boot:** To reset and trigger the Config Wizard again (e.g., to change API key):
