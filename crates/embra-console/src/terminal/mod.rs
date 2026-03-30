@@ -30,8 +30,8 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
     let (in_tx, mut out_rx) = client.open_conversation("").await?;
 
     // Initialize ratatui terminal
+    // Skip EnterAlternateScreen — doesn't work over QEMU serial (-nographic)
     enable_raw_mode()?;
-    stdout().execute(EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -91,7 +91,6 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
 
     // Cleanup
     disable_raw_mode()?;
-    stdout().execute(LeaveAlternateScreen)?;
     Ok(())
 }
 
