@@ -9,16 +9,15 @@ use ratatui::{
 };
 
 use super::render::{self, StyledLine, StyledSegment};
-use super::{AppMode, AppState, SetupStep};
+use super::state::{AppMode, AppState, SetupStep};
 
 pub fn draw(f: &mut Frame, app: &AppState) {
-    // Dynamic input height: 3 rows base, grows with newlines (max 10)
     let input_lines = if app.pasted_lines.is_some() {
         1
     } else {
         app.input_buffer.chars().filter(|c| *c == '\n').count() + 1
     };
-    let input_height = (input_lines as u16 + 2).min(10); // +2 for border
+    let input_height = (input_lines as u16 + 2).min(10);
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -52,52 +51,34 @@ fn draw_header(f: &mut Frame, area: Rect, app: &AppState) {
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                Span::raw(format!("v{}", app.config_version)),
                 Span::raw(" | "),
                 Span::styled("Setup", Style::default().fg(Color::Yellow)),
                 Span::raw(format!(" | Step: {}", step_label)),
             ]
         }
-        AppMode::Learning(lm) => {
-            let phase_label = crate::learning::phase_label(&lm.state.phase);
-            let name = app
-                .config
-                .as_ref()
-                .map(|c| c.name.as_str())
-                .unwrap_or("embraOS");
+        AppMode::Learning => {
             vec![
                 Span::styled(
-                    format!(" {} ", name),
+                    format!(" {} ", app.config_name),
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(format!("v{}", env!("CARGO_PKG_VERSION"))),
+                Span::raw(format!("v{}", app.config_version)),
                 Span::raw(" | "),
                 Span::styled("Learning Mode", Style::default().fg(Color::Magenta)),
-                Span::raw(format!(" | Phase: {}", phase_label)),
             ]
         }
         AppMode::Operational { session_name } => {
-            let name = app
-                .config
-                .as_ref()
-                .map(|c| c.name.as_str())
-                .unwrap_or("Embra");
             vec![
                 Span::styled(
-                    format!(" {} ", name),
+                    format!(" {} ", app.config_name),
                     Style::default()
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::raw(format!(
-                    "v{}",
-                    app.config
-                        .as_ref()
-                        .map(|c| c.version.as_str())
-                        .unwrap_or(env!("CARGO_PKG_VERSION"))
-                )),
+                Span::raw(format!("v{}", app.config_version)),
                 Span::raw(" | Session: "),
                 Span::styled(session_name, Style::default().fg(Color::Yellow)),
                 Span::raw(" | "),
@@ -111,20 +92,20 @@ fn draw_header(f: &mut Frame, area: Rect, app: &AppState) {
 }
 
 fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
-    // Collect all logical lines as multi-segment styled lines (DESIGN-004)
     let mut styled_lines: Vec<StyledLine> = Vec::new();
 
     for msg in &app.messages {
         let (color, prefix) = match msg.role.as_str() {
-            "You" => (Color::LightBlue, "You"),
+            "user" | "You" => (Color::LightBlue, "You"),
             "system" => (Color::White, ""),
+            "tool" => (Color::Cyan, ""),
             _ => (Color::Green, msg.role.as_str()),
         };
 
         let base_style = Style::default().fg(color);
 
-        if msg.role == "system" {
-            let style = Style::default().fg(Color::White);
+        if msg.role == "system" || msg.role == "tool" {
+            let style = Style::default().fg(color);
             for line in msg.content.lines() {
                 styled_lines.push(render::parse_styled_line(&format!("  {}", line), style));
             }
@@ -151,7 +132,6 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
                     continue;
                 }
                 if in_json_block {
-                    // JSON syntax highlighting
                     let mut json_segments = vec![StyledSegment::new("  ".to_string(), base_style)];
                     json_segments.extend(render::parse_json_line(line));
                     styled_lines.push(json_segments);
@@ -182,14 +162,8 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
         styled_lines.push(vec![StyledSegment::new(String::new(), Style::default())]);
     }
 
-    // Show thinking indicator (before first token arrives)
+    // Show thinking indicator
     if app.thinking && app.streaming_text.is_none() {
-        let name = app
-            .config
-            .as_ref()
-            .map(|c| c.name.as_str())
-            .unwrap_or("Embra");
-        // Animate dots based on elapsed time (~3 states cycling)
         let elapsed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -200,7 +174,7 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
             _ => "...",
         };
         styled_lines.push(vec![StyledSegment::new(
-            format!("  {} is thinking{}", name, dots),
+            format!("  {} is thinking{}", app.thinking_name, dots),
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
@@ -209,13 +183,8 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
 
     // Show streaming text if present
     if let Some(streaming) = &app.streaming_text {
-        let name = app
-            .config
-            .as_ref()
-            .map(|c| c.name.as_str())
-            .unwrap_or("Embra");
         styled_lines.push(vec![StyledSegment::new(
-            format!("{}: ", name),
+            format!("{}: ", app.thinking_name),
             Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD),
@@ -232,31 +201,27 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
         )]);
     }
 
-    // Manually wrap lines and render from the bottom up.
-    let content_width = area.width.saturating_sub(2) as usize; // 1px border each side
+    // Manually wrap lines and render from the bottom up
+    let content_width = area.width.saturating_sub(2) as usize;
     let visible_rows = area.height as usize;
 
     if content_width == 0 || visible_rows == 0 {
         return;
     }
 
-    // Wrap multi-segment lines into visual rows
     let mut visual_rows: Vec<Vec<Span>> = Vec::new();
     for styled_line in &styled_lines {
-        // Calculate total display width for this line (unicode-aware)
         let total_len: usize = styled_line.iter().map(|s| UnicodeWidthStr::width(s.text.as_str())).sum();
 
         if total_len == 0 {
             visual_rows.push(vec![Span::raw("")]);
         } else if total_len <= content_width {
-            // Fits in one row — convert segments to spans directly
             let spans: Vec<Span> = styled_line
                 .iter()
                 .map(|seg| Span::styled(seg.text.clone(), seg.style))
                 .collect();
             visual_rows.push(spans);
         } else {
-            // Need to wrap: flatten all chars with styles, then chunk by display width
             let mut flat_chars: Vec<(char, Style)> = Vec::new();
             for seg in styled_line {
                 for ch in seg.text.chars() {
@@ -264,7 +229,6 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
                 }
             }
 
-            // Break into rows respecting character display widths
             let mut i = 0;
             while i < flat_chars.len() {
                 let mut row_width = 0usize;
@@ -280,7 +244,6 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
                     i += 1;
                 }
 
-                // Group consecutive chars with same style into spans
                 if row_chars.is_empty() {
                     break;
                 }
@@ -307,7 +270,6 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
         }
     }
 
-    // Determine which rows to show (from the bottom, adjusted by scroll_offset)
     let total = visual_rows.len();
     let skip_from_bottom = app.scroll_offset as usize;
     let end = total.saturating_sub(skip_from_bottom);
@@ -315,13 +277,11 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
 
     let visible_slice = &visual_rows[start..end];
 
-    // Build ratatui Lines from our pre-wrapped rows
     let lines: Vec<Line> = visible_slice
         .iter()
         .map(|spans| Line::from(spans.clone()))
         .collect();
 
-    // Render without Wrap (we already wrapped manually) and without scroll
     let paragraph = Paragraph::new(Text::from(lines))
         .block(Block::default().borders(Borders::LEFT | Borders::RIGHT));
 
@@ -329,7 +289,6 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
 }
 
 fn draw_input(f: &mut Frame, area: Rect, app: &AppState) {
-    // If selector is active, show selection hint instead of text input
     if app.selector.is_some() {
         let hint = Paragraph::new("  Use ↑↓ arrows to select, Enter to confirm")
             .style(Style::default().fg(Color::DarkGray))
@@ -343,28 +302,17 @@ fn draw_input(f: &mut Frame, area: Rect, app: &AppState) {
         return;
     }
 
-    let (placeholder, title) = match &app.mode {
-        AppMode::Setup(setup) => {
-            let ph = match setup.step {
-                SetupStep::Name => "Enter a custom name...",
-                SetupStep::ApiKey => "Enter API key...",
-                SetupStep::Timezone => "Enter timezone (e.g. America/New_York)...",
-                SetupStep::Confirm => "Type yes or no...",
-            };
-            (ph, " Input ")
-        }
-        AppMode::Learning(_) => ("Type a message...", " You "),
-        AppMode::Operational { .. } => ("Type a message...", " You "),
+    let placeholder = app.input_placeholder();
+    let title = match &app.mode {
+        AppMode::Setup(_) => " Input ",
+        _ => " You ",
     };
 
-    // Show paste indicator or normal input (FEATURE-001: improved previews)
     let (input_text, style) = if let Some(ref pasted) = app.pasted_lines {
         let total_chars: usize = pasted.iter().map(|l| l.len()).sum::<usize>() + pasted.len().saturating_sub(1);
         let preview = if pasted.len() == 1 && total_chars > 200 {
-            // Long single-line paste
             format!("[{} chars pasted] press Enter to send", total_chars)
         } else if pasted.len() > 2 {
-            // Multi-line: show first 2 lines + count
             let first_two: String = pasted.iter().take(2).map(|l| {
                 if l.len() > 60 { format!("{}...", &l[..57]) } else { l.clone() }
             }).collect::<Vec<_>>().join(" | ");
@@ -388,9 +336,7 @@ fn draw_input(f: &mut Frame, area: Rect, app: &AppState) {
 
     f.render_widget(input, area);
 
-    // Position cursor (only for text input, not paste or selector)
     if app.pasted_lines.is_none() && !app.input_buffer.is_empty() {
-        // For multi-line input, find which line the cursor is on and the offset within that line
         let before_cursor: String = app.input_buffer.chars().take(app.cursor_pos).collect();
         let cursor_line = before_cursor.chars().filter(|c| *c == '\n').count() as u16;
         let last_newline_pos = before_cursor.rfind('\n').map(|p| p + 1).unwrap_or(0);
@@ -414,20 +360,10 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &AppState) {
 
     let left_spans = match &app.mode {
         AppMode::Setup(_) => vec![Span::raw(" Setup in progress")],
-        AppMode::Learning(lm) => {
-            let phase_num = match lm.state.phase {
-                crate::learning::LearningPhase::UserConfiguration => 1,
-                crate::learning::LearningPhase::IdentityFormation => 2,
-                crate::learning::LearningPhase::SoulDefinition => 3,
-                crate::learning::LearningPhase::InitialToolset => 4,
-                crate::learning::LearningPhase::Confirmation => 5,
-                crate::learning::LearningPhase::Complete => 5,
-            };
-            vec![
-                Span::raw(format!(" Phase {}/5", phase_num)),
-                Span::raw(" | Brain: opus-4.6"),
-            ]
-        }
+        AppMode::Learning => vec![
+            Span::raw(" Learning Mode"),
+            Span::raw(" | Brain: opus-4.6"),
+        ],
         AppMode::Operational { session_name } => vec![
             Span::raw(" Sessions: ["),
             Span::styled(

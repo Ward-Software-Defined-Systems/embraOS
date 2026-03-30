@@ -1,207 +1,327 @@
-//! Minimal terminal for embra-console Phase 1.
+//! Full TUI terminal for embra-console.
 //!
-//! Connects to embra-brain via embra-apid gRPC and renders a basic
-//! conversational experience over serial/TTY. Full Phase 0 TUI
-//! adaptation (styled rendering, JSON highlighting, etc.) is a follow-up.
+//! ratatui-based terminal driven by gRPC ConsoleEvents from embra-apid.
+//! Renders the full Phase 0 visual experience: styled text, JSON highlighting,
+//! thinking indicator, multi-line input, selectors, and mode transitions.
 
-// Phase 0 modules — available for future full TUI adaptation
-// mod commands;
-// mod input;
-// mod render;
-// mod ui;
+mod commands;
+mod input;
+mod render;
+pub mod state;
+mod ui;
 
+use state::*;
 use crate::grpc_client::{BrainClient, ConsoleEvent};
 use embra_common::proto::apid::*;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
-use crossterm::terminal::{self, disable_raw_mode, enable_raw_mode};
-use std::io::{self, Write};
-use tracing::info;
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    ExecutableCommand,
+};
+use ratatui::{backend::CrosstermBackend, Terminal};
+use std::io::{self, stdout};
+use std::time::Duration;
+use tokio::sync::mpsc;
 
 pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()> {
-    info!("Terminal starting");
-
     // Open conversation stream
     let (in_tx, mut out_rx) = client.open_conversation("").await?;
 
-    // Use raw mode for better input handling
+    // Initialize ratatui terminal
     enable_raw_mode()?;
-    let _raw_guard = RawModeGuard;
+    stdout().execute(EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout());
+    let mut terminal = Terminal::new(backend)?;
+    terminal.clear()?;
 
-    // Get terminal size with fallback for serial
-    let (cols, _rows) = terminal::size().unwrap_or((80, 24));
+    let mut app = AppState::new();
+    app.status_message = "OK".to_string();
 
-    print!("\x1b[2J\x1b[H"); // Clear screen
-    print!("\r\n  embraOS Phase 1 — Serial Console\r\n");
-    print!("  Type a message and press Enter. Ctrl-C to exit.\r\n");
-    print!("{}\r\n", "─".repeat(cols as usize));
-    print!("\r\n> ");
-    io::stdout().flush()?;
-
-    let mut input_buffer = String::new();
-    let mut setup_default: Option<String> = None;
-    let mut is_thinking = false;
-    let mut in_response = false;
-
-    loop {
-        tokio::select! {
-            // Handle gRPC events
-            event = out_rx.recv() => {
-                match event {
-                    Some(ConsoleEvent::Token(text)) => {
-                        if is_thinking {
-                            print!("\r\x1b[K"); // Clear thinking line
-                            is_thinking = false;
-                        }
-                        if !in_response {
-                            print!("\r\n\x1b[32m"); // Green for AI
-                            in_response = true;
-                        }
-                        print!("{}", text);
-                        io::stdout().flush()?;
-                    }
-                    Some(ConsoleEvent::ResponseDone(_full)) => {
-                        if in_response {
-                            print!("\x1b[0m\r\n"); // Reset color
-                            in_response = false;
-                        }
-                        print!("\r\n> ");
-                        io::stdout().flush()?;
-                    }
-                    Some(ConsoleEvent::SystemMessage { content, .. }) => {
-                        if is_thinking {
-                            print!("\r\x1b[K");
-                            is_thinking = false;
-                        }
-                        print!("\r\n\x1b[33m{}\x1b[0m\r\n", content); // Yellow for system
-                        if !in_response {
-                            print!("> ");
-                        }
-                        io::stdout().flush()?;
-                    }
-                    Some(ConsoleEvent::ToolExecution { name, result, success, .. }) => {
-                        let color = if success { "36" } else { "31" }; // Cyan or red
-                        print!("\r\n\x1b[{}m[{}] {}\x1b[0m\r\n", color, name, result);
-                        io::stdout().flush()?;
-                    }
-                    Some(ConsoleEvent::ThinkingState { is_thinking: thinking, name }) => {
-                        if thinking {
-                            print!("\r\x1b[90m{} is thinking...\x1b[0m", name);
-                            io::stdout().flush()?;
-                            is_thinking = true;
-                        } else if is_thinking {
-                            print!("\r\x1b[K");
-                            is_thinking = false;
-                        }
-                    }
-                    Some(ConsoleEvent::ModeTransition { message, .. }) => {
-                        print!("\r\n\x1b[35m══ {} ══\x1b[0m\r\n\r\n> ", message);
-                        io::stdout().flush()?;
-                    }
-                    Some(ConsoleEvent::SetupPrompt { field_type, prompt, options, default_value }) => {
-                        print!("\r\n\x1b[33m{}\x1b[0m", prompt);
-                        if !default_value.is_empty() {
-                            print!(" \x1b[90m[default: {}]\x1b[0m", default_value);
-                        }
-                        print!("\r\n");
-                        if !options.is_empty() {
-                            for (i, opt) in options.iter().enumerate() {
-                                print!("  {}. {}\r\n", i + 1, opt);
-                            }
-                        }
-                        print!("> ");
-                        io::stdout().flush()?;
-                        // Store default so Enter with empty input uses it
-                        setup_default = Some(default_value);
-                    }
-                    None => {
-                        print!("\r\n\x1b[31m[Disconnected from server]\x1b[0m\r\n");
-                        io::stdout().flush()?;
+    // Spawn terminal event reader
+    let (term_tx, mut term_rx) = mpsc::channel::<Event>(100);
+    std::thread::spawn(move || {
+        loop {
+            if event::poll(Duration::from_millis(50)).unwrap_or(false) {
+                if let Ok(ev) = event::read() {
+                    if term_tx.blocking_send(ev).is_err() {
                         break;
                     }
                 }
             }
-            // Handle keyboard input (polled)
-            _ = tokio::task::spawn_blocking(|| event::poll(std::time::Duration::from_millis(50))) => {
-                if event::poll(std::time::Duration::from_millis(0))? {
-                    if let Event::Key(key) = event::read()? {
-                        match (key.code, key.modifiers) {
-                            (KeyCode::Char('c'), KeyModifiers::CONTROL) |
-                            (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-                                print!("\r\n");
-                                break;
-                            }
-                            (KeyCode::Enter, _) => {
-                                let mut input = input_buffer.trim().to_string();
-                                input_buffer.clear();
-                                print!("\r\n");
-                                io::stdout().flush()?;
+        }
+    });
 
-                                // Use setup default if input is empty and a default is set
-                                if input.is_empty() {
-                                    if let Some(default) = setup_default.take() {
-                                        if !default.is_empty() {
-                                            input = default;
-                                        } else {
-                                            print!("> ");
-                                            io::stdout().flush()?;
-                                            continue;
-                                        }
-                                    } else {
-                                        print!("> ");
-                                        io::stdout().flush()?;
-                                        continue;
-                                    }
-                                }
-                                setup_default = None;
+    // Main event loop
+    loop {
+        terminal.draw(|f| ui::draw(f, &app))?;
 
-                                // Check for slash commands
-                                if input.starts_with('/') {
-                                    let parts: Vec<&str> = input.splitn(2, ' ').collect();
-                                    let cmd = parts[0];
-                                    let args = if parts.len() > 1 { parts[1] } else { "" };
-                                    let _ = in_tx.send(ConversationRequest {
-                                        request_type: Some(conversation_request::RequestType::SlashCommand(
-                                            SlashCommand { command: cmd.to_string(), args: args.to_string() }
-                                        )),
-                                    }).await;
-                                } else {
-                                    let _ = in_tx.send(ConversationRequest {
-                                        request_type: Some(conversation_request::RequestType::UserMessage(
-                                            UserMessage { content: input }
-                                        )),
-                                    }).await;
-                                }
-                            }
-                            (KeyCode::Backspace, _) => {
-                                if !input_buffer.is_empty() {
-                                    input_buffer.pop();
-                                    print!("\x08 \x08"); // Erase character
-                                    io::stdout().flush()?;
-                                }
-                            }
-                            (KeyCode::Char(c), _) => {
-                                input_buffer.push(c);
-                                print!("{}", c);
-                                io::stdout().flush()?;
-                            }
-                            _ => {}
-                        }
+        if app.should_quit {
+            break;
+        }
+
+        tokio::select! {
+            biased;
+
+            // gRPC events (highest priority)
+            event = out_rx.recv() => {
+                match event {
+                    Some(ev) => handle_console_event(ev, &mut app),
+                    None => {
+                        app.messages.push(DisplayMessage::system("Disconnected from server."));
+                        app.should_quit = true;
                     }
                 }
+            }
+
+            // Terminal events
+            Some(ev) = term_rx.recv() => {
+                if let Event::Key(key) = ev {
+                    handle_key_event(key, &mut app, &in_tx).await?;
+                }
+            }
+
+            // Tick for animations (thinking dots)
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {
+                // Just redraw
             }
         }
     }
 
+    // Cleanup
+    disable_raw_mode()?;
+    stdout().execute(LeaveAlternateScreen)?;
     Ok(())
 }
 
-/// RAII guard to restore terminal state on exit
-struct RawModeGuard;
-impl Drop for RawModeGuard {
-    fn drop(&mut self) {
-        let _ = disable_raw_mode();
-        print!("\r\n");
+fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
+    match event {
+        ConsoleEvent::Token(text) => {
+            app.thinking = false;
+            match &mut app.streaming_text {
+                Some(s) => s.push_str(&text),
+                None => app.streaming_text = Some(text),
+            }
+        }
+        ConsoleEvent::ResponseDone(full) => {
+            app.streaming_text = None;
+            app.thinking = false;
+            app.messages.push(DisplayMessage::assistant(&full));
+            app.scroll_offset = 0;
+        }
+        ConsoleEvent::SystemMessage { content, .. } => {
+            app.messages.push(DisplayMessage::system(&content));
+            app.scroll_offset = 0;
+        }
+        ConsoleEvent::ToolExecution { name, result, .. } => {
+            app.messages.push(DisplayMessage::tool(&name, &result));
+            app.scroll_offset = 0;
+        }
+        ConsoleEvent::ThinkingState { is_thinking, name } => {
+            app.thinking = is_thinking;
+            if !name.is_empty() {
+                app.thinking_name = name;
+            }
+        }
+        ConsoleEvent::ModeTransition { from_mode: _, to_mode, message } => {
+            // to_mode: 1=Setup, 2=Learning, 3=Operational
+            match to_mode {
+                1 => {
+                    app.mode = AppMode::Setup(SetupState { step: SetupStep::Name });
+                }
+                2 => {
+                    app.mode = AppMode::Learning;
+                }
+                3 => {
+                    let session = "default".to_string();
+                    app.mode = AppMode::Operational { session_name: session };
+                }
+                _ => {}
+            }
+            if !message.is_empty() {
+                app.messages.push(DisplayMessage::system(&message));
+            }
+            app.scroll_offset = 0;
+        }
+        ConsoleEvent::SetupPrompt { field_type, prompt, options, default_value } => {
+            app.messages.push(DisplayMessage::system(&prompt));
+
+            if field_type == "confirm" || field_type == "selector" {
+                if !options.is_empty() {
+                    app.selector = Some(Selector::new(options));
+                }
+            }
+
+            if !default_value.is_empty() {
+                app.setup_default = Some(default_value);
+            }
+
+            // Update setup step
+            if let AppMode::Setup(ref mut setup) = app.mode {
+                setup.step = AppState::infer_setup_step(&prompt);
+            }
+
+            app.scroll_offset = 0;
+        }
     }
+}
+
+async fn handle_key_event(
+    key: KeyEvent,
+    app: &mut AppState,
+    in_tx: &mpsc::Sender<ConversationRequest>,
+) -> Result<()> {
+    match (key.code, key.modifiers) {
+        // Quit
+        (KeyCode::Char('c'), KeyModifiers::CONTROL) |
+        (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
+            app.should_quit = true;
+        }
+
+        // Selector navigation
+        (KeyCode::Up, _) if app.selector.is_some() => {
+            if let Some(ref mut sel) = app.selector {
+                sel.up();
+            }
+        }
+        (KeyCode::Down, _) if app.selector.is_some() => {
+            if let Some(ref mut sel) = app.selector {
+                sel.down();
+            }
+        }
+
+        // Enter — send input or selector choice
+        (KeyCode::Enter, _) => {
+            if let Some(selector) = app.selector.take() {
+                // Send selector choice
+                let choice = selector.current().to_string();
+                let _ = in_tx.send(ConversationRequest {
+                    request_type: Some(conversation_request::RequestType::UserMessage(
+                        UserMessage { content: choice }
+                    )),
+                }).await;
+            } else if let Some(pasted) = app.pasted_lines.take() {
+                // Send pasted content
+                let content = pasted.join("\n");
+                app.messages.push(DisplayMessage::user(&content));
+                let _ = in_tx.send(ConversationRequest {
+                    request_type: Some(conversation_request::RequestType::UserMessage(
+                        UserMessage { content }
+                    )),
+                }).await;
+            } else {
+                let mut input = app.input_buffer.trim().to_string();
+                app.input_buffer.clear();
+                app.cursor_pos = 0;
+
+                // Use setup default if empty
+                if input.is_empty() {
+                    if let Some(default) = app.setup_default.take() {
+                        if !default.is_empty() {
+                            input = default;
+                        } else {
+                            return Ok(());
+                        }
+                    } else {
+                        return Ok(());
+                    }
+                }
+                app.setup_default = None;
+
+                // Check for slash commands
+                if input.starts_with('/') {
+                    let parts: Vec<&str> = input.splitn(2, ' ').collect();
+                    let cmd = parts[0];
+                    let args = if parts.len() > 1 { parts[1] } else { "" };
+
+                    // Handle local commands
+                    if commands::is_local_command(cmd) {
+                        if let Some(output) = commands::handle_local_command(cmd, args, &app.config_name) {
+                            app.messages.push(DisplayMessage::system(&output));
+                        }
+                    } else {
+                        // Send to brain via gRPC
+                        let _ = in_tx.send(ConversationRequest {
+                            request_type: Some(conversation_request::RequestType::SlashCommand(
+                                SlashCommand { command: cmd.to_string(), args: args.to_string() }
+                            )),
+                        }).await;
+                    }
+                } else {
+                    // Regular message
+                    app.messages.push(DisplayMessage::user(&input));
+                    let _ = in_tx.send(ConversationRequest {
+                        request_type: Some(conversation_request::RequestType::UserMessage(
+                            UserMessage { content: input }
+                        )),
+                    }).await;
+                }
+            }
+        }
+
+        // Alt+Enter — newline in input
+        (KeyCode::Enter, KeyModifiers::ALT) => {
+            app.input_buffer.insert(app.cursor_pos, '\n');
+            app.cursor_pos += 1;
+        }
+
+        // Scroll
+        (KeyCode::Up, _) => {
+            app.scroll_offset = app.scroll_offset.saturating_add(1);
+        }
+        (KeyCode::Down, _) => {
+            app.scroll_offset = app.scroll_offset.saturating_sub(1);
+        }
+        (KeyCode::PageUp, _) => {
+            app.scroll_offset = app.scroll_offset.saturating_add(10);
+        }
+        (KeyCode::PageDown, _) => {
+            app.scroll_offset = app.scroll_offset.saturating_sub(10);
+        }
+
+        // Backspace
+        (KeyCode::Backspace, _) => {
+            if app.cursor_pos > 0 {
+                app.cursor_pos -= 1;
+                app.input_buffer.remove(app.cursor_pos);
+            }
+        }
+
+        // Delete
+        (KeyCode::Delete, _) => {
+            if app.cursor_pos < app.input_buffer.len() {
+                app.input_buffer.remove(app.cursor_pos);
+            }
+        }
+
+        // Home/End
+        (KeyCode::Home, _) => {
+            app.cursor_pos = 0;
+        }
+        (KeyCode::End, _) => {
+            app.cursor_pos = app.input_buffer.len();
+        }
+
+        // Left/Right cursor
+        (KeyCode::Left, _) => {
+            app.cursor_pos = app.cursor_pos.saturating_sub(1);
+        }
+        (KeyCode::Right, _) => {
+            if app.cursor_pos < app.input_buffer.len() {
+                app.cursor_pos += 1;
+            }
+        }
+
+        // Character input
+        (KeyCode::Char(c), _) => {
+            app.input_buffer.insert(app.cursor_pos, c);
+            app.cursor_pos += 1;
+            app.scroll_offset = 0; // Auto-scroll to bottom on typing
+        }
+
+        _ => {}
+    }
+
+    Ok(())
 }
