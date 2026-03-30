@@ -26,12 +26,15 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()> {
-    // Open conversation stream
+    println!("[TUI] opening conversation...");
     let (in_tx, mut out_rx) = client.open_conversation("").await?;
+    println!("[TUI] conversation opened");
 
     // Initialize ratatui terminal
     // Skip EnterAlternateScreen — doesn't work over QEMU serial (-nographic)
+    println!("[TUI] enabling raw mode...");
     enable_raw_mode()?;
+    println!("[TUI] raw mode enabled");
 
     // Force terminal size for serial console — TIOCGWINSZ may return 0x0
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
