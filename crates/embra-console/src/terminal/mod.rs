@@ -53,6 +53,8 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
             viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, use_cols, use_rows)),
         },
     )?;
+    // Brief delay to let embrad finish its dup2 redirect, then clear any bleed-through
+    tokio::time::sleep(Duration::from_millis(200)).await;
     terminal_tui.clear()?;
 
     let mut app = AppState::new();
