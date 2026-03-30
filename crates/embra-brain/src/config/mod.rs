@@ -270,6 +270,17 @@ pub async fn run_config_wizard_grpc(
     save_config(db, &config).await?;
     info!("Config wizard complete, saved to WardSONDB");
 
+    // Also write API key to STATE partition so embrad can pass it on subsequent boots
+    let key_path = "/embra/state/api_key";
+    if let Some(parent) = std::path::Path::new(key_path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(key_path, &config.api_key) {
+        tracing::warn!("Could not write API key to STATE: {}", e);
+    } else {
+        info!("API key written to {}", key_path);
+    }
+
     // Transition to next mode
     let soul_sealed = crate::learning::is_soul_sealed(db).await.unwrap_or(false);
     let next_mode = if soul_sealed {

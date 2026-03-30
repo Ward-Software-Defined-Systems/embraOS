@@ -48,7 +48,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // API key: --api-key flag > ANTHROPIC_API_KEY env var > WardSONDB config
-    let api_key = api_key
+    let mut api_key = api_key
         .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
         .unwrap_or_default();
     if api_key.is_empty() {
@@ -84,8 +84,15 @@ async fn main() -> anyhow::Result<()> {
     info!("Migrations complete");
 
     // Load config (or default for first run)
+    // Also try to get API key from WardSONDB config if not provided via CLI/env
     let config_tz = match config::load_config(&db).await {
-        Ok(cfg) => cfg.timezone.clone(),
+        Ok(cfg) => {
+            if api_key.is_empty() && !cfg.api_key.is_empty() {
+                info!("Loaded API key from WardSONDB config");
+                api_key = cfg.api_key.clone();
+            }
+            cfg.timezone.clone()
+        }
         Err(_) => "UTC".to_string(),
     };
 
