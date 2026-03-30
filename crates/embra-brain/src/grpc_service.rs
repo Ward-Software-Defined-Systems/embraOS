@@ -72,9 +72,65 @@ impl BrainService for BrainGrpcService {
         let proactive_rx = self.proactive_rx.clone();
 
         tokio::spawn(async move {
+            let mut config_tz = config_tz;
+            let mut api_key = api_key;
+
+            // Check for first-run: no config in WardSONDB
+            let is_first_run = config::load_config(&db).await.is_err();
+
+            if is_first_run {
+                info!("First run detected — starting config wizard via gRPC");
+                let (wizard_tx, mut wizard_rx) = mpsc::channel::<String>(1);
+
+                // Spawn wizard task
+                let wizard_db = db.clone();
+                let wizard_gRPC_tx = tx.clone();
+                let mut wizard_handle = tokio::spawn(async move {
+                    config::run_config_wizard_grpc(&wizard_gRPC_tx, &mut wizard_rx, &wizard_db).await
+                });
+
+                // Feed user responses to wizard until it completes
+                loop {
+                    tokio::select! {
+                        msg = incoming.next() => {
+                            match msg {
+                                Some(Ok(req)) => {
+                                    if let Some(conversation_request::RequestType::UserMessage(um)) = req.request_type {
+                                        // Forward user input to wizard
+                                        if wizard_tx.send(um.content).await.is_err() {
+                                            break; // Wizard closed its receiver
+                                        }
+                                    }
+                                    // Ignore non-UserMessage during wizard (SlashCommand, SessionAttach)
+                                }
+                                Some(Err(e)) => { warn!("Stream error during wizard: {}", e); break; }
+                                None => { debug!("Client disconnected during wizard"); break; }
+                            }
+                        }
+                        result = &mut wizard_handle => {
+                            match result {
+                                Ok(Ok(new_config)) => {
+                                    info!("Config wizard completed: name={}", new_config.name);
+                                    api_key = new_config.api_key;
+                                    config_tz = new_config.timezone;
+                                }
+                                Ok(Err(e)) => {
+                                    error!("Config wizard failed: {}", e);
+                                }
+                                Err(e) => {
+                                    error!("Config wizard task panicked: {}", e);
+                                }
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+
             // Try to get proactive notifications (only one Converse stream gets them)
             let mut proactive = proactive_rx.try_lock().ok();
 
+            // Main conversation loop
             loop {
                 tokio::select! {
                     msg = incoming.next() => {
@@ -109,7 +165,6 @@ impl BrainService for BrainGrpcService {
                         if let Some(ref mut rx) = proactive {
                             rx.recv().await
                         } else {
-                            // No lock, just pend forever
                             std::future::pending().await
                         }
                     } => {

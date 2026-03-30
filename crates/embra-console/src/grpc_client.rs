@@ -22,8 +22,8 @@ pub enum ConsoleEvent {
     SystemMessage { content: String, msg_type: String },
     ToolExecution { name: String, input: String, result: String, success: bool },
     ThinkingState { is_thinking: bool, name: String },
-    ModeTransition { message: String },
-    SetupPrompt { field_type: String, prompt: String, options: Vec<String> },
+    ModeTransition { from_mode: i32, to_mode: i32, message: String },
+    SetupPrompt { field_type: String, prompt: String, options: Vec<String>, default_value: String },
 }
 
 impl BrainClient {
@@ -99,13 +99,23 @@ impl BrainClient {
                                         }
                                     }
                                     brain::conversation_response::ResponseType::ModeChange(m) => {
-                                        ConsoleEvent::ModeTransition { message: m.message }
+                                        ConsoleEvent::ModeTransition {
+                                            from_mode: m.from_mode,
+                                            to_mode: m.to_mode,
+                                            message: m.message,
+                                        }
                                     }
                                     brain::conversation_response::ResponseType::Setup(s) => {
                                         ConsoleEvent::SetupPrompt {
-                                            field_type: format!("{}", s.field_type),
+                                            field_type: match s.field_type {
+                                                1 => "text".to_string(),
+                                                2 => "selector".to_string(),
+                                                3 => "confirm".to_string(),
+                                                _ => "text".to_string(),
+                                            },
                                             prompt: s.prompt,
                                             options: s.options,
+                                            default_value: s.default_value,
                                         }
                                     }
                                 };

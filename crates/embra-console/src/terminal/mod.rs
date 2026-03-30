@@ -40,6 +40,7 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
     io::stdout().flush()?;
 
     let mut input_buffer = String::new();
+    let mut setup_default: Option<String> = None;
     let mut is_thinking = false;
     let mut in_response = false;
 
@@ -94,17 +95,25 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
                             is_thinking = false;
                         }
                     }
-                    Some(ConsoleEvent::ModeTransition { message }) => {
-                        print!("\r\n\x1b[35m[Mode] {}\x1b[0m\r\n> ", message);
+                    Some(ConsoleEvent::ModeTransition { message, .. }) => {
+                        print!("\r\n\x1b[35m══ {} ══\x1b[0m\r\n\r\n> ", message);
                         io::stdout().flush()?;
                     }
-                    Some(ConsoleEvent::SetupPrompt { prompt, options, .. }) => {
-                        print!("\r\n\x1b[33m{}\x1b[0m\r\n", prompt);
-                        for (i, opt) in options.iter().enumerate() {
-                            print!("  {}. {}\r\n", i + 1, opt);
+                    Some(ConsoleEvent::SetupPrompt { field_type, prompt, options, default_value }) => {
+                        print!("\r\n\x1b[33m{}\x1b[0m", prompt);
+                        if !default_value.is_empty() {
+                            print!(" \x1b[90m[default: {}]\x1b[0m", default_value);
+                        }
+                        print!("\r\n");
+                        if !options.is_empty() {
+                            for (i, opt) in options.iter().enumerate() {
+                                print!("  {}. {}\r\n", i + 1, opt);
+                            }
                         }
                         print!("> ");
                         io::stdout().flush()?;
+                        // Store default so Enter with empty input uses it
+                        setup_default = Some(default_value);
                     }
                     None => {
                         print!("\r\n\x1b[31m[Disconnected from server]\x1b[0m\r\n");
@@ -124,16 +133,28 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
                                 break;
                             }
                             (KeyCode::Enter, _) => {
-                                let input = input_buffer.trim().to_string();
+                                let mut input = input_buffer.trim().to_string();
                                 input_buffer.clear();
                                 print!("\r\n");
                                 io::stdout().flush()?;
 
+                                // Use setup default if input is empty and a default is set
                                 if input.is_empty() {
-                                    print!("> ");
-                                    io::stdout().flush()?;
-                                    continue;
+                                    if let Some(default) = setup_default.take() {
+                                        if !default.is_empty() {
+                                            input = default;
+                                        } else {
+                                            print!("> ");
+                                            io::stdout().flush()?;
+                                            continue;
+                                        }
+                                    } else {
+                                        print!("> ");
+                                        io::stdout().flush()?;
+                                        continue;
+                                    }
                                 }
+                                setup_default = None;
 
                                 // Check for slash commands
                                 if input.starts_with('/') {
