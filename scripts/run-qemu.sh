@@ -64,6 +64,12 @@ echo ""
 echo "Press Ctrl-A X to exit QEMU"
 echo ""
 
+# Detect host terminal size and pass to guest via kernel cmdline
+HOST_COLS=$(stty size 2>/dev/null | awk '{print $2}')
+HOST_ROWS=$(stty size 2>/dev/null | awk '{print $1}')
+HOST_COLS=${HOST_COLS:-80}
+HOST_ROWS=${HOST_ROWS:-24}
+
 qemu-system-x86_64 \
     $ACCEL \
     -m "$MEMORY" \
@@ -71,7 +77,7 @@ qemu-system-x86_64 \
     -drive file="$IMAGE",format=raw,if=virtio \
     -kernel "$KERNEL" \
     -initrd "$INITRD" \
-    -append "console=ttyS0 root=/dev/vda2 ro quiet" \
+    -append "console=ttyS0 root=/dev/vda2 ro quiet embra.cols=$HOST_COLS embra.rows=$HOST_ROWS" \
     -nographic \
     -serial mon:stdio \
     -nic user,hostfwd=tcp::50000-:50000,hostfwd=tcp::8443-:8443 \

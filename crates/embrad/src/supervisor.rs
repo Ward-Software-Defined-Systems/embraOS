@@ -12,6 +12,23 @@ use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
 use tracing::{info, warn, error};
 
+/// Read embra.cols and embra.rows from /proc/cmdline (set by run-qemu.sh)
+fn read_terminal_size_from_cmdline() -> (u16, u16) {
+    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let mut cols = 80u16;
+    let mut rows = 24u16;
+    for param in cmdline.split_whitespace() {
+        if let Some(val) = param.strip_prefix("embra.cols=") {
+            cols = val.parse().unwrap_or(80);
+        }
+        if let Some(val) = param.strip_prefix("embra.rows=") {
+            rows = val.parse().unwrap_or(24);
+        }
+    }
+    info!("Terminal size from cmdline: {}x{}", cols, rows);
+    (cols, rows)
+}
+
 /// Service definition
 #[derive(Clone)]
 pub struct ServiceDef {
@@ -170,15 +187,8 @@ impl Supervisor {
         });
 
         // 5. embra-console — depends on embra-brain
-        // Detect terminal size before embra-console takes over
-        let (term_cols, term_rows) = unsafe {
-            let mut ws: libc::winsize = std::mem::zeroed();
-            if libc::ioctl(0, libc::TIOCGWINSZ, &mut ws) == 0 && ws.ws_col > 0 && ws.ws_row > 0 {
-                (ws.ws_col, ws.ws_row)
-            } else {
-                (80u16, 24u16)
-            }
-        };
+        // Read terminal size from kernel cmdline (set by run-qemu.sh from host terminal)
+        let (term_cols, term_rows) = read_terminal_size_from_cmdline();
         self.add_service(ServiceDef {
             name: "embra-console".to_string(),
             binary: "/usr/bin/embra-console".to_string(),
