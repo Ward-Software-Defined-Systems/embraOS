@@ -32,9 +32,20 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
     // Initialize ratatui terminal
     // Skip EnterAlternateScreen — doesn't work over QEMU serial (-nographic)
     enable_raw_mode()?;
+
+    // Force terminal size for serial console — TIOCGWINSZ may return 0x0
+    let (cols, rows) = terminal::size().unwrap_or((80, 24));
+    if cols == 0 || rows == 0 {
+        // Set a reasonable default via crossterm
+        let _ = crossterm::execute!(
+            stdout(),
+            crossterm::terminal::SetSize(80, 24)
+        );
+    }
+
     let backend = CrosstermBackend::new(stdout());
-    let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
+    let mut terminal_tui = Terminal::new(backend)?;
+    terminal_tui.clear()?;
 
     let mut app = AppState::new();
     app.status_message = "OK".to_string();
@@ -55,7 +66,7 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
 
     // Main event loop
     loop {
-        terminal.draw(|f| ui::draw(f, &app))?;
+        terminal_tui.draw(|f| ui::draw(f, &app))?;
 
         if app.should_quit {
             break;
