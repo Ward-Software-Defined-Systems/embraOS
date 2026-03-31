@@ -408,7 +408,7 @@ All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memor
 | **Phase 0 — Sprint 3** | Session access tools (5), memory consolidation (2), session consolidation (3), schema migration framework | ✅ **Complete** |
 | **Phase 0 — Sprint 4** | SSH remote admin (4 tools), tag filter fix, timezone-aware timestamps, `/copy` deferred | ✅ **Complete** |
 | **Phase 0 — Sprint 5** | SSH ControlMaster refactor, Brain API upgrade (128K output, adaptive thinking, 1M context), WardSONDB integration upgrades, new filesystem/git tools (file_delete, file_move, dir_delete, git_rm, git_mv) | ✅ **Complete** |
-| **Phase 1** | Core OS — 7-crate workspace, `embrad` PID 1, `embra-trustd` PKI + soul verification, `embra-apid` gateway, Buildroot image, QEMU boot | **In Progress** |
+| **Phase 1** | Core OS — QEMU-bootable image, full boot chain, config wizard, Learning Mode, AI conversation + tools over serial TUI | **Initial Sprint Complete** |
 | **Phase 2** | Terminal & Sessions — full TUI rewrite, `embractl` management CLI (the `talosctl` equivalent), LLM-driven Continuity Engine feedback loop | Planned |
 | **Phase 3** | Module System — MCP server modules via `embra-guardian` governance proxy, containerd runtime, governed capability expansion | Planned |
 | **Phase 4** | Image Factory — bootable ISO builds, A/B partition scheme with automatic rollback, bare metal and Kubernetes deployment | Planned |
@@ -493,21 +493,30 @@ All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memor
 
 embraOS stops being a Docker application and starts being an operating system. Follows [Talos Linux](https://www.talos.dev/) architectural patterns directly — same philosophy (immutable, API-only, no shell), different mission (hosting a mind instead of running Kubernetes).
 
-**Initial Sprint (complete):** Cargo workspace with 7 crates, all cross-compiling to `x86_64-unknown-linux-musl` (static binaries):
+**Initial Sprint — QEMU-bootable with full AI conversation:**
+
+Cargo workspace with 7 crates, all cross-compiling to `x86_64-unknown-linux-musl` (static binaries):
 
 | Crate | Description | Status |
 |-------|-------------|--------|
-| `embra-init` | Initramfs: mount SquashFS/STATE/DATA, pivot_root, exec embrad | Implemented |
-| `embrad` | PID 1: service supervisor (5 services), soul verification, reconciliation loop | Implemented |
-| `embra-trustd` | Soul SHA-256 verification, Root CA generation, mTLS cert signing | Implemented |
-| `embra-apid` | gRPC + REST gateway, bidirectional streaming proxy | Implemented |
-| `embra-brain` | Headless AI runtime (gRPC scaffolding, Phase 0 extraction pending) | Scaffolded |
-| `embra-console` | TUI client over serial/gRPC (Phase 0 TUI adaptation pending) | Scaffolded |
-| `embra-common` | Shared protobuf types (tonic codegen) | Implemented |
+| `embra-init` | Initramfs: mount SquashFS/STATE/DATA, switch_root, exec embrad | Complete |
+| `embrad` | PID 1: loopback/eth0 setup, service supervisor, soul verification, reconciliation | Complete |
+| `embra-trustd` | Soul SHA-256 verification, Root CA generation, mTLS cert signing | Complete |
+| `embra-apid` | gRPC + REST gateway, bidirectional streaming proxy | Complete |
+| `embra-brain` | Headless AI runtime — Phase 0 Brain, ~63 tools, sessions, Learning Mode, proactive engine | Complete |
+| `embra-console` | Full ratatui TUI over serial/gRPC — config wizard, styled rendering, session management | Complete |
+| `embra-common` | Shared protobuf types (tonic codegen) | Complete |
 
-Plus: 4 protobuf definitions, Buildroot external tree with 7 package recipes, build/launch/test scripts, GPT disk image (boot + SquashFS rootfs + STATE ext4 + DATA ext4).
+End-to-end verified in QEMU:
+- Config wizard collects name/API key/timezone on first boot via gRPC SetupPrompt messages
+- 6-phase Learning Mode (UserConfiguration → SoulDefinition → Confirmation → Complete) with soul sealing
+- Subsequent boots verify soul SHA-256 hash — mismatch HALTs the system
+- Full conversation with Anthropic API streaming, tool dispatch, session persistence
+- ratatui TUI with styled text, JSON highlighting, thinking indicator, host terminal size passthrough
+- REST health check accessible from host (`curl http://localhost:8443/health`)
+- Session history restored on reconnect and `/switch`
 
-**Boot invariant:** if soul verification fails, the system halts. First boot (no soul) is allowed — enters Learning Mode.
+**Boot invariant:** if soul verification fails, the system halts. First boot (no soul) enters Config Wizard → Learning Mode.
 
 **Deferred to sub-sprints:** LUKS encryption, mTLS enforcement, A/B boot, embractl, custom kernel, ZFS, aarch64.
 
