@@ -154,7 +154,11 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
                     app.mode = AppMode::Learning;
                 }
                 3 => {
-                    let session = "default".to_string();
+                    // Extract session name from message (format: "Operational — Session: <name>")
+                    let session = message.split("Session: ")
+                        .nth(1)
+                        .unwrap_or("main")
+                        .to_string();
                     app.mode = AppMode::Operational { session_name: session };
                 }
                 _ => {}

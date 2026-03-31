@@ -112,7 +112,8 @@ pub struct AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
-            mode: AppMode::Setup(SetupState { step: SetupStep::Name }),
+            // Start in Learning mode — brain sends ModeTransition with correct mode
+            mode: AppMode::Learning,
             messages: Vec::new(),
             input_buffer: String::new(),
             cursor_pos: 0,

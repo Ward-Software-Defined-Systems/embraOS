@@ -581,18 +581,25 @@ async fn handle_request(
         }
 
         Some(conversation_request::RequestType::SessionAttach(attach)) => {
-            let session_name = if attach.session_name.is_empty() {
-                "default".to_string()
-            } else {
+            let mut mgr = session_mgr.write().await;
+
+            // Determine session: explicit name > most recent active > "main"
+            let session_name = if !attach.session_name.is_empty() {
                 attach.session_name.clone()
+            } else if let Some(ref active) = mgr.active_session {
+                active.clone()
+            } else if let Ok(Some(recent)) = mgr.get_most_recent_active().await {
+                recent.name.clone()
+            } else {
+                "main".to_string()
             };
 
             // Ensure session exists
-            let mut mgr = session_mgr.write().await;
             if !mgr.session_exists(&session_name).await.unwrap_or(false) {
                 let _ = mgr.create(&session_name).await;
             }
             mgr.active_session = Some(session_name.clone());
+            drop(mgr);
 
             let _ = tx.send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::System(
@@ -602,6 +609,24 @@ async fn handle_request(
                     }
                 )),
             })).await;
+
+            // Send ModeTransition so console knows the correct mode
+            let is_sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
+            let mode = if is_sealed { OperatingMode::Operational } else { OperatingMode::Learning };
+            let _ = tx.send(Ok(ConversationResponse {
+                response_type: Some(conversation_response::ResponseType::ModeChange(
+                    ModeTransition {
+                        from_mode: OperatingMode::Unspecified as i32,
+                        to_mode: mode as i32,
+                        message: if is_sealed {
+                            format!("Operational — Session: {}", session_name)
+                        } else {
+                            "Learning Mode".to_string()
+                        },
+                    }
+                )),
+            })).await;
+
             Ok(())
         }
 
