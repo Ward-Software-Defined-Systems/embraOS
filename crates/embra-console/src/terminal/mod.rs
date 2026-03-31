@@ -130,7 +130,7 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
         ConsoleEvent::ResponseDone(full) => {
             app.streaming_text = None;
             app.thinking = false;
-            app.messages.push(DisplayMessage::assistant(&full));
+            app.messages.push(DisplayMessage::new_with_tz("assistant", &full, &app.config_tz));
             app.scroll_offset = 0;
         }
         ConsoleEvent::SystemMessage { content, .. } => {
@@ -148,6 +148,14 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
             }
         }
         ConsoleEvent::ModeTransition { from_mode: _, to_mode, message } => {
+            // Parse timezone from message (format: "... — TZ: <tz>")
+            if let Some(tz_part) = message.split("TZ: ").nth(1) {
+                let tz = tz_part.split(" — ").next().unwrap_or(tz_part).trim().to_string();
+                if !tz.is_empty() {
+                    app.config_tz = tz;
+                }
+            }
+
             // to_mode: 1=Setup, 2=Learning, 3=Operational
             match to_mode {
                 1 => {
@@ -157,18 +165,17 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
                     app.mode = AppMode::Learning;
                 }
                 3 => {
-                    // Extract session name from message (format: "Operational — Session: <name>")
+                    // Extract session name (format: "Operational — Session: <name> — TZ: <tz>")
                     let session = message.split("Session: ")
                         .nth(1)
+                        .and_then(|s| s.split(" — ").next())
                         .unwrap_or("main")
                         .to_string();
                     app.mode = AppMode::Operational { session_name: session };
                 }
                 _ => {}
             }
-            if !message.is_empty() {
-                app.messages.push(DisplayMessage::system(&message));
-            }
+            // Don't display the raw ModeTransition message (it has internal metadata)
             app.scroll_offset = 0;
         }
         ConsoleEvent::SetupPrompt { field_type, prompt, options, default_value } => {
@@ -231,7 +238,7 @@ async fn handle_key_event(
             } else if let Some(pasted) = app.pasted_lines.take() {
                 // Send pasted content
                 let content = pasted.join("\n");
-                app.messages.push(DisplayMessage::user(&content));
+                app.messages.push(DisplayMessage::new_with_tz("user", &content, &app.config_tz));
                 let _ = in_tx.send(ConversationRequest {
                     request_type: Some(conversation_request::RequestType::UserMessage(
                         UserMessage { content }
@@ -277,7 +284,7 @@ async fn handle_key_event(
                     }
                 } else {
                     // Regular message
-                    app.messages.push(DisplayMessage::user(&input));
+                    app.messages.push(DisplayMessage::new_with_tz("user", &input, &app.config_tz));
                     let _ = in_tx.send(ConversationRequest {
                         request_type: Some(conversation_request::RequestType::UserMessage(
                             UserMessage { content: input }

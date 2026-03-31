@@ -621,18 +621,19 @@ async fn handle_request(
                 )),
             })).await;
 
-            // Send ModeTransition so console knows the correct mode
+            // Send ModeTransition so console knows the correct mode and timezone
             let is_sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
             let mode = if is_sealed { OperatingMode::Operational } else { OperatingMode::Learning };
+            let tz = config::load_config(&**db).await.map(|c| c.timezone).unwrap_or_else(|_| config_tz.to_string());
             let _ = tx.send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::ModeChange(
                     ModeTransition {
                         from_mode: OperatingMode::Unspecified as i32,
                         to_mode: mode as i32,
                         message: if is_sealed {
-                            format!("Operational — Session: {}", session_name)
+                            format!("Operational — Session: {} — TZ: {}", session_name, tz)
                         } else {
-                            "Learning Mode".to_string()
+                            format!("Learning Mode — TZ: {}", tz)
                         },
                     }
                 )),
@@ -666,16 +667,18 @@ async fn handle_slash_command(
     };
 
     // Helper to send a ModeTransition with updated session name
-    let send_session_update = |tx: &mpsc::Sender<Result<ConversationResponse, Status>>, session_name: &str| {
+    let tz = config_tz.to_string();
+    let send_session_update = move |tx: &mpsc::Sender<Result<ConversationResponse, Status>>, session_name: &str| {
         let tx = tx.clone();
         let name = session_name.to_string();
+        let tz = tz.clone();
         async move {
             let _ = tx.send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::ModeChange(
                     ModeTransition {
                         from_mode: OperatingMode::Operational as i32,
                         to_mode: OperatingMode::Operational as i32,
-                        message: format!("Operational — Session: {}", name),
+                        message: format!("Operational — Session: {} — TZ: {}", name, tz),
                     }
                 )),
             })).await;
@@ -731,8 +734,25 @@ async fn handle_slash_command(
                 if mgr.session_exists(args).await.unwrap_or(false) {
                     let _ = mgr.reattach(args).await;
                     mgr.active_session = Some(args.to_string());
-                    drop(mgr);
-                    send_msg(tx, format!("Switched to session '{}'", args)).await;
+                    // Load and send session history
+                    if let Ok(history) = mgr.load_history(args).await {
+                        drop(mgr);
+                        for msg in &history {
+                            let role_display = if msg.role == "user" { "user" } else { "assistant" };
+                            let _ = tx.send(Ok(ConversationResponse {
+                                response_type: Some(conversation_response::ResponseType::System(
+                                    SystemMessage {
+                                        content: format!("[{}] {}", role_display, msg.content),
+                                        msg_type: SystemMessageType::Reconnection as i32,
+                                    }
+                                )),
+                            })).await;
+                        }
+                        send_msg(tx, format!("Switched to session '{}' ({} messages)", args, history.len())).await;
+                    } else {
+                        drop(mgr);
+                        send_msg(tx, format!("Switched to session '{}'", args)).await;
+                    }
                     send_session_update(tx, args).await;
                 } else {
                     send_msg(tx, format!("Session '{}' does not exist", args)).await;

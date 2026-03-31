@@ -3,7 +3,8 @@
 //! These mirror Phase 0's AppState/AppMode but without backend dependencies.
 //! All data comes from gRPC ConsoleEvents.
 
-use chrono::{Local, Utc};
+use chrono::Utc;
+use chrono_tz::Tz;
 
 /// Operating mode of the console
 #[derive(Debug, Clone, PartialEq)]
@@ -69,7 +70,20 @@ impl DisplayMessage {
         Self {
             role: role.into(),
             content: content.into(),
-            timestamp: Local::now().format("%b %d %H:%M").to_string(),
+            timestamp: Utc::now().format("%b %d %H:%M").to_string(),
+        }
+    }
+
+    pub fn new_with_tz(role: impl Into<String>, content: impl Into<String>, tz_str: &str) -> Self {
+        let ts = if let Ok(tz) = tz_str.parse::<Tz>() {
+            Utc::now().with_timezone(&tz).format("%b %d %H:%M").to_string()
+        } else {
+            Utc::now().format("%b %d %H:%M UTC").to_string()
+        };
+        Self {
+            role: role.into(),
+            content: content.into(),
+            timestamp: ts,
         }
     }
 
@@ -106,6 +120,7 @@ pub struct AppState {
     pub setup_default: Option<String>,
     pub config_name: String,
     pub config_version: String,
+    pub config_tz: String,
     pub pasted_lines: Option<Vec<String>>,
 }
 
@@ -127,6 +142,7 @@ impl AppState {
             setup_default: None,
             config_name: "embraOS".to_string(),
             config_version: env!("CARGO_PKG_VERSION").to_string(),
+            config_tz: "UTC".to_string(),
             pasted_lines: None,
         }
     }
