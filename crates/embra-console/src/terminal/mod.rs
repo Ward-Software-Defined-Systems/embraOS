@@ -53,7 +53,10 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
             viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, use_cols, use_rows)),
         },
     )?;
-    // Brief delay to let embrad finish its dup2 redirect, then clear any bleed-through
+    // Delay to let embrad finish its dup2 redirect, then clear any log bleed-through
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    terminal_tui.clear()?;
+    // Double-clear to catch any late log messages
     tokio::time::sleep(Duration::from_millis(200)).await;
     terminal_tui.clear()?;
 

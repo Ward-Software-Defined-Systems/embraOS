@@ -568,15 +568,7 @@ async fn handle_request(
         }
 
         Some(conversation_request::RequestType::SlashCommand(cmd)) => {
-            let output = handle_slash_command(&cmd.command, &cmd.args, db, session_mgr, config_tz).await;
-            let _ = tx.send(Ok(ConversationResponse {
-                response_type: Some(conversation_response::ResponseType::System(
-                    SystemMessage {
-                        content: output,
-                        msg_type: SystemMessageType::Info as i32,
-                    }
-                )),
-            })).await;
+            handle_slash_command(&cmd.command, &cmd.args, tx, db, session_mgr, config_tz).await;
             Ok(())
         }
 
@@ -601,10 +593,29 @@ async fn handle_request(
             mgr.active_session = Some(session_name.clone());
             drop(mgr);
 
+            // Load and send session history so console displays prior conversation
+            {
+                let mgr = session_mgr.read().await;
+                if let Ok(history) = mgr.load_history(&session_name).await {
+                    for msg in &history {
+                        let role_display = if msg.role == "user" { "user" } else { "assistant" };
+                        let _ = tx.send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::System(
+                                SystemMessage {
+                                    content: format!("[{}] {}", role_display, msg.content),
+                                    msg_type: SystemMessageType::Reconnection as i32,
+                                }
+                            )),
+                        })).await;
+                    }
+                }
+            }
+
             let _ = tx.send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::System(
                     SystemMessage {
-                        content: format!("Session '{}' attached", session_name),
+                        content: format!("Session '{}' attached ({} messages restored)", session_name,
+                            session_mgr.read().await.load_history(&session_name).await.map(|h| h.len()).unwrap_or(0)),
                         msg_type: SystemMessageType::Reconnection as i32,
                     }
                 )),
@@ -637,19 +648,51 @@ async fn handle_request(
 async fn handle_slash_command(
     command: &str,
     args: &str,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
     db: &Arc<WardsonDbClient>,
     session_mgr: &Arc<RwLock<SessionManager>>,
     config_tz: &str,
-) -> String {
+) {
+    // Helper to send a system message
+    let send_msg = |tx: &mpsc::Sender<Result<ConversationResponse, Status>>, content: String| {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Ok(ConversationResponse {
+                response_type: Some(conversation_response::ResponseType::System(
+                    SystemMessage { content, msg_type: SystemMessageType::Info as i32 }
+                )),
+            })).await;
+        }
+    };
+
+    // Helper to send a ModeTransition with updated session name
+    let send_session_update = |tx: &mpsc::Sender<Result<ConversationResponse, Status>>, session_name: &str| {
+        let tx = tx.clone();
+        let name = session_name.to_string();
+        async move {
+            let _ = tx.send(Ok(ConversationResponse {
+                response_type: Some(conversation_response::ResponseType::ModeChange(
+                    ModeTransition {
+                        from_mode: OperatingMode::Operational as i32,
+                        to_mode: OperatingMode::Operational as i32,
+                        message: format!("Operational — Session: {}", name),
+                    }
+                )),
+            })).await;
+        }
+    };
+
     match command {
-        "/help" => "Available commands: /sessions, /switch <name>, /new <name>, /close, /status, /soul, /identity, /mode, /help".to_string(),
+        "/help" => {
+            send_msg(tx, "Available commands: /sessions, /switch <name>, /new <name>, /close, /status, /soul, /identity, /mode, /help".to_string()).await;
+        }
         "/status" => {
             let status = tools::system_status(db).await;
-            serde_json::to_string_pretty(&status).unwrap_or_else(|_| "Failed to get status".to_string())
+            send_msg(tx, serde_json::to_string_pretty(&status).unwrap_or_else(|_| "Failed to get status".to_string())).await;
         }
         "/sessions" => {
             let mgr = session_mgr.read().await;
-            match mgr.list().await {
+            let output = match mgr.list().await {
                 Ok(sessions) => {
                     if sessions.is_empty() {
                         "No sessions.".to_string()
@@ -660,33 +703,39 @@ async fn handle_slash_command(
                     }
                 }
                 Err(e) => format!("Error listing sessions: {}", e),
-            }
+            };
+            send_msg(tx, output).await;
         }
         "/new" => {
             if args.is_empty() {
-                "Usage: /new <session-name>".to_string()
+                send_msg(tx, "Usage: /new <session-name>".to_string()).await;
             } else {
                 let mut mgr = session_mgr.write().await;
                 match mgr.create(args).await {
                     Ok(s) => {
                         mgr.active_session = Some(s.name.clone());
-                        format!("Created and switched to session '{}'", s.name)
+                        let name = s.name.clone();
+                        drop(mgr);
+                        send_msg(tx, format!("Created and switched to session '{}'", name)).await;
+                        send_session_update(tx, &name).await;
                     }
-                    Err(e) => format!("Error creating session: {}", e),
+                    Err(e) => { send_msg(tx, format!("Error creating session: {}", e)).await; }
                 }
             }
         }
         "/switch" => {
             if args.is_empty() {
-                "Usage: /switch <session-name>".to_string()
+                send_msg(tx, "Usage: /switch <session-name>".to_string()).await;
             } else {
                 let mut mgr = session_mgr.write().await;
                 if mgr.session_exists(args).await.unwrap_or(false) {
                     let _ = mgr.reattach(args).await;
                     mgr.active_session = Some(args.to_string());
-                    format!("Switched to session '{}'", args)
+                    drop(mgr);
+                    send_msg(tx, format!("Switched to session '{}'", args)).await;
+                    send_session_update(tx, args).await;
                 } else {
-                    format!("Session '{}' does not exist", args)
+                    send_msg(tx, format!("Session '{}' does not exist", args)).await;
                 }
             }
         }
@@ -695,29 +744,33 @@ async fn handle_slash_command(
             if let Some(ref name) = mgr.active_session.clone() {
                 let _ = mgr.close(name).await;
                 mgr.active_session = None;
-                format!("Closed session '{}'", name)
+                send_msg(tx, format!("Closed session '{}'", name)).await;
             } else {
-                "No active session".to_string()
+                send_msg(tx, "No active session".to_string()).await;
             }
         }
         "/soul" => {
-            match learning::load_soul(&**db).await {
+            let output = match learning::load_soul(&**db).await {
                 Ok(Some(soul)) => serde_json::to_string_pretty(&soul).unwrap_or_default(),
                 Ok(None) => "No soul sealed yet.".to_string(),
                 Err(e) => format!("Error loading soul: {}", e),
-            }
+            };
+            send_msg(tx, output).await;
         }
         "/identity" => {
-            match db.read("memory.identity", "identity").await {
+            let output = match db.read("memory.identity", "identity").await {
                 Ok(doc) => serde_json::to_string_pretty(&doc).unwrap_or_default(),
                 Err(_) => "No identity document found.".to_string(),
-            }
+            };
+            send_msg(tx, output).await;
         }
         "/mode" => {
             let sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
-            if sealed { "Operational (soul sealed)".to_string() } else { "Learning (soul not sealed)".to_string() }
+            send_msg(tx, if sealed { "Operational (soul sealed)".to_string() } else { "Learning (soul not sealed)".to_string() }).await;
         }
-        _ => format!("Unknown command: {}. Type /help for available commands.", command),
+        _ => {
+            send_msg(tx, format!("Unknown command: {}. Type /help for available commands.", command)).await;
+        }
     }
 }
 
