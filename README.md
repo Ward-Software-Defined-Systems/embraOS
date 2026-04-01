@@ -362,7 +362,9 @@ Phase 0 includes ~63 built-in tools available in operational mode. These are int
 
 ## Known Issues
 
-All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memory consolidation capabilities. Sprint 4 added SSH remote admin, tag filtering fix, and timezone-aware timestamps. Sprint 5 refactored SSH persistent sessions to use ControlMaster multiplexing, upgraded the Brain to full Opus 4.6 capabilities (128K output, adaptive thinking, 1M context), and hardened WardSONDB integration (new API methods, custom singleton IDs, TTL policies, health degradation detection, query optimization). Phase 0 is functionally complete.
+### Phase 0
+
+All Phase 0 Sprint 1–5 bugs have been fixed. Phase 0 is functionally complete.
 
 **Sprint 1**
 
@@ -394,7 +396,13 @@ All Sprint 1 and Sprint 2 bugs have been fixed. Sprint 3 added session and memor
 | BUG-014 | 🟡 Medium | `recall`/`memory_scan` can't find `#tagged` queries | Strip leading `#` before matching (remember already strips on store) |
 | BUG-015 | 🟡 Medium | Multi-line paste sends each line separately inside `screen` | **Open.** `screen` strips bracketed paste escapes, so crossterm receives pasted lines as individual key events. Batch-drain mitigation in event loop attempted but not sufficient — `screen` may deliver events across multiple poll cycles. Workaround: use `tmux` instead of `screen`, or paste into a terminal without `screen`. |
 
-> **13 bugs + 1 crash fixed across Sprints 1–4.** BUG-015 is open. If you encounter new bugs, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
+> **13 bugs + 1 crash fixed across Phase 0 Sprints 1–4.** BUG-015 is open.
+
+### Phase 1
+
+Phase 1 initial sprint is functionally complete. Testing in progress — issues will be tracked here as they are identified.
+
+> If you encounter bugs, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
 ---
 
