@@ -213,9 +213,9 @@ pub fn verify_partitions() -> Result<()> {
     }
 
     // Create workspace directory on DATA partition (persistent, writable)
-    // Phase 0 tools expect /embra/workspace/repos/ for git/file operations
-    let workspace_data = "/embra/data/workspace/repos";
-    let workspace_mount = "/embra/workspace/repos";
+    // Bind mount so /embra/workspace is writable despite read-only SquashFS rootfs
+    let workspace_data = "/embra/data/workspace";
+    let workspace_mount = "/embra/workspace";
     std::fs::create_dir_all(workspace_data).ok();
     std::fs::create_dir_all(workspace_mount).ok();
     #[cfg(target_os = "linux")]

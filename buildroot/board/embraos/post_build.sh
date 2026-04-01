@@ -25,5 +25,5 @@ mkdir -p "${TARGET_DIR}/sys"
 mkdir -p "${TARGET_DIR}/etc"
 echo "nameserver 10.0.2.3" > "${TARGET_DIR}/etc/resolv.conf"
 
-# Workspace mount point (embrad bind-mounts /embra/data/workspace/repos here at boot)
-mkdir -p "${TARGET_DIR}/embra/workspace/repos"
+# Workspace mount point (embrad bind-mounts /embra/data/workspace here at boot)
+mkdir -p "${TARGET_DIR}/embra/workspace"
