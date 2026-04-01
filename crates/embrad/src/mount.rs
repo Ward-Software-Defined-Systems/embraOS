@@ -212,6 +212,27 @@ pub fn verify_partitions() -> Result<()> {
         mount_if_needed("tmpfs", "/embra/ephemeral", "tmpfs", MsFlags::MS_NOSUID | MsFlags::MS_NODEV)?;
     }
 
+    // Create workspace directory on DATA partition (persistent, writable)
+    // Phase 0 tools expect /embra/workspace/repos/ for git/file operations
+    let workspace_data = "/embra/data/workspace/repos";
+    let workspace_mount = "/embra/workspace/repos";
+    std::fs::create_dir_all(workspace_data).ok();
+    std::fs::create_dir_all(workspace_mount).ok();
+    #[cfg(target_os = "linux")]
+    {
+        use nix::mount::{mount, MsFlags};
+        match mount(
+            Some(workspace_data),
+            workspace_mount,
+            None::<&str>,
+            MsFlags::MS_BIND,
+            None::<&str>,
+        ) {
+            Ok(_) => info!("Workspace bind mount: {} → {}", workspace_data, workspace_mount),
+            Err(e) => tracing::warn!("Failed to bind mount workspace: {} (tools may fail on write)", e),
+        }
+    }
+
     info!("All partitions verified");
     Ok(())
 }
