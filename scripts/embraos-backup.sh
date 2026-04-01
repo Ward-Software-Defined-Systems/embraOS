@@ -232,14 +232,15 @@ do_backup() {
     local data_size=$(du -sh "${backup_path}/data" | cut -f1)
     log_info "DATA: ${data_files} files, ${data_size}"
 
-    # Count WardSONDB collections (each is a directory under the fjall data dir)
+    # Count WardSONDB collections (fjall stores each as a partition under partitions/)
     if [ -d "${backup_path}/data/wardsondb" ]; then
-        # fjall stores partitions as subdirectories
-        local collections=$(find "${backup_path}/data/wardsondb" -maxdepth 2 -name "*.sst" -o -name "*.wal" 2>/dev/null | head -1)
-        if [ -n "$collections" ]; then
-            log_info "WardSONDB data directory present and populated"
+        local partitions_dir="${backup_path}/data/wardsondb/partitions"
+        if [ -d "$partitions_dir" ]; then
+            # Count collection partitions (named like "soul.invariant#docs", "memory.entries#docs")
+            local collection_count=$(find "$partitions_dir" -maxdepth 1 -type d -name "*#docs" | wc -l)
+            log_info "WardSONDB: ${collection_count} collection partitions"
         else
-            log_warn "WardSONDB data directory exists but appears empty"
+            log_warn "WardSONDB data directory exists but no partitions/ subdirectory"
         fi
     else
         log_warn "No WardSONDB data directory found"
@@ -487,13 +488,15 @@ do_verify() {
     if [ -d "${MOUNT_DATA}/wardsondb" ]; then
         local db_size=$(du -sh "${MOUNT_DATA}/wardsondb" | cut -f1)
         local db_files=$(find "${MOUNT_DATA}/wardsondb" -type f | wc -l)
-        echo -e "  WardSONDB:    ${GREEN}present${NC} (${db_size}, ${db_files} files)"
+        local collection_count=$(find "${MOUNT_DATA}/wardsondb/partitions" -maxdepth 1 -type d -name "*#docs" 2>/dev/null | wc -l)
+        echo -e "  WardSONDB:    ${GREEN}present${NC} (${db_size}, ${db_files} files, ${collection_count} collections)"
 
-        # Check for known partition directories (fjall uses #docs suffix)
-        local has_soul=$(find "${MOUNT_DATA}/wardsondb" -maxdepth 2 -name "*soul*" -type d 2>/dev/null | head -1)
-        local has_sessions=$(find "${MOUNT_DATA}/wardsondb" -maxdepth 2 -name "*sessions*" -type d 2>/dev/null | head -1)
-        local has_memory=$(find "${MOUNT_DATA}/wardsondb" -maxdepth 2 -name "*memory*" -type d 2>/dev/null | head -1)
-        local has_config=$(find "${MOUNT_DATA}/wardsondb" -maxdepth 2 -name "*config*" -type d 2>/dev/null | head -1)
+        # Check for key collection partitions (fjall: partitions/{name}#docs/)
+        local pdir="${MOUNT_DATA}/wardsondb/partitions"
+        local has_soul=$(find "$pdir" -maxdepth 1 -type d -name "soul.invariant#docs" 2>/dev/null | head -1)
+        local has_sessions=$(find "$pdir" -maxdepth 1 -type d -name "sessions.*#docs" 2>/dev/null | head -1)
+        local has_memory=$(find "$pdir" -maxdepth 1 -type d -name "memory.*#docs" 2>/dev/null | head -1)
+        local has_config=$(find "$pdir" -maxdepth 1 -type d -name "config.*#docs" 2>/dev/null | head -1)
 
         [ -n "$has_soul" ]     && echo -e "    soul.invariant:  ${GREEN}✓${NC}" || echo -e "    soul.invariant:  ${YELLOW}✗${NC}"
         [ -n "$has_config" ]   && echo -e "    config.system:   ${GREEN}✓${NC}" || echo -e "    config.system:   ${YELLOW}✗${NC}"
