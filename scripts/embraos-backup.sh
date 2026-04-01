@@ -33,7 +33,17 @@ set -euo pipefail
 # --- Configuration ---
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 EMBRAOS_ROOT="${EMBRAOS_ROOT:-$(dirname "$SCRIPT_DIR")}"
-IMAGE="${EMBRAOS_IMAGE:-${EMBRAOS_ROOT}/output/images/embraos.img}"
+
+# Find image — same logic as run-qemu.sh: buildroot output first, then output/images
+if [ -n "${EMBRAOS_IMAGE:-}" ]; then
+    IMAGE="$EMBRAOS_IMAGE"
+elif [ -f "${EMBRAOS_ROOT}/buildroot-src/output/images/embraos.img" ]; then
+    IMAGE="${EMBRAOS_ROOT}/buildroot-src/output/images/embraos.img"
+elif [ -f "${EMBRAOS_ROOT}/output/images/embraos.img" ]; then
+    IMAGE="${EMBRAOS_ROOT}/output/images/embraos.img"
+else
+    IMAGE=""  # Will be caught by check_image()
+fi
 # Resolve the real user's home even under sudo (sudo sets HOME to /root)
 REAL_HOME="${HOME}"
 if [ -n "${SUDO_USER:-}" ]; then
@@ -75,11 +85,14 @@ check_root() {
 }
 
 check_image() {
-    if [ ! -f "$IMAGE" ]; then
-        log_error "Disk image not found: $IMAGE"
-        echo "  Set EMBRAOS_IMAGE to the path of your embraos.img"
+    if [ -z "$IMAGE" ] || [ ! -f "$IMAGE" ]; then
+        log_error "Disk image not found"
+        echo "  Searched: buildroot-src/output/images/embraos.img"
+        echo "            output/images/embraos.img"
+        echo "  Set EMBRAOS_IMAGE to override"
         exit 1
     fi
+    log_info "Using image: $IMAGE"
 }
 
 check_vm_stopped() {
@@ -545,7 +558,7 @@ case "$COMMAND" in
         echo "  sudo $0 verify                    Check disk image has valid data"
         echo ""
         echo "Environment:"
-        echo "  EMBRAOS_IMAGE       Path to embraos.img (default: output/images/embraos.img)"
+        echo "  EMBRAOS_IMAGE       Path to embraos.img (default: buildroot-src/output/images/ then output/images/)"
         echo "  EMBRAOS_BACKUP_DIR  Backup storage directory (default: ~/embraOS_BACKUPS)"
         echo "  EMBRAOS_ROOT        Project root (default: parent of scripts/)"
         echo ""
