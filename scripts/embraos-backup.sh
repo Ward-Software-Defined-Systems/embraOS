@@ -12,7 +12,7 @@
 # Prerequisites:
 #   - Must run as root (or with sudo) for loop mount
 #   - VM must be STOPPED (partitions can't be mounted while QEMU has the image open)
-#   - losetup, mount, rsync, sha256sum
+#   - mount, rsync, fdisk, sha256sum
 #
 # What gets backed up:
 #   STATE partition (/dev/vda3 → /embra/state):
@@ -34,13 +34,23 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 EMBRAOS_ROOT="${EMBRAOS_ROOT:-$(dirname "$SCRIPT_DIR")}"
 IMAGE="${EMBRAOS_IMAGE:-${EMBRAOS_ROOT}/output/images/embraos.img}"
-BACKUP_DIR="${EMBRAOS_BACKUP_DIR:-${HOME}/embraOS_BACKUPS}"
+# Resolve the real user's home even under sudo (sudo sets HOME to /root)
+REAL_HOME="${HOME}"
+if [ -n "${SUDO_USER:-}" ]; then
+    REAL_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+fi
+BACKUP_DIR="${EMBRAOS_BACKUP_DIR:-${REAL_HOME}/embraOS_BACKUPS}"
 mkdir -p "$BACKUP_DIR"
+# Ensure the backup dir is owned by the real user, not root
+if [ -n "${SUDO_USER:-}" ]; then
+    chown "${SUDO_USER}:${SUDO_USER}" "$BACKUP_DIR"
+fi
 
 # Partition numbers in the GPT layout (from genimage.cfg)
 # Partition 1 = boot, 2 = rootfs (SquashFS), 3 = STATE, 4 = DATA
 STATE_PART_NUM=3
 DATA_PART_NUM=4
+SECTOR_SIZE=512
 
 # Colors
 RED='\033[0;31m'
@@ -81,7 +91,46 @@ check_vm_stopped() {
     fi
 }
 
-# Mount a partition from the disk image
+# Parse the GPT partition table to get byte offset and size for a partition.
+# losetup --partscan mishandles non-standard GPT layouts (e.g., partitions
+# starting at sector 34 instead of 2048), so we read the table with fdisk
+# and mount directly with -o loop,offset=X,sizelimit=Y.
+#
+# Usage: get_partition_geometry <part_num>
+# Sets: PART_OFFSET (bytes), PART_SIZE (bytes)
+get_partition_geometry() {
+    local part_num=$1
+
+    # fdisk -l outputs lines like:
+    #   output/images/embraos.img3 158730  683017  524288  256M Linux filesystem
+    # We need the start sector and sector count (columns 2 and 4)
+    local line
+    line=$(fdisk -l "$IMAGE" 2>/dev/null | grep "\.img${part_num} " || true)
+
+    if [ -z "$line" ]; then
+        # Try alternate format without .img prefix
+        line=$(fdisk -l "$IMAGE" 2>/dev/null | grep "${part_num} " | tail -1 || true)
+    fi
+
+    if [ -z "$line" ]; then
+        log_error "Could not find partition $part_num in disk image"
+        fdisk -l "$IMAGE" 2>/dev/null
+        exit 1
+    fi
+
+    # Extract start sector and sector count
+    # fdisk GPT output: Device Start End Sectors Size Type
+    local start_sector sectors
+    start_sector=$(echo "$line" | awk '{print $2}')
+    sectors=$(echo "$line" | awk '{print $4}')
+
+    PART_OFFSET=$((start_sector * SECTOR_SIZE))
+    PART_SIZE=$((sectors * SECTOR_SIZE))
+
+    log_info "Partition $part_num: offset=${PART_OFFSET} (sector ${start_sector}), size=${PART_SIZE} (${sectors} sectors)"
+}
+
+# Mount a partition from the disk image using calculated offset.
 # Usage: mount_partition <part_num> <mount_point>
 mount_partition() {
     local part_num=$1
@@ -89,27 +138,10 @@ mount_partition() {
 
     mkdir -p "$mount_point"
 
-    # Use losetup with --partscan to detect partitions
-    if [ -z "${LOOP_DEV:-}" ]; then
-        LOOP_DEV=$(losetup --find --show --partscan "$IMAGE")
-        log_info "Loop device: $LOOP_DEV"
-        # Give the kernel a moment to scan partitions
-        sleep 1
-        partprobe "$LOOP_DEV" 2>/dev/null || true
-        sleep 0.5
-    fi
+    get_partition_geometry "$part_num"
 
-    local part_dev="${LOOP_DEV}p${part_num}"
-    if [ ! -b "$part_dev" ]; then
-        log_error "Partition device not found: $part_dev"
-        log_error "Available partitions:"
-        ls -la "${LOOP_DEV}p"* 2>/dev/null || echo "  (none)"
-        cleanup_loop
-        exit 1
-    fi
-
-    mount "$part_dev" "$mount_point"
-    log_info "Mounted ${part_dev} → ${mount_point}"
+    mount -o loop,offset=${PART_OFFSET},sizelimit=${PART_SIZE} "$IMAGE" "$mount_point"
+    log_info "Mounted partition ${part_num} → ${mount_point}"
 }
 
 cleanup_mounts() {
@@ -122,17 +154,8 @@ cleanup_mounts() {
     done
 }
 
-cleanup_loop() {
-    if [ -n "${LOOP_DEV:-}" ]; then
-        losetup -d "$LOOP_DEV" 2>/dev/null || true
-        log_info "Released loop device $LOOP_DEV"
-        LOOP_DEV=""
-    fi
-}
-
 cleanup() {
     cleanup_mounts
-    cleanup_loop
     # Remove temp mount points
     rmdir "${MOUNT_STATE:-/nonexistent}" 2>/dev/null || true
     rmdir "${MOUNT_DATA:-/nonexistent}" 2>/dev/null || true
@@ -238,7 +261,11 @@ EOF
 
     # Unmount
     cleanup_mounts
-    cleanup_loop
+
+    # Fix ownership so the real user can access backups without sudo
+    if [ -n "${SUDO_USER:-}" ]; then
+        chown -R "${SUDO_USER}:${SUDO_USER}" "${backup_path}"
+    fi
 
     log_info ""
     log_info "═══════════════════════════════════════════════════"
@@ -351,7 +378,6 @@ do_restore() {
 
     # Unmount
     cleanup_mounts
-    cleanup_loop
 
     log_info ""
     log_info "═══════════════════════════════════════════════════"
@@ -475,7 +501,6 @@ do_verify() {
 
     # Unmount
     cleanup_mounts
-    cleanup_loop
 
     echo ""
     if $all_ok; then
