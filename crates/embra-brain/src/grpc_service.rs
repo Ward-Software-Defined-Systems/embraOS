@@ -138,6 +138,7 @@ impl BrainService for BrainGrpcService {
                     deployment_mode: "phase1".into(),
                     created_at: String::new(),
                     version: env!("CARGO_PKG_VERSION").into(),
+                    github_token: None,
                 });
                 match run_learning_loop(&tx, &mut incoming, &db, &loaded_config, &api_key).await {
                     Ok(()) => {
@@ -706,7 +707,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands: /sessions, /switch <name>, /new <name>, /close, /status, /soul, /identity, /mode, /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /github-token <token>    Set GitHub token\n  /ssh-keygen              Generate SSH key pair\n  /ssh-copy-id <user@host> Copy SSH key to host\n  /git-setup <name> | <email>  Set git user config\n  /help".to_string()).await;
         }
         "/status" => {
             let status = tools::system_status(db).await;
@@ -814,6 +815,176 @@ async fn handle_slash_command(
         "/mode" => {
             let sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
             send_msg(tx, if sealed { "Operational (soul sealed)".to_string() } else { "Learning (soul not sealed)".to_string() }).await;
+        }
+        "/github-token" => {
+            if args.is_empty() {
+                let has_token = tools::engineering::resolve_github_token(&**db).await.is_some();
+                if has_token {
+                    send_msg(tx, "GitHub token is configured. Use /github-token <token> to update it.".to_string()).await;
+                } else {
+                    send_msg(tx, "Usage: /github-token <your-github-token>\nSets GITHUB_TOKEN for GitHub API access (issues, PRs, clone).".to_string()).await;
+                }
+            } else {
+                let token = args.trim().to_string();
+                if !token.starts_with("ghp_") && !token.starts_with("gho_") && !token.starts_with("github_pat_") {
+                    send_msg(tx, "Warning: token doesn't look like a GitHub token (expected ghp_/gho_/github_pat_ prefix). Saving anyway.".to_string()).await;
+                }
+                // Save to WardSONDB config.system
+                match config::load_config(&**db).await {
+                    Ok(mut cfg) => {
+                        cfg.github_token = Some(token.clone());
+                        if let Err(e) = config::save_config(&**db, &cfg).await {
+                            send_msg(tx, format!("Failed to save token: {}", e)).await;
+                            return;
+                        }
+                    }
+                    Err(_) => {
+                        send_msg(tx, "No system config found. Run config wizard first.".to_string()).await;
+                        return;
+                    }
+                }
+                // Persist to STATE partition for boot propagation
+                let path = "/embra/state/github_token";
+                if let Some(parent) = std::path::Path::new(path).parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(path, &token);
+                // Set env var for immediate availability
+                // SAFETY: single-threaded access to env at this point in the slash command handler
+                unsafe { std::env::set_var("GITHUB_TOKEN", &token); }
+                send_msg(tx, "GitHub token saved. GitHub tools (gh_issues, gh_prs, git_clone, etc.) are now active.".to_string()).await;
+            }
+        }
+        "/ssh-keygen" => {
+            let key_path = "/root/.ssh/id_ed25519";
+            let pub_path = format!("{}.pub", key_path);
+
+            if std::path::Path::new(key_path).exists() {
+                match std::fs::read_to_string(&pub_path) {
+                    Ok(pubkey) => {
+                        send_msg(tx, format!(
+                            "SSH key already exists. Public key:\n\n{}\n\nAdd this to ~/.ssh/authorized_keys on your target hosts.",
+                            pubkey.trim()
+                        )).await;
+                    }
+                    Err(_) => {
+                        send_msg(tx, "SSH private key exists but public key is missing.".to_string()).await;
+                    }
+                }
+                return;
+            }
+
+            // Ensure .ssh directory exists with correct permissions
+            let ssh_dir = "/root/.ssh";
+            let _ = std::fs::create_dir_all(ssh_dir);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(ssh_dir, std::fs::Permissions::from_mode(0o700));
+            }
+
+            match tokio::process::Command::new("ssh-keygen")
+                .args(["-t", "ed25519", "-f", key_path, "-N", "", "-C", "embra@embraos"])
+                .output()
+                .await
+            {
+                Ok(out) if out.status.success() => {
+                    match std::fs::read_to_string(&pub_path) {
+                        Ok(pubkey) => {
+                            send_msg(tx, format!(
+                                "SSH key generated. Public key:\n\n{}\n\nAdd this to ~/.ssh/authorized_keys on your target hosts.",
+                                pubkey.trim()
+                            )).await;
+                        }
+                        Err(e) => {
+                            send_msg(tx, format!("Key generated but could not read public key: {}", e)).await;
+                        }
+                    }
+                }
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    send_msg(tx, format!("ssh-keygen failed: {}", stderr.trim())).await;
+                }
+                Err(e) => {
+                    send_msg(tx, format!("Failed to run ssh-keygen: {}", e)).await;
+                }
+            }
+        }
+        "/ssh-copy-id" => {
+            if args.is_empty() {
+                send_msg(tx, "Usage: /ssh-copy-id <user@host>\nCopies SSH public key to remote host (RFC 1918 only).".to_string()).await;
+                return;
+            }
+
+            let pub_path = "/root/.ssh/id_ed25519.pub";
+            if !std::path::Path::new(pub_path).exists() {
+                send_msg(tx, "No SSH key found. Run /ssh-keygen first.".to_string()).await;
+                return;
+            }
+
+            let target = args.trim();
+            let host = target.rsplit('@').next().unwrap_or(target);
+            if !tools::security::is_private_address(host) {
+                send_msg(tx, format!(
+                    "Denied: '{}' is not a private address. SSH is restricted to RFC 1918 ranges.",
+                    host
+                )).await;
+                return;
+            }
+
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(30),
+                tokio::process::Command::new("ssh-copy-id")
+                    .args(["-i", pub_path, "-o", "StrictHostKeyChecking=accept-new", target])
+                    .output(),
+            ).await {
+                Ok(Ok(out)) if out.status.success() => {
+                    send_msg(tx, format!("SSH public key copied to {}.", target)).await;
+                }
+                Ok(Ok(out)) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    send_msg(tx, format!(
+                        "ssh-copy-id failed (password auth may be required or key already present):\n{}",
+                        stderr.trim()
+                    )).await;
+                }
+                Ok(Err(e)) => {
+                    send_msg(tx, format!("Failed to run ssh-copy-id: {}", e)).await;
+                }
+                Err(_) => {
+                    send_msg(tx, "ssh-copy-id timed out after 30 seconds.".to_string()).await;
+                }
+            }
+        }
+        "/git-setup" => {
+            if args.is_empty() {
+                let name_out = tokio::process::Command::new("git")
+                    .args(["config", "--global", "user.name"]).output().await
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+                let email_out = tokio::process::Command::new("git")
+                    .args(["config", "--global", "user.email"]).output().await
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+                send_msg(tx, format!(
+                    "Git config:\n  user.name:  {}\n  user.email: {}\n\nUsage: /git-setup <name> | <email>",
+                    if name_out.is_empty() { "(not set)".to_string() } else { name_out },
+                    if email_out.is_empty() { "(not set)".to_string() } else { email_out },
+                )).await;
+            } else {
+                let parts: Vec<&str> = args.splitn(2, " | ").collect();
+                if parts.len() < 2 {
+                    send_msg(tx, "Usage: /git-setup <name> | <email>".to_string()).await;
+                    return;
+                }
+                let name = parts[0].trim();
+                let email = parts[1].trim();
+                let _ = tokio::process::Command::new("git")
+                    .args(["config", "--global", "user.name", name]).output().await;
+                let _ = tokio::process::Command::new("git")
+                    .args(["config", "--global", "user.email", email]).output().await;
+                send_msg(tx, format!("Git config updated: user.name='{}', user.email='{}'", name, email)).await;
+            }
         }
         _ => {
             send_msg(tx, format!("Unknown command: {}. Type /help for available commands.", command)).await;

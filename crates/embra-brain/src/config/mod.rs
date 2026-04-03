@@ -17,6 +17,8 @@ pub struct SystemConfig {
     pub deployment_mode: String,
     pub created_at: String,
     pub version: String,
+    #[serde(default)]
+    pub github_token: Option<String>,
 }
 
 pub async fn run_config_wizard() -> Result<SystemConfig> {
@@ -61,6 +63,7 @@ pub async fn run_config_wizard() -> Result<SystemConfig> {
         deployment_mode: "container".into(),
         created_at: chrono::Utc::now().to_rfc3339(),
         version: env!("CARGO_PKG_VERSION").into(),
+        github_token: None,
     };
 
     println!();
@@ -266,6 +269,7 @@ pub async fn run_config_wizard_grpc(
         deployment_mode: "phase1".into(),
         created_at: chrono::Utc::now().to_rfc3339(),
         version: env!("CARGO_PKG_VERSION").into(),
+        github_token: None,
     };
     save_config(db, &config).await?;
     info!("Config wizard complete, saved to WardSONDB");

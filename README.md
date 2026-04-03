@@ -71,6 +71,26 @@ cd ../embraOS
 
 On first boot, the Config Wizard runs — name your intelligence, enter your Anthropic API key, set your timezone. After setup, you're in a full TUI conversation with styled text, thinking indicators, and tool execution.
 
+#### Post-Boot Setup
+
+After the Config Wizard completes, configure GitHub and SSH access from the TUI using slash commands. There is no shell — all setup is done through the conversational interface.
+
+```
+/github-token ghp_your_token_here          # Enable GitHub API tools (issues, PRs, clone)
+/ssh-keygen                                # Generate SSH key pair (shows public key)
+/git-setup Your Name | your@email.com      # Set git user.name and user.email
+```
+
+Once configured, the intelligence can clone repositories and work with GitHub:
+```
+Ask: "Clone the embraOS repo"              # AI uses [TOOL:git_clone https://github.com/.../embraOS]
+Ask: "Show open issues on wardsondb"       # AI uses [TOOL:gh_issues ward-software-defined-systems/wardsondb]
+```
+
+All tokens persist across reboots (stored on the STATE partition). Git `safe.directory` and `push.autoSetupRemote` are auto-configured at startup.
+
+> **SSH Setup:** `/ssh-keygen` generates an ed25519 key and displays the public key. Copy it to your target hosts' `~/.ssh/authorized_keys` manually, or use `/ssh-copy-id user@host` (RFC 1918 addresses only, best-effort with BatchMode).
+
 > **Note:** Learning Mode (the guided 6-phase soul formation sequence from Phase 0) is not yet wired into Phase 1. After the Config Wizard, the system enters a general conversation mode. The structured Learning Mode flow (identity formation, soul definition, sealing) will be implemented in the next sprint. For now, you can converse freely and test tool execution.
 
 > **Terminal Size:** The TUI automatically inherits your SSH terminal size via the QEMU kernel command line. For best results, maximize your terminal before running `run-qemu.sh`. The size is detected once at boot — resizing the terminal after launch won't update the TUI layout.
@@ -241,6 +261,10 @@ All sessions share the same intelligence — same memory, same identity, same so
 | `/soul` | Display the immutable soul document |
 | `/identity` | Display the intelligence's identity document |
 | `/mode` | Show current operating mode and soul seal status |
+| `/github-token <token>` | Set GitHub token for API access (persists across reboots) |
+| `/ssh-keygen` | Generate ed25519 SSH key pair and display public key |
+| `/ssh-copy-id <user@host>` | Copy SSH public key to remote host (RFC 1918 only) |
+| `/git-setup <name> \| <email>` | Set git user.name and user.email |
 | `/copy` | Copy conversation to clipboard via OSC 52 — `/copy 5` for last 5 messages (disabled — Sprint 5) |
 
 ### Keyboard Shortcuts
@@ -340,6 +364,7 @@ Phase 0 includes ~63 built-in tools available in operational mode. These are int
 
 | Tool | Description |
 |---|---|
+| **git_clone** | Clone a git repository into `/embra/workspace/repos/` — supports HTTPS (with GitHub token) and SSH URLs |
 | **git_status** | Run `git status` on a directory |
 | **git_log** | Show recent commits for a repository |
 | **git_diff** | View uncommitted changes, optionally for a specific file |
@@ -437,6 +462,11 @@ Phase 1 initial sprint is functionally complete. Sprint 1 addresses bugs and UX 
 - **S1-03: Multi-line Input (`/ml`)** — New `/ml` command toggles multi-line mode for serial consoles where `Shift+Enter` doesn't work. Type `.` on its own line to send.
 - **S1-07: Input Word-wrap** — Long input lines now wrap visually within the input area instead of scrolling off-screen.
 - **S1-08: Tool Output Truncation** — Tool results exceeding 50KB are truncated with a size indicator to prevent context overflow.
+- **`git_clone` tool** — Clone repos into `/embra/workspace/repos/` via AI tool. HTTPS (auto GitHub token injection) and SSH supported. 120s timeout.
+- **`/github-token` command** — Set GitHub token interactively. Stored in WardSONDB + STATE partition, survives reboots. All 7 GitHub tools use the stored token.
+- **`/ssh-keygen` command** — Generate ed25519 SSH key pair from the TUI. Displays public key for manual deployment.
+- **`/ssh-copy-id` command** — Copy SSH key to RFC 1918 hosts (best-effort with BatchMode).
+- **`/git-setup` command** — Set git user.name and user.email. `safe.directory` and `push.autoSetupRemote` auto-configured at startup.
 
 > If you encounter bugs, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 

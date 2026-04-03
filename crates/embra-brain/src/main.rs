@@ -25,7 +25,7 @@ use grpc_service::BrainGrpcService;
 
 use embra_common::proto::brain::brain_service_server::BrainServiceServer;
 use tonic::transport::Server;
-use tracing::{info, warn};
+use tracing::{info, warn, debug};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -43,6 +43,13 @@ async fn main() -> anyhow::Result<()> {
             "--port" => { port = args[i+1].parse().expect("Invalid port"); i += 2; }
             "--wardsondb-url" => { wardsondb_url = args[i+1].clone(); i += 2; }
             "--api-key" => { api_key = Some(args[i+1].clone()); i += 2; }
+            "--github-token" => {
+                let token = args[i+1].clone();
+                // SAFETY: called once at startup before tokio runtime is multi-threaded
+                unsafe { std::env::set_var("GITHUB_TOKEN", &token); }
+                info!("GitHub token configured from --github-token");
+                i += 2;
+            }
             _ => { i += 1; }
         }
     }
@@ -82,6 +89,15 @@ async fn main() -> anyhow::Result<()> {
     // Run schema migrations
     migrations::run_migrations(&db).await?;
     info!("Migrations complete");
+
+    // Auto-configure git defaults (safe.directory, push.autoSetupRemote)
+    let _ = tokio::process::Command::new("git")
+        .args(["config", "--global", "safe.directory", "*"])
+        .output().await;
+    let _ = tokio::process::Command::new("git")
+        .args(["config", "--global", "push.autoSetupRemote", "true"])
+        .output().await;
+    debug!("Git global config set: safe.directory=*, push.autoSetupRemote=true");
 
     // Load config (or default for first run)
     // Also try to get API key from WardSONDB config if not provided via CLI/env

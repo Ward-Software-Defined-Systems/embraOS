@@ -15,6 +15,90 @@ fn validate_workspace_path(path: &str) -> Result<String, String> {
     Ok(dir.to_string())
 }
 
+/// Resolve GITHUB_TOKEN: env var first, then WardSONDB config.system.github_token.
+pub async fn resolve_github_token(db: &WardsonDbClient) -> Option<String> {
+    if let Ok(t) = std::env::var("GITHUB_TOKEN") {
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+    if let Ok(doc) = db.read("config.system", "config").await {
+        if let Some(t) = doc.get("github_token").and_then(|v| v.as_str()) {
+            if !t.is_empty() {
+                return Some(t.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Clone a git repository into /embra/workspace/repos/.
+/// Format: `<url>` or `<url> <dirname>`
+pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
+    if param.is_empty() {
+        return "Usage: [TOOL:git_clone <url>] or [TOOL:git_clone <url> <dirname>]".into();
+    }
+
+    let parts: Vec<&str> = param.split_whitespace().collect();
+    let url = parts[0];
+
+    // Derive directory name from URL or use explicit name
+    let dirname = if parts.len() > 1 {
+        parts[1].to_string()
+    } else {
+        url.rsplit('/').next().unwrap_or("repo")
+            .trim_end_matches(".git").to_string()
+    };
+
+    let dest = format!("{}/{}", WORKSPACE_ROOT, dirname);
+
+    if let Err(e) = validate_workspace_path(&dest) {
+        return e;
+    }
+
+    if std::path::Path::new(&dest).exists() {
+        return format!("Directory already exists: {}", dest);
+    }
+
+    // Ensure workspace root exists
+    let _ = std::fs::create_dir_all(WORKSPACE_ROOT);
+
+    // For HTTPS GitHub URLs with a token, rewrite URL to embed credentials
+    let is_https = url.starts_with("https://");
+    let clone_url = if is_https && url.contains("github.com") {
+        if let Some(token) = resolve_github_token(db).await {
+            url.replace("https://", &format!("https://x-access-token:{}@", token))
+        } else {
+            url.to_string()
+        }
+    } else {
+        url.to_string()
+    };
+
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        tokio::process::Command::new("git")
+            .args(["clone", &clone_url, &dest])
+            .output(),
+    ).await {
+        Ok(Ok(out)) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if !out.status.success() {
+                // Scrub token from error output
+                let clean_err = if clone_url != url {
+                    stderr.replace(&clone_url, url)
+                } else {
+                    stderr.to_string()
+                };
+                return format!("git clone failed: {}", clean_err.trim());
+            }
+            format!("Cloned {} into {}", url, dest)
+        }
+        Ok(Err(e)) => format!("Failed to run git clone: {}", e),
+        Err(_) => "git clone timed out after 120 seconds".into(),
+    }
+}
+
 /// Run `git status` on a path.
 pub async fn git_status(path: &str) -> String {
     let dir = if path.is_empty() { "." } else { path };
@@ -228,10 +312,10 @@ pub async fn task_done(db: &WardsonDbClient, task_id: &str) -> String {
 }
 
 /// Fetch GitHub issues via API.
-pub async fn gh_issues(param: &str) -> String {
-    let token = match std::env::var("GITHUB_TOKEN") {
-        Ok(t) if !t.is_empty() => t,
-        _ => return "GITHUB_TOKEN environment variable not set. Required for GitHub API access.".into(),
+pub async fn gh_issues(db: &WardsonDbClient, param: &str) -> String {
+    let token = match resolve_github_token(db).await {
+        Some(t) => t,
+        None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
     };
 
     if param.is_empty() {
@@ -283,10 +367,10 @@ pub async fn gh_issues(param: &str) -> String {
 }
 
 /// Fetch GitHub PRs via API.
-pub async fn gh_prs(param: &str) -> String {
-    let token = match std::env::var("GITHUB_TOKEN") {
-        Ok(t) if !t.is_empty() => t,
-        _ => return "GITHUB_TOKEN environment variable not set. Required for GitHub API access.".into(),
+pub async fn gh_prs(db: &WardsonDbClient, param: &str) -> String {
+    let token = match resolve_github_token(db).await {
+        Some(t) => t,
+        None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
     };
 
     if param.is_empty() {
@@ -573,10 +657,10 @@ pub async fn git_checkout(param: &str) -> String {
 
 /// Create a GitHub issue.
 /// Param format: `<owner/repo> | <title> | <body>`
-pub async fn gh_issue_create(param: &str) -> String {
-    let token = match std::env::var("GITHUB_TOKEN") {
-        Ok(t) if !t.is_empty() => t,
-        _ => return "GITHUB_TOKEN environment variable not set.".into(),
+pub async fn gh_issue_create(db: &WardsonDbClient, param: &str) -> String {
+    let token = match resolve_github_token(db).await {
+        Some(t) => t,
+        None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
     };
 
     let parts: Vec<&str> = param.splitn(3, " | ").collect();
@@ -620,10 +704,10 @@ pub async fn gh_issue_create(param: &str) -> String {
 
 /// Close a GitHub issue.
 /// Param format: `<owner/repo> <number>`
-pub async fn gh_issue_close(param: &str) -> String {
-    let token = match std::env::var("GITHUB_TOKEN") {
-        Ok(t) if !t.is_empty() => t,
-        _ => return "GITHUB_TOKEN environment variable not set.".into(),
+pub async fn gh_issue_close(db: &WardsonDbClient, param: &str) -> String {
+    let token = match resolve_github_token(db).await {
+        Some(t) => t,
+        None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
     };
 
     let parts: Vec<&str> = param.split_whitespace().collect();
@@ -658,10 +742,10 @@ pub async fn gh_issue_close(param: &str) -> String {
 
 /// Create a GitHub pull request.
 /// Param format: `<owner/repo> | <title> | <head> | <base>`
-pub async fn gh_pr_create(param: &str) -> String {
-    let token = match std::env::var("GITHUB_TOKEN") {
-        Ok(t) if !t.is_empty() => t,
-        _ => return "GITHUB_TOKEN environment variable not set.".into(),
+pub async fn gh_pr_create(db: &WardsonDbClient, param: &str) -> String {
+    let token = match resolve_github_token(db).await {
+        Some(t) => t,
+        None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
     };
 
     let parts: Vec<&str> = param.splitn(4, " | ").collect();
@@ -707,10 +791,10 @@ pub async fn gh_pr_create(param: &str) -> String {
 
 /// List GitHub projects for a user.
 /// Param format: `<owner>`
-pub async fn gh_project_list(param: &str) -> String {
-    let token = match std::env::var("GITHUB_TOKEN") {
-        Ok(t) if !t.is_empty() => t,
-        _ => return "GITHUB_TOKEN environment variable not set.".into(),
+pub async fn gh_project_list(db: &WardsonDbClient, param: &str) -> String {
+    let token = match resolve_github_token(db).await {
+        Some(t) => t,
+        None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
     };
 
     if param.is_empty() {
@@ -751,10 +835,10 @@ pub async fn gh_project_list(param: &str) -> String {
 
 /// View a specific GitHub project.
 /// Param format: `<owner> <number>`
-pub async fn gh_project_view(param: &str) -> String {
-    let token = match std::env::var("GITHUB_TOKEN") {
-        Ok(t) if !t.is_empty() => t,
-        _ => return "GITHUB_TOKEN environment variable not set.".into(),
+pub async fn gh_project_view(db: &WardsonDbClient, param: &str) -> String {
+    let token = match resolve_github_token(db).await {
+        Some(t) => t,
+        None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
     };
 
     let parts: Vec<&str> = param.split_whitespace().collect();

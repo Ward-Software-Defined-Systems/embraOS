@@ -26,6 +26,12 @@ Commands:
   /identity          Display identity document
   /mode              Show operating mode
 
+Setup:
+  /github-token <token>       Set GitHub token
+  /ssh-keygen                 Generate SSH key pair
+  /ssh-copy-id <user@host>    Copy SSH key to host
+  /git-setup <name> | <email> Set git user config
+
 Keyboard:
   Enter              Send message (or newline in /ml mode)
   Alt+Enter          New line

@@ -173,6 +173,14 @@ impl Supervisor {
             brain_args.push("--api-key".to_string());
             brain_args.push(api_key);
         }
+        // GitHub token: read from STATE partition for boot propagation
+        let github_token = std::fs::read_to_string("/embra/state/github_token")
+            .unwrap_or_default()
+            .trim().to_string();
+        if !github_token.is_empty() {
+            brain_args.push("--github-token".to_string());
+            brain_args.push(github_token);
+        }
         self.add_service(ServiceDef {
             name: "embra-brain".to_string(),
             binary: "/usr/bin/embra-brain".to_string(),
