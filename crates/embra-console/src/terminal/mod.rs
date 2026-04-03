@@ -93,7 +93,7 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
                 match event {
                     Some(ev) => handle_console_event(ev, &mut app),
                     None => {
-                        app.messages.push(DisplayMessage::system("Disconnected from server."));
+                        app.messages.push(DisplayMessage::system_with_tz("Disconnected from server.", &app.config_tz));
                         app.should_quit = true;
                     }
                 }
@@ -134,11 +134,11 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
             app.scroll_offset = 0;
         }
         ConsoleEvent::SystemMessage { content, .. } => {
-            app.messages.push(DisplayMessage::system(&content));
+            app.messages.push(DisplayMessage::system_with_tz(&content, &app.config_tz));
             app.scroll_offset = 0;
         }
         ConsoleEvent::ToolExecution { name, result, .. } => {
-            app.messages.push(DisplayMessage::tool(&name, &result));
+            app.messages.push(DisplayMessage::tool_with_tz(&name, &result, &app.config_tz));
             app.scroll_offset = 0;
         }
         ConsoleEvent::ThinkingState { is_thinking, name } => {
@@ -179,7 +179,7 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
             app.scroll_offset = 0;
         }
         ConsoleEvent::SetupPrompt { field_type, prompt, options, default_value } => {
-            app.messages.push(DisplayMessage::system(&prompt));
+            app.messages.push(DisplayMessage::system_with_tz(&prompt, &app.config_tz));
 
             if field_type == "confirm" || field_type == "selector" {
                 if !options.is_empty() {
@@ -225,7 +225,7 @@ async fn handle_key_event(
             }
         }
 
-        // Enter — send input or selector choice
+        // Enter — send input or selector choice (multi-line aware)
         (KeyCode::Enter, _) => {
             if let Some(selector) = app.selector.take() {
                 // Send selector choice
@@ -244,6 +244,42 @@ async fn handle_key_event(
                         UserMessage { content }
                     )),
                 }).await;
+            } else if app.multiline_mode {
+                // Multi-line mode: check if the last line is "." (send terminator)
+                let last_line_is_dot = app.input_buffer
+                    .rsplit_once('\n')
+                    .map(|(_, last)| last.trim() == ".")
+                    .unwrap_or_else(|| app.input_buffer.trim() == ".");
+
+                if last_line_is_dot {
+                    // Remove the "." terminator line and send
+                    if let Some(pos) = app.input_buffer.rfind('\n') {
+                        app.input_buffer.truncate(pos);
+                    } else {
+                        // Buffer is just "." — clear it and don't send
+                        app.input_buffer.clear();
+                        app.cursor_pos = 0;
+                        app.multiline_mode = false;
+                        return Ok(());
+                    }
+                    let input = app.input_buffer.trim().to_string();
+                    app.input_buffer.clear();
+                    app.cursor_pos = 0;
+                    app.multiline_mode = false;
+
+                    if !input.is_empty() {
+                        app.messages.push(DisplayMessage::new_with_tz("user", &input, &app.config_tz));
+                        let _ = in_tx.send(ConversationRequest {
+                            request_type: Some(conversation_request::RequestType::UserMessage(
+                                UserMessage { content: input }
+                            )),
+                        }).await;
+                    }
+                } else {
+                    // Insert newline
+                    app.input_buffer.insert(app.cursor_pos, '\n');
+                    app.cursor_pos += 1;
+                }
             } else {
                 let mut input = app.input_buffer.trim().to_string();
                 app.input_buffer.clear();
@@ -269,10 +305,18 @@ async fn handle_key_event(
                     let cmd = parts[0];
                     let args = if parts.len() > 1 { parts[1] } else { "" };
 
-                    // Handle local commands
-                    if commands::is_local_command(cmd) {
+                    // Handle /ml toggle locally (needs mutable app state)
+                    if cmd == "/ml" {
+                        app.multiline_mode = !app.multiline_mode;
+                        let status = if app.multiline_mode {
+                            "Multi-line mode ON. Type on multiple lines, then '.' on its own line to send."
+                        } else {
+                            "Multi-line mode OFF."
+                        };
+                        app.messages.push(DisplayMessage::system_with_tz(status, &app.config_tz));
+                    } else if commands::is_local_command(cmd) {
                         if let Some(output) = commands::handle_local_command(cmd, args, &app.config_name) {
-                            app.messages.push(DisplayMessage::system(&output));
+                            app.messages.push(DisplayMessage::system_with_tz(&output, &app.config_tz));
                         }
                     } else {
                         // Send to brain via gRPC

@@ -33,6 +33,13 @@ BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_EMBRAOS_PATH)/board/embraos/post_im
 BR2_PACKAGE_HOST_GENIMAGE=y
 BR2_PACKAGE_HOST_MTOOLS=y
 
+# Git (15+ tools depend on this)
+BR2_PACKAGE_GIT=y
+
+# OpenSSH client only — NO server (security invariant)
+BR2_PACKAGE_OPENSSH=y
+BR2_PACKAGE_OPENSSH_CLIENT=y
+
 # embraOS packages
 BR2_PACKAGE_EMBRAD=y
 BR2_PACKAGE_EMBRA_APID=y

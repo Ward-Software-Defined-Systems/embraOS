@@ -19,12 +19,12 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
-/// Get all session collection prefixes (excluding learning sessions).
+/// Get all session collection prefixes (including learning session).
 async fn session_names(db: &WardsonDbClient) -> Vec<String> {
     let collections = db.list_collections().await.unwrap_or_default();
     collections
         .iter()
-        .filter(|c| c.starts_with("sessions.") && c.ends_with(".meta") && !c.contains("learning"))
+        .filter(|c| c.starts_with("sessions.") && c.ends_with(".meta"))
         .map(|c| {
             c.strip_prefix("sessions.")
                 .unwrap_or(c)

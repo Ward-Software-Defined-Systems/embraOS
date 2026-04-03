@@ -5,7 +5,7 @@
 
 /// Returns true if this command is handled locally (not sent to brain)
 pub fn is_local_command(cmd: &str) -> bool {
-    matches!(cmd, "/help" | "/copy")
+    matches!(cmd, "/help" | "/copy" | "/ml")
 }
 
 /// Handle a local command, returning the output string
@@ -16,6 +16,7 @@ pub fn handle_local_command(cmd: &str, _args: &str, name: &str) -> Option<String
 
 Commands:
   /help              Show this help message
+  /ml                Toggle multi-line mode (. on own line to send)
   /status            System status
   /sessions          List all sessions
   /new <name>        Create a new session
@@ -26,7 +27,7 @@ Commands:
   /mode              Show operating mode
 
 Keyboard:
-  Enter              Send message
+  Enter              Send message (or newline in /ml mode)
   Alt+Enter          New line
   Up/Down            Scroll history
   Ctrl+C / Ctrl+D    Exit"#, name)),

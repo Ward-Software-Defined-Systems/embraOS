@@ -8,7 +8,7 @@
 
 **embraOS** is a continuity-preserving AI operating system. It's not a chatbot. It's not an agent framework. It's an intelligence that remembers, evolves, and maintains itself across time — with a soul it can never modify and a memory it writes itself.
 
-**Current Status:** Phase 1 — Core OS (In Progress) | Phase 0 — Stable
+**Current Status:** Phase 1 — Core OS (Sprint 1) | Phase 0 — Stable
 
 ---
 
@@ -75,6 +75,13 @@ On first boot, the Config Wizard runs — name your intelligence, enter your Ant
 
 > **Terminal Size:** The TUI automatically inherits your SSH terminal size via the QEMU kernel command line. For best results, maximize your terminal before running `run-qemu.sh`. The size is detected once at boot — resizing the terminal after launch won't update the TUI layout.
 
+> **Image Search Order:** `run-qemu.sh` looks for the disk image in this order:
+> 1. Explicit path passed as argument: `./scripts/run-qemu.sh /path/to/embraos.img`
+> 2. `buildroot-src/output/images/embraos.img` (Buildroot output, always freshest)
+> 3. `output/images/embraos.img` (alternative output location)
+>
+> The kernel (`bzImage`) and initramfs (`initramfs.cpio.gz`) are searched alongside the image, then in the same fallback locations.
+
 > **Clean First Boot:** To reset and trigger the Config Wizard again (e.g., to change API key):
 > ```bash
 > LOOPDEV=$(sudo losetup --find --show --partscan buildroot-src/output/images/embraos.img)
@@ -87,6 +94,22 @@ On first boot, the Config Wizard runs — name your intelligence, enter your Ant
 > ```bash
 > curl http://localhost:8443/health
 > ```
+
+> **Backup & Restore:** `scripts/embraos-backup.sh` preserves STATE and DATA partitions across image rebuilds. This is a file-level backup — WardSONDB does not need to be running. The VM must be stopped.
+> ```bash
+> # Before rebuilding the image
+> sudo ./scripts/embraos-backup.sh backup --label pre-rebuild
+>
+> # After rebuilding
+> sudo ./scripts/embraos-backup.sh restore
+>
+> # List available backups
+> ./scripts/embraos-backup.sh list
+>
+> # Verify disk image has valid data
+> sudo ./scripts/embraos-backup.sh verify
+> ```
+> Backups are stored in `~/embraOS_BACKUPS/` by default (override with `EMBRAOS_BACKUP_DIR`). Each backup includes STATE (soul hash, PKI certs), DATA (WardSONDB collections, workspace), and metadata with SHA-256 of the source image.
 
 #### macOS (Cross-Compilation Only)
 
@@ -209,6 +232,7 @@ All sessions share the same intelligence — same memory, same identity, same so
 | Command | Description |
 |---|---|
 | `/help` | Show all commands and keyboard shortcuts |
+| `/ml` | Toggle multi-line input mode — type on multiple lines, `.` on its own line to send |
 | `/status` | System status — version, uptime, WardSONDB health, memory, soul status |
 | `/sessions` | List all sessions with state and last active time |
 | `/new <name>` | Create a new named session and switch to it |
@@ -223,12 +247,14 @@ All sessions share the same intelligence — same memory, same identity, same so
 
 | Key | Action |
 |---|---|
-| `Enter` | Send message |
+| `Enter` | Send message (or newline in `/ml` multi-line mode) |
 | `Shift+Enter` | New line (requires terminal support: kitty, iTerm2, WezTerm) |
 | `Alt+Enter` | New line (universal fallback for all terminals) |
 | `Up/Down` | Scroll history |
 | `Ctrl+C` | Graceful detach |
 | `Ctrl+D` | Graceful detach |
+
+> **Serial Console Tip:** `Shift+Enter` doesn't work over QEMU serial. Use `/ml` to toggle multi-line mode, or `Alt+Enter` for single newlines.
 
 ---
 
@@ -400,7 +426,17 @@ All Phase 0 Sprint 1–5 bugs have been fixed. Phase 0 is functionally complete.
 
 ### Phase 1
 
-Phase 1 initial sprint is functionally complete. Testing in progress — issues will be tracked here as they are identified.
+Phase 1 initial sprint is functionally complete. Sprint 1 addresses bugs and UX gaps found during end-to-end verification.
+
+**Sprint 1 Scope:**
+
+- **S1-01/02: Git & SSH in Buildroot** — Added `git` and `openssh-client` (no server) to the disk image. Unblocks 15+ git tools and 4 SSH tools.
+- **S1-06: Tool Feedback Loop** — Fixed tool call race condition where tool results weren't fed back to the Brain for multi-step operations. Now uses a bounded iteration loop (max 10) so the Brain can invoke tools, see results, and continue reasoning.
+- **S1-05: Learning Session Visibility** — Learning session now appears in `/sessions` with `[sealed]`/`[learning]` indicator. Read-only (cannot `/switch` to it).
+- **S1-04: Timezone Display** — System and tool messages now display in the user's configured timezone (previously UTC).
+- **S1-03: Multi-line Input (`/ml`)** — New `/ml` command toggles multi-line mode for serial consoles where `Shift+Enter` doesn't work. Type `.` on its own line to send.
+- **S1-07: Input Word-wrap** — Long input lines now wrap visually within the input area instead of scrolling off-screen.
+- **S1-08: Tool Output Truncation** — Tool results exceeding 50KB are truncated with a size indicator to prevent context overflow.
 
 > If you encounter bugs, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
@@ -416,7 +452,7 @@ Phase 1 initial sprint is functionally complete. Testing in progress — issues 
 | **Phase 0 — Sprint 3** | Session access tools (5), memory consolidation (2), session consolidation (3), schema migration framework | ✅ **Complete** |
 | **Phase 0 — Sprint 4** | SSH remote admin (4 tools), tag filter fix, timezone-aware timestamps, `/copy` deferred | ✅ **Complete** |
 | **Phase 0 — Sprint 5** | SSH ControlMaster refactor, Brain API upgrade (128K output, adaptive thinking, 1M context), WardSONDB integration upgrades, new filesystem/git tools (file_delete, file_move, dir_delete, git_rm, git_mv) | ✅ **Complete** |
-| **Phase 1** | Core OS — QEMU-bootable image, full boot chain, config wizard, Learning Mode, AI conversation + tools over serial TUI | **Initial Sprint Complete** |
+| **Phase 1** | Core OS — QEMU-bootable image, full boot chain, config wizard, Learning Mode, AI conversation + tools over serial TUI | **Sprint 1 In Progress** |
 | **Phase 2** | Terminal & Sessions — full TUI rewrite, `embractl` management CLI (the `talosctl` equivalent), LLM-driven Continuity Engine feedback loop | Planned |
 | **Phase 3** | Module System — MCP server modules via `embra-guardian` governance proxy, containerd runtime, governed capability expansion | Planned |
 | **Phase 4** | Image Factory — bootable ISO builds, A/B partition scheme with automatic rollback, bare metal and Kubernetes deployment | Planned |

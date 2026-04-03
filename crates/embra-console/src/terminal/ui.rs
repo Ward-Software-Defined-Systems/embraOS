@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
@@ -12,10 +12,17 @@ use super::render::{self, StyledLine, StyledSegment};
 use super::state::{AppMode, AppState, SetupStep};
 
 pub fn draw(f: &mut Frame, app: &AppState) {
+    let available_width = f.area().width.saturating_sub(2) as usize; // minus borders
     let input_lines = if app.pasted_lines.is_some() {
         1
+    } else if available_width == 0 {
+        1
     } else {
-        app.input_buffer.chars().filter(|c| *c == '\n').count() + 1
+        // Count visual lines including wrapping
+        app.input_buffer.split('\n').map(|line| {
+            let w = UnicodeWidthStr::width(line);
+            ((w / available_width) + 1).max(1)
+        }).sum::<usize>()
     };
     let input_height = (input_lines as u16 + 2).min(10);
 
@@ -327,25 +334,45 @@ fn draw_input(f: &mut Frame, area: Rect, app: &AppState) {
         (app.input_buffer.clone(), Style::default().fg(Color::White))
     };
 
-    let input = Paragraph::new(input_text).style(style).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(title)
-            .title_style(Style::default().fg(Color::LightBlue)),
-    );
+    let input = Paragraph::new(input_text).style(style)
+        .wrap(Wrap { trim: false })
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(title)
+                .title_style(Style::default().fg(Color::LightBlue)),
+        );
 
     f.render_widget(input, area);
 
     if app.pasted_lines.is_none() && !app.input_buffer.is_empty() {
+        let inner_width = area.width.saturating_sub(2) as usize; // minus borders
         let before_cursor: String = app.input_buffer.chars().take(app.cursor_pos).collect();
-        let cursor_line = before_cursor.chars().filter(|c| *c == '\n').count() as u16;
-        let last_newline_pos = before_cursor.rfind('\n').map(|p| p + 1).unwrap_or(0);
-        let line_text = &before_cursor[last_newline_pos..];
-        let display_offset: u16 = line_text
-            .chars()
-            .map(|c| if c.is_ascii() { 1u16 } else { 2u16 })
-            .sum();
-        f.set_cursor_position((area.x + display_offset + 1, area.y + 1 + cursor_line));
+
+        // Calculate visual row and column accounting for wrapping
+        let mut visual_row: u16 = 0;
+        let mut visual_col: u16 = 0;
+        for (i, line) in before_cursor.split('\n').enumerate() {
+            let is_last = i == before_cursor.matches('\n').count();
+            let w = UnicodeWidthStr::width(line);
+            if is_last {
+                // Cursor is on this line — compute wrapped position
+                if inner_width > 0 {
+                    visual_row += (w / inner_width) as u16;
+                    visual_col = (w % inner_width) as u16;
+                } else {
+                    visual_col = w as u16;
+                }
+            } else {
+                // Full line — count its visual lines
+                if inner_width > 0 {
+                    visual_row += ((w / inner_width) + 1) as u16;
+                } else {
+                    visual_row += 1;
+                }
+            }
+        }
+        f.set_cursor_position((area.x + visual_col + 1, area.y + 1 + visual_row));
     }
 }
 
@@ -375,6 +402,9 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &AppState) {
     };
 
     let mut spans = left_spans;
+    if app.multiline_mode {
+        spans.push(Span::styled(" [ML]", Style::default().fg(Color::Cyan)));
+    }
     spans.push(Span::raw(" | Status: "));
     spans.push(Span::styled(
         &app.status_message,

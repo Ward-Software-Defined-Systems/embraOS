@@ -489,44 +489,51 @@ async fn handle_request(
                 }
             }
 
-            // Tool feedback loop — extract tags, dispatch, feed results back
-            let mut tool_results = String::new();
-            let tags = tools::extract_tool_tags(&full_response);
-            for tag in &tags {
-                if let Some(result) = tools::dispatch(tag, db, config_tz, &session_name).await {
-                    let _ = tx.send(Ok(ConversationResponse {
-                        response_type: Some(conversation_response::ResponseType::Tool(
-                            ToolExecution {
-                                tool_name: tag.clone(),
-                                input: String::new(),
-                                result: result.clone(),
-                                success: true,
-                            }
-                        )),
-                    })).await;
-                    tool_results.push_str(&result);
-                    tool_results.push('\n');
+            // Bounded tool feedback loop — extract tags, dispatch, feed results back,
+            // then re-call Brain if tools produced output. Repeat until no more tools
+            // or MAX_TOOL_ITERATIONS is reached.
+            const MAX_TOOL_ITERATIONS: usize = 10;
+
+            let mut current_response = full_response;
+            for iteration in 0..MAX_TOOL_ITERATIONS {
+                let tags = tools::extract_tool_tags(&current_response);
+                if tags.is_empty() {
+                    break;
                 }
-            }
 
-            // Save to session history
-            {
-                let mgr = session_mgr.read().await;
-                let _ = mgr.append_message(&session_name, &Message::user(&msg.content)).await;
-                let _ = mgr.append_message(&session_name, &Message::assistant(&full_response)).await;
-            }
+                // Dispatch tools and stream ToolExecution events
+                let mut tool_results = String::new();
+                for tag in &tags {
+                    if let Some(result) = tools::dispatch(tag, db, config_tz, &session_name).await {
+                        let _ = tx.send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::Tool(
+                                ToolExecution {
+                                    tool_name: tag.clone(),
+                                    input: String::new(),
+                                    result: result.clone(),
+                                    success: true,
+                                }
+                            )),
+                        })).await;
+                        tool_results.push_str(&result);
+                        tool_results.push('\n');
+                    }
+                }
 
-            // If tools produced results, feed back to Brain for continuation
-            if !tool_results.is_empty() {
+                if tool_results.is_empty() {
+                    break;
+                }
+
+                // Feed tool results back to Brain for continuation
                 let feedback = format!("[SYSTEM] Tool results:\n{}", tool_results);
-                messages.push(Message::assistant(&full_response));
+                messages.push(Message::assistant(&current_response));
                 messages.push(Message::user(&feedback));
 
-                let mut brain_rx2 = brain.send_message_streaming(&messages).await
-                    .map_err(|e| anyhow::anyhow!("Brain continuation failed: {}", e))?;
+                let mut brain_rx_cont = brain.send_message_streaming(&messages).await
+                    .map_err(|e| anyhow::anyhow!("Brain continuation failed (iteration {}): {}", iteration + 1, e))?;
 
                 let mut continuation = String::new();
-                while let Some(event) = brain_rx2.recv().await {
+                while let Some(event) = brain_rx_cont.recv().await {
                     match event {
                         StreamEvent::Token(text) => {
                             continuation.push_str(&text);
@@ -553,15 +560,27 @@ async fn handle_request(
                                     }
                                 )),
                             })).await;
+                            break;
                         }
                     }
                 }
 
-                // Save continuation
-                {
-                    let mgr = session_mgr.read().await;
-                    let _ = mgr.append_message(&session_name, &Message::assistant(&continuation)).await;
+                current_response = continuation;
+            }
+
+            // Save complete conversation to session history
+            {
+                let mgr = session_mgr.read().await;
+                // Save the original user message
+                let _ = mgr.append_message(&session_name, &Message::user(&msg.content)).await;
+                // Save all assistant + tool feedback turns from the messages vec
+                // (messages started as history + user msg; assistant/feedback pairs were appended in the loop)
+                let original_len = history.len() + 1; // history + user message
+                for m in &messages[original_len..] {
+                    let _ = mgr.append_message(&session_name, m).await;
                 }
+                // Save the final response
+                let _ = mgr.append_message(&session_name, &Message::assistant(&current_response)).await;
             }
 
             Ok(())
@@ -695,13 +714,19 @@ async fn handle_slash_command(
         }
         "/sessions" => {
             let mgr = session_mgr.read().await;
+            let is_sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
             let output = match mgr.list().await {
                 Ok(sessions) => {
                     if sessions.is_empty() {
                         "No sessions.".to_string()
                     } else {
                         sessions.iter().map(|s| {
-                            format!("  {} [{:?}] last active: {}", s.name, s.state, s.last_active.format("%Y-%m-%d %H:%M"))
+                            let indicator = if s.name == "learning" {
+                                if is_sealed { " [sealed]" } else { " [learning]" }
+                            } else {
+                                ""
+                            };
+                            format!("  {}{} [{:?}] last active: {}", s.name, indicator, s.state, s.last_active.format("%Y-%m-%d %H:%M"))
                         }).collect::<Vec<_>>().join("\n")
                     }
                 }
@@ -729,6 +754,8 @@ async fn handle_slash_command(
         "/switch" => {
             if args.is_empty() {
                 send_msg(tx, "Usage: /switch <session-name>".to_string()).await;
+            } else if args == "learning" {
+                send_msg(tx, "Learning session is read-only. Use /soul to view the sealed soul document.".to_string()).await;
             } else {
                 let mut mgr = session_mgr.write().await;
                 if mgr.session_exists(args).await.unwrap_or(false) {
@@ -1045,13 +1072,31 @@ async fn save_learning_history(db: &Arc<WardsonDbClient>, history: &[Message]) -
     if !db.collection_exists(collection).await? {
         db.create_collection(collection).await?;
     }
+    let now = chrono::Utc::now().to_rfc3339();
     let doc = serde_json::json!({
         "_id": "learning",
         "turns": history,
-        "completed_at": chrono::Utc::now().to_rfc3339(),
+        "completed_at": &now,
     });
     match db.write(collection, &doc).await {
+        Ok(_) => {}
+        Err(_) => { let _ = db.update(collection, "learning", &doc).await; }
+    }
+
+    // Create meta entry so learning session appears in /sessions listing
+    let meta_collection = "sessions.learning.meta";
+    if !db.collection_exists(meta_collection).await? {
+        db.create_collection(meta_collection).await?;
+    }
+    let meta = serde_json::json!({
+        "_id": "learning",
+        "name": "learning",
+        "state": "Closed",
+        "created_at": &now,
+        "last_active": &now,
+    });
+    match db.write(meta_collection, &meta).await {
         Ok(_) => Ok(()),
-        Err(_) => db.update(collection, "learning", &doc).await.map_err(|e| e.into()),
+        Err(_) => db.update(meta_collection, "learning", &meta).await.map_err(|e| e.into()),
     }
 }

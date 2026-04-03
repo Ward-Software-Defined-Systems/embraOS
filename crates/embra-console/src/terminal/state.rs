@@ -91,6 +91,10 @@ impl DisplayMessage {
         Self::new("system", content)
     }
 
+    pub fn system_with_tz(content: impl Into<String>, tz_str: &str) -> Self {
+        Self::new_with_tz("system", content, tz_str)
+    }
+
     pub fn user(content: impl Into<String>) -> Self {
         Self::new("user", content)
     }
@@ -101,6 +105,10 @@ impl DisplayMessage {
 
     pub fn tool(name: &str, result: &str) -> Self {
         Self::new("tool", format!("[{}] {}", name, result))
+    }
+
+    pub fn tool_with_tz(name: &str, result: &str, tz_str: &str) -> Self {
+        Self::new_with_tz("tool", format!("[{}] {}", name, result), tz_str)
     }
 }
 
@@ -122,6 +130,7 @@ pub struct AppState {
     pub config_version: String,
     pub config_tz: String,
     pub pasted_lines: Option<Vec<String>>,
+    pub multiline_mode: bool,
 }
 
 impl AppState {
@@ -144,6 +153,7 @@ impl AppState {
             config_version: env!("CARGO_PKG_VERSION").to_string(),
             config_tz: "UTC".to_string(),
             pasted_lines: None,
+            multiline_mode: false,
         }
     }
 

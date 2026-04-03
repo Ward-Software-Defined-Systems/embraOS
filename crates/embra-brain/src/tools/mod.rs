@@ -121,6 +121,21 @@ pub async fn dispatch(
         _ => return None,
     };
 
+    // Truncate excessively large tool results to prevent context overflow
+    const MAX_TOOL_RESULT_SIZE: usize = 50_000;
+    if result.len() > MAX_TOOL_RESULT_SIZE {
+        // Find a safe UTF-8 boundary by scanning backwards
+        let mut safe_end = MAX_TOOL_RESULT_SIZE;
+        while safe_end > 0 && !result.is_char_boundary(safe_end) {
+            safe_end -= 1;
+        }
+        return Some(format!(
+            "{}...\n[truncated: {} bytes total]",
+            &result[..safe_end],
+            result.len()
+        ));
+    }
+
     Some(result)
 }
 
