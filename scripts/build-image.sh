@@ -70,8 +70,10 @@ if [ ! -d "$BUILDROOT_DIR" ]; then
 fi
 
 # Clean stale Buildroot package caches so fresh binaries are picked up
+# Includes embraOS packages AND upstream packages whose config may have changed
 (cd "$BUILDROOT_DIR" && \
-    for pkg in embrad embra-apid embra-trustd embra-brain embra-console wardsondb; do
+    for pkg in embrad embra-apid embra-trustd embra-brain embra-console wardsondb \
+               git openssl libcurl openssh; do
         make "${pkg}-dirclean" 2>/dev/null || true
     done && \
     rm -f output/images/rootfs.squashfs output/images/embraos.img)
