@@ -935,7 +935,12 @@ async fn handle_slash_command(
             match tokio::time::timeout(
                 std::time::Duration::from_secs(30),
                 tokio::process::Command::new("ssh-copy-id")
-                    .args(["-i", pub_path, "-o", "StrictHostKeyChecking=accept-new", target])
+                    .args([
+                        "-i", pub_path,
+                        "-o", "StrictHostKeyChecking=accept-new",
+                        "-o", &format!("UserKnownHostsFile=/embra/workspace/.ssh/known_hosts"),
+                        target,
+                    ])
                     .output(),
             ).await {
                 Ok(Ok(out)) if out.status.success() => {

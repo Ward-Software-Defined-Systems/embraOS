@@ -33,9 +33,10 @@ BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_EMBRAOS_PATH)/board/embraos/post_im
 BR2_PACKAGE_HOST_GENIMAGE=y
 BR2_PACKAGE_HOST_MTOOLS=y
 
-# OpenSSL + libcurl (required for git-remote-https)
+# OpenSSL + libcurl with TLS (required for git-remote-https)
 BR2_PACKAGE_OPENSSL=y
 BR2_PACKAGE_LIBCURL=y
+BR2_PACKAGE_LIBCURL_OPENSSL=y
 BR2_PACKAGE_LIBCURL_CURL=y
 
 # Git (15+ tools depend on this)

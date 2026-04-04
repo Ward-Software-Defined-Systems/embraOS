@@ -4,6 +4,10 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use tokio::sync::Semaphore;
 
+// SSH paths on the writable DATA partition (rootfs is read-only SquashFS)
+const SSH_KEY_PATH: &str = "/embra/workspace/.ssh/id_ed25519";
+const SSH_KNOWN_HOSTS: &str = "/embra/workspace/.ssh/known_hosts";
+
 /// Truncate a string to at most `max_bytes`, snapping to a char boundary.
 fn truncate_str(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
@@ -397,6 +401,8 @@ pub async fn ssh_remote_admin(param: &str) -> String {
     let result = tokio::time::timeout(
         Duration::from_secs(30),
         tokio::process::Command::new("ssh")
+            .arg("-i").arg(SSH_KEY_PATH)
+            .arg("-o").arg(format!("UserKnownHostsFile={}", SSH_KNOWN_HOSTS))
             .arg("-o").arg("StrictHostKeyChecking=accept-new")
             .arg("-o").arg("ConnectTimeout=10")
             .arg("-o").arg("BatchMode=yes")
@@ -482,6 +488,8 @@ pub async fn ssh_session_start(param: &str) -> String {
         Duration::from_secs(15),
         tokio::process::Command::new("ssh")
             .arg("-MNf")
+            .arg("-i").arg(SSH_KEY_PATH)
+            .arg("-o").arg(format!("UserKnownHostsFile={}", SSH_KNOWN_HOSTS))
             .arg("-o").arg(format!("ControlPath={}", control_path))
             .arg("-o").arg("ControlPersist=no")
             .arg("-o").arg("StrictHostKeyChecking=accept-new")
