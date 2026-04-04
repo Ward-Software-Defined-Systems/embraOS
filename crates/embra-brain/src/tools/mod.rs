@@ -62,7 +62,8 @@ pub async fn dispatch(
         "define" => define(db, param).await,
         "draft" => draft(db, param, session_name).await,
         "get" => get(db, param).await,
-        "search_memory" => recall(db, param).await, // alias
+        "memory_search" => recall(db, param).await,
+        "search_memory" => recall(db, param).await, // backward compat alias
         // Security tools (FEATURE-003)
         "security_check" => security::security_check().await,
         "port_scan" => security::port_scan(param).await,

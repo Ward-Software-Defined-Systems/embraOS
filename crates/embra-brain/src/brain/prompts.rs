@@ -237,6 +237,7 @@ Memory & Knowledge:
 - [TOOL:forget <id>] — remove a specific memory entry (confirm with user first)
 - [TOOL:define <term>] — look up a term, or [TOOL:define <term> | <definition>] to add/update
 - [TOOL:get <collection> <id>] — read a specific document from WardSONDB
+- [TOOL:memory_search <query>] — search past memories (alias for recall)
 
 Self-Awareness:
 - [TOOL:introspect] — reflect on your soul and identity documents
@@ -266,6 +267,7 @@ Security:
 - [TOOL:ssh_session_end] — close SSH session and tear down connection
 
 Engineering:
+- [TOOL:git_clone <url>] — clone a repo into /embra/workspace/ (HTTPS with GitHub token, SSH supported)
 - [TOOL:git_status <path>] — git status of a directory
 - [TOOL:git_log <path>] — recent git log
 - [TOOL:git_diff <path> [file]] — view uncommitted changes

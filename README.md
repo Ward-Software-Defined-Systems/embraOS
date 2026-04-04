@@ -313,7 +313,7 @@ Phase 0 includes ~63 built-in tools available in operational mode. These are int
 | **recall** | Search past conversations and saved memories by query — returns up to 10 results with IDs, content, tags, and timestamps |
 | **remember** | Save a note or fact to persistent memory with optional hashtag tags |
 | **forget** | Remove a specific memory entry by ID |
-| **search_memory** | Search and retrieve from the intelligence's memory stores |
+| **memory_search** | Search and retrieve from the intelligence's memory stores |
 | **get** | Retrieve any document by collection and ID from WardSONDB |
 | **define** | Look up or add terminology — `define term` to read, `define term | definition` to write |
 | **introspect** | Reflect on soul, identity, and user documents — focus filter extracts relevant subset (purpose, ethics, constraints, identity, user) |
