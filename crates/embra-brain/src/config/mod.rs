@@ -233,8 +233,8 @@ pub async fn run_config_wizard_grpc(
     })).await;
 
     let timezone = match response_rx.recv().await {
-        Some(input) if !input.is_empty() => input,
-        _ => tz_default,
+        Some(input) if !input.is_empty() => crate::tools::resolve_timezone(&input),
+        _ => crate::tools::resolve_timezone(&tz_default),
     };
 
     // Step 4: Confirmation

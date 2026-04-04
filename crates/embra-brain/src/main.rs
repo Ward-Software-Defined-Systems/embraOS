@@ -111,9 +111,10 @@ async fn main() -> anyhow::Result<()> {
                 info!("Loaded API key from WardSONDB config");
                 api_key = cfg.api_key.clone();
             }
-            cfg.timezone.clone()
+            // Resolve abbreviations (PDT → America/Los_Angeles) so chrono-tz can parse
+            tools::resolve_timezone(&cfg.timezone)
         }
-        Err(_) => "UTC".to_string(),
+        Err(_) => "Etc/UTC".to_string(),
     };
 
     // Start proactive engine
