@@ -916,7 +916,7 @@ async fn handle_slash_command(
                 return;
             }
 
-            let pub_path = "/root/.ssh/id_ed25519.pub";
+            let pub_path = "/embra/workspace/.ssh/id_ed25519.pub";
             if !std::path::Path::new(pub_path).exists() {
                 send_msg(tx, "No SSH key found. Run /ssh-keygen first.".to_string()).await;
                 return;
