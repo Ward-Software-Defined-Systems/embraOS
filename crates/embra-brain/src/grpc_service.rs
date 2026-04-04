@@ -641,19 +641,21 @@ async fn handle_request(
                 )),
             })).await;
 
-            // Send ModeTransition so console knows the correct mode and timezone
+            // Send ModeTransition so console knows the correct mode, timezone, and name
             let is_sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
             let mode = if is_sealed { OperatingMode::Operational } else { OperatingMode::Learning };
-            let tz = config::load_config(&**db).await.map(|c| c.timezone).unwrap_or_else(|_| config_tz.to_string());
+            let cfg = config::load_config(&**db).await.ok();
+            let tz = cfg.as_ref().map(|c| c.timezone.clone()).unwrap_or_else(|| config_tz.to_string());
+            let name = cfg.as_ref().map(|c| c.name.clone()).unwrap_or_else(|| "Embra".to_string());
             let _ = tx.send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::ModeChange(
                     ModeTransition {
                         from_mode: OperatingMode::Unspecified as i32,
                         to_mode: mode as i32,
                         message: if is_sealed {
-                            format!("Operational — Session: {} — TZ: {}", session_name, tz)
+                            format!("Operational — Name: {} — Session: {} — TZ: {}", name, session_name, tz)
                         } else {
-                            format!("Learning Mode — TZ: {}", tz)
+                            format!("Learning Mode — Name: {} — TZ: {}", name, tz)
                         },
                     }
                 )),
@@ -688,20 +690,26 @@ async fn handle_slash_command(
 
     // Helper to send a ModeTransition with updated session name
     let tz = config_tz.to_string();
-    let send_session_update = move |tx: &mpsc::Sender<Result<ConversationResponse, Status>>, session_name: &str| {
-        let tx = tx.clone();
-        let name = session_name.to_string();
-        let tz = tz.clone();
-        async move {
-            let _ = tx.send(Ok(ConversationResponse {
-                response_type: Some(conversation_response::ResponseType::ModeChange(
-                    ModeTransition {
-                        from_mode: OperatingMode::Operational as i32,
-                        to_mode: OperatingMode::Operational as i32,
-                        message: format!("Operational — Session: {} — TZ: {}", name, tz),
-                    }
-                )),
-            })).await;
+    let config_name = config::load_config(&**db).await
+        .map(|c| c.name).unwrap_or_else(|_| "Embra".to_string());
+    let send_session_update = {
+        let config_name = config_name.clone();
+        move |tx: &mpsc::Sender<Result<ConversationResponse, Status>>, session_name: &str| {
+            let tx = tx.clone();
+            let session = session_name.to_string();
+            let tz = tz.clone();
+            let config_name = config_name.clone();
+            async move {
+                let _ = tx.send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::ModeChange(
+                        ModeTransition {
+                            from_mode: OperatingMode::Operational as i32,
+                            to_mode: OperatingMode::Operational as i32,
+                            message: format!("Operational — Name: {} — Session: {} — TZ: {}", config_name, session, tz),
+                        }
+                    )),
+                })).await;
+            }
         }
     };
 

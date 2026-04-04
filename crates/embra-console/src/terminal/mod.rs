@@ -130,7 +130,7 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
         ConsoleEvent::ResponseDone(full) => {
             app.streaming_text = None;
             app.thinking = false;
-            app.messages.push(DisplayMessage::new_with_tz("assistant", &full, &app.config_tz));
+            app.messages.push(DisplayMessage::new_with_tz(&app.config_name, &full, &app.config_tz));
             app.scroll_offset = 0;
         }
         ConsoleEvent::SystemMessage { content, .. } => {
@@ -148,6 +148,15 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
             }
         }
         ConsoleEvent::ModeTransition { from_mode: _, to_mode, message } => {
+            // Parse name from message (format: "... — Name: <name> — ...")
+            if let Some(name_part) = message.split("Name: ").nth(1) {
+                let name = name_part.split(" — ").next().unwrap_or(name_part).trim().to_string();
+                if !name.is_empty() {
+                    app.config_name = name.clone();
+                    app.thinking_name = name;
+                }
+            }
+
             // Parse timezone from message (format: "... — TZ: <tz>")
             if let Some(tz_part) = message.split("TZ: ").nth(1) {
                 let tz = tz_part.split(" — ").next().unwrap_or(tz_part).trim().to_string();
@@ -165,7 +174,7 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
                     app.mode = AppMode::Learning;
                 }
                 3 => {
-                    // Extract session name (format: "Operational — Session: <name> — TZ: <tz>")
+                    // Extract session name (format: "Operational — Name: <name> — Session: <name> — TZ: <tz>")
                     let session = message.split("Session: ")
                         .nth(1)
                         .and_then(|s| s.split(" — ").next())
