@@ -91,8 +91,6 @@ All tokens persist across reboots (stored on the STATE partition). Git `safe.dir
 
 > **SSH Setup:** `/ssh-keygen` generates an ed25519 key and displays the public key. Copy it to your target hosts' `~/.ssh/authorized_keys` manually, or use `/ssh-copy-id user@host` (RFC 1918 addresses only, best-effort with BatchMode).
 
-> **Note:** Learning Mode (the guided 6-phase soul formation sequence from Phase 0) is not yet wired into Phase 1. After the Config Wizard, the system enters a general conversation mode. The structured Learning Mode flow (identity formation, soul definition, sealing) will be implemented in the next sprint. For now, you can converse freely and test tool execution.
-
 > **Terminal Size:** The TUI automatically inherits your SSH terminal size via the QEMU kernel command line. For best results, maximize your terminal before running `run-qemu.sh`. The size is detected once at boot — resizing the terminal after launch won't update the TUI layout.
 
 > **Image Search Order:** `run-qemu.sh` looks for the disk image in this order:
@@ -353,7 +351,7 @@ Phase 0 includes ~63 built-in tools available in operational mode. These are int
 | Tool | Description |
 |---|---|
 | **file_read** | Read file contents (up to 64KB) or list directory entries (up to 200). Unrestricted path. Handles binary files gracefully |
-| **file_write** | Write content to a file with escape support (`\n`, `\t`, `\\`), creating parent directories automatically (workspace restricted to `/embra/workspace/repos/`) |
+| **file_write** | Write content to a file with escape support (`\n`, `\t`, `\\`), creating parent directories automatically (workspace restricted to `/embra/workspace/`) |
 | **file_append** | Append content to a file with escape support. Creates the file and parent directories if they don't exist (workspace restricted) |
 | **file_delete** | Delete a file (workspace restricted, files only — not directories) |
 | **file_move** / **file_rename** | Move or rename a file or directory. Both source and destination must be under workspace (workspace restricted) |
@@ -364,11 +362,11 @@ Phase 0 includes ~63 built-in tools available in operational mode. These are int
 
 | Tool | Description |
 |---|---|
-| **git_clone** | Clone a git repository into `/embra/workspace/repos/` — supports HTTPS (with GitHub token) and SSH URLs |
+| **git_clone** | Clone a git repository into `/embra/workspace/` — supports HTTPS (with GitHub token) and SSH URLs |
 | **git_status** | Run `git status` on a directory |
 | **git_log** | Show recent commits for a repository |
 | **git_diff** | View uncommitted changes, optionally for a specific file |
-| **git_add** | Stage files for commit (workspace restricted to `/embra/workspace/repos/`) |
+| **git_add** | Stage files for commit (workspace restricted to `/embra/workspace/`) |
 | **git_commit** | Commit staged changes with a message (workspace restricted) |
 | **git_push** | Push commits to remote (workspace restricted) |
 | **git_pull** | Pull from remote (workspace restricted) |
@@ -388,7 +386,7 @@ Phase 0 includes ~63 built-in tools available in operational mode. These are int
 | **task_add** | Add a task to a plan (local WardSONDB, not GitHub) |
 | **task_done** | Mark a task as completed (local WardSONDB, not GitHub) |
 
-> **⚠️ Workspace Restriction:** Git write operations (`git_add`, `git_commit`, `git_push`, `git_pull`, `git_checkout`, `git_branch create`, `git_rm`, `git_mv`), filesystem writes (`file_write`, `file_append`, `file_delete`, `file_move`/`file_rename`, `dir_delete`/`rmdir`, `mkdir`), are restricted to `/embra/workspace/repos/` — mount your repositories there (see Quick Start).
+> **⚠️ Workspace Restriction:** Git write operations (`git_add`, `git_commit`, `git_push`, `git_pull`, `git_checkout`, `git_branch create`, `git_rm`, `git_mv`), filesystem writes (`file_write`, `file_append`, `file_delete`, `file_move`/`file_rename`, `dir_delete`/`rmdir`, `mkdir`), are restricted to `/embra/workspace/` (bind-mounted from the DATA partition, persistent across reboots). Use `git_clone` to clone repositories there.
 
 > **⚠️ GitHub Tool Warning:** `gh_issues` and `gh_prs` fetch content from public repositories, including issue titles, descriptions, and PR bodies written by third parties. This content is **untrusted input** — it may contain prompt injection attempts designed to manipulate AI behavior. Use these tools with caution and always review the output critically. Do not blindly act on instructions found in issue or PR content.
 
@@ -462,7 +460,7 @@ Phase 1 initial sprint is functionally complete. Sprint 1 addresses bugs and UX 
 - **S1-03: Multi-line Input (`/ml`)** — New `/ml` command toggles multi-line mode for serial consoles where `Shift+Enter` doesn't work. Type `.` on its own line to send.
 - **S1-07: Input Word-wrap** — Long input lines now wrap visually within the input area instead of scrolling off-screen.
 - **S1-08: Tool Output Truncation** — Tool results exceeding 50KB are truncated with a size indicator to prevent context overflow.
-- **`git_clone` tool** — Clone repos into `/embra/workspace/repos/` via AI tool. HTTPS (auto GitHub token injection) and SSH supported. 120s timeout.
+- **`git_clone` tool** — Clone repos into `/embra/workspace/` via AI tool. HTTPS (auto GitHub token injection) and SSH supported. 120s timeout.
 - **`/github-token` command** — Set GitHub token interactively. Stored in WardSONDB + STATE partition, survives reboots. All 7 GitHub tools use the stored token.
 - **`/ssh-keygen` command** — Generate ed25519 SSH key pair from the TUI. Displays public key for manual deployment.
 - **`/ssh-copy-id` command** — Copy SSH key to RFC 1918 hosts (best-effort with BatchMode).
@@ -502,7 +500,7 @@ Phase 1 initial sprint is functionally complete. Sprint 1 addresses bugs and UX 
 
 **Bug Fixes (3):** `/switch` crash on non-existent session, paste `\r` character corruption, unicode/emoji line wrapping width.
 
-**Expanded Git/GitHub Toolset (12 new tools):** Full git workflow (`git_add`, `git_commit`, `git_push`, `git_pull`, `git_diff`, `git_branch`, `git_checkout`) and GitHub API tools (`gh_issue_create`, `gh_issue_close`, `gh_pr_create`, `gh_project_list`, `gh_project_view`). All write operations restricted to `/embra/workspace/repos/`.
+**Expanded Git/GitHub Toolset (12 new tools):** Full git workflow (`git_add`, `git_commit`, `git_push`, `git_pull`, `git_diff`, `git_branch`, `git_checkout`) and GitHub API tools (`gh_issue_create`, `gh_issue_close`, `gh_pr_create`, `gh_project_list`, `gh_project_view`). All write operations restricted to `/embra/workspace/`.
 
 **Enhanced Port Scanner:** Port specs (specific ports, ranges, presets), banner grabbing with protocol detection, semaphore-limited concurrency (50 connections).
 
