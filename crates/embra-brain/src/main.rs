@@ -121,6 +121,16 @@ async fn main() -> anyhow::Result<()> {
     // SAFETY: called once at startup before multi-threaded work begins
     unsafe { std::env::set_var("TZ", &config_tz); }
 
+    // Ensure /embra/state/timezone exists (migration: backups from before this was persisted)
+    let tz_state_path = "/embra/state/timezone";
+    if !std::path::Path::new(tz_state_path).exists() && config_tz != "Etc/UTC" {
+        if let Err(e) = std::fs::write(tz_state_path, &config_tz) {
+            warn!("Could not write timezone to STATE: {}", e);
+        } else {
+            info!("Migrated timezone to {}: {}", tz_state_path, config_tz);
+        }
+    }
+
     // Start proactive engine
     let proactive_rx = proactive::start_proactive_engine(&db, &config_tz);
 
