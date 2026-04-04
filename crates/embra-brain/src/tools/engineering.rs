@@ -32,6 +32,19 @@ pub async fn resolve_github_token(db: &WardsonDbClient) -> Option<String> {
     None
 }
 
+/// Build git `-c` args to inject GITHUB_TOKEN for HTTPS GitHub remotes.
+/// Returns args like `["-c", "url.https://x-access-token:TOKEN@github.com/.insteadOf=https://github.com/"]`
+/// or an empty vec if no token is available.
+fn github_token_git_args(token: &Option<String>) -> Vec<String> {
+    match token {
+        Some(t) => vec![
+            "-c".to_string(),
+            format!("url.https://x-access-token:{}@github.com/.insteadOf=https://github.com/", t),
+        ],
+        None => vec![],
+    }
+}
+
 /// Clone a git repository into /embra/workspace/.
 /// Format: `<url>` or `<url> <dirname>`
 pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
@@ -63,34 +76,23 @@ pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
     // Ensure workspace root exists
     let _ = std::fs::create_dir_all(WORKSPACE_ROOT);
 
-    // For HTTPS GitHub URLs with a token, rewrite URL to embed credentials
-    let is_https = url.starts_with("https://");
-    let clone_url = if is_https && url.contains("github.com") {
-        if let Some(token) = resolve_github_token(db).await {
-            url.replace("https://", &format!("https://x-access-token:{}@", token))
-        } else {
-            url.to_string()
-        }
-    } else {
-        url.to_string()
-    };
+    // Inject GITHUB_TOKEN via git -c url rewriting (no token in URLs or config files)
+    let token = resolve_github_token(db).await;
+    let token_args = github_token_git_args(&token);
+
+    let mut args = token_args;
+    args.extend(["clone".to_string(), url.to_string(), dest.clone()]);
 
     match tokio::time::timeout(
         std::time::Duration::from_secs(120),
         tokio::process::Command::new("git")
-            .args(["clone", &clone_url, &dest])
+            .args(&args)
             .output(),
     ).await {
         Ok(Ok(out)) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
             if !out.status.success() {
-                // Scrub token from error output
-                let clean_err = if clone_url != url {
-                    stderr.replace(&clone_url, url)
-                } else {
-                    stderr.to_string()
-                };
-                return format!("git clone failed: {}", clean_err.trim());
+                return format!("git clone failed: {}", stderr.trim());
             }
             format!("Cloned {} into {}", url, dest)
         }
@@ -477,14 +479,18 @@ pub async fn git_commit(param: &str) -> String {
 
 /// Run `git push`. Write operation — workspace restricted.
 /// Param format: `<path>`
-pub async fn git_push(param: &str) -> String {
+pub async fn git_push(db: &WardsonDbClient, param: &str) -> String {
     let dir = match validate_workspace_path(param.trim()) {
         Ok(d) => d,
         Err(e) => return e,
     };
 
+    let token = resolve_github_token(db).await;
+    let mut args = github_token_git_args(&token);
+    args.extend(["-C".to_string(), dir.clone(), "push".to_string()]);
+
     match tokio::process::Command::new("git")
-        .args(["-C", &dir, "push"])
+        .args(&args)
         .output()
         .await
     {
@@ -507,14 +513,18 @@ pub async fn git_push(param: &str) -> String {
 
 /// Run `git pull`. Write operation — workspace restricted.
 /// Param format: `<path>`
-pub async fn git_pull(param: &str) -> String {
+pub async fn git_pull(db: &WardsonDbClient, param: &str) -> String {
     let dir = match validate_workspace_path(param.trim()) {
         Ok(d) => d,
         Err(e) => return e,
     };
 
+    let token = resolve_github_token(db).await;
+    let mut args = github_token_git_args(&token);
+    args.extend(["-C".to_string(), dir.clone(), "pull".to_string()]);
+
     match tokio::process::Command::new("git")
-        .args(["-C", &dir, "pull"])
+        .args(&args)
         .output()
         .await
     {
