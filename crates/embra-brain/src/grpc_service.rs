@@ -1037,7 +1037,7 @@ async fn run_learning_loop(
             ModeTransition {
                 from_mode: OperatingMode::Setup as i32,
                 to_mode: OperatingMode::Learning as i32,
-                message: format!("Learning Mode — Phase: {}", learning::phase_label(&state.phase)),
+                message: format!("Learning Mode — Name: {} — Phase: {} — TZ: {}", config.name, learning::phase_label(&state.phase), config.timezone),
             }
         )),
     })).await;
@@ -1111,7 +1111,7 @@ async fn run_learning_loop(
                         ModeTransition {
                             from_mode: OperatingMode::Learning as i32,
                             to_mode: OperatingMode::Operational as i32,
-                            message: "Soul sealed! Entering Operational mode.".to_string(),
+                            message: format!("Soul sealed — Name: {} — TZ: {}", config.name, config.timezone),
                         }
                     )),
                 })).await;
@@ -1166,7 +1166,7 @@ async fn run_learning_loop(
                                             ModeTransition {
                                                 from_mode: OperatingMode::Learning as i32,
                                                 to_mode: OperatingMode::Operational as i32,
-                                                message: "Soul sealed! Entering Operational mode.".to_string(),
+                                                message: format!("Soul sealed — Name: {} — TZ: {}", config.name, config.timezone),
                                             }
                                         )),
                                     })).await;

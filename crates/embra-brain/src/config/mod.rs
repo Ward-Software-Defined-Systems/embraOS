@@ -156,7 +156,7 @@ pub async fn run_config_wizard_grpc(
             ModeTransition {
                 from_mode: OperatingMode::Unspecified as i32,
                 to_mode: OperatingMode::Setup as i32,
-                message: "Welcome to embraOS — First Run Setup".to_string(),
+                message: "Welcome to embraOS — First Run Setup — TZ: Etc/UTC".to_string(),
             }
         )),
     })).await;
@@ -305,7 +305,7 @@ pub async fn run_config_wizard_grpc(
             ModeTransition {
                 from_mode: OperatingMode::Setup as i32,
                 to_mode: next_mode as i32,
-                message: format!("Setup complete! Entering {} mode.", if soul_sealed { "Operational" } else { "Learning" }),
+                message: format!("Setup complete — Name: {} — TZ: {}", config.name, config.timezone),
             }
         )),
     })).await;
