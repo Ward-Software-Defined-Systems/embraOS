@@ -117,6 +117,10 @@ async fn main() -> anyhow::Result<()> {
         Err(_) => "Etc/UTC".to_string(),
     };
 
+    // Set TZ env var so child processes (git, ssh) and libraries respect the timezone
+    // SAFETY: called once at startup before multi-threaded work begins
+    unsafe { std::env::set_var("TZ", &config_tz); }
+
     // Start proactive engine
     let proactive_rx = proactive::start_proactive_engine(&db, &config_tz);
 

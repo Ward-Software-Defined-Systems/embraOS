@@ -104,6 +104,15 @@ impl Supervisor {
 
     /// Register all embraOS services in dependency order.
     pub fn register_services(&mut self) {
+        // Set TZ for all child processes (read from STATE, written by config wizard)
+        let tz = std::fs::read_to_string("/embra/state/timezone")
+            .unwrap_or_default()
+            .trim().to_string();
+        if !tz.is_empty() {
+            // SAFETY: called once at startup before services are spawned
+            unsafe { std::env::set_var("TZ", &tz); }
+            tracing::info!("System timezone set: TZ={}", tz);
+        }
         // 1. WardSONDB — no dependencies
         self.add_service(ServiceDef {
             name: "wardsondb".to_string(),

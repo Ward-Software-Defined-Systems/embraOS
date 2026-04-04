@@ -274,6 +274,14 @@ pub async fn run_config_wizard_grpc(
     save_config(db, &config).await?;
     info!("Config wizard complete, saved to WardSONDB");
 
+    // Write timezone to STATE partition so embrad can set TZ on subsequent boots
+    let tz_path = "/embra/state/timezone";
+    if let Err(e) = std::fs::write(tz_path, &config.timezone) {
+        tracing::warn!("Could not write timezone to STATE: {}", e);
+    } else {
+        info!("Timezone written to {} ({})", tz_path, &config.timezone);
+    }
+
     // Also write API key to STATE partition so embrad can pass it on subsequent boots
     let key_path = "/embra/state/api_key";
     if let Some(parent) = std::path::Path::new(key_path).parent() {
