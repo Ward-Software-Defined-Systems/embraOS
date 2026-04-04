@@ -97,22 +97,22 @@ pub async fn save_config(db: &WardsonDbClient, config: &SystemConfig) -> Result<
 
 pub async fn load_config(db: &WardsonDbClient) -> Result<SystemConfig> {
     // Try direct GET by well-known ID first
-    match db.read("config.system", "config").await {
-        Ok(doc) => {
-            let config: SystemConfig = serde_json::from_value(doc)?;
-            return Ok(config);
+    let mut config = match db.read("config.system", "config").await {
+        Ok(doc) => serde_json::from_value::<SystemConfig>(doc)?,
+        Err(_) => {
+            // Fallback: query pattern (pre-migration data)
+            let results = db
+                .query("config.system", &serde_json::json!({}))
+                .await?;
+            let doc = results
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("No system config found"))?;
+            serde_json::from_value::<SystemConfig>(doc)?
         }
-        Err(_) => {}
-    }
-    // Fallback: query pattern (pre-migration data)
-    let results = db
-        .query("config.system", &serde_json::json!({}))
-        .await?;
-    let doc = results
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("No system config found"))?;
-    let config: SystemConfig = serde_json::from_value(doc)?;
+    };
+    // Always resolve timezone abbreviations (PDT → America/Los_Angeles) so chrono-tz can parse
+    config.timezone = crate::tools::resolve_timezone(&config.timezone);
     Ok(config)
 }
 
