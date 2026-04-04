@@ -2,7 +2,7 @@ use chrono::Utc;
 
 use crate::db::WardsonDbClient;
 
-const WORKSPACE_ROOT: &str = "/embra/workspace/repos";
+const WORKSPACE_ROOT: &str = "/embra/workspace";
 
 fn validate_workspace_path(path: &str) -> Result<String, String> {
     let dir = if path.is_empty() { WORKSPACE_ROOT } else { path };
@@ -32,7 +32,7 @@ pub async fn resolve_github_token(db: &WardsonDbClient) -> Option<String> {
     None
 }
 
-/// Clone a git repository into /embra/workspace/repos/.
+/// Clone a git repository into /embra/workspace/.
 /// Format: `<url>` or `<url> <dirname>`
 pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {

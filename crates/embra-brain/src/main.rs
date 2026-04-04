@@ -90,6 +90,10 @@ async fn main() -> anyhow::Result<()> {
     migrations::run_migrations(&db).await?;
     info!("Migrations complete");
 
+    // Set HOME to writable workspace so git/ssh config persists on DATA partition
+    // SAFETY: called once at startup before multi-threaded work begins
+    unsafe { std::env::set_var("HOME", "/embra/workspace"); }
+
     // Auto-configure git defaults (safe.directory, push.autoSetupRemote)
     let _ = tokio::process::Command::new("git")
         .args(["config", "--global", "safe.directory", "*"])

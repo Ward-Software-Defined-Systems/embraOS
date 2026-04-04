@@ -856,7 +856,7 @@ async fn handle_slash_command(
             }
         }
         "/ssh-keygen" => {
-            let key_path = "/root/.ssh/id_ed25519";
+            let key_path = "/embra/workspace/.ssh/id_ed25519";
             let pub_path = format!("{}.pub", key_path);
 
             if std::path::Path::new(key_path).exists() {
@@ -875,7 +875,7 @@ async fn handle_slash_command(
             }
 
             // Ensure .ssh directory exists with correct permissions
-            let ssh_dir = "/root/.ssh";
+            let ssh_dir = "/embra/workspace/.ssh";
             let _ = std::fs::create_dir_all(ssh_dir);
             #[cfg(unix)]
             {
