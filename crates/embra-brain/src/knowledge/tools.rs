@@ -70,12 +70,15 @@ pub async fn knowledge_link(params: &str, db: &WardsonDbClient) -> String {
     let Some((tgt_coll, tgt_id)) = parts[2].split_once(':') else {
         return "Error: target must be <collection>:<id>".into();
     };
+    if src_coll == tgt_coll && src_id == tgt_id {
+        return "Error: Cannot create edge from a node to itself".into();
+    }
     let weight: f64 = match parts[3].parse() {
         Ok(w) => w,
-        Err(_) => return "Error: Weight must be between 0.0 and 1.0".into(),
+        Err(_) => return "Error: Weight must be > 0.0 and ≤ 1.0".into(),
     };
-    if !(0.0..=1.0).contains(&weight) {
-        return "Error: Weight must be between 0.0 and 1.0".into();
+    if weight <= 0.0 || weight > 1.0 {
+        return "Error: Weight must be > 0.0 and ≤ 1.0".into();
     }
 
     // Validate source + target exist
@@ -137,6 +140,11 @@ pub async fn knowledge_traverse(
     let Some((start_coll, start_id)) = start.split_once(':') else {
         return "Error: start must be <collection>:<id>".into();
     };
+
+    // Validate start node exists — distinguishes "not found" from "no edges"
+    if db.read(start_coll, start_id).await.is_err() {
+        return format!("Error: Node {}:{} not found", start_coll, start_id);
+    }
 
     let depth: u32 = toks.next()
         .and_then(|s| s.parse().ok())
@@ -204,22 +212,41 @@ pub async fn knowledge_traverse(
     out
 }
 
-/// `[TOOL:knowledge_query <query_text> [max_results] [categories]]`
+/// `[TOOL:knowledge_query <query_text> [| <max_results> [| <categories_csv>]]]`
 pub async fn knowledge_query(
     params: &str,
     db: &WardsonDbClient,
     session_name: &str,
     config: &SystemConfig,
 ) -> String {
-    // Parameters are naive whitespace-split; the query text can be the full string
-    // if no flags are passed, otherwise we look for trailing integer + category CSV.
-    // Simple approach: take full params as query_text; no trailing flags for now.
-    // Users wanting max_results/categories can use structured syntax later.
-    let query_text = params.trim();
+    // Pipe-delimited: query_text | max_results | categories_csv
+    let parts: Vec<&str> = params.splitn(3, '|').map(|s| s.trim()).collect();
+    let query_text = parts.first().copied().unwrap_or("").trim();
     if query_text.is_empty() {
-        return "Error: usage [TOOL:knowledge_query <query_text>]".into();
+        return "Error: usage [TOOL:knowledge_query <query_text> [| <max_results> [| <categories_csv>]]]".into();
     }
-    let max_results = 20usize;
+
+    let max_results: usize = parts
+        .get(1)
+        .and_then(|s| if s.is_empty() { None } else { s.parse::<usize>().ok() })
+        .map(|n| n.clamp(1, 100))
+        .unwrap_or(20);
+
+    // Retrieve more than max_results before category filtering so filtering
+    // doesn't starve the output. Cap at 100 internally.
+    let retrieve_n = if parts.get(2).map(|s| !s.is_empty()).unwrap_or(false) {
+        (max_results * 3).clamp(20, 100)
+    } else {
+        max_results
+    };
+
+    let category_filter: Option<Vec<SemanticCategory>> = parts.get(2).and_then(|csv| {
+        if csv.is_empty() { return None; }
+        let cats: Vec<SemanticCategory> = csv.split(',')
+            .filter_map(|c| SemanticCategory::from_str(c.trim()))
+            .collect();
+        if cats.is_empty() { None } else { Some(cats) }
+    });
 
     // Derive tags from query text as naive space-split words
     let query_tags: Vec<String> = query_text
@@ -228,18 +255,49 @@ pub async fn knowledge_query(
         .filter(|s| !s.is_empty() && s.len() > 2)
         .collect();
 
-    let results = match retrieve_relevant_knowledge(
-        db, session_name, &query_tags, query_text, max_results, config
+    let mut results = match retrieve_relevant_knowledge(
+        db, session_name, &query_tags, query_text, retrieve_n, config
     ).await {
         Ok(r) => r,
         Err(e) => return format!("Error: retrieval failed: {}", e),
     };
 
+    // Apply category filter (only affects semantic nodes; episodic/procedural pass through)
+    if let Some(ref allowed) = category_filter {
+        results.retain(|r| match &r.node.node_type {
+            NodeType::Semantic { category } => allowed.iter().any(|c| c == category),
+            _ => true,
+        });
+    }
+
+    // Truncate to max_results after filtering
+    results.truncate(max_results);
+
+    // Count by source
+    let mut direct = 0usize;
+    let mut session = 0usize;
+    let mut graph = 0usize;
+    for r in &results {
+        match r.source.as_str() {
+            "direct_query" => direct += 1,
+            "session_based" => session += 1,
+            "graph_expansion" => graph += 1,
+            _ => graph += 1,
+        }
+    }
+
     if results.is_empty() {
         return format!("Knowledge query: \"{}\" (0 results)", query_text);
     }
 
-    let mut out = format!("Knowledge query: \"{}\" ({} results)\n\n", query_text, results.len());
+    let mut out = format!(
+        "Knowledge query: \"{}\" ({} results — direct: {}, session: {}, graph: {})\n",
+        query_text, results.len(), direct, session, graph
+    );
+    if direct == 0 {
+        out.push_str("[No direct matches — showing graph-expanded results]\n");
+    }
+    out.push('\n');
     for (i, r) in results.iter().enumerate() {
         out.push_str(&format!(
             "{}. [{}] {} (score: {:.2})\n   Source: {}\n\n",

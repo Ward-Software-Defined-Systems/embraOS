@@ -214,7 +214,15 @@ fn score_and_rank(
 
         let access_frequency = (c.access_count as f64) / max_access;
 
-        let score = tag_relevance * 0.4 + recency * 0.3 + access_frequency * 0.2 + c.confidence * 0.1;
+        let base = tag_relevance * 0.4 + recency * 0.3 + access_frequency * 0.2 + c.confidence * 0.1;
+        // Source-quality multiplier separates direct matches from graph-expansion noise.
+        let source_mult = match c.source.as_str() {
+            "direct_query" => 1.0,
+            "session_based" => 0.75,
+            "graph_expansion" => 0.5,
+            _ => 0.5,
+        };
+        let score = base * source_mult;
 
         let node = GraphNode {
             id: c.id,

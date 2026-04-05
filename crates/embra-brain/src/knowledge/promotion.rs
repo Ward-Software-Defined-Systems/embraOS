@@ -16,6 +16,8 @@ use crate::db::WardsonDbClient;
 use super::edges::derive_edges;
 use super::types::{EdgeType, SemanticCategory};
 
+const PROCEDURAL_SCHEMA_HINT: &str = r#"{"title": "...", "description": "...", "preconditions": [...], "steps": [{"order": N, "action": "...", "notes": "..."}], "outcomes": {"success": "...", "failure": "..."}}"#;
+
 /// Promote an episodic entry to `memory.semantic`. Returns the new semantic node _id.
 pub async fn promote_to_semantic(
     db: &WardsonDbClient,
@@ -84,24 +86,24 @@ pub async fn promote_to_procedural(
     let (source_doc, _content, tags, session) = load_source_entry(db, entry_id).await?;
 
     let parsed: serde_json::Value = serde_json::from_str(procedure_json)
-        .map_err(|e| anyhow!("Invalid procedural data: {}", e))?;
+        .map_err(|e| anyhow!("Invalid procedural data: {}\nExpected schema: {}", e, PROCEDURAL_SCHEMA_HINT))?;
 
     let title = parsed.get("title").and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("Invalid procedural data: missing field 'title'"))?.to_string();
+        .ok_or_else(|| anyhow!("Invalid procedural data: missing field 'title'\nExpected schema: {}", PROCEDURAL_SCHEMA_HINT))?.to_string();
     let description = parsed.get("description").and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("Invalid procedural data: missing field 'description'"))?.to_string();
+        .ok_or_else(|| anyhow!("Invalid procedural data: missing field 'description'\nExpected schema: {}", PROCEDURAL_SCHEMA_HINT))?.to_string();
     let preconditions: Vec<String> = parsed.get("preconditions")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
     let steps_val = parsed.get("steps")
-        .ok_or_else(|| anyhow!("Invalid procedural data: missing field 'steps'"))?;
+        .ok_or_else(|| anyhow!("Invalid procedural data: missing field 'steps'\nExpected schema: {}", PROCEDURAL_SCHEMA_HINT))?;
     let outcomes_val = parsed.get("outcomes")
-        .ok_or_else(|| anyhow!("Invalid procedural data: missing field 'outcomes'"))?;
+        .ok_or_else(|| anyhow!("Invalid procedural data: missing field 'outcomes'\nExpected schema: {}", PROCEDURAL_SCHEMA_HINT))?;
     let success = outcomes_val.get("success").and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("Invalid procedural data: missing field 'outcomes.success'"))?.to_string();
+        .ok_or_else(|| anyhow!("Invalid procedural data: missing field 'outcomes.success'\nExpected schema: {}", PROCEDURAL_SCHEMA_HINT))?.to_string();
     let failure = outcomes_val.get("failure").and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow!("Invalid procedural data: missing field 'outcomes.failure'"))?.to_string();
+        .ok_or_else(|| anyhow!("Invalid procedural data: missing field 'outcomes.failure'\nExpected schema: {}", PROCEDURAL_SCHEMA_HINT))?.to_string();
 
     let now = Utc::now().to_rfc3339();
     let proc_doc = json!({
