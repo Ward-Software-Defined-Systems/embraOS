@@ -8,7 +8,10 @@
 
 **embraOS** is a continuity-preserving AI operating system. It's not a chatbot. It's not an agent framework. It's an intelligence that remembers, evolves, and maintains itself across time — with a soul it can never modify and a memory it writes itself.
 
-**Current Status:** Phase 1 — Core OS (Sprint 1) | Phase 0 — Stable
+> **🎯 Milestone — Sprint 2: Cross-Session Knowledge Graph (2026-04-05)**
+> Memory is no longer a flat episodic log. Promoted semantic and procedural nodes, typed/weighted edges, BFS traversal, and graph-aware retrieval — all on WardSONDB, no external graph database. See [Phase 1 Sprint 2 Scope](#phase-1) for details.
+
+**Current Status:** Phase 1 — Core OS (Sprint 2 Complete) | Phase 0 — Stable
 
 ---
 
@@ -293,7 +296,7 @@ Phase 0 is a proof of concept. It demonstrates the core experience but doesn't i
 
 ### Default Tools
 
-Phase 0 includes ~63 built-in tools available in operational mode. These are internal tools invoked by the intelligence during conversation — not user-facing commands. The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
+Phase 0/1 includes ~69 built-in tools available in operational mode. These are internal tools invoked by the intelligence during conversation — not user-facing commands. The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
 
 > **⚠️ Testing Notice:** The default tools and slash commands are actively being tested. If you encounter bugs or unexpected behavior, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
@@ -310,15 +313,26 @@ Phase 0 includes ~63 built-in tools available in operational mode. These are int
 
 | Tool | Description |
 |---|---|
-| **recall** | Search past conversations and saved memories by query — returns up to 10 results with IDs, content, tags, and timestamps |
-| **remember** | Save a note or fact to persistent memory with optional hashtag tags |
+| **recall** | Search past conversations and saved memories by query — returns up to 10 results with IDs, content, tags, and timestamps. Now searches `memory.entries` + `memory.semantic` + `memory.procedural` and marks promoted entries |
+| **remember** | Save a note or fact to persistent memory with optional hashtag tags. Tags stored as JSON array; triggers background edge derivation |
 | **forget** | Remove a specific memory entry by ID |
-| **memory_search** | Search and retrieve from the intelligence's memory stores |
+| **memory_search** | Search and retrieve from the intelligence's memory stores. Cross-collection like `recall` |
 | **get** | Retrieve any document by collection and ID from WardSONDB |
 | **define** | Look up or add terminology — `define term` to read, `define term | definition` to write |
-| **introspect** | Reflect on soul, identity, and user documents — focus filter extracts relevant subset (purpose, ethics, constraints, identity, user) |
-| **memory_scan** | Memory inventory — total count, tag frequency, per-session breakdown, age buckets, duplicate candidates |
-| **memory_dedup** | Find duplicate memory groups (identical, near-duplicate, subset) with merge strategy proposals |
+| **introspect** | Reflect on soul, identity, and user documents — focus filter extracts relevant subset (purpose, ethics, constraints, identity, user, knowledge) |
+| **memory_scan** | Memory inventory — total count, tag frequency, per-session breakdown, age buckets, duplicate candidates. Includes a Knowledge Graph summary section (semantic/procedural/edge counts, promoted ratio) |
+| **memory_dedup** | Find duplicate memory groups (identical, near-duplicate, subset) with merge strategy proposals. Also flags cross-collection overlap between unpromoted entries and semantic nodes |
+
+**Knowledge Graph** *(Sprint 2)*
+
+| Tool | Description |
+|---|---|
+| **knowledge_promote** | Promote an episodic entry to semantic (with category) or procedural (with JSON procedure). Creates a `derived_from` edge and auto-derives additional edges |
+| **knowledge_link** | Create a directed weighted edge between any two knowledge nodes. Brain-created edge types: enables, contradicts, refines, depends_on. Self-loops and zero-weight edges rejected |
+| **knowledge_unlink** | Delete edges by ID or by `source \| type \| target` triple. Bidirectional deletion for auto-derived edge types |
+| **knowledge_traverse** | BFS traversal from a starting node with depth cap (default 3, ceiling 5), edge-type filter, min-weight filter. Validates start node exists |
+| **knowledge_query** | Context-aware retrieval — direct tag match, session context, depth-2 graph expansion, multi-signal ranking. Supports `query \| max \| categories_csv` syntax. Output shows source breakdown (direct/session/graph) |
+| **knowledge_graph_stats** | Node counts, category distribution, edge type distribution, promoted ratio, graph density |
 
 **Conversations & Sessions**
 
@@ -466,6 +480,18 @@ Phase 1 initial sprint is functionally complete. Sprint 1 addresses bugs and UX 
 - **`/ssh-copy-id` command** — Copy SSH key to RFC 1918 hosts (best-effort with BatchMode).
 - **`/git-setup` command** — Set git user.name and user.email. `safe.directory` and `push.autoSetupRemote` auto-configured at startup.
 
+**Sprint 2 Scope — Cross-Session Knowledge Graph:**
+
+- **Schema v5 migration** — 3 new collections (`memory.semantic`, `memory.procedural`, `memory.edges`), 7 indexes, tag array migration (comma-string → JSON array), 4 KG config fields added to `config.system`.
+- **Knowledge types** — `SemanticNode` (5 categories: fact/preference/decision/observation/pattern) and `ProceduralNode` (structured steps with preconditions + outcomes).
+- **Edge derivation engine** — auto-derived at write time: `same_session` (w=1.0), `temporal` (linear decay within 30-min window), `tag_overlap` (|overlap| / max(|a|,|b|)). Bidirectional. Best-effort via `tokio::spawn`, never blocks the user-facing response.
+- **Promotion** — 1:1 episodic → semantic/procedural with provenance (`derived_from` edge + `promoted_to` on source entry).
+- **BFS traversal** — configurable depth (default 3, ceiling 5), edge-type filter, min-weight, fire-and-forget access tracking.
+- **Context-aware retrieval** — multi-signal ranking (tag 0.4, recency 0.3, access 0.2, confidence 0.1) × source multiplier (direct=1.0, session=0.75, graph=0.5), depth-2 graph expansion.
+- **6 new KG tools** — `knowledge_promote`, `knowledge_link`, `knowledge_unlink`, `knowledge_traverse`, `knowledge_query`, `knowledge_graph_stats`.
+- **Existing tool updates** — `remember` stores array tags + background edge derivation, `recall`/`memory_search` cross-collection, `memory_scan` KG summary section, `memory_dedup` cross-collection flagging, `introspect` knowledge focus.
+- **`/feedback-loop` slash command (EXPERIMENTAL)** — Phase 3 Continuity Engine preview. Embeds `feedback-loop-spec-v2.md` read-only in the binary, synthesizes a user turn that walks the Brain through the self-evaluation protocol using existing tools.
+
 > If you encounter bugs, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
 ---
@@ -480,7 +506,7 @@ Phase 1 initial sprint is functionally complete. Sprint 1 addresses bugs and UX 
 | **Phase 0 — Sprint 3** | Session access tools (5), memory consolidation (2), session consolidation (3), schema migration framework | ✅ **Complete** |
 | **Phase 0 — Sprint 4** | SSH remote admin (4 tools), tag filter fix, timezone-aware timestamps, `/copy` deferred | ✅ **Complete** |
 | **Phase 0 — Sprint 5** | SSH ControlMaster refactor, Brain API upgrade (128K output, adaptive thinking, 1M context), WardSONDB integration upgrades, new filesystem/git tools (file_delete, file_move, dir_delete, git_rm, git_mv) | ✅ **Complete** |
-| **Phase 1** | Core OS — QEMU-bootable image, full boot chain, config wizard, Learning Mode, AI conversation + tools over serial TUI | **Sprint 1 In Progress** |
+| **Phase 1** | Core OS — QEMU-bootable image, full boot chain, config wizard, Learning Mode, AI conversation + tools over serial TUI | **Sprint 2 Complete** |
 | **Pit Stop** | Main branch merge | Planned |
 | **Pit Stop** | Code review branch — security audit, AI slop cleanup, refactoring | Planned |
 | **Pit Stop** | Main branch merge | Planned |
