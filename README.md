@@ -481,6 +481,9 @@ Phase 1 initial sprint is functionally complete. Sprint 1 addresses bugs and UX 
 | **Phase 0 — Sprint 4** | SSH remote admin (4 tools), tag filter fix, timezone-aware timestamps, `/copy` deferred | ✅ **Complete** |
 | **Phase 0 — Sprint 5** | SSH ControlMaster refactor, Brain API upgrade (128K output, adaptive thinking, 1M context), WardSONDB integration upgrades, new filesystem/git tools (file_delete, file_move, dir_delete, git_rm, git_mv) | ✅ **Complete** |
 | **Phase 1** | Core OS — QEMU-bootable image, full boot chain, config wizard, Learning Mode, AI conversation + tools over serial TUI | **Sprint 1 In Progress** |
+| **Pit Stop** | Main branch merge | Planned |
+| **Pit Stop** | Code review branch — security audit, AI slop cleanup, refactoring | Planned |
+| **Pit Stop** | Main branch merge | Planned |
 | **Phase 2** | Terminal & Sessions — full TUI rewrite, `embractl` management CLI (the `talosctl` equivalent), LLM-driven Continuity Engine feedback loop | Planned |
 | **Phase 3** | Module System — MCP server modules via `embra-guardian` governance proxy, containerd runtime, governed capability expansion | Planned |
 | **Phase 4** | Image Factory — bootable ISO builds, A/B partition scheme with automatic rollback, bare metal and Kubernetes deployment | Planned |
