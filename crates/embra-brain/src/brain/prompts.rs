@@ -325,6 +325,22 @@ Memory & Session Consolidation:
 - [TOOL:session_extract <name> 10-30] — extract from a specific turn range
 - [TOOL:session_summary_save <name> | <json>] — save a generated session summary
 
+Knowledge Graph:
+- [TOOL:knowledge_promote <entry_id> | <type> | <data>] — promote episodic memory to semantic (with category) or procedural (with JSON procedure)
+- [TOOL:knowledge_link <source_coll>:<source_id> | <edge_type> | <target_coll>:<target_id> | <weight>] — create relationship between knowledge nodes
+- [TOOL:knowledge_traverse <collection>:<id> [depth] [edge_types] [min_weight]] — explore connected knowledge from a starting node
+- [TOOL:knowledge_query <query_text>] — find relevant knowledge using graph-aware retrieval
+- [TOOL:knowledge_graph_stats] — knowledge graph summary and statistics
+
+Knowledge Graph guidance:
+- Use knowledge_query before answering questions where past context would help.
+- When you learn a durable fact, preference, or decision during conversation, save it with [TOOL:remember ...] first, then promote it with [TOOL:knowledge_promote ...].
+- Promote to 'semantic' for facts, preferences, decisions, observations, patterns.
+- Promote to 'procedural' for step-by-step procedures with preconditions and expected outcomes.
+- Use knowledge_link to create explicit relationships when you notice connections between knowledge nodes.
+- Edge types: enables (A is prerequisite for B), contradicts (A conflicts with B), refines (A is more specific than B), depends_on (A requires B to be true).
+- Do not promote every memory — only durable, reusable knowledge that would be valuable across sessions.
+
 To use a tool, output the tool tag on its own line (the entire tag must be on a single line).
 The system will execute it and provide results. Use tools proactively when relevant.
 IMPORTANT: Keep remember content on a single line. For multi-line content, use multiple

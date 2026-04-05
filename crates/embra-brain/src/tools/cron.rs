@@ -193,9 +193,23 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
             continue;
         }
 
-        // Execute the command via tool dispatch
+        // Execute the command via tool dispatch. Load config for dispatch; fall back
+        // to a minimal in-memory SystemConfig if load fails (e.g., pre-wizard).
+        let cfg = crate::config::load_config(db).await.unwrap_or_else(|_| crate::config::SystemConfig {
+            name: "Embra".to_string(),
+            api_key: String::new(),
+            timezone: config_tz.to_string(),
+            deployment_mode: "phase1".into(),
+            created_at: String::new(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            github_token: None,
+            kg_temporal_window_secs: 1800,
+            kg_max_traversal_depth: 3,
+            kg_traversal_depth_ceiling: 5,
+            kg_edge_candidate_limit: 50,
+        });
         let tool_tag = format!("[TOOL:{}]", command);
-        let result = super::dispatch(&tool_tag, db, config_tz, "cron").await;
+        let result = super::dispatch(&tool_tag, db, &cfg, "cron").await;
 
         let result_text = result.unwrap_or_else(|| format!("Unknown command: {}", command));
         results.push(format!("embraCRON [{}]: {}", command, result_text));

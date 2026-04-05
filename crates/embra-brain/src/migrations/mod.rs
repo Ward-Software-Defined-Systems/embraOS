@@ -4,7 +4,7 @@ use tracing::{error, info, warn};
 
 use crate::db::{WardsonDbClient, WardsonDbError};
 
-const CURRENT_SCHEMA_VERSION: u32 = 4;
+const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 /// Run all pending migrations. Each migration is idempotent.
 pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
@@ -44,6 +44,12 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
         // v4: TTL policies for auto-cleanup
         run_v4_ttl_policies(db).await?;
         set_schema_version(db, 4).await?;
+    }
+
+    if current_version < 5 {
+        // v5: knowledge graph — new collections, indexes, tag array migration, KG config
+        run_v5_knowledge_graph(db).await?;
+        set_schema_version(db, 5).await?;
     }
 
     info!("Migrations complete. Schema version: {}", CURRENT_SCHEMA_VERSION);
@@ -391,4 +397,144 @@ async fn run_v4_ttl_policies(db: &WardsonDbClient) -> Result<()> {
 
     info!("Migration v4: TTL policies complete");
     Ok(())
+}
+
+/// Migration v5: Knowledge graph setup.
+/// - Creates 3 new collections: memory.semantic, memory.procedural, memory.edges
+/// - Creates 7 indexes
+/// - Migrates memory.entries `tags` field from comma-separated strings to JSON arrays
+/// - PATCHes config.system with KG configuration fields
+async fn run_v5_knowledge_graph(db: &WardsonDbClient) -> Result<()> {
+    info!("Running migration v5: knowledge graph");
+
+    // Step 1: Create new collections (idempotent)
+    for collection in &["memory.semantic", "memory.procedural", "memory.edges"] {
+        if !db.collection_exists(collection).await.unwrap_or(false) {
+            info!("Creating collection: {}", collection);
+            if let Err(e) = db.create_collection(collection).await {
+                // 409 COLLECTION_EXISTS is idempotent success
+                if !is_conflict_err(&e) {
+                    error!("Migration v5: failed to create collection {}: {}", collection, e);
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    // Step 2: Create indexes (idempotent — create_index treats 409 as success)
+    // (collection, index_name, body)
+    let indexes: &[(&str, &str, serde_json::Value)] = &[
+        (
+            "memory.edges",
+            "idx_edge_source",
+            serde_json::json!({"name": "idx_edge_source", "fields": ["source_id", "edge_type"]}),
+        ),
+        (
+            "memory.edges",
+            "idx_edge_target",
+            serde_json::json!({"name": "idx_edge_target", "field": "target_id"}),
+        ),
+        (
+            "memory.edges",
+            "idx_edge_source_target",
+            serde_json::json!({"name": "idx_edge_source_target", "fields": ["source_id", "target_id"]}),
+        ),
+        (
+            "memory.semantic",
+            "idx_semantic_category",
+            serde_json::json!({"name": "idx_semantic_category", "field": "category"}),
+        ),
+        (
+            "memory.semantic",
+            "idx_semantic_source",
+            serde_json::json!({"name": "idx_semantic_source", "field": "source_entry_id"}),
+        ),
+        (
+            "memory.procedural",
+            "idx_procedural_source",
+            serde_json::json!({"name": "idx_procedural_source", "field": "source_entry_id"}),
+        ),
+        (
+            "memory.entries",
+            "idx_entries_session",
+            serde_json::json!({"name": "idx_entries_session", "field": "session"}),
+        ),
+    ];
+
+    for (collection, idx_name, body) in indexes {
+        match db.create_index(collection, body).await {
+            Ok(_) => info!("Migration v5: index {} on {} ensured", idx_name, collection),
+            Err(e) => warn!("Migration v5: index {} on {} failed: {}", idx_name, collection, e),
+        }
+    }
+
+    // Step 3: Tag array migration — convert comma-separated strings to JSON arrays
+    if db.collection_exists("memory.entries").await.unwrap_or(false) {
+        let all_entries = db
+            .query(
+                "memory.entries",
+                &serde_json::json!({ "filter": {}, "limit": 10000 }),
+            )
+            .await
+            .unwrap_or_default();
+
+        let mut migrated = 0usize;
+        let mut skipped = 0usize;
+        for doc in all_entries {
+            let id = match doc.get("_id").and_then(|v| v.as_str()) {
+                Some(id) => id.to_string(),
+                None => continue,
+            };
+
+            let tags_val = doc.get("tags");
+            let new_tags: Vec<String> = match tags_val {
+                Some(v) if v.is_array() => {
+                    skipped += 1;
+                    continue;
+                }
+                Some(v) if v.is_string() => v
+                    .as_str()
+                    .unwrap_or("")
+                    .split(", ")
+                    .map(|t| t.trim().trim_start_matches('#').trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect(),
+                _ => Vec::new(),
+            };
+
+            let patch = serde_json::json!({ "tags": new_tags });
+            match db.patch_document("memory.entries", &id, &patch).await {
+                Ok(_) => migrated += 1,
+                Err(e) => warn!("Migration v5: failed to patch tags on {}: {}", id, e),
+            }
+        }
+        info!(
+            "Migration v5: tag array migration — {} migrated, {} already array",
+            migrated, skipped
+        );
+    }
+
+    // Step 4: PATCH config.system with KG configuration fields
+    let kg_config_patch = serde_json::json!({
+        "kg_temporal_window_secs": 1800,
+        "kg_max_traversal_depth": 3,
+        "kg_traversal_depth_ceiling": 5,
+        "kg_edge_candidate_limit": 50,
+    });
+    match db
+        .patch_document("config.system", "config", &kg_config_patch)
+        .await
+    {
+        Ok(_) => info!("Migration v5: KG config fields added to config.system"),
+        Err(e) => warn!("Migration v5: failed to PATCH config.system: {}", e),
+    }
+
+    info!("Migration v5: knowledge graph complete");
+    Ok(())
+}
+
+fn is_conflict_err(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<WardsonDbError>()
+        .map(|w| w.is_conflict())
+        .unwrap_or(false)
 }

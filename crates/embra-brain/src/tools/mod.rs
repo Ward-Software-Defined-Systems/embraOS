@@ -1,7 +1,9 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
+use crate::config::SystemConfig;
 use crate::db::WardsonDbClient;
+use crate::knowledge;
 
 pub mod cron;
 pub mod engineering;
@@ -27,9 +29,10 @@ fn uptime_secs() -> u64 {
 pub async fn dispatch(
     tag: &str,
     db: &WardsonDbClient,
-    config_tz: &str,
+    config: &SystemConfig,
     session_name: &str,
 ) -> Option<String> {
+    let config_tz = config.timezone.as_str();
     // Strip brackets: "[TOOL:recall hello world]" -> "recall hello world"
     let inner = tag
         .strip_prefix("[TOOL:")
@@ -50,7 +53,7 @@ pub async fn dispatch(
             None => "WardSONDB is up to date.".into(),
         },
         "recall" => recall(db, param).await,
-        "remember" => remember(db, param, session_name).await,
+        "remember" => remember(db, param, session_name, config).await,
         "forget" => forget(db, param).await,
         "uptime_report" => uptime_report(db).await,
         "introspect" => introspect(db, param).await,
@@ -120,6 +123,12 @@ pub async fn dispatch(
         "session_summarize" => sessions::session_summarize(db, param).await,
         "session_summary_save" => sessions::session_summary_save(db, param).await,
         "session_extract" => sessions::session_extract(db, param).await,
+        // Knowledge graph tools (Sprint 2)
+        "knowledge_promote" => knowledge::tools::knowledge_promote(param, db, config).await,
+        "knowledge_link" => knowledge::tools::knowledge_link(param, db).await,
+        "knowledge_traverse" => knowledge::tools::knowledge_traverse(param, db, config).await,
+        "knowledge_query" => knowledge::tools::knowledge_query(param, db, session_name, config).await,
+        "knowledge_graph_stats" => knowledge::tools::knowledge_graph_stats(db).await,
         _ => return None,
     };
 
@@ -255,56 +264,75 @@ async fn ensure_collection(db: &WardsonDbClient, name: &str) {
 async fn recall(db: &WardsonDbClient, query: &str) -> String {
     ensure_collection(db, "memory.entries").await;
 
-    let results = db
-        .query(
-            "memory.entries",
-            &serde_json::json!({"fields": ["content", "tags", "session", "created_at"]}),
-        )
-        .await
-        .unwrap_or_default();
+    let entries = db.query("memory.entries", &serde_json::json!({})).await.unwrap_or_default();
+    let semantic = db.query("memory.semantic", &serde_json::json!({})).await.unwrap_or_default();
+    let procedural = db.query("memory.procedural", &serde_json::json!({})).await.unwrap_or_default();
 
-    if results.is_empty() {
+    if entries.is_empty() && semantic.is_empty() && procedural.is_empty() {
         return "No memory entries found.".into();
     }
 
     let query_lower = query.trim_start_matches('#').to_lowercase();
-    let matching: Vec<&serde_json::Value> = if query.is_empty() {
-        // Return all (latest first, up to 20)
-        results.iter().rev().take(20).collect()
-    } else {
-        results
-            .iter()
-            .filter(|doc| {
-                let content = doc
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let tags = doc
-                    .get("tags")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                content.to_lowercase().contains(&query_lower)
-                    || tags.to_lowercase().contains(&query_lower)
-            })
-            .collect()
+
+    fn tags_to_str(doc: &serde_json::Value) -> String {
+        match doc.get("tags") {
+            Some(v) if v.is_array() => v.as_array().unwrap().iter()
+                .filter_map(|t| t.as_str()).collect::<Vec<_>>().join(", "),
+            Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
+            _ => String::new(),
+        }
+    }
+
+    let matches_query = |content: &str, tags: &str| -> bool {
+        if query.is_empty() { return true; }
+        content.to_lowercase().contains(&query_lower) || tags.to_lowercase().contains(&query_lower)
     };
 
-    if matching.is_empty() {
+    // Promoted entries: content-bearing fields come from the promoted node, not the episodic entry.
+    // Mark entries with [promoted → collection] suffix.
+    let mut output_lines: Vec<String> = Vec::new();
+
+    // Promoted collections first (ranked higher)
+    for doc in semantic.iter().chain(procedural.iter()) {
+        let id = doc.get("_id").and_then(|v| v.as_str()).unwrap_or("?");
+        let collection = if doc.get("category").is_some() { "memory.semantic" } else { "memory.procedural" };
+        let content = doc.get("content").and_then(|v| v.as_str())
+            .or_else(|| doc.get("description").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        let title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let tags = tags_to_str(doc);
+        let searchable = format!("{} {} {}", title, content, tags);
+        if !matches_query(&searchable, &tags) { continue; }
+        let ts = doc.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+        let display = if !title.is_empty() { format!("{}: {}", title, content) } else { content.to_string() };
+        output_lines.push(format!("  [{}] [{}] {} (tags: {}) — {}", collection, id, display, tags, ts));
+    }
+
+    // Episodic entries
+    for doc in entries.iter() {
+        let content = doc.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        let tags = tags_to_str(doc);
+        if !matches_query(content, &tags) { continue; }
+        let id = doc.get("_id").and_then(|v| v.as_str()).unwrap_or("?");
+        let ts = doc.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+        let promoted_marker = doc.get("promoted_to")
+            .and_then(|v| if v.is_null() { None } else { v.get("collection") })
+            .and_then(|v| v.as_str())
+            .map(|c| format!(" [promoted → {}]", c))
+            .unwrap_or_default();
+        output_lines.push(format!("  [memory.entries] [{}] {}{} (tags: {}) — {}", id, content, promoted_marker, tags, ts));
+    }
+
+    if output_lines.is_empty() {
         return format!("No memory entries matching '{}'.", query);
     }
 
-    let mut output = format!("Found {} matching entries:\n", matching.len());
-    for doc in matching.iter().take(10) {
-        let id = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()).unwrap_or("?");
-        let content = doc.get("content").and_then(|v| v.as_str()).unwrap_or("");
-        let ts = doc.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
-        let tags = doc.get("tags").and_then(|v| v.as_str()).unwrap_or("");
-        output.push_str(&format!("  [{}] {} (tags: {}) — {}\n", id, content, tags, ts));
-    }
-    output
+    let total = output_lines.len();
+    output_lines.truncate(10);
+    format!("Found {} matching entries:\n{}", total, output_lines.join("\n"))
 }
 
-async fn remember(db: &WardsonDbClient, content: &str, session: &str) -> String {
+async fn remember(db: &WardsonDbClient, content: &str, session: &str, config: &SystemConfig) -> String {
     if content.is_empty() {
         return "Nothing to remember. Provide content after [TOOL:remember ...].".into();
     }
@@ -312,27 +340,48 @@ async fn remember(db: &WardsonDbClient, content: &str, session: &str) -> String 
     ensure_collection(db, "memory.entries").await;
 
     // Parse optional tags: "content text #tag1 #tag2"
-    let mut tags = Vec::new();
+    let mut tags: Vec<String> = Vec::new();
     let mut text_parts = Vec::new();
     for word in content.split_whitespace() {
         if word.starts_with('#') {
-            tags.push(word.trim_start_matches('#'));
+            tags.push(word.trim_start_matches('#').to_string());
         } else {
             text_parts.push(word);
         }
     }
     let text = text_parts.join(" ");
-    let tags_str = tags.join(", ");
+    let created_at = Utc::now().to_rfc3339();
 
     let doc = serde_json::json!({
         "content": text,
-        "tags": tags_str,
+        "tags": tags,
         "session": session,
-        "created_at": Utc::now().to_rfc3339(),
+        "promoted_to": serde_json::Value::Null,
+        "created_at": created_at,
     });
 
     match db.write("memory.entries", &doc).await {
-        Ok(id) => format!("Remembered. Entry ID: {}", id),
+        Ok(id) => {
+            // Background edge derivation (spec §4.8)
+            let db_clone = db.clone();
+            let id_clone = id.clone();
+            let session_clone = session.to_string();
+            let tags_clone = tags.clone();
+            let created_at_clone = created_at.clone();
+            let config_clone = config.clone();
+            tokio::spawn(async move {
+                let _ = knowledge::edges::derive_edges(
+                    &db_clone,
+                    &id_clone,
+                    "memory.entries",
+                    &session_clone,
+                    &tags_clone,
+                    &created_at_clone,
+                    &config_clone,
+                ).await;
+            });
+            format!("Remembered. Entry ID: {}", id)
+        }
         Err(e) => format!("Failed to save memory: {}", e),
     }
 }
@@ -465,8 +514,14 @@ fn filter_soul_keys(soul: &serde_json::Value, focus: &str) -> serde_json::Map<St
 }
 
 async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
-    let mut output = String::new();
     let focus_lower = focus.to_lowercase();
+
+    // Knowledge graph focus — delegate to knowledge_graph_stats
+    if matches!(focus_lower.as_str(), "knowledge" | "knowledge_graph" | "graph") {
+        return knowledge::tools::knowledge_graph_stats(db).await;
+    }
+
+    let mut output = String::new();
 
     // Load soul (direct GET, fallback to query)
     let soul_doc = db.read("soul.invariant", "soul").await.ok().or_else(|| None);

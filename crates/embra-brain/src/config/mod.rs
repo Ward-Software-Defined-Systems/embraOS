@@ -19,7 +19,21 @@ pub struct SystemConfig {
     pub version: String,
     #[serde(default)]
     pub github_token: Option<String>,
+    // Knowledge graph configuration (Sprint 2, schema v5)
+    #[serde(default = "default_kg_temporal_window")]
+    pub kg_temporal_window_secs: u64,
+    #[serde(default = "default_kg_max_depth")]
+    pub kg_max_traversal_depth: u32,
+    #[serde(default = "default_kg_depth_ceiling")]
+    pub kg_traversal_depth_ceiling: u32,
+    #[serde(default = "default_kg_candidate_limit")]
+    pub kg_edge_candidate_limit: u32,
 }
+
+fn default_kg_temporal_window() -> u64 { 1800 }
+fn default_kg_max_depth() -> u32 { 3 }
+fn default_kg_depth_ceiling() -> u32 { 5 }
+fn default_kg_candidate_limit() -> u32 { 50 }
 
 pub async fn run_config_wizard() -> Result<SystemConfig> {
     println!();
@@ -64,6 +78,10 @@ pub async fn run_config_wizard() -> Result<SystemConfig> {
         created_at: chrono::Utc::now().to_rfc3339(),
         version: env!("CARGO_PKG_VERSION").into(),
         github_token: None,
+        kg_temporal_window_secs: default_kg_temporal_window(),
+        kg_max_traversal_depth: default_kg_max_depth(),
+        kg_traversal_depth_ceiling: default_kg_depth_ceiling(),
+        kg_edge_candidate_limit: default_kg_candidate_limit(),
     };
 
     println!();
@@ -270,6 +288,10 @@ pub async fn run_config_wizard_grpc(
         created_at: chrono::Utc::now().to_rfc3339(),
         version: env!("CARGO_PKG_VERSION").into(),
         github_token: None,
+        kg_temporal_window_secs: default_kg_temporal_window(),
+        kg_max_traversal_depth: default_kg_max_depth(),
+        kg_traversal_depth_ceiling: default_kg_depth_ceiling(),
+        kg_edge_candidate_limit: default_kg_candidate_limit(),
     };
     save_config(db, &config).await?;
     info!("Config wizard complete, saved to WardSONDB");

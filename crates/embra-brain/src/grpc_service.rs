@@ -139,6 +139,10 @@ impl BrainService for BrainGrpcService {
                     created_at: String::new(),
                     version: env!("CARGO_PKG_VERSION").into(),
                     github_token: None,
+                    kg_temporal_window_secs: 1800,
+                    kg_max_traversal_depth: 3,
+                    kg_traversal_depth_ceiling: 5,
+                    kg_edge_candidate_limit: 50,
                 });
                 match run_learning_loop(&tx, &mut incoming, &db, &loaded_config, &api_key).await {
                     Ok(()) => {
@@ -384,9 +388,20 @@ async fn handle_request(
             };
 
             // Load config — api_key comes from --api-key flag or env, not WardSONDB
-            let config_name = config::load_config(db).await
-                .map(|c| c.name)
-                .unwrap_or_else(|_| "Embra".to_string());
+            let loaded_config = config::load_config(db).await.unwrap_or_else(|_| config::SystemConfig {
+                name: "Embra".to_string(),
+                api_key: api_key.to_string(),
+                timezone: config_tz.to_string(),
+                deployment_mode: "phase1".into(),
+                created_at: String::new(),
+                version: env!("CARGO_PKG_VERSION").into(),
+                github_token: None,
+                kg_temporal_window_secs: 1800,
+                kg_max_traversal_depth: 3,
+                kg_traversal_depth_ceiling: 5,
+                kg_edge_candidate_limit: 50,
+            });
+            let config_name = loaded_config.name.clone();
 
             if api_key.is_empty() {
                 let _ = tx.send(Ok(ConversationResponse {
@@ -505,7 +520,7 @@ async fn handle_request(
                 // Dispatch tools and stream ToolExecution events
                 let mut tool_results = String::new();
                 for tag in &tags {
-                    if let Some(result) = tools::dispatch(tag, db, config_tz, &session_name).await {
+                    if let Some(result) = tools::dispatch(tag, db, &loaded_config, &session_name).await {
                         let _ = tx.send(Ok(ConversationResponse {
                             response_type: Some(conversation_response::ResponseType::Tool(
                                 ToolExecution {

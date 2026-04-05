@@ -388,4 +388,77 @@ impl WardsonDbClient {
         let envelope: WardsonEnvelope<serde_json::Value> = resp.json().await?;
         Ok(envelope.data)
     }
+
+    /// Create an index on a collection. Body shape:
+    ///   single-field:  {"name": "...", "field": "..."}
+    ///   compound:      {"name": "...", "fields": ["a", "b"]}
+    /// Returns Ok(()) on both 2xx and 409 INDEX_EXISTS (idempotent).
+    pub async fn create_index(
+        &self,
+        collection: &str,
+        body: &serde_json::Value,
+    ) -> Result<()> {
+        let resp = self
+            .http_client
+            .post(format!("{}/{}/indexes", self.base_url, collection))
+            .json(body)
+            .send()
+            .await?;
+        if resp.status().is_success() || resp.status().as_u16() == 409 {
+            return Ok(());
+        }
+        let status = resp.status().as_u16();
+        let body_text = resp.text().await.unwrap_or_default();
+        Err(WardsonDbError::Api { status, body: body_text }.into())
+    }
+
+    /// Bulk insert documents (max 10,000 per request). Partial-success semantics:
+    /// invalid documents are skipped with per-document errors.
+    /// Returns the count of successfully inserted documents.
+    pub async fn bulk_write(
+        &self,
+        collection: &str,
+        documents: &[serde_json::Value],
+    ) -> Result<u64> {
+        let resp = self
+            .http_client
+            .post(format!("{}/{}/docs/_bulk", self.base_url, collection))
+            .json(&serde_json::json!({ "documents": documents }))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(WardsonDbError::Api { status, body }.into());
+        }
+        let envelope: WardsonEnvelope<serde_json::Value> = resp.json().await?;
+        // Response shape: { "inserted": <int>, "errors": [...] }
+        let inserted = envelope
+            .data
+            .get("inserted")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        Ok(inserted)
+    }
+
+    /// Run an aggregation pipeline.
+    pub async fn aggregate(
+        &self,
+        collection: &str,
+        pipeline: &serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>> {
+        let resp = self
+            .http_client
+            .post(format!("{}/{}/aggregate", self.base_url, collection))
+            .json(&serde_json::json!({ "pipeline": pipeline }))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            let status = resp.status().as_u16();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(WardsonDbError::Api { status, body }.into());
+        }
+        let envelope: WardsonEnvelope<Vec<serde_json::Value>> = resp.json().await?;
+        Ok(envelope.data)
+    }
 }

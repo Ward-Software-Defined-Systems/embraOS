@@ -19,6 +19,7 @@ mod proactive;
 mod migrations;
 mod config;
 mod learning;
+mod knowledge;
 mod grpc_service;
 
 use grpc_service::BrainGrpcService;

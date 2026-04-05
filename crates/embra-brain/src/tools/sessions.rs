@@ -468,17 +468,23 @@ pub async fn memory_scan(db: &WardsonDbClient, param: &str) -> String {
         Some(param.trim_start_matches('#').to_lowercase())
     };
 
+    // Helper: extract tags from doc, handling both array (v5+) and string (legacy) formats.
+    fn extract_tags(doc: &serde_json::Value) -> Vec<String> {
+        match doc.get("tags") {
+            Some(v) if v.is_array() => v.as_array().unwrap().iter()
+                .filter_map(|t| t.as_str().map(|s| s.to_string())).collect(),
+            Some(v) if v.is_string() => v.as_str().unwrap_or("").split(", ")
+                .filter(|t| !t.is_empty()).map(|t| t.trim_start_matches('#').to_string()).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     // Filter entries by tag if specified
     let entries: Vec<&serde_json::Value> = if let Some(ref filter) = tag_filter {
         entries
             .iter()
             .filter(|doc| {
-                let tags = doc
-                    .get("tags")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                tags.contains(filter.as_str())
+                extract_tags(doc).iter().any(|t| t.to_lowercase().contains(filter.as_str()))
             })
             .collect()
     } else {
@@ -490,12 +496,9 @@ pub async fn memory_scan(db: &WardsonDbClient, param: &str) -> String {
     // Tag frequency
     let mut tag_counts = std::collections::HashMap::new();
     for doc in &entries {
-        let tags = doc
-            .get("tags")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        for tag in tags.split(", ").filter(|t| !t.is_empty()) {
-            *tag_counts.entry(tag.to_string()).or_insert(0u32) += 1;
+        for tag in extract_tags(doc) {
+            if tag.is_empty() { continue; }
+            *tag_counts.entry(tag).or_insert(0u32) += 1;
         }
     }
 
@@ -621,6 +624,26 @@ pub async fn memory_scan(db: &WardsonDbClient, param: &str) -> String {
         output.push_str("\nNo duplicate candidates detected.\n");
     }
 
+    // Knowledge Graph section (Sprint 2)
+    let sem = db.query("memory.semantic", &serde_json::json!({})).await.unwrap_or_default();
+    let proc_docs = db.query("memory.procedural", &serde_json::json!({})).await.unwrap_or_default();
+    let edges = db.query("memory.edges", &serde_json::json!({})).await.unwrap_or_default();
+    let promoted = entries.iter().filter(|d| {
+        d.get("promoted_to").map(|v| !v.is_null()).unwrap_or(false)
+    }).count();
+    let mut cat_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for d in &sem {
+        if let Some(c) = d.get("category").and_then(|v| v.as_str()) {
+            *cat_counts.entry(c.to_string()).or_insert(0) += 1;
+        }
+    }
+    let cat_summary: Vec<String> = ["fact", "preference", "decision", "observation", "pattern"]
+        .iter().map(|k| format!("{}={}", k, cat_counts.get(*k).copied().unwrap_or(0))).collect();
+    output.push_str(&format!(
+        "\nKnowledge Graph:\n  Semantic nodes: {} ({})\n  Procedural nodes: {}\n  Edges: {}\n  Promoted entries: {} / {}\n",
+        sem.len(), cat_summary.join(", "), proc_docs.len(), edges.len(), promoted, total
+    ));
+
     output
 }
 
@@ -688,11 +711,12 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ");
-            let tags = doc
-                .get("tags")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let tags = match doc.get("tags") {
+                Some(v) if v.is_array() => v.as_array().unwrap().iter()
+                    .filter_map(|t| t.as_str()).collect::<Vec<_>>().join(", "),
+                Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
+                _ => String::new(),
+            };
             let created_at = doc
                 .get("created_at")
                 .and_then(|v| v.as_str())
@@ -790,8 +814,45 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
     }
 
     output.push_str(
-        "To execute this plan, approve and I will use [TOOL:remember] and [TOOL:forget] to merge/delete entries.",
+        "To execute this plan, approve and I will use [TOOL:remember] and [TOOL:forget] to merge/delete entries.\n",
     );
+
+    // Cross-collection duplicate detection (Sprint 2): flag unpromoted entries whose
+    // normalized content is a subset/superset of an existing semantic node's content.
+    let semantic = db.query("memory.semantic", &serde_json::json!({})).await.unwrap_or_default();
+    if !semantic.is_empty() {
+        let mut cross_dupes: Vec<String> = Vec::new();
+        for entry in &normalized {
+            // Only flag unpromoted entries (we don't have promoted_to in NormalizedEntry,
+            // so re-scan entries for this; simple heuristic here).
+            for sem in &semantic {
+                let sem_id = sem.get("_id").and_then(|v| v.as_str()).unwrap_or("");
+                let sem_content = sem.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                let sem_norm: String = sem_content.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
+                if sem_norm.is_empty() || entry.normalized.is_empty() { continue; }
+                let (shorter, longer) = if entry.normalized.len() <= sem_norm.len() {
+                    (&entry.normalized, &sem_norm)
+                } else {
+                    (&sem_norm, &entry.normalized)
+                };
+                if longer.contains(shorter.as_str()) {
+                    cross_dupes.push(format!(
+                        "  Potential cross-collection duplicate: entry {} ≈ semantic node {}",
+                        entry.id, sem_id
+                    ));
+                    if cross_dupes.len() >= 10 { break; }
+                }
+            }
+            if cross_dupes.len() >= 10 { break; }
+        }
+        if !cross_dupes.is_empty() {
+            output.push_str(&format!("\nCross-collection overlap ({}):\n", cross_dupes.len()));
+            for line in &cross_dupes {
+                output.push_str(line);
+                output.push('\n');
+            }
+        }
+    }
 
     output
 }
