@@ -603,7 +603,19 @@ async fn handle_request(
         }
 
         Some(conversation_request::RequestType::SlashCommand(cmd)) => {
-            handle_slash_command(&cmd.command, &cmd.args, tx, db, session_mgr, config_tz).await;
+            if let Some(synthetic_prompt) = handle_slash_command(
+                &cmd.command, &cmd.args, tx, db, session_mgr, config_tz, api_key
+            ).await {
+                // Slash command requested a synthetic user turn — feed it through the Brain.
+                let synthetic = ConversationRequest {
+                    request_type: Some(conversation_request::RequestType::UserMessage(
+                        UserMessage { content: synthetic_prompt, timestamp: None }
+                    )),
+                };
+                Box::pin(handle_request(
+                    synthetic, tx, db, session_mgr, config_tz, api_key
+                )).await?;
+            }
             Ok(())
         }
 
@@ -690,7 +702,8 @@ async fn handle_slash_command(
     db: &Arc<WardsonDbClient>,
     session_mgr: &Arc<RwLock<SessionManager>>,
     config_tz: &str,
-) {
+    _api_key: &str,
+) -> Option<String> {
     // Helper to send a system message
     let send_msg = |tx: &mpsc::Sender<Result<ConversationResponse, Status>>, content: String| {
         let tx = tx.clone();
@@ -730,7 +743,11 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /github-token <token>    Set GitHub token\n  /ssh-keygen              Generate SSH key pair\n  /ssh-copy-id <user@host> Copy SSH key to host\n  /git-setup <name> | <email>  Set git user config\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /github-token <token>    Set GitHub token\n  /ssh-keygen              Generate SSH key pair\n  /ssh-copy-id <user@host> Copy SSH key to host\n  /git-setup <name> | <email>  Set git user config\n  /feedback-loop           (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+        }
+        "/feedback-loop" => {
+            send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
+            return Some(build_feedback_loop_prompt());
         }
         "/status" => {
             let status = tools::system_status(db).await;
@@ -858,12 +875,12 @@ async fn handle_slash_command(
                         cfg.github_token = Some(token.clone());
                         if let Err(e) = config::save_config(&**db, &cfg).await {
                             send_msg(tx, format!("Failed to save token: {}", e)).await;
-                            return;
+                            return None;
                         }
                     }
                     Err(_) => {
                         send_msg(tx, "No system config found. Run config wizard first.".to_string()).await;
-                        return;
+                        return None;
                     }
                 }
                 // Persist to STATE partition for boot propagation
@@ -894,7 +911,7 @@ async fn handle_slash_command(
                         send_msg(tx, "SSH private key exists but public key is missing.".to_string()).await;
                     }
                 }
-                return;
+                return None;
             }
 
             // Ensure .ssh directory exists with correct permissions
@@ -936,13 +953,13 @@ async fn handle_slash_command(
         "/ssh-copy-id" => {
             if args.is_empty() {
                 send_msg(tx, "Usage: /ssh-copy-id <user@host>\nCopies SSH public key to remote host (RFC 1918 only).".to_string()).await;
-                return;
+                return None;
             }
 
             let pub_path = "/embra/workspace/.ssh/id_ed25519.pub";
             if !std::path::Path::new(pub_path).exists() {
                 send_msg(tx, "No SSH key found. Run /ssh-keygen first.".to_string()).await;
-                return;
+                return None;
             }
 
             let target = args.trim();
@@ -952,7 +969,7 @@ async fn handle_slash_command(
                     "Denied: '{}' is not a private address. SSH is restricted to RFC 1918 ranges.",
                     host
                 )).await;
-                return;
+                return None;
             }
 
             match tokio::time::timeout(
@@ -1003,7 +1020,7 @@ async fn handle_slash_command(
                 let parts: Vec<&str> = args.splitn(2, " | ").collect();
                 if parts.len() < 2 {
                     send_msg(tx, "Usage: /git-setup <name> | <email>".to_string()).await;
-                    return;
+                    return None;
                 }
                 let name = parts[0].trim();
                 let email = parts[1].trim();
@@ -1018,6 +1035,37 @@ async fn handle_slash_command(
             send_msg(tx, format!("Unknown command: {}. Type /help for available commands.", command)).await;
         }
     }
+    None
+}
+
+/// Embedded feedback-loop protocol spec (Phase 3 preview, v2).
+/// Read-only: baked into the binary at compile time.
+const FEEDBACK_LOOP_SPEC_V2: &str = include_str!("brain/feedback_loop_spec_v2.md");
+
+/// Build the synthetic user message that kicks off the feedback-loop protocol.
+/// Fed through `handle_request` as if the user had typed it.
+fn build_feedback_loop_prompt() -> String {
+    format!(
+        "MANUAL FEEDBACK LOOP TRIGGER \u{2014} EXPERIMENTAL (Phase 3 Continuity Engine preview)\n\
+\n\
+Will has invoked /feedback-loop. You are to initiate the feedback loop\n\
+self-evaluation protocol using the spec below. Work through the protocol\n\
+using the tools you already have. Follow the spec's governance boundary:\n\
+S0/S1 actions auto-execute; S2/S3 actions are presented to Will for approval.\n\
+\n\
+Begin with Step 1.1 (Introspect: Load Evaluation Criteria). Work through\n\
+the protocol sequentially. Pause at the Step 4.2 governance boundary to\n\
+present S2/S3 findings for approval.\n\
+\n\
+=== FEEDBACK LOOP SPEC v2.0 (read-only, embedded in binary) ===\n\
+\n\
+{}\n\
+\n\
+=== END SPEC ===\n\
+\n\
+Acknowledge you're initiating the protocol, then execute Step 1.1.",
+        FEEDBACK_LOOP_SPEC_V2
+    )
 }
 
 /// Drive the 6-phase Learning Mode over gRPC.
