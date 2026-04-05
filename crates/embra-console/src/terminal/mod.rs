@@ -286,7 +286,8 @@ async fn handle_key_event(
                     }
                 } else {
                     // Insert newline
-                    app.input_buffer.insert(app.cursor_pos, '\n');
+                    let byte_pos = char_to_byte_pos(&app.input_buffer, app.cursor_pos);
+                    app.input_buffer.insert(byte_pos, '\n');
                     app.cursor_pos += 1;
                 }
             } else {
@@ -349,7 +350,8 @@ async fn handle_key_event(
 
         // Alt+Enter — newline in input
         (KeyCode::Enter, KeyModifiers::ALT) => {
-            app.input_buffer.insert(app.cursor_pos, '\n');
+            let byte_pos = char_to_byte_pos(&app.input_buffer, app.cursor_pos);
+            app.input_buffer.insert(byte_pos, '\n');
             app.cursor_pos += 1;
         }
 
@@ -371,14 +373,16 @@ async fn handle_key_event(
         (KeyCode::Backspace, _) => {
             if app.cursor_pos > 0 {
                 app.cursor_pos -= 1;
-                app.input_buffer.remove(app.cursor_pos);
+                let byte_pos = char_to_byte_pos(&app.input_buffer, app.cursor_pos);
+                app.input_buffer.remove(byte_pos);
             }
         }
 
         // Delete
         (KeyCode::Delete, _) => {
-            if app.cursor_pos < app.input_buffer.len() {
-                app.input_buffer.remove(app.cursor_pos);
+            if app.cursor_pos < char_count(&app.input_buffer) {
+                let byte_pos = char_to_byte_pos(&app.input_buffer, app.cursor_pos);
+                app.input_buffer.remove(byte_pos);
             }
         }
 
@@ -387,7 +391,7 @@ async fn handle_key_event(
             app.cursor_pos = 0;
         }
         (KeyCode::End, _) => {
-            app.cursor_pos = app.input_buffer.len();
+            app.cursor_pos = char_count(&app.input_buffer);
         }
 
         // Left/Right cursor
@@ -395,14 +399,15 @@ async fn handle_key_event(
             app.cursor_pos = app.cursor_pos.saturating_sub(1);
         }
         (KeyCode::Right, _) => {
-            if app.cursor_pos < app.input_buffer.len() {
+            if app.cursor_pos < char_count(&app.input_buffer) {
                 app.cursor_pos += 1;
             }
         }
 
         // Character input
         (KeyCode::Char(c), _) => {
-            app.input_buffer.insert(app.cursor_pos, c);
+            let byte_pos = char_to_byte_pos(&app.input_buffer, app.cursor_pos);
+            app.input_buffer.insert(byte_pos, c);
             app.cursor_pos += 1;
             app.scroll_offset = 0; // Auto-scroll to bottom on typing
         }
@@ -411,4 +416,18 @@ async fn handle_key_event(
     }
 
     Ok(())
+}
+
+/// Convert a char index to a byte index in a string.
+/// cursor_pos is a character offset; String::insert/remove need byte offsets.
+fn char_to_byte_pos(s: &str, char_pos: usize) -> usize {
+    s.char_indices()
+        .nth(char_pos)
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or(s.len())
+}
+
+/// Return the number of characters in a string (not bytes).
+fn char_count(s: &str) -> usize {
+    s.chars().count()
 }
