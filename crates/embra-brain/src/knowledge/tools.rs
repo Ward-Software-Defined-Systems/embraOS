@@ -126,6 +126,75 @@ pub async fn knowledge_link(params: &str, db: &WardsonDbClient) -> String {
     }
 }
 
+/// `[TOOL:knowledge_unlink <edge_id>]` — delete a single edge by ID
+/// `[TOOL:knowledge_unlink <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>]` — delete matching edges (bidirectional)
+pub async fn knowledge_unlink(params: &str, db: &WardsonDbClient) -> String {
+    let trimmed = params.trim();
+    if trimmed.is_empty() {
+        return "Error: usage [TOOL:knowledge_unlink <edge_id>] or [TOOL:knowledge_unlink <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>]".into();
+    }
+
+    if trimmed.contains('|') {
+        // Form 2: triple parse, bidirectional delete
+        let parts: Vec<&str> = trimmed.splitn(3, '|').map(|s| s.trim()).collect();
+        if parts.len() < 3 {
+            return "Error: usage [TOOL:knowledge_unlink <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>]".into();
+        }
+        let Some((src_coll, src_id)) = parts[0].split_once(':') else {
+            return "Error: source must be <collection>:<id>".into();
+        };
+        let Some(edge_type) = EdgeType::from_str(parts[1]) else {
+            return format!("Error: Invalid edge type '{}'. Valid types: same_session, temporal, tag_overlap, derived_from, enables, contradicts, refines, depends_on", parts[1]);
+        };
+        let Some((tgt_coll, tgt_id)) = parts[2].split_once(':') else {
+            return "Error: target must be <collection>:<id>".into();
+        };
+
+        let etype = edge_type.as_str();
+        let filter = json!({
+            "$or": [
+                {"source_id": src_id, "target_id": tgt_id, "edge_type": etype},
+                {"source_id": tgt_id, "target_id": src_id, "edge_type": etype}
+            ]
+        });
+        match db.delete_by_query("memory.edges", &filter).await {
+            Ok(0) => format!(
+                "Error: No edge found from {}:{} to {}:{} with type {}",
+                src_coll, src_id, tgt_coll, tgt_id, etype
+            ),
+            Ok(1) => format!(
+                "Removed 1 edge:\n  {}:{} --[{}]--> {}:{}",
+                src_coll, src_id, etype, tgt_coll, tgt_id
+            ),
+            Ok(n) => format!(
+                "Removed {} edges (bidirectional):\n  {}:{} --[{}]--> {}:{}\n  {}:{} --[{}]--> {}:{}",
+                n, src_coll, src_id, etype, tgt_coll, tgt_id,
+                tgt_coll, tgt_id, etype, src_coll, src_id
+            ),
+            Err(e) => format!("Error: delete failed: {}", e),
+        }
+    } else {
+        // Form 1: delete by edge ID
+        let edge_id = trimmed;
+        let edge_doc = match db.read("memory.edges", edge_id).await {
+            Ok(doc) => doc,
+            Err(_) => return format!("Error: Edge {} not found", edge_id),
+        };
+        let src_coll = edge_doc.get("source_collection").and_then(|v| v.as_str()).unwrap_or("?");
+        let src_id = edge_doc.get("source_id").and_then(|v| v.as_str()).unwrap_or("?");
+        let tgt_coll = edge_doc.get("target_collection").and_then(|v| v.as_str()).unwrap_or("?");
+        let tgt_id = edge_doc.get("target_id").and_then(|v| v.as_str()).unwrap_or("?");
+        let etype = edge_doc.get("edge_type").and_then(|v| v.as_str()).unwrap_or("?");
+        match db.delete("memory.edges", edge_id).await {
+            Ok(()) => format!(
+                "Removed 1 edge:\n  {}:{} --[{}]--> {}:{}",
+                src_coll, src_id, etype, tgt_coll, tgt_id
+            ),
+            Err(e) => format!("Error: delete failed: {}", e),
+        }
+    }
+}
+
 /// `[TOOL:knowledge_traverse <collection>:<id> [depth] [edge_types] [min_weight]]`
 pub async fn knowledge_traverse(
     params: &str,

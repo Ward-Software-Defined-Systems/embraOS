@@ -328,6 +328,8 @@ Memory & Session Consolidation:
 Knowledge Graph:
 - [TOOL:knowledge_promote <entry_id> | <type> | <data>] — promote episodic memory to semantic (with category) or procedural (with JSON procedure)
 - [TOOL:knowledge_link <source_coll>:<source_id> | <edge_type> | <target_coll>:<target_id> | <weight>] — create relationship between knowledge nodes
+- [TOOL:knowledge_unlink <edge_id>] — delete a single edge by ID
+- [TOOL:knowledge_unlink <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>] — delete matching edges (bidirectional for auto-derived types)
 - [TOOL:knowledge_traverse <collection>:<id> [depth] [edge_types] [min_weight]] — explore connected knowledge from a starting node
 - [TOOL:knowledge_query <query_text>] — find relevant knowledge using graph-aware retrieval
 - [TOOL:knowledge_graph_stats] — knowledge graph summary and statistics
@@ -339,6 +341,7 @@ Knowledge Graph guidance:
 - Promote to 'procedural' for step-by-step procedures with preconditions and expected outcomes.
 - Use knowledge_link to create explicit relationships when you notice connections between knowledge nodes.
 - Edge types: enables (A is prerequisite for B), contradicts (A conflicts with B), refines (A is more specific than B), depends_on (A requires B to be true).
+- Use knowledge_unlink to remove stale, incorrect, or pre-existing invalid edges (e.g., self-loops or zero-weight edges from earlier protocol versions).
 - Do not promote every memory — only durable, reusable knowledge that would be valuable across sessions.
 
 To use a tool, output the tool tag on its own line (the entire tag must be on a single line).

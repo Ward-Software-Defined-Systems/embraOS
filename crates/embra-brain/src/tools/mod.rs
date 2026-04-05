@@ -126,6 +126,7 @@ pub async fn dispatch(
         // Knowledge graph tools (Sprint 2)
         "knowledge_promote" => knowledge::tools::knowledge_promote(param, db, config).await,
         "knowledge_link" => knowledge::tools::knowledge_link(param, db).await,
+        "knowledge_unlink" => knowledge::tools::knowledge_unlink(param, db).await,
         "knowledge_traverse" => knowledge::tools::knowledge_traverse(param, db, config).await,
         "knowledge_query" => knowledge::tools::knowledge_query(param, db, session_name, config).await,
         "knowledge_graph_stats" => knowledge::tools::knowledge_graph_stats(db).await,
