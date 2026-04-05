@@ -316,12 +316,17 @@ fn draw_input(f: &mut Frame, area: Rect, app: &AppState) {
     };
 
     let (input_text, style) = if let Some(ref pasted) = app.pasted_lines {
-        let total_chars: usize = pasted.iter().map(|l| l.len()).sum::<usize>() + pasted.len().saturating_sub(1);
+        let total_chars: usize = pasted.iter().map(|l| l.chars().count()).sum::<usize>() + pasted.len().saturating_sub(1);
         let preview = if pasted.len() == 1 && total_chars > 200 {
             format!("[{} chars pasted] press Enter to send", total_chars)
         } else if pasted.len() > 2 {
             let first_two: String = pasted.iter().take(2).map(|l| {
-                if l.len() > 60 { format!("{}...", &l[..57]) } else { l.clone() }
+                if l.chars().count() > 60 {
+                    let truncated: String = l.chars().take(57).collect();
+                    format!("{}...", truncated)
+                } else {
+                    l.clone()
+                }
             }).collect::<Vec<_>>().join(" | ");
             format!("{} ... and {} more lines", first_two, pasted.len() - 2)
         } else {
