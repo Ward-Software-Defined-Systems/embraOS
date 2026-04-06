@@ -266,6 +266,7 @@ All sessions share the same intelligence — same memory, same identity, same so
 | `/ssh-keygen` | Generate ed25519 SSH key pair and display public key |
 | `/ssh-copy-id <user@host>` | Copy SSH public key to remote host (RFC 1918 only) |
 | `/git-setup <name> \| <email>` | Set git user.name and user.email |
+| `/feedback-loop` | **(EXPERIMENTAL)** Trigger Phase 3 Continuity Engine self-evaluation protocol — the Brain walks through a multi-step gather/evaluate/reconcile/execute sequence using existing tools |
 | `/copy` | Copy conversation to clipboard via OSC 52 — `/copy 5` for last 5 messages (disabled — Sprint 5) |
 
 ### Keyboard Shortcuts
@@ -492,6 +493,8 @@ Phase 1 initial sprint is functionally complete. Sprint 1 addresses bugs and UX 
 - **Existing tool updates** — `remember` stores array tags + background edge derivation, `recall`/`memory_search` cross-collection, `memory_scan` KG summary section, `memory_dedup` cross-collection flagging, `introspect` knowledge focus.
 - **`/feedback-loop` slash command (EXPERIMENTAL)** — Phase 3 Continuity Engine preview. Embeds `feedback-loop-spec-v2.md` read-only in the binary, synthesizes a user turn that walks the Brain through the self-evaluation protocol using existing tools.
 
+> **Note:** Knowledge graph promotion is currently a manual process. The intelligence promotes episodic memories to the knowledge graph during conversation (using `knowledge_promote`) or as part of the `/feedback-loop` self-evaluation protocol. Automated promotion (e.g., confidence-based triggers or scheduled consolidation) is planned for Phase 3's Continuity Engine.
+
 > If you encounter bugs, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
 ---
@@ -506,7 +509,9 @@ Phase 1 initial sprint is functionally complete. Sprint 1 addresses bugs and UX 
 | **Phase 0 — Sprint 3** | Session access tools (5), memory consolidation (2), session consolidation (3), schema migration framework | ✅ **Complete** |
 | **Phase 0 — Sprint 4** | SSH remote admin (4 tools), tag filter fix, timezone-aware timestamps, `/copy` deferred | ✅ **Complete** |
 | **Phase 0 — Sprint 5** | SSH ControlMaster refactor, Brain API upgrade (128K output, adaptive thinking, 1M context), WardSONDB integration upgrades, new filesystem/git tools (file_delete, file_move, dir_delete, git_rm, git_mv) | ✅ **Complete** |
-| **Phase 1** | Core OS — QEMU-bootable image, full boot chain, config wizard, Learning Mode, AI conversation + tools over serial TUI | **Sprint 2 Complete** |
+| **Phase 1 — Initial Sprint** | Core OS — QEMU-bootable image, immutable SquashFS rootfs, full boot chain (embra-init → embrad → services), config wizard, Learning Mode, soul sealing, gRPC architecture, serial TUI | ✅ **Complete** |
+| **Phase 1 — Sprint 1** | Bug fixes & UX — tool feedback loop, timezone display, multi-line input, git/SSH/GitHub setup commands, input word-wrap, tool output truncation, Unicode crash fix | ✅ **Complete** |
+| **Phase 1 — Sprint 2** | Cross-session knowledge graph — semantic/procedural promotion, typed/weighted edges, BFS traversal, graph-aware retrieval, 6 KG tools, `/feedback-loop` command | ✅ **Complete** |
 | **Pit Stop** | Main branch merge | Planned |
 | **Pit Stop** | Code review branch — security audit, AI slop cleanup, refactoring | Planned |
 | **Pit Stop** | Main branch merge | Planned |
