@@ -284,7 +284,7 @@ All sessions share the same intelligence — same memory, same identity, same so
 
 ---
 
-## Phase 0 Limitations
+## Current Limitations
 
 Phase 0 is a proof of concept. It demonstrates the core experience but doesn't include the full OS:
 
@@ -464,36 +464,7 @@ All Phase 0 Sprint 1–5 bugs have been fixed. Phase 0 is functionally complete.
 
 ### Phase 1
 
-Phase 1 initial sprint is functionally complete. Sprint 1 addresses bugs and UX gaps found during end-to-end verification.
-
-**Sprint 1 Scope:**
-
-- **S1-01/02: Git & SSH in Buildroot** — Added `git` and `openssh-client` (no server) to the disk image. Unblocks 15+ git tools and 4 SSH tools.
-- **S1-06: Tool Feedback Loop** — Fixed tool call race condition where tool results weren't fed back to the Brain for multi-step operations. Now uses a bounded iteration loop (max 10) so the Brain can invoke tools, see results, and continue reasoning.
-- **S1-05: Learning Session Visibility** — Learning session now appears in `/sessions` with `[sealed]`/`[learning]` indicator. Read-only (cannot `/switch` to it).
-- **S1-04: Timezone Display** — System and tool messages now display in the user's configured timezone (previously UTC).
-- **S1-03: Multi-line Input (`/ml`)** — New `/ml` command toggles multi-line mode for serial consoles where `Shift+Enter` doesn't work. Type `.` on its own line to send.
-- **S1-07: Input Word-wrap** — Long input lines now wrap visually within the input area instead of scrolling off-screen.
-- **S1-08: Tool Output Truncation** — Tool results exceeding 50KB are truncated with a size indicator to prevent context overflow.
-- **`git_clone` tool** — Clone repos into `/embra/workspace/` via AI tool. HTTPS (auto GitHub token injection) and SSH supported. 120s timeout.
-- **`/github-token` command** — Set GitHub token interactively. Stored in WardSONDB + STATE partition, survives reboots. All 7 GitHub tools use the stored token.
-- **`/ssh-keygen` command** — Generate ed25519 SSH key pair from the TUI. Displays public key for manual deployment.
-- **`/ssh-copy-id` command** — Copy SSH key to RFC 1918 hosts (best-effort with BatchMode).
-- **`/git-setup` command** — Set git user.name and user.email. `safe.directory` and `push.autoSetupRemote` auto-configured at startup.
-
-**Sprint 2 Scope — Cross-Session Knowledge Graph:**
-
-- **Schema v5 migration** — 3 new collections (`memory.semantic`, `memory.procedural`, `memory.edges`), 7 indexes, tag array migration (comma-string → JSON array), 4 KG config fields added to `config.system`.
-- **Knowledge types** — `SemanticNode` (5 categories: fact/preference/decision/observation/pattern) and `ProceduralNode` (structured steps with preconditions + outcomes).
-- **Edge derivation engine** — auto-derived at write time: `same_session` (w=1.0), `temporal` (linear decay within 30-min window), `tag_overlap` (|overlap| / max(|a|,|b|)). Bidirectional. Best-effort via `tokio::spawn`, never blocks the user-facing response.
-- **Promotion** — 1:1 episodic → semantic/procedural with provenance (`derived_from` edge + `promoted_to` on source entry).
-- **BFS traversal** — configurable depth (default 3, ceiling 5), edge-type filter, min-weight, fire-and-forget access tracking.
-- **Context-aware retrieval** — multi-signal ranking (tag 0.4, recency 0.3, access 0.2, confidence 0.1) × source multiplier (direct=1.0, session=0.75, graph=0.5), depth-2 graph expansion.
-- **6 new KG tools** — `knowledge_promote`, `knowledge_link`, `knowledge_unlink`, `knowledge_traverse`, `knowledge_query`, `knowledge_graph_stats`.
-- **Existing tool updates** — `remember` stores array tags + background edge derivation, `recall`/`memory_search` cross-collection, `memory_scan` KG summary section, `memory_dedup` cross-collection flagging, `introspect` knowledge focus.
-- **`/feedback-loop` slash command (EXPERIMENTAL)** — Phase 3 Continuity Engine preview. Embeds `feedback-loop-spec-v2.md` read-only in the binary, synthesizes a user turn that walks the Brain through the self-evaluation protocol using existing tools.
-
-> **Note:** Knowledge graph promotion is currently a manual process. The intelligence promotes episodic memories to the knowledge graph during conversation (using `knowledge_promote`) or as part of the `/feedback-loop` self-evaluation protocol. Automated promotion (e.g., confidence-based triggers or scheduled consolidation) is planned for Phase 3's Continuity Engine.
+No known issues. Sprint 1 and Sprint 2 scope details are in the [Roadmap](#roadmap) section.
 
 > If you encounter bugs, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
@@ -609,7 +580,7 @@ Cargo workspace with 7 crates, all cross-compiling to `x86_64-unknown-linux-musl
 | `embrad` | PID 1: loopback/eth0 setup, service supervisor, soul verification, reconciliation | Complete |
 | `embra-trustd` | Soul SHA-256 verification, Root CA generation, mTLS cert signing | Complete |
 | `embra-apid` | gRPC + REST gateway, bidirectional streaming proxy | Complete |
-| `embra-brain` | Headless AI runtime — Phase 0 Brain, ~63 tools, sessions, Learning Mode, proactive engine | Complete |
+| `embra-brain` | Headless AI runtime — Phase 0 Brain, ~69 tools, sessions, Learning Mode, proactive engine, knowledge graph | Complete |
 | `embra-console` | Full ratatui TUI over serial/gRPC — config wizard, styled rendering, session management | Complete |
 | `embra-common` | Shared protobuf types (tonic codegen) | Complete |
 
@@ -625,6 +596,43 @@ End-to-end verified in QEMU:
 **Boot invariant:** if soul verification fails, the system halts. First boot (no soul) enters Config Wizard → Learning Mode.
 
 **Deferred to sub-sprints:** LUKS encryption, mTLS enforcement, A/B boot, embractl, custom kernel, ZFS, aarch64.
+
+### Phase 1 Sprint 1 Scope
+
+Bug fixes and UX improvements found during end-to-end QEMU verification of the Initial Sprint.
+
+- **S1-01/02: Git & SSH in Buildroot** — Added `git` and `openssh-client` (no server) to the disk image. Unblocks 15+ git tools and 4 SSH tools.
+- **S1-06: Tool Feedback Loop** — Fixed tool call race condition where tool results weren't fed back to the Brain for multi-step operations. Now uses a bounded iteration loop (max 10) so the Brain can invoke tools, see results, and continue reasoning.
+- **S1-05: Learning Session Visibility** — Learning session now appears in `/sessions` with `[sealed]`/`[learning]` indicator. Read-only (cannot `/switch` to it).
+- **S1-04: Timezone Display** — System and tool messages now display in the user's configured timezone (previously UTC).
+- **S1-03: Multi-line Input (`/ml`)** — New `/ml` command toggles multi-line mode for serial consoles where `Shift+Enter` doesn't work. Type `.` on its own line to send.
+- **S1-07: Input Word-wrap** — Long input lines now wrap visually within the input area instead of scrolling off-screen.
+- **S1-08: Tool Output Truncation** — Tool results exceeding 50KB are truncated with a size indicator to prevent context overflow.
+- **`git_clone` tool** — Clone repos into `/embra/workspace/` via AI tool. HTTPS (auto GitHub token injection) and SSH supported. 120s timeout.
+- **`/github-token` command** — Set GitHub token interactively. Stored in WardSONDB + STATE partition, survives reboots. All 7 GitHub tools use the stored token.
+- **`/ssh-keygen` command** — Generate ed25519 SSH key pair from the TUI. Displays public key for manual deployment.
+- **`/ssh-copy-id` command** — Copy SSH key to RFC 1918 hosts (best-effort with BatchMode).
+- **`/git-setup` command** — Set git user.name and user.email. `safe.directory` and `push.autoSetupRemote` auto-configured at startup.
+
+**Status:** All Sprint 1 items verified in QEMU. 17 commits on `phase1-arch-rework`.
+
+### Phase 1 Sprint 2 Scope
+
+Cross-session knowledge graph — the intelligence can now promote episodic memories to durable semantic/procedural knowledge and traverse relationships between knowledge nodes.
+
+- **Schema v5 migration** — 3 new collections (`memory.semantic`, `memory.procedural`, `memory.edges`), 7 indexes, tag array migration (comma-string → JSON array), 4 KG config fields added to `config.system`.
+- **Knowledge types** — `SemanticNode` (5 categories: fact/preference/decision/observation/pattern) and `ProceduralNode` (structured steps with preconditions + outcomes).
+- **Edge derivation engine** — auto-derived at write time: `same_session` (w=1.0), `temporal` (linear decay within 30-min window), `tag_overlap` (|overlap| / max(|a|,|b|)). Bidirectional. Best-effort via `tokio::spawn`, never blocks the user-facing response.
+- **Promotion** — 1:1 episodic → semantic/procedural with provenance (`derived_from` edge + `promoted_to` on source entry).
+- **BFS traversal** — configurable depth (default 3, ceiling 5), edge-type filter, min-weight, fire-and-forget access tracking.
+- **Context-aware retrieval** — multi-signal ranking (tag 0.4, recency 0.3, access 0.2, confidence 0.1) × source multiplier (direct=1.0, session=0.75, graph=0.5), depth-2 graph expansion.
+- **6 new KG tools** — `knowledge_promote`, `knowledge_link`, `knowledge_unlink`, `knowledge_traverse`, `knowledge_query`, `knowledge_graph_stats`.
+- **Existing tool updates** — `remember` stores array tags + background edge derivation, `recall`/`memory_search` cross-collection, `memory_scan` KG summary section, `memory_dedup` cross-collection flagging, `introspect` knowledge focus.
+- **`/feedback-loop` slash command (EXPERIMENTAL)** — Phase 3 Continuity Engine preview. Embeds `feedback-loop-spec-v2.md` read-only in the binary, synthesizes a user turn that walks the Brain through the self-evaluation protocol using existing tools.
+
+> **Note:** Knowledge graph promotion is currently a manual process. The intelligence promotes episodic memories to the knowledge graph during conversation (using `knowledge_promote`) or as part of the `/feedback-loop` self-evaluation protocol. Automated promotion (e.g., confidence-based triggers or scheduled consolidation) is planned for Phase 3's Continuity Engine.
+
+**Status:** All Sprint 2 items implemented and stress-tested. 4 commits on `phase1-arch-rework`. Tool count ~63 → ~69.
 
 ### Phase 2 — Terminal & Sessions
 
