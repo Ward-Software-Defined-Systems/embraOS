@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { width: 1200px; height: 630px; background: #0a0a0f; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; overflow: hidden; }
+
+.bg {
+  width: 100%; height: 100%;
+  background: radial-gradient(ellipse at 50% 45%, rgba(200,100,20,0.07) 0%, transparent 55%),
+              radial-gradient(ellipse at 70% 30%, rgba(180,60,10,0.04) 0%, transparent 45%),
+              linear-gradient(180deg, #0a0a0f 0%, #0d0a08 50%, #0a0a0f 100%);
+  position: relative;
+}
+
+.title-bar {
+  position: absolute;
+  top: 24px;
+  left: 40px;
+  right: 40px;
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+}
+
+.title {
+  font-size: 28px;
+  font-weight: 800;
+  letter-spacing: 2px;
+  background: linear-gradient(135deg, #f59e0b 0%, #ef4444 40%, #c2410c 70%, #f59e0b 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.subtitle {
+  font-size: 13px;
+  color: #6a5a4a;
+  letter-spacing: 0.5px;
+  margin-top: 4px;
+}
+
+.phase-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 14px;
+  background: rgba(245,158,11,0.1);
+  border: 1px solid rgba(245,158,11,0.2);
+  color: #f59e0b;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1px;
+}
+
+.graph-container {
+  position: absolute;
+  top: 80px;
+  left: 30px;
+  right: 30px;
+  bottom: 65px;
+}
+
+.legend {
+  position: absolute;
+  bottom: 78px;
+  left: 40px;
+  display: flex;
+  gap: 18px;
+  align-items: center;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-line {
+  width: 24px;
+  height: 2px;
+  border-radius: 1px;
+}
+
+.legend-label {
+  font-size: 9px;
+  color: #5a5a6a;
+  letter-spacing: 0.3px;
+}
+
+.bottom-bar {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  padding: 16px 40px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-top: 1px solid rgba(255,255,255,0.04);
+}
+
+.bottom-bar .brand { color: #3a3a4a; font-size: 12px; }
+.bottom-bar .tech { color: #4a3a2a; font-size: 11px; letter-spacing: 0.5px; }
+</style>
+</head>
+<body>
+<div class="bg">
+
+  <div class="title-bar">
+    <div>
+      <div class="title">embraOS Knowledge Graph</div>
+      <div class="subtitle">Structured multigraph with auto-derived edges — not vector embeddings</div>
+    </div>
+    <div class="phase-badge">PHASE 1 · SPRINT 2</div>
+  </div>
+
+  <div class="graph-container">
+    <svg width="1140" height="475" viewBox="0 0 1140 475" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <!-- Arrow markers -->
+        <marker id="arr-derived" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="8" markerHeight="6" orient="auto">
+          <polygon points="0 0, 10 3.5, 0 7" fill="#c2410c"/>
+        </marker>
+        <marker id="arr-enables" viewBox="0 0 10 7" refX="10" refY="3.5" markerWidth="7" markerHeight="5" orient="auto">
+          <polygon points="0 0, 10 3.5, 0 7" fill="#22d3ee"/>
+        </marker>
+      </defs>
+
+      <!-- Zone backgrounds -->
+      <rect x="0" y="0" width="1140" height="120" rx="12" fill="rgba(200,120,40,0.04)" stroke="rgba(200,120,40,0.08)" stroke-width="1"/>
+      <text x="20" y="22" font-size="10" fill="#5a4a3a" font-family="system-ui" letter-spacing="1.5" font-weight="600">MEMORY.PROCEDURAL</text>
+
+      <rect x="0" y="135" width="1140" height="155" rx="12" fill="rgba(239,68,68,0.03)" stroke="rgba(239,68,68,0.06)" stroke-width="1"/>
+      <text x="20" y="157" font-size="10" fill="#5a3a3a" font-family="system-ui" letter-spacing="1.5" font-weight="600">MEMORY.SEMANTIC</text>
+
+      <rect x="0" y="305" width="1140" height="170" rx="12" fill="rgba(120,120,140,0.04)" stroke="rgba(120,120,140,0.06)" stroke-width="1"/>
+      <text x="20" y="327" font-size="10" fill="#4a4a5a" font-family="system-ui" letter-spacing="1.5" font-weight="600">MEMORY.ENTRIES</text>
+
+      <!-- ═══════════════ EDGES (drawn first, behind nodes) ═══════════════ -->
+
+      <!-- derived_from: episodic → semantic/procedural (thick, upward) -->
+      <path d="M 250,340 C 250,290 220,265 200,255" stroke="#c2410c" stroke-width="2.5" fill="none" marker-end="url(#arr-derived)" opacity="0.8"/>
+      <path d="M 480,340 C 480,290 490,265 500,255" stroke="#c2410c" stroke-width="2.5" fill="none" marker-end="url(#arr-derived)" opacity="0.8"/>
+      <path d="M 700,340 C 700,270 720,225 730,215" stroke="#c2410c" stroke-width="2.5" fill="none" marker-end="url(#arr-derived)" opacity="0.8"/>
+      <path d="M 920,340 C 920,200 510,100 480,85" stroke="#c2410c" stroke-width="2.5" fill="none" marker-end="url(#arr-derived)" opacity="0.7"/>
+      <path d="M 150,340 C 150,200 810,120 830,85" stroke="#c2410c" stroke-width="2.5" fill="none" marker-end="url(#arr-derived)" opacity="0.6"/>
+
+      <!-- same_session edges (gold solid, bidirectional) -->
+      <path d="M 300,370 C 380,345 420,345 470,370" stroke="#f59e0b" stroke-width="1.5" fill="none" opacity="0.6"/>
+      <path d="M 520,370 C 580,350 640,350 695,370" stroke="#f59e0b" stroke-width="1.5" fill="none" opacity="0.6"/>
+      <path d="M 250,215 C 350,190 400,190 490,215" stroke="#f59e0b" stroke-width="1.5" fill="none" opacity="0.5"/>
+      <path d="M 540,215 C 600,195 660,195 720,215" stroke="#f59e0b" stroke-width="1.5" fill="none" opacity="0.5"/>
+      <path d="M 200,380 C 260,410 380,410 460,380" stroke="#f59e0b" stroke-width="1.5" fill="none" opacity="0.5"/>
+      <path d="M 730,380 C 800,410 860,410 910,380" stroke="#f59e0b" stroke-width="1.5" fill="none" opacity="0.5"/>
+
+      <!-- temporal edges (orange dashed, bidirectional) -->
+      <path d="M 300,365 C 370,335 430,335 470,365" stroke="#fb923c" stroke-width="1.2" fill="none" stroke-dasharray="6,4" opacity="0.55"/>
+      <path d="M 530,365 C 590,340 650,340 690,365" stroke="#fb923c" stroke-width="1.2" fill="none" stroke-dasharray="6,4" opacity="0.55"/>
+      <path d="M 740,365 C 800,340 850,340 900,365" stroke="#fb923c" stroke-width="1.2" fill="none" stroke-dasharray="6,4" opacity="0.55"/>
+      <path d="M 250,205 C 350,175 420,175 500,205" stroke="#fb923c" stroke-width="1.2" fill="none" stroke-dasharray="6,4" opacity="0.45"/>
+      <path d="M 200,395 C 380,440 680,440 920,395" stroke="#fb923c" stroke-width="1.2" fill="none" stroke-dasharray="6,4" opacity="0.35"/>
+
+      <!-- tag_overlap edges (red dotted) -->
+      <path d="M 300,375 C 380,355 420,355 470,375" stroke="#ef4444" stroke-width="1.3" fill="none" stroke-dasharray="3,4" opacity="0.5"/>
+      <path d="M 250,225 C 370,260 600,260 720,225" stroke="#ef4444" stroke-width="1.3" fill="none" stroke-dasharray="3,4" opacity="0.45"/>
+      <path d="M 200,230 C 250,280 400,280 490,230" stroke="#ef4444" stroke-width="1.3" fill="none" stroke-dasharray="3,4" opacity="0.4"/>
+      <path d="M 500,230 C 600,270 700,270 730,230" stroke="#ef4444" stroke-width="1.3" fill="none" stroke-dasharray="3,4" opacity="0.4"/>
+      <path d="M 200,390 C 400,450 700,450 920,390" stroke="#ef4444" stroke-width="1.3" fill="none" stroke-dasharray="3,4" opacity="0.3"/>
+      <path d="M 520,385 C 620,420 780,420 910,385" stroke="#ef4444" stroke-width="1.3" fill="none" stroke-dasharray="3,4" opacity="0.35"/>
+
+      <!-- enables edges (cyan, directed) -->
+      <path d="M 250,210 C 350,140 400,100 430,80" stroke="#22d3ee" stroke-width="1.2" fill="none" marker-end="url(#arr-enables)" opacity="0.5"/>
+      <path d="M 760,210 C 790,150 810,110 830,80" stroke="#22d3ee" stroke-width="1.2" fill="none" marker-end="url(#arr-enables)" opacity="0.5"/>
+      <path d="M 540,215 C 560,170 680,170 720,215" stroke="#22d3ee" stroke-width="1" fill="none" marker-end="url(#arr-enables)" opacity="0.4"/>
+
+      <!-- ═══════════════ NODES ═══════════════ -->
+
+      <!-- Procedural nodes (top zone) -->
+      <g>
+        <rect x="340" y="35" width="280" height="56" rx="10" fill="rgba(200,120,40,0.12)" stroke="#c2410c" stroke-width="1.5"/>
+        <text x="355" y="57" font-size="9" fill="#c2410c" font-family="system-ui" font-weight="700" letter-spacing="0.5">PROCEDURAL</text>
+        <text x="355" y="74" font-size="12" fill="#d4a070" font-family="system-ui" font-weight="500">Debugging QEMU Boot Failures</text>
+      </g>
+      <g>
+        <rect x="700" y="35" width="280" height="56" rx="10" fill="rgba(200,120,40,0.12)" stroke="#c2410c" stroke-width="1.5"/>
+        <text x="715" y="57" font-size="9" fill="#c2410c" font-family="system-ui" font-weight="700" letter-spacing="0.5">PROCEDURAL</text>
+        <text x="715" y="74" font-size="12" fill="#d4a070" font-family="system-ui" font-weight="500">Deploying Buildroot Image</text>
+      </g>
+
+      <!-- Semantic nodes (middle zone) -->
+      <g>
+        <rect x="100" y="185" width="215" height="52" rx="8" fill="rgba(239,68,68,0.08)" stroke="#f59e0b" stroke-width="1.2"/>
+        <rect x="112" y="195" width="72" height="16" rx="4" fill="rgba(245,158,11,0.15)"/>
+        <text x="120" y="207" font-size="9" fill="#f59e0b" font-family="system-ui" font-weight="700">PREFERENCE</text>
+        <text x="112" y="226" font-size="11" fill="#c8a070" font-family="system-ui">dark mode UI</text>
+      </g>
+      <g>
+        <rect x="380" y="185" width="230" height="52" rx="8" fill="rgba(239,68,68,0.08)" stroke="#f59e0b" stroke-width="1.2"/>
+        <rect x="392" y="195" width="38" height="16" rx="4" fill="rgba(245,158,11,0.15)"/>
+        <text x="398" y="207" font-size="9" fill="#f59e0b" font-family="system-ui" font-weight="700">FACT</text>
+        <text x="392" y="226" font-size="11" fill="#c8a070" font-family="system-ui">Rust async requires tokio</text>
+      </g>
+      <g>
+        <rect x="630" y="185" width="230" height="52" rx="8" fill="rgba(239,68,68,0.08)" stroke="#f59e0b" stroke-width="1.2"/>
+        <rect x="642" y="195" width="62" height="16" rx="4" fill="rgba(245,158,11,0.15)"/>
+        <text x="648" y="207" font-size="9" fill="#f59e0b" font-family="system-ui" font-weight="700">DECISION</text>
+        <text x="642" y="226" font-size="11" fill="#c8a070" font-family="system-ui">SquashFS immutable rootfs</text>
+      </g>
+      <g>
+        <rect x="880" y="185" width="210" height="52" rx="8" fill="rgba(239,68,68,0.08)" stroke="#f59e0b" stroke-width="1.2"/>
+        <rect x="892" y="195" width="63" height="16" rx="4" fill="rgba(245,158,11,0.15)"/>
+        <text x="898" y="207" font-size="9" fill="#f59e0b" font-family="system-ui" font-weight="700">PATTERN</text>
+        <text x="892" y="226" font-size="11" fill="#c8a070" font-family="system-ui">idempotent migrations</text>
+      </g>
+
+      <!-- Episodic nodes (bottom zone) -->
+      <g>
+        <rect x="60" y="345" width="200" height="42" rx="7" fill="rgba(120,120,140,0.06)" stroke="#5a5a6a" stroke-width="1"/>
+        <text x="75" y="371" font-size="11" fill="#8a8a9a" font-family="system-ui">User prefers dark mode</text>
+      </g>
+      <g>
+        <rect x="290" y="345" width="220" height="42" rx="7" fill="rgba(120,120,140,0.06)" stroke="#5a5a6a" stroke-width="1"/>
+        <text x="305" y="371" font-size="11" fill="#8a8a9a" font-family="system-ui">Discussed Rust async patterns</text>
+      </g>
+      <g>
+        <rect x="540" y="345" width="210" height="42" rx="7" fill="rgba(120,120,140,0.06)" stroke="#5a5a6a" stroke-width="1"/>
+        <text x="555" y="371" font-size="11" fill="#8a8a9a" font-family="system-ui">QEMU boot chain debugging</text>
+      </g>
+      <g>
+        <rect x="780" y="345" width="200" height="42" rx="7" fill="rgba(120,120,140,0.06)" stroke="#5a5a6a" stroke-width="1"/>
+        <text x="795" y="371" font-size="11" fill="#8a8a9a" font-family="system-ui">WardSONDB index design</text>
+      </g>
+      <g>
+        <rect x="60" y="410" width="220" height="42" rx="7" fill="rgba(120,120,140,0.06)" stroke="#5a5a6a" stroke-width="1"/>
+        <text x="75" y="436" font-size="11" fill="#8a8a9a" font-family="system-ui">Phase 1 architecture review</text>
+      </g>
+
+      <!-- Weight labels on a few prominent edges -->
+      <text x="340" y="300" font-size="8" fill="#5a5a6a" font-family="system-ui" opacity="0.6">w=0.85</text>
+      <text x="610" y="300" font-size="8" fill="#5a5a6a" font-family="system-ui" opacity="0.6">w=0.72</text>
+      <text x="245" y="290" font-size="8" fill="#5a5a6a" font-family="system-ui" opacity="0.6">w=1.0</text>
+
+    </svg>
+  </div>
+
+  <div class="legend">
+    <div class="legend-item">
+      <div class="legend-line" style="background: #f59e0b;"></div>
+      <span class="legend-label">same_session</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-line" style="background: #fb923c; background-image: repeating-linear-gradient(90deg, #fb923c 0px, #fb923c 6px, transparent 6px, transparent 10px);"></div>
+      <span class="legend-label">temporal</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-line" style="background: #ef4444; background-image: repeating-linear-gradient(90deg, #ef4444 0px, #ef4444 3px, transparent 3px, transparent 7px);"></div>
+      <span class="legend-label">tag_overlap</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-line" style="background: #c2410c; height: 3px;"></div>
+      <span class="legend-label">derived_from</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-line" style="background: #22d3ee;"></div>
+      <span class="legend-label">enables</span>
+    </div>
+  </div>
+
+  <div class="bottom-bar">
+    <span class="brand">Ward Software Defined Systems LLC · wsds.io</span>
+    <span class="tech">Phase 1 Sprint 2 · WardSONDB · Rust · Claude Opus 4.6</span>
+  </div>
+
+</div>
+</body>
+</html>
