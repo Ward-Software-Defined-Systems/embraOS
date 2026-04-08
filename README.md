@@ -11,6 +11,10 @@
 > **🎯 Milestone — Sprint 2: Cross-Session Knowledge Graph (2026-04-05)**
 > Memory is no longer a flat episodic log. Promoted semantic and procedural nodes, typed/weighted edges, BFS traversal, and graph-aware retrieval — all on WardSONDB, no external graph database. See [Phase 1 Sprint 2 Scope](#phase-1) for details.
 
+<p align="center">
+  <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — dense multigraph with auto-derived edges" width="100%">
+</p>
+
 **Current Status:** Phase 1 — Core OS (Sprint 2 Complete) | Phase 0 — Stable
 
 ---
