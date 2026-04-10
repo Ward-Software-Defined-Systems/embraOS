@@ -126,15 +126,20 @@ pub async fn dispatch(
         // Knowledge graph tools (Sprint 2)
         "knowledge_promote" => knowledge::tools::knowledge_promote(param, db, config).await,
         "knowledge_link" => knowledge::tools::knowledge_link(param, db).await,
-        "knowledge_unlink" => knowledge::tools::knowledge_unlink(param, db).await,
+        "knowledge_unlink_edge" => knowledge::tools::knowledge_unlink_edge(param, db).await,
+        "knowledge_unlink_node" => knowledge::tools::knowledge_unlink_node(param, db).await,
+        "knowledge_update" => knowledge::tools::knowledge_update(param, db).await,
         "knowledge_traverse" => knowledge::tools::knowledge_traverse(param, db, config).await,
         "knowledge_query" => knowledge::tools::knowledge_query(param, db, session_name, config).await,
         "knowledge_graph_stats" => knowledge::tools::knowledge_graph_stats(db).await,
         _ => return None,
     };
 
-    // Truncate excessively large tool results to prevent context overflow
-    const MAX_TOOL_RESULT_SIZE: usize = 50_000;
+    // Truncate excessively large tool results to prevent context overflow.
+    // Raised from 50KB to 2 MiB in Sprint 2 to allow session_read, git_diff,
+    // knowledge_traverse, memory_scan, recall, file_read, etc. to return full
+    // content for realistic workloads. 2 MiB ≈ 500K tokens — fits 1M context.
+    const MAX_TOOL_RESULT_SIZE: usize = 2_097_152;
     if result.len() > MAX_TOOL_RESULT_SIZE {
         // Find a safe UTF-8 boundary by scanning backwards
         let mut safe_end = MAX_TOOL_RESULT_SIZE;

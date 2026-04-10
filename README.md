@@ -9,7 +9,9 @@
 **embraOS** is a continuity-preserving AI operating system. It's not a chatbot. It's not an agent framework. It's an intelligence that remembers, evolves, and maintains itself across time — with a soul it can never modify and a memory it writes itself.
 
 > **🎯 Milestone — Sprint 2: Cross-Session Knowledge Graph (2026-04-05)**
-> Memory is no longer a flat episodic log. Promoted semantic and procedural nodes, typed/weighted edges, BFS traversal, and graph-aware retrieval — all on WardSONDB, no external graph database. See [Phase 1 Sprint 2 Scope](#phase-1) for details.
+> Memory is no longer a flat episodic log. Promoted semantic and procedural nodes, typed/weighted edges, BFS traversal, and graph-aware retrieval — all on WardSONDB, no external graph database.
+>
+> **Late-sprint additions (2026-04-10):** Auto-enrichment now runs the graph implicitly on every user turn — relevant prior knowledge is wrapped into a `<retrieved_context>` block before the Brain sees the message, so the intelligence doesn't have to be told "check the KG first." Tool-result cap raised 50 KB → 2 MiB with `file_read` gaining chunked `offset|limit` reads for large-document ingestion. Graph hygiene expanded with `knowledge_unlink_node` (cascade delete) alongside the renamed `knowledge_unlink_edge`, and `knowledge_update` lets the Brain refine a node in place without losing its edges. `/feedback-loop` Step 5.3 now promotes findings, practices, and protocol updates into the KG. See [Phase 1 Sprint 2 Scope](#phase-1) for details.
 
 <p align="center">
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — dense multigraph with auto-derived edges" width="100%">
@@ -334,7 +336,9 @@ Phase 0/1 includes ~69 built-in tools available in operational mode. These are i
 |---|---|
 | **knowledge_promote** | Promote an episodic entry to semantic (with category) or procedural (with JSON procedure). Creates a `derived_from` edge and auto-derives additional edges |
 | **knowledge_link** | Create a directed weighted edge between any two knowledge nodes. Brain-created edge types: enables, contradicts, refines, depends_on. Self-loops and zero-weight edges rejected |
-| **knowledge_unlink** | Delete edges by ID or by `source \| type \| target` triple. Bidirectional deletion for auto-derived edge types |
+| **knowledge_unlink_edge** | Delete edges by ID or by `source \| type \| target` triple. Bidirectional deletion for auto-derived edge types |
+| **knowledge_unlink_node** | Delete a semantic or procedural node and cascade-remove every edge referencing it (source or target). Scoped to `memory.semantic`/`memory.procedural` — use `forget` for episodic entries |
+| **knowledge_update** | Update fields on a semantic or procedural node in place via JSON patch while preserving every referencing edge. Immutable fields (provenance, timestamps, access counters) rejected |
 | **knowledge_traverse** | BFS traversal from a starting node with depth cap (default 3, ceiling 5), edge-type filter, min-weight filter. Validates start node exists |
 | **knowledge_query** | Context-aware retrieval — direct tag match, session context, depth-2 graph expansion, multi-signal ranking. Supports `query \| max \| categories_csv` syntax. Output shows source breakdown (direct/session/graph) |
 | **knowledge_graph_stats** | Node counts, category distribution, edge type distribution, promoted ratio, graph density |
@@ -630,13 +634,21 @@ Cross-session knowledge graph — the intelligence can now promote episodic memo
 - **Promotion** — 1:1 episodic → semantic/procedural with provenance (`derived_from` edge + `promoted_to` on source entry).
 - **BFS traversal** — configurable depth (default 3, ceiling 5), edge-type filter, min-weight, fire-and-forget access tracking.
 - **Context-aware retrieval** — multi-signal ranking (tag 0.4, recency 0.3, access 0.2, confidence 0.1) × source multiplier (direct=1.0, session=0.75, graph=0.5), depth-2 graph expansion.
-- **6 new KG tools** — `knowledge_promote`, `knowledge_link`, `knowledge_unlink`, `knowledge_traverse`, `knowledge_query`, `knowledge_graph_stats`.
+- **8 new KG tools** — `knowledge_promote`, `knowledge_link`, `knowledge_unlink_edge`, `knowledge_unlink_node`, `knowledge_update`, `knowledge_traverse`, `knowledge_query`, `knowledge_graph_stats`.
 - **Existing tool updates** — `remember` stores array tags + background edge derivation, `recall`/`memory_search` cross-collection, `memory_scan` KG summary section, `memory_dedup` cross-collection flagging, `introspect` knowledge focus.
 - **`/feedback-loop` slash command (EXPERIMENTAL)** — Phase 3 Continuity Engine preview. Embeds `feedback-loop-spec-v2.md` read-only in the binary, synthesizes a user turn that walks the Brain through the self-evaluation protocol using existing tools.
 
-> **Note:** Knowledge graph promotion is currently a manual process. The intelligence promotes episodic memories to the knowledge graph during conversation (using `knowledge_promote`) or as part of the `/feedback-loop` self-evaluation protocol. Automated promotion (e.g., confidence-based triggers or scheduled consolidation) is planned for Phase 3's Continuity Engine.
+**Late-sprint additions (2026-04-10):**
 
-**Status:** All Sprint 2 items implemented and stress-tested. 4 commits on `phase1-arch-rework`. Tool count ~63 → ~69.
+- **Auto-KG-enrichment on user prompts** — every non-trivial user turn now runs `retrieve_relevant_knowledge` against the KG before the Anthropic API call. When ≥1 result scores ≥ 0.3, the user message is wrapped in a `<retrieved_context source="auto-enrichment">` block containing the top matches, so the Brain has durable knowledge in-hand without being told to look. The system prompt is untouched, so Anthropic prompt caching stays warm. Gated on message length, chatty-filler detection, and `[TOOL:` manual overrides; the wrapper never persists to session history. Observable via a `tracing::info!` event with session, tag count, result count, and top score.
+- **Tool-result cap raised 50 KB → 2 MiB** — the single global `MAX_TOOL_RESULT_SIZE` constant now allows every long-output tool (`session_read`, `git_diff`, `git_log`, `knowledge_traverse`, `knowledge_query`, `memory_scan`, `recall`, etc.) to return realistic volumes. Previously every result over 50 KB was clipped.
+- **`file_read` chunked reading** — new signature `[TOOL:file_read <path>[|<offset>[|<limit>]]]`, 2 MiB per-call ceiling, `seek + read_exact` path, null-byte binary detection preserved, continuation trailer tells the model how to fetch the next slice. Large-document ingestion is now practical.
+- **Graph hygiene expanded** — `knowledge_unlink` renamed to `knowledge_unlink_edge`; new `knowledge_unlink_node` deletes a semantic/procedural node and cascade-removes every edge referencing it (source or target), scoped to `memory.semantic`/`memory.procedural` so `memory.entries` cleanup stays with `forget`. New `knowledge_update` patches node content in place via JSON patch while preserving every referencing edge — the Brain can refine a semantic fact or rewrite a procedural step without losing the graph it's embedded in.
+- **`/feedback-loop` Step 5.3 rewritten** — the old "push updated spec to git" step is gone. Step 5.3 now promotes findings (Step 5.2), operational practices (Steps 4.1/4.2), and protocol updates (Step 4.3) into the KG; judgment-based promotion covers rewrite/reclassify outputs. Protocol refinements now live in the graph, not in runtime git commits — the spec document itself only changes during active development.
+
+> **Note:** Knowledge graph promotion is still a judgment call. The intelligence promotes episodic memories during conversation (via `knowledge_promote`) or as part of the `/feedback-loop` self-evaluation protocol. Automated promotion (e.g., confidence-based triggers or scheduled consolidation) is planned for Phase 3's Continuity Engine. With auto-enrichment now in place, the *retrieval* half of the loop is implicit, but promotion remains explicit.
+
+**Status:** Sprint 2 core complete (4 commits on `phase1-arch-rework`). Late-sprint additions in working tree, pending QEMU verification. Tool count ~63 → ~70.
 
 ### Phase 2 — Terminal & Sessions
 

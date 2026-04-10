@@ -889,21 +889,47 @@ pub async fn gh_project_view(db: &WardsonDbClient, param: &str) -> String {
     }
 }
 
+/// Maximum bytes a single file_read call can return. Matches the global
+/// MAX_TOOL_RESULT_SIZE in tools/mod.rs so there is no disparity between the
+/// tool's internal limit and the wrapper's truncation.
+const FILE_READ_MAX: usize = 2_097_152; // 2 MiB
+
 /// Read a file's contents. Unrestricted path.
-/// Returns up to 64KB to avoid overwhelming the conversation context.
-pub async fn file_read(path: &str) -> String {
-    if path.is_empty() {
-        return "Usage: [TOOL:file_read <path>]\nExample: [TOOL:file_read /embra/workspace/repos/myrepo/README.md]".into();
+///
+/// Param format: `<path>[|<offset>[|<limit>]]`
+/// - `path`: file or directory path
+/// - `offset`: byte offset to start reading (default 0)
+/// - `limit`: max bytes to read (default and ceiling: FILE_READ_MAX)
+///
+/// When the read doesn't reach EOF, a trailer tells the model how to continue
+/// with the next slice.
+pub async fn file_read(params: &str) -> String {
+    if params.is_empty() {
+        return "Usage: [TOOL:file_read <path>[|<offset>[|<limit>]]]\n\
+                Example: [TOOL:file_read /embra/workspace/repos/myrepo/README.md]\n\
+                Example: [TOOL:file_read /path/to/big.log|2097152|1048576]".into();
     }
 
-    let path = path.trim();
+    let mut parts = params.splitn(3, '|').map(str::trim);
+    let path = parts.next().unwrap_or("");
+    let offset: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let limit: usize = parts
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(FILE_READ_MAX)
+        .min(FILE_READ_MAX);
+
+    if path.is_empty() {
+        return "Usage: [TOOL:file_read <path>[|<offset>[|<limit>]]]".into();
+    }
+
     let file_path = std::path::Path::new(path);
 
     if !file_path.exists() {
         return format!("File not found: {}", path);
     }
     if file_path.is_dir() {
-        // List directory contents instead
+        // List directory contents instead — offset/limit are meaningless here.
         match tokio::fs::read_dir(path).await {
             Ok(mut entries) => {
                 let mut listing = format!("=== Directory: {} ===\n", path);
@@ -922,42 +948,64 @@ pub async fn file_read(path: &str) -> String {
                 if count == 0 {
                     listing.push_str("  (empty directory)\n");
                 }
-                listing
+                return listing;
             }
-            Err(e) => format!("Failed to read directory: {}", e),
-        }
-    } else {
-        // Read file with size limit
-        match tokio::fs::metadata(path).await {
-            Ok(meta) => {
-                let size = meta.len();
-                if size > 65536 {
-                    // Read first 64KB only
-                    match tokio::fs::read(path).await {
-                        Ok(bytes) => {
-                            let content = String::from_utf8_lossy(&bytes[..65536]);
-                            format!(
-                                "=== {} ({} bytes, showing first 64KB) ===\n{}",
-                                path, size, content
-                            )
-                        }
-                        Err(e) => format!("Failed to read file: {}", e),
-                    }
-                } else {
-                    match tokio::fs::read_to_string(path).await {
-                        Ok(content) => {
-                            format!("=== {} ({} bytes) ===\n{}", path, size, content)
-                        }
-                        Err(_) => {
-                            // Might be binary
-                            format!("{} is a binary file ({} bytes)", path, size)
-                        }
-                    }
-                }
-            }
-            Err(e) => format!("Failed to stat file: {}", e),
+            Err(e) => return format!("Failed to read directory: {}", e),
         }
     }
+
+    // File branch — seek + read_exact the requested slice.
+    let meta = match tokio::fs::metadata(path).await {
+        Ok(m) => m,
+        Err(e) => return format!("Failed to stat file: {}", e),
+    };
+    let size = meta.len();
+    if offset >= size && size > 0 {
+        return format!(
+            "Offset {} is at or past EOF ({} bytes)",
+            offset, size
+        );
+    }
+    let read_end = (offset + limit as u64).min(size);
+    let read_bytes = (read_end - offset) as usize;
+
+    use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
+    let mut f = match tokio::fs::File::open(path).await {
+        Ok(f) => f,
+        Err(e) => return format!("Failed to open file: {}", e),
+    };
+    if let Err(e) = f.seek(SeekFrom::Start(offset)).await {
+        return format!("Failed to seek file: {}", e);
+    }
+    let mut buf = vec![0u8; read_bytes];
+    if let Err(e) = f.read_exact(&mut buf).await {
+        return format!("Failed to read file: {}", e);
+    }
+
+    // Preserve the existing binary-file detection: a null byte in the first
+    // 1KB strongly suggests non-text content.
+    let head = &buf[..buf.len().min(1024)];
+    if head.contains(&0u8) {
+        return format!("{} is a binary file ({} bytes)", path, size);
+    }
+
+    let content = String::from_utf8_lossy(&buf);
+    let more = if read_end < size {
+        format!(
+            "\n[... {} more bytes at offset {}. Continue with [TOOL:file_read {}|{}|{}] ]",
+            size - read_end,
+            read_end,
+            path,
+            read_end,
+            limit
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "=== {} ({} bytes, showing {}..{}) ===\n{}{}",
+        path, size, offset, read_end, content, more
+    )
 }
 
 /// Expand escape sequences in tool content: `\\n` → newline, `\\t` → tab, `\\\\` → backslash.

@@ -445,9 +445,22 @@ async fn handle_request(
                 mgr.load_history(&session_name).await.unwrap_or_default()
             };
 
+            // Auto-KG-enrichment: wrap the user message in a <retrieved_context>
+            // block when the knowledge graph has relevant prior knowledge. The
+            // system prompt is left untouched so Anthropic prompt caching stays
+            // warm. History persistence below saves `msg.content` (raw), so the
+            // wrapper never leaks into subsequent turns.
+            let enriched = crate::knowledge::enrichment::build_turn_context(
+                db.as_ref(),
+                &msg.content,
+                &session_name,
+                &loaded_config,
+            )
+            .await;
+
             // Add current message to history for the Brain call
             let mut messages = history.clone();
-            messages.push(Message::user(&msg.content));
+            messages.push(Message::user(&enriched));
 
             // Send thinking indicator
             let _ = tx.send(Ok(ConversationResponse {

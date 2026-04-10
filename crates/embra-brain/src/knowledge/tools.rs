@@ -1,4 +1,4 @@
-//! Knowledge graph tool implementations (5 tools).
+//! Knowledge graph tool implementations.
 //!
 //! Tag syntax uses `|` as a delimiter between compound parameters.
 
@@ -10,7 +10,7 @@ use crate::db::WardsonDbClient;
 use super::promotion::{promote_to_procedural, promote_to_semantic};
 use super::retrieval::retrieve_relevant_knowledge;
 use super::traversal::traverse;
-use super::types::{EdgeType, NodeType, SemanticCategory};
+use super::types::{content_preview, EdgeType, NodeType, SemanticCategory};
 
 /// `[TOOL:knowledge_promote <entry_id> | <type> | <data>]`
 pub async fn knowledge_promote(
@@ -126,19 +126,19 @@ pub async fn knowledge_link(params: &str, db: &WardsonDbClient) -> String {
     }
 }
 
-/// `[TOOL:knowledge_unlink <edge_id>]` — delete a single edge by ID
-/// `[TOOL:knowledge_unlink <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>]` — delete matching edges (bidirectional)
-pub async fn knowledge_unlink(params: &str, db: &WardsonDbClient) -> String {
+/// `[TOOL:knowledge_unlink_edge <edge_id>]` — delete a single edge by ID
+/// `[TOOL:knowledge_unlink_edge <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>]` — delete matching edges (bidirectional)
+pub async fn knowledge_unlink_edge(params: &str, db: &WardsonDbClient) -> String {
     let trimmed = params.trim();
     if trimmed.is_empty() {
-        return "Error: usage [TOOL:knowledge_unlink <edge_id>] or [TOOL:knowledge_unlink <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>]".into();
+        return "Error: usage [TOOL:knowledge_unlink_edge <edge_id>] or [TOOL:knowledge_unlink_edge <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>]".into();
     }
 
     if trimmed.contains('|') {
         // Form 2: triple parse, bidirectional delete
         let parts: Vec<&str> = trimmed.splitn(3, '|').map(|s| s.trim()).collect();
         if parts.len() < 3 {
-            return "Error: usage [TOOL:knowledge_unlink <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>]".into();
+            return "Error: usage [TOOL:knowledge_unlink_edge <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>]".into();
         }
         let Some((src_coll, src_id)) = parts[0].split_once(':') else {
             return "Error: source must be <collection>:<id>".into();
@@ -193,6 +193,154 @@ pub async fn knowledge_unlink(params: &str, db: &WardsonDbClient) -> String {
             Err(e) => format!("Error: delete failed: {}", e),
         }
     }
+}
+
+/// `[TOOL:knowledge_unlink_node <collection>:<id>]` — delete a semantic or
+/// procedural node and cascade-remove every edge referencing it (source or target).
+///
+/// Scoped to `memory.semantic` and `memory.procedural`. Use `[TOOL:forget]` for
+/// episodic `memory.entries` cleanup.
+pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String {
+    let trimmed = params.trim();
+    if trimmed.is_empty() {
+        return "Error: usage [TOOL:knowledge_unlink_node <collection>:<id>]".into();
+    }
+    let Some((coll, id)) = trimmed.split_once(':') else {
+        return "Error: target must be <collection>:<id>".into();
+    };
+    let coll = coll.trim();
+    let id = id.trim();
+    if coll != "memory.semantic" && coll != "memory.procedural" {
+        return format!(
+            "Error: knowledge_unlink_node only operates on memory.semantic or memory.procedural (got '{}'). Use [TOOL:forget] for memory.entries.",
+            coll
+        );
+    }
+
+    let node_doc = match db.read(coll, id).await {
+        Ok(doc) => doc,
+        Err(_) => return format!("Error: Node {}:{} not found", coll, id),
+    };
+
+    let preview_src = node_doc
+        .get("content")
+        .or_else(|| node_doc.get("title"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("(no preview)");
+    let preview = content_preview(preview_src, 80);
+
+    let edge_filter = json!({
+        "$or": [
+            {"source_id": id, "source_collection": coll},
+            {"target_id": id, "target_collection": coll}
+        ]
+    });
+    let edge_count = db.delete_by_query("memory.edges", &edge_filter).await.unwrap_or(0);
+
+    if let Err(e) = db.delete(coll, id).await {
+        return format!(
+            "Error: removed {} referencing edge(s) but failed to delete node {}:{}: {}",
+            edge_count, coll, id, e
+        );
+    }
+
+    format!(
+        "Removed node {}:{} (\"{}\") and {} referencing edge(s)",
+        coll, id, preview, edge_count
+    )
+}
+
+/// `[TOOL:knowledge_update <collection>:<id> | <json_patch>]` — update a semantic
+/// or procedural node in place while preserving every referencing edge.
+///
+/// JSON patch is an object containing only the fields to change. Immutable fields
+/// (`_id`, `source_entry_id`, `source_session`, `created_at`, `access_count`,
+/// `last_accessed`, `updated_at`) are rejected. `updated_at` is auto-refreshed.
+///
+/// Edges referencing the node by id are preserved automatically — `memory.edges`
+/// stores references by id, not content, so a PATCH on the node doc leaves every
+/// edge intact.
+///
+/// Auto-derived edges (`tag_overlap`, `temporal`) are NOT re-derived. If a tag
+/// change makes specific edges stale, follow up with `knowledge_unlink_edge`.
+pub async fn knowledge_update(params: &str, db: &WardsonDbClient) -> String {
+    let trimmed = params.trim();
+    let Some((target, patch_str)) = trimmed.split_once('|') else {
+        return "Error: usage [TOOL:knowledge_update <collection>:<id> | <json_patch>]".into();
+    };
+    let Some((coll, id)) = target.trim().split_once(':') else {
+        return "Error: target must be <collection>:<id>".into();
+    };
+    let coll = coll.trim();
+    let id = id.trim();
+
+    if coll != "memory.semantic" && coll != "memory.procedural" {
+        return format!(
+            "Error: knowledge_update only operates on memory.semantic or memory.procedural (got '{}'). Use [TOOL:forget] + [TOOL:remember] for memory.entries.",
+            coll
+        );
+    }
+
+    let mut patch: serde_json::Value = match serde_json::from_str(patch_str.trim()) {
+        Ok(v) => v,
+        Err(e) => return format!("Error: invalid JSON patch: {}", e),
+    };
+    let obj = match patch.as_object_mut() {
+        Some(o) => o,
+        None => return "Error: JSON patch must be an object".into(),
+    };
+    if obj.is_empty() {
+        return "Error: JSON patch is empty — nothing to update".into();
+    }
+
+    const IMMUTABLE: &[&str] = &[
+        "_id",
+        "source_entry_id",
+        "source_session",
+        "created_at",
+        "access_count",
+        "last_accessed",
+        "updated_at",
+    ];
+    for field in IMMUTABLE {
+        if obj.contains_key(*field) {
+            return format!(
+                "Error: field '{}' is immutable and cannot be changed via knowledge_update",
+                field
+            );
+        }
+    }
+
+    let existing = match db.read(coll, id).await {
+        Ok(doc) => doc,
+        Err(_) => return format!("Error: Node {}:{} not found", coll, id),
+    };
+
+    let changed_fields: Vec<String> = obj.keys().cloned().collect();
+    obj.insert(
+        "updated_at".to_string(),
+        json!(chrono::Utc::now().to_rfc3339()),
+    );
+
+    if let Err(e) = db.patch_document(coll, id, &patch).await {
+        return format!("Error: patch failed: {}", e);
+    }
+
+    let preview_src = existing
+        .get("content")
+        .or_else(|| existing.get("title"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("(no preview)");
+    let preview = content_preview(preview_src, 60);
+
+    format!(
+        "Updated {}:{} (\"{}\") — {} field(s): {}",
+        coll,
+        id,
+        preview,
+        changed_fields.len(),
+        changed_fields.join(", ")
+    )
 }
 
 /// `[TOOL:knowledge_traverse <collection>:<id> [depth] [edge_types] [min_weight]]`

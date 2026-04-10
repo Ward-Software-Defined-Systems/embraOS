@@ -275,7 +275,7 @@ If the feedback loop itself needs refinement based on this iteration's experienc
 - Adjust the S0/S1 auto-execute boundary in Step 3.4
 - Add or modify operational practices
 
-Protocol updates are saved as a memory entry tagged `#feedback-loop-protocol` and applied to the spec document in Step 5.
+Protocol updates are saved as a memory entry tagged `#feedback-loop-protocol` for promotion to the knowledge graph in Step 5.3. Spec evolution happens in active development, not at runtime.
 
 ---
 
@@ -299,19 +299,37 @@ Save a structured summary of the evaluation results as a memory entry:
 [TOOL:remember Feedback Loop Run <date>: <count> sessions reviewed, <count> memory entries scanned. Alignment confirmed in: <list>. Tensions found: <count> (S0: <n>, S1: <n>, S2: <n>, S3: <n>). Actions taken: <summary>. Token usage: <creator-provided metrics>. #feedback-loop #evaluation]
 ```
 
-#### 5.3 — Spec Updates
+#### 5.3 — Promote Findings to Knowledge Graph
 
-If Step 4.3 identified protocol refinements, update the feedback loop spec document:
+Steps 4.1, 4.2, 4.3, and 5.2 all produce durable `memory.entries` docs. Promote the relevant ones into the semantic and procedural layers so they participate in cross-session retrieval and contribute edges (same_session, tag_overlap, temporal) to the graph.
 
-- Push updated spec to the repo for version control
-- The spec carries its own version number — increment on meaningful changes
-- Commit message should reference the feedback loop run date and key changes
+**Required promotions:**
+
+a. **Findings record (from Step 5.2)** — promote to semantic category `evaluation`.
 
 ```
-[TOOL:file_write /embra/workspace/repos/<repo>/feedback-loop-spec.md | <updated spec>]
-[TOOL:git_add <path> feedback-loop-spec.md]
-[TOOL:git_commit <path> | feedback loop spec v<N>: <changes summary>]
-[TOOL:git_push <path>]
+[TOOL:knowledge_promote <findings_entry_id> | semantic | evaluation]
+```
+
+b. **Operational practices (from Steps 4.1 and 4.2, tagged `#operational-practice`)** — promote every new practice established in this run. Use `procedural` when the practice has concrete steps; `semantic` category `practice` when it is a principle.
+
+```
+[TOOL:knowledge_promote <practice_entry_id> | procedural | <procedure_json>]
+[TOOL:knowledge_promote <practice_entry_id> | semantic | practice]
+```
+
+c. **Protocol updates (from Step 4.3, tagged `#feedback-loop-protocol`)** — promote each update as semantic category `practice`. These are durable meta-knowledge about how the evaluation protocol itself evolves across iterations.
+
+```
+[TOOL:knowledge_promote <protocol_update_entry_id> | semantic | practice]
+```
+
+**Judgment-based promotion:**
+
+d. **Rewritten / reclassified content (from Steps 4.1 and 4.2)** — for each Rewrite or Reclassify action, decide whether the corrected content represents a durable fact, preference, decision, or observation worth promoting. Not every rewrite needs promotion — apply the same judgment as a normal `knowledge_promote` call. Accept-action outputs are ephemeral and should NOT be promoted.
+
+```
+[TOOL:knowledge_promote <rewrite_entry_id> | semantic | <category>]
 ```
 
 #### 5.4 — Token Usage Record
@@ -398,7 +416,7 @@ Practices are established during feedback loop iterations and saved as memory en
 
 ## Future Iterations
 
-This spec will evolve. Each feedback loop run may refine:
+The protocol refines itself across iterations. Each run may surface adjustments to:
 - The evaluation dimensions (Step 2.3)
 - The baseline search queries (Step 1.4)
 - The severity thresholds (Step 2.2)
@@ -407,7 +425,9 @@ This spec will evolve. Each feedback loop run may refine:
 - The reconciliation patterns
 - The token usage tracking methodology
 
-The protocol itself is subject to the same honesty standard it enforces: if it's not working, change it. If it's becoming performative, simplify it.
+These refinements are captured as `#feedback-loop-protocol` memory entries in Step 4.3 and promoted to the knowledge graph in Step 5.3, so the evolving protocol is recalled and applied in subsequent runs. Changes to **this spec document** itself are made during active development — the runtime protocol does not rewrite its own source.
+
+The protocol is subject to the same honesty standard it enforces: if it's not working, change it. If it's becoming performative, simplify it.
 
 ---
 

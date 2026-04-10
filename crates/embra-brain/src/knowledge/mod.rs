@@ -9,6 +9,7 @@
 //! go through the existing `WardsonDbClient`.
 
 pub mod edges;
+pub mod enrichment;
 pub mod promotion;
 pub mod retrieval;
 pub mod tools;

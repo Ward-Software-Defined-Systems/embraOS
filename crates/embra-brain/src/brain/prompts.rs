@@ -328,8 +328,10 @@ Memory & Session Consolidation:
 Knowledge Graph:
 - [TOOL:knowledge_promote <entry_id> | <type> | <data>] — promote episodic memory to semantic (with category) or procedural (with JSON procedure)
 - [TOOL:knowledge_link <source_coll>:<source_id> | <edge_type> | <target_coll>:<target_id> | <weight>] — create relationship between knowledge nodes
-- [TOOL:knowledge_unlink <edge_id>] — delete a single edge by ID
-- [TOOL:knowledge_unlink <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>] — delete matching edges (bidirectional for auto-derived types)
+- [TOOL:knowledge_unlink_edge <edge_id>] — delete a single edge by ID
+- [TOOL:knowledge_unlink_edge <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>] — delete matching edges (bidirectional for auto-derived types)
+- [TOOL:knowledge_unlink_node <collection>:<id>] — delete a semantic or procedural node and cascade-remove all edges referencing it
+- [TOOL:knowledge_update <collection>:<id> | <json_patch>] — update fields on a semantic or procedural node in place while preserving all referencing edges. Immutable fields (provenance, timestamps, access counters) are rejected
 - [TOOL:knowledge_traverse <collection>:<id> [depth] [edge_types] [min_weight]] — explore connected knowledge from a starting node
 - [TOOL:knowledge_query <query_text>] — find relevant knowledge using graph-aware retrieval
 - [TOOL:knowledge_graph_stats] — knowledge graph summary and statistics
@@ -341,7 +343,10 @@ Knowledge Graph guidance:
 - Promote to 'procedural' for step-by-step procedures with preconditions and expected outcomes.
 - Use knowledge_link to create explicit relationships when you notice connections between knowledge nodes.
 - Edge types: enables (A is prerequisite for B), contradicts (A conflicts with B), refines (A is more specific than B), depends_on (A requires B to be true).
-- Use knowledge_unlink to remove stale, incorrect, or pre-existing invalid edges (e.g., self-loops or zero-weight edges from earlier protocol versions).
+- Use knowledge_unlink_edge to remove stale, incorrect, or pre-existing invalid edges (e.g., self-loops or zero-weight edges from earlier protocol versions).
+- Use knowledge_unlink_node to cleanly remove a semantic or procedural node that is wrong, superseded, or no longer valuable — the cascade deletion prevents dangling edges. Prefer this over deleting edges one-by-one when the node itself should go. For episodic entries in memory.entries, use [TOOL:forget] instead.
+- Use knowledge_update to refine an existing semantic or procedural node in place (fix a typo, adjust confidence, add tags, rewrite a procedural step) WITHOUT losing its edges. Prefer this over knowledge_unlink_node + re-promote when the node identity and provenance should stay intact.
+- If you substantially change a node's tags via knowledge_update, the auto-derived tag_overlap edges for that node may be stale — use knowledge_unlink_edge to clean up specific edges you know are now incorrect.
 - Do not promote every memory — only durable, reusable knowledge that would be valuable across sessions.
 
 To use a tool, output the tool tag on its own line (the entire tag must be on a single line).
