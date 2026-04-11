@@ -700,7 +700,7 @@ The continuity architecture (7-layer model, soul immutability, feedback loops, T
 embraOS is built using WSDS's AI-Augmented SDLC — human steers direction, AI architects, builds, and operates. Every phase from research to production is AI-accelerated with human-in-the-loop oversight.
 
 <p align="center">
-  <img src="assets/vibe-engineering.png" alt="Vibe Engineering — The AI-Augmented SDLC" width="100%">
+  <img src="assets/ai-augmented-engineering.png" alt="Vibe Engineering — The AI-Augmented SDLC" width="100%">
 </p>
 
 <p align="center">
