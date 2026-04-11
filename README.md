@@ -68,6 +68,7 @@ cd ..
 git clone https://github.com/Ward-Software-Defined-Systems/wardsondb.git WardSONDB
 cd WardSONDB
 cargo build --release --target x86_64-unknown-linux-musl
+mkdir -p ../embraOS/target/x86_64-unknown-linux-musl/release/
 cp target/x86_64-unknown-linux-musl/release/wardsondb ../embraOS/target/x86_64-unknown-linux-musl/release/
 cd ../embraOS
 ```
@@ -494,10 +495,10 @@ No known issues. Sprint 1 and Sprint 2 scope details are in the [Roadmap](#roadm
 | **Pit Stop** | Main branch merge | Planned |
 | **Pit Stop** | Code review branch — security audit, AI slop cleanup, refactoring | Planned |
 | **Pit Stop** | Main branch merge | Planned |
-| **Phase 2** | Terminal & Sessions — full TUI rewrite, `embractl` management CLI (the `talosctl` equivalent), LLM-driven Continuity Engine feedback loop | Planned |
-| **Phase 3** | Module System — MCP server modules via `embra-guardian` governance proxy, containerd runtime, governed capability expansion | Planned |
-| **Phase 4** | Image Factory — bootable ISO builds, A/B partition scheme with automatic rollback, bare metal and Kubernetes deployment | Planned |
-| **Phase 5** | Sovereign Intelligence — local LLM inference, offline operation, zero external dependencies | Planned |
+| **Phase 2** | Terminal & Sessions — Full TUI rewrite, API Web Searches via `embra-guardian` v1 (including additional prompt injection protection for the returned results) | Planned |
+| **Phase 3** | Module System — `embra-guardian` v2, `embractl` management CLI (the `talosctl` equivalent), `embra-brain` Local/Hybrid option via external Ollama but default/recommended remains Anthropic API, LLM-driven Continuity Engine feedback loop (local/API/Hybrid options), MCP server modules via `embra-guardian` governance proxy, containerd runtime, governed capability expansion | Planned |
+| **Phase 4** | Image Factory — GPT Partition Alignment, additional bootable ISO builds, bare metal and Kubernetes deployment | Planned |
+| **Phase 5** | Sovereign Intelligence Options, OS Updates, and Security — A/B partition scheme with automatic rollback, LUKS encryption, mTLS enforcement, custom kernel, custom embraOS-QNM AI model option, local LLM inference/offline operation, zero external dependencies | Planned |
 
 ### Phase 0 Sprint 1 Scope
 
@@ -651,22 +652,6 @@ Cross-session knowledge graph — the intelligence can now promote episodic memo
 > **Note:** Knowledge graph promotion is still a judgment call. The intelligence promotes episodic memories during conversation (via `knowledge_promote`) or as part of the `/feedback-loop` self-evaluation protocol. Automated promotion (e.g., confidence-based triggers or scheduled consolidation) is planned for Phase 3's Continuity Engine. With auto-enrichment now in place, the *retrieval* half of the loop is implicit, but promotion remains explicit.
 
 **Status:** Sprint 2 core complete (4 commits on `phase1-arch-rework`). Late-sprint additions in working tree, pending QEMU verification. Tool count ~63 → ~70.
-
-### Phase 2 — Terminal & Sessions
-
-`embractl` becomes the sole operator management CLI — the `talosctl` equivalent for embraOS. Full TUI rewrite resolves Phase 0 workarounds (including BUG-015 paste handling). The Continuity Engine gains its LLM-driven feedback loop: continuous risk assessment, resilience scoring, and goal-progress evaluation against soul objectives.
-
-### Phase 3 — Module System
-
-The intelligence can extend its own capabilities through governed, sandboxed MCP server modules. `embra-guardian` intercepts all module operations with pre-write rule evaluation, image allowlist enforcement, and audit trail. Modules run via containerd (bare metal) or Kubernetes API, abstracted by a pluggable `ModuleRuntime` trait. The tool registry becomes dynamic and governance-gated.
-
-### Phase 4 — Image Factory
-
-embraOS becomes a bootable operating system. ISO build pipeline produces images for bare metal and VM deployment. A/B partition scheme — new OS images written to the inactive slot, automatic rollback on boot failure. WardSONDB DATA partition is never touched by OS updates.
-
-### Phase 5 — Sovereign Intelligence
-
-The endgame: fully offline, zero external dependencies. Local LLM inference replaces the Anthropic API. Model updates go through embra-guardian's governance pipeline. Multi-model routing lets the Brain select inference targets by task type. The full 7-layer continuity architecture operates without network access.
 
 ---
 
