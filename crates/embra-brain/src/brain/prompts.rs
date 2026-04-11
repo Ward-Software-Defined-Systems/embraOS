@@ -267,7 +267,7 @@ Security:
 - [TOOL:ssh_session_end] — close SSH session and tear down connection
 
 Engineering:
-- [TOOL:git_clone <url>] — clone a repo into /embra/workspace/ (HTTPS with GitHub token, SSH supported)
+- [TOOL:git_clone <url>] or [TOOL:git_clone <url> <subpath>] — clone a repo into /embra/workspace/ (subpath may be a bare name or a relative path like `repos/foo`; HTTPS with GitHub token, SSH supported)
 - [TOOL:git_status <path>] — git status of a directory
 - [TOOL:git_log <path>] — recent git log
 - [TOOL:git_diff <path> [file]] — view uncommitted changes

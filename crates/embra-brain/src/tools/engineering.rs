@@ -46,24 +46,45 @@ fn github_token_git_args(token: &Option<String>) -> Vec<String> {
 }
 
 /// Clone a git repository into /embra/workspace/.
-/// Format: `<url>` or `<url> <dirname>`
+/// Format: `<url>` or `<url> <subpath>`
+/// `<subpath>` may be a bare dirname (`myrepo`) or a relative path under the
+/// workspace (`repos/myrepo`). Absolute paths and `..` segments are rejected.
 pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:git_clone <url>] or [TOOL:git_clone <url> <dirname>]".into();
+        return "Usage: [TOOL:git_clone <url>] or [TOOL:git_clone <url> <subpath>]".into();
     }
 
     let parts: Vec<&str> = param.split_whitespace().collect();
     let url = parts[0];
 
-    // Derive directory name from URL or use explicit name
-    let dirname = if parts.len() > 1 {
-        parts[1].to_string()
+    let derived_name = url
+        .rsplit('/')
+        .next()
+        .unwrap_or("repo")
+        .trim_end_matches(".git")
+        .to_string();
+
+    let subpath = if parts.len() > 1 {
+        let raw = parts[1];
+        if raw.starts_with('/') {
+            return format!("Denied: subpath '{}' must be relative to {}", raw, WORKSPACE_ROOT);
+        }
+        if std::path::Path::new(raw)
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
+            return format!("Denied: subpath '{}' contains '..' segments", raw);
+        }
+        if raw.ends_with('/') {
+            format!("{}{}", raw, derived_name)
+        } else {
+            raw.to_string()
+        }
     } else {
-        url.rsplit('/').next().unwrap_or("repo")
-            .trim_end_matches(".git").to_string()
+        derived_name
     };
 
-    let dest = format!("{}/{}", WORKSPACE_ROOT, dirname);
+    let dest = format!("{}/{}", WORKSPACE_ROOT, subpath);
 
     if let Err(e) = validate_workspace_path(&dest) {
         return e;
@@ -73,8 +94,11 @@ pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
         return format!("Directory already exists: {}", dest);
     }
 
-    // Ensure workspace root exists
-    let _ = std::fs::create_dir_all(WORKSPACE_ROOT);
+    // Ensure the destination's parent directory exists so nested subpaths
+    // like `repos/foo/bar` work on first use.
+    if let Some(parent) = std::path::Path::new(&dest).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
 
     // Inject GITHUB_TOKEN via git -c url rewriting (no token in URLs or config files)
     let token = resolve_github_token(db).await;

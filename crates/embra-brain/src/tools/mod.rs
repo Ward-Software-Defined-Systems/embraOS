@@ -984,8 +984,10 @@ async fn get(db: &WardsonDbClient, param: &str) -> String {
 
 /// Extract `[TOOL:...]` tags from AI output safely.
 /// Strips fenced code blocks and inline code first so that examples/documentation
-/// are never mis-parsed as real tool invocations (BUG-001 fix).
-/// Only lines whose trimmed content is exactly one `[TOOL:...]` tag are matched.
+/// are never mis-parsed as real tool invocations (BUG-001 fix). Unlike an earlier
+/// version, this parser tolerates tool tags whose parameter contains soft
+/// newlines — a forward scan finds each `[TOOL:` / `]` pair (even across lines)
+/// and collapses internal whitespace into single spaces before dispatch.
 pub fn extract_tool_tags(text: &str) -> Vec<String> {
     // Step 1: Strip fenced code blocks (``` ... ```)
     let mut stripped = String::with_capacity(text.len());
@@ -1015,16 +1017,106 @@ pub fn extract_tool_tags(text: &str) -> Vec<String> {
         }
     }
 
-    // Step 3: Match lines that are exactly one [TOOL:...] tag
+    // Step 3: Forward-scan for [TOOL:...] spans, allowing internal newlines.
+    const OPEN: &str = "[TOOL:";
     let mut tags = Vec::new();
-    for line in no_inline.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("[TOOL:") && trimmed.ends_with(']') && trimmed.matches("[TOOL:").count() == 1 {
-            tags.push(trimmed.to_string());
+    let mut cursor = 0;
+    while let Some(rel_open) = no_inline[cursor..].find(OPEN) {
+        let open_at = cursor + rel_open;
+        let inner_start = open_at + OPEN.len();
+
+        // Find the next ']' after the opener.
+        let Some(rel_close) = no_inline[inner_start..].find(']') else {
+            break; // unterminated — drop the rest silently
+        };
+        let close_at = inner_start + rel_close;
+
+        // Reject nested openers: if another `[TOOL:` appears before the close,
+        // the outer tag is garbled. Skip past the outer opener and let the
+        // inner one try to match on its own iteration.
+        if no_inline[inner_start..close_at].contains(OPEN) {
+            cursor = inner_start;
+            continue;
         }
+
+        // Collapse internal whitespace (including newlines) into single spaces
+        // so dispatch()'s `splitn(2, ' ')` works as if the tag were on one line.
+        let raw = &no_inline[open_at..=close_at];
+        let mut collapsed = String::with_capacity(raw.len());
+        let mut last_was_space = false;
+        for ch in raw.chars() {
+            if ch.is_whitespace() {
+                if !last_was_space {
+                    collapsed.push(' ');
+                    last_was_space = true;
+                }
+            } else {
+                collapsed.push(ch);
+                last_was_space = false;
+            }
+        }
+        tags.push(collapsed);
+
+        cursor = close_at + 1;
     }
 
     tags
+}
+
+#[cfg(test)]
+mod extract_tool_tags_tests {
+    use super::extract_tool_tags;
+
+    #[test]
+    fn single_line_tag_matches() {
+        let tags = extract_tool_tags("before\n[TOOL:git_status /tmp]\nafter");
+        assert_eq!(tags, vec!["[TOOL:git_status /tmp]"]);
+    }
+
+    #[test]
+    fn multi_line_param_is_collapsed() {
+        let input = "heading\n[TOOL:remember Operational practice: line one,\nline two,\nline three]\ntrailing";
+        let tags = extract_tool_tags(input);
+        assert_eq!(
+            tags,
+            vec!["[TOOL:remember Operational practice: line one, line two, line three]"]
+        );
+    }
+
+    #[test]
+    fn tag_inside_fenced_code_block_is_ignored() {
+        let input = "text\n```\n[TOOL:git_status /tmp]\n```\nmore";
+        assert!(extract_tool_tags(input).is_empty());
+    }
+
+    #[test]
+    fn tag_inside_inline_backticks_is_ignored() {
+        let input = "prose `[TOOL:git_status /tmp]` more prose";
+        assert!(extract_tool_tags(input).is_empty());
+    }
+
+    #[test]
+    fn adjacent_tags_both_extract() {
+        let input = "[TOOL:git_status /a]\n[TOOL:git_status /b]";
+        let tags = extract_tool_tags(input);
+        assert_eq!(
+            tags,
+            vec!["[TOOL:git_status /a]", "[TOOL:git_status /b]"]
+        );
+    }
+
+    #[test]
+    fn unterminated_tag_dropped_silently() {
+        let input = "[TOOL:remember a long note with no closing bracket";
+        assert!(extract_tool_tags(input).is_empty());
+    }
+
+    #[test]
+    fn nested_opener_recovers_on_inner_tag() {
+        let input = "[TOOL:outer [TOOL:git_status /tmp]";
+        let tags = extract_tool_tags(input);
+        assert_eq!(tags, vec!["[TOOL:git_status /tmp]"]);
+    }
 }
 
 // ── Timezone Resolution ──

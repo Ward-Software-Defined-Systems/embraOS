@@ -373,7 +373,7 @@ Phase 0/1 includes ~69 built-in tools available in operational mode. These are i
 
 | Tool | Description |
 |---|---|
-| **file_read** | Read file contents (up to 64KB) or list directory entries (up to 200). Unrestricted path. Handles binary files gracefully |
+| **file_read** | Read file contents or list directory entries (up to 200). Supports chunked reads via `[TOOL:file_read <path>[\|<offset>[\|<limit>]]]` with a 2 MiB per-call ceiling and a continuation trailer so the model can fetch the next slice. Unrestricted path. Handles binary files gracefully |
 | **file_write** | Write content to a file with escape support (`\n`, `\t`, `\\`), creating parent directories automatically (workspace restricted to `/embra/workspace/`) |
 | **file_append** | Append content to a file with escape support. Creates the file and parent directories if they don't exist (workspace restricted) |
 | **file_delete** | Delete a file (workspace restricted, files only — not directories) |
@@ -385,7 +385,7 @@ Phase 0/1 includes ~69 built-in tools available in operational mode. These are i
 
 | Tool | Description |
 |---|---|
-| **git_clone** | Clone a git repository into `/embra/workspace/` — supports HTTPS (with GitHub token) and SSH URLs |
+| **git_clone** | Clone a git repository into `/embra/workspace/` — supports HTTPS (with GitHub token) and SSH URLs. Optional second argument accepts a bare dirname (`myrepo`) or a relative path under the workspace (`repos/myrepo`); parent directories are created on demand and `..` segments are rejected |
 | **git_status** | Run `git status` on a directory |
 | **git_log** | Show recent commits for a repository |
 | **git_diff** | View uncommitted changes, optionally for a specific file |
@@ -645,6 +645,8 @@ Cross-session knowledge graph — the intelligence can now promote episodic memo
 - **`file_read` chunked reading** — new signature `[TOOL:file_read <path>[|<offset>[|<limit>]]]`, 2 MiB per-call ceiling, `seek + read_exact` path, null-byte binary detection preserved, continuation trailer tells the model how to fetch the next slice. Large-document ingestion is now practical.
 - **Graph hygiene expanded** — `knowledge_unlink` renamed to `knowledge_unlink_edge`; new `knowledge_unlink_node` deletes a semantic/procedural node and cascade-removes every edge referencing it (source or target), scoped to `memory.semantic`/`memory.procedural` so `memory.entries` cleanup stays with `forget`. New `knowledge_update` patches node content in place via JSON patch while preserving every referencing edge — the Brain can refine a semantic fact or rewrite a procedural step without losing the graph it's embedded in.
 - **`/feedback-loop` Step 5.3 rewritten** — the old "push updated spec to git" step is gone. Step 5.3 now promotes findings (Step 5.2), operational practices (Steps 4.1/4.2), and protocol updates (Step 4.3) into the KG; judgment-based promotion covers rewrite/reclassify outputs. Protocol refinements now live in the graph, not in runtime git commits — the spec document itself only changes during active development.
+- **`git_clone` subfolder support** — second arg now accepts a relative path (`repos/foo`) in addition to a bare dirname. Parent directories are created on demand; absolute paths and `..` segments are rejected before the workspace-prefix check. Lets the Brain organise clones under `/embra/workspace/repos/` without a follow-up move.
+- **Multi-line tool-tag parser fix** — `extract_tool_tags` was rejecting tool calls whose parameter wrapped across lines (e.g. a long `remember` blurb), silently dropping the tag and stalling the turn. Replaced the line-by-line predicate with a forward scan that spans newlines and collapses internal whitespace before dispatch. Fence/backtick stripping preserved; 7 unit tests cover single-line, multi-line, fenced, inline-backtick, adjacent, unterminated, and nested cases.
 
 > **Note:** Knowledge graph promotion is still a judgment call. The intelligence promotes episodic memories during conversation (via `knowledge_promote`) or as part of the `/feedback-loop` self-evaluation protocol. Automated promotion (e.g., confidence-based triggers or scheduled consolidation) is planned for Phase 3's Continuity Engine. With auto-enrichment now in place, the *retrieval* half of the loop is implicit, but promotion remains explicit.
 
