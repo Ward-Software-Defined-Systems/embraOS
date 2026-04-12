@@ -283,18 +283,16 @@ All sessions share the same intelligence — same memory, same identity, same so
 
 ## Current Limitations
 
-Phase 0 is a proof of concept. It demonstrates the core experience but doesn't include the full OS:
-
 - **API only** — requires internet connectivity and an Anthropic API key
 - **Single model** — Claude Opus 4.6, not configurable
-- **Docker only** — not a bootable OS *(Phase 1 addresses this — QEMU-bootable image with immutable rootfs)*
-- **Tested on limited platforms** — built and verified on Mac Studio M4 Max / Apple Silicon (macOS / OrbStack), MacBook Pro 2.3 GHz 8-Core Intel Core i9 (macOS / Docker Desktop), Azure Standard B2as v2 / AMD EPYC (Ubuntu 24.04 / Docker Engine), and Ubuntu 24.04 VM (Phase 1 builds)
+- **QEMU x86_64 only** — bare metal and other architectures come in Phase 4
+- **Tested on limited platforms** — built and verified on Ubuntu 24.04 under QEMU 8.2.2; bootable image also runs under QEMU on Intel and Apple Silicon Macs
 - **Built-in tools only** — no MCP server modules (yet)
 - **No local LLM** — coming in a future phase
 
 ### Default Tools
 
-Phase 0/1 includes ~69 built-in tools available in operational mode. These are internal tools invoked by the intelligence during conversation — not user-facing commands. The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
+Phase 1 includes ~76 built-in tools available in operational mode. These are internal tools invoked by the intelligence during conversation — not user-facing commands. The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
 
 > **⚠️ Testing Notice:** The default tools and slash commands are actively being tested. If you encounter bugs or unexpected behavior, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
@@ -458,7 +456,7 @@ Cargo workspace with 7 crates, all cross-compiling to `x86_64-unknown-linux-musl
 | `embrad` | PID 1: loopback/eth0 setup, service supervisor, soul verification, reconciliation | Complete |
 | `embra-trustd` | Soul SHA-256 verification, Root CA generation, mTLS cert signing | Complete |
 | `embra-apid` | gRPC + REST gateway, bidirectional streaming proxy | Complete |
-| `embra-brain` | Headless AI runtime — Phase 0 Brain, ~69 tools, sessions, Learning Mode, proactive engine, knowledge graph | Complete |
+| `embra-brain` | Headless AI runtime — Brain, ~76 tools, sessions, Learning Mode, proactive engine, knowledge graph | Complete |
 | `embra-console` | Full ratatui TUI over serial/gRPC — config wizard, styled rendering, session management | Complete |
 | `embra-common` | Shared protobuf types (tonic codegen) | Complete |
 
