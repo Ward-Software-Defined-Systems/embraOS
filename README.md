@@ -175,16 +175,6 @@ cargo build --release --target x86_64-unknown-linux-musl --workspace
 # ./scripts/build-image.sh --buildroot-only
 ```
 
-### Phase 0 — Docker
-
-Phase 0 (proof of concept) runs as a Docker container and is still fully functional. The Phase 0 source is in `src/` and the Docker build is unchanged. For full Phase 0 documentation including persistence, GitHub integration, and SSH setup, see the [README on the main branch](https://github.com/Ward-Software-Defined-Systems/embraOS/tree/main).
-
-```bash
-git checkout main
-docker build -t embraos:phase0 .
-docker run -it --name embra -e ANTHROPIC_API_KEY=sk-ant-... -v embra-data:/embra/data embraos:phase0
-```
-
 ---
 
 ## What Happens When You Run It
@@ -433,52 +423,6 @@ Phase 0/1 includes ~69 built-in tools available in operational mode. These are i
 
 ---
 
-## Known Issues
-
-### Phase 0
-
-All Phase 0 Sprint 1–5 bugs have been fixed. Phase 0 is functionally complete.
-
-**Sprint 1**
-
-| ID | Severity | Issue | Resolution |
-|---|---|---|---|
-| BUG-001 | 🔴 Critical | Tool tag scanner runaway loop | Code-block-aware extraction, line-level matching |
-| CRASH-001 | 🔴 High | UTF-8 byte/char index panic in renderer | Char-array indexing instead of byte-slicing |
-| BUG-002 | 🟡 Medium | Duplicate tool result injection | Removed double history push |
-| BUG-003 | 🟡 Medium | Countdown notifications not reaching Brain | Reclassified as DESIGN-004; system message injection into Brain |
-| BUG-008 | 🟡 Medium | Paste handling losing input buffer content | Input buffer folds into pasted lines, multiple pastes stack |
-| BUG-010 | 🟡 Medium | `/copy` corrupting TUI rendering | OSC 52 writes through terminal backend after draw (disabled pending further testing) |
-| BUG-004 | 🟢 Low | Introspect focus filter too broad | Recursive soul unwrap + key-name-only filtering + keyword mapping |
-| BUG-005 | 🟢 Low | Define fallback triggering BUG-001 | Plain text fallback, no tool tags |
-| BUG-006 | 🟢 Low | Multi-line tag parsing | Updated prompt to instruct single-line content |
-| BUG-007 | 🟡 Medium | Timezone abbreviation mismatch | IANA zone resolution for US abbreviations |
-
-**Sprint 2**
-
-| ID | Severity | Issue | Resolution |
-|---|---|---|---|
-| BUG-011 | 🔴 High | `/switch` crash on non-existent session | Added `session_exists()` guard — returns friendly error |
-| BUG-012 | 🟡 Medium | Paste `\r` characters corrupting input | Normalize `\r\n` → `\n` and `\r` → `\n` in paste handler |
-| BUG-013 | 🟡 Medium | Unicode/emoji breaking line wrapping | Replaced `chars().count()` with `unicode-width` display widths |
-
-**Sprint 4**
-
-| ID | Severity | Issue | Resolution |
-|---|---|---|---|
-| BUG-014 | 🟡 Medium | `recall`/`memory_scan` can't find `#tagged` queries | Strip leading `#` before matching (remember already strips on store) |
-| BUG-015 | 🟡 Medium | Multi-line paste sends each line separately inside `screen` | **Open.** `screen` strips bracketed paste escapes, so crossterm receives pasted lines as individual key events. Batch-drain mitigation in event loop attempted but not sufficient — `screen` may deliver events across multiple poll cycles. Workaround: use `tmux` instead of `screen`, or paste into a terminal without `screen`. |
-
-> **13 bugs + 1 crash fixed across Phase 0 Sprints 1–4.** BUG-015 is open.
-
-### Phase 1
-
-No known issues. Sprint 1 and Sprint 2 scope details are in the [Roadmap](#roadmap) section.
-
-> If you encounter bugs, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
-
----
-
 ## Roadmap
 
 | Phase | Description | Status |
@@ -499,81 +443,6 @@ No known issues. Sprint 1 and Sprint 2 scope details are in the [Roadmap](#roadm
 | **Phase 3** | Module System — `embra-guardian` v2, `embractl` management CLI (the `talosctl` equivalent), `embra-brain` Local/Hybrid option via external Ollama but default/recommended remains Anthropic API, LLM-driven Continuity Engine feedback loop (local/API/Hybrid options), MCP server modules via `embra-guardian` governance proxy, containerd runtime, governed capability expansion | Planned |
 | **Phase 4** | Image Factory — GPT Partition Alignment, additional bootable ISO builds, bare metal and Kubernetes deployment | Planned |
 | **Phase 5** | Sovereign Intelligence Options, OS Updates, and Security — A/B partition scheme with automatic rollback, LUKS encryption, mTLS enforcement, custom kernel, custom embraOS-QNM AI model option, local LLM inference/offline operation, zero external dependencies | Planned |
-
-### Phase 0 Sprint 1 Scope
-
-**Bug Fixes (9 + 1 crash):** Tool tag scanner runaway loop (critical), UTF-8 render crash, duplicate tool result injection, countdown-to-Brain notifications, paste handling, `/copy` TUI corruption, introspect focus filtering, define fallback text, multi-line tag parsing, timezone handling.
-
-**Design Improvements (4):** Draft upsert, ID-based document retrieval (`get` tool), `define` write path, proactive engine → Brain notification injection. Plus: JSON/markdown syntax highlighting, dynamic multi-line input, thinking indicator, Shift/Alt+Enter newline support.
-
-**New Tools:** Security checkpoint (`security_check`, `port_scan`), software engineering (`git_status`, `git_log`, `plan`, `tasks`, `task_add`, `task_done`). Post-sprint tool count: ~25.
-
-**Status:** All Sprint 1 items implemented and tested. Tool count expanded from 15 to ~30.
-
-### Phase 0 Sprint 2 Scope
-
-**Bug Fixes (3):** `/switch` crash on non-existent session, paste `\r` character corruption, unicode/emoji line wrapping width.
-
-**Expanded Git/GitHub Toolset (12 new tools):** Full git workflow (`git_add`, `git_commit`, `git_push`, `git_pull`, `git_diff`, `git_branch`, `git_checkout`) and GitHub API tools (`gh_issue_create`, `gh_issue_close`, `gh_pr_create`, `gh_project_list`, `gh_project_view`). All write operations restricted to `/embra/workspace/`.
-
-**Enhanced Port Scanner:** Port specs (specific ports, ranges, presets), banner grabbing with protocol detection, semaphore-limited concurrency (50 connections).
-
-**embraCRON:** Scheduled recurring tool execution (`cron_add`, `cron_list`, `cron_remove`). Supports natural schedules (`every 5m`, `hourly`, `daily 09:00`). Proactive engine checks every 15 seconds.
-
-**Status:** All Sprint 2 items implemented and tested. Tool count expanded from ~30 to ~49.
-
-### Phase 0 Sprint 3 Scope
-
-**Session Access Tools (5):** Read-only tools for navigating session transcripts — `session_list`, `session_read` (with range support), `session_search` (quoted phrase + cross-session), `session_meta`, `session_delta`. All string truncation is char-boundary-safe for unicode/emoji.
-
-**Memory Consolidation Tools (2):** `memory_scan` for inventory reports (tag frequency, age buckets, duplicate candidates) and `memory_dedup` for finding duplicate groups with merge strategy proposals.
-
-**Session Consolidation Tools (3):** Brain-dependent "Option B" pattern — tools fetch data and return it with instructions, the Brain generates content via the existing feedback loop. `session_summarize` (cache-aware with SHA-256 source hashing), `session_summary_save` (persists summaries with audit trail), `session_extract` (identifies durable learnings from transcripts).
-
-**Schema Migration Framework:** Idempotent migration system (`src/migrations/mod.rs`) that runs on every startup. Initial migrations: v0 (BUG-001 phantom cleanup), v1 (baseline collections), v2 (`system.consolidation_log` for audit trail). Extended in Sprint 5 with v3 (singleton `_id` migration) and v4 (TTL policies).
-
-**New Collections:** `sessions.{name}.summary`, `system.consolidation_log`, `system.migrations`.
-
-**Status:** All Sprint 3 items implemented and tested. Tool count expanded from ~49 to ~59.
-
-### Phase 0 Sprint 4 Scope
-
-**SSH Remote Admin (4 tools, EXPERIMENTAL):** `ssh_remote_admin` for single command execution, `ssh_session_start` / `ssh_session_exec` / `ssh_session_end` for persistent interactive sessions. All restricted to RFC 1918 private + loopback addresses. 30s timeouts, 10KB output truncation, one session at a time. *(Persistent session internals refactored in Sprint 5 — see below.)*
-
-**Tag Filter Fix:** `recall` and `memory_scan` now strip leading `#` from queries before matching. The `remember` tool already strips `#` when storing tags, so searching for `#worldstate` now correctly finds entries tagged `worldstate`.
-
-**Timezone-Aware Timestamps:** Conversation messages now display date+time in the operator's configured timezone (e.g., `Mar 20 14:30`) instead of UTC-only time. Uses `chrono_tz` for conversion. Early setup messages before config is available fall back to UTC.
-
-**`/copy` Deferred:** Updated availability message from Sprint 2 to Sprint 5.
-
-**Status:** All Sprint 4 items implemented and tested. Tool count expanded from ~59 to ~63.
-
-### Phase 0 Sprint 5 Scope
-
-**SSH ControlMaster Refactor:** Replaced the pipe+sentinel architecture in persistent SSH sessions with SSH ControlMaster multiplexing. `ssh_session_start` now spawns a background ControlMaster connection (`ssh -MNf`) with a unique Unix socket. `ssh_session_exec` runs each command as a discrete SSH process through the ControlMaster socket — giving every command a clean process lifecycle identical to `ssh_remote_admin`, but without re-authentication overhead. This eliminates sentinel detection, stdin/stdout piping, byte-level reads, PTY workarounds, and the `timeout` wrapper. Resolves the curl/wget hang bug where commands that held connections open would prevent sentinel detection and cause 30s timeouts.
-
-**Brain API Upgrade — Full Opus 4.6 Capabilities:**
-- Max output tokens: 4,096 → 128,000 — removes artificial truncation of Brain responses
-- Adaptive thinking: `thinking: {type: "adaptive"}` — model decides when and how much to reason internally. Thinking tokens consumed from output budget; thinking content not displayed to user or stored in session history
-- 1M context window: GA, no beta header required — conversations effectively never hit the context limit in Phase 0
-- Universal streaming: SSE streaming in all modes (operational + Learning Mode). Streaming parser updated to handle `thinking_delta` (silently consumed) and `signature_delta` (ignored) alongside existing `text_delta` events
-- Thinking indicator naturally stays visible during thinking phase (no `Token` events emitted until text begins)
-
-**WardSONDB Integration Upgrades:**
-- New client methods: `patch_document` (RFC 7396 merge patch), `delete_by_query` (atomic bulk delete), `set_ttl` (auto-cleanup policies), `stats` (expanded server statistics), `health_detailed` (degraded status + write pressure detection), `query_with_options` (projection + count_only)
-- Custom `_id` for singleton documents: `config.system` → `"config"`, `soul.invariant` → `"soul"`, `memory.identity` → `"identity"`, `memory.user` → `"user"`. Enables direct GET by ID instead of query-then-take-first
-- Migration v3: Singleton `_id` migration with 6-state classification (empty/migrated/needs-migration/crash-recovery/unexpected), system field stripping, 409 conflict handling, and SHA-256 soul integrity verification with automatic rollback
-- Migration v4: TTL policies — 7-day retention on `reminders`, 90-day retention on `system.consolidation_log`
-- Migration v0 refactored: atomic `_delete_by_query` replaces query-then-loop pattern
-- File descriptor limit: `libc::setrlimit` raises `RLIMIT_NOFILE` to 65536 before spawning WardSONDB (fjall requires >= 4096)
-- Health degradation: proactive engine detects `status: "degraded"` (Critical notification) and `write_pressure: "high"` (Normal notification)
-- `session_summary_save` uses PATCH+insert upsert (eliminates delete-then-insert race window)
-- Query projection: `recall`, `memory_scan`, `session_list`, `changelog` use `fields` parameter to fetch only needed fields
-- Count-only queries: `uptime_report` memory count uses `count_only: true` instead of loading all documents
-- Error type: `WardsonDbError` gains `is_conflict()` (409) and `is_not_found()` (404) convenience methods
-- Reusable soul hash: `compute_soul_hash()` shared between startup validation and migration v3
-
-**Status:** All Sprint 5 items implemented and tested. ~68 tools total (added file_delete, file_move/file_rename, dir_delete/rmdir, git_rm, git_mv). Schema version 2 → 4. Builds clean.
 
 ### Phase 1 — Core OS
 
