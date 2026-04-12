@@ -520,7 +520,7 @@ Cross-session knowledge graph — the intelligence can now promote episodic memo
 
 > **Note:** Knowledge graph promotion is still a judgment call. The intelligence promotes episodic memories during conversation (via `knowledge_promote`) or as part of the `/feedback-loop` self-evaluation protocol. Automated promotion (e.g., confidence-based triggers or scheduled consolidation) is planned for Phase 3's Continuity Engine. With auto-enrichment now in place, the *retrieval* half of the loop is implicit, but promotion remains explicit.
 
-**Status:** Sprint 2 core complete (4 commits on `phase1-arch-rework`). Late-sprint additions in working tree, pending QEMU verification. Tool count ~63 → ~70.
+**Status:** Sprint 2 core complete (4 commits on `phase1-arch-rework`).
 
 ---
 
