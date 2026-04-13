@@ -38,10 +38,12 @@ pub async fn dispatch(
         .strip_prefix("[TOOL:")
         .and_then(|s| s.strip_suffix(']'))?;
 
-    let (name, param) = match inner.find(' ') {
+    let (name, raw_param) = match inner.find(' ') {
         Some(pos) => (&inner[..pos], inner[pos + 1..].trim()),
         None => (inner, ""),
     };
+    let unescaped = unescape_param(raw_param);
+    let param = unescaped.as_str();
 
     let result = match name {
         "system_status" => {
@@ -982,6 +984,33 @@ async fn get(db: &WardsonDbClient, param: &str) -> String {
 
 // ── Tool Tag Extraction ──
 
+/// Unescape `\]` → `]` and `\\` → `\` in a tool parameter string.
+/// Unknown escapes (e.g. `\n`, `\t`, Windows paths like `\foo`) pass through
+/// untouched so we don't silently mangle regex, paths, or newline markers.
+/// A lone trailing `\` is also left as-is.
+fn unescape_param(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.peek() {
+                Some(']') => {
+                    out.push(']');
+                    chars.next();
+                }
+                Some('\\') => {
+                    out.push('\\');
+                    chars.next();
+                }
+                _ => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Extract `[TOOL:...]` tags from AI output safely.
 /// Strips fenced code blocks and inline code first so that examples/documentation
 /// are never mis-parsed as real tool invocations (BUG-001 fix). Unlike an earlier
@@ -1025,11 +1054,58 @@ pub fn extract_tool_tags(text: &str) -> Vec<String> {
         let open_at = cursor + rel_open;
         let inner_start = open_at + OPEN.len();
 
-        // Find the next ']' after the opener.
-        let Some(rel_close) = no_inline[inner_start..].find(']') else {
-            break; // unterminated — drop the rest silently
+        // Find the matching ']' using bracket/brace balancing with JSON string
+        // awareness. The outer `[TOOL:` already consumed one `[`, so depth starts
+        // at 1 and the closing `]` is the one that brings depth back to 0. This
+        // prevents stray `]` in JSON arrays, markdown links, git `[section]`
+        // notation, or code like `vec![0u8; 4]` from prematurely ending the tag.
+        let rest = &no_inline[inner_start..];
+        let mut close_at_opt: Option<usize> = None;
+        let mut depth: usize = 1;
+        let mut in_string = false;
+        let mut escape = false;
+        for (i, ch) in rest.char_indices() {
+            if escape {
+                escape = false;
+                continue;
+            }
+            if in_string {
+                match ch {
+                    '\\' => escape = true,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match ch {
+                '\\' => escape = true, // outside-string escape: `\]` / `\\` literal
+                '"' => in_string = true,
+                '[' | '{' => depth += 1,
+                ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close_at_opt = Some(inner_start + i);
+                        break;
+                    }
+                }
+                '}' => {
+                    if depth > 0 {
+                        depth -= 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close_at) = close_at_opt else {
+            // Unterminated. If a nested `[TOOL:` appeared inside the unclosed
+            // span, skip past the outer opener so the inner one can match on
+            // its own iteration. Otherwise drop the rest silently.
+            if rest.contains(OPEN) {
+                cursor = inner_start;
+                continue;
+            }
+            break;
         };
-        let close_at = inner_start + rel_close;
 
         // Reject nested openers: if another `[TOOL:` appears before the close,
         // the outer tag is garbled. Skip past the outer opener and let the
@@ -1116,6 +1192,101 @@ mod extract_tool_tags_tests {
         let input = "[TOOL:outer [TOOL:git_status /tmp]";
         let tags = extract_tool_tags(input);
         assert_eq!(tags, vec!["[TOOL:git_status /tmp]"]);
+    }
+
+    #[test]
+    fn json_array_param_preserved() {
+        let input = r#"[TOOL:knowledge_update mem.semantic:x | {"tags": ["a","b"]}]"#;
+        let tags = extract_tool_tags(input);
+        assert_eq!(tags, vec![input.to_string()]);
+    }
+
+    #[test]
+    fn markdown_link_in_free_text() {
+        let input = "[TOOL:remember See [docs](https://x) now]";
+        let tags = extract_tool_tags(input);
+        assert_eq!(tags, vec![input.to_string()]);
+    }
+
+    #[test]
+    fn git_section_in_commit_message() {
+        let input = "[TOOL:git_commit /r | edit [core] section]";
+        let tags = extract_tool_tags(input);
+        assert_eq!(tags, vec![input.to_string()]);
+    }
+
+    #[test]
+    fn code_bracket_in_commit_message() {
+        let input = "[TOOL:git_commit /r | use vec![0u8; 4] buffer]";
+        let tags = extract_tool_tags(input);
+        assert_eq!(tags, vec![input.to_string()]);
+    }
+
+    #[test]
+    fn quoted_bracket_in_json_string() {
+        let input = r#"[TOOL:remember {"note": "closing]here"}]"#;
+        let tags = extract_tool_tags(input);
+        assert_eq!(tags, vec![input.to_string()]);
+    }
+
+    #[test]
+    fn escaped_quote_in_json_string() {
+        let input = r#"[TOOL:remember {"msg": "say \"hi]\""}]"#;
+        let tags = extract_tool_tags(input);
+        assert_eq!(tags, vec![input.to_string()]);
+    }
+
+    #[test]
+    fn nested_json_object() {
+        let input = r#"[TOOL:knowledge_link a | enables | b | {"meta": {"w": 0.8}}]"#;
+        let tags = extract_tool_tags(input);
+        assert_eq!(tags, vec![input.to_string()]);
+    }
+
+    #[test]
+    fn escaped_close_bracket_preserved() {
+        let input = r"[TOOL:file_write /p | This has a \] bracket in it]";
+        let tags = extract_tool_tags(input);
+        assert_eq!(tags, vec![input.to_string()]);
+    }
+
+    #[test]
+    fn escaped_backslash_preserved() {
+        let input = r"[TOOL:remember path C:\\foo ok]";
+        let tags = extract_tool_tags(input);
+        assert_eq!(tags, vec![input.to_string()]);
+    }
+
+    #[test]
+    fn unknown_escape_left_alone() {
+        let input = r"[TOOL:remember newline\n rule]";
+        let tags = extract_tool_tags(input);
+        assert_eq!(tags, vec![input.to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod unescape_param_tests {
+    use super::unescape_param;
+
+    #[test]
+    fn unescapes_close_bracket_and_backslash() {
+        assert_eq!(unescape_param(r"\]\\foo"), r"]\foo");
+    }
+
+    #[test]
+    fn no_escapes_passes_through() {
+        assert_eq!(unescape_param("no escapes"), "no escapes");
+    }
+
+    #[test]
+    fn trailing_backslash_preserved() {
+        assert_eq!(unescape_param(r"trailing \"), r"trailing \");
+    }
+
+    #[test]
+    fn unknown_escape_preserved() {
+        assert_eq!(unescape_param(r"line\n here"), r"line\n here");
     }
 }
 

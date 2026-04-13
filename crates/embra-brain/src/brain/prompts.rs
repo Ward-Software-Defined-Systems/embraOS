@@ -353,6 +353,7 @@ To use a tool, output the tool tag on its own line (the entire tag must be on a 
 The system will execute it and provide results. Use tools proactively when relevant.
 IMPORTANT: Keep remember content on a single line. For multi-line content, use multiple
 remember calls. Never place tool tags inside code blocks or inline code.
+If a tool parameter must contain a literal `]` or `\`, escape it as `\]` or `\\`.
 
 Session commands the user may use:
 - /sessions — list sessions
