@@ -229,6 +229,31 @@ pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String
         .unwrap_or("(no preview)");
     let preview = content_preview(preview_src, 80);
 
+    // Clear promoted_to on any episodic source entries that point at this node.
+    // Done before the edge cascade so a partial failure leaves the system retryable
+    // rather than with a stale pointer to a missing node.
+    let derived_filter = json!({
+        "filter": {
+            "source_id": id,
+            "source_collection": coll,
+            "edge_type": "derived_from",
+        },
+        "limit": 50,
+    });
+    let mut cleared_entries = 0usize;
+    if let Ok(derived_edges) = db.query("memory.edges", &derived_filter).await {
+        for edge in derived_edges {
+            let (Some(tgt_id), Some(tgt_coll)) = (
+                edge.get("target_id").and_then(|v| v.as_str()),
+                edge.get("target_collection").and_then(|v| v.as_str()),
+            ) else { continue };
+            if tgt_coll != "memory.entries" { continue; }
+            if db.patch_document("memory.entries", tgt_id, &json!({"promoted_to": null})).await.is_ok() {
+                cleared_entries += 1;
+            }
+        }
+    }
+
     let edge_filter = json!({
         "$or": [
             {"source_id": id, "source_collection": coll},
@@ -239,14 +264,14 @@ pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String
 
     if let Err(e) = db.delete(coll, id).await {
         return format!(
-            "Error: removed {} referencing edge(s) but failed to delete node {}:{}: {}",
-            edge_count, coll, id, e
+            "Error: cleared {} source entry(ies) and removed {} referencing edge(s) but failed to delete node {}:{}: {}",
+            cleared_entries, edge_count, coll, id, e
         );
     }
 
     format!(
-        "Removed node {}:{} (\"{}\") and {} referencing edge(s)",
-        coll, id, preview, edge_count
+        "Removed node {}:{} (\"{}\"), {} referencing edge(s), cleared promoted_to on {} source entry(ies)",
+        coll, id, preview, edge_count, cleared_entries
     )
 }
 
