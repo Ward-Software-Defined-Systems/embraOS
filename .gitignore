@@ -47,6 +47,7 @@ embraOS_Phase0_Sprint1.md
 ARCHITECTURE_Phase0_Sprint1.md
 
 # Phase 0 reference (retired from branch, kept locally)
-src/
-Dockerfile
-Cargo.toml.phase0
+# Leading slash anchors to repo root so crates/*/src/ are not matched.
+/src/
+/Dockerfile
+/Cargo.toml.phase0
