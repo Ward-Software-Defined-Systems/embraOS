@@ -44,7 +44,8 @@ impl Brain {
         let body = json!({
             "model": EMBRA_MODEL,
             "max_tokens": EMBRA_MAX_TOKENS,
-            "thinking": {"type": "adaptive"},
+            "thinking": {"type": "adaptive", "display": "omitted"},
+            "output_config": {"effort": "max"},
             "system": [{
                 "type": "text",
                 "text": self.system_prompt,
@@ -109,7 +110,8 @@ impl Brain {
         let body = json!({
             "model": EMBRA_MODEL,
             "max_tokens": EMBRA_MAX_TOKENS,
-            "thinking": {"type": "adaptive"},
+            "thinking": {"type": "adaptive", "display": "omitted"},
+            "output_config": {"effort": "max"},
             "system": [{
                 "type": "text",
                 "text": self.system_prompt,
