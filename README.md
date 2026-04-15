@@ -292,7 +292,7 @@ All sessions share the same intelligence — same memory, same identity, same so
 
 ### Default Tools
 
-Phase 1 includes ~76 built-in tools available in operational mode. These are internal tools invoked by the intelligence during conversation — not user-facing commands. The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
+Phase 1 includes 75 built-in tools available in operational mode. These are internal tools invoked by the intelligence during conversation — not user-facing commands. The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
 
 > **⚠️ Testing Notice:** The default tools and slash commands are actively being tested. If you encounter bugs or unexpected behavior, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
@@ -456,7 +456,7 @@ Cargo workspace with 7 crates, all cross-compiling to `x86_64-unknown-linux-musl
 | `embrad` | PID 1: loopback/eth0 setup, service supervisor, soul verification, reconciliation | Complete |
 | `embra-trustd` | Soul SHA-256 verification, Root CA generation, mTLS cert signing | Complete |
 | `embra-apid` | gRPC + REST gateway, bidirectional streaming proxy | Complete |
-| `embra-brain` | Headless AI runtime — Brain, ~76 tools, sessions, Learning Mode, proactive engine, knowledge graph | Complete |
+| `embra-brain` | Headless AI runtime — Brain, 75 tools, sessions, Learning Mode, proactive engine, knowledge graph | Complete |
 | `embra-console` | Full ratatui TUI over serial/gRPC — config wizard, styled rendering, session management | Complete |
 | `embra-common` | Shared protobuf types (tonic codegen) | Complete |
 
