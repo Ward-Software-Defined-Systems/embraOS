@@ -17,9 +17,7 @@ pub fn phase_kickoff(phase: &LearningPhase) -> String {
         LearningPhase::SoulDefinition => {
             "Identity confirmed. Now let's define your soul — your immutable core values.".into()
         }
-        LearningPhase::InitialToolset => {
-            "Soul sealed. Let's configure your initial toolset.".into()
-        }
+        LearningPhase::InitialToolset => String::new(),
         LearningPhase::Confirmation => {
             "Tools configured. Let's do a final review of everything.".into()
         }
@@ -59,20 +57,7 @@ pub fn system_prompt_for_phase(state: &LearningState, config: &SystemConfig) -> 
                 .unwrap_or_default();
             prompts::learning_soul_definition(&config.name, &user_profile, &identity)
         }
-        LearningPhase::InitialToolset => {
-            let user_profile = state
-                .user_profile
-                .as_ref()
-                .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
-                .unwrap_or_default();
-            let user_name = state
-                .user_profile
-                .as_ref()
-                .and_then(|v| v.get("name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("User");
-            prompts::learning_initial_toolset(&config.name, user_name, &user_profile)
-        }
+        LearningPhase::InitialToolset => String::new(),
         LearningPhase::Confirmation => {
             let user_profile = state
                 .user_profile
@@ -124,6 +109,58 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
     }
 }
 
+// Single source of truth for Phase 4 tool category counts.
+// (json_key, display_label, count). Keep in sync with the dispatch table in
+// `crates/embra-brain/src/tools/mod.rs` when tools are added or removed.
+const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
+    ("system", "System", 3),
+    ("memory_knowledge", "Memory & Knowledge", 5),
+    ("self_awareness", "Self-Awareness", 2),
+    ("time_context", "Time & Context", 3),
+    ("utility", "Utility", 2),
+    ("security", "Security", 9),
+    ("engineering", "Engineering", 23),
+    ("filesystem", "Filesystem", 7),
+    ("scheduling", "Scheduling", 3),
+    ("sessions", "Sessions", 10),
+    ("knowledge_graph", "Knowledge Graph", 8),
+];
+
+pub fn default_tools_registry_doc() -> serde_json::Value {
+    let categories: serde_json::Map<String, serde_json::Value> = CATEGORY_COUNTS
+        .iter()
+        .map(|(key, _, count)| ((*key).to_string(), serde_json::json!(count)))
+        .collect();
+    let total: usize = CATEGORY_COUNTS.iter().map(|(_, _, c)| c).sum();
+    serde_json::json!({
+        "policy": "all_enabled",
+        "sealed_at": chrono::Utc::now().to_rfc3339(),
+        "categories": categories,
+        "tool_count": total,
+    })
+}
+
+pub fn tool_summary_message(name: &str) -> String {
+    let total: usize = CATEGORY_COUNTS.iter().map(|(_, _, c)| c).sum();
+    let categories_list = CATEGORY_COUNTS
+        .iter()
+        .map(|(_, label, count)| format!("  - {label} ({count})"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "=== Phase 4: Initial Toolset ===\n\
+         All {total} built-in tools are enabled by default for {name}.\n\
+         \n\
+         {categories_list}\n\
+         \n\
+         Safety:\n\
+         \x20 - Filesystem and git writes are restricted to /embra/workspace.\n\
+         \x20 - SSH and port scans are restricted to RFC 1918 / loopback addresses.\n\
+         \n\
+         \u{2192} Advancing to Final Confirmation..."
+    )
+}
+
 pub async fn handle_phase_complete(
     state: &mut LearningState,
     db: &WardsonDbClient,
@@ -159,11 +196,10 @@ pub async fn handle_phase_complete(
             state.phase = LearningPhase::InitialToolset;
         }
         LearningPhase::InitialToolset => {
-            if let Some(tools) = doc {
-                state.tools_config = Some(tools.clone());
-                persist_document(db, "tools.registry", &tools, None).await?;
-                tracing::info!("Tools config persisted");
-            }
+            let tools = default_tools_registry_doc();
+            state.tools_config = Some(tools.clone());
+            persist_document(db, "tools.registry", &tools, None).await?;
+            tracing::info!("Tools config persisted (all_enabled policy)");
             state.phase = LearningPhase::Confirmation;
         }
         LearningPhase::Confirmation => {

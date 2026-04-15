@@ -1123,6 +1123,43 @@ async fn run_learning_loop(
             break;
         }
 
+        // Phase 4 is non-interactive: render a deterministic tool summary,
+        // persist an "all_enabled" registry doc, and auto-advance to Confirmation
+        // without consulting the Brain.
+        if state.phase == learning::LearningPhase::InitialToolset {
+            let summary = learning::tool_summary_message(&config.name);
+            let _ = tx.send(Ok(ConversationResponse {
+                response_type: Some(conversation_response::ResponseType::System(
+                    SystemMessage {
+                        content: summary,
+                        msg_type: SystemMessageType::Info as i32,
+                    }
+                )),
+            })).await;
+
+            if let Err(e) = learning::handle_phase_complete(&mut state, &**db, config).await {
+                error!("Phase 4 auto-advance failed: {}", e);
+                let _ = tx.send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage {
+                            content: format!("Error processing phase: {}", e),
+                            msg_type: SystemMessageType::Error as i32,
+                        }
+                    )),
+                })).await;
+            }
+
+            let _ = tx.send(Ok(ConversationResponse {
+                response_type: Some(conversation_response::ResponseType::System(
+                    SystemMessage {
+                        content: format!("Phase complete — advancing to: {}", learning::phase_label(&state.phase)),
+                        msg_type: SystemMessageType::Info as i32,
+                    }
+                )),
+            })).await;
+            continue;
+        }
+
         // Build system prompt for current phase
         let system_prompt = learning::system_prompt_for_phase(&state, config);
         let brain = Brain::new(api_key.to_string(), system_prompt);
