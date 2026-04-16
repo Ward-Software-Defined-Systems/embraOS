@@ -1,6 +1,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::io::{self, Write};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tonic::Status;
 use tracing::info;
@@ -161,6 +162,65 @@ fn prompt_required(prompt: &str) -> Result<String> {
     }
 }
 
+enum ApiKeyCheck {
+    Valid,
+    Invalid(String),
+}
+
+async fn validate_api_key(key: &str) -> ApiKeyCheck {
+    if key.is_empty() {
+        return ApiKeyCheck::Invalid("API key is empty.".into());
+    }
+    if !key.starts_with("sk-") {
+        return ApiKeyCheck::Invalid("API key must start with 'sk-'.".into());
+    }
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            return ApiKeyCheck::Invalid(format!("Could not build HTTP client: {}", e));
+        }
+    };
+    let resp = client
+        .get("https://api.anthropic.com/v1/models")
+        .header("x-api-key", key)
+        .header("anthropic-version", "2023-06-01")
+        .send()
+        .await;
+    match resp {
+        Ok(r) if r.status().is_success() => ApiKeyCheck::Valid,
+        Ok(r) if matches!(r.status().as_u16(), 401 | 403) => {
+            ApiKeyCheck::Invalid("Invalid API key — check and try again.".into())
+        }
+        Ok(r) if r.status().is_client_error() => {
+            ApiKeyCheck::Invalid(format!("API rejected key ({}).", r.status()))
+        }
+        Ok(r) => ApiKeyCheck::Invalid(format!(
+            "Could not verify key: Anthropic returned {}. Check network and try again.",
+            r.status()
+        )),
+        Err(e) => ApiKeyCheck::Invalid(format!(
+            "Could not verify key: {}. Check network and try again.",
+            e
+        )),
+    }
+}
+
+fn validate_timezone(input: &str) -> Result<String, String> {
+    let resolved = crate::tools::resolve_timezone(input);
+    resolved
+        .parse::<chrono_tz::Tz>()
+        .map(|_| resolved.clone())
+        .map_err(|_| {
+            format!(
+                "Invalid timezone '{}' — expected an IANA name like 'America/Los_Angeles'.",
+                input
+            )
+        })
+}
+
 /// Drive the config wizard over a gRPC Converse stream.
 /// Sends SetupPrompt messages and waits for UserMessage responses.
 pub async fn run_config_wizard_grpc(
@@ -197,9 +257,25 @@ pub async fn run_config_wizard_grpc(
     };
     info!("Config wizard: name = {}", name);
 
-    // Step 2: API Key
-    let api_key = match std::env::var("ANTHROPIC_API_KEY") {
-        Ok(key) if !key.is_empty() => {
+    // Step 2: API Key — re-prompts until validation against Anthropic succeeds.
+    let api_key = loop {
+        let (candidate, from_env) = match std::env::var("ANTHROPIC_API_KEY") {
+            Ok(k) if !k.is_empty() => (k, true),
+            _ => {
+                let _ = tx.send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::Setup(
+                        SetupPrompt {
+                            field_type: SetupFieldType::Text as i32,
+                            prompt: "Enter your Anthropic API key:".to_string(),
+                            options: vec![],
+                            default_value: String::new(),
+                        }
+                    )),
+                })).await;
+                (response_rx.recv().await.unwrap_or_default(), false)
+            }
+        };
+        if from_env {
             let _ = tx.send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::System(
                     SystemMessage {
@@ -208,51 +284,64 @@ pub async fn run_config_wizard_grpc(
                     }
                 )),
             })).await;
-            key
         }
-        _ => {
-            let _ = tx.send(Ok(ConversationResponse {
-                response_type: Some(conversation_response::ResponseType::Setup(
-                    SetupPrompt {
-                        field_type: SetupFieldType::Text as i32,
-                        prompt: "Enter your Anthropic API key:".to_string(),
-                        options: vec![],
-                        default_value: String::new(),
-                    }
-                )),
-            })).await;
-
-            let key = response_rx.recv().await.unwrap_or_default();
-            if !key.starts_with("sk-") && !key.is_empty() {
+        let _ = tx.send(Ok(ConversationResponse {
+            response_type: Some(conversation_response::ResponseType::System(
+                SystemMessage {
+                    content: "Validating API key with Anthropic…".to_string(),
+                    msg_type: SystemMessageType::Info as i32,
+                }
+            )),
+        })).await;
+        match validate_api_key(&candidate).await {
+            ApiKeyCheck::Valid => break candidate,
+            ApiKeyCheck::Invalid(msg) => {
                 let _ = tx.send(Ok(ConversationResponse {
                     response_type: Some(conversation_response::ResponseType::System(
                         SystemMessage {
-                            content: "Warning: API key doesn't start with 'sk-'. Proceeding anyway.".to_string(),
-                            msg_type: SystemMessageType::Warning as i32,
+                            content: msg,
+                            msg_type: SystemMessageType::Error as i32,
                         }
                     )),
                 })).await;
+                if from_env {
+                    // Stop trusting the env var; fall through to prompting next iteration.
+                    unsafe { std::env::remove_var("ANTHROPIC_API_KEY"); }
+                }
+                continue;
             }
-            key
         }
     };
 
-    // Step 3: Timezone
-    let tz_default = detect_timezone();
-    let _ = tx.send(Ok(ConversationResponse {
-        response_type: Some(conversation_response::ResponseType::Setup(
-            SetupPrompt {
-                field_type: SetupFieldType::Text as i32,
-                prompt: format!("What timezone are you in? (detected: {})", tz_default),
-                options: vec![],
-                default_value: tz_default.clone(),
+    // Step 3: Timezone — re-prompts until chrono_tz can parse the resolved value.
+    let timezone = loop {
+        let tz_default = detect_timezone();
+        let _ = tx.send(Ok(ConversationResponse {
+            response_type: Some(conversation_response::ResponseType::Setup(
+                SetupPrompt {
+                    field_type: SetupFieldType::Text as i32,
+                    prompt: format!("What timezone are you in? (detected: {})", tz_default),
+                    options: vec![],
+                    default_value: tz_default.clone(),
+                }
+            )),
+        })).await;
+        let input = response_rx.recv().await.unwrap_or_default();
+        let candidate = if input.is_empty() { tz_default } else { input };
+        match validate_timezone(&candidate) {
+            Ok(tz) => break tz,
+            Err(msg) => {
+                let _ = tx.send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage {
+                            content: msg,
+                            msg_type: SystemMessageType::Error as i32,
+                        }
+                    )),
+                })).await;
+                continue;
             }
-        )),
-    })).await;
-
-    let timezone = match response_rx.recv().await {
-        Some(input) if !input.is_empty() => crate::tools::resolve_timezone(&input),
-        _ => crate::tools::resolve_timezone(&tz_default),
+        }
     };
 
     // Step 4: Confirmation
