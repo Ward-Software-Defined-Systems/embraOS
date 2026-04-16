@@ -608,8 +608,15 @@ async fn handle_request(
                 for m in &messages[original_len..] {
                     let _ = mgr.append_message(&session_name, m).await;
                 }
-                // Save the final response
-                let _ = mgr.append_message(&session_name, &Message::assistant(&current_response)).await;
+                // Save the final response. If the continuation after the tool
+                // loop produced no text, store a placeholder — empty assistant
+                // messages cannot be replayed through the API on later turns.
+                let final_text = if current_response.trim().is_empty() {
+                    "(no response)".to_string()
+                } else {
+                    current_response.clone()
+                };
+                let _ = mgr.append_message(&session_name, &Message::assistant(&final_text)).await;
             }
 
             Ok(())
@@ -1197,8 +1204,15 @@ async fn run_learning_loop(
         let phase_complete = full_response.contains("[PHASE_COMPLETE]");
         let clean_response = full_response.replace("[PHASE_COMPLETE]", "").trim().to_string();
 
-        // Add to conversation history (without marker)
-        state.conversation_history.push(Message::assistant(&clean_response));
+        // Add to conversation history (without marker).
+        // Opus 4.7 sometimes emits only the marker with no prose; never push
+        // an empty assistant message — Anthropic rejects empty text blocks.
+        let history_entry = if clean_response.is_empty() {
+            "(phase complete)".to_string()
+        } else {
+            clean_response.clone()
+        };
+        state.conversation_history.push(Message::assistant(&history_entry));
 
         if phase_complete {
             // Persist extracted documents and advance phase
@@ -1265,7 +1279,12 @@ async fn run_learning_loop(
 
                             let phase_complete = full_response.contains("[PHASE_COMPLETE]");
                             let clean_response = full_response.replace("[PHASE_COMPLETE]", "").trim().to_string();
-                            state.conversation_history.push(Message::assistant(&clean_response));
+                            let history_entry = if clean_response.is_empty() {
+                                "(phase complete)".to_string()
+                            } else {
+                                clean_response.clone()
+                            };
+                            state.conversation_history.push(Message::assistant(&history_entry));
 
                             if phase_complete {
                                 if let Err(e) = learning::handle_phase_complete(&mut state, &**db, config).await {

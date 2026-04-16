@@ -394,7 +394,7 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &AppState) {
         AppMode::Setup(_) => vec![Span::raw(" Setup in progress")],
         AppMode::Learning => vec![
             Span::raw(" Learning Mode"),
-            Span::raw(" | Brain: opus-4.6"),
+            Span::raw(" | Brain: opus-4.7"),
         ],
         AppMode::Operational { session_name } => vec![
             Span::raw(" Sessions: ["),
@@ -402,7 +402,7 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &AppState) {
                 format!("{}*", session_name),
                 Style::default().fg(Color::Yellow),
             ),
-            Span::raw("] | Brain: opus-4.6"),
+            Span::raw("] | Brain: opus-4.7"),
         ],
     };
 

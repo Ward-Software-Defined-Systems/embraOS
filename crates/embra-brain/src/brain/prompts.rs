@@ -153,7 +153,7 @@ Time & Context:
 - [TOOL:session_summary] — summarize the current conversation
 
 Utility:
-- [TOOL:calculate <expression>] — evaluate math (e.g. 1024 * 1024)
+- [TOOL:calculate <expression>] — evaluate math (e.g. 2 ** 10, 1024 * 1024)
 - [TOOL:draft <title> | <content>] — save/update a text draft for later retrieval
 
 Security:

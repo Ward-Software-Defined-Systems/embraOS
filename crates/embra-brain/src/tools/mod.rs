@@ -820,12 +820,14 @@ async fn session_summary(db: &WardsonDbClient, session_name: &str) -> String {
 
 fn calculate(expression: &str) -> String {
     if expression.is_empty() {
-        return "Usage: [TOOL:calculate <expression>]\nExample: [TOOL:calculate 1024 * 1024]".into();
+        return "Usage: [TOOL:calculate <expression>]\nExample: [TOOL:calculate 2 ** 10]".into();
     }
 
-    match meval::eval_str(expression) {
+    // Accept ** for exponents (Python/Rust convention); meval's parser uses ^.
+    let normalized = expression.replace("**", "^");
+
+    match meval::eval_str(&normalized) {
         Ok(result) => {
-            // Format nicely: no trailing zeros for whole numbers
             if result == result.floor() && result.abs() < 1e15 {
                 format!("{} = {}", expression, result as i64)
             } else {

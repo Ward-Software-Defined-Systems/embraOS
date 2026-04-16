@@ -13,7 +13,7 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing::{error, warn};
 
-const EMBRA_MODEL: &str = "claude-opus-4-6";
+const EMBRA_MODEL: &str = "claude-opus-4-7";
 const EMBRA_MAX_TOKENS: u32 = 128_000;
 const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
@@ -171,8 +171,9 @@ fn build_cached_messages(messages: &[Message]) -> Vec<serde_json::Value> {
         .iter()
         .enumerate()
         .map(|(i, msg)| {
-            if len >= 2 && i == len - 2 {
-                // Cache breakpoint: caches all messages up to this point
+            // Anthropic rejects cache_control on empty text blocks, so only
+            // apply the breakpoint when the message actually has content.
+            if len >= 2 && i == len - 2 && !msg.content.is_empty() {
                 json!({
                     "role": msg.role,
                     "content": [{
