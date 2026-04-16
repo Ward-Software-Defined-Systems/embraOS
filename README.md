@@ -139,42 +139,6 @@ All tokens persist across reboots (stored on the STATE partition). Git `safe.dir
 > ```
 > Backups are stored in `~/embraOS_BACKUPS/` by default (override with `EMBRAOS_BACKUP_DIR`). Each backup includes STATE (soul hash, PKI certs), DATA (WardSONDB collections, workspace), and metadata with SHA-256 of the source image.
 
-#### macOS (Cross-Compilation Only)
-
-macOS can cross-compile all Rust binaries but cannot run Buildroot (which requires a Linux host to compile the kernel and assemble the disk image). Use an Ubuntu VM or Docker for the full build.
-
-```bash
-# Install dependencies
-brew install protobuf
-brew install filosottile/musl-cross/musl-cross
-brew install qemu grpcurl
-rustup target add x86_64-unknown-linux-musl
-```
-
-```bash
-# Clone and configure
-git clone https://github.com/Ward-Software-Defined-Systems/embraOS.git
-cd embraOS
-git checkout phase1-arch-rework
-
-# Configure musl-cross linker (per-machine, only needed once — adjust path if Homebrew prefix differs)
-cat >> ~/.cargo/config.toml << 'EOF'
-[target.x86_64-unknown-linux-musl]
-linker = "/usr/local/Cellar/musl-cross/0.9.11/libexec/bin/x86_64-linux-musl-gcc"
-EOF
-```
-
-```bash
-# Cross-compile all binaries (static Linux ELFs)
-cargo build --release --target x86_64-unknown-linux-musl --workspace
-
-# Create initramfs (works on macOS)
-./scripts/create_initramfs.sh
-
-# Buildroot step requires Linux — run on Ubuntu VM or via Docker:
-# ./scripts/build-image.sh --buildroot-only
-```
-
 ---
 
 ## What Happens When You Run It
@@ -208,7 +172,7 @@ embraOS is built on a 7-layer continuity architecture:
 
 **Persistence:** [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a high-performance JSON document database built in Rust. It's not just a backend — it's the AI's memory, identity store, and state of consciousness.
 
-**AI Model:** Claude Opus 4.6 (Anthropic). Phase 0 is locked to this model for the highest quality reasoning during soul formation and ongoing interaction.
+**AI Model:** Claude Opus 4.7 (Anthropic). The Brain is pinned to the current flagship model for the highest quality reasoning during soul formation and ongoing interaction; requests are sent with `output_config.effort=max` and `thinking.display=omitted`.
 
 **Prompt Caching:** embraOS uses Anthropic's ephemeral prompt caching with two cache breakpoints to minimize token costs:
 
@@ -284,7 +248,7 @@ All sessions share the same intelligence — same memory, same identity, same so
 ## Current Limitations
 
 - **API only** — requires internet connectivity and an Anthropic API key
-- **Single model** — Claude Opus 4.6, not configurable
+- **Single model** — Claude Opus 4.7, not configurable
 - **QEMU x86_64 only** — bare metal and other architectures come in Phase 4
 - **Tested on limited platforms** — built and verified on Ubuntu 24.04 under QEMU 8.2.2; bootable image also runs under QEMU on Intel and Apple Silicon Macs
 - **Built-in tools only** — no MCP server modules (yet)
@@ -319,7 +283,7 @@ Phase 1 includes 75 built-in tools available in operational mode. These are inte
 | **memory_scan** | Memory inventory — total count, tag frequency, per-session breakdown, age buckets, duplicate candidates. Includes a Knowledge Graph summary section (semantic/procedural/edge counts, promoted ratio) |
 | **memory_dedup** | Find duplicate memory groups (identical, near-duplicate, subset) with merge strategy proposals. Also flags cross-collection overlap between unpromoted entries and semantic nodes |
 
-**Knowledge Graph** *(Sprint 2)*
+**Knowledge Graph** *(Sprint 2 — EXPERIMENTAL)*
 
 | Tool | Description |
 |---|---|
@@ -434,7 +398,6 @@ Phase 1 includes 75 built-in tools available in operational mode. These are inte
 | **Phase 1 — Initial Sprint** | Core OS — QEMU-bootable image, immutable SquashFS rootfs, full boot chain (embra-init → embrad → services), config wizard, Learning Mode, soul sealing, gRPC architecture, serial TUI | ✅ **Complete** |
 | **Phase 1 — Sprint 1** | Bug fixes & UX — tool feedback loop, timezone display, multi-line input, git/SSH/GitHub setup commands, input word-wrap, tool output truncation, Unicode crash fix | ✅ **Complete** |
 | **Phase 1 — Sprint 2** | Cross-session knowledge graph — semantic/procedural promotion, typed/weighted edges, BFS traversal, graph-aware retrieval, 6 KG tools, `/feedback-loop` command | ✅ **Complete** |
-| **Pit Stop** | Main branch merge | Planned |
 | **Pit Stop** | Code review branch — security audit, AI slop cleanup, refactoring | Planned |
 | **Pit Stop** | Main branch merge | Planned |
 | **Phase 2** | Terminal & Sessions — Full TUI rewrite, API Web Searches via `embra-guardian` v1 (including additional prompt injection protection for the returned results) | Planned |
@@ -494,6 +457,8 @@ Bug fixes and UX improvements found during end-to-end QEMU verification of the I
 
 ### Phase 1 Sprint 2 Scope
 
+> **⚠️ Experimental:** The knowledge graph is a first cut. The current implementation is sub-optimal (naive edge derivation, single-signal ranking weights, no compaction) and is slated for considerable optimization in a later phase. Expect the schema, tool surface, and ranking heuristics to evolve.
+
 Cross-session knowledge graph — the intelligence can now promote episodic memories to durable semantic/procedural knowledge and traverse relationships between knowledge nodes.
 
 - **Schema v5 migration** — 3 new collections (`memory.semantic`, `memory.procedural`, `memory.edges`), 7 indexes, tag array migration (comma-string → JSON array), 4 KG config fields added to `config.system`.
@@ -506,7 +471,7 @@ Cross-session knowledge graph — the intelligence can now promote episodic memo
 - **Existing tool updates** — `remember` stores array tags + background edge derivation, `recall`/`memory_search` cross-collection, `memory_scan` KG summary section, `memory_dedup` cross-collection flagging, `introspect` knowledge focus.
 - **`/feedback-loop` slash command (EXPERIMENTAL)** — Phase 3 Continuity Engine preview. Embeds `feedback-loop-spec-v2.md` read-only in the binary, synthesizes a user turn that walks the Brain through the self-evaluation protocol using existing tools.
 
-**Late-sprint additions (2026-04-10):**
+**Late-sprint additions & post-Sprint 2 fixes (2026-04-10 – 2026-04-16):**
 
 - **Auto-KG-enrichment on user prompts** — every non-trivial user turn now runs `retrieve_relevant_knowledge` against the KG before the Anthropic API call. When ≥1 result scores ≥ 0.3, the user message is wrapped in a `<retrieved_context source="auto-enrichment">` block containing the top matches, so the Brain has durable knowledge in-hand without being told to look. The system prompt is untouched, so Anthropic prompt caching stays warm. Gated on message length, chatty-filler detection, and `[TOOL:` manual overrides; the wrapper never persists to session history. Observable via a `tracing::info!` event with session, tag count, result count, and top score.
 - **Tool-result cap raised 50 KB → 2 MiB** — the single global `MAX_TOOL_RESULT_SIZE` constant now allows every long-output tool (`session_read`, `git_diff`, `git_log`, `knowledge_traverse`, `knowledge_query`, `memory_scan`, `recall`, etc.) to return realistic volumes. Previously every result over 50 KB was clipped.
@@ -517,10 +482,14 @@ Cross-session knowledge graph — the intelligence can now promote episodic memo
 - **Multi-line tool-tag parser fix** — `extract_tool_tags` was rejecting tool calls whose parameter wrapped across lines (e.g. a long `remember` blurb), silently dropping the tag and stalling the turn. Replaced the line-by-line predicate with a forward scan that spans newlines and collapses internal whitespace before dispatch. Fence/backtick stripping preserved; 7 unit tests cover single-line, multi-line, fenced, inline-backtick, adjacent, unterminated, and nested cases.
 - **Tool-tag parser bracket-truncation fix** — `extract_tool_tags` was using a naive `find(']')` that terminated at the first `]` in tool arguments, silently truncating every call whose parameter contained JSON arrays (`{"tags": ["a"]}`), markdown links (`[docs](url)`), git `[section]` notation, or Rust examples (`vec![0u8; 4]`). All ~70 tools were affected. Replaced the scan with depth-tracked bracket/brace balancing that honors JSON string quoting, plus a `\]` / `\\` escape path for stray `]` in free-text params (e.g. `file_write`, `remember`, `git_commit`). System prompt gained one line directing the intelligence to use `\]` when needed; stays stable for prompt caching. 10 new unit tests cover JSON, markdown, git sections, code brackets, quoted/escaped strings, nested objects, and the escape path.
 - **Config wizard validation (API key + timezone)** — first-run Step 2 and Step 3 now validate before committing. The API key runs through a 10 s-timeout probe at `GET https://api.anthropic.com/v1/models`: 200 advances, 401/403 rejects with "Invalid API key", and network errors / 5xx / timeouts all re-prompt rather than accepting an unverified key (embraOS is non-functional without a working brain). The timezone runs through the existing `resolve_timezone()` then `chrono_tz::Tz::parse()` — typos no longer silently fall back to UTC downstream. Invalid input emits a `SystemMessage::Error` and re-sends the same prompt; the console's keyword step-inference keeps the user on the correct step. `ANTHROPIC_API_KEY` from env is validated too, with a fallback to the manual prompt on failure. `/embra/state/api_key` and `/embra/state/timezone` stay gated behind both loops, so a cancelled wizard leaves STATE untouched.
+- **Orphaned `promoted_to` fix** — `knowledge_unlink_node` previously removed the node and referencing edges but left `promoted_to` on source episodic entries pointing at the deleted node, blocking re-promotion and silently dropping entries from direct-query retrieval. `unlink_node` now queries `derived_from` edges sourced at the node and PATCHes `promoted_to: null` on each target episodic entry before the edge cascade, reporting the cleared count in the success message. `promotion::load_source_entry` also lazy-invalidates: when `promoted_to` is non-null it reads the target first and clears the stale pointer if the read fails. Heals the entries stuck from the earlier parser-truncation bug on next re-promotion attempt.
+- **Brain upgraded to Opus 4.7 with max reasoning effort** — Both Messages-API request bodies (streaming + non-streaming) now opt into `output_config.effort=max` and suppress thinking-block streaming via `thinking.display=omitted`; thinking type itself is still `adaptive`. `EMBRA_MODEL` bumped from `claude-opus-4-6` to `claude-opus-4-7`. 4.7's more-literal instruction following sometimes collapses a phase-completing turn to `[PHASE_COMPLETE]` with no prose, which Anthropic then rejects on the next call as "cache\_control cannot be set for empty text blocks" — guards now substitute `(phase complete)` / `(no response)` at the three push sites, and `build_cached_messages` defensively skips `cache_control` when the breakpoint would land on an empty content block. Prompt caching unaffected; console status line shows `opus-4.7` in Learning and Operational modes.
+- **Learning Mode Phase 4 (InitialToolset) now deterministic** — The AI-driven tool-selection conversation was ceremonial: the stored `tools.registry` doc was never consulted at runtime (dispatch always matched every tool). `run_learning_loop` now short-circuits InitialToolset: renders a deterministic summary via `tool_summary_message()`, persists an `all_enabled` registry via `default_tools_registry_doc()`, and advances to Confirmation without a Brain call. Category counts live in a single `CATEGORY_COUNTS` const shared by both helpers to prevent drift. Soul hash unaffected (tools are not part of `soul.invariant`).
+- **`calculate` operator cleanup** — tool now accepts `**` as the exponent operator (4.7 emits Python/Rust convention; translated to `^` before `meval`) and rejects bare `^` in the input to prevent the XOR-vs-exponent confusion a user would otherwise have no way to diagnose. Catalog and usage string updated in kind.
 
 > **Note:** Knowledge graph promotion is still a judgment call. The intelligence promotes episodic memories during conversation (via `knowledge_promote`) or as part of the `/feedback-loop` self-evaluation protocol. Automated promotion (e.g., confidence-based triggers or scheduled consolidation) is planned for Phase 3's Continuity Engine. With auto-enrichment now in place, the *retrieval* half of the loop is implicit, but promotion remains explicit.
 
-**Status:** Sprint 2 core complete (4 commits on `phase1-arch-rework`).
+**Status:** Sprint 2 core + late-sprint additions + post-sprint fixes complete on `phase1-arch-rework`, pending merge to `main`.
 
 ---
 
