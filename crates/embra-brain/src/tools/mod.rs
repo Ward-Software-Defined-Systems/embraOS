@@ -823,7 +823,16 @@ fn calculate(expression: &str) -> String {
         return "Usage: [TOOL:calculate <expression>]\nExample: [TOOL:calculate 2 ** 10]".into();
     }
 
-    // Accept ** for exponents (Python/Rust convention); meval's parser uses ^.
+    // Exponent is ** (Python/Rust convention). Reject bare ^ up-front so it
+    // never silently resolves to meval's native power operator — in Python ^
+    // is XOR, and this tool does not support XOR. Detect ^ before translating
+    // ** → ^ for meval.
+    if expression.contains('^') {
+        return format!(
+            "Could not evaluate '{}': '^' is not supported. Use ** for exponent (e.g. 2 ** 10). XOR is not available in this tool.",
+            expression
+        );
+    }
     let normalized = expression.replace("**", "^");
 
     match meval::eval_str(&normalized) {
