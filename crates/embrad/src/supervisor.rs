@@ -113,11 +113,18 @@ impl Supervisor {
             unsafe { std::env::set_var("TZ", &tz); }
             tracing::info!("System timezone set: TZ={}", tz);
         }
+        // Storage engine baked at build time via scripts/build-image.sh --storage-engine.
+        // Falls back to rocksdb for dev builds (`cargo check`/`cargo run`) that bypass
+        // the build script. See crates/embrad/build.rs.
+        let storage_engine: &'static str =
+            option_env!("EMBRA_STORAGE_ENGINE").unwrap_or("rocksdb");
+        info!("WardSONDB storage engine: {}", storage_engine);
         // 1. WardSONDB — no dependencies
         self.add_service(ServiceDef {
             name: "wardsondb".to_string(),
             binary: "/usr/bin/wardsondb".to_string(),
             args: vec![
+                "--storage-engine".to_string(), storage_engine.to_string(),
                 "--port".to_string(), "8090".to_string(),
                 "--data-dir".to_string(), "/embra/data/wardsondb".to_string(),
                 "--log-file".to_string(), "/embra/ephemeral/wardsondb.log".to_string(),
@@ -315,22 +322,27 @@ impl Supervisor {
         if let Some(ref mut child) = svc.child {
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    // Read stderr for error details
-                    let stderr_output = if let Some(stderr) = child.stderr.take() {
-                        use tokio::io::AsyncReadExt;
-                        let mut buf = Vec::new();
-                        let mut reader = tokio::io::BufReader::new(stderr);
-                        let _ = reader.read_to_end(&mut buf).await;
-                        String::from_utf8_lossy(&buf).to_string()
-                    } else {
-                        String::new()
-                    };
-                    let msg = format!("{} exited immediately with status: {:?}", svc.def.name, status);
-                    if !stderr_output.is_empty() {
-                        error!("{}\nstderr: {}", msg, stderr_output);
-                    } else {
-                        error!("{}", msg);
+                    let name = svc.def.name.clone();
+                    let msg = format!("{} exited immediately with status: {:?}", name, status);
+                    // stdout+stderr were redirected to the log file — read its tail
+                    // via eprintln! so it lands on the serial console before halt.
+                    eprintln!("[embrad] DIAG: {}", msg);
+                    let log_path = format!("/embra/ephemeral/{}.log", name);
+                    match std::fs::read_to_string(&log_path) {
+                        Ok(log_content) if !log_content.is_empty() => {
+                            eprintln!("[embrad] DIAG: {} log tail:", name);
+                            for line in log_content.lines().rev().take(30).collect::<Vec<_>>().into_iter().rev() {
+                                eprintln!("  {}", line);
+                            }
+                        }
+                        Ok(_) => {
+                            eprintln!("[embrad] DIAG: {} log file is empty — service produced no output", name);
+                        }
+                        Err(log_err) => {
+                            eprintln!("[embrad] DIAG: {} could not read log file {}: {}", name, log_path, log_err);
+                        }
                     }
+                    error!("{}", msg);
                     svc.status = ServiceStatus::Failed(msg.clone());
                     svc.child = None;
                     return Err(anyhow::anyhow!(msg));

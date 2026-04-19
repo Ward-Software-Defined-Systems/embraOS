@@ -45,6 +45,20 @@ sudo apt-get update && sudo apt-get install -y \
   build-essential gcc g++ unzip bc cpio rsync wget python3 file \
   protobuf-compiler musl-tools qemu-system-x86 libelf-dev libssl-dev genext2fs
 
+# Install musl cross-toolchain (gcc+g++ with a matching musl libstdc++).
+# Ubuntu's musl-tools only wraps the host gcc and drags in a glibc-linked
+# libstdc++ — which won't link against musl. WardSONDB's rocksdb backend is
+# C++, so we need a self-contained musl toolchain from musl.cc.
+cd /tmp
+curl -LO https://musl.cc/x86_64-linux-musl-cross.tgz
+sudo tar -xzf x86_64-linux-musl-cross.tgz -C /opt
+# Put the toolchain on PATH for ad-hoc cargo builds (build-image.sh also
+# auto-detects /opt/x86_64-linux-musl-cross even if PATH isn't set).
+echo 'export PATH="/opt/x86_64-linux-musl-cross/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+x86_64-linux-musl-gcc --version
+x86_64-linux-musl-g++ --version
+
 # Install Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source ~/.cargo/env
@@ -60,24 +74,24 @@ git checkout phase1-arch-rework
 # Configure musl linker (per-machine, only needed once)
 cat >> ~/.cargo/config.toml << 'EOF'
 [target.x86_64-unknown-linux-musl]
-linker = "musl-gcc"
+linker = "x86_64-linux-musl-gcc"
 EOF
 
-# Build WardSONDB (separate repo, required dependency)
+# Clone WardSONDB (separate repo, required dependency — build-image.sh builds and copies it)
 cd ..
 git clone https://github.com/Ward-Software-Defined-Systems/wardsondb.git WardSONDB
 cd WardSONDB
-cargo build --release --target x86_64-unknown-linux-musl
-mkdir -p ../embraOS/target/x86_64-unknown-linux-musl/release/
-cp target/x86_64-unknown-linux-musl/release/wardsondb ../embraOS/target/x86_64-unknown-linux-musl/release/
+git checkout backend-storage-arch-rework    # Pluggable storage engine (rocksdb / fjall)
 cd ../embraOS
 ```
 
 ```bash
-# Build and run
-./scripts/build-image.sh                    # Full pipeline: Rust → initramfs → Buildroot → disk image
-./scripts/run-qemu.sh                       # Boot in QEMU with serial console
+# Build and run — pick a storage engine: rocksdb (battle-tested) or fjall (pure Rust)
+./scripts/build-image.sh --storage-engine rocksdb   # Full pipeline: Rust → initramfs → Buildroot → disk image
+./scripts/run-qemu.sh                                # Boot in QEMU with serial console
 ```
+
+> **Storage engine:** The `--storage-engine` flag is required and is baked into the embrad binary at build time. WardSONDB locks the choice into the DATA partition on first boot via a `.engine` marker file — switching engines later requires wiping DATA.
 
 On first boot, the Config Wizard runs — name your intelligence, enter your Anthropic API key, set your timezone. Each field is validated before commit — an invalid API key or garbage timezone re-prompts instead of persisting. After setup, you're in a full TUI conversation with styled text, thinking indicators, and tool execution.
 

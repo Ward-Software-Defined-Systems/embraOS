@@ -1,9 +1,18 @@
 #!/bin/bash
 # Full build: Rust binaries → initramfs → Buildroot → disk image
 #
+# Usage:
+#   ./scripts/build-image.sh --storage-engine <fjall|rocksdb>
+#   ./scripts/build-image.sh --buildroot-only
+#
+# --storage-engine selects the WardSONDB backend baked into the embrad binary.
+# The choice is locked into the DATA partition on first boot via WardSONDB's
+# .engine marker file — switching engines later requires wiping DATA.
+#
 # NOTE: Steps 1-3 (Rust cross-compilation + initramfs) work on macOS.
 #       Step 4 (Buildroot) requires a Linux host. On macOS, use Docker:
 #
+#   ./scripts/build-image.sh --storage-engine rocksdb   # outer call bakes engine
 #   docker run --rm -v "$PWD":/work -w /work ubuntu:24.04 bash -c \
 #     "apt-get update && apt-get install -y build-essential gcc g++ \
 #      unzip bc cpio rsync wget python3 file && \
@@ -21,12 +30,62 @@ nproc_compat() {
 }
 
 BUILDROOT_ONLY=false
-if [ "${1:-}" = "--buildroot-only" ]; then
-    BUILDROOT_ONLY=true
-    shift
+STORAGE_ENGINE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --buildroot-only)
+            BUILDROOT_ONLY=true
+            shift
+            ;;
+        --storage-engine)
+            STORAGE_ENGINE="${2:-}"
+            shift 2
+            ;;
+        *)
+            echo "ERROR: unknown argument: $1" >&2
+            echo "Usage: $0 --storage-engine <fjall|rocksdb> [--buildroot-only]" >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [ "$BUILDROOT_ONLY" = false ]; then
+    if [ -z "$STORAGE_ENGINE" ]; then
+        echo "ERROR: --storage-engine <fjall|rocksdb> is required" >&2
+        exit 2
+    fi
+    case "$STORAGE_ENGINE" in
+        fjall|rocksdb) ;;
+        *)
+            echo "ERROR: --storage-engine must be 'fjall' or 'rocksdb', got '$STORAGE_ENGINE'" >&2
+            exit 2
+            ;;
+    esac
+    export EMBRA_STORAGE_ENGINE="$STORAGE_ENGINE"
+    echo "=== embraOS build: storage engine = $STORAGE_ENGINE ==="
+elif [ -n "$STORAGE_ENGINE" ]; then
+    echo "WARNING: --storage-engine ignored with --buildroot-only (Rust not rebuilt;" >&2
+    echo "         engine taken from the previously-baked embrad binary)" >&2
 fi
 
 if [ "$BUILDROOT_ONLY" = false ]; then
+    # Musl cross-toolchain. Ubuntu's musl-tools wraps the host gcc and pulls in
+    # a glibc-linked libstdc++ that won't link against musl — we need the self-
+    # contained musl.cc toolchain for both C and C++ compilation.
+    MUSL_CROSS="${MUSL_CROSS:-/opt/x86_64-linux-musl-cross}"
+    if [ ! -x "$MUSL_CROSS/bin/x86_64-linux-musl-gcc" ]; then
+        echo "ERROR: musl cross-toolchain not found at $MUSL_CROSS" >&2
+        echo "  Install it with:" >&2
+        echo "    cd /tmp && curl -LO https://musl.cc/x86_64-linux-musl-cross.tgz" >&2
+        echo "    sudo tar -xzf x86_64-linux-musl-cross.tgz -C /opt" >&2
+        exit 1
+    fi
+    export PATH="$MUSL_CROSS/bin:$PATH"
+    export CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc
+    export CXX_x86_64_unknown_linux_musl=x86_64-linux-musl-g++
+    export AR_x86_64_unknown_linux_musl=x86_64-linux-musl-ar
+    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
+
     echo "=== Step 1: Build Rust binaries (musl static) ==="
     rustup target add x86_64-unknown-linux-musl
     cargo build --release --target x86_64-unknown-linux-musl
@@ -52,7 +111,8 @@ if [ "$(uname)" = "Darwin" ]; then
     echo "ERROR: Buildroot cannot build natively on macOS."
     echo ""
     echo "Steps 1-3 (Rust cross-compilation + initramfs) completed successfully."
-    echo "To build the disk image, run Buildroot in Docker:"
+    echo "Storage engine '${EMBRA_STORAGE_ENGINE:-<unset>}' was baked into the embrad binary."
+    echo "To build the disk image, run Buildroot in Docker (no engine flag needed inside):"
     echo ""
     echo "  docker run --rm -v \"\$PWD\":/work -w /work ubuntu:24.04 bash -c \\"
     echo "    \"apt-get update && apt-get install -y build-essential gcc g++ \\"
