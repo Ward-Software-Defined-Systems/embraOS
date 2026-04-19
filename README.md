@@ -41,9 +41,12 @@ Phase 1 builds a QEMU-bootable x86_64 disk image with an immutable SquashFS root
 
 ```bash
 # Install dependencies
+# clang + libclang-dev are required by bindgen (pulled in by WardSONDB's
+# rocksdb → zstd-sys dep chain) to parse C headers at build time.
 sudo apt-get update && sudo apt-get install -y \
   build-essential gcc g++ unzip bc cpio rsync wget python3 file \
-  protobuf-compiler musl-tools qemu-system-x86 libelf-dev libssl-dev genext2fs
+  protobuf-compiler musl-tools clang libclang-dev \
+  qemu-system-x86 libelf-dev libssl-dev genext2fs
 
 # Install musl cross-toolchain (gcc+g++ with a matching musl libstdc++).
 # Ubuntu's musl-tools only wraps the host gcc and drags in a glibc-linked
@@ -69,7 +72,7 @@ rustup target add x86_64-unknown-linux-musl
 # Clone and configure
 git clone https://github.com/Ward-Software-Defined-Systems/embraOS.git
 cd embraOS
-git checkout phase1-arch-rework
+git checkout phase1-sprint3        # active development (Phase 1 Sprint 3)
 
 # Configure musl linker (per-machine, only needed once)
 cat >> ~/.cargo/config.toml << 'EOF'
