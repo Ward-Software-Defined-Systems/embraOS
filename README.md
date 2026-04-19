@@ -17,7 +17,7 @@
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — dense multigraph with auto-derived edges" width="100%">
 </p>
 
-**Current Status:** Phase 1 — Core OS (Sprint 2 Complete) | Phase 0 — Stable
+**Current Status:** Phase 1 — Core OS (Sprint 2 Merged → `main`, Sprint 3 In Progress) | Phase 0 — Stable
 
 ---
 
@@ -415,6 +415,7 @@ Phase 1 includes 75 built-in tools available in operational mode. These are inte
 | **Phase 1 — Initial Sprint** | Core OS — QEMU-bootable image, immutable SquashFS rootfs, full boot chain (embra-init → embrad → services), config wizard, Learning Mode, soul sealing, gRPC architecture, serial TUI | ✅ **Complete** |
 | **Phase 1 — Sprint 1** | Bug fixes & UX — tool feedback loop, timezone display, multi-line input, git/SSH/GitHub setup commands, input word-wrap, tool output truncation, Unicode crash fix | ✅ **Complete** |
 | **Phase 1 — Sprint 2** | Cross-session knowledge graph — semantic/procedural promotion, typed/weighted edges, BFS traversal, graph-aware retrieval, 6 KG tools, `/feedback-loop` command | ✅ **Complete** |
+| **Phase 1 — Sprint 3** | WardSONDB pluggable storage engine — `--storage-engine <fjall\|rocksdb>` plumbed from `build-image.sh` through embrad to runtime via `cargo:rustc-env`, musl.cc cross-toolchain switch (RocksDB requires musl-built libstdc++), supervisor immediate-exit log dump, README quickstart fixes for fresh-VM walkthroughs | 🚧 In Progress |
 | **Pit Stop** | Code review branch — security audit, AI slop cleanup, refactoring | Planned |
 | **Phase 2** | Terminal & Sessions — Full TUI rewrite, API Web Searches via `embra-guardian` v1 (including additional prompt injection protection for the returned results) | Planned |
 | **Phase 3** | Module System — `embra-guardian` v2, `embractl` management CLI (the `talosctl` equivalent), `embra-brain` Local/Hybrid option via external Ollama but default/recommended remains Anthropic API, LLM-driven Continuity Engine feedback loop (local/API/Hybrid options), MCP server modules via `embra-guardian` governance proxy, containerd runtime, governed capability expansion | Planned |
@@ -505,7 +506,25 @@ Cross-session knowledge graph — the intelligence can now promote episodic memo
 
 > **Note:** Knowledge graph promotion is still a judgment call. The intelligence promotes episodic memories during conversation (via `knowledge_promote`) or as part of the `/feedback-loop` self-evaluation protocol. Automated promotion (e.g., confidence-based triggers or scheduled consolidation) is planned for Phase 3's Continuity Engine. With auto-enrichment now in place, the *retrieval* half of the loop is implicit, but promotion remains explicit.
 
-**Status:** Sprint 2 core + late-sprint additions + post-sprint fixes complete on `phase1-arch-rework`, pending merge to `main`.
+**Status:** Sprint 2 core + late-sprint additions + post-sprint fixes complete on `phase1-arch-rework`, fast-forward merged to `main` 2026-04-16 at tag `v0.2.0-phase1` (tip `dda8c6c`, 121 commits).
+
+### Phase 1 Sprint 3 Scope
+
+> **🚧 In Progress** on `phase1-sprint3` (cut from `dda8c6c`). The work below is committed locally and verified end-to-end in QEMU on the primary dev host; fresh-VM walkthrough is in progress.
+
+WardSONDB's `backend-storage-arch-rework` branch made `--storage-engine <rocksdb|fjall>` a required flag on every launch — no default, and the data directory is locked to its first engine via a `.engine` marker file (mismatch on re-open is a hard startup error). Sprint 3's first body of work plumbs the operator's engine choice from the build script through to the runtime supervisor and resolves the toolchain gaps that surfaced once RocksDB's C++ sources entered the dependency tree.
+
+- **`--storage-engine` flag on `build-image.sh`** — new required arg `--storage-engine <fjall|rocksdb>` parsed by an ordering-insensitive `while`-loop. Validates the value before doing any work, exports `EMBRA_STORAGE_ENGINE` to the environment so `cargo build` sees it. With `--buildroot-only` the flag is warn-and-ignored (Rust isn't rebuilt; the engine is taken from the previously-baked `embrad` binary).
+- **Compile-time engine bake via `crates/embrad/build.rs`** — new build script emits `cargo:rerun-if-env-changed=EMBRA_STORAGE_ENGINE` AND `cargo:rustc-env=EMBRA_STORAGE_ENGINE=<value>`. The `rustc-env` directive is the load-bearing piece: `rerun-if-env-changed` alone only invalidates the build script, not source files that consume the env var via `option_env!`/`env!`. Without it, `supervisor.rs` would silently ship stale engine literals on subsequent rebuilds with a different engine value.
+- **Runtime plumbing in `supervisor.rs`** — `register_services()` resolves the engine via `option_env!("EMBRA_STORAGE_ENGINE").unwrap_or("rocksdb")` (rocksdb fallback so plain `cargo check` still compiles), logs `WardSONDB storage engine: <engine>` at INFO, and splices `--storage-engine <engine>` as the first two args in the wardsondb launch vec. Engine choice is therefore baked at compile time, matching SquashFS immutability and WardSONDB's per-data-dir engine lock.
+- **Musl cross-toolchain switched from `musl-tools` → musl.cc** — Ubuntu's `musl-tools` package wraps the host gcc and pulls in `/usr/lib/gcc/.../libstdc++.a`, which is glibc-linked. RocksDB's C++ sources won't link against musl with that wrapper (long cascade of `__libc_single_threaded`, `__memcpy_chk`, `fopen64`, etc. undefined references). Switched to musl.cc's self-contained toolchain at `/opt/x86_64-linux-musl-cross`, which ships `x86_64-linux-musl-gcc`, `x86_64-linux-musl-g++`, and `x86_64-linux-musl-ar` with a matching musl libstdc++. `~/.cargo/config.toml` linker updated; `build-image.sh` exports `PATH`/`CC_*`/`CXX_*`/`AR_*`/`CARGO_TARGET_*_LINKER` so cargo and `cc-rs` use the same toolchain across every crate. Script fails fast with install instructions if the toolchain isn't present at the expected path.
+- **`clang` + `libclang-dev` apt prereqs** — RocksDB's `zstd-sys` dep runs `bindgen` over zstd's C headers at build time. Bindgen needs `libclang` and clang's builtin headers (which live under `/usr/lib/llvm-*/lib/clang/*/include/`). Without them the build dies with `fatal error: 'stddef.h' file not found`. Added to the README's apt install list so fresh-VM walkthroughs succeed without a follow-up.
+- **Supervisor immediate-exit diagnostic** — when a supervised service exits before its health check fires, embrad now reads `/embra/ephemeral/<name>.log` and dumps the last 30 lines via `eprintln!` to the serial console BEFORE the SYSTEM HALT. Previously the immediate-exit branch tried to read `child.stderr.take()`, but stderr is redirected to the log file (not a pipe), so the read returned `None` and the operator saw only an opaque `ExitStatus(unix_wait_status(512))`. The new diagnostic is what made the "unexpected argument `--storage-engine`" surface error visible during rollout (it turned out to be a stale binary in `target/x86_64-unknown-linux-musl/release/`).
+- **README quickstart fixes for fresh-VM walkthroughs** — branch reference updated from `phase1-arch-rework` (frozen ship branch) to `phase1-sprint3`; WardSONDB clone snippet now does `git checkout backend-storage-arch-rework` and drops the redundant manual `cargo build` + `cp` (Step 2 of `build-image.sh` does it); musl.cc toolchain install via tarball + PATH update; cargo config linker updated; `clang`/`libclang-dev` added to apt list; build invocation now `./scripts/build-image.sh --storage-engine rocksdb` with a callout block on the per-data-dir engine lock.
+
+**Why build-time, not runtime:** Three considerations forced build-time. The SquashFS rootfs is immutable per image build — there's no place a runtime override could live without violating the immutability invariant. WardSONDB's `.engine` marker locks the choice into the data directory on first boot, so switching engines on existing data is already a destructive operation requiring a DATA-partition wipe. Baking the value into the embrad binary makes the image self-describing — `strings target/.../embrad | grep -E "^(fjall|rocksdb)$"` reveals which engine ships, no runtime introspection needed. The tradeoff is one rebuild per engine change, which is acceptable given how rare the switch is.
+
+**Status:** Sprint 3 commits `6a10b3e` (storage-engine plumbing + musl.cc toolchain + supervisor diagnostic + initial README) and `3bba52d` (README quickstart fixes — `clang`/`libclang-dev` apt prereqs + branch reference) on `phase1-sprint3`, ahead of `origin/phase1-sprint3` pending push.
 
 ---
 
