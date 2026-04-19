@@ -130,6 +130,19 @@ impl EmbraApi for EmbraApiImpl {
         Ok(Response::new(CloseSessionResponse { payload }))
     }
 
+    async fn get_expression(&self, _request: Request<GetExpressionRequest>) -> Result<Response<ExpressionState>, Status> {
+        let mut brain = self.backends.brain_client().await?;
+        let resp = brain
+            .get_expression(embra_common::proto::brain::GetExpressionRequest {})
+            .await?;
+        let inner = resp.into_inner();
+        Ok(Response::new(ExpressionState {
+            content: inner.content,
+            version: inner.version,
+            updated_at: inner.updated_at,
+        }))
+    }
+
     // --- Trust proxies ---
 
     async fn verify_soul(&self, request: Request<VerifySoulRequest>) -> Result<Response<VerifySoulResponse>, Status> {

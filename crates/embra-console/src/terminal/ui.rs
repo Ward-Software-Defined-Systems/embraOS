@@ -26,20 +26,82 @@ pub fn draw(f: &mut Frame, app: &AppState) {
     };
     let input_height = (input_lines as u16 + 2).min(10);
 
+    // EXPR-01: optional expression panel as a horizontal band below the header.
+    // Hidden on small terminals so the conversation keeps enough rows.
+    let show_panel = app.viewport_cols >= 80 && app.viewport_rows >= 20;
+    let panel_height: u16 = if show_panel { 8 } else { 0 };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),            // Header
-            Constraint::Min(5),              // Conversation
+            Constraint::Length(panel_height), // Expression panel (EXPR-01)
+            Constraint::Min(5),               // Conversation
             Constraint::Length(input_height), // Input (dynamic)
             Constraint::Length(1),            // Status bar
         ])
         .split(f.area());
 
     draw_header(f, chunks[0], app);
-    draw_conversation(f, chunks[1], app);
-    draw_input(f, chunks[2], app);
-    draw_status_bar(f, chunks[3], app);
+    if show_panel {
+        draw_expression_panel(f, chunks[1], app);
+    }
+    draw_conversation(f, chunks[2], app);
+    draw_input(f, chunks[3], app);
+    draw_status_bar(f, chunks[4], app);
+}
+
+fn draw_expression_panel(f: &mut Frame, area: Rect, app: &AppState) {
+    let rendered = sanitize_for_render(&app.expression_content);
+    let para = Paragraph::new(rendered)
+        .block(Block::default().borders(Borders::ALL))
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(Color::Gray));
+    f.render_widget(para, area);
+}
+
+/// Render-side ANSI and control-char strip. Second defence layer behind
+/// the brain-side sanitize in the `express` tool — the tool should already
+/// keep these out of WardSONDB, but we never want a stray escape sequence
+/// to corrupt the rest of the TUI.
+fn sanitize_for_render(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            match chars.peek() {
+                Some(&'[') => {
+                    chars.next();
+                    while let Some(&c) = chars.peek() {
+                        chars.next();
+                        let cv = c as u32;
+                        if (0x40..=0x7e).contains(&cv) {
+                            break;
+                        }
+                    }
+                }
+                Some(&']') => {
+                    chars.next();
+                    while let Some(&c) = chars.peek() {
+                        chars.next();
+                        if c == '\x07' {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '\n' => out.push(ch),
+            c if (c as u32) < 0x20 => continue,
+            '\u{7f}' => continue,
+            c if (c as u32) >= 0x80 && (c as u32) < 0xA0 => continue,
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &AppState) {

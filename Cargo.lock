@@ -468,6 +468,7 @@ name = "embra-brain"
 version = "0.2.0-phase1"
 dependencies = [
  "anyhow",
+ "base64",
  "chrono",
  "chrono-tz",
  "embra-common",

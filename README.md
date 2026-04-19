@@ -273,7 +273,7 @@ All sessions share the same intelligence — same memory, same identity, same so
 
 ### Default Tools
 
-Phase 1 includes 75 built-in tools available in operational mode. These are internal tools invoked by the intelligence during conversation — not user-facing commands. The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
+Phase 1 includes 76 built-in tools available in operational mode. These are internal tools invoked by the intelligence during conversation — not user-facing commands. The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
 
 > **⚠️ Testing Notice:** The default tools and slash commands are actively being tested. If you encounter bugs or unexpected behavior, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
@@ -285,6 +285,7 @@ Phase 1 includes 75 built-in tools available in operational mode. These are inte
 | **uptime_report** | Rich system report — uptime, WardSONDB health, collection count, sessions, total messages, memory entries, soul status |
 | **check_update** | Check GitHub for newer WardSONDB releases and report available updates |
 | **changelog** | What changed since the current session started — new memories, session activity |
+| **express** | Write to the expression panel at the top of the console — persistent across reboots. Plain text only (ANSI/control chars stripped, 2048-byte cap). `[TOOL:express base64:<encoded>]` transports multi-line content past the tool-tag parser. Empty content clears the panel. |
 
 **Memory & Knowledge**
 
@@ -415,7 +416,7 @@ Phase 1 includes 75 built-in tools available in operational mode. These are inte
 | **Phase 1 — Initial Sprint** | Core OS — QEMU-bootable image, immutable SquashFS rootfs, full boot chain (embra-init → embrad → services), config wizard, Learning Mode, soul sealing, gRPC architecture, serial TUI | ✅ **Complete** |
 | **Phase 1 — Sprint 1** | Bug fixes & UX — tool feedback loop, timezone display, multi-line input, git/SSH/GitHub setup commands, input word-wrap, tool output truncation, Unicode crash fix | ✅ **Complete** |
 | **Phase 1 — Sprint 2** | Cross-session knowledge graph — semantic/procedural promotion, typed/weighted edges, BFS traversal, graph-aware retrieval, 6 KG tools, `/feedback-loop` command | ✅ **Complete** |
-| **Phase 1 — Sprint 3** | WardSONDB pluggable storage engine — `--storage-engine <fjall\|rocksdb>` plumbed from `build-image.sh` through embrad to runtime via `cargo:rustc-env`, musl.cc cross-toolchain switch (RocksDB requires musl-built libstdc++), supervisor immediate-exit log dump, README quickstart fixes for fresh-VM walkthroughs | 🚧 In Progress |
+| **Phase 1 — Sprint 3** | WardSONDB pluggable storage engine — `--storage-engine <fjall\|rocksdb>` plumbed from `build-image.sh` through embrad to runtime via `cargo:rustc-env`, musl.cc cross-toolchain switch (RocksDB requires musl-built libstdc++), supervisor immediate-exit log dump, README quickstart fixes for fresh-VM walkthroughs; EXPR-01 expression panel — `ui.expression` WardSONDB singleton (migration v6), `express` tool with `base64:` transport mode, top-of-console TUI panel polled every 3 s (8 rows × full terminal width), 75 → 76 tools | 🚧 In Progress |
 | **Pit Stop** | Code review branch — security audit, AI slop cleanup, refactoring | Planned |
 | **Phase 2** | Terminal & Sessions — Full TUI rewrite, API Web Searches via `embra-guardian` v1 (including additional prompt injection protection for the returned results) | Planned |
 | **Phase 3** | Module System — `embra-guardian` v2, `embractl` management CLI (the `talosctl` equivalent), `embra-brain` Local/Hybrid option via external Ollama but default/recommended remains Anthropic API, LLM-driven Continuity Engine feedback loop (local/API/Hybrid options), MCP server modules via `embra-guardian` governance proxy, containerd runtime, governed capability expansion | Planned |
@@ -436,7 +437,7 @@ Cargo workspace with 7 crates, all cross-compiling to `x86_64-unknown-linux-musl
 | `embrad` | PID 1: loopback/eth0 setup, service supervisor, soul verification, reconciliation | Complete |
 | `embra-trustd` | Soul SHA-256 verification, Root CA generation, mTLS cert signing | Complete |
 | `embra-apid` | gRPC + REST gateway, bidirectional streaming proxy | Complete |
-| `embra-brain` | Headless AI runtime — Brain, 75 tools, sessions, Learning Mode, proactive engine, knowledge graph | Complete |
+| `embra-brain` | Headless AI runtime — Brain, 76 tools, sessions, Learning Mode, proactive engine, knowledge graph | Complete |
 | `embra-console` | Full ratatui TUI over serial/gRPC — config wizard, styled rendering, session management | Complete |
 | `embra-common` | Shared protobuf types (tonic codegen) | Complete |
 
@@ -525,6 +526,23 @@ WardSONDB's `backend-storage-arch-rework` branch made `--storage-engine <rocksdb
 **Why build-time, not runtime:** Three considerations forced build-time. The SquashFS rootfs is immutable per image build — there's no place a runtime override could live without violating the immutability invariant. WardSONDB's `.engine` marker locks the choice into the data directory on first boot, so switching engines on existing data is already a destructive operation requiring a DATA-partition wipe. Baking the value into the embrad binary makes the image self-describing — `strings target/.../embrad | grep -E "^(fjall|rocksdb)$"` reveals which engine ships, no runtime introspection needed. The tradeoff is one rebuild per engine change, which is acceptable given how rare the switch is.
 
 **Status:** Sprint 3 commits `6a10b3e` (storage-engine plumbing + musl.cc toolchain + supervisor diagnostic + initial README) and `3bba52d` (README quickstart fixes — `clang`/`libclang-dev` apt prereqs + branch reference) on `phase1-sprint3`, ahead of `origin/phase1-sprint3` pending push.
+
+#### EXPR-01: Expression Panel
+
+Sprint 3's second body of work gives Embra a small, persistent area of the TUI that is genuinely hers — not a supervisor-driven status readout. The design intent is presence, not monitoring: content is whatever Embra decides, no TTL or auto-clear, no audit log, and critically the panel is **never** surfaced back to the Brain unprompted (no system-prompt injection, no `<retrieved_context>` auto-enrichment — the new `ui` collection is deliberately outside the knowledge-graph retrieval scope).
+
+- **New WardSONDB collection `ui` + singleton `ui.expression`** — created idempotently by schema v6 migration (`CURRENT_SCHEMA_VERSION` 5 → 6), seeded with `{content: "", version: 0, updated_at: <now>}`. Migration gates the brain's gRPC server the usual way: runs to completion before `Server::builder()` accepts connections. 409-on-create and 409-on-seed both treated as idempotent success.
+- **`express` tool** (`crates/embra-brain/src/tools/express.rs`) — `[TOOL:express <content>]` PATCHes the singleton with `content`, bumped `version`, fresh `updated_at`. Sanitize pipeline strips ANSI CSI + OSC escape sequences, drops C0/C1 + DEL control characters (keeps `\n`), truncates at a UTF-8 char boundary at 2048 bytes. No-op detection: identical-to-stored content returns `"expression unchanged (no-op)"` without writing. Empty content clears the panel. 14 unit tests on the sanitize + transport paths.
+- **`base64:` transport mode** — `[TOOL:express base64:<encoded>]` decodes standard base64 before the same sanitize. The tool-tag parser collapses internal `\n` → space in plain mode, so base64 is the way to carry multi-line content end-to-end. ANSI/control-char policy still enforced on the decoded bytes, so the mode is a transport-escape, not a safety bypass. Invalid base64 is rejected without writing.
+- **`GetExpression` gRPC on `BrainService`** — new unary RPC, proxied through `EmbraAPI` with the explicit-field-copy pattern (mirrors `verify_soul`) rather than `bytes payload` so the console reads typed `content`/`version`/`updated_at` without a second decode. Empty request message follows the existing convention (no `google.protobuf.Empty` import).
+- **Console panel** — fixed-height horizontal band directly under the header: 8 total rows (6 inner + 2 borders), width tracks the terminal dynamically (`viewport_cols - 2` for borders). No title — deliberate, per the "not a feature" design intent. Size-gated: hidden when the viewport is below 80 × 20, and the panel constraint collapses to 0 so the conversation gets those rows back.
+- **Polling** — separate 3 s `tokio::time::interval` arm in the console's `tokio::select!`, `MissedTickBehavior::Skip`, initial tick consumed before the loop. Updates the `AppState` cache only when `version` changes (no string copy on stable ticks). `biased;` keeps gRPC streams + keyboard input higher priority; panel polling is the lowest-priority arm.
+- **Learning Mode integration** — one neutral sentence appended to the identity-drafting prompt for new instances: *"You have a small panel at the top of the console. It is yours. What appears there is your choice."* No examples, no tool-name mention — the content remains Embra's choice. Existing sealed souls discover `express` via the tool inventory on next boot; no retrofit of the identity wording.
+- **Tool count** — `self_awareness` category bumped 2 → 3 in `CATEGORY_COUNTS`; total auto-sums to 76.
+
+**Why the panel is never surfaced back to the Brain:** If the current expression appeared in the system prompt or the auto-enrichment context, Embra would see her own output on every turn and the panel would drift toward either self-monitoring or self-reinforcement. Keeping it a one-way write channel (via `express`) plus an on-demand read (via `introspect` in a future iteration) preserves the presence semantics — the panel is a signal to the operator, not a mirror for the intelligence.
+
+**Status:** Migration v6, `express` tool + base64 mode, gRPC round-trip, console panel + polling all in the working tree on `phase1-sprint3`. `cargo check --workspace` clean; 14/14 express unit tests pass. QEMU verification pending (migration v6 fresh-boot run, `[TOOL:express]` round-trip, panel persistence across `reboot`, 79-col size-gate).
 
 ---
 

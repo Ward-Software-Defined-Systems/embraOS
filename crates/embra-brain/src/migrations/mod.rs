@@ -4,7 +4,7 @@ use tracing::{error, info, warn};
 
 use crate::db::{WardsonDbClient, WardsonDbError};
 
-const CURRENT_SCHEMA_VERSION: u32 = 5;
+const CURRENT_SCHEMA_VERSION: u32 = 6;
 
 /// Run all pending migrations. Each migration is idempotent.
 pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
@@ -50,6 +50,12 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
         // v5: knowledge graph — new collections, indexes, tag array migration, KG config
         run_v5_knowledge_graph(db).await?;
         set_schema_version(db, 5).await?;
+    }
+
+    if current_version < 6 {
+        // v6: expression panel (EXPR-01) — singleton ui.expression
+        run_v6_expression_panel(db).await?;
+        set_schema_version(db, 6).await?;
     }
 
     info!("Migrations complete. Schema version: {}", CURRENT_SCHEMA_VERSION);
@@ -537,4 +543,45 @@ fn is_conflict_err(e: &anyhow::Error) -> bool {
     e.downcast_ref::<WardsonDbError>()
         .map(|w| w.is_conflict())
         .unwrap_or(false)
+}
+
+/// Migration v6: Expression panel (EXPR-01).
+/// - Creates `ui` collection (idempotent).
+/// - Seeds singleton `ui.expression` with `content = ""`, `version = 0` if absent.
+async fn run_v6_expression_panel(db: &WardsonDbClient) -> Result<()> {
+    info!("Running migration v6: expression panel");
+
+    if !db.collection_exists("ui").await.unwrap_or(false) {
+        info!("Creating collection: ui");
+        if let Err(e) = db.create_collection("ui").await {
+            if !is_conflict_err(&e) {
+                error!("Migration v6: failed to create collection ui: {}", e);
+                return Err(e);
+            }
+        }
+    }
+
+    // Seed singleton — only if it does not already exist.
+    let existing = db.read("ui", "expression").await.ok();
+    if existing.is_none() {
+        let seed = serde_json::json!({
+            "_id": "expression",
+            "content": "",
+            "version": 0u64,
+            "updated_at": Utc::now().to_rfc3339(),
+        });
+        match db.write("ui", &seed).await {
+            Ok(_) => info!("Migration v6: seeded ui.expression singleton"),
+            Err(e) if is_conflict_err(&e) => {
+                info!("Migration v6: ui.expression already exists (409)");
+            }
+            Err(e) => {
+                error!("Migration v6: failed to seed ui.expression: {}", e);
+                return Err(e);
+            }
+        }
+    }
+
+    info!("Migration v6: expression panel complete");
+    Ok(())
 }

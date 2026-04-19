@@ -136,4 +136,13 @@ impl BrainClient {
 
         Ok((in_tx, out_rx))
     }
+
+    /// Fetch the current expression panel state.
+    /// Returns (content, version) — updated_at is intentionally dropped
+    /// because the console only uses version for cache-change detection.
+    pub async fn get_expression(&mut self) -> anyhow::Result<(String, u64)> {
+        let resp = self.client.get_expression(GetExpressionRequest {}).await?;
+        let inner = resp.into_inner();
+        Ok((inner.content, inner.version))
+    }
 }

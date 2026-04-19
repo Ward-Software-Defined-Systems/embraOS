@@ -115,7 +115,7 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
     ("system", "System", 3),
     ("memory_knowledge", "Memory & Knowledge", 5),
-    ("self_awareness", "Self-Awareness", 2),
+    ("self_awareness", "Self-Awareness", 3),
     ("time_context", "Time & Context", 3),
     ("utility", "Utility", 2),
     ("security", "Security", 9),

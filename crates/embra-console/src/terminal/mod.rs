@@ -62,6 +62,8 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
 
     let mut app = AppState::new();
     app.status_message = "OK".to_string();
+    app.viewport_cols = use_cols;
+    app.viewport_rows = use_rows;
 
     // Spawn terminal event reader
     let (term_tx, mut term_rx) = mpsc::channel::<Event>(100);
@@ -76,6 +78,14 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
             }
         }
     });
+
+    // EXPR-01: 3-second polling tick for the expression panel.
+    // Separate from the 200ms animation tick so the panel can change while
+    // nothing else is happening.
+    let mut expression_tick = tokio::time::interval(Duration::from_secs(3));
+    expression_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Consume the immediate first tick so the first poll happens after 3s.
+    expression_tick.tick().await;
 
     // Main event loop
     loop {
@@ -103,6 +113,16 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
             Some(ev) = term_rx.recv() => {
                 if let Event::Key(key) = ev {
                     handle_key_event(key, &mut app, &in_tx).await?;
+                }
+            }
+
+            // Expression panel poll (EXPR-01)
+            _ = expression_tick.tick() => {
+                if let Ok((content, version)) = client.get_expression().await {
+                    if version != app.expression_version {
+                        app.expression_content = content;
+                        app.expression_version = version;
+                    }
                 }
             }
 

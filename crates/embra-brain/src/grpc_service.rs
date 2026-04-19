@@ -346,6 +346,21 @@ impl BrainService for BrainGrpcService {
         }
     }
 
+    async fn get_expression(&self, _req: Request<GetExpressionRequest>) -> Result<Response<ExpressionState>, Status> {
+        match self.db.read("ui", "expression").await {
+            Ok(doc) => Ok(Response::new(ExpressionState {
+                content: doc.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                version: doc.get("version").and_then(|v| v.as_u64()).unwrap_or(0),
+                updated_at: doc.get("updated_at").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+            })),
+            Err(_) => Ok(Response::new(ExpressionState {
+                content: String::new(),
+                version: 0,
+                updated_at: String::new(),
+            })),
+        }
+    }
+
     async fn get_mode(&self, _req: Request<GetModeRequest>) -> Result<Response<GetModeResponse>, Status> {
         let is_sealed = learning::is_soul_sealed(&**&self.db).await.unwrap_or(false);
         let mode = if is_sealed {

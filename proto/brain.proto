@@ -20,6 +20,9 @@ service BrainService {
   rpc GetSoulDocument(GetSoulDocumentRequest) returns (GetSoulDocumentResponse);
   rpc GetIdentity(GetIdentityRequest) returns (GetIdentityResponse);
 
+  // Expression panel (Sprint 3 / EXPR-01)
+  rpc GetExpression(GetExpressionRequest) returns (ExpressionState);
+
   // Lifecycle
   rpc GetMode(GetModeRequest) returns (GetModeResponse);
 
@@ -183,6 +186,13 @@ message GetSoulDocumentResponse {
 message GetIdentityRequest {}
 message GetIdentityResponse {
   string identity_json = 1;  // Full memory.identity document as JSON
+}
+
+message GetExpressionRequest {}
+message ExpressionState {
+  string content = 1;
+  uint64 version = 2;
+  string updated_at = 3;  // RFC3339
 }
 
 message GetModeRequest {}

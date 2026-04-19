@@ -131,6 +131,12 @@ pub struct AppState {
     pub config_tz: String,
     pub pasted_lines: Option<Vec<String>>,
     pub multiline_mode: bool,
+    // EXPR-01 expression panel — cached state polled from brain every 3s
+    pub expression_content: String,
+    pub expression_version: u64,
+    // Viewport dimensions (detected once at boot) — drive the panel size gate
+    pub viewport_cols: u16,
+    pub viewport_rows: u16,
 }
 
 impl AppState {
@@ -154,6 +160,10 @@ impl AppState {
             config_tz: "UTC".to_string(),
             pasted_lines: None,
             multiline_mode: false,
+            expression_content: String::new(),
+            expression_version: 0,
+            viewport_cols: 80,
+            viewport_rows: 24,
         }
     }
 

@@ -7,6 +7,7 @@ use crate::knowledge;
 
 pub mod cron;
 pub mod engineering;
+pub mod express;
 pub mod security;
 pub mod sessions;
 
@@ -60,6 +61,7 @@ pub async fn dispatch(
         "uptime_report" => uptime_report(db).await,
         "introspect" => introspect(db, param).await,
         "changelog" => changelog(db, session_name).await,
+        "express" => express::express(db, param).await,
         "time" => time_now(config_tz),
         "countdown" => countdown(db, param).await,
         "session_summary" => session_summary(db, session_name).await,

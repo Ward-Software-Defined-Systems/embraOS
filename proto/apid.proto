@@ -10,6 +10,7 @@ service EmbraAPI {
   rpc CreateSession(CreateSessionRequest) returns (CreateSessionResponse);
   rpc SwitchSession(SwitchSessionRequest) returns (SwitchSessionResponse);
   rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
+  rpc GetExpression(GetExpressionRequest) returns (ExpressionState);
 
   // --- Proxied Trust methods ---
   rpc VerifySoul(VerifySoulRequest) returns (VerifySoulResponse);
@@ -48,6 +49,13 @@ message SwitchSessionRequest { string name = 1; }
 message SwitchSessionResponse { bytes payload = 1; }
 message CloseSessionRequest {}
 message CloseSessionResponse { bytes payload = 1; }
+
+message GetExpressionRequest {}
+message ExpressionState {
+  string content = 1;
+  uint64 version = 2;
+  string updated_at = 3;
+}
 
 // --- Proxied trust types ---
 message VerifySoulRequest { string expected_hash = 1; }
