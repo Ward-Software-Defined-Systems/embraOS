@@ -285,7 +285,7 @@ Phase 1 includes 76 built-in tools available in operational mode. These are inte
 | **uptime_report** | Rich system report — uptime, WardSONDB health, collection count, sessions, total messages, memory entries, soul status |
 | **check_update** | Check GitHub for newer WardSONDB releases and report available updates |
 | **changelog** | What changed since the current session started — new memories, session activity |
-| **express** | Draw ASCII art to the expression panel at the top of the console — persistent across reboots. Plain characters only (ANSI/control chars stripped, 2048-byte cap). `[TOOL:express base64:<encoded>]` is the standard form for multi-line content, which is most ASCII art. Empty content clears the panel. |
+| **express** | Write to the intelligence's expression panel — a 6-row × full-width canvas at the top of the console, designed as a signal of presence to the operator rather than a status readout. Content is the intelligence's choice, persists across reboots, and is never surfaced back to the Brain. ANSI and control characters are stripped, 2048-byte cap. `[TOOL:express base64:<encoded>]` is the standard form for multi-line ASCII art — plain mode collapses newlines at the tool-tag parser. Empty content clears the panel. |
 
 **Memory & Knowledge**
 
