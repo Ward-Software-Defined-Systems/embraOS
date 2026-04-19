@@ -338,19 +338,19 @@ pub async fn port_scan(param: &str) -> String {
     output
 }
 
-/// Stub for firewall status — not available in container mode.
+/// Stub for firewall status — not yet implemented.
 pub fn firewall_status() -> String {
-    "Firewall status: not implemented in container mode. Full firewall inspection requires host-level access.".into()
+    "Firewall status: not yet implemented. Requires iptables/nftables integration on the embraOS rootfs.".into()
 }
 
-/// Stub for SSH sessions — not available in container mode.
+/// Stub for SSH sessions — not yet implemented.
 pub fn ssh_sessions() -> String {
-    "SSH sessions: not implemented in container mode. Container uses stdin/stdout for interaction.".into()
+    "SSH sessions: not yet implemented. embraOS currently exposes no inbound SSH; interaction is via the serial console.".into()
 }
 
-/// Stub for security audit — not available in container mode.
+/// Stub for security audit — not yet implemented.
 pub fn security_audit() -> String {
-    "Security audit: not implemented in container mode. Full audit capabilities will be available in later phases with host-level access.".into()
+    "Security audit: not yet implemented. Broader audit tooling is planned with embra-guardian in Phase 3.".into()
 }
 
 // ── SSH Remote Admin (EXPERIMENTAL) ──

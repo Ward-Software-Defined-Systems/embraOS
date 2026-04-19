@@ -39,7 +39,7 @@ fn default_kg_candidate_limit() -> u32 { 50 }
 pub async fn run_config_wizard() -> Result<SystemConfig> {
     println!();
     println!("╔══════════════════════════════════════════╗");
-    println!("║     embraOS Phase 0 — First Run Setup    ║");
+    println!("║     embraOS Phase 1 — First Run Setup    ║");
     println!("╚══════════════════════════════════════════╝");
     println!();
 
@@ -75,7 +75,7 @@ pub async fn run_config_wizard() -> Result<SystemConfig> {
         name,
         api_key,
         timezone,
-        deployment_mode: "container".into(),
+        deployment_mode: "phase1".into(),
         created_at: chrono::Utc::now().to_rfc3339(),
         version: env!("CARGO_PKG_VERSION").into(),
         github_token: None,
