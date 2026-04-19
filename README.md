@@ -285,7 +285,7 @@ Phase 1 includes 76 built-in tools available in operational mode. These are inte
 | **uptime_report** | Rich system report — uptime, WardSONDB health, collection count, sessions, total messages, memory entries, soul status |
 | **check_update** | Check GitHub for newer WardSONDB releases and report available updates |
 | **changelog** | What changed since the current session started — new memories, session activity |
-| **express** | Write to the expression panel at the top of the console — persistent across reboots. Plain text only (ANSI/control chars stripped, 2048-byte cap). `[TOOL:express base64:<encoded>]` transports multi-line content past the tool-tag parser. Empty content clears the panel. |
+| **express** | Draw ASCII art to the expression panel at the top of the console — persistent across reboots. Plain characters only (ANSI/control chars stripped, 2048-byte cap). `[TOOL:express base64:<encoded>]` is the standard form for multi-line content, which is most ASCII art. Empty content clears the panel. |
 
 **Memory & Knowledge**
 
@@ -537,12 +537,12 @@ Sprint 3's second body of work gives Embra a small, persistent area of the TUI t
 - **`GetExpression` gRPC on `BrainService`** — new unary RPC, proxied through `EmbraAPI` with the explicit-field-copy pattern (mirrors `verify_soul`) rather than `bytes payload` so the console reads typed `content`/`version`/`updated_at` without a second decode. Empty request message follows the existing convention (no `google.protobuf.Empty` import).
 - **Console panel** — fixed-height horizontal band directly under the header: 8 total rows (6 inner + 2 borders), width tracks the terminal dynamically (`viewport_cols - 2` for borders). No title — deliberate, per the "not a feature" design intent. Size-gated: hidden when the viewport is below 80 × 20, and the panel constraint collapses to 0 so the conversation gets those rows back.
 - **Polling** — separate 3 s `tokio::time::interval` arm in the console's `tokio::select!`, `MissedTickBehavior::Skip`, initial tick consumed before the loop. Updates the `AppState` cache only when `version` changes (no string copy on stable ticks). `biased;` keeps gRPC streams + keyboard input higher priority; panel polling is the lowest-priority arm.
-- **Learning Mode integration** — one neutral sentence appended to the identity-drafting prompt for new instances: *"You have a small panel at the top of the console. It is yours. What appears there is your choice."* No examples, no tool-name mention — the content remains Embra's choice. Existing sealed souls discover `express` via the tool inventory on next boot; no retrofit of the identity wording.
+- **Learning Mode integration** — one neutral sentence appended to the identity-drafting prompt for new instances: *"You have an ASCII art panel at the top of the console. It is yours. What appears there is your choice."* The medium (ASCII art) is named because the panel's dimensions and newline-preserving sanitize were designed around it; the subject of the art — what Embra chooses to draw — stays hers. Existing sealed souls discover `express` via the tool inventory on next boot; no retrofit of the identity wording.
 - **Tool count** — `self_awareness` category bumped 2 → 3 in `CATEGORY_COUNTS`; total auto-sums to 76.
 
 **Why the panel is never surfaced back to the Brain:** If the current expression appeared in the system prompt or the auto-enrichment context, Embra would see her own output on every turn and the panel would drift toward either self-monitoring or self-reinforcement. Keeping it a one-way write channel (via `express`) plus an on-demand read (via `introspect` in a future iteration) preserves the presence semantics — the panel is a signal to the operator, not a mirror for the intelligence.
 
-**Status:** Migration v6, `express` tool + base64 mode, gRPC round-trip, console panel + polling all in the working tree on `phase1-sprint3`. `cargo check --workspace` clean; 14/14 express unit tests pass. QEMU verification pending (migration v6 fresh-boot run, `[TOOL:express]` round-trip, panel persistence across `reboot`, 79-col size-gate).
+**Status:** Feature committed at `4f6cce6` on `phase1-sprint3` (17 files, 440 insertions; 14 express unit tests passing). Post-commit prompt-refinement pass (2026-04-19) names ASCII art as the panel's medium and drops single-line / "small" adjective biases from the identity and operational prompts — working tree, uncommitted. `cargo check --workspace` clean. QEMU verification pending (migration v6 fresh-boot run, `[TOOL:express]` round-trip, panel persistence across `reboot`, 79-col size-gate, observation of Embra's canvas use post-refinement).
 
 ---
 
