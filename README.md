@@ -84,7 +84,6 @@ EOF
 cd ..
 git clone https://github.com/Ward-Software-Defined-Systems/wardsondb.git WardSONDB
 cd WardSONDB
-git checkout backend-storage-arch-rework    # Pluggable storage engine (rocksdb / fjall)
 cd ../embraOS
 ```
 
