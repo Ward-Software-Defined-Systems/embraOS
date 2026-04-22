@@ -1,5 +1,6 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use tracing::info;
 
 use crate::config::SystemConfig;
 use crate::db::WardsonDbClient;
@@ -283,6 +284,11 @@ async fn recall(db: &WardsonDbClient, query: &str) -> String {
     }
 
     let query_lower = query.trim_start_matches('#').to_lowercase();
+    let query_tokens: Vec<String> = query_lower
+        .split_whitespace()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
 
     fn tags_to_str(doc: &serde_json::Value) -> String {
         match doc.get("tags") {
@@ -294,8 +300,9 @@ async fn recall(db: &WardsonDbClient, query: &str) -> String {
     }
 
     let matches_query = |content: &str, tags: &str| -> bool {
-        if query.is_empty() { return true; }
-        content.to_lowercase().contains(&query_lower) || tags.to_lowercase().contains(&query_lower)
+        if query_tokens.is_empty() { return true; }
+        let hay = format!("{} {}", content.to_lowercase(), tags.to_lowercase());
+        tokens_all_match(&hay, &query_tokens)
     };
 
     // Promoted entries: content-bearing fields come from the promoted node, not the episodic entry.
@@ -334,12 +341,57 @@ async fn recall(db: &WardsonDbClient, query: &str) -> String {
     }
 
     if output_lines.is_empty() {
-        return format!("No memory entries matching '{}'.", query);
+        info!(target: "recall", query = %query, token_count = query_tokens.len(), "zero-result recall");
+        let mut msg = format!("No memory entries matching '{}'.", query);
+        if query_tokens.len() > 1 {
+            msg.push_str(" Multi-token queries require ALL tokens to appear; try a single word, or omit the query to list recent entries.");
+        }
+        return msg;
     }
 
     let total = output_lines.len();
     output_lines.truncate(10);
     format!("Found {} matching entries:\n{}", total, output_lines.join("\n"))
+}
+
+/// Return true iff every token appears as a substring of `hay` (already lowercased).
+fn tokens_all_match(hay: &str, tokens: &[String]) -> bool {
+    tokens.iter().all(|t| hay.contains(t.as_str()))
+}
+
+#[cfg(test)]
+mod tokens_all_match_tests {
+    use super::tokens_all_match;
+
+    fn toks(s: &[&str]) -> Vec<String> {
+        s.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn empty_tokens_any_hay_matches() {
+        assert!(tokens_all_match("anything", &toks(&[])));
+    }
+
+    #[test]
+    fn all_tokens_present_matches() {
+        assert!(tokens_all_match("express tool caveats noted", &toks(&["express", "tool", "caveats"])));
+    }
+
+    #[test]
+    fn missing_one_token_rejects() {
+        assert!(!tokens_all_match("express tool only", &toks(&["express", "tool", "caveats"])));
+    }
+
+    #[test]
+    fn tokens_can_appear_out_of_order() {
+        assert!(tokens_all_match("caveats about the express tool", &toks(&["express", "caveats"])));
+    }
+
+    #[test]
+    fn single_token_still_works() {
+        assert!(tokens_all_match("express panel", &toks(&["express"])));
+        assert!(!tokens_all_match("panel only", &toks(&["express"])));
+    }
 }
 
 async fn remember(db: &WardsonDbClient, content: &str, session: &str, config: &SystemConfig) -> String {
