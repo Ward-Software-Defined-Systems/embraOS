@@ -150,7 +150,26 @@ const COMMON_PORTS: &[(u16, &str)] = &[
     (27017, "MongoDB"),
 ];
 
-/// Parse a port specification into a list of (port, label) pairs.
+/// Look up a COMMON_PORTS label or synthesize one.
+fn port_label(p: u16) -> String {
+    COMMON_PORTS
+        .iter()
+        .find(|&&(cp, _)| cp == p)
+        .map(|&(_, s)| s.to_string())
+        .unwrap_or_else(|| format!("port-{}", p))
+}
+
+/// Max number of ports selected from a user-supplied spec (comma/range mix).
+/// Presets (`low`, `all`) are exempt — the operator has explicitly asked for them.
+const MAX_USER_PORTS: usize = 2048;
+
+/// Parse a port specification into a list of (port, label) pairs. Accepts:
+/// - empty → default 17 common ports
+/// - `web` / `db` → named presets
+/// - `low` → 1–1024 (all well-known ports)
+/// - `all` → 1–65535 (exhaustive; may take many minutes)
+/// - otherwise comma-separated list, each token either `N` or `A-B`.
+///   Duplicates are de-duplicated; total capped at `MAX_USER_PORTS`.
 fn parse_port_spec(spec: &str) -> Vec<(u16, String)> {
     let spec = spec.trim();
     if spec.is_empty() {
@@ -158,54 +177,53 @@ fn parse_port_spec(spec: &str) -> Vec<(u16, String)> {
     }
 
     match spec {
-        "web" => vec![
+        "web" => return vec![
             (80, "HTTP".into()),
             (443, "HTTPS".into()),
             (8080, "HTTP-Alt".into()),
             (8443, "HTTPS-Alt".into()),
         ],
-        "db" => vec![
+        "db" => return vec![
             (3306, "MySQL".into()),
             (5432, "PostgreSQL".into()),
             (6379, "Redis".into()),
             (27017, "MongoDB".into()),
             (5984, "CouchDB".into()),
         ],
-        "all" => (1..=1024).map(|p| {
-            let label = COMMON_PORTS.iter()
-                .find(|&&(cp, _)| cp == p)
-                .map(|&(_, s)| s.to_string())
-                .unwrap_or_else(|| format!("port-{}", p));
-            (p, label)
-        }).collect(),
-        _ => {
-            // Try range: "8000-8100"
-            if let Some((start_str, end_str)) = spec.split_once('-') {
-                if let (Ok(start), Ok(end)) = (start_str.parse::<u16>(), end_str.parse::<u16>()) {
-                    if start <= end && end - start <= 2048 {
-                        return (start..=end).map(|p| {
-                            let label = COMMON_PORTS.iter()
-                                .find(|&&(cp, _)| cp == p)
-                                .map(|&(_, s)| s.to_string())
-                                .unwrap_or_else(|| format!("port-{}", p));
-                            (p, label)
-                        }).collect();
+        "low" => return (1u16..=1024).map(|p| (p, port_label(p))).collect(),
+        "all" => return (1u16..=65535).map(|p| (p, port_label(p))).collect(),
+        _ => {}
+    }
+
+    // Generic parse: comma-separated tokens, each either "N" or "A-B".
+    let mut out: Vec<(u16, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::<u16>::new();
+    for tok in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some((a, b)) = tok.split_once('-') {
+            let (Ok(start), Ok(end)) = (a.trim().parse::<u16>(), b.trim().parse::<u16>()) else {
+                continue;
+            };
+            if start > end {
+                continue;
+            }
+            for p in start..=end {
+                if seen.insert(p) {
+                    out.push((p, port_label(p)));
+                    if out.len() >= MAX_USER_PORTS {
+                        return out;
                     }
                 }
             }
-            // Try comma-separated: "80,443,8080"
-            spec.split(',')
-                .filter_map(|s| {
-                    let p: u16 = s.trim().parse().ok()?;
-                    let label = COMMON_PORTS.iter()
-                        .find(|&&(cp, _)| cp == p)
-                        .map(|&(_, s)| s.to_string())
-                        .unwrap_or_else(|| format!("port-{}", p));
-                    Some((p, label))
-                })
-                .collect()
+        } else if let Ok(p) = tok.parse::<u16>() {
+            if seen.insert(p) {
+                out.push((p, port_label(p)));
+                if out.len() >= MAX_USER_PORTS {
+                    return out;
+                }
+            }
         }
     }
+    out
 }
 
 /// Attempt banner grabbing on an open TCP connection.
@@ -247,18 +265,22 @@ async fn grab_banner(host: &str, port: u16) -> Option<String> {
 /// Restricted to private/loopback addresses only (RFC 1918 + 127.0.0.0/8).
 ///
 /// Param format: `<host> [ports]`
-/// Port specs: empty (default 17 common), `80,443,8080`, `8000-8100`, `web`, `db`, `all`
+/// Port specs: empty (default 17 common), `80,443,8080`, `8000-8100`,
+/// `8000-8100,443` (mixed), `web`, `db`, `low`, `all`.
 pub async fn port_scan(param: &str) -> String {
     if param.is_empty() {
         return "Usage: [TOOL:port_scan <host> [ports]]\n\
-                Examples:\n\
-                  [TOOL:port_scan localhost]          — default 17 common ports\n\
-                  [TOOL:port_scan 192.168.1.1 80,443] — specific ports\n\
-                  [TOOL:port_scan localhost 8000-8100] — port range\n\
-                  [TOOL:port_scan localhost web]       — preset: 80, 443, 8080, 8443\n\
-                  [TOOL:port_scan localhost db]        — preset: 3306, 5432, 6379, 27017, 5984\n\
-                  [TOOL:port_scan localhost all]       — well-known 1-1024\n\
-                Note: restricted to private/loopback addresses only."
+                Examples:\n  \
+                  [TOOL:port_scan localhost]              — default 17 common ports\n  \
+                  [TOOL:port_scan 192.168.1.1 80,443]     — specific ports\n  \
+                  [TOOL:port_scan localhost 8000-8100]    — port range\n  \
+                  [TOOL:port_scan localhost 8000-8100,443] — mixed range and list\n  \
+                  [TOOL:port_scan localhost web]          — preset: 80, 443, 8080, 8443\n  \
+                  [TOOL:port_scan localhost db]           — preset: 3306, 5432, 6379, 27017, 5984\n  \
+                  [TOOL:port_scan localhost low]          — well-known 1-1024\n  \
+                  [TOOL:port_scan localhost all]          — exhaustive 1-65535 (may take many minutes)\n\
+                Custom ranges/lists are capped at 2048 distinct ports; presets are exempt.\n\
+                Restricted to private/loopback addresses only."
             .into();
     }
 
@@ -688,5 +710,56 @@ pub async fn ssh_session_end() -> String {
             }
         }
         None => "No SSH session is open.".into(),
+    }
+}
+
+#[cfg(test)]
+mod parse_port_spec_tests {
+    use super::parse_port_spec;
+
+    #[test]
+    fn empty_returns_common_ports() {
+        let out = parse_port_spec("");
+        assert_eq!(out.len(), 17); // matches COMMON_PORTS
+        assert!(out.iter().any(|(p, _)| *p == 22));
+    }
+
+    #[test]
+    fn preset_low_is_1024_ports() {
+        assert_eq!(parse_port_spec("low").len(), 1024);
+    }
+
+    #[test]
+    fn preset_all_is_65535_ports() {
+        assert_eq!(parse_port_spec("all").len(), 65535);
+    }
+
+    #[test]
+    fn range_plus_commas_with_dedup() {
+        let out = parse_port_spec("80,443,8000-8002,443");
+        let nums: Vec<u16> = out.iter().map(|(p, _)| *p).collect();
+        assert_eq!(nums, vec![80, 443, 8000, 8001, 8002]);
+    }
+
+    #[test]
+    fn cap_applies_only_to_user_ranges() {
+        // 3000-port request clamps to MAX_USER_PORTS (2048)
+        assert_eq!(parse_port_spec("1-3000").len(), 2048);
+    }
+
+    #[test]
+    fn mixed_range_comma_reproducer_finding8() {
+        // Finding 8 repro: "50000-50002,8090" used to scan only 8090.
+        let nums: Vec<u16> = parse_port_spec("50000-50002,8090")
+            .iter()
+            .map(|(p, _)| *p)
+            .collect();
+        assert_eq!(nums, vec![50000, 50001, 50002, 8090]);
+    }
+
+    #[test]
+    fn web_and_db_presets() {
+        assert_eq!(parse_port_spec("web").len(), 4);
+        assert_eq!(parse_port_spec("db").len(), 5);
     }
 }
