@@ -27,3 +27,17 @@ echo "nameserver 10.0.2.3" > "${TARGET_DIR}/etc/resolv.conf"
 
 # Workspace mount point (embrad bind-mounts /embra/data/workspace here at boot)
 mkdir -p "${TARGET_DIR}/embra/workspace"
+
+# Defense-in-depth: lock the root account.
+# The Buildroot skeleton leaves /etc/shadow with an empty root password,
+# which means anyone with shell access can become root without credentials.
+# embraOS has no login paths today (no getty on the console, no SSH server in
+# the defconfig), so an empty-password root is not currently exploitable —
+# but file_read is unrestricted and `/etc/shadow` is readable, so agent
+# compromise via prompt injection (flagged in Sprint 3 sweep #11) would hand
+# over a useful credential for free. Locking it removes that value while
+# leaving the account structure intact so future tooling (su, su-exec) can
+# still reason about UID 0. See Embra_Debug #11.
+if [ -f "${TARGET_DIR}/etc/shadow" ]; then
+    sed -i 's/^root:[^:]*:/root:*:/' "${TARGET_DIR}/etc/shadow"
+fi
