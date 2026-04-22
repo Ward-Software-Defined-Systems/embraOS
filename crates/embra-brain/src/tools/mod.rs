@@ -20,7 +20,10 @@ pub fn init_start_time() {
     START_TIME.get_or_init(std::time::Instant::now);
 }
 
-fn uptime_secs() -> u64 {
+/// Seconds since this embra-brain process started. Not the same as session
+/// age — sessions persist across process restarts, whereas this counter resets
+/// on every launch. Used by uptime_report and SystemStatus.uptime_seconds.
+fn process_uptime_secs() -> u64 {
     START_TIME.get().map(|t| t.elapsed().as_secs()).unwrap_or(0)
 }
 
@@ -59,7 +62,7 @@ pub async fn dispatch(
         "recall" => recall(db, param).await,
         "remember" => remember(db, param, session_name, config).await,
         "forget" => forget(db, param).await,
-        "uptime_report" => uptime_report(db).await,
+        "uptime_report" => uptime_report(db, session_name).await,
         "introspect" => introspect(db, param).await,
         "changelog" => changelog(db, session_name).await,
         "express" => express::express(db, param).await,
@@ -202,7 +205,7 @@ pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
 
     SystemStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        uptime_seconds: uptime_secs(),
+        uptime_seconds: process_uptime_secs(),
         wardsondb_healthy: healthy,
         wardsondb_collections: collections,
         memory_usage_mb: get_memory_usage_mb(),
@@ -461,10 +464,36 @@ async fn forget(db: &WardsonDbClient, id: &str) -> String {
 
 // ── Self-Awareness Tools ──
 
-async fn uptime_report(db: &WardsonDbClient) -> String {
-    let uptime = uptime_secs();
+async fn uptime_report(db: &WardsonDbClient, session_name: &str) -> String {
+    let uptime = process_uptime_secs();
     let hours = uptime / 3600;
     let mins = (uptime % 3600) / 60;
+
+    // Session age — queried from sessions.{name}.meta.created_at if available.
+    // This is independent of process uptime: sessions outlive restarts.
+    let session_age_line = {
+        let meta_col = format!("sessions.{}.meta", session_name);
+        let created_at = db
+            .query(&meta_col, &serde_json::json!({}))
+            .await
+            .ok()
+            .and_then(|docs| docs.into_iter().next())
+            .and_then(|doc| doc.get("created_at").and_then(|v| v.as_str()).map(String::from));
+        match created_at {
+            Some(ts) => {
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&ts) {
+                    let age = Utc::now().signed_duration_since(dt.with_timezone(&Utc));
+                    let age_secs = age.num_seconds().max(0) as u64;
+                    let ah = age_secs / 3600;
+                    let am = (age_secs % 3600) / 60;
+                    format!("Session age: {}h {}m (session '{}' since {})\n", ah, am, session_name, ts)
+                } else {
+                    format!("Session age: unknown (session '{}', unparseable timestamp)\n", session_name)
+                }
+            }
+            None => format!("Session age: unknown (no meta doc for session '{}')\n", session_name),
+        }
+    };
 
     let collections = db.list_collections().await.unwrap_or_default();
 
@@ -501,7 +530,8 @@ async fn uptime_report(db: &WardsonDbClient) -> String {
 
     format!(
         "Uptime Report:\n\
-         Uptime: {}h {}m\n\
+         Process uptime: {}h {}m\n\
+         {}\
          WardSONDB: {}\n\
          Collections: {}\n\
          Sessions created: {}\n\
@@ -510,6 +540,7 @@ async fn uptime_report(db: &WardsonDbClient) -> String {
          Soul: {}",
         hours,
         mins,
+        session_age_line,
         if healthy { "healthy" } else { "unhealthy" },
         collections.len(),
         session_count,
