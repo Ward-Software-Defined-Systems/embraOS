@@ -624,25 +624,12 @@ pub async fn memory_scan(db: &WardsonDbClient, param: &str) -> String {
         output.push_str("\nNo duplicate candidates detected.\n");
     }
 
-    // Knowledge Graph section (Sprint 2)
-    let sem = db.query("memory.semantic", &serde_json::json!({})).await.unwrap_or_default();
-    let proc_docs = db.query("memory.procedural", &serde_json::json!({})).await.unwrap_or_default();
-    let edges = db.query("memory.edges", &serde_json::json!({})).await.unwrap_or_default();
-    let promoted = entries.iter().filter(|d| {
-        d.get("promoted_to").map(|v| !v.is_null()).unwrap_or(false)
-    }).count();
-    let mut cat_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for d in &sem {
-        if let Some(c) = d.get("category").and_then(|v| v.as_str()) {
-            *cat_counts.entry(c.to_string()).or_insert(0) += 1;
-        }
-    }
-    let cat_summary: Vec<String> = ["fact", "preference", "decision", "observation", "pattern"]
-        .iter().map(|k| format!("{}={}", k, cat_counts.get(*k).copied().unwrap_or(0))).collect();
-    output.push_str(&format!(
-        "\nKnowledge Graph:\n  Semantic nodes: {} ({})\n  Procedural nodes: {}\n  Edges: {}\n  Promoted entries: {} / {}\n",
-        sem.len(), cat_summary.join(", "), proc_docs.len(), edges.len(), promoted, total
-    ));
+    // Knowledge Graph section — delegate to knowledge_graph_stats so both tools
+    // return the same numbers. The inline query variant here used `json!({})`
+    // with no `limit`, which silently capped at the WardSONDB default and
+    // undercounted edges and promoted entries vs knowledge_graph_stats.
+    output.push('\n');
+    output.push_str(&crate::knowledge::tools::knowledge_graph_stats(db).await);
 
     output
 }
