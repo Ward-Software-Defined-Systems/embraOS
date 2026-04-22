@@ -1489,7 +1489,14 @@ pub async fn file_symlink(param: &str) -> String {
     }
 }
 
-/// Delete a file. Workspace restricted.
+/// Delete a file or symlink. Workspace restricted. Refuses real directories
+/// (use a shell command for recursive removal). Handles symlinks cleanly:
+/// - Dangling symlinks (target missing): unlinked normally; `Path::exists()`
+///   would have returned false and misled the old implementation into a
+///   "File not found" error.
+/// - Symlinks to directories: unlinked (only the link goes; the target
+///   directory is untouched). `Path::is_dir()` follows symlinks and would
+///   have refused these.
 /// Param format: `<path>`
 pub async fn file_delete(param: &str) -> String {
     if param.is_empty() {
@@ -1502,12 +1509,25 @@ pub async fn file_delete(param: &str) -> String {
         return e;
     }
 
-    let p = std::path::Path::new(path);
-    if !p.exists() {
-        return format!("File not found: {}", path);
+    // symlink_metadata does NOT follow symlinks — critical for correct handling
+    // of dangling links and links pointing at directories.
+    let meta = match tokio::fs::symlink_metadata(path).await {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return format!("File not found: {}", path);
+        }
+        Err(e) => return format!("Failed to stat {}: {}", path, e),
+    };
+
+    if meta.file_type().is_symlink() {
+        // Unlink the link itself. Target state is irrelevant.
+        return match tokio::fs::remove_file(path).await {
+            Ok(()) => format!("Deleted symlink: {}", path),
+            Err(e) => format!("Failed to delete {}: {}", path, e),
+        };
     }
 
-    if p.is_dir() {
+    if meta.is_dir() {
         return format!("Cannot delete directory with file_delete (use a shell command for recursive removal): {}", path);
     }
 
