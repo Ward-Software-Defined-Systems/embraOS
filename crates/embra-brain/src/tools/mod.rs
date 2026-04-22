@@ -378,6 +378,45 @@ fn tokens_all_match(hay: &str, tokens: &[String]) -> bool {
 }
 
 #[cfg(test)]
+mod is_tag_token_tests {
+    use super::is_tag_token;
+
+    #[test]
+    fn alpha_start_is_tag() {
+        assert!(is_tag_token("#soul"));
+        assert!(is_tag_token("#architecture"));
+        assert!(is_tag_token("#issue-tracking"));
+        assert!(is_tag_token("#A"));
+    }
+
+    #[test]
+    fn numeric_start_is_not_tag() {
+        // GitHub-style issue refs stay in content
+        assert!(!is_tag_token("#5"));
+        assert!(!is_tag_token("#42"));
+        assert!(!is_tag_token("#5issues"));
+    }
+
+    #[test]
+    fn non_alpha_start_is_not_tag() {
+        assert!(!is_tag_token("#-leading-hyphen"));
+        assert!(!is_tag_token("#_underscore"));
+    }
+
+    #[test]
+    fn lone_hash_is_not_tag() {
+        assert!(!is_tag_token("#"));
+    }
+
+    #[test]
+    fn no_hash_is_not_tag() {
+        assert!(!is_tag_token("soul"));
+        assert!(!is_tag_token(""));
+        assert!(!is_tag_token("hello#world"));
+    }
+}
+
+#[cfg(test)]
 mod tokens_all_match_tests {
     use super::tokens_all_match;
 
@@ -412,6 +451,27 @@ mod tokens_all_match_tests {
     }
 }
 
+/// Is `word` a tag token (`#<letter>[letters/digits/_/-]*`)?
+///
+/// Hashtag-prefixed tokens are stripped from content and pushed into the
+/// `tags` array. The previous rule (anything starting with `#`) also captured
+/// GitHub-style issue references (`#5`, `#42`) and turned them into tag
+/// entries, which drops the reference from the remembered prose (Issue #14).
+///
+/// The letter-start rule is cheap and correct for the common cases:
+///   #soul, #architecture, #issue-tracking  → tags
+///   #5, #42, #-hyphen-start, #             → stay in text
+/// Commit SHAs prefixed with `#` (rare) that happen to start with a letter
+/// would be classified as tags; operators typically reference SHAs without
+/// a leading `#`, so the ambiguity is acceptable.
+fn is_tag_token(word: &str) -> bool {
+    let mut chars = word.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some('#'), Some(c)) if c.is_alphabetic()
+    )
+}
+
 async fn remember(db: &WardsonDbClient, content: &str, session: &str, config: &SystemConfig) -> String {
     if content.is_empty() {
         return "Nothing to remember. Provide content after [TOOL:remember ...].".into();
@@ -419,11 +479,12 @@ async fn remember(db: &WardsonDbClient, content: &str, session: &str, config: &S
 
     ensure_collection(db, "memory.entries").await;
 
-    // Parse optional tags: "content text #tag1 #tag2"
+    // Parse optional tags: "content text #tag1 #tag2". GitHub-style issue
+    // references like `#5` stay in content (is_tag_token requires letter start).
     let mut tags: Vec<String> = Vec::new();
     let mut text_parts = Vec::new();
     for word in content.split_whitespace() {
-        if word.starts_with('#') {
+        if is_tag_token(word) {
             tags.push(word.trim_start_matches('#').to_string());
         } else {
             text_parts.push(word);
