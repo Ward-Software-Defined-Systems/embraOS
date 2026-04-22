@@ -1041,14 +1041,22 @@ async fn define(db: &WardsonDbClient, param: &str) -> String {
 
 async fn draft(db: &WardsonDbClient, param: &str, session: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:draft <title> | <content>]\nSeparate title and content with ' | '.\nExample: [TOOL:draft Meeting Notes | Key decisions: ...]".into();
+        return "draft rejected (missing arguments). Usage: [TOOL:draft <title> | <content>]\nSeparate title and content with ' | '.\nExample: [TOOL:draft Meeting Notes | Key decisions: ...]".into();
     }
 
     ensure_collection(db, "drafts").await;
 
-    // Parse "title | content" or just treat entire param as content with auto-title
+    // Parse "title | content" or treat entire param as content with auto-title.
     let (title, content) = if let Some(pos) = param.find(" | ") {
-        (&param[..pos], &param[pos + 3..])
+        let t = param[..pos].trim();
+        let c = param[pos + 3..].trim();
+        if t.is_empty() {
+            return "draft rejected (title is empty before the '|')".into();
+        }
+        if c.is_empty() {
+            return "draft rejected (content is empty after the '|')".into();
+        }
+        (t, c)
     } else {
         ("Untitled Draft", param)
     };
@@ -1074,14 +1082,14 @@ async fn draft(db: &WardsonDbClient, param: &str, session: &str) -> String {
     if let Some(id) = existing_id {
         match db.update("drafts", &id, &doc).await {
             Ok(()) => format!("Draft updated: '{}' (ID: {})", title, id),
-            Err(e) => format!("Failed to update draft: {}", e),
+            Err(e) => format!("draft failed (update '{}': {})", title, e),
         }
     } else {
         let mut doc = doc;
         doc["created_at"] = serde_json::json!(Utc::now().to_rfc3339());
         match db.write("drafts", &doc).await {
             Ok(id) => format!("Draft created: '{}' (ID: {})", title, id),
-            Err(e) => format!("Failed to save draft: {}", e),
+            Err(e) => format!("draft failed (save '{}': {})", title, e),
         }
     }
 }

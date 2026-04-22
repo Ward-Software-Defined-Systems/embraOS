@@ -290,32 +290,38 @@ pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String
 /// change makes specific edges stale, follow up with `knowledge_unlink_edge`.
 pub async fn knowledge_update(params: &str, db: &WardsonDbClient) -> String {
     let trimmed = params.trim();
+    if trimmed.is_empty() {
+        return "knowledge_update rejected (missing arguments). Usage: [TOOL:knowledge_update <collection>:<id> | <json_patch>]".into();
+    }
     let Some((target, patch_str)) = trimmed.split_once('|') else {
-        return "Error: usage [TOOL:knowledge_update <collection>:<id> | <json_patch>]".into();
+        return "knowledge_update rejected (missing `|` separator). Usage: [TOOL:knowledge_update <collection>:<id> | <json_patch>]".into();
     };
     let Some((coll, id)) = target.trim().split_once(':') else {
-        return "Error: target must be <collection>:<id>".into();
+        return "knowledge_update rejected (target must be <collection>:<id>)".into();
     };
     let coll = coll.trim();
     let id = id.trim();
+    if id.is_empty() {
+        return "knowledge_update rejected (missing id after `:`)".into();
+    }
 
     if coll != "memory.semantic" && coll != "memory.procedural" {
         return format!(
-            "Error: knowledge_update only operates on memory.semantic or memory.procedural (got '{}'). Use [TOOL:forget] + [TOOL:remember] for memory.entries.",
+            "knowledge_update rejected (collection '{}' not supported — only memory.semantic or memory.procedural). Use [TOOL:forget] + [TOOL:remember] for memory.entries.",
             coll
         );
     }
 
     let mut patch: serde_json::Value = match serde_json::from_str(patch_str.trim()) {
         Ok(v) => v,
-        Err(e) => return format!("Error: invalid JSON patch: {}", e),
+        Err(e) => return format!("knowledge_update rejected (invalid JSON patch: {})", e),
     };
     let obj = match patch.as_object_mut() {
         Some(o) => o,
-        None => return "Error: JSON patch must be an object".into(),
+        None => return "knowledge_update rejected (JSON patch must be an object)".into(),
     };
     if obj.is_empty() {
-        return "Error: JSON patch is empty — nothing to update".into();
+        return "knowledge_update rejected (JSON patch is empty — nothing to update)".into();
     }
 
     const IMMUTABLE: &[&str] = &[
@@ -330,7 +336,7 @@ pub async fn knowledge_update(params: &str, db: &WardsonDbClient) -> String {
     for field in IMMUTABLE {
         if obj.contains_key(*field) {
             return format!(
-                "Error: field '{}' is immutable and cannot be changed via knowledge_update",
+                "knowledge_update rejected (field '{}' is immutable)",
                 field
             );
         }
@@ -338,7 +344,7 @@ pub async fn knowledge_update(params: &str, db: &WardsonDbClient) -> String {
 
     let existing = match db.read(coll, id).await {
         Ok(doc) => doc,
-        Err(_) => return format!("Error: Node {}:{} not found", coll, id),
+        Err(_) => return format!("knowledge_update rejected (node {}:{} not found)", coll, id),
     };
 
     let changed_fields: Vec<String> = obj.keys().cloned().collect();
@@ -348,7 +354,7 @@ pub async fn knowledge_update(params: &str, db: &WardsonDbClient) -> String {
     );
 
     if let Err(e) = db.patch_document(coll, id, &patch).await {
-        return format!("Error: patch failed: {}", e);
+        return format!("knowledge_update failed: {}", e);
     }
 
     let preview_src = existing
