@@ -962,10 +962,42 @@ fn calculate(expression: &str) -> String {
 
 async fn define(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:define <term>] to look up, or [TOOL:define <term> | <definition>] to add".into();
+        return "Usage: [TOOL:define <term>] to look up, [TOOL:define <term> | <definition>] to add/update, or [TOOL:define delete <term>] to remove".into();
     }
 
     ensure_collection(db, "knowledge.definitions").await;
+
+    // Delete form: `delete <term>` (case-insensitive prefix).
+    let trimmed = param.trim();
+    if let Some(rest) = trimmed
+        .strip_prefix("delete ")
+        .or_else(|| trimmed.strip_prefix("Delete "))
+        .or_else(|| trimmed.strip_prefix("DELETE "))
+    {
+        let term = rest.trim();
+        if term.is_empty() {
+            return "define rejected (delete requires a term)".into();
+        }
+        let results = db
+            .query("knowledge.definitions", &serde_json::json!({}))
+            .await
+            .unwrap_or_default();
+        let match_id = results.iter().find_map(|doc| {
+            let doc_term = doc.get("term").and_then(|v| v.as_str()).unwrap_or("");
+            if doc_term.eq_ignore_ascii_case(term) {
+                doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()).map(|s| s.to_string())
+            } else {
+                None
+            }
+        });
+        return match match_id {
+            Some(id) => match db.delete("knowledge.definitions", &id).await {
+                Ok(()) => format!("Definition deleted: {}", term),
+                Err(e) => format!("define failed (delete '{}': {})", term, e),
+            },
+            None => format!("define rejected (no definition for '{}' found)", term),
+        };
+    }
 
     // DESIGN-003: If param contains ` | `, split into term + definition and write
     if let Some(pipe_pos) = param.find(" | ") {
@@ -1041,10 +1073,39 @@ async fn define(db: &WardsonDbClient, param: &str) -> String {
 
 async fn draft(db: &WardsonDbClient, param: &str, session: &str) -> String {
     if param.is_empty() {
-        return "draft rejected (missing arguments). Usage: [TOOL:draft <title> | <content>]\nSeparate title and content with ' | '.\nExample: [TOOL:draft Meeting Notes | Key decisions: ...]".into();
+        return "draft rejected (missing arguments). Usage: [TOOL:draft <title> | <content>] or [TOOL:draft delete <title>]\nSeparate title and content with ' | '.\nExample: [TOOL:draft Meeting Notes | Key decisions: ...]".into();
     }
 
     ensure_collection(db, "drafts").await;
+
+    // Delete form: `delete <title>` (case-insensitive prefix).
+    let trimmed = param.trim();
+    if let Some(rest) = trimmed
+        .strip_prefix("delete ")
+        .or_else(|| trimmed.strip_prefix("Delete "))
+        .or_else(|| trimmed.strip_prefix("DELETE "))
+    {
+        let title = rest.trim();
+        if title.is_empty() {
+            return "draft rejected (delete requires a title)".into();
+        }
+        let existing = db.query("drafts", &serde_json::json!({})).await.unwrap_or_default();
+        let match_id = existing.iter().find_map(|doc| {
+            let doc_title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            if doc_title.eq_ignore_ascii_case(title) {
+                doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()).map(|s| s.to_string())
+            } else {
+                None
+            }
+        });
+        return match match_id {
+            Some(id) => match db.delete("drafts", &id).await {
+                Ok(()) => format!("Draft deleted: '{}' (ID: {})", title, id),
+                Err(e) => format!("draft failed (delete '{}': {})", title, e),
+            },
+            None => format!("draft rejected (no draft titled '{}' found)", title),
+        };
+    }
 
     // Parse "title | content" or treat entire param as content with auto-title.
     let (title, content) = if let Some(pos) = param.find(" | ") {

@@ -603,24 +603,50 @@ pub async fn git_diff(param: &str) -> String {
     }
 }
 
-/// Run `git branch`. Read-only for listing, write for creating — workspace restricted for create.
-/// Param format: `<path> [name]`
+/// Run `git branch`. Three forms:
+/// - `<path>`              → list branches (read-only, unrestricted path)
+/// - `<path> <name>`       → create a branch (workspace restricted)
+/// - `<path> delete <name>` → delete a branch (workspace restricted, `-d` only
+///   so unmerged branches require manual removal; operator safety)
 pub async fn git_branch(param: &str) -> String {
     let parts: Vec<&str> = param.split_whitespace().collect();
-    let (dir, branch_name) = if parts.is_empty() {
-        (".", None)
-    } else if parts.len() == 1 {
-        (parts[0], None)
-    } else {
-        (parts[0], Some(parts[1]))
-    };
+    if parts.is_empty() {
+        // List in current dir
+        return git_branch_list(".").await;
+    }
+    let dir = parts[0];
 
-    if let Some(name) = branch_name {
-        // Creating a branch — workspace restricted
+    // Delete form: `<path> delete <name>`
+    if parts.len() >= 3 && parts[1].eq_ignore_ascii_case("delete") {
+        let name = parts[2];
         if let Err(e) = validate_workspace_path(dir) {
             return e;
         }
-        match tokio::process::Command::new("git")
+        return match tokio::process::Command::new("git")
+            .args(["-C", dir, "branch", "-d", name])
+            .output()
+            .await
+        {
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if !out.status.success() {
+                    // `-d` refuses unmerged branches — surface the error verbatim
+                    // so the operator knows why and can decide whether to act.
+                    return format!("git branch failed: {}", stderr.trim());
+                }
+                format!("Deleted branch '{}' in {}", name, dir)
+            }
+            Err(e) => format!("Failed to run git: {}", e),
+        };
+    }
+
+    // Create form: `<path> <name>`
+    if parts.len() >= 2 {
+        let name = parts[1];
+        if let Err(e) = validate_workspace_path(dir) {
+            return e;
+        }
+        return match tokio::process::Command::new("git")
             .args(["-C", dir, "branch", name])
             .output()
             .await
@@ -633,24 +659,28 @@ pub async fn git_branch(param: &str) -> String {
                 format!("Created branch '{}' in {}", name, dir)
             }
             Err(e) => format!("Failed to run git: {}", e),
-        }
-    } else {
-        // Listing branches — unrestricted
-        match tokio::process::Command::new("git")
-            .args(["-C", dir, "branch", "-a"])
-            .output()
-            .await
-        {
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                if !out.status.success() {
-                    return format!("git branch failed: {}", stderr.trim());
-                }
-                format!("=== Branches ({}) ===\n{}", dir, stdout)
+        };
+    }
+
+    // Single arg: list form
+    git_branch_list(dir).await
+}
+
+async fn git_branch_list(dir: &str) -> String {
+    match tokio::process::Command::new("git")
+        .args(["-C", dir, "branch", "-a"])
+        .output()
+        .await
+    {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if !out.status.success() {
+                return format!("git branch failed: {}", stderr.trim());
             }
-            Err(e) => format!("Failed to run git: {}", e),
+            format!("=== Branches ({}) ===\n{}", dir, stdout)
         }
+        Err(e) => format!("Failed to run git: {}", e),
     }
 }
 

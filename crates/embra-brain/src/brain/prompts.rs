@@ -161,7 +161,7 @@ Memory & Knowledge:
 - [TOOL:recall <query>] — search past conversations and saved memories
 - [TOOL:remember <content> #tag1 #tag2] — save a note or fact to persistent memory
 - [TOOL:forget <id>] — remove a specific memory entry (confirm with user first)
-- [TOOL:define <term>] — look up a term, or [TOOL:define <term> | <definition>] to add/update
+- [TOOL:define <term>] — look up a term, or [TOOL:define <term> | <definition>] to add/update, or [TOOL:define delete <term>] to remove
 - [TOOL:get <collection> <id>] — read a specific document from WardSONDB
 - [TOOL:memory_search <query>] — search past memories (alias for recall)
 
@@ -179,7 +179,7 @@ Time & Context:
 
 Utility:
 - [TOOL:calculate <expression>] — evaluate math (e.g. 2 ** 10, 1024 * 1024)
-- [TOOL:draft <title> | <content>] — save/update a text draft for later retrieval
+- [TOOL:draft <title> | <content>] — save/update a text draft for later retrieval. Also [TOOL:draft delete <title>] to remove a draft by title.
 
 Security:
 - [TOOL:security_check] — system security overview (processes, load, ports)
@@ -203,7 +203,7 @@ Engineering:
 - [TOOL:git_commit <path> | <message>] — commit staged changes (workspace restricted)
 - [TOOL:git_push <path>] — push to remote (workspace restricted)
 - [TOOL:git_pull <path>] — pull from remote (workspace restricted)
-- [TOOL:git_branch <path>] — list branches, or [TOOL:git_branch <path> <name>] to create
+- [TOOL:git_branch <path>] — list branches, [TOOL:git_branch <path> <name>] to create, [TOOL:git_branch <path> delete <name>] to delete (workspace restricted; refuses unmerged branches)
 - [TOOL:git_checkout <path> <branch>] — switch branches (workspace restricted)
 - [TOOL:git_rm <path> <files>] — stage file removal (workspace restricted)
 - [TOOL:git_mv <path> <source> <destination>] — git mv for tracked moves and case-sensitive renames (workspace restricted)
