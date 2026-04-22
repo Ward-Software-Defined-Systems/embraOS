@@ -473,19 +473,30 @@ pub async fn git_add(param: &str) -> String {
 
 /// Run `git commit`. Write operation — workspace restricted.
 /// Param format: `<path> | <message>`
+///
+/// The tool-tag parser collapses literal newlines inside a tag to single
+/// spaces, so multi-paragraph commit messages entered as real newlines
+/// would arrive here as one line. To get a multi-line commit message
+/// through, use `\n` escape sequences (and `\t` for tabs, `\\` for a
+/// literal backslash) — `expand_escapes` turns them into real whitespace
+/// right before the `git commit -m` invocation. Same pattern as
+/// `file_write` / `file_append`.
+///
+/// Example: `[TOOL:git_commit /path | Subject line\n\nBody paragraph]`
+/// produces a commit with a proper subject/body split.
 pub async fn git_commit(param: &str) -> String {
     let parts: Vec<&str> = param.splitn(2, " | ").collect();
     if parts.len() < 2 {
-        return "Usage: [TOOL:git_commit <path> | <message>]".into();
+        return "Usage: [TOOL:git_commit <path> | <message>]\nUse \\n in the message for line breaks (multi-paragraph commits).".into();
     }
     let dir = match validate_workspace_path(parts[0].trim()) {
         Ok(d) => d,
         Err(e) => return e,
     };
-    let message = parts[1].trim();
+    let message = expand_escapes(parts[1].trim());
 
     match tokio::process::Command::new("git")
-        .args(["-C", &dir, "commit", "-m", message])
+        .args(["-C", &dir, "commit", "-m", &message])
         .output()
         .await
     {

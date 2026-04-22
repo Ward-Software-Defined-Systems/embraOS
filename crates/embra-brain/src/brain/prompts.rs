@@ -198,7 +198,7 @@ Engineering:
 - [TOOL:git_log <path>] — recent git log
 - [TOOL:git_diff <path> [file]] — view uncommitted changes
 - [TOOL:git_add <path> <files>] — stage files (workspace restricted)
-- [TOOL:git_commit <path> | <message>] — commit staged changes (workspace restricted)
+- [TOOL:git_commit <path> | <message>] — commit staged changes (workspace restricted). Use `\n` in the message for multi-paragraph commits (subject line, blank line, body). The tool expands `\n`/`\t`/`\\` escapes before calling git.
 - [TOOL:git_push <path>] — push to remote (workspace restricted)
 - [TOOL:git_pull <path>] — pull from remote (workspace restricted)
 - [TOOL:git_branch <path>] — list branches, [TOOL:git_branch <path> <name>] to create, [TOOL:git_branch <path> delete <name>] to delete (workspace restricted; refuses unmerged branches)
