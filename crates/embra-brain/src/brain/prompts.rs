@@ -225,6 +225,7 @@ Filesystem:
 - [TOOL:file_append <path> | <content>] — append to a file (workspace restricted). Creates file if needed. Use \n for newlines.
 - [TOOL:file_delete <path>] — delete a file (workspace restricted, files only)
 - [TOOL:file_move <source> | <destination>] — move or rename a file or directory (workspace restricted). Also available as file_rename.
+- [TOOL:file_symlink <target> | <link_path>] — create a symbolic link at link_path pointing to target (workspace restricted on both paths; dangling targets allowed)
 - [TOOL:dir_delete <path>] — remove an empty directory (workspace restricted). Also available as rmdir.
 - [TOOL:dir_delete <path> --force] — remove a directory and all contents (workspace restricted)
 - [TOOL:mkdir <path>] — create a directory and parents (workspace restricted)

@@ -112,6 +112,7 @@ pub async fn dispatch(
         "file_append" => engineering::file_append(param).await,
         "file_delete" => engineering::file_delete(param).await,
         "file_move" | "file_rename" => engineering::file_move(param).await,
+        "file_symlink" => engineering::file_symlink(param).await,
         "dir_delete" | "rmdir" => engineering::dir_delete(param).await,
         "mkdir" => engineering::mkdir(param).await,
         "git_rm" => engineering::git_rm(param).await,

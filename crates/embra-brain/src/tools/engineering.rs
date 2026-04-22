@@ -1254,6 +1254,43 @@ pub async fn mkdir(param: &str) -> String {
     }
 }
 
+/// Create a symbolic link. Workspace restricted (both target and link path must
+/// be under `/embra/workspace/`). Dangling targets are allowed — operators can
+/// create a forward-reference symlink and populate the target afterwards.
+/// Param format: `<target> | <link_path>`
+pub async fn file_symlink(param: &str) -> String {
+    let parts: Vec<&str> = param.splitn(2, '|').collect();
+    if parts.len() < 2 {
+        return "file_symlink rejected (missing arguments). Usage: [TOOL:file_symlink <target> | <link_path>]\nExample: [TOOL:file_symlink /embra/workspace/repos/foo/src | /embra/workspace/src-link]".into();
+    }
+
+    let target = parts[0].trim();
+    let link = parts[1].trim();
+
+    if target.is_empty() {
+        return "file_symlink rejected (target is empty before the '|')".into();
+    }
+    if link.is_empty() {
+        return "file_symlink rejected (link path is empty after the '|')".into();
+    }
+
+    if let Err(e) = validate_workspace_path(target) {
+        return e;
+    }
+    if let Err(e) = validate_workspace_path(link) {
+        return e;
+    }
+
+    if std::path::Path::new(link).exists() {
+        return format!("file_symlink rejected (link path already exists: {})", link);
+    }
+
+    match tokio::fs::symlink(target, link).await {
+        Ok(()) => format!("Symlink created: {} → {}", link, target),
+        Err(e) => format!("file_symlink failed: {}", e),
+    }
+}
+
 /// Delete a file. Workspace restricted.
 /// Param format: `<path>`
 pub async fn file_delete(param: &str) -> String {
