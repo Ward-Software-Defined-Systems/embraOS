@@ -109,6 +109,7 @@ pub async fn dispatch(
         "gh_pr_create" => engineering::gh_pr_create(db, param).await,
         "gh_pr_close" => engineering::gh_pr_close(db, param).await,
         "gh_pr_comment" => engineering::gh_pr_comment(db, param).await,
+        "gh_pr_merge" => engineering::gh_pr_merge(db, param).await,
         "gh_project_list" => engineering::gh_project_list(db, param).await,
         "gh_project_view" => engineering::gh_project_view(db, param).await,
         "file_read" => engineering::file_read(param).await,

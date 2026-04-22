@@ -219,6 +219,8 @@ Engineering:
 - [TOOL:gh_issue_comment <owner/repo> <number> | <body>] — post a comment on an issue
 - [TOOL:gh_pr_create <owner/repo> | <title> | <head> | <base>] — create a PR
 - [TOOL:gh_pr_close <owner/repo> <number>] — close a PR without merging
+- [TOOL:gh_pr_merge <owner/repo> <number>] — merge a PR (default method: merge). Destructive to the upstream branch — writes to shared GitHub state.
+- [TOOL:gh_pr_merge <owner/repo> <number> | <method>] — merge method is one of merge, squash, rebase.
 - [TOOL:gh_pr_comment <owner/repo> <number> | <body>] — post a comment on a PR's conversation tab
 - [TOOL:gh_project_list <owner>] — list GitHub projects
 - [TOOL:gh_project_view <owner> <number>] — view a GitHub project

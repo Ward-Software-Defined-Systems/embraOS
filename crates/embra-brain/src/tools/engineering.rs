@@ -984,6 +984,73 @@ pub async fn gh_pr_create(db: &WardsonDbClient, param: &str) -> String {
     }
 }
 
+/// Merge a GitHub pull request. Destructive-to-upstream: writes to shared
+/// GitHub state under the operator's token scope — authorization is inherited,
+/// not re-confirmed at call time (same model as gh_pr_create / gh_issue_close).
+/// Param format: `<owner/repo> <number>` (defaults merge_method = "merge") or
+/// `<owner/repo> <number> | <method>` where method is merge / squash / rebase.
+pub async fn gh_pr_merge(db: &WardsonDbClient, param: &str) -> String {
+    let token = match resolve_github_token(db).await {
+        Some(t) => t,
+        None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
+    };
+
+    // Parse: split on " | " first to separate optional method.
+    let (head, method) = match param.split_once(" | ") {
+        Some((h, m)) => (h.trim(), m.trim()),
+        None => (param.trim(), "merge"),
+    };
+    let parts: Vec<&str> = head.split_whitespace().collect();
+    if parts.len() < 2 {
+        return "gh_pr_merge rejected (missing args). Usage: [TOOL:gh_pr_merge <owner/repo> <number>] or [TOOL:gh_pr_merge <owner/repo> <number> | <method>] where method is merge|squash|rebase".into();
+    }
+    let repo = parts[0];
+    let number = parts[1];
+    if !matches!(method, "merge" | "squash" | "rebase") {
+        return format!("gh_pr_merge rejected (invalid method '{}'; use merge, squash, or rebase)", method);
+    }
+
+    let url = format!(
+        "https://api.github.com/repos/{}/pulls/{}/merge",
+        repo, number
+    );
+    let payload = serde_json::json!({ "merge_method": method });
+
+    let client = reqwest::Client::new();
+    match client
+        .put(&url)
+        .header("User-Agent", "embraOS/0.1.0")
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&payload)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status();
+            match status.as_u16() {
+                200 => {
+                    let v: serde_json::Value = resp.json().await.unwrap_or_default();
+                    let sha = v.get("sha").and_then(|x| x.as_str()).unwrap_or("");
+                    let sha_short = if sha.len() >= 7 { &sha[..7] } else { sha };
+                    let merged = v.get("merged").and_then(|x| x.as_bool()).unwrap_or(false);
+                    if merged {
+                        format!("PR #{} merged in {} (method: {}, sha: {})", number, repo, method, sha_short)
+                    } else {
+                        format!("PR #{} merge API returned 200 but merged=false; check the response", number)
+                    }
+                }
+                405 => "gh_pr_merge rejected (PR not mergeable — check approvals, required status checks, or conflicts)".into(),
+                409 => "gh_pr_merge rejected (merge conflict; resolve and retry)".into(),
+                _ => {
+                    let body = resp.text().await.unwrap_or_default();
+                    format!("gh_pr_merge failed: GitHub API {}: {}", status, body)
+                }
+            }
+        }
+        Err(e) => format!("gh_pr_merge failed: transport error: {}", e),
+    }
+}
+
 /// Outcome of a classic-projects fetch.
 enum ProjectsFetch {
     Ok(Vec<serde_json::Value>),
