@@ -184,13 +184,11 @@ Utility:
 Security:
 - [TOOL:security_check] — system security overview (processes, load, ports)
 - [TOOL:port_scan <host> [ports]] — TCP scan with banner grabbing (private/loopback only)
-  Port specs: 80,443 (specific), 8000-8100 (range), web/db/all (presets)
-- [TOOL:firewall_status] — firewall status (not yet implemented)
-- [TOOL:ssh_sessions] — SSH session info (not yet implemented)
-- [TOOL:security_audit] — security audit (not yet implemented)
+  Port specs: 80,443 (specific), 8000-8100 (range), 80,443,8000-8100 (mixed), web/db/low/all (presets)
 - [TOOL:ssh_remote_admin <host> <command>] — execute single command on remote host via SSH (EXPERIMENTAL — private/loopback IPs only, use at your own risk)
 - [TOOL:ssh_remote_admin user@host <command>] — SSH as specific user
-- [TOOL:ssh_session_start <user@host>] — open persistent SSH session (EXPERIMENTAL — private/loopback only)
+- [TOOL:ssh_remote_admin user@host:port <command>] — SSH on a non-default port (e.g. user@192.168.1.10:2222)
+- [TOOL:ssh_session_start <user@host[:port]>] — open persistent SSH session (EXPERIMENTAL — private/loopback only; default port 22)
 - [TOOL:ssh_session_exec <command>] — run command in open SSH session. Each command gets a clean process lifecycle. 30s timeout, 10KB truncation.
 - [TOOL:ssh_session_end] — close SSH session and tear down connection
 

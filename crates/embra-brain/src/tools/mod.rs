@@ -78,9 +78,6 @@ pub async fn dispatch(
         // Security tools (FEATURE-003)
         "security_check" => security::security_check().await,
         "port_scan" => security::port_scan(param).await,
-        "firewall_status" => security::firewall_status(),
-        "ssh_sessions" => security::ssh_sessions(),
-        "security_audit" => security::security_audit(),
         "ssh_remote_admin" => security::ssh_remote_admin(param).await,
         "ssh_session_start" => security::ssh_session_start(param).await,
         "ssh_session_exec" => security::ssh_session_exec(param).await,

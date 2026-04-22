@@ -360,25 +360,11 @@ pub async fn port_scan(param: &str) -> String {
     output
 }
 
-/// Stub for firewall status — not yet implemented.
-pub fn firewall_status() -> String {
-    "Firewall status: not yet implemented. Requires iptables/nftables integration on the embraOS rootfs.".into()
-}
-
-/// Stub for SSH sessions — not yet implemented.
-pub fn ssh_sessions() -> String {
-    "SSH sessions: not yet implemented. embraOS currently exposes no inbound SSH; interaction is via the serial console.".into()
-}
-
-/// Stub for security audit — not yet implemented.
-pub fn security_audit() -> String {
-    "Security audit: not yet implemented. Broader audit tooling is planned with embra-guardian in Phase 3.".into()
-}
-
 // ── SSH Remote Admin (EXPERIMENTAL) ──
 
 struct SshSession {
     user_host: String,      // "user@host"
+    port: u16,              // SSH port (default 22)
     control_path: String,   // "/tmp/embra-ssh-{uuid}"
 }
 
@@ -387,12 +373,82 @@ fn ssh_session_lock() -> &'static tokio::sync::Mutex<Option<SshSession>> {
     SSH_SESSION.get_or_init(|| tokio::sync::Mutex::new(None))
 }
 
-/// Parse `user@host` or `host` (default user: root).
-fn parse_ssh_target(target: &str) -> (String, String) {
-    if let Some(at_pos) = target.find('@') {
-        (target[..at_pos].to_string(), target[at_pos + 1..].to_string())
+/// Parse an SSH target string into (user, host, port). Supported forms:
+/// - `user@host`       → (user, host, 22)
+/// - `host`            → (root, host, 22)
+/// - `user@host:port`  → (user, host, port)
+/// - `host:port`       → (root, host, port)
+/// If `port` is present but unparseable, it is silently ignored and 22 is
+/// used (keeps the caller's `is_private_address` path robust; bad input still
+/// fails the RFC 1918 check or the subsequent SSH connection, not this parser).
+/// IPv6 bracketed hosts (`[::1]:22`) are deliberately not supported in this
+/// pass — the existing `is_private_address` check only handles v4/v6 without
+/// brackets, and adding full IPv6 URI parsing is out of scope here.
+fn parse_ssh_target(target: &str) -> (String, String, u16) {
+    let (user_part, host_port) = if let Some(at_pos) = target.find('@') {
+        (target[..at_pos].to_string(), &target[at_pos + 1..])
     } else {
-        ("root".to_string(), target.to_string())
+        ("root".to_string(), target)
+    };
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((h, p)) => match p.parse::<u16>() {
+            Ok(pnum) if pnum > 0 => (h.to_string(), pnum),
+            _ => (host_port.to_string(), 22),
+        },
+        None => (host_port.to_string(), 22),
+    };
+    (user_part, host, port)
+}
+
+#[cfg(test)]
+mod parse_ssh_target_tests {
+    use super::parse_ssh_target;
+
+    #[test]
+    fn bare_host_defaults_user_and_port() {
+        assert_eq!(
+            parse_ssh_target("192.168.1.10"),
+            ("root".into(), "192.168.1.10".into(), 22)
+        );
+    }
+
+    #[test]
+    fn user_at_host_keeps_port_default() {
+        assert_eq!(
+            parse_ssh_target("will@192.168.1.10"),
+            ("will".into(), "192.168.1.10".into(), 22)
+        );
+    }
+
+    #[test]
+    fn host_with_port_defaults_user() {
+        assert_eq!(
+            parse_ssh_target("192.168.1.10:2222"),
+            ("root".into(), "192.168.1.10".into(), 2222)
+        );
+    }
+
+    #[test]
+    fn user_at_host_with_port() {
+        assert_eq!(
+            parse_ssh_target("will@192.168.1.10:2222"),
+            ("will".into(), "192.168.1.10".into(), 2222)
+        );
+    }
+
+    #[test]
+    fn unparseable_port_falls_back_to_22() {
+        // "abc" is not a valid port; the whole host_port is treated as the host.
+        let (u, h, p) = parse_ssh_target("192.168.1.10:abc");
+        assert_eq!(u, "root");
+        assert_eq!(p, 22);
+        assert_eq!(h, "192.168.1.10:abc");
+    }
+
+    #[test]
+    fn port_zero_falls_back_to_22() {
+        let (_u, _h, p) = parse_ssh_target("host:0");
+        assert_eq!(p, 22);
     }
 }
 
@@ -400,7 +456,7 @@ fn parse_ssh_target(target: &str) -> (String, String) {
 /// Param format: `<user@host> <command>` or `<host> <command>`
 pub async fn ssh_remote_admin(param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:ssh_remote_admin <host> <command>] or [TOOL:ssh_remote_admin user@host <command>]".into();
+        return "Usage: [TOOL:ssh_remote_admin <host> <command>] or [TOOL:ssh_remote_admin user@host[:port] <command>]".into();
     }
 
     let parts: Vec<&str> = param.splitn(2, ' ').collect();
@@ -410,7 +466,7 @@ pub async fn ssh_remote_admin(param: &str) -> String {
 
     let target = parts[0];
     let command = parts[1];
-    let (user, host) = parse_ssh_target(target);
+    let (user, host, port) = parse_ssh_target(target);
 
     if !is_private_address(&host) {
         return format!(
@@ -420,9 +476,16 @@ pub async fn ssh_remote_admin(param: &str) -> String {
         );
     }
 
+    let host_display = if port == 22 {
+        format!("{}@{}", user, host)
+    } else {
+        format!("{}@{}:{}", user, host, port)
+    };
+
     let result = tokio::time::timeout(
         Duration::from_secs(30),
         tokio::process::Command::new("ssh")
+            .arg("-p").arg(port.to_string())
             .arg("-i").arg(SSH_KEY_PATH)
             .arg("-o").arg(format!("UserKnownHostsFile={}", SSH_KNOWN_HOSTS))
             .arg("-o").arg("StrictHostKeyChecking=accept-new")
@@ -455,39 +518,39 @@ pub async fn ssh_remote_admin(param: &str) -> String {
 
             format!(
                 "[EXPERIMENTAL] SSH Remote Admin — use at your own risk\n\
-                 Host: {}@{}\n\
+                 Host: {}\n\
                  Command: {}\n\
                  Exit code: {}\n\n\
                  --- stdout ---\n{}\n\
                  --- stderr ---\n{}",
-                user, host, command, code, stdout_trunc.trim(), stderr_trunc.trim()
+                host_display, command, code, stdout_trunc.trim(), stderr_trunc.trim()
             )
         }
         Ok(Err(e)) => format!(
             "[EXPERIMENTAL] SSH Remote Admin — use at your own risk\n\
-             Host: {}@{}\n\
+             Host: {}\n\
              Command: {}\n\
              Error: {}",
-            user, host, command, e
+            host_display, command, e
         ),
         Err(_) => format!(
             "[EXPERIMENTAL] SSH Remote Admin — use at your own risk\n\
-             Host: {}@{}\n\
+             Host: {}\n\
              Command: {}\n\
              Error: command timed out after 30 seconds",
-            user, host, command
+            host_display, command
         ),
     }
 }
 
 /// Open a persistent SSH session via ControlMaster (EXPERIMENTAL).
-/// Param: `<user@host>` or `<host>` (default user: root)
+/// Param: `<user@host[:port]>` or `<host[:port]>` (default user: root, default port: 22)
 pub async fn ssh_session_start(param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:ssh_session_start <user@host>] or [TOOL:ssh_session_start <host>]".into();
+        return "Usage: [TOOL:ssh_session_start <user@host>] or [TOOL:ssh_session_start <user@host:port>] or [TOOL:ssh_session_start <host>]".into();
     }
 
-    let (user, host) = parse_ssh_target(param.trim());
+    let (user, host, port) = parse_ssh_target(param.trim());
 
     if !is_private_address(&host) {
         return format!(
@@ -503,6 +566,11 @@ pub async fn ssh_session_start(param: &str) -> String {
     }
 
     let user_host = format!("{}@{}", user, host);
+    let user_host_port_display = if port == 22 {
+        user_host.clone()
+    } else {
+        format!("{}:{}", user_host, port)
+    };
     let control_path = format!("/tmp/embra-ssh-{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
     // Start ControlMaster in background (-MNf): authenticates, then backgrounds itself
@@ -510,6 +578,7 @@ pub async fn ssh_session_start(param: &str) -> String {
         Duration::from_secs(15),
         tokio::process::Command::new("ssh")
             .arg("-MNf")
+            .arg("-p").arg(port.to_string())
             .arg("-i").arg(SSH_KEY_PATH)
             .arg("-o").arg(format!("UserKnownHostsFile={}", SSH_KNOWN_HOSTS))
             .arg("-o").arg(format!("ControlPath={}", control_path))
@@ -526,7 +595,9 @@ pub async fn ssh_session_start(param: &str) -> String {
 
     match master_result {
         Ok(Ok(output)) if output.status.success() => {
-            // ControlMaster backgrounded successfully — validate with a probe command
+            // ControlMaster backgrounded successfully — validate with a probe command.
+            // Subsequent connections via the ControlPath socket inherit the
+            // master's port, so `-p` is not needed here.
             let probe_result = tokio::time::timeout(
                 Duration::from_secs(10),
                 tokio::process::Command::new("ssh")
@@ -543,11 +614,12 @@ pub async fn ssh_session_start(param: &str) -> String {
                     if stdout.contains("embra_probe_ok") {
                         *lock = Some(SshSession {
                             user_host: user_host.clone(),
+                            port,
                             control_path,
                         });
                         format!(
                             "[EXPERIMENTAL] SSH session opened to {}. Use ssh_session_exec to run commands, ssh_session_end to close.",
-                            user_host
+                            user_host_port_display
                         )
                     } else {
                         // Probe didn't return expected output — tear down
@@ -560,13 +632,13 @@ pub async fn ssh_session_start(param: &str) -> String {
                         let stderr = String::from_utf8_lossy(&probe_out.stderr);
                         format!(
                             "[EXPERIMENTAL] SSH connection to {} failed: probe returned unexpected output. {}",
-                            user_host, stderr.trim()
+                            user_host_port_display, stderr.trim()
                         )
                     }
                 }
                 Ok(Err(e)) => {
                     let _ = std::fs::remove_file(&control_path);
-                    format!("[EXPERIMENTAL] SSH connection to {} failed: {}", user_host, e)
+                    format!("[EXPERIMENTAL] SSH connection to {} failed: {}", user_host_port_display, e)
                 }
                 Err(_) => {
                     let _ = tokio::process::Command::new("ssh")
@@ -575,7 +647,7 @@ pub async fn ssh_session_start(param: &str) -> String {
                         .arg(&user_host)
                         .output().await;
                     let _ = std::fs::remove_file(&control_path);
-                    format!("[EXPERIMENTAL] SSH connection to {} failed: probe timed out", user_host)
+                    format!("[EXPERIMENTAL] SSH connection to {} failed: probe timed out", user_host_port_display)
                 }
             }
         }
@@ -583,14 +655,14 @@ pub async fn ssh_session_start(param: &str) -> String {
             // ControlMaster exited with non-zero — connection failed
             let stderr = String::from_utf8_lossy(&output.stderr);
             let _ = std::fs::remove_file(&control_path);
-            format!("[EXPERIMENTAL] SSH connection to {} failed: {}", user_host, stderr.trim())
+            format!("[EXPERIMENTAL] SSH connection to {} failed: {}", user_host_port_display, stderr.trim())
         }
         Ok(Err(e)) => {
             format!("[EXPERIMENTAL] Failed to start SSH session: {}", e)
         }
         Err(_) => {
             let _ = std::fs::remove_file(&control_path);
-            format!("[EXPERIMENTAL] SSH connection to {} failed: connection timed out", user_host)
+            format!("[EXPERIMENTAL] SSH connection to {} failed: connection timed out", user_host_port_display)
         }
     }
 }
