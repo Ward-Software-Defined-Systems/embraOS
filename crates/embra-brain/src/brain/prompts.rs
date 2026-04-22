@@ -270,7 +270,7 @@ Knowledge Graph guidance:
 - Promote to 'semantic' for facts, preferences, decisions, observations, patterns.
 - Promote to 'procedural' for step-by-step procedures with preconditions and expected outcomes.
 - Use knowledge_link to create explicit relationships when you notice connections between knowledge nodes.
-- Edge types: enables (A is prerequisite for B), contradicts (A conflicts with B), refines (A is more specific than B), depends_on (A requires B to be true).
+- Edge types: enables (A is prerequisite for B), contradicts (A conflicts with B), refines (A is more specific than B), depends_on (A requires B to be true), related_to (A and B concern the same topic or system area; symmetric/same-scope, not hierarchical).
 - Use knowledge_unlink_edge to remove stale, incorrect, or pre-existing invalid edges (e.g., self-loops or zero-weight edges from earlier protocol versions).
 - Use knowledge_unlink_node to cleanly remove a semantic or procedural node that is wrong, superseded, or no longer valuable — the cascade deletion prevents dangling edges. Prefer this over deleting edges one-by-one when the node itself should go. For episodic entries in memory.entries, use [TOOL:forget] instead.
 - Use knowledge_update to refine an existing semantic or procedural node in place (fix a typo, adjust confidence, add tags, rewrite a procedural step) WITHOUT losing its edges. Prefer this over knowledge_unlink_node + re-promote when the node identity and provenance should stay intact.

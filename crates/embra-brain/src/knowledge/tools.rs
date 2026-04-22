@@ -62,10 +62,10 @@ pub async fn knowledge_link(params: &str, db: &WardsonDbClient) -> String {
         return "Error: source must be <collection>:<id>".into();
     };
     let Some(edge_type) = EdgeType::from_str(parts[1]) else {
-        return format!("Error: Invalid edge type '{}'. Brain-created types: enables, contradicts, refines, depends_on", parts[1]);
+        return format!("Error: Invalid edge type '{}'. Brain-created types: enables, contradicts, refines, depends_on, related_to", parts[1]);
     };
     if !edge_type.is_brain_created() {
-        return format!("Error: Invalid edge type '{}'. Brain-created types: enables, contradicts, refines, depends_on", parts[1]);
+        return format!("Error: Invalid edge type '{}'. Brain-created types: enables, contradicts, refines, depends_on, related_to", parts[1]);
     }
     let Some((tgt_coll, tgt_id)) = parts[2].split_once(':') else {
         return "Error: target must be <collection>:<id>".into();
