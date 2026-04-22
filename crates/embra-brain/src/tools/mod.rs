@@ -677,8 +677,13 @@ async fn changelog(db: &WardsonDbClient, current_session: &str) -> String {
         .await
         .unwrap_or_default();
 
+    const DISPLAY_CAP: usize = 5;
+
+    // Newest first in both branches so the list's order matches expectations.
+    // The session_start branch filters to entries created after session start
+    // (variable count); the no-session-start branch shows the tail of history.
     let recent_entries: Vec<_> = if let Some(ref start) = session_start {
-        entries
+        let mut filtered: Vec<_> = entries
             .iter()
             .filter(|doc| {
                 doc.get("created_at")
@@ -686,28 +691,51 @@ async fn changelog(db: &WardsonDbClient, current_session: &str) -> String {
                     .map(|ts| ts > start.as_str())
                     .unwrap_or(false)
             })
-            .collect()
+            .collect();
+        filtered.reverse();
+        filtered
     } else {
-        entries.iter().rev().take(5).collect()
+        entries.iter().rev().collect()
     };
 
-    if recent_entries.is_empty() {
+    let total_recent = recent_entries.len();
+    if total_recent == 0 {
         output.push_str("  No new memory entries.\n");
+    } else if total_recent <= DISPLAY_CAP {
+        output.push_str(&format!("  {} new memory entries:\n", total_recent));
+        for entry in recent_entries.iter() {
+            let content = entry.get("content").and_then(|v| v.as_str()).unwrap_or("?");
+            output.push_str(&format!("    - {}\n", content));
+        }
     } else {
-        output.push_str(&format!("  {} new memory entries:\n", recent_entries.len()));
-        for entry in recent_entries.iter().take(5) {
+        output.push_str(&format!(
+            "  {} new memory entries (showing latest {}):\n",
+            total_recent, DISPLAY_CAP
+        ));
+        for entry in recent_entries.iter().take(DISPLAY_CAP) {
             let content = entry.get("content").and_then(|v| v.as_str()).unwrap_or("?");
             output.push_str(&format!("    - {}\n", content));
         }
     }
 
-    // List sessions
+    // List sessions. Learning sessions are a one-time setup artifact; exclude
+    // from "operational" count but note their presence so the total doesn't
+    // appear to drift vs `session_list` (which shows every session).
     let collections = db.list_collections().await.unwrap_or_default();
-    let sessions: Vec<_> = collections
+    let all_session_metas: Vec<_> = collections
         .iter()
-        .filter(|c| c.starts_with("sessions.") && c.ends_with(".meta") && !c.contains("learning"))
+        .filter(|c| c.starts_with("sessions.") && c.ends_with(".meta"))
         .collect();
-    output.push_str(&format!("  Total sessions: {}\n", sessions.len()));
+    let learning_count = all_session_metas.iter().filter(|c| c.contains("learning")).count();
+    let operational_count = all_session_metas.len() - learning_count;
+    if learning_count > 0 {
+        output.push_str(&format!(
+            "  Total sessions: {} operational + {} learning (use `session_list` to see all)\n",
+            operational_count, learning_count
+        ));
+    } else {
+        output.push_str(&format!("  Total sessions: {}\n", operational_count));
+    }
 
     output
 }
