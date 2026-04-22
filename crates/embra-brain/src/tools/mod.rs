@@ -113,7 +113,7 @@ pub async fn dispatch(
         "git_rm" => engineering::git_rm(param).await,
         "git_mv" => engineering::git_mv(param).await,
         // Scheduling tools (embraCRON)
-        "cron_add" => cron::cron_add(db, param).await,
+        "cron_add" => cron::cron_add(db, param, config_tz).await,
         "cron_list" => cron::cron_list(db).await,
         "cron_remove" => cron::cron_remove(db, param).await,
         // Session access & consolidation tools (Sprint 3)

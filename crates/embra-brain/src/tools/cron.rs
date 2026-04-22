@@ -1,12 +1,48 @@
-use chrono::Utc;
+use chrono::{DateTime, TimeZone, Utc};
+use chrono_tz::Tz;
 
 use crate::db::WardsonDbClient;
 use super::parse_duration;
 
+/// Compute the next UTC fire time for `daily HH:MM` expressed in the operator's
+/// timezone. Scans forward up to 7 local days to skip any DST spring-forward
+/// gap (e.g. 02:30 local on US DST-transition days); returns None only if
+/// nothing in the next week is representable, which would be pathological.
+fn daily_next(
+    now_utc: DateTime<Utc>,
+    tz: Tz,
+    hour: u32,
+    minute: u32,
+) -> Option<DateTime<Utc>> {
+    if hour >= 24 || minute >= 60 {
+        return None;
+    }
+    let target_time = chrono::NaiveTime::from_hms_opt(hour, minute, 0)?;
+    let now_local = now_utc.with_timezone(&tz);
+    let mut candidate = now_local.date_naive();
+    for _ in 0..7 {
+        if let Some(t) = tz
+            .from_local_datetime(&candidate.and_time(target_time))
+            .earliest()
+        {
+            let t_utc = t.with_timezone(&Utc);
+            if t_utc > now_utc {
+                return Some(t_utc);
+            }
+        }
+        candidate += chrono::Duration::days(1);
+    }
+    None
+}
+
 /// Parse a schedule string into seconds between runs.
 /// Formats: "every 5m", "every 1h", "every 30s", "hourly", "daily HH:MM"
 /// Returns (interval_secs, next_run_rfc3339) or None if unparseable.
-fn parse_schedule(schedule: &str) -> Option<(u64, String)> {
+///
+/// `config_tz` is consulted only for `daily HH:MM` — interval schedules are
+/// timezone-agnostic. The value is resolved through `resolve_timezone` so both
+/// IANA names ("America/Los_Angeles") and abbreviations ("PST") are accepted.
+fn parse_schedule(schedule: &str, config_tz: &str) -> Option<(u64, String)> {
     let s = schedule.trim().to_lowercase();
 
     if s == "hourly" {
@@ -16,23 +52,13 @@ fn parse_schedule(schedule: &str) -> Option<(u64, String)> {
 
     if let Some(time_str) = s.strip_prefix("daily ") {
         let time_str = time_str.trim();
-        // Parse HH:MM
         let parts: Vec<&str> = time_str.split(':').collect();
         if parts.len() == 2 {
             if let (Ok(hour), Ok(minute)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
-                if hour < 24 && minute < 60 {
-                    let now = Utc::now();
-                    let today = now.date_naive();
-                    let target_time = chrono::NaiveTime::from_hms_opt(hour, minute, 0)?;
-                    let target_dt = today.and_time(target_time);
-                    let target_utc = target_dt.and_utc();
-                    let next = if target_utc <= now {
-                        target_utc + chrono::Duration::days(1)
-                    } else {
-                        target_utc
-                    };
-                    return Some((86400, next.to_rfc3339()));
-                }
+                let resolved = super::resolve_timezone(config_tz);
+                let tz: Tz = resolved.parse().unwrap_or(chrono_tz::UTC);
+                let next_utc = daily_next(Utc::now(), tz, hour, minute)?;
+                return Some((86400, next_utc.to_rfc3339()));
             }
         }
         return None;
@@ -63,10 +89,11 @@ async fn ensure_collection(db: &WardsonDbClient) {
 
 /// Add a cron job.
 /// Param format: `<schedule> | <command>`
-pub async fn cron_add(db: &WardsonDbClient, param: &str) -> String {
+pub async fn cron_add(db: &WardsonDbClient, param: &str, config_tz: &str) -> String {
     if param.is_empty() {
         return "Usage: [TOOL:cron_add <schedule> | <command>]\n\
                 Schedules: every 5m, every 1h, every 30s, hourly, daily 09:00\n\
+                'daily HH:MM' is resolved in the configured timezone; avoid 02:00–03:00 on DST days.\n\
                 Example: [TOOL:cron_add every 5m | system_status]"
             .into();
     }
@@ -79,7 +106,7 @@ pub async fn cron_add(db: &WardsonDbClient, param: &str) -> String {
     let schedule_str = parts[0].trim();
     let command = parts[1].trim();
 
-    let (interval_secs, next_run) = match parse_schedule(schedule_str) {
+    let (interval_secs, next_run) = match parse_schedule(schedule_str, config_tz) {
         Some(v) => v,
         None => return format!("Could not parse schedule: '{}'. Use formats like: every 5m, every 1h, hourly, daily 09:00", schedule_str),
     };
@@ -224,4 +251,63 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
     }
 
     results
+}
+
+#[cfg(test)]
+mod daily_next_tests {
+    use super::daily_next;
+    use chrono::TimeZone;
+    use chrono_tz::Tz;
+
+    fn la() -> Tz {
+        "America/Los_Angeles".parse().unwrap()
+    }
+
+    #[test]
+    fn daily_0900_la_in_winter_is_1700_utc() {
+        // 2026-01-15 12:00 UTC (04:00 PST) → next 09:00 PST is 2026-01-15 17:00 UTC.
+        let now = chrono::Utc.with_ymd_and_hms(2026, 1, 15, 12, 0, 0).unwrap();
+        let next = daily_next(now, la(), 9, 0).unwrap();
+        assert_eq!(next, chrono::Utc.with_ymd_and_hms(2026, 1, 15, 17, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn daily_0900_la_in_summer_is_1600_utc() {
+        // 2026-07-15 12:00 UTC (05:00 PDT) → next 09:00 PDT is 2026-07-15 16:00 UTC.
+        let now = chrono::Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
+        let next = daily_next(now, la(), 9, 0).unwrap();
+        assert_eq!(next, chrono::Utc.with_ymd_and_hms(2026, 7, 15, 16, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn daily_in_past_rolls_to_tomorrow() {
+        // 2026-01-15 18:00 UTC (10:00 PST) → next 09:00 PST is 2026-01-16 17:00 UTC (today has passed).
+        let now = chrono::Utc.with_ymd_and_hms(2026, 1, 15, 18, 0, 0).unwrap();
+        let next = daily_next(now, la(), 9, 0).unwrap();
+        assert_eq!(next, chrono::Utc.with_ymd_and_hms(2026, 1, 16, 17, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn dst_gap_falls_back_to_next_day() {
+        // 2026-03-08 is spring-forward in the US; 02:30 local does not exist.
+        // `daily_next` should fall through to 2026-03-09 02:30 (valid).
+        let now = chrono::Utc.with_ymd_and_hms(2026, 3, 8, 0, 0, 0).unwrap();
+        let next = daily_next(now, la(), 2, 30);
+        assert!(next.is_some(), "should fall forward to next-day target");
+    }
+
+    #[test]
+    fn invalid_hour_minute_returns_none() {
+        let now = chrono::Utc.with_ymd_and_hms(2026, 1, 15, 12, 0, 0).unwrap();
+        assert!(daily_next(now, la(), 25, 0).is_none());
+        assert!(daily_next(now, la(), 9, 60).is_none());
+    }
+
+    #[test]
+    fn utc_tz_is_no_op() {
+        // 2026-01-15 08:00 UTC → next 09:00 UTC is 2026-01-15 09:00 UTC.
+        let now = chrono::Utc.with_ymd_and_hms(2026, 1, 15, 8, 0, 0).unwrap();
+        let next = daily_next(now, chrono_tz::UTC, 9, 0).unwrap();
+        assert_eq!(next, chrono::Utc.with_ymd_and_hms(2026, 1, 15, 9, 0, 0).unwrap());
+    }
 }
