@@ -24,15 +24,28 @@ use tracing::{debug, error, info, warn};
 /// Truncate a tag string for log output so arbitrary-length user content
 /// doesn't blow up log lines.
 fn log_tag(tag: &str) -> String {
-    const LIMIT: usize = 200;
-    if tag.len() <= LIMIT {
-        tag.to_string()
+    truncate_for_log(tag, 200)
+}
+
+/// Truncate a longer text preview (e.g. the full streamed Brain response) for
+/// log output. Larger limit than `log_tag` so correlation with an extracted
+/// tag is unambiguous — the surrounding Brain text tells the whole story.
+fn log_response_preview(text: &str) -> String {
+    truncate_for_log(text, 500)
+}
+
+/// Char-boundary-safe truncation for tracing output. Returns the input as-is
+/// when it already fits; otherwise cuts at the nearest valid char boundary
+/// under `limit` and appends a hint at how many bytes were dropped.
+fn truncate_for_log(text: &str, limit: usize) -> String {
+    if text.len() <= limit {
+        text.to_string()
     } else {
-        let mut end = LIMIT;
-        while end > 0 && !tag.is_char_boundary(end) {
+        let mut end = limit;
+        while end > 0 && !text.is_char_boundary(end) {
             end -= 1;
         }
-        format!("{}…(+{} bytes)", &tag[..end], tag.len() - end)
+        format!("{}…(+{} bytes)", &text[..end], text.len() - end)
     }
 }
 
@@ -555,6 +568,19 @@ async fn handle_request(
 
             let mut current_response = full_response;
             for iteration in 0..MAX_TOOL_ITERATIONS {
+                // FIX-01 diagnostic: log the Brain-stream content the parser is
+                // about to scan. Paired with the `dispatch:start` log line below,
+                // this settles whether an unsolicited dispatch came from an echo
+                // of history content, retrieved context, or a generated tag —
+                // the preview shows the verbatim text that produced the match.
+                info!(
+                    target: "dispatch",
+                    session = %session_name,
+                    iteration = iteration,
+                    response_bytes = current_response.len(),
+                    response_preview = %log_response_preview(&current_response),
+                    "dispatch:response_preview"
+                );
                 let tags = tools::extract_tool_tags(&current_response);
                 debug!(
                     target: "dispatch",
