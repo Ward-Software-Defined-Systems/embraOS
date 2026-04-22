@@ -1025,13 +1025,14 @@ fn unescape_param(s: &str) -> String {
 }
 
 /// Extract `[TOOL:...]` tags from AI output safely.
-/// Strips fenced code blocks and inline code first so that examples/documentation
-/// are never mis-parsed as real tool invocations (BUG-001 fix). Unlike an earlier
-/// version, this parser tolerates tool tags whose parameter contains soft
-/// newlines — a forward scan finds each `[TOOL:` / `]` pair (even across lines)
-/// and collapses internal whitespace into single spaces before dispatch.
+/// Strips fenced code blocks first so that examples/documentation inside fences
+/// are never mis-parsed as real tool invocations. Outside fences, a depth-aware
+/// forward scan finds each `[TOOL:` / matching `]` pair (even across lines),
+/// treating argument bodies as opaque — nested `[TOOL:` in arguments counts as
+/// bracket content, not a separate tag. Internal whitespace in the matched span
+/// collapses to single spaces before dispatch.
 pub fn extract_tool_tags(text: &str) -> Vec<String> {
-    // Step 1: Strip fenced code blocks (``` ... ```)
+    // Step 1: Strip fenced code blocks (``` ... ```). Preserves line count.
     let mut stripped = String::with_capacity(text.len());
     let mut in_fence = false;
     for line in text.lines() {
@@ -1048,31 +1049,19 @@ pub fn extract_tool_tags(text: &str) -> Vec<String> {
         }
     }
 
-    // Step 2: Strip inline backtick spans
-    let mut no_inline = String::with_capacity(stripped.len());
-    let mut in_backtick = false;
-    for ch in stripped.chars() {
-        if ch == '`' {
-            in_backtick = !in_backtick;
-        } else if !in_backtick {
-            no_inline.push(ch);
-        }
-    }
-
-    // Step 3: Forward-scan for [TOOL:...] spans, allowing internal newlines.
+    // Step 2: Forward-scan for [TOOL:...] spans. The outer `[TOOL:` consumes one
+    // `[`, so depth starts at 1 and the closing `]` brings depth back to 0. This
+    // keeps stray `]` in JSON arrays, markdown links, git `[section]` notation,
+    // `vec![0u8; 4]` code, or nested `[TOOL:...]` mentions inside arguments from
+    // prematurely ending or hijacking the outer tag.
     const OPEN: &str = "[TOOL:";
     let mut tags = Vec::new();
     let mut cursor = 0;
-    while let Some(rel_open) = no_inline[cursor..].find(OPEN) {
+    while let Some(rel_open) = stripped[cursor..].find(OPEN) {
         let open_at = cursor + rel_open;
         let inner_start = open_at + OPEN.len();
 
-        // Find the matching ']' using bracket/brace balancing with JSON string
-        // awareness. The outer `[TOOL:` already consumed one `[`, so depth starts
-        // at 1 and the closing `]` is the one that brings depth back to 0. This
-        // prevents stray `]` in JSON arrays, markdown links, git `[section]`
-        // notation, or code like `vec![0u8; 4]` from prematurely ending the tag.
-        let rest = &no_inline[inner_start..];
+        let rest = &stripped[inner_start..];
         let mut close_at_opt: Option<usize> = None;
         let mut depth: usize = 1;
         let mut in_string = false;
@@ -1110,27 +1099,15 @@ pub fn extract_tool_tags(text: &str) -> Vec<String> {
             }
         }
         let Some(close_at) = close_at_opt else {
-            // Unterminated. If a nested `[TOOL:` appeared inside the unclosed
-            // span, skip past the outer opener so the inner one can match on
-            // its own iteration. Otherwise drop the rest silently.
-            if rest.contains(OPEN) {
-                cursor = inner_start;
-                continue;
-            }
-            break;
-        };
-
-        // Reject nested openers: if another `[TOOL:` appears before the close,
-        // the outer tag is garbled. Skip past the outer opener and let the
-        // inner one try to match on its own iteration.
-        if no_inline[inner_start..close_at].contains(OPEN) {
+            // Unterminated: advance past the outer opener; subsequent iterations
+            // may still find a well-formed `[TOOL:` further on.
             cursor = inner_start;
             continue;
-        }
+        };
 
         // Collapse internal whitespace (including newlines) into single spaces
         // so dispatch()'s `splitn(2, ' ')` works as if the tag were on one line.
-        let raw = &no_inline[open_at..=close_at];
+        let raw = &stripped[open_at..=close_at];
         let mut collapsed = String::with_capacity(raw.len());
         let mut last_was_space = false;
         for ch in raw.chars() {
@@ -1179,9 +1156,22 @@ mod extract_tool_tags_tests {
     }
 
     #[test]
-    fn tag_inside_inline_backticks_is_ignored() {
-        let input = "prose `[TOOL:git_status /tmp]` more prose";
-        assert!(extract_tool_tags(input).is_empty());
+    fn backticks_in_args_preserved() {
+        // Inline backticks inside a tag argument are literal content, not code
+        // delimiters. The enclosed span must survive tag extraction intact.
+        let input = r"[TOOL:draft title | uses `code` here]";
+        let tags = extract_tool_tags(input);
+        assert_eq!(tags, vec![input.to_string()]);
+    }
+
+    #[test]
+    fn nested_tool_tag_in_args_is_literal_content() {
+        // A well-formed outer tag whose argument body mentions `[TOOL:...]` as
+        // documentation or prose must extract the OUTER tag intact — the inner
+        // mention is opaque bracket-balanced content, not a separate invocation.
+        let input = "[TOOL:gh_issue_create body contains [TOOL:example X] see docs]";
+        let tags = extract_tool_tags(input);
+        assert_eq!(tags, vec![input.to_string()]);
     }
 
     #[test]
