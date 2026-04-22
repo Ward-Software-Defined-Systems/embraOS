@@ -1,6 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
 use serde_json::json;
+use tracing::info;
 
 use crate::db::WardsonDbClient;
 
@@ -35,6 +36,20 @@ pub async fn express(db: &WardsonDbClient, param: &str) -> String {
         "version": new_version,
         "updated_at": Utc::now().to_rfc3339(),
     });
+
+    // EXPR-01 diagnostic: every writer to ui.expression is logged with
+    // `actor` + version transition so a mystery writer (see Embra_Debug #10)
+    // can be identified if the bug recurs.
+    info!(
+        target: "ui.expression",
+        actor = "express",
+        prev_version = current_version,
+        new_version = new_version,
+        prev_bytes = current_content.len(),
+        new_bytes = sanitized.len(),
+        empty = sanitized.is_empty(),
+        "writing ui.expression"
+    );
 
     match db.patch_document("ui", "expression", &patch).await {
         Ok(_) => {

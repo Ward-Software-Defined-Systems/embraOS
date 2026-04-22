@@ -570,6 +570,16 @@ async fn run_v6_expression_panel(db: &WardsonDbClient) -> Result<()> {
             "version": 0u64,
             "updated_at": Utc::now().to_rfc3339(),
         });
+        // EXPR-01 diagnostic: log the migration write under the same target
+        // the express tool uses, so journalctl --grep 'ui.expression' captures
+        // every authorized writer.
+        info!(
+            target: "ui.expression",
+            actor = "migration_v6",
+            new_bytes = 0,
+            empty = true,
+            "seeding ui.expression singleton"
+        );
         match db.write("ui", &seed).await {
             Ok(_) => info!("Migration v6: seeded ui.expression singleton"),
             Err(e) if is_conflict_err(&e) => {
