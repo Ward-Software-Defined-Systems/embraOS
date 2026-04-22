@@ -272,7 +272,7 @@ All sessions share the same intelligence — same memory, same identity, same so
 
 ### Default Tools
 
-Phase 1 includes 76 built-in tools available in operational mode. These are internal tools invoked by the intelligence during conversation — not user-facing commands. The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
+Phase 1 includes 79 built-in tools available in operational mode. These are internal tools invoked by the intelligence during conversation — not user-facing commands. The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
 
 > **⚠️ Testing Notice:** The default tools and slash commands are actively being tested. If you encounter bugs or unexpected behavior, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
@@ -295,7 +295,7 @@ Phase 1 includes 76 built-in tools available in operational mode. These are inte
 | **forget** | Remove a specific memory entry by ID |
 | **memory_search** | Search and retrieve from the intelligence's memory stores. Cross-collection like `recall` |
 | **get** | Retrieve any document by collection and ID from WardSONDB |
-| **define** | Look up or add terminology — `define term` to read, `define term | definition` to write |
+| **define** | Look up or add terminology — `define term` to read, `define term | definition` to write, `define delete term` to remove (case-insensitive) |
 | **introspect** | Reflect on soul, identity, and user documents — focus filter extracts relevant subset (purpose, ethics, constraints, identity, user, knowledge) |
 | **memory_scan** | Memory inventory — total count, tag frequency, per-session breakdown, age buckets, duplicate candidates. Includes a Knowledge Graph summary section (semantic/procedural/edge counts, promoted ratio) |
 | **memory_dedup** | Find duplicate memory groups (identical, near-duplicate, subset) with merge strategy proposals. Also flags cross-collection overlap between unpromoted entries and semantic nodes |
@@ -305,7 +305,7 @@ Phase 1 includes 76 built-in tools available in operational mode. These are inte
 | Tool | Description |
 |---|---|
 | **knowledge_promote** | Promote an episodic entry to semantic (with category) or procedural (with JSON procedure). Creates a `derived_from` edge and auto-derives additional edges |
-| **knowledge_link** | Create a directed weighted edge between any two knowledge nodes. Brain-created edge types: enables, contradicts, refines, depends_on. Self-loops and zero-weight edges rejected |
+| **knowledge_link** | Create a directed weighted edge between any two knowledge nodes. Brain-created edge types: enables, contradicts, refines, depends_on, related_to (symmetric lateral link). Self-loops and zero-weight edges rejected |
 | **knowledge_unlink_edge** | Delete edges by ID or by `source \| type \| target` triple. Bidirectional deletion for auto-derived edge types |
 | **knowledge_unlink_node** | Delete a semantic or procedural node and cascade-remove every edge referencing it (source or target). Scoped to `memory.semantic`/`memory.procedural` — use `forget` for episodic entries |
 | **knowledge_update** | Update fields on a semantic or procedural node in place via JSON patch while preserving every referencing edge. Immutable fields (provenance, timestamps, access counters) rejected |
@@ -333,7 +333,7 @@ Phase 1 includes 76 built-in tools available in operational mode. These are inte
 |---|---|
 | **time** | Current date, time, and day of week in the operator's configured timezone |
 | **calculate** | Evaluate math expressions — arithmetic, trig, and more via `meval` |
-| **draft** | Save structured text artifacts (drafts, outlines, notes) — upserts by title |
+| **draft** | Save structured text artifacts (drafts, outlines, notes) — upserts by title; `draft delete <title>` removes (case-insensitive) |
 | **countdown** | Set a reminder with duration and message — proactive engine checks every 15 seconds |
 | **cron_add** | Schedule recurring tool execution — supports `every 5m`, `every 1h`, `hourly`, `daily 09:00`, etc. |
 | **cron_list** | List all scheduled cron jobs with status and next/last run times |
@@ -350,6 +350,7 @@ Phase 1 includes 76 built-in tools available in operational mode. These are inte
 | **file_move** / **file_rename** | Move or rename a file or directory. Both source and destination must be under workspace (workspace restricted) |
 | **dir_delete** / **rmdir** | Remove a directory — empty by default, `--force` to remove with contents (workspace restricted) |
 | **mkdir** | Create a directory and all parent directories (workspace restricted) |
+| **file_symlink** | Create a symbolic link — `<target> \| <link_path>`. Both paths workspace-restricted; refuses to overwrite an existing link; dangling targets allowed (use `file_delete` to remove the link itself) |
 
 **Engineering & Project Management** (GitHub tools require `GITHUB_TOKEN`)
 
@@ -363,7 +364,7 @@ Phase 1 includes 76 built-in tools available in operational mode. These are inte
 | **git_commit** | Commit staged changes with a message (workspace restricted) |
 | **git_push** | Push commits to remote (workspace restricted) |
 | **git_pull** | Pull from remote (workspace restricted) |
-| **git_branch** | List branches or create a new one (create is workspace restricted) |
+| **git_branch** | List branches, create a new one, or delete one — `git_branch <path> delete <name>` uses `-d` (unmerged branches require manual force, no `-D` path exposed). Create and delete are workspace restricted |
 | **git_checkout** | Switch branches (workspace restricted) |
 | **git_rm** | Stage a file removal with `git rm` (workspace restricted) |
 | **git_mv** | Move or rename tracked files with `git mv` — handles case-sensitive renames on case-insensitive filesystems (workspace restricted) |
@@ -371,7 +372,12 @@ Phase 1 includes 76 built-in tools available in operational mode. These are inte
 | **gh_prs** | List open GitHub pull requests for a repository |
 | **gh_issue_create** | Create a GitHub issue |
 | **gh_issue_close** | Close a GitHub issue by number |
+| **gh_issue_reopen** | Reopen a previously closed GitHub issue by number |
+| **gh_issue_comment** | Post a comment on a GitHub issue — `<owner/repo> <number> | <body>` |
 | **gh_pr_create** | Create a pull request |
+| **gh_pr_close** | Close a GitHub pull request by number (does not merge) |
+| **gh_pr_merge** | Merge a GitHub pull request — `<owner/repo> <number> [merge\|squash\|rebase]` (default `merge`). Distinct 405 (not mergeable — approvals/status/conflicts) and 409 (merge conflict) errors. Destructive to upstream |
+| **gh_pr_comment** | Post a comment on a GitHub pull request — `<owner/repo> <number> | <body>` |
 | **gh_project_list** | List GitHub projects for a user or org |
 | **gh_project_view** | View a GitHub project board |
 | **plan** | Create or list project plans (stored in WardSONDB `plans` collection) |
@@ -389,11 +395,8 @@ Phase 1 includes 76 built-in tools available in operational mode. These are inte
 |---|---|
 | **security_check** | Container security overview — running processes, load average, listening ports |
 | **port_scan** | TCP connect scan with banner grabbing — supports specific ports (`80,443`), ranges (`8000-8100`), and presets (`web`, `db`, `all`). Semaphore-limited concurrency. Restricted to RFC 1918 private and loopback addresses only |
-| **firewall_status** | Check firewall rules and status (stub — not available in container mode) |
-| **ssh_sessions** | List recent and active SSH sessions (stub — not available in container mode) |
-| **security_audit** | Check file permissions, running processes, recent logins (stub — not available in container mode) |
-| **ssh_remote_admin** | Execute a single command on a remote host via SSH — `ssh_remote_admin host command` or `ssh_remote_admin user@host command`. 30s timeout, 10KB output truncation (EXPERIMENTAL) |
-| **ssh_session_start** | Open a persistent SSH session via ControlMaster — connection validated with probe command. One session at a time (EXPERIMENTAL) |
+| **ssh_remote_admin** | Execute a single command on a remote host via SSH — host forms: `host`, `user@host`, `host:port`, `user@host:port`. 30s timeout, 10KB output truncation (EXPERIMENTAL) |
+| **ssh_session_start** | Open a persistent SSH session via ControlMaster — connection validated with probe command. Same host forms as `ssh_remote_admin` (`host:port` / `user@host:port` supported). One session at a time (EXPERIMENTAL) |
 | **ssh_session_exec** | Run a command in the open SSH session — each command gets a clean process lifecycle via ControlMaster socket. 30s timeout, 10KB truncation (EXPERIMENTAL) |
 | **ssh_session_end** | Close SSH session and tear down ControlMaster connection (EXPERIMENTAL) |
 
@@ -415,7 +418,7 @@ Phase 1 includes 76 built-in tools available in operational mode. These are inte
 | **Phase 1 — Initial Sprint** | Core OS — QEMU-bootable image, immutable SquashFS rootfs, full boot chain (embra-init → embrad → services), config wizard, Learning Mode, soul sealing, gRPC architecture, serial TUI | ✅ **Complete** |
 | **Phase 1 — Sprint 1** | Bug fixes & UX — tool feedback loop, timezone display, multi-line input, git/SSH/GitHub setup commands, input word-wrap, tool output truncation, Unicode crash fix | ✅ **Complete** |
 | **Phase 1 — Sprint 2** | Cross-session knowledge graph — semantic/procedural promotion, typed/weighted edges, BFS traversal, graph-aware retrieval, 6 KG tools, `/feedback-loop` command | ✅ **Complete** |
-| **Phase 1 — Sprint 3** | WardSONDB pluggable storage engine — `--storage-engine <fjall\|rocksdb>` plumbed from `build-image.sh` through embrad to runtime via `cargo:rustc-env`, musl.cc cross-toolchain switch (RocksDB requires musl-built libstdc++), supervisor immediate-exit log dump, README quickstart fixes for fresh-VM walkthroughs; EXPR-01 expression panel — `ui.expression` WardSONDB singleton (migration v6), `express` tool with `base64:` transport mode, top-of-console TUI panel polled every 3 s (8 rows × full terminal width), 75 → 76 tools | 🚧 In Progress |
+| **Phase 1 — Sprint 3** | WardSONDB pluggable storage engine — `--storage-engine <fjall\|rocksdb>` plumbed from `build-image.sh` through embrad to runtime via `cargo:rustc-env`, musl.cc cross-toolchain switch (RocksDB requires musl-built libstdc++), supervisor immediate-exit log dump, README quickstart fixes for fresh-VM walkthroughs; EXPR-01 expression panel — `ui.expression` WardSONDB singleton (migration v6), `express` tool with `base64:` transport mode, top-of-console TUI panel polled every 3 s (8 rows × full terminal width); tool-bug fix series (13 commits — parser correctness, `port_scan` presets, `memory_scan` delegation, `cron daily HH:MM` in operator tz, `recall` tokenization, `changelog` consistency, process uptime vs session age, `gh_project_list` user/org fallback, error messaging pattern, `session_read` range, dispatch logging, root password lock); tool-coverage expansion (7 commits — `related_to` edge type, delete forms on `git_branch` / `draft` / `define`, `file_symlink`, `gh_issue_comment` / `gh_pr_comment`, `gh_issue_reopen` / `gh_pr_close`, `gh_pr_merge`, removal of 3 stale stubs, SSH `host:port` / `user@host:port` forms); unknown-tool dispatcher fix (returns a helpful error instead of stalling the Brain); post-verification bug fixes (Embra_Debug #14 `remember` preserves `#<digit>` GitHub issue refs, #15 `git_commit` expands `\n`/`\t`/`\\` in the message, #18 `file_delete` handles symlinks without following); 75 → 79 tools, 80 unit tests | 🚧 In Progress |
 | **Pit Stop** | Code review branch — security audit, AI slop cleanup, refactoring | Planned |
 | **Phase 2** | Terminal & Sessions — Full TUI rewrite, API Web Searches via `embra-guardian` v1 (including additional prompt injection protection for the returned results) | Planned |
 | **Phase 3** | Module System — `embra-guardian` v2, `embractl` management CLI (the `talosctl` equivalent), `embra-brain` Local/Hybrid option via external Ollama but default/recommended remains Anthropic API, LLM-driven Continuity Engine feedback loop (local/API/Hybrid options), MCP server modules via `embra-guardian` governance proxy, containerd runtime, governed capability expansion | Planned |
@@ -436,7 +439,7 @@ Cargo workspace with 7 crates, all cross-compiling to `x86_64-unknown-linux-musl
 | `embrad` | PID 1: loopback/eth0 setup, service supervisor, soul verification, reconciliation | Complete |
 | `embra-trustd` | Soul SHA-256 verification, Root CA generation, mTLS cert signing | Complete |
 | `embra-apid` | gRPC + REST gateway, bidirectional streaming proxy | Complete |
-| `embra-brain` | Headless AI runtime — Brain, 76 tools, sessions, Learning Mode, proactive engine, knowledge graph | Complete |
+| `embra-brain` | Headless AI runtime — Brain, 79 tools, sessions, Learning Mode, proactive engine, knowledge graph | Complete |
 | `embra-console` | Full ratatui TUI over serial/gRPC — config wizard, styled rendering, session management | Complete |
 | `embra-common` | Shared protobuf types (tonic codegen) | Complete |
 
