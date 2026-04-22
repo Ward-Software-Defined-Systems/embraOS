@@ -71,33 +71,109 @@ fn format_turn(index: usize, turn: &serde_json::Value, max_chars: usize) -> Stri
     format!("[{}] [{}]: {}", index + 1, role, preview)
 }
 
-/// Parse a turn range string like "1-20", "80-", or "" into (start_0indexed, end_exclusive).
-fn parse_range(range_str: &str, total: usize) -> (usize, usize) {
+/// Parse a turn range string like "1-20", "80-", "5", or "" into
+/// (start_0indexed, end_exclusive). Returns a human-readable Err when the
+/// request cannot be satisfied (e.g. start beyond total) so the caller can
+/// surface the problem instead of printing an inverted header.
+fn parse_range(range_str: &str, total: usize) -> Result<(usize, usize), String> {
+    if total == 0 {
+        return Err("session has no turns".into());
+    }
     if range_str.is_empty() {
-        // Default: last 30 turns
+        // Default: last 30 turns.
         let start = if total > 30 { total - 30 } else { 0 };
-        return (start, total);
+        return Ok((start, total));
     }
 
     if let Some(dash_pos) = range_str.find('-') {
-        let start_str = &range_str[..dash_pos];
-        let end_str = &range_str[dash_pos + 1..];
+        let start_str = range_str[..dash_pos].trim();
+        let end_str = range_str[dash_pos + 1..].trim();
 
-        let start_1 = start_str.parse::<usize>().unwrap_or(1).max(1);
-        let start_0 = start_1 - 1;
-
+        let start_1: usize = start_str
+            .parse()
+            .map_err(|_| format!("bad start '{}' — expected a 1-based turn number", start_str))?;
+        if start_1 < 1 {
+            return Err("start must be ≥ 1".into());
+        }
+        if start_1 > total {
+            return Err(format!("start {} exceeds total {} turns", start_1, total));
+        }
         let end = if end_str.is_empty() {
             total
         } else {
-            end_str.parse::<usize>().unwrap_or(total).min(total)
+            let raw: usize = end_str
+                .parse()
+                .map_err(|_| format!("bad end '{}' — expected a 1-based turn number", end_str))?;
+            raw.min(total)
         };
-
-        (start_0.min(total), end.min(total))
+        if end < start_1 {
+            return Err(format!("end {} is before start {}", end, start_1));
+        }
+        Ok((start_1 - 1, end))
     } else {
-        // Single number — show that one turn
-        let n = range_str.parse::<usize>().unwrap_or(1).max(1);
-        let idx = (n - 1).min(total.saturating_sub(1));
-        (idx, (idx + 1).min(total))
+        // Single number — show that one turn.
+        let n: usize = range_str
+            .trim()
+            .parse()
+            .map_err(|_| format!("bad turn '{}' — expected a 1-based turn number", range_str))?;
+        if n < 1 || n > total {
+            return Err(format!("turn {} out of range 1..={}", n, total));
+        }
+        Ok((n - 1, n))
+    }
+}
+
+#[cfg(test)]
+mod parse_range_tests {
+    use super::parse_range;
+
+    #[test]
+    fn empty_returns_tail_30_of_larger_session() {
+        assert_eq!(parse_range("", 50).unwrap(), (20, 50));
+    }
+
+    #[test]
+    fn empty_on_small_session_returns_all() {
+        assert_eq!(parse_range("", 10).unwrap(), (0, 10));
+    }
+
+    #[test]
+    fn single_turn_at_valid_index() {
+        assert_eq!(parse_range("5", 10).unwrap(), (4, 5));
+    }
+
+    #[test]
+    fn single_turn_out_of_range_errors() {
+        assert!(parse_range("11", 10).is_err());
+        assert!(parse_range("0", 10).is_err());
+    }
+
+    #[test]
+    fn range_end_clamps_to_total() {
+        assert_eq!(parse_range("1-9999", 10).unwrap(), (0, 10));
+    }
+
+    #[test]
+    fn range_out_of_bounds_reproducer_finding16() {
+        // 500-600 on a 20-turn session used to silently return "turns 21-20 of 20".
+        let err = parse_range("500-600", 20).unwrap_err();
+        assert!(err.contains("exceeds total"), "unexpected message: {}", err);
+    }
+
+    #[test]
+    fn zero_total_errors() {
+        assert!(parse_range("1-5", 0).is_err());
+    }
+
+    #[test]
+    fn end_before_start_errors() {
+        assert!(parse_range("10-5", 20).is_err());
+    }
+
+    #[test]
+    fn bad_input_errors() {
+        assert!(parse_range("foo", 10).is_err());
+        assert!(parse_range("1-foo", 10).is_err());
     }
 }
 
@@ -210,7 +286,10 @@ pub async fn session_read(db: &WardsonDbClient, param: &str) -> String {
         return format!("No conversation history found for session '{}'.", name);
     }
 
-    let (start, end) = parse_range(range_str, total);
+    let (start, end) = match parse_range(range_str, total) {
+        Ok(v) => v,
+        Err(msg) => return format!("session_read rejected ({}) for session '{}' (total turns: {})", msg, name, total),
+    };
 
     let mut output = format!(
         "Session '{}': turns {}-{} of {}\n\n",
@@ -1080,7 +1159,10 @@ pub async fn session_extract(db: &WardsonDbClient, param: &str) -> String {
     let (start, end) = if range_str.is_empty() {
         (0, total)
     } else {
-        parse_range(range_str, total)
+        match parse_range(range_str, total) {
+            Ok(v) => v,
+            Err(msg) => return format!("session_extract rejected ({}) for session '{}' (total turns: {})", msg, name, total),
+        }
     };
 
     let turn_slice = &turns[start..end];
