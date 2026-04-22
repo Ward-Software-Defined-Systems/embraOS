@@ -215,8 +215,10 @@ Engineering:
 - [TOOL:gh_prs <owner/repo>] — list open GitHub PRs (requires GITHUB_TOKEN)
 - [TOOL:gh_issue_create <owner/repo> | <title> | <body>] — create a GitHub issue
 - [TOOL:gh_issue_close <owner/repo> <number>] — close a GitHub issue
+- [TOOL:gh_issue_reopen <owner/repo> <number>] — reopen a previously-closed issue
 - [TOOL:gh_issue_comment <owner/repo> <number> | <body>] — post a comment on an issue
 - [TOOL:gh_pr_create <owner/repo> | <title> | <head> | <base>] — create a PR
+- [TOOL:gh_pr_close <owner/repo> <number>] — close a PR without merging
 - [TOOL:gh_pr_comment <owner/repo> <number> | <body>] — post a comment on a PR's conversation tab
 - [TOOL:gh_project_list <owner>] — list GitHub projects
 - [TOOL:gh_project_view <owner> <number>] — view a GitHub project

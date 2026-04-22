@@ -865,6 +865,33 @@ pub async fn gh_pr_comment(db: &WardsonDbClient, param: &str) -> String {
 /// Close a GitHub issue.
 /// Param format: `<owner/repo> <number>`
 pub async fn gh_issue_close(db: &WardsonDbClient, param: &str) -> String {
+    patch_issue_or_pr_state(db, "issues", param, "closed", "gh_issue_close", "Issue", "closed").await
+}
+
+/// Reopen a previously-closed GitHub issue.
+/// Param format: `<owner/repo> <number>`
+pub async fn gh_issue_reopen(db: &WardsonDbClient, param: &str) -> String {
+    patch_issue_or_pr_state(db, "issues", param, "open", "gh_issue_reopen", "Issue", "reopened").await
+}
+
+/// Close a GitHub pull request without merging.
+/// Param format: `<owner/repo> <number>`
+pub async fn gh_pr_close(db: &WardsonDbClient, param: &str) -> String {
+    patch_issue_or_pr_state(db, "pulls", param, "closed", "gh_pr_close", "PR", "closed").await
+}
+
+/// Shared implementation for issue/PR state PATCH operations.
+/// `kind` is "issues" or "pulls" (URL path segment). `new_state` is "open" or
+/// "closed". Tool name + artifact label + verb drive the error/success strings.
+async fn patch_issue_or_pr_state(
+    db: &WardsonDbClient,
+    kind: &str,
+    param: &str,
+    new_state: &str,
+    tool_name: &str,
+    artifact_label: &str,
+    verb: &str,
+) -> String {
     let token = match resolve_github_token(db).await {
         Some(t) => t,
         None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
@@ -872,14 +899,14 @@ pub async fn gh_issue_close(db: &WardsonDbClient, param: &str) -> String {
 
     let parts: Vec<&str> = param.split_whitespace().collect();
     if parts.len() < 2 {
-        return "Usage: [TOOL:gh_issue_close <owner/repo> <number>]".into();
+        return format!("{} rejected (missing args). Usage: [TOOL:{} <owner/repo> <number>]", tool_name, tool_name);
     }
 
     let repo = parts[0];
     let number = parts[1];
 
-    let url = format!("https://api.github.com/repos/{}/issues/{}", repo, number);
-    let payload = serde_json::json!({ "state": "closed" });
+    let url = format!("https://api.github.com/repos/{}/{}/{}", repo, kind, number);
+    let payload = serde_json::json!({ "state": new_state });
 
     let client = reqwest::Client::new();
     match client
@@ -891,12 +918,20 @@ pub async fn gh_issue_close(db: &WardsonDbClient, param: &str) -> String {
         .await
     {
         Ok(resp) => {
-            if !resp.status().is_success() {
-                return format!("GitHub API error: {}", resp.status());
+            let status = resp.status();
+            if !status.is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                return format!("{} failed: GitHub API {}: {}", tool_name, status, body);
             }
-            format!("Issue #{} closed in {}", number, repo)
+            let v: serde_json::Value = resp.json().await.unwrap_or_default();
+            let html_url = v.get("html_url").and_then(|x| x.as_str()).unwrap_or("");
+            if html_url.is_empty() {
+                format!("{} #{} {} in {}", artifact_label, number, verb, repo)
+            } else {
+                format!("{} #{} {}: {}", artifact_label, number, verb, html_url)
+            }
         }
-        Err(e) => format!("Failed to close issue: {}", e),
+        Err(e) => format!("{} failed: transport error: {}", tool_name, e),
     }
 }
 
