@@ -143,7 +143,19 @@ pub async fn dispatch(
         "knowledge_traverse" => knowledge::tools::knowledge_traverse(param, db, config).await,
         "knowledge_query" => knowledge::tools::knowledge_query(param, db, session_name, config).await,
         "knowledge_graph_stats" => knowledge::tools::knowledge_graph_stats(db).await,
-        _ => return None,
+        _ => {
+            // Unknown tool name. Surface a specific error to the Brain via the
+            // [SYSTEM] feedback roundtrip instead of silently dropping the
+            // call, which used to leave the session in an apparent "stall" —
+            // no ToolExecution frame, no feedback, no way for the Brain to
+            // self-correct or for the operator to see what went wrong.
+            tracing::warn!(target: "dispatch", tool = %name, "unknown tool name");
+            return Some(format!(
+                "Unknown tool: '{}'. Parsed a valid [TOOL:...] tag but the name is not in the registered tool set. \
+                 Check the tool catalog in your system prompt for the correct name; verify spelling and underscore placement.",
+                name
+            ));
+        }
     };
 
     // Truncate excessively large tool results to prevent context overflow.
