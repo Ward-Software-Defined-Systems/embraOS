@@ -19,7 +19,22 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
-use tracing::{info, debug, error, warn};
+use tracing::{debug, error, info, warn};
+
+/// Truncate a tag string for log output so arbitrary-length user content
+/// doesn't blow up log lines.
+fn log_tag(tag: &str) -> String {
+    const LIMIT: usize = 200;
+    if tag.len() <= LIMIT {
+        tag.to_string()
+    } else {
+        let mut end = LIMIT;
+        while end > 0 && !tag.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…(+{} bytes)", &tag[..end], tag.len() - end)
+    }
+}
 
 pub struct BrainGrpcService {
     db: Arc<WardsonDbClient>,
@@ -541,14 +556,52 @@ async fn handle_request(
             let mut current_response = full_response;
             for iteration in 0..MAX_TOOL_ITERATIONS {
                 let tags = tools::extract_tool_tags(&current_response);
+                debug!(
+                    target: "dispatch",
+                    session = %session_name,
+                    iteration = iteration,
+                    tag_count = tags.len(),
+                    "extracted tool tags"
+                );
                 if tags.is_empty() {
                     break;
                 }
 
-                // Dispatch tools and stream ToolExecution events
+                // Dispatch tools and stream ToolExecution events.
+                // Each dispatch call is bracketed by `dispatch:start` / `dispatch:end`
+                // log lines so a transient non-execution (Embra_Debug #9 finding 5)
+                // can be localized: no `dispatch:start` → drop before dispatch; no
+                // `dispatch:end` → hang during dispatch; no ToolExecution send →
+                // response-transport failure.
                 let mut tool_results = String::new();
                 for tag in &tags {
-                    if let Some(result) = tools::dispatch(tag, db, &loaded_config, &session_name).await {
+                    let tag_preview = log_tag(tag);
+                    info!(
+                        target: "dispatch",
+                        session = %session_name,
+                        tag = %tag_preview,
+                        "dispatch:start"
+                    );
+                    let started = std::time::Instant::now();
+                    let dispatch_result =
+                        tools::dispatch(tag, db, &loaded_config, &session_name).await;
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                    info!(
+                        target: "dispatch",
+                        session = %session_name,
+                        tag = %tag_preview,
+                        elapsed_ms,
+                        matched = dispatch_result.is_some(),
+                        "dispatch:end"
+                    );
+                    if let Some(result) = dispatch_result {
+                        debug!(
+                            target: "dispatch",
+                            session = %session_name,
+                            tag = %tag_preview,
+                            result_bytes = result.len(),
+                            "sending ToolExecution event"
+                        );
                         let _ = tx.send(Ok(ConversationResponse {
                             response_type: Some(conversation_response::ResponseType::Tool(
                                 ToolExecution {
@@ -568,7 +621,11 @@ async fn handle_request(
                     break;
                 }
 
-                // Feed tool results back to Brain for continuation
+                // Feed tool results back to Brain for continuation.
+                // All tool outputs from this iteration are concatenated into a
+                // single [SYSTEM] message by design: this amortizes the extra
+                // Brain roundtrip across N tools. If a tool needs isolated
+                // contextual feedback, emit its [TOOL:...] tag in its own turn.
                 let feedback = format!("[SYSTEM] Tool results:\n{}", tool_results);
                 messages.push(Message::assistant(&current_response));
                 messages.push(Message::user(&feedback));
