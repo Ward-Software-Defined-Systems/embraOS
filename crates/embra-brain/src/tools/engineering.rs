@@ -823,7 +823,83 @@ pub async fn gh_pr_create(db: &WardsonDbClient, param: &str) -> String {
     }
 }
 
-/// List GitHub projects for a user.
+/// Outcome of a classic-projects fetch.
+enum ProjectsFetch {
+    Ok(Vec<serde_json::Value>),
+    /// 404 on both user and org endpoints — owner has no classic projects.
+    NotFound,
+    /// 410 Gone — classic projects deprecated for this owner.
+    Gone,
+    /// Transport or other API error (non-404/410 status, or request failure).
+    Err(String),
+}
+
+/// Fetch classic GitHub projects for `owner`, trying the user endpoint first
+/// and falling back to the org endpoint on 404. Projects v2 is NOT supported;
+/// this only talks to the classic REST API.
+async fn fetch_classic_projects(token: &str, owner: &str) -> ProjectsFetch {
+    let client = reqwest::Client::new();
+    let endpoints = [
+        format!("https://api.github.com/users/{}/projects", owner),
+        format!("https://api.github.com/orgs/{}/projects", owner),
+    ];
+    let mut last_status: Option<reqwest::StatusCode> = None;
+    for url in &endpoints {
+        match client
+            .get(url)
+            .header("User-Agent", "embraOS/0.1.0")
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Accept", "application/vnd.github.inertia-preview+json")
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    let body: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
+                    return ProjectsFetch::Ok(body);
+                }
+                if status.as_u16() == 404 {
+                    last_status = Some(status);
+                    continue; // try the other endpoint
+                }
+                if status.as_u16() == 410 {
+                    return ProjectsFetch::Gone;
+                }
+                return ProjectsFetch::Err(format!("GitHub API error: {}", status));
+            }
+            Err(e) => return ProjectsFetch::Err(format!("Failed to fetch projects: {}", e)),
+        }
+    }
+    if matches!(last_status.map(|s| s.as_u16()), Some(404)) {
+        ProjectsFetch::NotFound
+    } else {
+        ProjectsFetch::Err(format!(
+            "GitHub API error: {}",
+            last_status.map(|s| s.to_string()).unwrap_or_else(|| "unknown".into())
+        ))
+    }
+}
+
+/// Shared 404/410 messages for classic-projects endpoints.
+fn classic_projects_not_found_msg(owner: &str) -> String {
+    format!(
+        "No classic projects found for '{}'.\n\
+         Note: this tool uses GitHub's classic Projects REST API. \
+         Projects v2 (org-level boards) is not supported — use the GitHub web UI for those.",
+        owner
+    )
+}
+
+fn classic_projects_gone_msg(owner: &str) -> String {
+    format!(
+        "GitHub has deprecated classic projects for '{}' (410 Gone).\n\
+         Use Projects v2 via the GitHub web UI (not yet supported by embraOS).",
+        owner
+    )
+}
+
+/// List GitHub projects for a user or org (classic REST API).
 /// Param format: `<owner>`
 pub async fn gh_project_list(db: &WardsonDbClient, param: &str) -> String {
     let token = match resolve_github_token(db).await {
@@ -836,21 +912,8 @@ pub async fn gh_project_list(db: &WardsonDbClient, param: &str) -> String {
     }
 
     let owner = param.trim();
-    let url = format!("https://api.github.com/users/{}/projects", owner);
-
-    let client = reqwest::Client::new();
-    match client
-        .get(&url)
-        .header("User-Agent", "embraOS/0.1.0")
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            if !resp.status().is_success() {
-                return format!("GitHub API error: {}", resp.status());
-            }
-            let projects: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
+    match fetch_classic_projects(&token, owner).await {
+        ProjectsFetch::Ok(projects) => {
             if projects.is_empty() {
                 return format!("No projects found for {}.", owner);
             }
@@ -863,11 +926,13 @@ pub async fn gh_project_list(db: &WardsonDbClient, param: &str) -> String {
             }
             output
         }
-        Err(e) => format!("Failed to fetch projects: {}", e),
+        ProjectsFetch::NotFound => classic_projects_not_found_msg(owner),
+        ProjectsFetch::Gone => classic_projects_gone_msg(owner),
+        ProjectsFetch::Err(e) => e,
     }
 }
 
-/// View a specific GitHub project.
+/// View a specific GitHub classic project.
 /// Param format: `<owner> <number>`
 pub async fn gh_project_view(db: &WardsonDbClient, param: &str) -> String {
     let token = match resolve_github_token(db).await {
@@ -882,25 +947,10 @@ pub async fn gh_project_view(db: &WardsonDbClient, param: &str) -> String {
 
     let owner = parts[0];
     let number = parts[1];
+    let target_num: u64 = number.parse().unwrap_or(0);
 
-    // Use the REST API for classic projects — get user projects and find by number
-    let url = format!("https://api.github.com/users/{}/projects", owner);
-
-    let client = reqwest::Client::new();
-    match client
-        .get(&url)
-        .header("User-Agent", "embraOS/0.1.0")
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            if !resp.status().is_success() {
-                return format!("GitHub API error: {}", resp.status());
-            }
-            let projects: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
-            // Find the project by number
-            let target_num: u64 = number.parse().unwrap_or(0);
+    match fetch_classic_projects(&token, owner).await {
+        ProjectsFetch::Ok(projects) => {
             if let Some(proj) = projects.iter().find(|p| {
                 p.get("number").and_then(|v| v.as_u64()).unwrap_or(0) == target_num
             }) {
@@ -909,7 +959,9 @@ pub async fn gh_project_view(db: &WardsonDbClient, param: &str) -> String {
                 format!("Project #{} not found for {}", number, owner)
             }
         }
-        Err(e) => format!("Failed to fetch project: {}", e),
+        ProjectsFetch::NotFound => classic_projects_not_found_msg(owner),
+        ProjectsFetch::Gone => classic_projects_gone_msg(owner),
+        ProjectsFetch::Err(e) => e,
     }
 }
 
