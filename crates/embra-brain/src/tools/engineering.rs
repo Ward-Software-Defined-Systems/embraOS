@@ -766,6 +766,102 @@ pub async fn gh_issue_create(db: &WardsonDbClient, param: &str) -> String {
     }
 }
 
+/// Post a comment on a GitHub issue or PR. GitHub's comment endpoint treats
+/// PRs as issues for comment purposes (both types share the same API), so
+/// `gh_issue_comment` and `gh_pr_comment` both route through this helper.
+async fn post_github_comment(
+    token: &str,
+    repo: &str,
+    number: &str,
+    body: &str,
+) -> Result<(u64, String), String> {
+    let url = format!(
+        "https://api.github.com/repos/{}/issues/{}/comments",
+        repo, number
+    );
+    let payload = serde_json::json!({ "body": body });
+
+    let client = reqwest::Client::new();
+    match client
+        .post(&url)
+        .header("User-Agent", "embraOS/0.1.0")
+        .header("Authorization", format!("Bearer {}", token))
+        .json(&payload)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            let status = resp.status();
+            if !status.is_success() {
+                let body_text = resp.text().await.unwrap_or_default();
+                return Err(format!("GitHub API error {}: {}", status, body_text));
+            }
+            let v: serde_json::Value = resp.json().await.unwrap_or_default();
+            let id = v.get("id").and_then(|x| x.as_u64()).unwrap_or(0);
+            let html_url = v
+                .get("html_url")
+                .and_then(|x| x.as_str())
+                .unwrap_or("")
+                .to_string();
+            Ok((id, html_url))
+        }
+        Err(e) => Err(format!("transport error: {}", e)),
+    }
+}
+
+/// Parse `<owner/repo> <number> | <body>` for comment tools.
+fn parse_comment_param(param: &str) -> Result<(&str, &str, &str), String> {
+    let Some((head, body)) = param.split_once(" | ") else {
+        return Err("missing `|` separator before body".into());
+    };
+    let head = head.trim();
+    let body = body.trim();
+    if body.is_empty() {
+        return Err("body is empty".into());
+    }
+    let head_parts: Vec<&str> = head.split_whitespace().collect();
+    if head_parts.len() < 2 {
+        return Err("need `<owner/repo> <number>` before the `|`".into());
+    }
+    Ok((head_parts[0], head_parts[1], body))
+}
+
+/// Post a comment on a GitHub issue.
+/// Param format: `<owner/repo> <number> | <body>`
+pub async fn gh_issue_comment(db: &WardsonDbClient, param: &str) -> String {
+    let token = match resolve_github_token(db).await {
+        Some(t) => t,
+        None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
+    };
+    let (repo, number, body) = match parse_comment_param(param) {
+        Ok(v) => v,
+        Err(e) => return format!("gh_issue_comment rejected ({}). Usage: [TOOL:gh_issue_comment <owner/repo> <number> | <body>]", e),
+    };
+    match post_github_comment(&token, repo, number, body).await {
+        Ok((_id, html_url)) => format!("Comment posted on issue #{} in {}: {}", number, repo, html_url),
+        Err(e) => format!("gh_issue_comment failed: {}", e),
+    }
+}
+
+/// Post a comment on a GitHub pull request. Hits the same underlying endpoint
+/// as `gh_issue_comment` — GitHub treats PR comments (the conversation tab) as
+/// issue comments. Separate tool for semantic clarity in the catalog.
+/// Param format: `<owner/repo> <number> | <body>`
+pub async fn gh_pr_comment(db: &WardsonDbClient, param: &str) -> String {
+    let token = match resolve_github_token(db).await {
+        Some(t) => t,
+        None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
+    };
+    let (repo, number, body) = match parse_comment_param(param) {
+        Ok(v) => v,
+        Err(e) => return format!("gh_pr_comment rejected ({}). Usage: [TOOL:gh_pr_comment <owner/repo> <number> | <body>]", e),
+    };
+    match post_github_comment(&token, repo, number, body).await {
+        Ok((_id, html_url)) => format!("Comment posted on PR #{} in {}: {}", number, repo, html_url),
+        Err(e) => format!("gh_pr_comment failed: {}", e),
+    }
+}
+
 /// Close a GitHub issue.
 /// Param format: `<owner/repo> <number>`
 pub async fn gh_issue_close(db: &WardsonDbClient, param: &str) -> String {
