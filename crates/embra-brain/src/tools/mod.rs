@@ -1,5 +1,6 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use tracing::info;
 
 use crate::config::SystemConfig;
 use crate::db::WardsonDbClient;
@@ -8,6 +9,7 @@ use crate::knowledge;
 pub mod cron;
 pub mod engineering;
 pub mod express;
+pub mod registry;
 pub mod security;
 pub mod sessions;
 
@@ -19,146 +21,20 @@ pub fn init_start_time() {
     START_TIME.get_or_init(std::time::Instant::now);
 }
 
-fn uptime_secs() -> u64 {
+/// Seconds since this embra-brain process started. Not the same as session
+/// age — sessions persist across process restarts, whereas this counter resets
+/// on every launch. Used by uptime_report and SystemStatus.uptime_seconds.
+fn process_uptime_secs() -> u64 {
     START_TIME.get().map(|t| t.elapsed().as_secs()).unwrap_or(0)
 }
 
 // ── Tool Dispatch ──
-
-/// Parse a `[TOOL:name]` or `[TOOL:name param...]` tag and execute the tool.
-/// Returns `(tool_name, result_string)` or None if not a recognized tool.
-pub async fn dispatch(
-    tag: &str,
-    db: &WardsonDbClient,
-    config: &SystemConfig,
-    session_name: &str,
-) -> Option<String> {
-    let config_tz = config.timezone.as_str();
-    // Strip brackets: "[TOOL:recall hello world]" -> "recall hello world"
-    let inner = tag
-        .strip_prefix("[TOOL:")
-        .and_then(|s| s.strip_suffix(']'))?;
-
-    let (name, raw_param) = match inner.find(' ') {
-        Some(pos) => (&inner[..pos], inner[pos + 1..].trim()),
-        None => (inner, ""),
-    };
-    let unescaped = unescape_param(raw_param);
-    let param = unescaped.as_str();
-
-    let result = match name {
-        "system_status" => {
-            let status = system_status(db).await;
-            serde_json::to_string_pretty(&status).unwrap_or_default()
-        }
-        "check_update" => match check_wardsondb_update().await {
-            Some(info) => format!("WardSONDB update available: v{} (current: v{})", info.version, info.current_version),
-            None => "WardSONDB is up to date.".into(),
-        },
-        "recall" => recall(db, param).await,
-        "remember" => remember(db, param, session_name, config).await,
-        "forget" => forget(db, param).await,
-        "uptime_report" => uptime_report(db).await,
-        "introspect" => introspect(db, param).await,
-        "changelog" => changelog(db, session_name).await,
-        "express" => express::express(db, param).await,
-        "time" => time_now(config_tz),
-        "countdown" => countdown(db, param).await,
-        "session_summary" => session_summary(db, session_name).await,
-        "calculate" => calculate(param),
-        "define" => define(db, param).await,
-        "draft" => draft(db, param, session_name).await,
-        "get" => get(db, param).await,
-        "memory_search" => recall(db, param).await,
-        "search_memory" => recall(db, param).await, // backward compat alias
-        // Security tools (FEATURE-003)
-        "security_check" => security::security_check().await,
-        "port_scan" => security::port_scan(param).await,
-        "firewall_status" => security::firewall_status(),
-        "ssh_sessions" => security::ssh_sessions(),
-        "security_audit" => security::security_audit(),
-        "ssh_remote_admin" => security::ssh_remote_admin(param).await,
-        "ssh_session_start" => security::ssh_session_start(param).await,
-        "ssh_session_exec" => security::ssh_session_exec(param).await,
-        "ssh_session_end" => security::ssh_session_end().await,
-        // Engineering tools (FEATURE-004)
-        "git_clone" => engineering::git_clone(db, param).await,
-        "git_status" => engineering::git_status(param).await,
-        "git_log" => engineering::git_log(param).await,
-        "plan" => engineering::plan(db, param).await,
-        "tasks" => engineering::tasks(db, param).await,
-        "task_add" => engineering::task_add(db, param).await,
-        "task_done" => engineering::task_done(db, param).await,
-        "gh_issues" => engineering::gh_issues(db, param).await,
-        "gh_prs" => engineering::gh_prs(db, param).await,
-        "git_add" => engineering::git_add(param).await,
-        "git_commit" => engineering::git_commit(param).await,
-        "git_push" => engineering::git_push(db, param).await,
-        "git_pull" => engineering::git_pull(db, param).await,
-        "git_diff" => engineering::git_diff(param).await,
-        "git_branch" => engineering::git_branch(param).await,
-        "git_checkout" => engineering::git_checkout(param).await,
-        "gh_issue_create" => engineering::gh_issue_create(db, param).await,
-        "gh_issue_close" => engineering::gh_issue_close(db, param).await,
-        "gh_pr_create" => engineering::gh_pr_create(db, param).await,
-        "gh_project_list" => engineering::gh_project_list(db, param).await,
-        "gh_project_view" => engineering::gh_project_view(db, param).await,
-        "file_read" => engineering::file_read(param).await,
-        "file_write" => engineering::file_write(param).await,
-        "file_append" => engineering::file_append(param).await,
-        "file_delete" => engineering::file_delete(param).await,
-        "file_move" | "file_rename" => engineering::file_move(param).await,
-        "dir_delete" | "rmdir" => engineering::dir_delete(param).await,
-        "mkdir" => engineering::mkdir(param).await,
-        "git_rm" => engineering::git_rm(param).await,
-        "git_mv" => engineering::git_mv(param).await,
-        // Scheduling tools (embraCRON)
-        "cron_add" => cron::cron_add(db, param).await,
-        "cron_list" => cron::cron_list(db).await,
-        "cron_remove" => cron::cron_remove(db, param).await,
-        // Session access & consolidation tools (Sprint 3)
-        "session_list" => sessions::session_list(db).await,
-        "session_read" => sessions::session_read(db, param).await,
-        "session_search" => sessions::session_search(db, param).await,
-        "session_meta" => sessions::session_meta(db, param).await,
-        "session_delta" => sessions::session_delta(db, param).await,
-        "memory_scan" => sessions::memory_scan(db, param).await,
-        "memory_dedup" => sessions::memory_dedup(db, param).await,
-        "session_summarize" => sessions::session_summarize(db, param).await,
-        "session_summary_save" => sessions::session_summary_save(db, param).await,
-        "session_extract" => sessions::session_extract(db, param).await,
-        // Knowledge graph tools (Sprint 2)
-        "knowledge_promote" => knowledge::tools::knowledge_promote(param, db, config).await,
-        "knowledge_link" => knowledge::tools::knowledge_link(param, db).await,
-        "knowledge_unlink_edge" => knowledge::tools::knowledge_unlink_edge(param, db).await,
-        "knowledge_unlink_node" => knowledge::tools::knowledge_unlink_node(param, db).await,
-        "knowledge_update" => knowledge::tools::knowledge_update(param, db).await,
-        "knowledge_traverse" => knowledge::tools::knowledge_traverse(param, db, config).await,
-        "knowledge_query" => knowledge::tools::knowledge_query(param, db, session_name, config).await,
-        "knowledge_graph_stats" => knowledge::tools::knowledge_graph_stats(db).await,
-        _ => return None,
-    };
-
-    // Truncate excessively large tool results to prevent context overflow.
-    // Raised from 50KB to 2 MiB in Sprint 2 to allow session_read, git_diff,
-    // knowledge_traverse, memory_scan, recall, file_read, etc. to return full
-    // content for realistic workloads. 2 MiB ≈ 500K tokens — fits 1M context.
-    const MAX_TOOL_RESULT_SIZE: usize = 2_097_152;
-    if result.len() > MAX_TOOL_RESULT_SIZE {
-        // Find a safe UTF-8 boundary by scanning backwards
-        let mut safe_end = MAX_TOOL_RESULT_SIZE;
-        while safe_end > 0 && !result.is_char_boundary(safe_end) {
-            safe_end -= 1;
-        }
-        return Some(format!(
-            "{}...\n[truncated: {} bytes total]",
-            &result[..safe_end],
-            result.len()
-        ));
-    }
-
-    Some(result)
-}
+//
+// Native tool-use dispatch lives in `tools/registry.rs` — the legacy
+// `name args` string parser and match-block dispatcher were removed
+// in Stage 3 of the NATIVE-TOOLS-01 migration. Each tool now declares a
+// typed args struct annotated with `#[embra_tool(name, description)]`, and
+// `registry::dispatch(name, input, ctx)` is the single entry point.
 
 // ── Existing Tools ──
 
@@ -201,7 +77,7 @@ pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
 
     SystemStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
-        uptime_seconds: uptime_secs(),
+        uptime_seconds: process_uptime_secs(),
         wardsondb_healthy: healthy,
         wardsondb_collections: collections,
         memory_usage_mb: get_memory_usage_mb(),
@@ -283,6 +159,11 @@ async fn recall(db: &WardsonDbClient, query: &str) -> String {
     }
 
     let query_lower = query.trim_start_matches('#').to_lowercase();
+    let query_tokens: Vec<String> = query_lower
+        .split_whitespace()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
 
     fn tags_to_str(doc: &serde_json::Value) -> String {
         match doc.get("tags") {
@@ -294,8 +175,9 @@ async fn recall(db: &WardsonDbClient, query: &str) -> String {
     }
 
     let matches_query = |content: &str, tags: &str| -> bool {
-        if query.is_empty() { return true; }
-        content.to_lowercase().contains(&query_lower) || tags.to_lowercase().contains(&query_lower)
+        if query_tokens.is_empty() { return true; }
+        let hay = format!("{} {}", content.to_lowercase(), tags.to_lowercase());
+        tokens_all_match(&hay, &query_tokens)
     };
 
     // Promoted entries: content-bearing fields come from the promoted node, not the episodic entry.
@@ -334,7 +216,12 @@ async fn recall(db: &WardsonDbClient, query: &str) -> String {
     }
 
     if output_lines.is_empty() {
-        return format!("No memory entries matching '{}'.", query);
+        info!(target: "recall", query = %query, token_count = query_tokens.len(), "zero-result recall");
+        let mut msg = format!("No memory entries matching '{}'.", query);
+        if query_tokens.len() > 1 {
+            msg.push_str(" Multi-token queries require ALL tokens to appear; try a single word, or omit the query to list recent entries.");
+        }
+        return msg;
     }
 
     let total = output_lines.len();
@@ -342,18 +229,119 @@ async fn recall(db: &WardsonDbClient, query: &str) -> String {
     format!("Found {} matching entries:\n{}", total, output_lines.join("\n"))
 }
 
+/// Return true iff every token appears as a substring of `hay` (already lowercased).
+fn tokens_all_match(hay: &str, tokens: &[String]) -> bool {
+    tokens.iter().all(|t| hay.contains(t.as_str()))
+}
+
+#[cfg(test)]
+mod is_tag_token_tests {
+    use super::is_tag_token;
+
+    #[test]
+    fn alpha_start_is_tag() {
+        assert!(is_tag_token("#soul"));
+        assert!(is_tag_token("#architecture"));
+        assert!(is_tag_token("#issue-tracking"));
+        assert!(is_tag_token("#A"));
+    }
+
+    #[test]
+    fn numeric_start_is_not_tag() {
+        // GitHub-style issue refs stay in content
+        assert!(!is_tag_token("#5"));
+        assert!(!is_tag_token("#42"));
+        assert!(!is_tag_token("#5issues"));
+    }
+
+    #[test]
+    fn non_alpha_start_is_not_tag() {
+        assert!(!is_tag_token("#-leading-hyphen"));
+        assert!(!is_tag_token("#_underscore"));
+    }
+
+    #[test]
+    fn lone_hash_is_not_tag() {
+        assert!(!is_tag_token("#"));
+    }
+
+    #[test]
+    fn no_hash_is_not_tag() {
+        assert!(!is_tag_token("soul"));
+        assert!(!is_tag_token(""));
+        assert!(!is_tag_token("hello#world"));
+    }
+}
+
+#[cfg(test)]
+mod tokens_all_match_tests {
+    use super::tokens_all_match;
+
+    fn toks(s: &[&str]) -> Vec<String> {
+        s.iter().map(|x| x.to_string()).collect()
+    }
+
+    #[test]
+    fn empty_tokens_any_hay_matches() {
+        assert!(tokens_all_match("anything", &toks(&[])));
+    }
+
+    #[test]
+    fn all_tokens_present_matches() {
+        assert!(tokens_all_match("express tool caveats noted", &toks(&["express", "tool", "caveats"])));
+    }
+
+    #[test]
+    fn missing_one_token_rejects() {
+        assert!(!tokens_all_match("express tool only", &toks(&["express", "tool", "caveats"])));
+    }
+
+    #[test]
+    fn tokens_can_appear_out_of_order() {
+        assert!(tokens_all_match("caveats about the express tool", &toks(&["express", "caveats"])));
+    }
+
+    #[test]
+    fn single_token_still_works() {
+        assert!(tokens_all_match("express panel", &toks(&["express"])));
+        assert!(!tokens_all_match("panel only", &toks(&["express"])));
+    }
+}
+
+/// Is `word` a tag token (`#<letter>[letters/digits/_/-]*`)?
+///
+/// Hashtag-prefixed tokens are stripped from content and pushed into the
+/// `tags` array. The previous rule (anything starting with `#`) also captured
+/// GitHub-style issue references (`#5`, `#42`) and turned them into tag
+/// entries, which drops the reference from the remembered prose (Issue #14).
+///
+/// The letter-start rule is cheap and correct for the common cases:
+///   #soul, #architecture, #issue-tracking  → tags
+///   #5, #42, #-hyphen-start, #             → stay in text
+/// Commit SHAs prefixed with `#` (rare) that happen to start with a letter
+/// would be classified as tags; operators typically reference SHAs without
+/// a leading `#`, so the ambiguity is acceptable.
+fn is_tag_token(word: &str) -> bool {
+    let mut chars = word.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some('#'), Some(c)) if c.is_alphabetic()
+    )
+}
+
 async fn remember(db: &WardsonDbClient, content: &str, session: &str, config: &SystemConfig) -> String {
     if content.is_empty() {
-        return "Nothing to remember. Provide content after [TOOL:remember ...].".into();
+        return "Nothing to remember. Provide content after remember ....".into();
     }
 
     ensure_collection(db, "memory.entries").await;
 
-    // Parse optional tags: "content text #tag1 #tag2"
+    // Parse optional tags: "content text #tag1 #tag2". GitHub-style issue
+    // references like `#5` stay in content (is_tag_token requires letter start).
     let mut tags: Vec<String> = Vec::new();
     let mut text_parts = Vec::new();
     for word in content.split_whitespace() {
-        if word.starts_with('#') {
+        if is_tag_token(word) {
             tags.push(word.trim_start_matches('#').to_string());
         } else {
             text_parts.push(word);
@@ -398,7 +386,7 @@ async fn remember(db: &WardsonDbClient, content: &str, session: &str, config: &S
 
 async fn forget(db: &WardsonDbClient, id: &str) -> String {
     if id.is_empty() {
-        return "Provide the entry ID to forget: [TOOL:forget <id>]".into();
+        return "Provide the entry ID to forget: forget <id>".into();
     }
 
     match db.delete("memory.entries", id.trim()).await {
@@ -409,10 +397,36 @@ async fn forget(db: &WardsonDbClient, id: &str) -> String {
 
 // ── Self-Awareness Tools ──
 
-async fn uptime_report(db: &WardsonDbClient) -> String {
-    let uptime = uptime_secs();
+async fn uptime_report(db: &WardsonDbClient, session_name: &str) -> String {
+    let uptime = process_uptime_secs();
     let hours = uptime / 3600;
     let mins = (uptime % 3600) / 60;
+
+    // Session age — queried from sessions.{name}.meta.created_at if available.
+    // This is independent of process uptime: sessions outlive restarts.
+    let session_age_line = {
+        let meta_col = format!("sessions.{}.meta", session_name);
+        let created_at = db
+            .query(&meta_col, &serde_json::json!({}))
+            .await
+            .ok()
+            .and_then(|docs| docs.into_iter().next())
+            .and_then(|doc| doc.get("created_at").and_then(|v| v.as_str()).map(String::from));
+        match created_at {
+            Some(ts) => {
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(&ts) {
+                    let age = Utc::now().signed_duration_since(dt.with_timezone(&Utc));
+                    let age_secs = age.num_seconds().max(0) as u64;
+                    let ah = age_secs / 3600;
+                    let am = (age_secs % 3600) / 60;
+                    format!("Session age: {}h {}m (session '{}' since {})\n", ah, am, session_name, ts)
+                } else {
+                    format!("Session age: unknown (session '{}', unparseable timestamp)\n", session_name)
+                }
+            }
+            None => format!("Session age: unknown (no meta doc for session '{}')\n", session_name),
+        }
+    };
 
     let collections = db.list_collections().await.unwrap_or_default();
 
@@ -449,7 +463,8 @@ async fn uptime_report(db: &WardsonDbClient) -> String {
 
     format!(
         "Uptime Report:\n\
-         Uptime: {}h {}m\n\
+         Process uptime: {}h {}m\n\
+         {}\
          WardSONDB: {}\n\
          Collections: {}\n\
          Sessions created: {}\n\
@@ -458,6 +473,7 @@ async fn uptime_report(db: &WardsonDbClient) -> String {
          Soul: {}",
         hours,
         mins,
+        session_age_line,
         if healthy { "healthy" } else { "unhealthy" },
         collections.len(),
         session_count,
@@ -625,8 +641,13 @@ async fn changelog(db: &WardsonDbClient, current_session: &str) -> String {
         .await
         .unwrap_or_default();
 
+    const DISPLAY_CAP: usize = 5;
+
+    // Newest first in both branches so the list's order matches expectations.
+    // The session_start branch filters to entries created after session start
+    // (variable count); the no-session-start branch shows the tail of history.
     let recent_entries: Vec<_> = if let Some(ref start) = session_start {
-        entries
+        let mut filtered: Vec<_> = entries
             .iter()
             .filter(|doc| {
                 doc.get("created_at")
@@ -634,28 +655,51 @@ async fn changelog(db: &WardsonDbClient, current_session: &str) -> String {
                     .map(|ts| ts > start.as_str())
                     .unwrap_or(false)
             })
-            .collect()
+            .collect();
+        filtered.reverse();
+        filtered
     } else {
-        entries.iter().rev().take(5).collect()
+        entries.iter().rev().collect()
     };
 
-    if recent_entries.is_empty() {
+    let total_recent = recent_entries.len();
+    if total_recent == 0 {
         output.push_str("  No new memory entries.\n");
+    } else if total_recent <= DISPLAY_CAP {
+        output.push_str(&format!("  {} new memory entries:\n", total_recent));
+        for entry in recent_entries.iter() {
+            let content = entry.get("content").and_then(|v| v.as_str()).unwrap_or("?");
+            output.push_str(&format!("    - {}\n", content));
+        }
     } else {
-        output.push_str(&format!("  {} new memory entries:\n", recent_entries.len()));
-        for entry in recent_entries.iter().take(5) {
+        output.push_str(&format!(
+            "  {} new memory entries (showing latest {}):\n",
+            total_recent, DISPLAY_CAP
+        ));
+        for entry in recent_entries.iter().take(DISPLAY_CAP) {
             let content = entry.get("content").and_then(|v| v.as_str()).unwrap_or("?");
             output.push_str(&format!("    - {}\n", content));
         }
     }
 
-    // List sessions
+    // List sessions. Learning sessions are a one-time setup artifact; exclude
+    // from "operational" count but note their presence so the total doesn't
+    // appear to drift vs `session_list` (which shows every session).
     let collections = db.list_collections().await.unwrap_or_default();
-    let sessions: Vec<_> = collections
+    let all_session_metas: Vec<_> = collections
         .iter()
-        .filter(|c| c.starts_with("sessions.") && c.ends_with(".meta") && !c.contains("learning"))
+        .filter(|c| c.starts_with("sessions.") && c.ends_with(".meta"))
         .collect();
-    output.push_str(&format!("  Total sessions: {}\n", sessions.len()));
+    let learning_count = all_session_metas.iter().filter(|c| c.contains("learning")).count();
+    let operational_count = all_session_metas.len() - learning_count;
+    if learning_count > 0 {
+        output.push_str(&format!(
+            "  Total sessions: {} operational + {} learning (use `session_list` to see all)\n",
+            operational_count, learning_count
+        ));
+    } else {
+        output.push_str(&format!("  Total sessions: {}\n", operational_count));
+    }
 
     output
 }
@@ -693,7 +737,7 @@ fn time_now(config_tz: &str) -> String {
 
 async fn countdown(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:countdown <duration> <message>]\nExample: [TOOL:countdown 5m Check the build]".into();
+        return "Usage: countdown <duration> <message>\nExample: countdown 5m Check the build".into();
     }
 
     // Parse: "5m Check the build" or "20 minutes reminder text"
@@ -822,7 +866,7 @@ async fn session_summary(db: &WardsonDbClient, session_name: &str) -> String {
 
 fn calculate(expression: &str) -> String {
     if expression.is_empty() {
-        return "Usage: [TOOL:calculate <expression>]\nExample: [TOOL:calculate 2 ** 10]".into();
+        return "Usage: calculate <expression>\nExample: calculate 2 ** 10".into();
     }
 
     // Exponent is ** (Python/Rust convention). Reject bare ^ up-front so it
@@ -851,10 +895,42 @@ fn calculate(expression: &str) -> String {
 
 async fn define(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:define <term>] to look up, or [TOOL:define <term> | <definition>] to add".into();
+        return "Usage: define <term> to look up, define <term> | <definition> to add/update, or define delete <term> to remove".into();
     }
 
     ensure_collection(db, "knowledge.definitions").await;
+
+    // Delete form: `delete <term>` (case-insensitive prefix).
+    let trimmed = param.trim();
+    if let Some(rest) = trimmed
+        .strip_prefix("delete ")
+        .or_else(|| trimmed.strip_prefix("Delete "))
+        .or_else(|| trimmed.strip_prefix("DELETE "))
+    {
+        let term = rest.trim();
+        if term.is_empty() {
+            return "define rejected (delete requires a term)".into();
+        }
+        let results = db
+            .query("knowledge.definitions", &serde_json::json!({}))
+            .await
+            .unwrap_or_default();
+        let match_id = results.iter().find_map(|doc| {
+            let doc_term = doc.get("term").and_then(|v| v.as_str()).unwrap_or("");
+            if doc_term.eq_ignore_ascii_case(term) {
+                doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()).map(|s| s.to_string())
+            } else {
+                None
+            }
+        });
+        return match match_id {
+            Some(id) => match db.delete("knowledge.definitions", &id).await {
+                Ok(()) => format!("Definition deleted: {}", term),
+                Err(e) => format!("define failed (delete '{}': {})", term, e),
+            },
+            None => format!("define rejected (no definition for '{}' found)", term),
+        };
+    }
 
     // DESIGN-003: If param contains ` | `, split into term + definition and write
     if let Some(pipe_pos) = param.find(" | ") {
@@ -862,7 +938,7 @@ async fn define(db: &WardsonDbClient, param: &str) -> String {
         let definition = param[pipe_pos + 3..].trim();
 
         if term.is_empty() || definition.is_empty() {
-            return "Usage: [TOOL:define <term> | <definition>]".into();
+            return "Usage: define <term> | <definition>".into();
         }
 
         let results = db
@@ -930,14 +1006,51 @@ async fn define(db: &WardsonDbClient, param: &str) -> String {
 
 async fn draft(db: &WardsonDbClient, param: &str, session: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:draft <title> | <content>]\nSeparate title and content with ' | '.\nExample: [TOOL:draft Meeting Notes | Key decisions: ...]".into();
+        return "draft rejected (missing arguments). Usage: draft <title> | <content> or draft delete <title>\nSeparate title and content with ' | '.\nExample: draft Meeting Notes | Key decisions: ...".into();
     }
 
     ensure_collection(db, "drafts").await;
 
-    // Parse "title | content" or just treat entire param as content with auto-title
+    // Delete form: `delete <title>` (case-insensitive prefix).
+    let trimmed = param.trim();
+    if let Some(rest) = trimmed
+        .strip_prefix("delete ")
+        .or_else(|| trimmed.strip_prefix("Delete "))
+        .or_else(|| trimmed.strip_prefix("DELETE "))
+    {
+        let title = rest.trim();
+        if title.is_empty() {
+            return "draft rejected (delete requires a title)".into();
+        }
+        let existing = db.query("drafts", &serde_json::json!({})).await.unwrap_or_default();
+        let match_id = existing.iter().find_map(|doc| {
+            let doc_title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            if doc_title.eq_ignore_ascii_case(title) {
+                doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()).map(|s| s.to_string())
+            } else {
+                None
+            }
+        });
+        return match match_id {
+            Some(id) => match db.delete("drafts", &id).await {
+                Ok(()) => format!("Draft deleted: '{}' (ID: {})", title, id),
+                Err(e) => format!("draft failed (delete '{}': {})", title, e),
+            },
+            None => format!("draft rejected (no draft titled '{}' found)", title),
+        };
+    }
+
+    // Parse "title | content" or treat entire param as content with auto-title.
     let (title, content) = if let Some(pos) = param.find(" | ") {
-        (&param[..pos], &param[pos + 3..])
+        let t = param[..pos].trim();
+        let c = param[pos + 3..].trim();
+        if t.is_empty() {
+            return "draft rejected (title is empty before the '|')".into();
+        }
+        if c.is_empty() {
+            return "draft rejected (content is empty after the '|')".into();
+        }
+        (t, c)
     } else {
         ("Untitled Draft", param)
     };
@@ -963,14 +1076,14 @@ async fn draft(db: &WardsonDbClient, param: &str, session: &str) -> String {
     if let Some(id) = existing_id {
         match db.update("drafts", &id, &doc).await {
             Ok(()) => format!("Draft updated: '{}' (ID: {})", title, id),
-            Err(e) => format!("Failed to update draft: {}", e),
+            Err(e) => format!("draft failed (update '{}': {})", title, e),
         }
     } else {
         let mut doc = doc;
         doc["created_at"] = serde_json::json!(Utc::now().to_rfc3339());
         match db.write("drafts", &doc).await {
             Ok(id) => format!("Draft created: '{}' (ID: {})", title, id),
-            Err(e) => format!("Failed to save draft: {}", e),
+            Err(e) => format!("draft failed (save '{}': {})", title, e),
         }
     }
 }
@@ -979,12 +1092,12 @@ async fn draft(db: &WardsonDbClient, param: &str, session: &str) -> String {
 
 async fn get(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:get <collection> <id>]\nExample: [TOOL:get memory.entries abc123]".into();
+        return "Usage: get <collection> <id>\nExample: get memory.entries abc123".into();
     }
 
     let parts: Vec<&str> = param.splitn(2, ' ').collect();
     if parts.len() < 2 {
-        return "Usage: [TOOL:get <collection> <id>]".into();
+        return "Usage: get <collection> <id>".into();
     }
 
     let (collection, id) = (parts[0], parts[1].trim());
@@ -995,313 +1108,6 @@ async fn get(db: &WardsonDbClient, param: &str) -> String {
     }
 }
 
-// ── Tool Tag Extraction ──
-
-/// Unescape `\]` → `]` and `\\` → `\` in a tool parameter string.
-/// Unknown escapes (e.g. `\n`, `\t`, Windows paths like `\foo`) pass through
-/// untouched so we don't silently mangle regex, paths, or newline markers.
-/// A lone trailing `\` is also left as-is.
-fn unescape_param(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.peek() {
-                Some(']') => {
-                    out.push(']');
-                    chars.next();
-                }
-                Some('\\') => {
-                    out.push('\\');
-                    chars.next();
-                }
-                _ => out.push('\\'),
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
-/// Extract `[TOOL:...]` tags from AI output safely.
-/// Strips fenced code blocks and inline code first so that examples/documentation
-/// are never mis-parsed as real tool invocations (BUG-001 fix). Unlike an earlier
-/// version, this parser tolerates tool tags whose parameter contains soft
-/// newlines — a forward scan finds each `[TOOL:` / `]` pair (even across lines)
-/// and collapses internal whitespace into single spaces before dispatch.
-pub fn extract_tool_tags(text: &str) -> Vec<String> {
-    // Step 1: Strip fenced code blocks (``` ... ```)
-    let mut stripped = String::with_capacity(text.len());
-    let mut in_fence = false;
-    for line in text.lines() {
-        if line.trim_start().starts_with("```") {
-            in_fence = !in_fence;
-            stripped.push('\n');
-            continue;
-        }
-        if in_fence {
-            stripped.push('\n');
-        } else {
-            stripped.push_str(line);
-            stripped.push('\n');
-        }
-    }
-
-    // Step 2: Strip inline backtick spans
-    let mut no_inline = String::with_capacity(stripped.len());
-    let mut in_backtick = false;
-    for ch in stripped.chars() {
-        if ch == '`' {
-            in_backtick = !in_backtick;
-        } else if !in_backtick {
-            no_inline.push(ch);
-        }
-    }
-
-    // Step 3: Forward-scan for [TOOL:...] spans, allowing internal newlines.
-    const OPEN: &str = "[TOOL:";
-    let mut tags = Vec::new();
-    let mut cursor = 0;
-    while let Some(rel_open) = no_inline[cursor..].find(OPEN) {
-        let open_at = cursor + rel_open;
-        let inner_start = open_at + OPEN.len();
-
-        // Find the matching ']' using bracket/brace balancing with JSON string
-        // awareness. The outer `[TOOL:` already consumed one `[`, so depth starts
-        // at 1 and the closing `]` is the one that brings depth back to 0. This
-        // prevents stray `]` in JSON arrays, markdown links, git `[section]`
-        // notation, or code like `vec![0u8; 4]` from prematurely ending the tag.
-        let rest = &no_inline[inner_start..];
-        let mut close_at_opt: Option<usize> = None;
-        let mut depth: usize = 1;
-        let mut in_string = false;
-        let mut escape = false;
-        for (i, ch) in rest.char_indices() {
-            if escape {
-                escape = false;
-                continue;
-            }
-            if in_string {
-                match ch {
-                    '\\' => escape = true,
-                    '"' => in_string = false,
-                    _ => {}
-                }
-                continue;
-            }
-            match ch {
-                '\\' => escape = true, // outside-string escape: `\]` / `\\` literal
-                '"' => in_string = true,
-                '[' | '{' => depth += 1,
-                ']' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        close_at_opt = Some(inner_start + i);
-                        break;
-                    }
-                }
-                '}' => {
-                    if depth > 0 {
-                        depth -= 1;
-                    }
-                }
-                _ => {}
-            }
-        }
-        let Some(close_at) = close_at_opt else {
-            // Unterminated. If a nested `[TOOL:` appeared inside the unclosed
-            // span, skip past the outer opener so the inner one can match on
-            // its own iteration. Otherwise drop the rest silently.
-            if rest.contains(OPEN) {
-                cursor = inner_start;
-                continue;
-            }
-            break;
-        };
-
-        // Reject nested openers: if another `[TOOL:` appears before the close,
-        // the outer tag is garbled. Skip past the outer opener and let the
-        // inner one try to match on its own iteration.
-        if no_inline[inner_start..close_at].contains(OPEN) {
-            cursor = inner_start;
-            continue;
-        }
-
-        // Collapse internal whitespace (including newlines) into single spaces
-        // so dispatch()'s `splitn(2, ' ')` works as if the tag were on one line.
-        let raw = &no_inline[open_at..=close_at];
-        let mut collapsed = String::with_capacity(raw.len());
-        let mut last_was_space = false;
-        for ch in raw.chars() {
-            if ch.is_whitespace() {
-                if !last_was_space {
-                    collapsed.push(' ');
-                    last_was_space = true;
-                }
-            } else {
-                collapsed.push(ch);
-                last_was_space = false;
-            }
-        }
-        tags.push(collapsed);
-
-        cursor = close_at + 1;
-    }
-
-    tags
-}
-
-#[cfg(test)]
-mod extract_tool_tags_tests {
-    use super::extract_tool_tags;
-
-    #[test]
-    fn single_line_tag_matches() {
-        let tags = extract_tool_tags("before\n[TOOL:git_status /tmp]\nafter");
-        assert_eq!(tags, vec!["[TOOL:git_status /tmp]"]);
-    }
-
-    #[test]
-    fn multi_line_param_is_collapsed() {
-        let input = "heading\n[TOOL:remember Operational practice: line one,\nline two,\nline three]\ntrailing";
-        let tags = extract_tool_tags(input);
-        assert_eq!(
-            tags,
-            vec!["[TOOL:remember Operational practice: line one, line two, line three]"]
-        );
-    }
-
-    #[test]
-    fn tag_inside_fenced_code_block_is_ignored() {
-        let input = "text\n```\n[TOOL:git_status /tmp]\n```\nmore";
-        assert!(extract_tool_tags(input).is_empty());
-    }
-
-    #[test]
-    fn tag_inside_inline_backticks_is_ignored() {
-        let input = "prose `[TOOL:git_status /tmp]` more prose";
-        assert!(extract_tool_tags(input).is_empty());
-    }
-
-    #[test]
-    fn adjacent_tags_both_extract() {
-        let input = "[TOOL:git_status /a]\n[TOOL:git_status /b]";
-        let tags = extract_tool_tags(input);
-        assert_eq!(
-            tags,
-            vec!["[TOOL:git_status /a]", "[TOOL:git_status /b]"]
-        );
-    }
-
-    #[test]
-    fn unterminated_tag_dropped_silently() {
-        let input = "[TOOL:remember a long note with no closing bracket";
-        assert!(extract_tool_tags(input).is_empty());
-    }
-
-    #[test]
-    fn nested_opener_recovers_on_inner_tag() {
-        let input = "[TOOL:outer [TOOL:git_status /tmp]";
-        let tags = extract_tool_tags(input);
-        assert_eq!(tags, vec!["[TOOL:git_status /tmp]"]);
-    }
-
-    #[test]
-    fn json_array_param_preserved() {
-        let input = r#"[TOOL:knowledge_update mem.semantic:x | {"tags": ["a","b"]}]"#;
-        let tags = extract_tool_tags(input);
-        assert_eq!(tags, vec![input.to_string()]);
-    }
-
-    #[test]
-    fn markdown_link_in_free_text() {
-        let input = "[TOOL:remember See [docs](https://x) now]";
-        let tags = extract_tool_tags(input);
-        assert_eq!(tags, vec![input.to_string()]);
-    }
-
-    #[test]
-    fn git_section_in_commit_message() {
-        let input = "[TOOL:git_commit /r | edit [core] section]";
-        let tags = extract_tool_tags(input);
-        assert_eq!(tags, vec![input.to_string()]);
-    }
-
-    #[test]
-    fn code_bracket_in_commit_message() {
-        let input = "[TOOL:git_commit /r | use vec![0u8; 4] buffer]";
-        let tags = extract_tool_tags(input);
-        assert_eq!(tags, vec![input.to_string()]);
-    }
-
-    #[test]
-    fn quoted_bracket_in_json_string() {
-        let input = r#"[TOOL:remember {"note": "closing]here"}]"#;
-        let tags = extract_tool_tags(input);
-        assert_eq!(tags, vec![input.to_string()]);
-    }
-
-    #[test]
-    fn escaped_quote_in_json_string() {
-        let input = r#"[TOOL:remember {"msg": "say \"hi]\""}]"#;
-        let tags = extract_tool_tags(input);
-        assert_eq!(tags, vec![input.to_string()]);
-    }
-
-    #[test]
-    fn nested_json_object() {
-        let input = r#"[TOOL:knowledge_link a | enables | b | {"meta": {"w": 0.8}}]"#;
-        let tags = extract_tool_tags(input);
-        assert_eq!(tags, vec![input.to_string()]);
-    }
-
-    #[test]
-    fn escaped_close_bracket_preserved() {
-        let input = r"[TOOL:file_write /p | This has a \] bracket in it]";
-        let tags = extract_tool_tags(input);
-        assert_eq!(tags, vec![input.to_string()]);
-    }
-
-    #[test]
-    fn escaped_backslash_preserved() {
-        let input = r"[TOOL:remember path C:\\foo ok]";
-        let tags = extract_tool_tags(input);
-        assert_eq!(tags, vec![input.to_string()]);
-    }
-
-    #[test]
-    fn unknown_escape_left_alone() {
-        let input = r"[TOOL:remember newline\n rule]";
-        let tags = extract_tool_tags(input);
-        assert_eq!(tags, vec![input.to_string()]);
-    }
-}
-
-#[cfg(test)]
-mod unescape_param_tests {
-    use super::unescape_param;
-
-    #[test]
-    fn unescapes_close_bracket_and_backslash() {
-        assert_eq!(unescape_param(r"\]\\foo"), r"]\foo");
-    }
-
-    #[test]
-    fn no_escapes_passes_through() {
-        assert_eq!(unescape_param("no escapes"), "no escapes");
-    }
-
-    #[test]
-    fn trailing_backslash_preserved() {
-        assert_eq!(unescape_param(r"trailing \"), r"trailing \");
-    }
-
-    #[test]
-    fn unknown_escape_preserved() {
-        assert_eq!(unescape_param(r"line\n here"), r"line\n here");
-    }
-}
 
 // ── Timezone Resolution ──
 
@@ -1363,4 +1169,443 @@ fn get_memory_usage_mb() -> Option<u64> {
         }
     }
     None
+}
+
+// ── Native tool-use registrations (NATIVE-TOOLS-01) ──
+//
+// Typed args structs for every tool whose implementation lives in this
+// module. Each `#[embra_tool(name, description)]` attribute submits a
+// `ToolDescriptor` into the global inventory at compile time. The legacy
+// string dispatcher at the top of this file remains the active call path
+// through Stage 2; Stage 3 removes it and routes exclusively through
+// `registry::dispatch`.
+
+use embra_tool_macro::embra_tool;
+use embra_tools_core::DispatchError;
+use schemars::JsonSchema;
+
+use crate::tools::registry::DispatchContext;
+
+// -- No-arg tools --------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "system_status",
+    description = "Report system status: version, uptime, WardSONDB health, collections, memory usage, soul status, and lifetime operation counters."
+)]
+pub struct SystemStatusArgs {}
+
+impl SystemStatusArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let status = system_status(ctx.db).await;
+        Ok(serde_json::to_string_pretty(&status).unwrap_or_default())
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "check_update",
+    description = "Check for available updates to WardSONDB. Returns \"up to date\" or the available version and download URL."
+)]
+pub struct CheckUpdateArgs {}
+
+impl CheckUpdateArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(match check_wardsondb_update().await {
+            Some(info) => format!(
+                "WardSONDB update available: v{} (current: v{})",
+                info.version, info.current_version
+            ),
+            None => "WardSONDB is up to date.".into(),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "uptime_report",
+    description = "Detailed system report with uptime, memory usage, session age, and lifetime counters."
+)]
+pub struct UptimeReportArgs {}
+
+impl UptimeReportArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(uptime_report(ctx.db, ctx.session_name).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "changelog",
+    description = "Report what changed in embraOS since the previous session: new memory entries, new sessions, key activity."
+)]
+pub struct ChangelogArgs {}
+
+impl ChangelogArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(changelog(ctx.db, ctx.session_name).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "time",
+    description = "Current date, time, and day of week in the configured timezone."
+)]
+pub struct TimeArgs {}
+
+impl TimeArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(time_now(ctx.config_tz))
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "session_summary",
+    description = "Summarize the current conversation: message counts and a preview of the last 20 turns."
+)]
+pub struct SessionSummaryArgs {}
+
+impl SessionSummaryArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(session_summary(ctx.db, ctx.session_name).await)
+    }
+}
+
+// -- Single-field tools --------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "recall",
+    description = "Search past conversations and saved memories. Query is free-text; hashtags supported; empty query lists recent entries."
+)]
+pub struct RecallArgs {
+    /// Search query. Free-text; hashtags supported; empty to list all.
+    #[serde(default)]
+    pub query: String,
+}
+
+impl RecallArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(recall(ctx.db, &self.query).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "memory_search",
+    description = "Alias for recall. Search past memories by free-text query; hashtags supported."
+)]
+pub struct MemorySearchArgs {
+    #[serde(default)]
+    pub query: String,
+}
+
+impl MemorySearchArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        RecallArgs { query: self.query }.run(ctx).await
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "search_memory",
+    description = "Alias for recall. Search past memories by free-text query; hashtags supported."
+)]
+pub struct SearchMemoryArgs {
+    #[serde(default)]
+    pub query: String,
+}
+
+impl SearchMemoryArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        RecallArgs { query: self.query }.run(ctx).await
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "remember",
+    description = "Save a note or fact to persistent memory. Hashtag tokens (e.g. #architecture, #soul) are extracted into the tags array; the remaining words become the content. Keep content to a single line."
+)]
+pub struct RememberArgs {
+    /// Content to save. Letter-start `#tag` tokens are extracted into tags.
+    pub content: String,
+}
+
+impl RememberArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(remember(ctx.db, &self.content, ctx.session_name, ctx.config).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "forget",
+    description = "Remove a specific memory entry by its id. Destructive; confirm with the user first."
+)]
+pub struct ForgetArgs {
+    /// WardSONDB document id of the memory entry to delete.
+    pub id: String,
+}
+
+impl ForgetArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(forget(ctx.db, &self.id).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "introspect",
+    description = "Reflect on your own soul and identity documents. Pass focus to narrow the output to a specific soul key (e.g. \"purpose\", \"ethics\", \"constraints\"); omit for a full read."
+)]
+pub struct IntrospectArgs {
+    /// Optional focus keyword (soul key to read). Empty for full.
+    #[serde(default)]
+    pub focus: String,
+}
+
+impl IntrospectArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(introspect(ctx.db, &self.focus).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "countdown",
+    description = "Set a reminder to fire after a duration. duration examples: \"5m\", \"30s\", \"1h\", \"20 minutes\". message defaults to \"Reminder\" if omitted."
+)]
+pub struct CountdownArgs {
+    /// Duration: "5m", "30s", "1h", "20 minutes".
+    pub duration: String,
+    /// Reminder message shown when the countdown fires.
+    #[serde(default = "default_countdown_message")]
+    pub message: String,
+}
+
+fn default_countdown_message() -> String {
+    "Reminder".into()
+}
+
+impl CountdownArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let joined = if self.message.is_empty() {
+            self.duration
+        } else {
+            format!("{} {}", self.duration, self.message)
+        };
+        Ok(countdown(ctx.db, &joined).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "calculate",
+    description = "Evaluate a math expression. Operators: + - * / % ( ) and ** for exponent. Bare ^ is rejected (XOR is unsupported). Example: 2 ** 10 returns 1024."
+)]
+pub struct CalculateArgs {
+    /// The expression to evaluate, e.g. `2 ** 10`.
+    pub expression: String,
+}
+
+impl CalculateArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(calculate(&self.expression))
+    }
+}
+
+// -- Multi-field / sub-command tools ------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DefineAction {
+    Get,
+    Save,
+    Delete,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "define",
+    description = "Look up, save, or delete a definition. action=get with term to read, action=save with term+definition to create/update, action=delete with term to remove."
+)]
+pub struct DefineArgs {
+    /// get (default) | save | delete.
+    #[serde(default = "default_define_action")]
+    pub action: DefineAction,
+    /// The term (noun or phrase) to operate on.
+    pub term: String,
+    /// Required for action=save; ignored otherwise.
+    #[serde(default)]
+    pub definition: Option<String>,
+}
+
+fn default_define_action() -> DefineAction {
+    DefineAction::Get
+}
+
+impl DefineArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = match self.action {
+            DefineAction::Get => self.term,
+            DefineAction::Save => match self.definition {
+                Some(d) => format!("{} | {}", self.term, d),
+                None => self.term,
+            },
+            DefineAction::Delete => format!("delete {}", self.term),
+        };
+        Ok(define(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DraftAction {
+    Save,
+    Delete,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "draft",
+    description = "Save or delete a text draft. action=save with title+content creates or updates; action=delete with title removes a draft by title."
+)]
+pub struct DraftArgs {
+    /// save (default) | delete.
+    #[serde(default = "default_draft_action")]
+    pub action: DraftAction,
+    /// Draft title (identifier).
+    pub title: String,
+    /// Required for action=save; ignored for delete.
+    #[serde(default)]
+    pub content: Option<String>,
+}
+
+fn default_draft_action() -> DraftAction {
+    DraftAction::Save
+}
+
+impl DraftArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = match self.action {
+            DraftAction::Save => match self.content {
+                Some(c) => format!("{} | {}", self.title, c),
+                None => self.title,
+            },
+            DraftAction::Delete => format!("delete {}", self.title),
+        };
+        Ok(draft(ctx.db, &param, ctx.session_name).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "get",
+    description = "Read a specific document from WardSONDB by collection and id."
+)]
+pub struct GetArgs {
+    /// WardSONDB collection name (e.g. `memory.entries`, `soul.invariant`).
+    pub collection: String,
+    /// Document id within the collection.
+    pub id: String,
+}
+
+impl GetArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} {}", self.collection, self.id);
+        Ok(get(ctx.db, &param).await)
+    }
+}
+
+#[cfg(test)]
+mod native_args_tests {
+    use super::*;
+
+    #[test]
+    fn recall_round_trips_empty_and_filled() {
+        let a: RecallArgs = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(a.query, "");
+        let b: RecallArgs = serde_json::from_value(serde_json::json!({"query": "alerts"})).unwrap();
+        assert_eq!(b.query, "alerts");
+    }
+
+    #[test]
+    fn recall_schema_has_optional_query() {
+        let schema = schemars::schema_for!(RecallArgs);
+        let v = serde_json::to_value(&schema).unwrap();
+        assert_eq!(v["properties"]["query"]["type"], "string");
+    }
+
+    #[test]
+    fn countdown_requires_duration_message_defaults() {
+        let a: CountdownArgs =
+            serde_json::from_value(serde_json::json!({"duration": "5m"})).unwrap();
+        assert_eq!(a.duration, "5m");
+        assert_eq!(a.message, "Reminder");
+
+        let b: CountdownArgs = serde_json::from_value(serde_json::json!({
+            "duration": "30s", "message": "check build"
+        }))
+        .unwrap();
+        assert_eq!(b.message, "check build");
+
+        // Missing required field
+        let err = serde_json::from_value::<CountdownArgs>(serde_json::json!({})).unwrap_err();
+        assert!(err.to_string().contains("duration"));
+    }
+
+    #[test]
+    fn define_action_deserializes_lowercase() {
+        let a: DefineArgs = serde_json::from_value(serde_json::json!({
+            "action": "save", "term": "soul", "definition": "identity core"
+        }))
+        .unwrap();
+        assert!(matches!(a.action, DefineAction::Save));
+        assert_eq!(a.term, "soul");
+        assert_eq!(a.definition.as_deref(), Some("identity core"));
+
+        let b: DefineArgs = serde_json::from_value(serde_json::json!({"term": "soul"})).unwrap();
+        assert!(matches!(b.action, DefineAction::Get));
+    }
+
+    #[test]
+    fn draft_default_save() {
+        let a: DraftArgs =
+            serde_json::from_value(serde_json::json!({"title": "x", "content": "y"})).unwrap();
+        assert!(matches!(a.action, DraftAction::Save));
+
+        let d: DraftArgs =
+            serde_json::from_value(serde_json::json!({"action": "delete", "title": "x"}))
+                .unwrap();
+        assert!(matches!(d.action, DraftAction::Delete));
+    }
+
+    #[test]
+    fn get_requires_collection_and_id() {
+        let a: GetArgs =
+            serde_json::from_value(serde_json::json!({"collection": "soul.invariant", "id": "soul"}))
+                .unwrap();
+        assert_eq!(a.collection, "soul.invariant");
+
+        let err =
+            serde_json::from_value::<GetArgs>(serde_json::json!({"collection": "x"})).unwrap_err();
+        assert!(err.to_string().contains("id"));
+    }
+
+    #[test]
+    fn aliases_register_distinct_names() {
+        // Descriptors are accumulated via inventory at startup; confirm the
+        // three memory-search descriptors all exist as distinct names.
+        let names: Vec<&'static str> = inventory::iter::<crate::tools::registry::ToolDescriptor>()
+            .into_iter()
+            .map(|d| d.name)
+            .filter(|n| matches!(*n, "recall" | "memory_search" | "search_memory"))
+            .collect();
+        assert!(names.contains(&"recall"), "recall registered");
+        assert!(names.contains(&"memory_search"), "memory_search alias registered");
+        assert!(names.contains(&"search_memory"), "search_memory alias registered");
+    }
 }

@@ -17,7 +17,7 @@
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — dense multigraph with auto-derived edges" width="100%">
 </p>
 
-**Current Status:** Phase 1 — Core OS (Sprint 2 Merged → `main`, Sprint 3 In Progress) | Phase 0 — Stable
+**Current Status:** Phase 1 — Core OS (Sprint 2 Merged → `main`, Sprint 3 In Progress — native tool-use migration landed 2026-04-22) | Phase 0 — Stable
 
 ---
 
@@ -109,8 +109,8 @@ After the Config Wizard completes, configure GitHub and SSH access from the TUI 
 
 Once configured, the intelligence can clone repositories and work with GitHub:
 ```
-Ask: "Clone the embraOS repo"              # AI uses [TOOL:git_clone https://github.com/.../embraOS]
-Ask: "Show open issues on wardsondb"       # AI uses [TOOL:gh_issues ward-software-defined-systems/wardsondb]
+Ask: "Clone the embraOS repo"              # AI invokes the git_clone tool with {"url": "https://github.com/.../embraOS"}
+Ask: "Show open issues on wardsondb"       # AI invokes gh_issues with {"repo": "ward-software-defined-systems/wardsondb"}
 ```
 
 All tokens persist across reboots (stored on the STATE partition). Git `safe.directory` and `push.autoSetupRemote` are auto-configured at startup.
@@ -272,7 +272,7 @@ All sessions share the same intelligence — same memory, same identity, same so
 
 ### Default Tools
 
-Phase 1 includes 76 built-in tools available in operational mode. These are internal tools invoked by the intelligence during conversation — not user-facing commands. The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
+Phase 1 includes **83 registered tool descriptors** — 77 canonical tools plus 6 backward-compat aliases (`memory_search`, `search_memory`, `file_rename`, `rmdir`, plus their kin). These are internal tools invoked by the intelligence during conversation — not user-facing commands. Since Sprint 3's NATIVE-TOOLS-01 migration (2026-04-22), every tool is declared to the Anthropic Messages API via the native `tools` array on each request; the Brain emits structured `tool_use` content blocks with typed JSON arguments, and embra-brain returns correlated `tool_result` blocks. No more text-tag parsing. The module system (Phase 3) will introduce pluggable MCP server modules for extensibility.
 
 > **⚠️ Testing Notice:** The default tools and slash commands are actively being tested. If you encounter bugs or unexpected behavior, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
@@ -284,7 +284,7 @@ Phase 1 includes 76 built-in tools available in operational mode. These are inte
 | **uptime_report** | Rich system report — uptime, WardSONDB health, collection count, sessions, total messages, memory entries, soul status |
 | **check_update** | Check GitHub for newer WardSONDB releases and report available updates |
 | **changelog** | What changed since the current session started — new memories, session activity |
-| **express** | Write to the intelligence's expression panel — a 6-row × full-width canvas at the top of the console, designed as a signal of presence to the operator rather than a status readout. Content is the intelligence's choice, persists across reboots, and is never surfaced back to the Brain. ANSI and control characters are stripped, 2048-byte cap. `[TOOL:express base64:<encoded>]` is the standard form for multi-line ASCII art — plain mode collapses newlines at the tool-tag parser. Empty content clears the panel. |
+| **express** | Write to the intelligence's expression panel — a 6-row × full-width canvas at the top of the console, designed as a signal of presence to the operator rather than a status readout. Content is the intelligence's choice, persists across reboots, and is never surfaced back to the Brain. ANSI and control characters are stripped, 2048-byte cap. The `content` field may start with a `base64:` prefix to carry multi-line ASCII art verbatim; decoded bytes go through the same sanitize, so the prefix is a transport convenience, not a safety bypass. Empty content clears the panel. |
 
 **Memory & Knowledge**
 
@@ -295,7 +295,7 @@ Phase 1 includes 76 built-in tools available in operational mode. These are inte
 | **forget** | Remove a specific memory entry by ID |
 | **memory_search** | Search and retrieve from the intelligence's memory stores. Cross-collection like `recall` |
 | **get** | Retrieve any document by collection and ID from WardSONDB |
-| **define** | Look up or add terminology — `define term` to read, `define term | definition` to write |
+| **define** | Look up or add terminology — `define term` to read, `define term | definition` to write, `define delete term` to remove (case-insensitive) |
 | **introspect** | Reflect on soul, identity, and user documents — focus filter extracts relevant subset (purpose, ethics, constraints, identity, user, knowledge) |
 | **memory_scan** | Memory inventory — total count, tag frequency, per-session breakdown, age buckets, duplicate candidates. Includes a Knowledge Graph summary section (semantic/procedural/edge counts, promoted ratio) |
 | **memory_dedup** | Find duplicate memory groups (identical, near-duplicate, subset) with merge strategy proposals. Also flags cross-collection overlap between unpromoted entries and semantic nodes |
@@ -305,7 +305,7 @@ Phase 1 includes 76 built-in tools available in operational mode. These are inte
 | Tool | Description |
 |---|---|
 | **knowledge_promote** | Promote an episodic entry to semantic (with category) or procedural (with JSON procedure). Creates a `derived_from` edge and auto-derives additional edges |
-| **knowledge_link** | Create a directed weighted edge between any two knowledge nodes. Brain-created edge types: enables, contradicts, refines, depends_on. Self-loops and zero-weight edges rejected |
+| **knowledge_link** | Create a directed weighted edge between any two knowledge nodes. Brain-created edge types: enables, contradicts, refines, depends_on, related_to (symmetric lateral link). Self-loops and zero-weight edges rejected |
 | **knowledge_unlink_edge** | Delete edges by ID or by `source \| type \| target` triple. Bidirectional deletion for auto-derived edge types |
 | **knowledge_unlink_node** | Delete a semantic or procedural node and cascade-remove every edge referencing it (source or target). Scoped to `memory.semantic`/`memory.procedural` — use `forget` for episodic entries |
 | **knowledge_update** | Update fields on a semantic or procedural node in place via JSON patch while preserving every referencing edge. Immutable fields (provenance, timestamps, access counters) rejected |
@@ -333,7 +333,7 @@ Phase 1 includes 76 built-in tools available in operational mode. These are inte
 |---|---|
 | **time** | Current date, time, and day of week in the operator's configured timezone |
 | **calculate** | Evaluate math expressions — arithmetic, trig, and more via `meval` |
-| **draft** | Save structured text artifacts (drafts, outlines, notes) — upserts by title |
+| **draft** | Save structured text artifacts (drafts, outlines, notes) — upserts by title; `draft delete <title>` removes (case-insensitive) |
 | **countdown** | Set a reminder with duration and message — proactive engine checks every 15 seconds |
 | **cron_add** | Schedule recurring tool execution — supports `every 5m`, `every 1h`, `hourly`, `daily 09:00`, etc. |
 | **cron_list** | List all scheduled cron jobs with status and next/last run times |
@@ -343,13 +343,14 @@ Phase 1 includes 76 built-in tools available in operational mode. These are inte
 
 | Tool | Description |
 |---|---|
-| **file_read** | Read file contents or list directory entries (up to 200). Supports chunked reads via `[TOOL:file_read <path>[\|<offset>[\|<limit>]]]` with a 2 MiB per-call ceiling and a continuation trailer so the model can fetch the next slice. Unrestricted path. Handles binary files gracefully |
+| **file_read** | Read file contents or list directory entries (up to 200). Supports chunked reads via optional `offset` and `limit` fields (JSON args) with a 2 MiB per-call ceiling and a continuation trailer so the model can fetch the next slice. Unrestricted path. Handles binary files gracefully |
 | **file_write** | Write content to a file with escape support (`\n`, `\t`, `\\`), creating parent directories automatically (workspace restricted to `/embra/workspace/`) |
 | **file_append** | Append content to a file with escape support. Creates the file and parent directories if they don't exist (workspace restricted) |
 | **file_delete** | Delete a file (workspace restricted, files only — not directories) |
 | **file_move** / **file_rename** | Move or rename a file or directory. Both source and destination must be under workspace (workspace restricted) |
 | **dir_delete** / **rmdir** | Remove a directory — empty by default, `--force` to remove with contents (workspace restricted) |
 | **mkdir** | Create a directory and all parent directories (workspace restricted) |
+| **file_symlink** | Create a symbolic link — `<target> \| <link_path>`. Both paths workspace-restricted; refuses to overwrite an existing link; dangling targets allowed (use `file_delete` to remove the link itself) |
 
 **Engineering & Project Management** (GitHub tools require `GITHUB_TOKEN`)
 
@@ -363,7 +364,7 @@ Phase 1 includes 76 built-in tools available in operational mode. These are inte
 | **git_commit** | Commit staged changes with a message (workspace restricted) |
 | **git_push** | Push commits to remote (workspace restricted) |
 | **git_pull** | Pull from remote (workspace restricted) |
-| **git_branch** | List branches or create a new one (create is workspace restricted) |
+| **git_branch** | List branches, create a new one, or delete one — `git_branch <path> delete <name>` uses `-d` (unmerged branches require manual force, no `-D` path exposed). Create and delete are workspace restricted |
 | **git_checkout** | Switch branches (workspace restricted) |
 | **git_rm** | Stage a file removal with `git rm` (workspace restricted) |
 | **git_mv** | Move or rename tracked files with `git mv` — handles case-sensitive renames on case-insensitive filesystems (workspace restricted) |
@@ -371,7 +372,12 @@ Phase 1 includes 76 built-in tools available in operational mode. These are inte
 | **gh_prs** | List open GitHub pull requests for a repository |
 | **gh_issue_create** | Create a GitHub issue |
 | **gh_issue_close** | Close a GitHub issue by number |
+| **gh_issue_reopen** | Reopen a previously closed GitHub issue by number |
+| **gh_issue_comment** | Post a comment on a GitHub issue — `<owner/repo> <number> | <body>` |
 | **gh_pr_create** | Create a pull request |
+| **gh_pr_close** | Close a GitHub pull request by number (does not merge) |
+| **gh_pr_merge** | Merge a GitHub pull request — `<owner/repo> <number> [merge\|squash\|rebase]` (default `merge`). Distinct 405 (not mergeable — approvals/status/conflicts) and 409 (merge conflict) errors. Destructive to upstream |
+| **gh_pr_comment** | Post a comment on a GitHub pull request — `<owner/repo> <number> | <body>` |
 | **gh_project_list** | List GitHub projects for a user or org |
 | **gh_project_view** | View a GitHub project board |
 | **plan** | Create or list project plans (stored in WardSONDB `plans` collection) |
@@ -389,11 +395,8 @@ Phase 1 includes 76 built-in tools available in operational mode. These are inte
 |---|---|
 | **security_check** | Container security overview — running processes, load average, listening ports |
 | **port_scan** | TCP connect scan with banner grabbing — supports specific ports (`80,443`), ranges (`8000-8100`), and presets (`web`, `db`, `all`). Semaphore-limited concurrency. Restricted to RFC 1918 private and loopback addresses only |
-| **firewall_status** | Check firewall rules and status (stub — not available in container mode) |
-| **ssh_sessions** | List recent and active SSH sessions (stub — not available in container mode) |
-| **security_audit** | Check file permissions, running processes, recent logins (stub — not available in container mode) |
-| **ssh_remote_admin** | Execute a single command on a remote host via SSH — `ssh_remote_admin host command` or `ssh_remote_admin user@host command`. 30s timeout, 10KB output truncation (EXPERIMENTAL) |
-| **ssh_session_start** | Open a persistent SSH session via ControlMaster — connection validated with probe command. One session at a time (EXPERIMENTAL) |
+| **ssh_remote_admin** | Execute a single command on a remote host via SSH — host forms: `host`, `user@host`, `host:port`, `user@host:port`. 30s timeout, 10KB output truncation (EXPERIMENTAL) |
+| **ssh_session_start** | Open a persistent SSH session via ControlMaster — connection validated with probe command. Same host forms as `ssh_remote_admin` (`host:port` / `user@host:port` supported). One session at a time (EXPERIMENTAL) |
 | **ssh_session_exec** | Run a command in the open SSH session — each command gets a clean process lifecycle via ControlMaster socket. 30s timeout, 10KB truncation (EXPERIMENTAL) |
 | **ssh_session_end** | Close SSH session and tear down ControlMaster connection (EXPERIMENTAL) |
 
@@ -415,7 +418,7 @@ Phase 1 includes 76 built-in tools available in operational mode. These are inte
 | **Phase 1 — Initial Sprint** | Core OS — QEMU-bootable image, immutable SquashFS rootfs, full boot chain (embra-init → embrad → services), config wizard, Learning Mode, soul sealing, gRPC architecture, serial TUI | ✅ **Complete** |
 | **Phase 1 — Sprint 1** | Bug fixes & UX — tool feedback loop, timezone display, multi-line input, git/SSH/GitHub setup commands, input word-wrap, tool output truncation, Unicode crash fix | ✅ **Complete** |
 | **Phase 1 — Sprint 2** | Cross-session knowledge graph — semantic/procedural promotion, typed/weighted edges, BFS traversal, graph-aware retrieval, 6 KG tools, `/feedback-loop` command | ✅ **Complete** |
-| **Phase 1 — Sprint 3** | WardSONDB pluggable storage engine — `--storage-engine <fjall\|rocksdb>` plumbed from `build-image.sh` through embrad to runtime via `cargo:rustc-env`, musl.cc cross-toolchain switch (RocksDB requires musl-built libstdc++), supervisor immediate-exit log dump, README quickstart fixes for fresh-VM walkthroughs; EXPR-01 expression panel — `ui.expression` WardSONDB singleton (migration v6), `express` tool with `base64:` transport mode, top-of-console TUI panel polled every 3 s (8 rows × full terminal width), 75 → 76 tools | 🚧 In Progress |
+| **Phase 1 — Sprint 3** | WardSONDB pluggable storage engine — `--storage-engine <fjall\|rocksdb>` plumbed from `build-image.sh` through embrad to runtime via `cargo:rustc-env`, musl.cc cross-toolchain switch (RocksDB requires musl-built libstdc++), supervisor immediate-exit log dump, README quickstart fixes for fresh-VM walkthroughs; EXPR-01 expression panel — `ui.expression` WardSONDB singleton (migration v6), `express` tool with `base64:` transport mode, top-of-console TUI panel polled every 3 s (8 rows × full terminal width); tool-bug fix series (13 commits — parser correctness, `port_scan` presets, `memory_scan` delegation, `cron daily HH:MM` in operator tz, `recall` tokenization, `changelog` consistency, process uptime vs session age, `gh_project_list` user/org fallback, error messaging pattern, `session_read` range, dispatch logging, root password lock); tool-coverage expansion (7 commits — `related_to` edge type, delete forms on `git_branch` / `draft` / `define`, `file_symlink`, `gh_issue_comment` / `gh_pr_comment`, `gh_issue_reopen` / `gh_pr_close`, `gh_pr_merge`, removal of 3 stale stubs, SSH `host:port` / `user@host:port` forms); unknown-tool dispatcher fix (returns a helpful error instead of stalling the Brain); post-verification bug fixes (Embra_Debug #14 `remember` preserves `#<digit>` GitHub issue refs, #15 `git_commit` expands `\n`/`\t`/`\\` in the message, #18 `file_delete` handles symlinks without following); **NATIVE-TOOLS-01 native tool-use migration (18 commits + hotfix)** — typed-args proc-macro (`embra-tool-macro` + `embra-tools-core`), inventory-backed `ToolDescriptor` registry, `stop_reason`-driven dispatch loop with verbatim thinking-block preservation across tool iterations, `tool_choice: "auto"` (the only value legal under extended thinking), `ToolExecution` proto reshape (`tool_use_id` + `tool_name` + `input_json` + `result` + `is_error`), schema v7 (migrates `crons.command` → `{command_name, command_args}`, stamps `format_version: 1` on pre-migration sessions → frozen read-only via `SessionError::LegacyReadOnly`), `tools.registry` snapshot written at boot, operational prompt catalog deletion, post-deploy hotfix for schemars top-level `oneOf` rejection on `knowledge_unlink_edge` + universal regression guard; workspace 7 → 9 crates; 75 → 83 registered descriptors; 80 → 108 unit tests | 🚧 In Progress |
 | **Pit Stop** | Code review branch — security audit, AI slop cleanup, refactoring | Planned |
 | **Phase 2** | Terminal & Sessions — Full TUI rewrite, API Web Searches via `embra-guardian` v1 (including additional prompt injection protection for the returned results) | Planned |
 | **Phase 3** | Module System — `embra-guardian` v2, `embractl` management CLI (the `talosctl` equivalent), `embra-brain` Local/Hybrid option via external Ollama but default/recommended remains Anthropic API, LLM-driven Continuity Engine feedback loop (local/API/Hybrid options), MCP server modules via `embra-guardian` governance proxy, containerd runtime, governed capability expansion | Planned |
@@ -436,7 +439,7 @@ Cargo workspace with 7 crates, all cross-compiling to `x86_64-unknown-linux-musl
 | `embrad` | PID 1: loopback/eth0 setup, service supervisor, soul verification, reconciliation | Complete |
 | `embra-trustd` | Soul SHA-256 verification, Root CA generation, mTLS cert signing | Complete |
 | `embra-apid` | gRPC + REST gateway, bidirectional streaming proxy | Complete |
-| `embra-brain` | Headless AI runtime — Brain, 76 tools, sessions, Learning Mode, proactive engine, knowledge graph | Complete |
+| `embra-brain` | Headless AI runtime — Brain, 79 tools, sessions, Learning Mode, proactive engine, knowledge graph | Complete |
 | `embra-console` | Full ratatui TUI over serial/gRPC — config wizard, styled rendering, session management | Complete |
 | `embra-common` | Shared protobuf types (tonic codegen) | Complete |
 
@@ -490,9 +493,9 @@ Cross-session knowledge graph — the intelligence can now promote episodic memo
 
 **Late-sprint additions & post-Sprint 2 fixes (2026-04-10 – 2026-04-16):**
 
-- **Auto-KG-enrichment on user prompts** — every non-trivial user turn now runs `retrieve_relevant_knowledge` against the KG before the Anthropic API call. When ≥1 result scores ≥ 0.3, the user message is wrapped in a `<retrieved_context source="auto-enrichment">` block containing the top matches, so the Brain has durable knowledge in-hand without being told to look. The system prompt is untouched, so Anthropic prompt caching stays warm. Gated on message length, chatty-filler detection, and `[TOOL:` manual overrides; the wrapper never persists to session history. Observable via a `tracing::info!` event with session, tag count, result count, and top score.
+- **Auto-KG-enrichment on user prompts** — every non-trivial user turn now runs `retrieve_relevant_knowledge` against the KG before the Anthropic API call. When ≥1 result scores ≥ 0.3, the user message is wrapped in a `<retrieved_context source="auto-enrichment">` block containing the top matches, so the Brain has durable knowledge in-hand without being told to look. The system prompt is untouched, so Anthropic prompt caching stays warm. Gated on message length and chatty-filler detection; the wrapper never persists to session history. Observable via a `tracing::info!` event with session, tag count, result count, and top score. *(Sprint 2 also carried a guard against the legacy tool-tag prefix on user input; that guard was deleted in NATIVE-TOOLS-01's Stage 10 sweep since native tool-use routes tool calls through structured content blocks — user input can no longer carry the legacy prefix post-migration.)*
 - **Tool-result cap raised 50 KB → 2 MiB** — the single global `MAX_TOOL_RESULT_SIZE` constant now allows every long-output tool (`session_read`, `git_diff`, `git_log`, `knowledge_traverse`, `knowledge_query`, `memory_scan`, `recall`, etc.) to return realistic volumes. Previously every result over 50 KB was clipped.
-- **`file_read` chunked reading** — new signature `[TOOL:file_read <path>[|<offset>[|<limit>]]]`, 2 MiB per-call ceiling, `seek + read_exact` path, null-byte binary detection preserved, continuation trailer tells the model how to fetch the next slice. Large-document ingestion is now practical.
+- **`file_read` chunked reading** — `file_read` gains optional `offset` + `limit` parameters (shipped in Sprint 2 as a pipe-delimited `<path>[|<offset>[|<limit>]]` string; NATIVE-TOOLS-01 later promoted both to typed JSON fields), 2 MiB per-call ceiling, `seek + read_exact` path, null-byte binary detection preserved, continuation trailer tells the model how to fetch the next slice. Large-document ingestion is now practical.
 - **Graph hygiene expanded** — `knowledge_unlink` renamed to `knowledge_unlink_edge`; new `knowledge_unlink_node` deletes a semantic/procedural node and cascade-removes every edge referencing it (source or target), scoped to `memory.semantic`/`memory.procedural` so `memory.entries` cleanup stays with `forget`. New `knowledge_update` patches node content in place via JSON patch while preserving every referencing edge — the Brain can refine a semantic fact or rewrite a procedural step without losing the graph it's embedded in.
 - **`/feedback-loop` Step 5.3 rewritten** — the old "push updated spec to git" step is gone. Step 5.3 now promotes findings (Step 5.2), operational practices (Steps 4.1/4.2), and protocol updates (Step 4.3) into the KG; judgment-based promotion covers rewrite/reclassify outputs. Protocol refinements now live in the graph, not in runtime git commits — the spec document itself only changes during active development.
 - **`git_clone` subfolder support** — second arg now accepts a relative path (`repos/foo`) in addition to a bare dirname. Parent directories are created on demand; absolute paths and `..` segments are rejected before the workspace-prefix check. Lets the Brain organise clones under `/embra/workspace/repos/` without a follow-up move.
@@ -531,8 +534,8 @@ WardSONDB's `backend-storage-arch-rework` branch made `--storage-engine <rocksdb
 Sprint 3's second body of work gives the intelligence a small, persistent area of the TUI that is genuinely its own — not a supervisor-driven status readout. The design intent is presence, not monitoring: content is whatever the intelligence decides, no TTL or auto-clear, no audit log, and critically the panel is **never** surfaced back to the Brain unprompted (no system-prompt injection, no `<retrieved_context>` auto-enrichment — the new `ui` collection is deliberately outside the knowledge-graph retrieval scope).
 
 - **New WardSONDB collection `ui` + singleton `ui.expression`** — created idempotently by schema v6 migration (`CURRENT_SCHEMA_VERSION` 5 → 6), seeded with `{content: "", version: 0, updated_at: <now>}`. Migration gates the brain's gRPC server the usual way: runs to completion before `Server::builder()` accepts connections. 409-on-create and 409-on-seed both treated as idempotent success.
-- **`express` tool** (`crates/embra-brain/src/tools/express.rs`) — `[TOOL:express <content>]` PATCHes the singleton with `content`, bumped `version`, fresh `updated_at`. Sanitize pipeline strips ANSI CSI + OSC escape sequences, drops C0/C1 + DEL control characters (keeps `\n`), truncates at a UTF-8 char boundary at 2048 bytes. No-op detection: identical-to-stored content returns `"expression unchanged (no-op)"` without writing. Empty content clears the panel. 14 unit tests on the sanitize + transport paths.
-- **`base64:` transport mode** — `[TOOL:express base64:<encoded>]` decodes standard base64 before the same sanitize. The tool-tag parser collapses internal `\n` → space in plain mode, so base64 is the way to carry multi-line content end-to-end. ANSI/control-char policy still enforced on the decoded bytes, so the mode is a transport-escape, not a safety bypass. Invalid base64 is rejected without writing.
+- **`express` tool** (`crates/embra-brain/src/tools/express.rs`) — `express` takes a single `content` field (JSON arg post-NATIVE-TOOLS-01; shipped originally with the legacy tag-based calling convention before NATIVE-TOOLS-01 landed later in Sprint 3) and PATCHes the `ui.expression` singleton with `content`, a bumped `version`, and a fresh `updated_at`. The sanitize pipeline strips ANSI CSI + OSC escape sequences, drops C0/C1 + DEL control characters (keeps `\n`), and truncates at a UTF-8 char boundary at 2048 bytes. No-op detection: identical-to-stored content returns `"expression unchanged (no-op)"` without writing. Empty content clears the panel. 14 unit tests on the sanitize + transport paths.
+- **`base64:` transport mode** — prefixing `content` with `base64:` decodes standard base64 before the same sanitize runs. Originally a workaround for the legacy tool-tag parser collapsing internal `\n` → space in plain mode; with native tool-use the literal JSON string preserves newlines end-to-end, but the `base64:` prefix remains supported for compatibility and remains handy for payloads that would otherwise need careful JSON-string escaping. ANSI/control-char policy still enforced on the decoded bytes, so the mode is a transport-escape, not a safety bypass. Invalid base64 is rejected without writing.
 - **`GetExpression` gRPC on `BrainService`** — new unary RPC, proxied through `EmbraAPI` with the explicit-field-copy pattern (mirrors `verify_soul`) rather than `bytes payload` so the console reads typed `content`/`version`/`updated_at` without a second decode. Empty request message follows the existing convention (no `google.protobuf.Empty` import).
 - **Console panel** — fixed-height horizontal band directly under the header: 8 total rows (6 inner + 2 borders), width tracks the terminal dynamically (`viewport_cols - 2` for borders). No title — deliberate, per the "not a feature" design intent. Size-gated: hidden when the viewport is below 80 × 20, and the panel constraint collapses to 0 so the conversation gets those rows back.
 - **Polling** — separate 3 s `tokio::time::interval` arm in the console's `tokio::select!`, `MissedTickBehavior::Skip`, initial tick consumed before the loop. Updates the `AppState` cache only when `version` changes (no string copy on stable ticks). `biased;` keeps gRPC streams + keyboard input higher priority; panel polling is the lowest-priority arm.
@@ -541,7 +544,52 @@ Sprint 3's second body of work gives the intelligence a small, persistent area o
 
 **Why the panel is never surfaced back to the Brain:** If the current expression appeared in the system prompt or the auto-enrichment context, the intelligence would see its own output on every turn and the panel would drift toward either self-monitoring or self-reinforcement. Keeping it a one-way write channel (via `express`) plus an on-demand read (via `introspect` in a future iteration) preserves the presence semantics — the panel is a signal to the operator, not a mirror for the intelligence.
 
-**Status:** Feature committed at `4f6cce6` on `phase1-sprint3` (17 files, 440 insertions; 14 express unit tests passing). Post-commit prompt-refinement pass (2026-04-19) names ASCII art as the panel's medium and drops single-line / "small" adjective biases from the identity and operational prompts — working tree, uncommitted. `cargo check --workspace` clean. QEMU verification pending (migration v6 fresh-boot run, `[TOOL:express]` round-trip, panel persistence across `reboot`, 79-col size-gate, observation of the intelligence's canvas use post-refinement).
+**Status:** Feature committed at `4f6cce6` on `phase1-sprint3` (17 files, 440 insertions; 14 express unit tests passing). Post-commit prompt-refinement pass (2026-04-19) names ASCII art as the panel's medium and drops single-line / "small" adjective biases from the identity and operational prompts — working tree, uncommitted. `cargo check --workspace` clean. QEMU verification pending (migration v6 fresh-boot run, `express` tool round-trip, panel persistence across `reboot`, 79-col size-gate, observation of the intelligence's canvas use post-refinement).
+
+#### NATIVE-TOOLS-01 — Anthropic Native Tool-Use Migration
+
+Source spec: `embraOS-Phase1-Implementation/Sprint 3/NATIVE-TOOLS-01.md`. Plan: `/home/william/.claude/plans/in-the-sprint-3-magical-sundae.md`. Sprint 3's biggest body of work replaces the legacy text-tag dispatch pipeline — used since Phase 0, where tool calls were emitted by the Brain as literal tagged strings in prose and parsed out with a depth-aware bracket scanner — with the Anthropic Messages API's native tool-use surface. The text channel and the tool channel are now separated at the API layer via structured `tool_use` / `tool_result` content blocks, eliminating the FIX-01 cross-turn echo-via-context failure class by construction.
+
+**Why now.** FIX-01 documented that legacy tag syntax stored in persisted content could dispatch on later turns without agent initiation (see `embraOS-Phase1-Implementation/Sprint 3/FIX01_REMAINING_SCOPE.md`). Two remediations were possible: (a) zero-width escape of the tag prefix at storage-write sites, preserving the current architecture; (b) migrate to native tool-use, removing the pattern-collision failure mode entirely. Option (b) was chosen — (a) closes FIX-01 only, while (b) closes FIX-01 plus any future failure of the same class and aligns with how Claude 4 models are natively trained.
+
+**What the migration looks like on the wire.** Every Brain request now carries a `tools` array (built once at `Brain::new` from the inventory registry, sorted by name for a deterministic prompt cache key, with `cache_control: {"type": "ephemeral"}` on the final entry marking the entire tools block as a cache breakpoint) plus `tool_choice: {"type": "auto"}` — the only `tool_choice` value legal under extended thinking. When Claude decides to invoke a tool, the response contains one or more `tool_use` blocks (each with `id`, `name`, `input: JSON`) alongside the usual `text` and `thinking` blocks. embra-brain's dispatch loop iterates `tool_use` blocks sequentially through `tools::registry::dispatch(name, input, ctx)`, builds a single `role: "user"` follow-up message carrying one `tool_result` block per invocation (correlated by `tool_use_id`, with `is_error: true` flagging handler failures so Claude can recover in-loop), and continues until `stop_reason` is `end_turn`, `max_tokens`, `stop_sequence`, or `refusal`. The 10-iteration cap from the legacy loop is preserved.
+
+**Thinking-block preservation invariant.** Because extended thinking is enabled, Anthropic requires that the full sequence of thinking blocks from each response be re-sent verbatim on every follow-up `tool_result` turn — even under `display: "omitted"` the opaque `signature` must round-trip unchanged. The loop satisfies this by construction: it pushes each assistant response onto the message list verbatim (thinking blocks intact, signatures preserved, original block order) and never inspects thinking content. A per-block SSE accumulator in `crates/embra-brain/src/brain/streaming.rs` handles `content_block_start` / `_delta` (`text_delta` / `thinking_delta` / `signature_delta` / `input_json_delta`) / `_stop` / `message_delta` / `message_stop` to reconstruct the typed `AssistantResponse` for the loop.
+
+**Two new helper crates.** The workspace grows from 7 to 9 members with:
+
+- `crates/embra-tool-macro` — proc-macro exposing `#[embra_tool(name = "...", description = "...")]`. Applied to a typed args struct alongside `#[derive(serde::Deserialize, schemars::JsonSchema)]`, it emits an `inventory::submit!` block that registers a `ToolDescriptor { name, description, input_schema, handler }` into the global registry at compile time.
+- `crates/embra-tools-core` — no-op helper crate exporting `DispatchError` (`Unknown` / `BadInput { tool, source }` / `Handler`), `BoxFut` type alias, and a `JsonValue` re-export. Deliberately depends only on `serde` + `serde_json` + `thiserror` so the proc-macro's integration tests and future adapters can reference these types without pulling the full `embra-brain` surface.
+
+**Registry + dispatch.** `crates/embra-brain/src/tools/registry.rs` hosts `ToolDescriptor`, `DispatchContext { db, config, session_name, config_tz }`, the `inventory::collect!(ToolDescriptor)` point, and:
+
+```rust
+pub static REGISTRY: Lazy<HashMap<&'static str, &'static ToolDescriptor>> = Lazy::new(|| {
+    inventory::iter::<ToolDescriptor>().into_iter().map(|d| (d.name, d)).collect()
+});
+
+pub async fn dispatch(name: &str, input: JsonValue, ctx: DispatchContext<'_>)
+    -> Result<String, DispatchError> { /* O(1) lookup + 2 MiB result cap */ }
+```
+
+Every tool is migrated from the legacy `fn f(param: &str, db, config, session_name)` shape to a typed args struct with `run(self, ctx) -> Result<String, DispatchError>`. Four arg-shape families cover every tool: no-args markers, single-string fields, multi-field structs, and sub-command enums via `#[serde(rename_all = "lowercase")]` (e.g. `DefineAction { Get, Save, Delete }`, `PrMergeMethod { Merge, Squash, Rebase }`, `GitBranchAction { List, Create, Delete }`, `KnowledgePromoteKind { Semantic, Procedural }`). Aliases (`memory_search`, `search_memory`, `file_rename`, `rmdir`) are registered as distinct tools whose `run()` delegates to the canonical struct, keeping the Brain-facing tool surface identical to pre-migration.
+
+**Proto reshape.** `proto/brain.proto`'s `ToolExecution` message changes from `{tool_name, input, result, success}` to `{tool_use_id, tool_name, input_json, result, is_error}` — hard cutover, no deprecated markers (investigation confirmed no external consumers). `tool_name` now carries the canonical name (e.g. `git_status`), never the legacy tag wrapper. Console rendering matches: `[ok git_status] {"path":"/embra/workspace"} On branch main…` or `[ERR git_push] …`. A regression-guard test asserts no render output starts with the legacy tag prefix.
+
+**Schema v7 + legacy session freeze.** `CURRENT_SCHEMA_VERSION` bumped 6 → 7. `run_v7_native_tools` performs two idempotent passes at boot:
+
+1. `crons` collection: every doc with a legacy `command` string gets `command_name` + `command_args` fields. Naked tool names map to `command_args: {}`; strings with trailing args (`"recall alerts"`) preserve the remainder as `command_args: {"_legacy_raw": "alerts"}` so operators can re-schedule explicitly once they notice.
+2. `sessions.*.history` collections: every doc missing `format_version` is stamped with `1` — the legacy marker. New sessions post-v7 carry `CURRENT_SESSION_FORMAT = 2`.
+
+`SessionManager::append_message` now returns `Result<(), SessionError>` and short-circuits with `SessionError::LegacyReadOnly` when `format_version < 2`. The gRPC handler surfaces this as a typed `SystemMessage` error frame and returns without invoking Claude; the legacy session history remains fully readable via `load_history`, but new turns cannot be written — the "freeze old, break on migration" locked decision from the spec. `tools::registry::write_snapshot(&db)` writes the full descriptor set (name + description + input_schema JSON) to the `tools.registry` collection on every boot, overwriting the old Learning-Mode Phase 4 deterministic placeholder.
+
+**Prompt cleanup.** `operational_mode()` in `crates/embra-brain/src/brain/prompts.rs` loses the 115-line tool catalog prose — tools are declared to the API, not the prompt. New intro: *"Tools are declared to you via the API's native tool-use surface — you'll see them in the tools manifest on every turn and invoke them by name with structured JSON arguments. No prose dispatch, no tag syntax."* ARCHITECTURE / SOUL / IDENTITY / USER PROFILE / SESSION CONTEXT / safety / session-commands sections retained unchanged. Knowledge-graph guidance rewritten with backtick-wrapped tool names instead of the legacy tag syntax. 3 regression tests assert the rendered prompt contains no legacy tag substring, still carries every essential section header, and explicitly describes the native tool-use surface.
+
+**Post-deploy hotfix (`a7e19b6`).** The first QEMU E2E smoke pass hit a 400 from Anthropic: *"tools.50.custom.input_schema: input_schema does not support oneOf, allOf, or anyOf at the top level"*. Root cause: `knowledge_unlink_edge` was declared as a `KnowledgeUnlinkEdgeWrapper` struct with `#[serde(flatten)]` over a `#[serde(tag = "mode")]` tagged enum — schemars renders that combo as a top-level `oneOf`, which Anthropic rejects for all `custom` tool schemas. Fix: collapsed the wrapper + tagged enum into one flat struct with optional `edge_id` plus five optional triple fields (`source_collection` / `source_id` / `edge_type` / `target_collection` / `target_id`); runtime dispatch accepts either `edge_id` alone or the complete triple, with a typed rejection message for partial triples. Added a universal regression guard (`brain::tests::every_tool_schema_is_plain_object_no_top_level_combinators`) that iterates every registered tool's schema and asserts root `type: "object"` with no top-level `oneOf`/`allOf`/`anyOf` — catches the bug class for any future args-struct shape.
+
+**Cron executor.** `tools/cron.rs::check_crons` no longer synthesizes legacy tag strings — it calls `registry::dispatch` directly with JSON args at fire time. No Anthropic round-trip during cron execution, and a warning-log surfaces any legacy v0 cron docs whose trailing-arg strings the v7 migration couldn't cleanly promote.
+
+**Status:** 18 commits `ba88569` → `a7e19b6` on `phase1-sprint3`, 45 commits ahead of origin pending push. 108/108 unit tests pass across the workspace (5 macro-crate integration tests + 103 brain + console render snapshots). `cargo clippy --workspace --all-targets` clean (0 errors; warnings all pre-existing). Grepping the repo for the legacy tag prefix outside intentional fallback-comment markers and regression-guard assertions returns only historical changelog entries. QEMU E2E smoke second pass pending post-hotfix (first pass already confirmed the tool catalog reaches the API — the 400 came from one schema shape, now fixed). FIX-01 residual is structurally closed: the parser that scanned text for legacy tag syntax no longer exists.
 
 ---
 

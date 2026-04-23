@@ -1,6 +1,7 @@
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use chrono::Utc;
 use serde_json::json;
+use tracing::info;
 
 use crate::db::WardsonDbClient;
 
@@ -35,6 +36,20 @@ pub async fn express(db: &WardsonDbClient, param: &str) -> String {
         "version": new_version,
         "updated_at": Utc::now().to_rfc3339(),
     });
+
+    // EXPR-01 diagnostic: every writer to ui.expression is logged with
+    // `actor` + version transition so a mystery writer (see Embra_Debug #10)
+    // can be identified if the bug recurs.
+    info!(
+        target: "ui.expression",
+        actor = "express",
+        prev_version = current_version,
+        new_version = new_version,
+        prev_bytes = current_content.len(),
+        new_bytes = sanitized.len(),
+        empty = sanitized.is_empty(),
+        "writing ui.expression"
+    );
 
     match db.patch_document("ui", "expression", &patch).await {
         Ok(_) => {
@@ -206,5 +221,53 @@ mod tests {
     #[test]
     fn base64_empty_payload_decodes_to_empty() {
         assert_eq!(decode_payload("base64:").unwrap(), "");
+    }
+}
+
+// ── Native tool-use registration (NATIVE-TOOLS-01) ──
+
+use embra_tool_macro::embra_tool;
+use embra_tools_core::DispatchError;
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+use crate::tools::registry::DispatchContext;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "express",
+    description = "Draw ASCII art to the expression panel above the console. Canvas is 6 rows tall × (terminal width - 2). Plain characters only; ANSI escapes and control characters are stripped. Max 2048 bytes after sanitization. Empty content clears the panel; content persists across reboots. To transport multi-line ASCII art reliably, prefix the content with `base64:` followed by the base64-encoded payload — the decoded bytes still go through sanitization."
+)]
+pub struct ExpressArgs {
+    /// The content to draw. May start with `base64:` for base64-encoded payload.
+    /// Empty string clears the panel.
+    pub content: String,
+}
+
+impl ExpressArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(express(ctx.db, &self.content).await)
+    }
+}
+
+#[cfg(test)]
+mod native_args_tests {
+    use super::*;
+
+    #[test]
+    fn express_args_round_trip() {
+        let a: ExpressArgs =
+            serde_json::from_value(serde_json::json!({"content": "hello"})).unwrap();
+        assert_eq!(a.content, "hello");
+    }
+
+    #[test]
+    fn express_args_schema_has_content_string() {
+        let schema = schemars::schema_for!(ExpressArgs);
+        let v = serde_json::to_value(&schema).unwrap();
+        assert_eq!(v["properties"]["content"]["type"], "string");
+        // Required list should include "content"
+        let required = v["required"].as_array().expect("required array");
+        assert!(required.iter().any(|r| r == "content"));
     }
 }

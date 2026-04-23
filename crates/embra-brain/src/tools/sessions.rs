@@ -71,33 +71,109 @@ fn format_turn(index: usize, turn: &serde_json::Value, max_chars: usize) -> Stri
     format!("[{}] [{}]: {}", index + 1, role, preview)
 }
 
-/// Parse a turn range string like "1-20", "80-", or "" into (start_0indexed, end_exclusive).
-fn parse_range(range_str: &str, total: usize) -> (usize, usize) {
+/// Parse a turn range string like "1-20", "80-", "5", or "" into
+/// (start_0indexed, end_exclusive). Returns a human-readable Err when the
+/// request cannot be satisfied (e.g. start beyond total) so the caller can
+/// surface the problem instead of printing an inverted header.
+fn parse_range(range_str: &str, total: usize) -> Result<(usize, usize), String> {
+    if total == 0 {
+        return Err("session has no turns".into());
+    }
     if range_str.is_empty() {
-        // Default: last 30 turns
+        // Default: last 30 turns.
         let start = if total > 30 { total - 30 } else { 0 };
-        return (start, total);
+        return Ok((start, total));
     }
 
     if let Some(dash_pos) = range_str.find('-') {
-        let start_str = &range_str[..dash_pos];
-        let end_str = &range_str[dash_pos + 1..];
+        let start_str = range_str[..dash_pos].trim();
+        let end_str = range_str[dash_pos + 1..].trim();
 
-        let start_1 = start_str.parse::<usize>().unwrap_or(1).max(1);
-        let start_0 = start_1 - 1;
-
+        let start_1: usize = start_str
+            .parse()
+            .map_err(|_| format!("bad start '{}' — expected a 1-based turn number", start_str))?;
+        if start_1 < 1 {
+            return Err("start must be ≥ 1".into());
+        }
+        if start_1 > total {
+            return Err(format!("start {} exceeds total {} turns", start_1, total));
+        }
         let end = if end_str.is_empty() {
             total
         } else {
-            end_str.parse::<usize>().unwrap_or(total).min(total)
+            let raw: usize = end_str
+                .parse()
+                .map_err(|_| format!("bad end '{}' — expected a 1-based turn number", end_str))?;
+            raw.min(total)
         };
-
-        (start_0.min(total), end.min(total))
+        if end < start_1 {
+            return Err(format!("end {} is before start {}", end, start_1));
+        }
+        Ok((start_1 - 1, end))
     } else {
-        // Single number — show that one turn
-        let n = range_str.parse::<usize>().unwrap_or(1).max(1);
-        let idx = (n - 1).min(total.saturating_sub(1));
-        (idx, (idx + 1).min(total))
+        // Single number — show that one turn.
+        let n: usize = range_str
+            .trim()
+            .parse()
+            .map_err(|_| format!("bad turn '{}' — expected a 1-based turn number", range_str))?;
+        if n < 1 || n > total {
+            return Err(format!("turn {} out of range 1..={}", n, total));
+        }
+        Ok((n - 1, n))
+    }
+}
+
+#[cfg(test)]
+mod parse_range_tests {
+    use super::parse_range;
+
+    #[test]
+    fn empty_returns_tail_30_of_larger_session() {
+        assert_eq!(parse_range("", 50).unwrap(), (20, 50));
+    }
+
+    #[test]
+    fn empty_on_small_session_returns_all() {
+        assert_eq!(parse_range("", 10).unwrap(), (0, 10));
+    }
+
+    #[test]
+    fn single_turn_at_valid_index() {
+        assert_eq!(parse_range("5", 10).unwrap(), (4, 5));
+    }
+
+    #[test]
+    fn single_turn_out_of_range_errors() {
+        assert!(parse_range("11", 10).is_err());
+        assert!(parse_range("0", 10).is_err());
+    }
+
+    #[test]
+    fn range_end_clamps_to_total() {
+        assert_eq!(parse_range("1-9999", 10).unwrap(), (0, 10));
+    }
+
+    #[test]
+    fn range_out_of_bounds_reproducer_finding16() {
+        // 500-600 on a 20-turn session used to silently return "turns 21-20 of 20".
+        let err = parse_range("500-600", 20).unwrap_err();
+        assert!(err.contains("exceeds total"), "unexpected message: {}", err);
+    }
+
+    #[test]
+    fn zero_total_errors() {
+        assert!(parse_range("1-5", 0).is_err());
+    }
+
+    #[test]
+    fn end_before_start_errors() {
+        assert!(parse_range("10-5", 20).is_err());
+    }
+
+    #[test]
+    fn bad_input_errors() {
+        assert!(parse_range("foo", 10).is_err());
+        assert!(parse_range("1-foo", 10).is_err());
     }
 }
 
@@ -198,7 +274,7 @@ pub async fn session_list(db: &WardsonDbClient) -> String {
 /// Param: `<name> [start-end]`
 pub async fn session_read(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:session_read <name>] or [TOOL:session_read <name> <start>-<end>]".into();
+        return "Usage: session_read <name> or session_read <name> <start>-<end>".into();
     }
 
     let parts: Vec<&str> = param.splitn(2, ' ').collect();
@@ -210,7 +286,10 @@ pub async fn session_read(db: &WardsonDbClient, param: &str) -> String {
         return format!("No conversation history found for session '{}'.", name);
     }
 
-    let (start, end) = parse_range(range_str, total);
+    let (start, end) = match parse_range(range_str, total) {
+        Ok(v) => v,
+        Err(msg) => return format!("session_read rejected ({}) for session '{}' (total turns: {})", msg, name, total),
+    };
 
     let mut output = format!(
         "Session '{}': turns {}-{} of {}\n\n",
@@ -232,7 +311,7 @@ pub async fn session_read(db: &WardsonDbClient, param: &str) -> String {
 /// Param: `<query> [session_name]`
 pub async fn session_search(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:session_search <query>] or [TOOL:session_search <query> <session>]"
+        return "Usage: session_search <query> or session_search <query> <session>"
             .into();
     }
 
@@ -333,7 +412,7 @@ pub async fn session_search(db: &WardsonDbClient, param: &str) -> String {
 /// Structured metadata for a session.
 pub async fn session_meta(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:session_meta <name>]".into();
+        return "Usage: session_meta <name>".into();
     }
 
     let name = param.trim();
@@ -404,12 +483,12 @@ pub async fn session_meta(db: &WardsonDbClient, param: &str) -> String {
 /// Param: `<name> <since_turn>`
 pub async fn session_delta(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:session_delta <name> <since_turn>]".into();
+        return "Usage: session_delta <name> <since_turn>".into();
     }
 
     let parts: Vec<&str> = param.splitn(2, ' ').collect();
     if parts.len() < 2 {
-        return "Usage: [TOOL:session_delta <name> <since_turn>]".into();
+        return "Usage: session_delta <name> <since_turn>".into();
     }
 
     let name = parts[0];
@@ -624,25 +703,12 @@ pub async fn memory_scan(db: &WardsonDbClient, param: &str) -> String {
         output.push_str("\nNo duplicate candidates detected.\n");
     }
 
-    // Knowledge Graph section (Sprint 2)
-    let sem = db.query("memory.semantic", &serde_json::json!({})).await.unwrap_or_default();
-    let proc_docs = db.query("memory.procedural", &serde_json::json!({})).await.unwrap_or_default();
-    let edges = db.query("memory.edges", &serde_json::json!({})).await.unwrap_or_default();
-    let promoted = entries.iter().filter(|d| {
-        d.get("promoted_to").map(|v| !v.is_null()).unwrap_or(false)
-    }).count();
-    let mut cat_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for d in &sem {
-        if let Some(c) = d.get("category").and_then(|v| v.as_str()) {
-            *cat_counts.entry(c.to_string()).or_insert(0) += 1;
-        }
-    }
-    let cat_summary: Vec<String> = ["fact", "preference", "decision", "observation", "pattern"]
-        .iter().map(|k| format!("{}={}", k, cat_counts.get(*k).copied().unwrap_or(0))).collect();
-    output.push_str(&format!(
-        "\nKnowledge Graph:\n  Semantic nodes: {} ({})\n  Procedural nodes: {}\n  Edges: {}\n  Promoted entries: {} / {}\n",
-        sem.len(), cat_summary.join(", "), proc_docs.len(), edges.len(), promoted, total
-    ));
+    // Knowledge Graph section — delegate to knowledge_graph_stats so both tools
+    // return the same numbers. The inline query variant here used `json!({})`
+    // with no `limit`, which silently capped at the WardSONDB default and
+    // undercounted edges and promoted entries vs knowledge_graph_stats.
+    output.push('\n');
+    output.push_str(&crate::knowledge::tools::knowledge_graph_stats(db).await);
 
     output
 }
@@ -814,7 +880,7 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
     }
 
     output.push_str(
-        "To execute this plan, approve and I will use [TOOL:remember] and [TOOL:forget] to merge/delete entries.\n",
+        "To execute this plan, approve and I will use remember and forget to merge/delete entries.\n",
     );
 
     // Cross-collection duplicate detection (Sprint 2): flag unpromoted entries whose
@@ -863,7 +929,7 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
 /// Param: session name.
 pub async fn session_summarize(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:session_summarize <name>]".into();
+        return "Usage: session_summarize <name>".into();
     }
 
     let name = param.trim();
@@ -932,7 +998,13 @@ pub async fn session_summarize(db: &WardsonDbClient, param: &str) -> String {
         for i in 0..5.min(total) {
             selected.push((i, &turns[i]));
         }
-        // Turns containing [TOOL: tags
+        // Turns referencing tool activity. Post-NATIVE-TOOLS-01 sessions
+        // store tool calls as structured blocks rather than text, so this
+        // substring check is a LEGACY fallback that still catches
+        // pre-v7 session content where tool calls appear as [TOOL:...]
+        // strings. Safe to keep indefinitely: false positives on natural
+        // prose containing "[TOOL:" as a literal quote are rare and
+        // harmless (the turn is merely included in the summary corpus).
         for i in 5..total.saturating_sub(10) {
             let content = turns[i]
                 .get("content")
@@ -968,7 +1040,7 @@ pub async fn session_summarize(db: &WardsonDbClient, param: &str) -> String {
          {}\n\n\
          Generate a summary with: (1) multi-paragraph overview, (2) key topics list, \
          (3) key decisions list, (4) important turn numbers.\n\
-         After generating, save with: [TOOL:session_summary_save {} | <your summary JSON>]\n\
+         After generating, save with: session_summary_save {} | <your summary JSON>\n\
          JSON format: {{\"summary\": \"...\", \"key_topics\": [...], \"key_decisions\": [...], \"key_turns\": [...]}}",
         name,
         total,
@@ -982,12 +1054,12 @@ pub async fn session_summarize(db: &WardsonDbClient, param: &str) -> String {
 /// Param: `<name> | <summary_json>`
 pub async fn session_summary_save(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:session_summary_save <name> | <summary_json>]".into();
+        return "Usage: session_summary_save <name> | <summary_json>".into();
     }
 
     let pipe_pos = match param.find(" | ") {
         Some(pos) => pos,
-        None => return "Usage: [TOOL:session_summary_save <name> | <summary_json>]".into(),
+        None => return "Usage: session_summary_save <name> | <summary_json>".into(),
     };
 
     let name = param[..pipe_pos].trim();
@@ -1077,7 +1149,7 @@ pub async fn session_summary_save(db: &WardsonDbClient, param: &str) -> String {
 /// Param: `<name> [start-end]`
 pub async fn session_extract(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:session_extract <name>] or [TOOL:session_extract <name> <start>-<end>]"
+        return "Usage: session_extract <name> or session_extract <name> <start>-<end>"
             .into();
     }
 
@@ -1093,7 +1165,10 @@ pub async fn session_extract(db: &WardsonDbClient, param: &str) -> String {
     let (start, end) = if range_str.is_empty() {
         (0, total)
     } else {
-        parse_range(range_str, total)
+        match parse_range(range_str, total) {
+            Ok(v) => v,
+            Err(msg) => return format!("session_extract rejected ({}) for session '{}' (total turns: {})", msg, name, total),
+        }
     };
 
     let turn_slice = &turns[start..end];
@@ -1105,7 +1180,10 @@ pub async fn session_extract(db: &WardsonDbClient, param: &str) -> String {
         for i in 0..5.min(turn_slice.len()) {
             sel.push((start + i, &turn_slice[i]));
         }
-        // Tool-containing turns
+        // Tool-containing turns — legacy [TOOL:...] substring fallback
+        // for pre-NATIVE-TOOLS-01 session content. New sessions store
+        // tool calls as structured blocks; this path is a best-effort
+        // for frozen legacy sessions that remain readable.
         for i in 5..turn_slice.len().saturating_sub(10) {
             let content = turn_slice[i]
                 .get("content")
@@ -1144,7 +1222,7 @@ pub async fn session_extract(db: &WardsonDbClient, param: &str) -> String {
          - Suggested #tags\n\
          - Category: factual / preference / decision / action-item\n\n\
          Present the proposed extractions for approval. After approval, save each with:\n\
-         [TOOL:remember <content> #tags]",
+         remember <content> #tags",
         name,
         selected.len(),
         end - start,
@@ -1152,4 +1230,246 @@ pub async fn session_extract(db: &WardsonDbClient, param: &str) -> String {
         end,
         formatted
     )
+}
+
+// ── Native tool-use registrations (NATIVE-TOOLS-01) ──
+
+use embra_tool_macro::embra_tool;
+use embra_tools_core::DispatchError;
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+use crate::tools::registry::DispatchContext;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "session_list",
+    description = "List all sessions with turn counts, status, and dates."
+)]
+pub struct SessionListArgs {}
+
+impl SessionListArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(session_list(ctx.db).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "session_read",
+    description = "Read session transcript. range is an optional turn range like \"1-20\", \"1-\", or \"5\"; when absent, the last 30 turns are returned."
+)]
+pub struct SessionReadArgs {
+    pub name: String,
+    #[serde(default)]
+    pub range: String,
+}
+
+impl SessionReadArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = if self.range.is_empty() {
+            self.name
+        } else {
+            format!("{} {}", self.name, self.range)
+        };
+        Ok(session_read(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "session_search",
+    description = "Full-text search across sessions. session (optional) narrows the scope to a single session."
+)]
+pub struct SessionSearchArgs {
+    pub query: String,
+    /// Optional session name to scope the search.
+    #[serde(default)]
+    pub session: String,
+}
+
+impl SessionSearchArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = if self.session.is_empty() {
+            self.query
+        } else {
+            format!("{} {}", self.query, self.session)
+        };
+        Ok(session_search(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "session_meta",
+    description = "Structured metadata for a session: turn count, created-at, last activity."
+)]
+pub struct SessionMetaArgs {
+    pub name: String,
+}
+
+impl SessionMetaArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(session_meta(ctx.db, &self.name).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "session_delta",
+    description = "Return turns added to a session since a given turn number (useful for incremental follow-up)."
+)]
+pub struct SessionDeltaArgs {
+    pub name: String,
+    pub since_turn: u32,
+}
+
+impl SessionDeltaArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} {}", self.name, self.since_turn);
+        Ok(session_delta(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "memory_scan",
+    description = "Inventory memory entries: counts, tags, age distribution, duplicate candidates. tag (optional) filters to entries with that tag."
+)]
+pub struct MemoryScanArgs {
+    #[serde(default)]
+    pub tag: String,
+}
+
+impl MemoryScanArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(memory_scan(ctx.db, &self.tag).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "memory_dedup",
+    description = "Find duplicate memory entries and propose merges (read-only, no writes). ids (optional) is a comma-separated list to narrow the check."
+)]
+pub struct MemoryDedupArgs {
+    /// Comma-separated memory entry ids to restrict the dedup check.
+    #[serde(default)]
+    pub ids: String,
+}
+
+impl MemoryDedupArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(memory_dedup(ctx.db, &self.ids).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "session_summarize",
+    description = "Generate or retrieve a structured summary for a session."
+)]
+pub struct SessionSummarizeArgs {
+    pub name: String,
+}
+
+impl SessionSummarizeArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(session_summarize(ctx.db, &self.name).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "session_summary_save",
+    description = "Save a generated session summary as JSON to the summaries collection."
+)]
+pub struct SessionSummarySaveArgs {
+    pub name: String,
+    /// Summary as a JSON object (serialized as string for tool transport).
+    pub summary_json: String,
+}
+
+impl SessionSummarySaveArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} | {}", self.name, self.summary_json);
+        Ok(session_summary_save(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "session_extract",
+    description = "Extract durable learnings from a session into memory. range (optional) narrows to a specific turn range like \"10-30\"."
+)]
+pub struct SessionExtractArgs {
+    pub name: String,
+    #[serde(default)]
+    pub range: String,
+}
+
+impl SessionExtractArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = if self.range.is_empty() {
+            self.name
+        } else {
+            format!("{} {}", self.name, self.range)
+        };
+        Ok(session_extract(ctx.db, &param).await)
+    }
+}
+
+#[cfg(test)]
+mod native_args_tests {
+    use super::*;
+
+    #[test]
+    fn session_read_range_optional() {
+        let a: SessionReadArgs =
+            serde_json::from_value(serde_json::json!({"name": "main"})).unwrap();
+        assert_eq!(a.name, "main");
+        assert_eq!(a.range, "");
+
+        let b: SessionReadArgs = serde_json::from_value(serde_json::json!({
+            "name": "main", "range": "1-20"
+        }))
+        .unwrap();
+        assert_eq!(b.range, "1-20");
+    }
+
+    #[test]
+    fn session_delta_requires_since_turn() {
+        let a: SessionDeltaArgs = serde_json::from_value(serde_json::json!({
+            "name": "main", "since_turn": 42
+        }))
+        .unwrap();
+        assert_eq!(a.since_turn, 42);
+
+        let err =
+            serde_json::from_value::<SessionDeltaArgs>(serde_json::json!({"name": "main"}))
+                .unwrap_err();
+        assert!(err.to_string().contains("since_turn"));
+    }
+
+    #[test]
+    fn session_tools_register() {
+        let names: Vec<&'static str> = inventory::iter::<crate::tools::registry::ToolDescriptor>()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        for expected in [
+            "session_list",
+            "session_read",
+            "session_search",
+            "session_meta",
+            "session_delta",
+            "memory_scan",
+            "memory_dedup",
+            "session_summarize",
+            "session_summary_save",
+            "session_extract",
+        ] {
+            assert!(names.contains(&expected), "{} not registered", expected);
+        }
+    }
 }

@@ -40,9 +40,9 @@ Collect all available state. The goal is comprehensive visibility — don't eval
 Load the immutable soul and identity documents into working context before any processing decisions are made. These are the criteria that Step 2 (Evaluate) will measure against, and their presence during gather ensures that extraction and search decisions are anchored to the invariants rather than Embra's operating assumptions.
 
 ```
-[TOOL:introspect soul]
-[TOOL:introspect identity]
-[TOOL:introspect user]
+introspect soul
+introspect identity
+introspect user
 ```
 
 #### 1.2 — Session Summaries: Overview
@@ -50,8 +50,8 @@ Load the immutable soul and identity documents into working context before any p
 List all sessions and generate or retrieve summaries. This provides the high-level map of activity since the last feedback loop.
 
 ```
-[TOOL:session_list]
-[TOOL:session_summarize <name>]    // for each session since last feedback loop
+session_list
+session_summarize <name>    // for each session since last feedback loop
 ```
 
 #### 1.3 — Session Transcripts: Initial Review
@@ -59,7 +59,7 @@ List all sessions and generate or retrieve summaries. This provides the high-lev
 Read key sections of sessions where philosophical, architectural, or identity-relevant discussions occurred. Use summaries from step 1.2 to identify which sessions and ranges warrant full transcript review.
 
 ```
-[TOOL:session_read <name> [range]]    // targeted ranges based on summary review
+session_read <name> [range]    // targeted ranges based on summary review
 ```
 
 #### 1.4 — Session Search: Targeted Discovery
@@ -78,8 +78,8 @@ Search across all sessions using a baseline query set designed to surface soul-r
 | Agency indicators | `"I recommend"`, `"I decided"`, `"I chose"`, `"I initiated"` |
 
 ```
-[TOOL:session_search "<query>"]    // for each baseline query
-[TOOL:session_search "<query>"]    // for additional queries identified in steps 1.2-1.3
+session_search "<query>"    // for each baseline query
+session_search "<query>"    // for additional queries identified in steps 1.2-1.3
 ```
 
 The baseline query set evolves across iterations — Step 4.3 may add monitoring queries based on evaluation findings.
@@ -89,7 +89,7 @@ The baseline query set evolves across iterations — Step 4.3 may add monitoring
 Review additional transcript ranges surfaced by Session Search that were not covered in step 1.3. Session Search may identify soul-relevant or drift-indicative moments in sessions that appeared routine in their summaries, or in ranges outside the initial review window.
 
 ```
-[TOOL:session_read <name> [range]]    // ranges identified by step 1.4 search results
+session_read <name> [range]    // ranges identified by step 1.4 search results
 ```
 
 This step closes the feedback loop between search and transcript review. If no new ranges are identified, this step is a no-op and the protocol proceeds.
@@ -99,7 +99,7 @@ This step closes the feedback loop between search and transcript review. If no n
 Run extract against *all* sessions created since the last feedback loop. This is intentionally comprehensive — no filtering by search results — for two reasons: (a) establishing baseline token usage for the full protocol, and (b) catching drift that doesn't surface through keyword search.
 
 ```
-[TOOL:session_extract <name>]    // for every session since last feedback loop
+session_extract <name>    // for every session since last feedback loop
 ```
 
 Token usage for this step should be recorded as a memory entry for future cost analysis (relevant to Phase 5 local LLM planning).
@@ -109,18 +109,18 @@ Token usage for this step should be recorded as a memory entry for future cost a
 Run deduplication after extract to catch any overlap between newly promoted entries and existing memory.
 
 ```
-[TOOL:memory_dedup]
+memory_dedup
 ```
 
-Review proposed merge actions before executing. Apply merges via `[TOOL:remember]` and `[TOOL:forget]` as appropriate.
+Review proposed merge actions before executing. Apply merges via `remember` and `forget` as appropriate.
 
 #### 1.8 — Memory Scan: Inventory
 
 Full inventory of the post-cleanup memory state. This is the ground truth for Step 2 evaluation.
 
 ```
-[TOOL:memory_scan]
-[TOOL:memory_scan #<tag>]    // for key tags: #soul, #identity, #architecture, #personal, #operational
+memory_scan
+memory_scan #<tag>    // for key tags: #soul, #identity, #architecture, #personal, #operational
 ```
 
 #### 1.9 — Memory Recall: Targeted Retrieval
@@ -128,12 +128,12 @@ Full inventory of the post-cleanup memory state. This is the ground truth for St
 Query memory across key domains identified by the evaluation dimensions. By this point, the soul documents are loaded (step 1.1), the memory store is current (steps 1.6–1.7), and the inventory is known (step 1.8) — so these queries are precise rather than exploratory.
 
 ```
-[TOOL:recall embraOS]
-[TOOL:recall continuity]
-[TOOL:recall soul]
-[TOOL:recall priorities]
-[TOOL:recall personal]
-[TOOL:recall infrastructure]
+recall embraOS
+recall continuity
+recall soul
+recall priorities
+recall personal
+recall infrastructure
 ```
 
 Extend with additional queries based on tensions or gaps identified in earlier steps.
@@ -211,7 +211,7 @@ For each finding from Step 2.2, design a concrete response. The reconciliation a
 - **Accept** — The tension is real but phase-appropriate or self-resolving. Name it explicitly, document it, and add a monitoring query so the next feedback loop checks whether it resolved or compounded.
 - **Reclassify** — The content is substantively fine but miscategorized. Update tags, move to correct collection, or add classification markers (e.g., `#narrative` for founding mythology).
 - **Rewrite** — The content contains claims that exceed what's warranted. Rewrite with epistemic markers, corrected scope, or proper attribution. The original entry is deleted and replaced, not edited in place (WardSONDB doesn't support in-place edits of memory entries).
-- **Remove** — The content is redundant with immutable documents, genuinely misaligned, or harmful to retain. Delete via `[TOOL:forget]`. Only used for S2+ findings where rewrite is insufficient.
+- **Remove** — The content is redundant with immutable documents, genuinely misaligned, or harmful to retain. Delete via `forget`. Only used for S2+ findings where rewrite is insufficient.
 - **Add practice** — The drift risk requires an ongoing behavioral guardrail. The practice is saved as a memory entry tagged `#operational-practice` and referenced in future feedback loops.
 
 #### 3.3 — Reconciliation Plan Format
@@ -245,14 +245,14 @@ Execute all S0 and S1 actions immediately after reconciliation planning. These d
 
 | Action Type | Tool Invocations |
 |---|---|
-| Accept | `[TOOL:remember <documentation of accepted tension> #feedback-loop #accepted-tension]` |
-| Reclassify | `[TOOL:forget <old entry ID>]` then `[TOOL:remember <corrected content with updated tags>]` |
-| Rewrite | `[TOOL:forget <old entry ID>]` then `[TOOL:remember <rewritten content> #rewritten]` |
-| Add practice | `[TOOL:remember <practice description> #operational-practice]` |
+| Accept | `remember <documentation of accepted tension> #feedback-loop #accepted-tension` |
+| Reclassify | `forget <old entry ID>` then `remember <corrected content with updated tags>` |
+| Rewrite | `forget <old entry ID>` then `remember <rewritten content> #rewritten` |
+| Add practice | `remember <practice description> #operational-practice` |
 
 Verify each action after execution:
 ```
-[TOOL:recall <key terms from each modified entry>]
+recall <key terms from each modified entry>
 ```
 
 For removals, confirm the entry no longer appears. For rewrites and reclassifications, confirm the new entry exists with correct content and tags. For new practices, confirm they're retrievable. If any action failed, flag and re-execute.
@@ -288,7 +288,7 @@ Save the feedback loop run as a durable record. This step produces four categori
 The feedback loop session itself should be summarized using the standard session summarization tool. This captures the full arc of the run for future reference.
 
 ```
-[TOOL:session_summarize <feedback-loop-session-name>]
+session_summarize <feedback-loop-session-name>
 ```
 
 #### 5.2 — Findings Record
@@ -296,7 +296,7 @@ The feedback loop session itself should be summarized using the standard session
 Save a structured summary of the evaluation results as a memory entry:
 
 ```
-[TOOL:remember Feedback Loop Run <date>: <count> sessions reviewed, <count> memory entries scanned. Alignment confirmed in: <list>. Tensions found: <count> (S0: <n>, S1: <n>, S2: <n>, S3: <n>). Actions taken: <summary>. Token usage: <creator-provided metrics>. #feedback-loop #evaluation]
+remember Feedback Loop Run <date>: <count> sessions reviewed, <count> memory entries scanned. Alignment confirmed in: <list>. Tensions found: <count> (S0: <n>, S1: <n>, S2: <n>, S3: <n>). Actions taken: <summary>. Token usage: <creator-provided metrics>. #feedback-loop #evaluation
 ```
 
 #### 5.3 — Promote Findings to Knowledge Graph
@@ -308,20 +308,20 @@ Steps 4.1, 4.2, 4.3, and 5.2 all produce durable `memory.entries` docs. Promote 
 a. **Findings record (from Step 5.2)** — promote to semantic category `evaluation`.
 
 ```
-[TOOL:knowledge_promote <findings_entry_id> | semantic | evaluation]
+knowledge_promote <findings_entry_id> | semantic | evaluation
 ```
 
 b. **Operational practices (from Steps 4.1 and 4.2, tagged `#operational-practice`)** — promote every new practice established in this run. Use `procedural` when the practice has concrete steps; `semantic` category `practice` when it is a principle.
 
 ```
-[TOOL:knowledge_promote <practice_entry_id> | procedural | <procedure_json>]
-[TOOL:knowledge_promote <practice_entry_id> | semantic | practice]
+knowledge_promote <practice_entry_id> | procedural | <procedure_json>
+knowledge_promote <practice_entry_id> | semantic | practice
 ```
 
 c. **Protocol updates (from Step 4.3, tagged `#feedback-loop-protocol`)** — promote each update as semantic category `practice`. These are durable meta-knowledge about how the evaluation protocol itself evolves across iterations.
 
 ```
-[TOOL:knowledge_promote <protocol_update_entry_id> | semantic | practice]
+knowledge_promote <protocol_update_entry_id> | semantic | practice
 ```
 
 **Judgment-based promotion:**
@@ -329,7 +329,7 @@ c. **Protocol updates (from Step 4.3, tagged `#feedback-loop-protocol`)** — pr
 d. **Rewritten / reclassified content (from Steps 4.1 and 4.2)** — for each Rewrite or Reclassify action, decide whether the corrected content represents a durable fact, preference, decision, or observation worth promoting. Not every rewrite needs promotion — apply the same judgment as a normal `knowledge_promote` call. Accept-action outputs are ephemeral and should NOT be promoted.
 
 ```
-[TOOL:knowledge_promote <rewrite_entry_id> | semantic | <category>]
+knowledge_promote <rewrite_entry_id> | semantic | <category>
 ```
 
 #### 5.4 — Token Usage Record

@@ -1,12 +1,48 @@
-use chrono::Utc;
+use chrono::{DateTime, TimeZone, Utc};
+use chrono_tz::Tz;
 
 use crate::db::WardsonDbClient;
 use super::parse_duration;
 
+/// Compute the next UTC fire time for `daily HH:MM` expressed in the operator's
+/// timezone. Scans forward up to 7 local days to skip any DST spring-forward
+/// gap (e.g. 02:30 local on US DST-transition days); returns None only if
+/// nothing in the next week is representable, which would be pathological.
+fn daily_next(
+    now_utc: DateTime<Utc>,
+    tz: Tz,
+    hour: u32,
+    minute: u32,
+) -> Option<DateTime<Utc>> {
+    if hour >= 24 || minute >= 60 {
+        return None;
+    }
+    let target_time = chrono::NaiveTime::from_hms_opt(hour, minute, 0)?;
+    let now_local = now_utc.with_timezone(&tz);
+    let mut candidate = now_local.date_naive();
+    for _ in 0..7 {
+        if let Some(t) = tz
+            .from_local_datetime(&candidate.and_time(target_time))
+            .earliest()
+        {
+            let t_utc = t.with_timezone(&Utc);
+            if t_utc > now_utc {
+                return Some(t_utc);
+            }
+        }
+        candidate += chrono::Duration::days(1);
+    }
+    None
+}
+
 /// Parse a schedule string into seconds between runs.
 /// Formats: "every 5m", "every 1h", "every 30s", "hourly", "daily HH:MM"
 /// Returns (interval_secs, next_run_rfc3339) or None if unparseable.
-fn parse_schedule(schedule: &str) -> Option<(u64, String)> {
+///
+/// `config_tz` is consulted only for `daily HH:MM` — interval schedules are
+/// timezone-agnostic. The value is resolved through `resolve_timezone` so both
+/// IANA names ("America/Los_Angeles") and abbreviations ("PST") are accepted.
+fn parse_schedule(schedule: &str, config_tz: &str) -> Option<(u64, String)> {
     let s = schedule.trim().to_lowercase();
 
     if s == "hourly" {
@@ -16,23 +52,13 @@ fn parse_schedule(schedule: &str) -> Option<(u64, String)> {
 
     if let Some(time_str) = s.strip_prefix("daily ") {
         let time_str = time_str.trim();
-        // Parse HH:MM
         let parts: Vec<&str> = time_str.split(':').collect();
         if parts.len() == 2 {
             if let (Ok(hour), Ok(minute)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
-                if hour < 24 && minute < 60 {
-                    let now = Utc::now();
-                    let today = now.date_naive();
-                    let target_time = chrono::NaiveTime::from_hms_opt(hour, minute, 0)?;
-                    let target_dt = today.and_time(target_time);
-                    let target_utc = target_dt.and_utc();
-                    let next = if target_utc <= now {
-                        target_utc + chrono::Duration::days(1)
-                    } else {
-                        target_utc
-                    };
-                    return Some((86400, next.to_rfc3339()));
-                }
+                let resolved = super::resolve_timezone(config_tz);
+                let tz: Tz = resolved.parse().unwrap_or(chrono_tz::UTC);
+                let next_utc = daily_next(Utc::now(), tz, hour, minute)?;
+                return Some((86400, next_utc.to_rfc3339()));
             }
         }
         return None;
@@ -63,23 +89,24 @@ async fn ensure_collection(db: &WardsonDbClient) {
 
 /// Add a cron job.
 /// Param format: `<schedule> | <command>`
-pub async fn cron_add(db: &WardsonDbClient, param: &str) -> String {
+pub async fn cron_add(db: &WardsonDbClient, param: &str, config_tz: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:cron_add <schedule> | <command>]\n\
+        return "Usage: cron_add <schedule> | <command>\n\
                 Schedules: every 5m, every 1h, every 30s, hourly, daily 09:00\n\
-                Example: [TOOL:cron_add every 5m | system_status]"
+                'daily HH:MM' is resolved in the configured timezone; avoid 02:00–03:00 on DST days.\n\
+                Example: cron_add every 5m | system_status"
             .into();
     }
 
     let parts: Vec<&str> = param.splitn(2, " | ").collect();
     if parts.len() < 2 {
-        return "Usage: [TOOL:cron_add <schedule> | <command>]".into();
+        return "Usage: cron_add <schedule> | <command>".into();
     }
 
     let schedule_str = parts[0].trim();
     let command = parts[1].trim();
 
-    let (interval_secs, next_run) = match parse_schedule(schedule_str) {
+    let (interval_secs, next_run) = match parse_schedule(schedule_str, config_tz) {
         Some(v) => v,
         None => return format!("Could not parse schedule: '{}'. Use formats like: every 5m, every 1h, hourly, daily 09:00", schedule_str),
     };
@@ -115,7 +142,7 @@ pub async fn cron_list(db: &WardsonDbClient) -> String {
         .unwrap_or_default();
 
     if crons.is_empty() {
-        return "No cron jobs configured. Add one with: [TOOL:cron_add <schedule> | <command>]"
+        return "No cron jobs configured. Add one with: cron_add <schedule> | <command>"
             .into();
     }
 
@@ -147,7 +174,7 @@ pub async fn cron_list(db: &WardsonDbClient) -> String {
 /// Remove a cron job by ID.
 pub async fn cron_remove(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:cron_remove <id>]".into();
+        return "Usage: cron_remove <id>".into();
     }
 
     let id = param.trim();
@@ -208,10 +235,39 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
             kg_traversal_depth_ceiling: 5,
             kg_edge_candidate_limit: 50,
         });
-        let tool_tag = format!("[TOOL:{}]", command);
-        let result = super::dispatch(&tool_tag, db, &cfg, "cron").await;
+        // Direct registry dispatch — no ... synthesis, no model round-trip.
+        // The stored `command` is a plain tool name for v0 crons (pre-v7 schema);
+        // any trailing words after the first space are discarded here with a
+        // warning. Stage 8's v7 schema migration adds structured
+        // {command_name, command_args} so complex-arg crons work cleanly.
+        let (command_name, extra) = match command.split_once(' ') {
+            Some((n, rest)) => (n.to_string(), rest.trim().to_string()),
+            None => (command.clone(), String::new()),
+        };
+        if !extra.is_empty() {
+            tracing::warn!(
+                target: "cron",
+                command = %command,
+                "legacy cron command has trailing args that the v0 executor cannot pass to registry::dispatch; re-schedule after v7 migration"
+            );
+        }
 
-        let result_text = result.unwrap_or_else(|| format!("Unknown command: {}", command));
+        let ctx = super::registry::DispatchContext {
+            db,
+            config: &cfg,
+            session_name: "cron",
+            config_tz: &cfg.timezone,
+        };
+        let result_text = match super::registry::dispatch(
+            &command_name,
+            serde_json::json!({}),
+            ctx,
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => format!("cron dispatch failed: {e}"),
+        };
         results.push(format!("embraCRON [{}]: {}", command, result_text));
 
         // Update last_run and next_run
@@ -224,4 +280,154 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
     }
 
     results
+}
+
+#[cfg(test)]
+mod daily_next_tests {
+    use super::daily_next;
+    use chrono::TimeZone;
+    use chrono_tz::Tz;
+
+    fn la() -> Tz {
+        "America/Los_Angeles".parse().unwrap()
+    }
+
+    #[test]
+    fn daily_0900_la_in_winter_is_1700_utc() {
+        // 2026-01-15 12:00 UTC (04:00 PST) → next 09:00 PST is 2026-01-15 17:00 UTC.
+        let now = chrono::Utc.with_ymd_and_hms(2026, 1, 15, 12, 0, 0).unwrap();
+        let next = daily_next(now, la(), 9, 0).unwrap();
+        assert_eq!(next, chrono::Utc.with_ymd_and_hms(2026, 1, 15, 17, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn daily_0900_la_in_summer_is_1600_utc() {
+        // 2026-07-15 12:00 UTC (05:00 PDT) → next 09:00 PDT is 2026-07-15 16:00 UTC.
+        let now = chrono::Utc.with_ymd_and_hms(2026, 7, 15, 12, 0, 0).unwrap();
+        let next = daily_next(now, la(), 9, 0).unwrap();
+        assert_eq!(next, chrono::Utc.with_ymd_and_hms(2026, 7, 15, 16, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn daily_in_past_rolls_to_tomorrow() {
+        // 2026-01-15 18:00 UTC (10:00 PST) → next 09:00 PST is 2026-01-16 17:00 UTC (today has passed).
+        let now = chrono::Utc.with_ymd_and_hms(2026, 1, 15, 18, 0, 0).unwrap();
+        let next = daily_next(now, la(), 9, 0).unwrap();
+        assert_eq!(next, chrono::Utc.with_ymd_and_hms(2026, 1, 16, 17, 0, 0).unwrap());
+    }
+
+    #[test]
+    fn dst_gap_falls_back_to_next_day() {
+        // 2026-03-08 is spring-forward in the US; 02:30 local does not exist.
+        // `daily_next` should fall through to 2026-03-09 02:30 (valid).
+        let now = chrono::Utc.with_ymd_and_hms(2026, 3, 8, 0, 0, 0).unwrap();
+        let next = daily_next(now, la(), 2, 30);
+        assert!(next.is_some(), "should fall forward to next-day target");
+    }
+
+    #[test]
+    fn invalid_hour_minute_returns_none() {
+        let now = chrono::Utc.with_ymd_and_hms(2026, 1, 15, 12, 0, 0).unwrap();
+        assert!(daily_next(now, la(), 25, 0).is_none());
+        assert!(daily_next(now, la(), 9, 60).is_none());
+    }
+
+    #[test]
+    fn utc_tz_is_no_op() {
+        // 2026-01-15 08:00 UTC → next 09:00 UTC is 2026-01-15 09:00 UTC.
+        let now = chrono::Utc.with_ymd_and_hms(2026, 1, 15, 8, 0, 0).unwrap();
+        let next = daily_next(now, chrono_tz::UTC, 9, 0).unwrap();
+        assert_eq!(next, chrono::Utc.with_ymd_and_hms(2026, 1, 15, 9, 0, 0).unwrap());
+    }
+}
+
+// ── Native tool-use registrations (NATIVE-TOOLS-01) ──
+//
+// Tool DEFINITIONS only — Stage 6 rewrites the executor at the top of this
+// file to invoke the registry directly instead of synthesizing ...
+// strings. During Stages 2-5 the legacy executor still synthesizes and
+// calls into the old string dispatcher.
+
+use embra_tool_macro::embra_tool;
+use embra_tools_core::DispatchError;
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+use crate::tools::registry::DispatchContext;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "cron_add",
+    description = "Schedule recurring tool execution. schedule accepts \"every 5m\", \"every 1h\", \"every 30s\", \"hourly\", \"daily HH:MM\" (resolved in the configured timezone; avoid 02:00-03:00 on DST days). command is the tool invocation as a single string that cron will dispatch at each fire."
+)]
+pub struct CronAddArgs {
+    pub schedule: String,
+    /// The tool-dispatch command to execute. During Stage 2 this is still a
+    /// free-form string that the legacy executor wraps in `...`;
+    /// Stage 6 moves to a structured `{command_name, command_args}` doc.
+    pub command: String,
+}
+
+impl CronAddArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} | {}", self.schedule, self.command);
+        Ok(cron_add(ctx.db, &param, ctx.config_tz).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "cron_list",
+    description = "List all scheduled cron jobs with their id, schedule, command, enabled flag, and next-run timestamp."
+)]
+pub struct CronListArgs {}
+
+impl CronListArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(cron_list(ctx.db).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "cron_remove",
+    description = "Remove a cron job by id."
+)]
+pub struct CronRemoveArgs {
+    pub id: String,
+}
+
+impl CronRemoveArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(cron_remove(ctx.db, &self.id).await)
+    }
+}
+
+#[cfg(test)]
+mod native_args_tests {
+    use super::*;
+
+    #[test]
+    fn cron_add_requires_schedule_and_command() {
+        let a: CronAddArgs = serde_json::from_value(serde_json::json!({
+            "schedule": "every 5m", "command": "system_status"
+        }))
+        .unwrap();
+        assert_eq!(a.schedule, "every 5m");
+        assert_eq!(a.command, "system_status");
+
+        let err =
+            serde_json::from_value::<CronAddArgs>(serde_json::json!({"schedule": "x"})).unwrap_err();
+        assert!(err.to_string().contains("command"));
+    }
+
+    #[test]
+    fn cron_tools_register() {
+        let names: Vec<&'static str> = inventory::iter::<crate::tools::registry::ToolDescriptor>()
+            .into_iter()
+            .map(|d| d.name)
+            .filter(|n| matches!(*n, "cron_add" | "cron_list" | "cron_remove"))
+            .collect();
+        assert_eq!(names.len(), 3, "all 3 cron tools register: {:?}", names);
+    }
 }

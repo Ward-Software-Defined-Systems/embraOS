@@ -2,7 +2,7 @@
 //!
 //! Bridges Phase 0 Brain + tools + sessions into a gRPC streaming interface.
 
-use crate::brain::{Brain, Message, StreamEvent};
+use crate::brain::{ApiMessage, AssistantResponse, Brain, Message, MessageBlock, StopReason, StreamEvent};
 use crate::config;
 use crate::db::WardsonDbClient;
 use crate::learning;
@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
-use tracing::{info, debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 pub struct BrainGrpcService {
     db: Arc<WardsonDbClient>,
@@ -473,165 +473,228 @@ async fn handle_request(
             )
             .await;
 
-            // Add current message to history for the Brain call
-            let mut messages = history.clone();
-            messages.push(Message::user(&enriched));
+            // Build typed-message conversation for the native tool-use loop.
+            // Legacy history (role+String content) maps to text-only ApiMessage
+            // blocks; thinking signatures were never persisted, so cross-turn
+            // preservation is out of scope. Within a single turn's loop the
+            // assistant response (thinking blocks included) is pushed back
+            // verbatim between iterations — the API requires this.
+            let mut api_messages: Vec<ApiMessage> = history
+                .iter()
+                .map(legacy_message_to_api)
+                .collect();
+            api_messages.push(ApiMessage::user_text(&enriched));
 
-            // Send thinking indicator
+            // Send thinking indicator.
             let _ = tx.send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::Thinking(
                     ThinkingState { is_thinking: true, name: config_name.clone() }
                 )),
             })).await;
 
-            // Call Brain streaming
-            debug!("Calling Anthropic API with {} messages", messages.len());
-            let mut brain_rx = brain.send_message_streaming(&messages).await
-                .map_err(|e| anyhow::anyhow!("Brain call failed: {}", e))?;
-
-            // Stream Brain tokens to gRPC
-            let mut full_response = String::new();
-            let mut first_token = true;
-            while let Some(event) = brain_rx.recv().await {
-                match event {
-                    StreamEvent::Token(text) => {
-                        if first_token {
-                            // Clear thinking on first token
-                            let _ = tx.send(Ok(ConversationResponse {
-                                response_type: Some(conversation_response::ResponseType::Thinking(
-                                    ThinkingState { is_thinking: false, name: String::new() }
-                                )),
-                            })).await;
-                            first_token = false;
-                        }
-                        full_response.push_str(&text);
-                        let _ = tx.send(Ok(ConversationResponse {
-                            response_type: Some(conversation_response::ResponseType::Token(
-                                StreamToken { text }
-                            )),
-                        })).await;
-                    }
-                    StreamEvent::Done(full) => {
-                        full_response = full;
-                        let _ = tx.send(Ok(ConversationResponse {
-                            response_type: Some(conversation_response::ResponseType::Done(
-                                StreamDone { full_response: full_response.clone() }
-                            )),
-                        })).await;
-                    }
-                    StreamEvent::Error(err) => {
-                        error!("Brain stream error: {}", err);
-                        let _ = tx.send(Ok(ConversationResponse {
-                            response_type: Some(conversation_response::ResponseType::System(
-                                SystemMessage {
-                                    content: format!("Brain error: {}", err),
-                                    msg_type: SystemMessageType::Error as i32,
-                                }
-                            )),
-                        })).await;
-                    }
-                }
-            }
-
-            // Bounded tool feedback loop — extract tags, dispatch, feed results back,
-            // then re-call Brain if tools produced output. Repeat until no more tools
-            // or MAX_TOOL_ITERATIONS is reached.
+            // Native tool-use loop driven by stop_reason.
             const MAX_TOOL_ITERATIONS: usize = 10;
+            let mut tool_iter: usize = 0;
+            let mut last_response_text = String::new();
 
-            let mut current_response = full_response;
-            for iteration in 0..MAX_TOOL_ITERATIONS {
-                let tags = tools::extract_tool_tags(&current_response);
-                if tags.is_empty() {
-                    break;
-                }
+            let first_rx = brain
+                .send_message_streaming_with_tools(&api_messages)
+                .await
+                .map_err(|e| anyhow::anyhow!("Brain call failed: {}", e))?;
+            let Some(mut current_response) =
+                collect_response(first_rx, &tx, &config_name).await?
+            else {
+                // Stream closed without Complete — treat as error and save nothing.
+                return Ok(());
+            };
+            // Track text from the most recent response for persistence fallback.
+            last_response_text = response_text(&current_response);
+            api_messages.push(ApiMessage::assistant_blocks(current_response.content.clone()));
 
-                // Dispatch tools and stream ToolExecution events
-                let mut tool_results = String::new();
-                for tag in &tags {
-                    if let Some(result) = tools::dispatch(tag, db, &loaded_config, &session_name).await {
-                        let _ = tx.send(Ok(ConversationResponse {
-                            response_type: Some(conversation_response::ResponseType::Tool(
-                                ToolExecution {
-                                    tool_name: tag.clone(),
-                                    input: String::new(),
-                                    result: result.clone(),
-                                    success: true,
-                                }
-                            )),
-                        })).await;
-                        tool_results.push_str(&result);
-                        tool_results.push('\n');
+            loop {
+                match current_response.stop_reason {
+                    StopReason::EndTurn
+                    | StopReason::MaxTokens
+                    | StopReason::StopSequence
+                    | StopReason::Refusal => break,
+
+                    StopReason::PauseTurn => {
+                        warn!(
+                            target: "dispatch",
+                            session = %session_name,
+                            "stop_reason=pause_turn; resuming conversation"
+                        );
+                        let rx = brain
+                            .send_message_streaming_with_tools(&api_messages)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Brain pause-resume failed: {}", e))?;
+                        let Some(resp) = collect_response(rx, &tx, &config_name).await? else {
+                            break;
+                        };
+                        current_response = resp;
+                        last_response_text = response_text(&current_response);
+                        api_messages.push(ApiMessage::assistant_blocks(
+                            current_response.content.clone(),
+                        ));
+                        continue;
                     }
-                }
 
-                if tool_results.is_empty() {
-                    break;
-                }
-
-                // Feed tool results back to Brain for continuation
-                let feedback = format!("[SYSTEM] Tool results:\n{}", tool_results);
-                messages.push(Message::assistant(&current_response));
-                messages.push(Message::user(&feedback));
-
-                let mut brain_rx_cont = brain.send_message_streaming(&messages).await
-                    .map_err(|e| anyhow::anyhow!("Brain continuation failed (iteration {}): {}", iteration + 1, e))?;
-
-                let mut continuation = String::new();
-                while let Some(event) = brain_rx_cont.recv().await {
-                    match event {
-                        StreamEvent::Token(text) => {
-                            continuation.push_str(&text);
-                            let _ = tx.send(Ok(ConversationResponse {
-                                response_type: Some(conversation_response::ResponseType::Token(
-                                    StreamToken { text }
-                                )),
-                            })).await;
+                    StopReason::ToolUse => {
+                        if tool_iter >= MAX_TOOL_ITERATIONS {
+                            warn!(
+                                target: "dispatch",
+                                session = %session_name,
+                                "tool iteration cap hit ({MAX_TOOL_ITERATIONS})"
+                            );
+                            break;
                         }
-                        StreamEvent::Done(full) => {
-                            continuation = full;
+                        tool_iter += 1;
+
+                        let mut result_blocks: Vec<MessageBlock> = Vec::new();
+                        for block in &current_response.content {
+                            let MessageBlock::ToolUse { id, name, input } = block else {
+                                continue;
+                            };
+                            let started = std::time::Instant::now();
+                            info!(
+                                target: "dispatch",
+                                session = %session_name,
+                                tool = %name,
+                                tool_use_id = %id,
+                                "dispatch:start"
+                            );
+                            let ctx = tools::registry::DispatchContext {
+                                db,
+                                config: &loaded_config,
+                                session_name: &session_name,
+                                config_tz: &loaded_config.timezone,
+                            };
+                            let outcome = tools::registry::dispatch(
+                                name,
+                                input.clone(),
+                                ctx,
+                            )
+                            .await;
+                            let elapsed_ms = started.elapsed().as_millis() as u64;
+                            let (content, is_error) = match outcome {
+                                Ok(s) => (s, false),
+                                Err(embra_tools_core::DispatchError::Unknown(n)) => (
+                                    format!(
+                                        "Unknown tool: '{}'. Check the tool manifest for the correct name.",
+                                        n
+                                    ),
+                                    true,
+                                ),
+                                Err(embra_tools_core::DispatchError::BadInput {
+                                    tool,
+                                    source,
+                                }) => (
+                                    format!(
+                                        "Input schema mismatch for '{}': {}",
+                                        tool, source
+                                    ),
+                                    true,
+                                ),
+                                Err(embra_tools_core::DispatchError::Handler(msg)) => (msg, true),
+                            };
+                            info!(
+                                target: "dispatch",
+                                session = %session_name,
+                                tool = %name,
+                                tool_use_id = %id,
+                                elapsed_ms,
+                                is_error,
+                                "dispatch:end"
+                            );
                             let _ = tx.send(Ok(ConversationResponse {
-                                response_type: Some(conversation_response::ResponseType::Done(
-                                    StreamDone { full_response: continuation.clone() }
-                                )),
-                            })).await;
-                        }
-                        StreamEvent::Error(err) => {
-                            let _ = tx.send(Ok(ConversationResponse {
-                                response_type: Some(conversation_response::ResponseType::System(
-                                    SystemMessage {
-                                        content: format!("Brain error: {}", err),
-                                        msg_type: SystemMessageType::Error as i32,
+                                response_type: Some(conversation_response::ResponseType::Tool(
+                                    ToolExecution {
+                                        tool_use_id: id.clone(),
+                                        tool_name: name.clone(),
+                                        input_json: serde_json::to_string(input).unwrap_or_default(),
+                                        result: content.clone(),
+                                        is_error,
                                     }
                                 )),
                             })).await;
+                            result_blocks.push(MessageBlock::ToolResult {
+                                tool_use_id: id.clone(),
+                                content,
+                                is_error,
+                            });
+                        }
+
+                        if result_blocks.is_empty() {
+                            // stop_reason claimed tool_use but no ToolUse blocks
+                            // were present — treat as a terminal state and exit.
                             break;
                         }
+
+                        api_messages.push(ApiMessage::user_tool_results(result_blocks));
+                        let rx = brain
+                            .send_message_streaming_with_tools(&api_messages)
+                            .await
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "Brain continuation failed (iter {tool_iter}): {e}"
+                                )
+                            })?;
+                        let Some(resp) = collect_response(rx, &tx, &config_name).await? else {
+                            break;
+                        };
+                        current_response = resp;
+                        last_response_text = response_text(&current_response);
+                        api_messages.push(ApiMessage::assistant_blocks(
+                            current_response.content.clone(),
+                        ));
                     }
                 }
-
-                current_response = continuation;
             }
 
-            // Save complete conversation to session history
+            // Save conversation to session history.
+            //
+            // Persistence still uses the legacy Message { role, content: String }
+            // shape — Stage 8 introduces format_version-aware typed-block
+            // storage. We store the raw user message (pre-enrichment) and the
+            // concatenated text of the final assistant response. Thinking
+            // signatures and tool_use/tool_result blocks are NOT persisted in
+            // Stage 5; the model doesn't require cross-turn thinking
+            // preservation, and tool results are dropped silently (they reconstruct
+            // on re-runs if the user asks again).
             {
                 let mgr = session_mgr.read().await;
-                // Save the original user message
-                let _ = mgr.append_message(&session_name, &Message::user(&msg.content)).await;
-                // Save all assistant + tool feedback turns from the messages vec
-                // (messages started as history + user msg; assistant/feedback pairs were appended in the loop)
-                let original_len = history.len() + 1; // history + user message
-                for m in &messages[original_len..] {
-                    let _ = mgr.append_message(&session_name, m).await;
+                let append_outcome = mgr
+                    .append_message(&session_name, &Message::user(&msg.content))
+                    .await;
+                if let Err(crate::sessions::SessionError::LegacyReadOnly(ref sess)) =
+                    append_outcome
+                {
+                    warn!(
+                        target: "sessions",
+                        session = %sess,
+                        "legacy session rejected append; surfacing to client"
+                    );
+                    let _ = tx.send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::System(
+                            SystemMessage {
+                                content: format!(
+                                    "Session '{}' is legacy (pre-native-tools) and is read-only. Create a new session to continue.",
+                                    sess
+                                ),
+                                msg_type: SystemMessageType::Error as i32,
+                            }
+                        )),
+                    })).await;
+                    return Ok(());
                 }
-                // Save the final response. If the continuation after the tool
-                // loop produced no text, store a placeholder — empty assistant
-                // messages cannot be replayed through the API on later turns.
-                let final_text = if current_response.trim().is_empty() {
+                let final_text = if last_response_text.trim().is_empty() {
                     "(no response)".to_string()
                 } else {
-                    current_response.clone()
+                    last_response_text.clone()
                 };
-                let _ = mgr.append_message(&session_name, &Message::assistant(&final_text)).await;
+                let _ = mgr
+                    .append_message(&session_name, &Message::assistant(&final_text))
+                    .await;
             }
 
             Ok(())
@@ -1391,6 +1454,8 @@ async fn stream_brain_to_grpc(
                     )),
                 })).await;
             }
+            // Native tool-use events — consumed by Stage 5's loop driver.
+            StreamEvent::BlockComplete { .. } | StreamEvent::Complete { .. } => {}
         }
     }
 
@@ -1429,5 +1494,187 @@ async fn save_learning_history(db: &Arc<WardsonDbClient>, history: &[Message]) -
     match db.write(meta_collection, &meta).await {
         Ok(_) => Ok(()),
         Err(_) => db.update(meta_collection, "learning", &meta).await.map_err(|e| e.into()),
+    }
+}
+
+// ── NATIVE-TOOLS-01 helpers ──
+
+/// Convert a legacy on-disk `Message` (role + String content) to a typed
+/// `ApiMessage`. Used to build the conversation history for the native
+/// tool-use loop. Thinking signatures were never persisted, so every
+/// historical turn becomes a text-only block. This is the migration-era
+/// shim; Stage 8 introduces typed-block persistence and deprecates this
+/// conversion path for post-v7 sessions.
+fn legacy_message_to_api(m: &Message) -> ApiMessage {
+    let block = MessageBlock::Text {
+        text: m.content.clone(),
+    };
+    match m.role.as_str() {
+        "user" => ApiMessage::User {
+            content: vec![block],
+        },
+        _ => ApiMessage::Assistant {
+            content: vec![block],
+        },
+    }
+}
+
+/// Extract the plain-text portion of an assistant response for session
+/// persistence. Concatenates all `Text` blocks; thinking signatures and
+/// tool_use blocks are dropped.
+fn response_text(response: &AssistantResponse) -> String {
+    response
+        .content
+        .iter()
+        .filter_map(|b| match b {
+            MessageBlock::Text { text } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// Drive a Brain SSE stream, forwarding `Token` events to the gRPC UX
+/// channel (`tx`) and returning the final typed `AssistantResponse` when
+/// the stream completes. Also clears the thinking indicator on first token
+/// and forwards Done frames to the console as before.
+///
+/// Returns `Ok(None)` when the stream ended without a `Complete` event
+/// (e.g. connection dropped or fatal error mid-stream).
+async fn collect_response(
+    mut brain_rx: mpsc::Receiver<StreamEvent>,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    config_name: &str,
+) -> anyhow::Result<Option<AssistantResponse>> {
+    let mut first_token = true;
+    let mut full_response: Option<AssistantResponse> = None;
+
+    while let Some(event) = brain_rx.recv().await {
+        match event {
+            StreamEvent::Token(text) => {
+                if first_token {
+                    let _ = tx
+                        .send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::Thinking(
+                                ThinkingState {
+                                    is_thinking: false,
+                                    name: String::new(),
+                                },
+                            )),
+                        }))
+                        .await;
+                    first_token = false;
+                }
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::Token(
+                            StreamToken { text },
+                        )),
+                    }))
+                    .await;
+            }
+            StreamEvent::Done(full) => {
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::Done(
+                            StreamDone { full_response: full },
+                        )),
+                    }))
+                    .await;
+            }
+            StreamEvent::Error(err) => {
+                error!(
+                    target: "dispatch",
+                    config = %config_name,
+                    "Brain stream error: {err}"
+                );
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::System(
+                            SystemMessage {
+                                content: format!("Brain error: {err}"),
+                                msg_type: SystemMessageType::Error as i32,
+                            },
+                        )),
+                    }))
+                    .await;
+            }
+            StreamEvent::BlockComplete { .. } => {}
+            StreamEvent::Complete { response } => {
+                full_response = Some(response);
+            }
+        }
+    }
+
+    Ok(full_response)
+}
+
+#[cfg(test)]
+mod native_loop_tests {
+    use super::*;
+    use crate::brain::{AssistantResponse, MessageBlock, StopReason};
+
+    #[test]
+    fn legacy_user_message_converts_to_user_text_block() {
+        let m = Message::user("hello");
+        let api = legacy_message_to_api(&m);
+        match api {
+            ApiMessage::User { content } => {
+                assert_eq!(content.len(), 1);
+                match &content[0] {
+                    MessageBlock::Text { text } => assert_eq!(text, "hello"),
+                    other => panic!("expected Text, got {other:?}"),
+                }
+            }
+            other => panic!("expected User, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn legacy_assistant_message_converts_to_assistant_text_block() {
+        let m = Message::assistant("response");
+        let api = legacy_message_to_api(&m);
+        assert!(matches!(api, ApiMessage::Assistant { .. }));
+    }
+
+    #[test]
+    fn response_text_concatenates_text_blocks_skipping_thinking_and_tool_use() {
+        let resp = AssistantResponse {
+            id: None,
+            content: vec![
+                MessageBlock::Thinking {
+                    thinking: String::new(),
+                    signature: "sig".into(),
+                },
+                MessageBlock::Text {
+                    text: "Hello".into(),
+                },
+                MessageBlock::ToolUse {
+                    id: "t1".into(),
+                    name: "time".into(),
+                    input: serde_json::json!({}),
+                },
+                MessageBlock::Text {
+                    text: ", world".into(),
+                },
+            ],
+            stop_reason: StopReason::EndTurn,
+            stop_sequence: None,
+        };
+        assert_eq!(response_text(&resp), "Hello, world");
+    }
+
+    #[test]
+    fn response_text_empty_without_text_blocks() {
+        let resp = AssistantResponse {
+            id: None,
+            content: vec![MessageBlock::Thinking {
+                thinking: String::new(),
+                signature: "sig".into(),
+            }],
+            stop_reason: StopReason::ToolUse,
+            stop_sequence: None,
+        };
+        assert_eq!(response_text(&resp), "");
     }
 }

@@ -96,6 +96,11 @@ pub enum EdgeType {
     Contradicts,
     Refines,
     DependsOn,
+    /// Symmetric same-scope link. Used when two nodes concern the same topic /
+    /// system area but neither enables, refines, nor contradicts the other.
+    /// Still stored with a source → target direction; retrieval treats it as
+    /// non-hierarchical.
+    RelatedTo,
 }
 
 impl EdgeType {
@@ -109,6 +114,7 @@ impl EdgeType {
             Self::Contradicts => "contradicts",
             Self::Refines => "refines",
             Self::DependsOn => "depends_on",
+            Self::RelatedTo => "related_to",
         }
     }
 
@@ -122,6 +128,7 @@ impl EdgeType {
             "contradicts" => Some(Self::Contradicts),
             "refines" => Some(Self::Refines),
             "depends_on" => Some(Self::DependsOn),
+            "related_to" => Some(Self::RelatedTo),
             _ => None,
         }
     }
@@ -130,8 +137,50 @@ impl EdgeType {
     pub fn is_brain_created(&self) -> bool {
         matches!(
             self,
-            Self::Enables | Self::Contradicts | Self::Refines | Self::DependsOn
+            Self::Enables
+                | Self::Contradicts
+                | Self::Refines
+                | Self::DependsOn
+                | Self::RelatedTo
         )
+    }
+}
+
+#[cfg(test)]
+mod edge_type_tests {
+    use super::EdgeType;
+
+    #[test]
+    fn related_to_roundtrip() {
+        let t = EdgeType::from_str("related_to").expect("parse");
+        assert_eq!(t, EdgeType::RelatedTo);
+        assert_eq!(t.as_str(), "related_to");
+        assert!(t.is_brain_created());
+    }
+
+    #[test]
+    fn related_to_tolerates_case_and_whitespace() {
+        assert_eq!(EdgeType::from_str("  Related_To "), Some(EdgeType::RelatedTo));
+        assert_eq!(EdgeType::from_str("RELATED_TO"), Some(EdgeType::RelatedTo));
+    }
+
+    #[test]
+    fn existing_brain_types_still_brain_created() {
+        for t in [
+            EdgeType::Enables,
+            EdgeType::Contradicts,
+            EdgeType::Refines,
+            EdgeType::DependsOn,
+        ] {
+            assert!(t.is_brain_created());
+        }
+    }
+
+    #[test]
+    fn auto_derived_not_brain_created() {
+        for t in [EdgeType::SameSession, EdgeType::Temporal, EdgeType::TagOverlap] {
+            assert!(!t.is_brain_created());
+        }
     }
 }
 

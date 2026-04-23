@@ -150,7 +150,26 @@ const COMMON_PORTS: &[(u16, &str)] = &[
     (27017, "MongoDB"),
 ];
 
-/// Parse a port specification into a list of (port, label) pairs.
+/// Look up a COMMON_PORTS label or synthesize one.
+fn port_label(p: u16) -> String {
+    COMMON_PORTS
+        .iter()
+        .find(|&&(cp, _)| cp == p)
+        .map(|&(_, s)| s.to_string())
+        .unwrap_or_else(|| format!("port-{}", p))
+}
+
+/// Max number of ports selected from a user-supplied spec (comma/range mix).
+/// Presets (`low`, `all`) are exempt — the operator has explicitly asked for them.
+const MAX_USER_PORTS: usize = 2048;
+
+/// Parse a port specification into a list of (port, label) pairs. Accepts:
+/// - empty → default 17 common ports
+/// - `web` / `db` → named presets
+/// - `low` → 1–1024 (all well-known ports)
+/// - `all` → 1–65535 (exhaustive; may take many minutes)
+/// - otherwise comma-separated list, each token either `N` or `A-B`.
+///   Duplicates are de-duplicated; total capped at `MAX_USER_PORTS`.
 fn parse_port_spec(spec: &str) -> Vec<(u16, String)> {
     let spec = spec.trim();
     if spec.is_empty() {
@@ -158,54 +177,53 @@ fn parse_port_spec(spec: &str) -> Vec<(u16, String)> {
     }
 
     match spec {
-        "web" => vec![
+        "web" => return vec![
             (80, "HTTP".into()),
             (443, "HTTPS".into()),
             (8080, "HTTP-Alt".into()),
             (8443, "HTTPS-Alt".into()),
         ],
-        "db" => vec![
+        "db" => return vec![
             (3306, "MySQL".into()),
             (5432, "PostgreSQL".into()),
             (6379, "Redis".into()),
             (27017, "MongoDB".into()),
             (5984, "CouchDB".into()),
         ],
-        "all" => (1..=1024).map(|p| {
-            let label = COMMON_PORTS.iter()
-                .find(|&&(cp, _)| cp == p)
-                .map(|&(_, s)| s.to_string())
-                .unwrap_or_else(|| format!("port-{}", p));
-            (p, label)
-        }).collect(),
-        _ => {
-            // Try range: "8000-8100"
-            if let Some((start_str, end_str)) = spec.split_once('-') {
-                if let (Ok(start), Ok(end)) = (start_str.parse::<u16>(), end_str.parse::<u16>()) {
-                    if start <= end && end - start <= 2048 {
-                        return (start..=end).map(|p| {
-                            let label = COMMON_PORTS.iter()
-                                .find(|&&(cp, _)| cp == p)
-                                .map(|&(_, s)| s.to_string())
-                                .unwrap_or_else(|| format!("port-{}", p));
-                            (p, label)
-                        }).collect();
+        "low" => return (1u16..=1024).map(|p| (p, port_label(p))).collect(),
+        "all" => return (1u16..=65535).map(|p| (p, port_label(p))).collect(),
+        _ => {}
+    }
+
+    // Generic parse: comma-separated tokens, each either "N" or "A-B".
+    let mut out: Vec<(u16, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::<u16>::new();
+    for tok in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some((a, b)) = tok.split_once('-') {
+            let (Ok(start), Ok(end)) = (a.trim().parse::<u16>(), b.trim().parse::<u16>()) else {
+                continue;
+            };
+            if start > end {
+                continue;
+            }
+            for p in start..=end {
+                if seen.insert(p) {
+                    out.push((p, port_label(p)));
+                    if out.len() >= MAX_USER_PORTS {
+                        return out;
                     }
                 }
             }
-            // Try comma-separated: "80,443,8080"
-            spec.split(',')
-                .filter_map(|s| {
-                    let p: u16 = s.trim().parse().ok()?;
-                    let label = COMMON_PORTS.iter()
-                        .find(|&&(cp, _)| cp == p)
-                        .map(|&(_, s)| s.to_string())
-                        .unwrap_or_else(|| format!("port-{}", p));
-                    Some((p, label))
-                })
-                .collect()
+        } else if let Ok(p) = tok.parse::<u16>() {
+            if seen.insert(p) {
+                out.push((p, port_label(p)));
+                if out.len() >= MAX_USER_PORTS {
+                    return out;
+                }
+            }
         }
     }
+    out
 }
 
 /// Attempt banner grabbing on an open TCP connection.
@@ -247,18 +265,22 @@ async fn grab_banner(host: &str, port: u16) -> Option<String> {
 /// Restricted to private/loopback addresses only (RFC 1918 + 127.0.0.0/8).
 ///
 /// Param format: `<host> [ports]`
-/// Port specs: empty (default 17 common), `80,443,8080`, `8000-8100`, `web`, `db`, `all`
+/// Port specs: empty (default 17 common), `80,443,8080`, `8000-8100`,
+/// `8000-8100,443` (mixed), `web`, `db`, `low`, `all`.
 pub async fn port_scan(param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:port_scan <host> [ports]]\n\
-                Examples:\n\
-                  [TOOL:port_scan localhost]          — default 17 common ports\n\
-                  [TOOL:port_scan 192.168.1.1 80,443] — specific ports\n\
-                  [TOOL:port_scan localhost 8000-8100] — port range\n\
-                  [TOOL:port_scan localhost web]       — preset: 80, 443, 8080, 8443\n\
-                  [TOOL:port_scan localhost db]        — preset: 3306, 5432, 6379, 27017, 5984\n\
-                  [TOOL:port_scan localhost all]       — well-known 1-1024\n\
-                Note: restricted to private/loopback addresses only."
+        return "Usage: port_scan <host> [ports]\n\
+                Examples:\n  \
+                  port_scan localhost              — default 17 common ports\n  \
+                  port_scan 192.168.1.1 80,443     — specific ports\n  \
+                  port_scan localhost 8000-8100    — port range\n  \
+                  port_scan localhost 8000-8100,443 — mixed range and list\n  \
+                  port_scan localhost web          — preset: 80, 443, 8080, 8443\n  \
+                  port_scan localhost db           — preset: 3306, 5432, 6379, 27017, 5984\n  \
+                  port_scan localhost low          — well-known 1-1024\n  \
+                  port_scan localhost all          — exhaustive 1-65535 (may take many minutes)\n\
+                Custom ranges/lists are capped at 2048 distinct ports; presets are exempt.\n\
+                Restricted to private/loopback addresses only."
             .into();
     }
 
@@ -338,25 +360,11 @@ pub async fn port_scan(param: &str) -> String {
     output
 }
 
-/// Stub for firewall status — not yet implemented.
-pub fn firewall_status() -> String {
-    "Firewall status: not yet implemented. Requires iptables/nftables integration on the embraOS rootfs.".into()
-}
-
-/// Stub for SSH sessions — not yet implemented.
-pub fn ssh_sessions() -> String {
-    "SSH sessions: not yet implemented. embraOS currently exposes no inbound SSH; interaction is via the serial console.".into()
-}
-
-/// Stub for security audit — not yet implemented.
-pub fn security_audit() -> String {
-    "Security audit: not yet implemented. Broader audit tooling is planned with embra-guardian in Phase 3.".into()
-}
-
 // ── SSH Remote Admin (EXPERIMENTAL) ──
 
 struct SshSession {
     user_host: String,      // "user@host"
+    port: u16,              // SSH port (default 22)
     control_path: String,   // "/tmp/embra-ssh-{uuid}"
 }
 
@@ -365,12 +373,82 @@ fn ssh_session_lock() -> &'static tokio::sync::Mutex<Option<SshSession>> {
     SSH_SESSION.get_or_init(|| tokio::sync::Mutex::new(None))
 }
 
-/// Parse `user@host` or `host` (default user: root).
-fn parse_ssh_target(target: &str) -> (String, String) {
-    if let Some(at_pos) = target.find('@') {
-        (target[..at_pos].to_string(), target[at_pos + 1..].to_string())
+/// Parse an SSH target string into (user, host, port). Supported forms:
+/// - `user@host`       → (user, host, 22)
+/// - `host`            → (root, host, 22)
+/// - `user@host:port`  → (user, host, port)
+/// - `host:port`       → (root, host, port)
+/// If `port` is present but unparseable, it is silently ignored and 22 is
+/// used (keeps the caller's `is_private_address` path robust; bad input still
+/// fails the RFC 1918 check or the subsequent SSH connection, not this parser).
+/// IPv6 bracketed hosts (`[::1]:22`) are deliberately not supported in this
+/// pass — the existing `is_private_address` check only handles v4/v6 without
+/// brackets, and adding full IPv6 URI parsing is out of scope here.
+fn parse_ssh_target(target: &str) -> (String, String, u16) {
+    let (user_part, host_port) = if let Some(at_pos) = target.find('@') {
+        (target[..at_pos].to_string(), &target[at_pos + 1..])
     } else {
-        ("root".to_string(), target.to_string())
+        ("root".to_string(), target)
+    };
+    let (host, port) = match host_port.rsplit_once(':') {
+        Some((h, p)) => match p.parse::<u16>() {
+            Ok(pnum) if pnum > 0 => (h.to_string(), pnum),
+            _ => (host_port.to_string(), 22),
+        },
+        None => (host_port.to_string(), 22),
+    };
+    (user_part, host, port)
+}
+
+#[cfg(test)]
+mod parse_ssh_target_tests {
+    use super::parse_ssh_target;
+
+    #[test]
+    fn bare_host_defaults_user_and_port() {
+        assert_eq!(
+            parse_ssh_target("192.168.1.10"),
+            ("root".into(), "192.168.1.10".into(), 22)
+        );
+    }
+
+    #[test]
+    fn user_at_host_keeps_port_default() {
+        assert_eq!(
+            parse_ssh_target("will@192.168.1.10"),
+            ("will".into(), "192.168.1.10".into(), 22)
+        );
+    }
+
+    #[test]
+    fn host_with_port_defaults_user() {
+        assert_eq!(
+            parse_ssh_target("192.168.1.10:2222"),
+            ("root".into(), "192.168.1.10".into(), 2222)
+        );
+    }
+
+    #[test]
+    fn user_at_host_with_port() {
+        assert_eq!(
+            parse_ssh_target("will@192.168.1.10:2222"),
+            ("will".into(), "192.168.1.10".into(), 2222)
+        );
+    }
+
+    #[test]
+    fn unparseable_port_falls_back_to_22() {
+        // "abc" is not a valid port; the whole host_port is treated as the host.
+        let (u, h, p) = parse_ssh_target("192.168.1.10:abc");
+        assert_eq!(u, "root");
+        assert_eq!(p, 22);
+        assert_eq!(h, "192.168.1.10:abc");
+    }
+
+    #[test]
+    fn port_zero_falls_back_to_22() {
+        let (_u, _h, p) = parse_ssh_target("host:0");
+        assert_eq!(p, 22);
     }
 }
 
@@ -378,17 +456,17 @@ fn parse_ssh_target(target: &str) -> (String, String) {
 /// Param format: `<user@host> <command>` or `<host> <command>`
 pub async fn ssh_remote_admin(param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:ssh_remote_admin <host> <command>] or [TOOL:ssh_remote_admin user@host <command>]".into();
+        return "Usage: ssh_remote_admin <host> <command> or ssh_remote_admin user@host[:port <command>]".into();
     }
 
     let parts: Vec<&str> = param.splitn(2, ' ').collect();
     if parts.len() < 2 {
-        return "Usage: [TOOL:ssh_remote_admin <host> <command>]".into();
+        return "Usage: ssh_remote_admin <host> <command>".into();
     }
 
     let target = parts[0];
     let command = parts[1];
-    let (user, host) = parse_ssh_target(target);
+    let (user, host, port) = parse_ssh_target(target);
 
     if !is_private_address(&host) {
         return format!(
@@ -398,9 +476,16 @@ pub async fn ssh_remote_admin(param: &str) -> String {
         );
     }
 
+    let host_display = if port == 22 {
+        format!("{}@{}", user, host)
+    } else {
+        format!("{}@{}:{}", user, host, port)
+    };
+
     let result = tokio::time::timeout(
         Duration::from_secs(30),
         tokio::process::Command::new("ssh")
+            .arg("-p").arg(port.to_string())
             .arg("-i").arg(SSH_KEY_PATH)
             .arg("-o").arg(format!("UserKnownHostsFile={}", SSH_KNOWN_HOSTS))
             .arg("-o").arg("StrictHostKeyChecking=accept-new")
@@ -433,39 +518,39 @@ pub async fn ssh_remote_admin(param: &str) -> String {
 
             format!(
                 "[EXPERIMENTAL] SSH Remote Admin — use at your own risk\n\
-                 Host: {}@{}\n\
+                 Host: {}\n\
                  Command: {}\n\
                  Exit code: {}\n\n\
                  --- stdout ---\n{}\n\
                  --- stderr ---\n{}",
-                user, host, command, code, stdout_trunc.trim(), stderr_trunc.trim()
+                host_display, command, code, stdout_trunc.trim(), stderr_trunc.trim()
             )
         }
         Ok(Err(e)) => format!(
             "[EXPERIMENTAL] SSH Remote Admin — use at your own risk\n\
-             Host: {}@{}\n\
+             Host: {}\n\
              Command: {}\n\
              Error: {}",
-            user, host, command, e
+            host_display, command, e
         ),
         Err(_) => format!(
             "[EXPERIMENTAL] SSH Remote Admin — use at your own risk\n\
-             Host: {}@{}\n\
+             Host: {}\n\
              Command: {}\n\
              Error: command timed out after 30 seconds",
-            user, host, command
+            host_display, command
         ),
     }
 }
 
 /// Open a persistent SSH session via ControlMaster (EXPERIMENTAL).
-/// Param: `<user@host>` or `<host>` (default user: root)
+/// Param: `<user@host[:port]>` or `<host[:port]>` (default user: root, default port: 22)
 pub async fn ssh_session_start(param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:ssh_session_start <user@host>] or [TOOL:ssh_session_start <host>]".into();
+        return "Usage: ssh_session_start <user@host> or ssh_session_start <user@host:port> or ssh_session_start <host>".into();
     }
 
-    let (user, host) = parse_ssh_target(param.trim());
+    let (user, host, port) = parse_ssh_target(param.trim());
 
     if !is_private_address(&host) {
         return format!(
@@ -481,6 +566,11 @@ pub async fn ssh_session_start(param: &str) -> String {
     }
 
     let user_host = format!("{}@{}", user, host);
+    let user_host_port_display = if port == 22 {
+        user_host.clone()
+    } else {
+        format!("{}:{}", user_host, port)
+    };
     let control_path = format!("/tmp/embra-ssh-{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
     // Start ControlMaster in background (-MNf): authenticates, then backgrounds itself
@@ -488,6 +578,7 @@ pub async fn ssh_session_start(param: &str) -> String {
         Duration::from_secs(15),
         tokio::process::Command::new("ssh")
             .arg("-MNf")
+            .arg("-p").arg(port.to_string())
             .arg("-i").arg(SSH_KEY_PATH)
             .arg("-o").arg(format!("UserKnownHostsFile={}", SSH_KNOWN_HOSTS))
             .arg("-o").arg(format!("ControlPath={}", control_path))
@@ -504,7 +595,9 @@ pub async fn ssh_session_start(param: &str) -> String {
 
     match master_result {
         Ok(Ok(output)) if output.status.success() => {
-            // ControlMaster backgrounded successfully — validate with a probe command
+            // ControlMaster backgrounded successfully — validate with a probe command.
+            // Subsequent connections via the ControlPath socket inherit the
+            // master's port, so `-p` is not needed here.
             let probe_result = tokio::time::timeout(
                 Duration::from_secs(10),
                 tokio::process::Command::new("ssh")
@@ -521,11 +614,12 @@ pub async fn ssh_session_start(param: &str) -> String {
                     if stdout.contains("embra_probe_ok") {
                         *lock = Some(SshSession {
                             user_host: user_host.clone(),
+                            port,
                             control_path,
                         });
                         format!(
                             "[EXPERIMENTAL] SSH session opened to {}. Use ssh_session_exec to run commands, ssh_session_end to close.",
-                            user_host
+                            user_host_port_display
                         )
                     } else {
                         // Probe didn't return expected output — tear down
@@ -538,13 +632,13 @@ pub async fn ssh_session_start(param: &str) -> String {
                         let stderr = String::from_utf8_lossy(&probe_out.stderr);
                         format!(
                             "[EXPERIMENTAL] SSH connection to {} failed: probe returned unexpected output. {}",
-                            user_host, stderr.trim()
+                            user_host_port_display, stderr.trim()
                         )
                     }
                 }
                 Ok(Err(e)) => {
                     let _ = std::fs::remove_file(&control_path);
-                    format!("[EXPERIMENTAL] SSH connection to {} failed: {}", user_host, e)
+                    format!("[EXPERIMENTAL] SSH connection to {} failed: {}", user_host_port_display, e)
                 }
                 Err(_) => {
                     let _ = tokio::process::Command::new("ssh")
@@ -553,7 +647,7 @@ pub async fn ssh_session_start(param: &str) -> String {
                         .arg(&user_host)
                         .output().await;
                     let _ = std::fs::remove_file(&control_path);
-                    format!("[EXPERIMENTAL] SSH connection to {} failed: probe timed out", user_host)
+                    format!("[EXPERIMENTAL] SSH connection to {} failed: probe timed out", user_host_port_display)
                 }
             }
         }
@@ -561,14 +655,14 @@ pub async fn ssh_session_start(param: &str) -> String {
             // ControlMaster exited with non-zero — connection failed
             let stderr = String::from_utf8_lossy(&output.stderr);
             let _ = std::fs::remove_file(&control_path);
-            format!("[EXPERIMENTAL] SSH connection to {} failed: {}", user_host, stderr.trim())
+            format!("[EXPERIMENTAL] SSH connection to {} failed: {}", user_host_port_display, stderr.trim())
         }
         Ok(Err(e)) => {
             format!("[EXPERIMENTAL] Failed to start SSH session: {}", e)
         }
         Err(_) => {
             let _ = std::fs::remove_file(&control_path);
-            format!("[EXPERIMENTAL] SSH connection to {} failed: connection timed out", user_host)
+            format!("[EXPERIMENTAL] SSH connection to {} failed: connection timed out", user_host_port_display)
         }
     }
 }
@@ -578,7 +672,7 @@ pub async fn ssh_session_start(param: &str) -> String {
 /// Param: command to execute
 pub async fn ssh_session_exec(param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:ssh_session_exec <command>]".into();
+        return "Usage: ssh_session_exec <command>".into();
     }
 
     let lock = ssh_session_lock().lock().await;
@@ -688,5 +782,224 @@ pub async fn ssh_session_end() -> String {
             }
         }
         None => "No SSH session is open.".into(),
+    }
+}
+
+#[cfg(test)]
+mod parse_port_spec_tests {
+    use super::parse_port_spec;
+
+    #[test]
+    fn empty_returns_common_ports() {
+        let out = parse_port_spec("");
+        assert_eq!(out.len(), 17); // matches COMMON_PORTS
+        assert!(out.iter().any(|(p, _)| *p == 22));
+    }
+
+    #[test]
+    fn preset_low_is_1024_ports() {
+        assert_eq!(parse_port_spec("low").len(), 1024);
+    }
+
+    #[test]
+    fn preset_all_is_65535_ports() {
+        assert_eq!(parse_port_spec("all").len(), 65535);
+    }
+
+    #[test]
+    fn range_plus_commas_with_dedup() {
+        let out = parse_port_spec("80,443,8000-8002,443");
+        let nums: Vec<u16> = out.iter().map(|(p, _)| *p).collect();
+        assert_eq!(nums, vec![80, 443, 8000, 8001, 8002]);
+    }
+
+    #[test]
+    fn cap_applies_only_to_user_ranges() {
+        // 3000-port request clamps to MAX_USER_PORTS (2048)
+        assert_eq!(parse_port_spec("1-3000").len(), 2048);
+    }
+
+    #[test]
+    fn mixed_range_comma_reproducer_finding8() {
+        // Finding 8 repro: "50000-50002,8090" used to scan only 8090.
+        let nums: Vec<u16> = parse_port_spec("50000-50002,8090")
+            .iter()
+            .map(|(p, _)| *p)
+            .collect();
+        assert_eq!(nums, vec![50000, 50001, 50002, 8090]);
+    }
+
+    #[test]
+    fn web_and_db_presets() {
+        assert_eq!(parse_port_spec("web").len(), 4);
+        assert_eq!(parse_port_spec("db").len(), 5);
+    }
+}
+
+// ── Native tool-use registrations (NATIVE-TOOLS-01) ──
+
+use embra_tool_macro::embra_tool;
+use embra_tools_core::DispatchError;
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+use crate::tools::registry::DispatchContext;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "security_check",
+    description = "System security overview: processes, load, open ports, soul status, and storage integrity flags."
+)]
+pub struct SecurityCheckArgs {}
+
+impl SecurityCheckArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(security_check().await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "port_scan",
+    description = "TCP scan with banner grabbing. Restricted to RFC 1918 private ranges and loopback. Default (no ports) scans 17 common ports. Accepts port specs: \"80,443,8080\" (list), \"8000-8100\" (range), mixed, or presets \"web\" (80,443,8080,8443), \"db\" (3306,5432,6379,27017,5984), \"low\" (1-1024), \"all\" (1-65535)."
+)]
+pub struct PortScanArgs {
+    /// Host/IP (private/loopback only).
+    pub host: String,
+    /// Port spec. Empty = 17 common ports.
+    #[serde(default)]
+    pub ports: String,
+}
+
+impl PortScanArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = if self.ports.is_empty() {
+            self.host
+        } else {
+            format!("{} {}", self.host, self.ports)
+        };
+        Ok(port_scan(&param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "ssh_remote_admin",
+    description = "Execute a single command on a remote host via SSH (EXPERIMENTAL). Restricted to RFC 1918 private ranges and loopback. target format: host OR user@host OR user@host:port. 30s timeout."
+)]
+pub struct SshRemoteAdminArgs {
+    /// SSH target: host OR user@host OR user@host:port.
+    pub target: String,
+    /// Command to execute on the remote host.
+    pub command: String,
+}
+
+impl SshRemoteAdminArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} {}", self.target, self.command);
+        Ok(ssh_remote_admin(&param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "ssh_session_start",
+    description = "Open a persistent SSH session (EXPERIMENTAL; private/loopback only). target format: user@host or user@host:port or host. At most one session open at a time."
+)]
+pub struct SshSessionStartArgs {
+    /// SSH target. Required.
+    pub target: String,
+}
+
+impl SshSessionStartArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(ssh_session_start(&self.target).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "ssh_session_exec",
+    description = "Run a command in the open SSH session. 30s timeout, 10KB output truncation. Each command runs in a fresh process; state between commands is not preserved by the shell."
+)]
+pub struct SshSessionExecArgs {
+    /// Command to run on the remote host.
+    pub command: String,
+}
+
+impl SshSessionExecArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(ssh_session_exec(&self.command).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "ssh_session_end",
+    description = "Close the currently open SSH session and tear down the ControlMaster connection."
+)]
+pub struct SshSessionEndArgs {}
+
+impl SshSessionEndArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(ssh_session_end().await)
+    }
+}
+
+#[cfg(test)]
+mod native_args_tests {
+    use super::*;
+
+    #[test]
+    fn port_scan_host_required_ports_optional() {
+        let a: PortScanArgs =
+            serde_json::from_value(serde_json::json!({"host": "127.0.0.1"})).unwrap();
+        assert_eq!(a.host, "127.0.0.1");
+        assert_eq!(a.ports, "");
+
+        let b: PortScanArgs =
+            serde_json::from_value(serde_json::json!({"host": "127.0.0.1", "ports": "web"}))
+                .unwrap();
+        assert_eq!(b.ports, "web");
+
+        let err =
+            serde_json::from_value::<PortScanArgs>(serde_json::json!({"ports": "web"})).unwrap_err();
+        assert!(err.to_string().contains("host"));
+    }
+
+    #[test]
+    fn ssh_remote_admin_requires_both_fields() {
+        let a: SshRemoteAdminArgs = serde_json::from_value(serde_json::json!({
+            "target": "user@192.168.1.10", "command": "uname -a"
+        }))
+        .unwrap();
+        assert_eq!(a.target, "user@192.168.1.10");
+        assert_eq!(a.command, "uname -a");
+
+        let err = serde_json::from_value::<SshRemoteAdminArgs>(
+            serde_json::json!({"target": "192.168.1.10"}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("command"));
+    }
+
+    #[test]
+    fn security_tools_register() {
+        let names: Vec<&'static str> = inventory::iter::<crate::tools::registry::ToolDescriptor>()
+            .into_iter()
+            .map(|d| d.name)
+            .filter(|n| {
+                matches!(
+                    *n,
+                    "security_check"
+                        | "port_scan"
+                        | "ssh_remote_admin"
+                        | "ssh_session_start"
+                        | "ssh_session_exec"
+                        | "ssh_session_end"
+                )
+            })
+            .collect();
+        assert_eq!(names.len(), 6, "all 6 security tools registered: {:?}", names);
     }
 }

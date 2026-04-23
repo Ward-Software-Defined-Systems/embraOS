@@ -20,7 +20,13 @@ pub enum ConsoleEvent {
     Token(String),
     ResponseDone(String),
     SystemMessage { content: String, msg_type: String },
-    ToolExecution { name: String, input: String, result: String, success: bool },
+    ToolExecution {
+        tool_use_id: String,
+        name: String,
+        input_json: String,
+        result: String,
+        is_error: bool,
+    },
     ThinkingState { is_thinking: bool, name: String },
     ModeTransition { from_mode: i32, to_mode: i32, message: String },
     SetupPrompt { field_type: String, prompt: String, options: Vec<String>, default_value: String },
@@ -86,10 +92,11 @@ impl BrainClient {
                                     }
                                     brain::conversation_response::ResponseType::Tool(t) => {
                                         ConsoleEvent::ToolExecution {
+                                            tool_use_id: t.tool_use_id,
                                             name: t.tool_name,
-                                            input: t.input,
+                                            input_json: t.input_json,
                                             result: t.result,
-                                            success: t.success,
+                                            is_error: t.is_error,
                                         }
                                     }
                                     brain::conversation_response::ResponseType::Thinking(t) => {

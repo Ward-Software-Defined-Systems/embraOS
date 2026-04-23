@@ -157,8 +157,20 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
             app.messages.push(DisplayMessage::system_with_tz(&content, &app.config_tz));
             app.scroll_offset = 0;
         }
-        ConsoleEvent::ToolExecution { name, result, .. } => {
-            app.messages.push(DisplayMessage::tool_with_tz(&name, &result, &app.config_tz));
+        ConsoleEvent::ToolExecution {
+            name,
+            input_json,
+            result,
+            is_error,
+            ..
+        } => {
+            app.messages.push(DisplayMessage::tool_native(
+                &name,
+                &input_json,
+                &result,
+                is_error,
+                &app.config_tz,
+            ));
             app.scroll_offset = 0;
         }
         ConsoleEvent::ThinkingState { is_thinking, name } => {
