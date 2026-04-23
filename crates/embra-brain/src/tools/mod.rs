@@ -38,24 +38,40 @@ fn process_uptime_secs() -> u64 {
 
 // ── Existing Tools ──
 
+/// WardSONDB lifetime counters. All four are wardsondb-scoped (document
+/// inserts/queries/deletes the DB itself routed) and explicitly NOT
+/// global OS counters — filesystem ops via `file_delete` etc. don't tick
+/// them. The nested placement under `wardsondb.lifetime` makes that scope
+/// honest in the rendered JSON.
+#[derive(Debug, Serialize)]
+pub struct WardsondbLifetime {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requests: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inserts: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queries: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deletes: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WardsondbSection {
+    pub healthy: bool,
+    pub collections: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_poisoned: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lifetime: Option<WardsondbLifetime>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SystemStatus {
     pub version: String,
     pub uptime_seconds: u64,
-    pub wardsondb_healthy: bool,
-    pub wardsondb_collections: Vec<String>,
     pub memory_usage_mb: Option<u64>,
     pub soul_status: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub storage_poisoned: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lifetime_requests: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lifetime_inserts: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lifetime_queries: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lifetime_deletes: Option<u64>,
+    pub wardsondb: WardsondbSection,
 }
 
 pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
@@ -67,34 +83,32 @@ pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
         "unsealed"
     };
 
-    // Fetch expanded stats
     let stats = db.stats().await.ok();
     let storage_poisoned = stats
         .as_ref()
         .and_then(|s| s.get("storage_poisoned"))
         .and_then(|v| v.as_bool());
-    let lifetime = stats.as_ref().and_then(|s| s.get("lifetime"));
+    let lifetime_block = stats
+        .as_ref()
+        .and_then(|s| s.get("lifetime"))
+        .map(|l| WardsondbLifetime {
+            requests: l.get("requests").and_then(|v| v.as_u64()),
+            inserts: l.get("inserts").and_then(|v| v.as_u64()),
+            queries: l.get("queries").and_then(|v| v.as_u64()),
+            deletes: l.get("deletes").and_then(|v| v.as_u64()),
+        });
 
     SystemStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_seconds: process_uptime_secs(),
-        wardsondb_healthy: healthy,
-        wardsondb_collections: collections,
         memory_usage_mb: get_memory_usage_mb(),
         soul_status: soul_status.into(),
-        storage_poisoned,
-        lifetime_requests: lifetime
-            .and_then(|l| l.get("requests"))
-            .and_then(|v| v.as_u64()),
-        lifetime_inserts: lifetime
-            .and_then(|l| l.get("inserts"))
-            .and_then(|v| v.as_u64()),
-        lifetime_queries: lifetime
-            .and_then(|l| l.get("queries"))
-            .and_then(|v| v.as_u64()),
-        lifetime_deletes: lifetime
-            .and_then(|l| l.get("deletes"))
-            .and_then(|v| v.as_u64()),
+        wardsondb: WardsondbSection {
+            healthy,
+            collections,
+            storage_poisoned,
+            lifetime: lifetime_block,
+        },
     }
 }
 
@@ -1206,7 +1220,7 @@ use crate::tools::registry::DispatchContext;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "system_status",
-    description = "Report system status: version, uptime, WardSONDB health, collections, memory usage, soul status, and lifetime operation counters."
+    description = "Report system status: version, uptime, soul status, memory usage, and a `wardsondb` section nesting health, collections, storage_poisoned, and lifetime counters (requests/inserts/queries/deletes — all wardsondb-scoped, NOT global OS counters)."
 )]
 pub struct SystemStatusArgs {}
 
@@ -1549,6 +1563,41 @@ mod native_args_tests {
         assert_eq!(a.query, "");
         let b: RecallArgs = serde_json::from_value(serde_json::json!({"query": "alerts"})).unwrap();
         assert_eq!(b.query, "alerts");
+    }
+
+    #[test]
+    fn system_status_nests_lifetime_under_wardsondb() {
+        // Closes #42: lifetime_* fields no longer appear at top level — they
+        // sit under wardsondb.lifetime so the wardsondb scope is honest.
+        let s = SystemStatus {
+            version: "test".into(),
+            uptime_seconds: 0,
+            memory_usage_mb: None,
+            soul_status: "sealed".into(),
+            wardsondb: WardsondbSection {
+                healthy: true,
+                collections: vec!["memory.entries".into()],
+                storage_poisoned: None,
+                lifetime: Some(WardsondbLifetime {
+                    requests: Some(7),
+                    inserts: Some(3),
+                    queries: Some(4),
+                    deletes: Some(0),
+                }),
+            },
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(v.get("lifetime_requests").is_none(), "flat field leaked");
+        assert!(v.get("lifetime_inserts").is_none(), "flat field leaked");
+        assert!(v.get("lifetime_queries").is_none(), "flat field leaked");
+        assert!(v.get("lifetime_deletes").is_none(), "flat field leaked");
+        assert!(v.get("wardsondb_healthy").is_none(), "flat field leaked");
+        assert_eq!(v["wardsondb"]["healthy"], true);
+        assert_eq!(v["wardsondb"]["collections"][0], "memory.entries");
+        assert_eq!(v["wardsondb"]["lifetime"]["requests"], 7);
+        assert_eq!(v["wardsondb"]["lifetime"]["inserts"], 3);
+        assert_eq!(v["wardsondb"]["lifetime"]["queries"], 4);
+        assert_eq!(v["wardsondb"]["lifetime"]["deletes"], 0);
     }
 
     #[test]
