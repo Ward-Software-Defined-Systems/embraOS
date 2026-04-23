@@ -110,20 +110,23 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 }
 
 // Single source of truth for Phase 4 tool category counts.
-// (json_key, display_label, count). Keep in sync with the dispatch table in
-// `crates/embra-brain/src/tools/mod.rs` when tools are added or removed.
+// (json_key, display_label, count). Sums to 85 — matches the descriptor count
+// in `tools::registry::REGISTRY`. Aliases (`memory_search`, `search_memory`,
+// `file_rename`, `rmdir`) are folded into their target's category so the
+// displayed total matches what the model sees in the tools manifest. Keep in
+// sync with `tools::registry::REGISTRY.len()` when tools are added or removed.
 const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
     ("system", "System", 3),
-    ("memory_knowledge", "Memory & Knowledge", 5),
-    ("self_awareness", "Self-Awareness", 3),
+    ("memory_knowledge", "Memory & Knowledge", 7),
+    ("self_awareness", "Self-Awareness", 4),
     ("time_context", "Time & Context", 3),
     ("utility", "Utility", 2),
     ("security", "Security", 6),
     ("engineering", "Engineering", 28),
-    ("filesystem", "Filesystem", 8),
+    ("filesystem", "Filesystem", 10),
     ("scheduling", "Scheduling", 3),
     ("sessions", "Sessions", 10),
-    ("knowledge_graph", "Knowledge Graph", 8),
+    ("knowledge_graph", "Knowledge Graph", 9),
 ];
 
 pub fn default_tools_registry_doc() -> serde_json::Value {
