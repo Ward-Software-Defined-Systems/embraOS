@@ -835,3 +835,171 @@ mod parse_port_spec_tests {
         assert_eq!(parse_port_spec("db").len(), 5);
     }
 }
+
+// ── Native tool-use registrations (NATIVE-TOOLS-01) ──
+
+use embra_tool_macro::embra_tool;
+use embra_tools_core::DispatchError;
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+use crate::tools::registry::DispatchContext;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "security_check",
+    description = "System security overview: processes, load, open ports, soul status, and storage integrity flags."
+)]
+pub struct SecurityCheckArgs {}
+
+impl SecurityCheckArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(security_check().await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "port_scan",
+    description = "TCP scan with banner grabbing. Restricted to RFC 1918 private ranges and loopback. Default (no ports) scans 17 common ports. Accepts port specs: \"80,443,8080\" (list), \"8000-8100\" (range), mixed, or presets \"web\" (80,443,8080,8443), \"db\" (3306,5432,6379,27017,5984), \"low\" (1-1024), \"all\" (1-65535)."
+)]
+pub struct PortScanArgs {
+    /// Host/IP (private/loopback only).
+    pub host: String,
+    /// Port spec. Empty = 17 common ports.
+    #[serde(default)]
+    pub ports: String,
+}
+
+impl PortScanArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = if self.ports.is_empty() {
+            self.host
+        } else {
+            format!("{} {}", self.host, self.ports)
+        };
+        Ok(port_scan(&param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "ssh_remote_admin",
+    description = "Execute a single command on a remote host via SSH (EXPERIMENTAL). Restricted to RFC 1918 private ranges and loopback. target format: host OR user@host OR user@host:port. 30s timeout."
+)]
+pub struct SshRemoteAdminArgs {
+    /// SSH target: host OR user@host OR user@host:port.
+    pub target: String,
+    /// Command to execute on the remote host.
+    pub command: String,
+}
+
+impl SshRemoteAdminArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} {}", self.target, self.command);
+        Ok(ssh_remote_admin(&param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "ssh_session_start",
+    description = "Open a persistent SSH session (EXPERIMENTAL; private/loopback only). target format: user@host or user@host:port or host. At most one session open at a time."
+)]
+pub struct SshSessionStartArgs {
+    /// SSH target. Required.
+    pub target: String,
+}
+
+impl SshSessionStartArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(ssh_session_start(&self.target).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "ssh_session_exec",
+    description = "Run a command in the open SSH session. 30s timeout, 10KB output truncation. Each command runs in a fresh process; state between commands is not preserved by the shell."
+)]
+pub struct SshSessionExecArgs {
+    /// Command to run on the remote host.
+    pub command: String,
+}
+
+impl SshSessionExecArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(ssh_session_exec(&self.command).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "ssh_session_end",
+    description = "Close the currently open SSH session and tear down the ControlMaster connection."
+)]
+pub struct SshSessionEndArgs {}
+
+impl SshSessionEndArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(ssh_session_end().await)
+    }
+}
+
+#[cfg(test)]
+mod native_args_tests {
+    use super::*;
+
+    #[test]
+    fn port_scan_host_required_ports_optional() {
+        let a: PortScanArgs =
+            serde_json::from_value(serde_json::json!({"host": "127.0.0.1"})).unwrap();
+        assert_eq!(a.host, "127.0.0.1");
+        assert_eq!(a.ports, "");
+
+        let b: PortScanArgs =
+            serde_json::from_value(serde_json::json!({"host": "127.0.0.1", "ports": "web"}))
+                .unwrap();
+        assert_eq!(b.ports, "web");
+
+        let err =
+            serde_json::from_value::<PortScanArgs>(serde_json::json!({"ports": "web"})).unwrap_err();
+        assert!(err.to_string().contains("host"));
+    }
+
+    #[test]
+    fn ssh_remote_admin_requires_both_fields() {
+        let a: SshRemoteAdminArgs = serde_json::from_value(serde_json::json!({
+            "target": "user@192.168.1.10", "command": "uname -a"
+        }))
+        .unwrap();
+        assert_eq!(a.target, "user@192.168.1.10");
+        assert_eq!(a.command, "uname -a");
+
+        let err = serde_json::from_value::<SshRemoteAdminArgs>(
+            serde_json::json!({"target": "192.168.1.10"}),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("command"));
+    }
+
+    #[test]
+    fn security_tools_register() {
+        let names: Vec<&'static str> = inventory::iter::<crate::tools::registry::ToolDescriptor>()
+            .into_iter()
+            .map(|d| d.name)
+            .filter(|n| {
+                matches!(
+                    *n,
+                    "security_check"
+                        | "port_scan"
+                        | "ssh_remote_admin"
+                        | "ssh_session_start"
+                        | "ssh_session_exec"
+                        | "ssh_session_end"
+                )
+            })
+            .collect();
+        assert_eq!(names.len(), 6, "all 6 security tools registered: {:?}", names);
+    }
+}
