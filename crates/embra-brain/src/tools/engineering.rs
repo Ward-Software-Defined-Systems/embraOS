@@ -1721,3 +1721,861 @@ async fn ensure_collection(db: &WardsonDbClient, name: &str) {
         let _ = db.create_collection(name).await;
     }
 }
+
+// ── Native tool-use registrations (NATIVE-TOOLS-01) ──
+
+use embra_tool_macro::embra_tool;
+use embra_tools_core::DispatchError;
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+use crate::tools::registry::DispatchContext;
+
+// -- Git repository tools -----------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "git_clone",
+    description = "Clone a git repository into /embra/workspace/. HTTPS uses the stored GitHub token; SSH is also supported. subpath may be a bare directory name or a relative path like \"repos/foo\"; if omitted, the repo name is derived from the URL."
+)]
+pub struct GitCloneArgs {
+    pub url: String,
+    #[serde(default)]
+    pub subpath: Option<String>,
+}
+
+impl GitCloneArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = match self.subpath {
+            Some(s) if !s.is_empty() => format!("{} {}", self.url, s),
+            _ => self.url,
+        };
+        Ok(git_clone(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "git_status",
+    description = "Show `git status` for a directory under /embra/workspace."
+)]
+pub struct GitStatusArgs {
+    pub path: String,
+}
+
+impl GitStatusArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(git_status(&self.path).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "git_log",
+    description = "Show recent git log for a directory. args is an optional free-form git-log argument string (e.g. `-n 20 --oneline`)."
+)]
+pub struct GitLogArgs {
+    pub path: String,
+    #[serde(default)]
+    pub args: String,
+}
+
+impl GitLogArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = if self.args.is_empty() {
+            self.path
+        } else {
+            format!("{} {}", self.path, self.args)
+        };
+        Ok(git_log(&param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "git_add",
+    description = "Stage files for commit in a workspace repository."
+)]
+pub struct GitAddArgs {
+    pub path: String,
+    /// Space-separated file paths to stage, or \".\" for everything.
+    pub files: String,
+}
+
+impl GitAddArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} {}", self.path, self.files);
+        Ok(git_add(&param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "git_commit",
+    description = "Commit staged changes in a workspace repository. The message may include \\n for newlines (expanded before git invocation) to create multi-paragraph messages with subject line + body."
+)]
+pub struct GitCommitArgs {
+    pub path: String,
+    pub message: String,
+}
+
+impl GitCommitArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} | {}", self.path, self.message);
+        Ok(git_commit(&param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "git_push",
+    description = "Push local commits to the remote branch of a workspace repository."
+)]
+pub struct GitPushArgs {
+    pub path: String,
+}
+
+impl GitPushArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(git_push(ctx.db, &self.path).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "git_pull",
+    description = "Pull from the remote branch into a workspace repository."
+)]
+pub struct GitPullArgs {
+    pub path: String,
+}
+
+impl GitPullArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(git_pull(ctx.db, &self.path).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "git_diff",
+    description = "Show uncommitted changes in a workspace repository. Optional file narrows the diff to a single path."
+)]
+pub struct GitDiffArgs {
+    pub path: String,
+    #[serde(default)]
+    pub file: Option<String>,
+}
+
+impl GitDiffArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = match self.file {
+            Some(f) if !f.is_empty() => format!("{} {}", self.path, f),
+            _ => self.path,
+        };
+        Ok(git_diff(&param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum GitBranchAction {
+    /// List branches (default).
+    List,
+    /// Create a new branch named `name`.
+    Create,
+    /// Delete branch `name` (refuses unmerged branches).
+    Delete,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "git_branch",
+    description = "List, create, or delete branches in a workspace repository. action=list returns current branches; action=create requires name; action=delete requires name and refuses unmerged branches."
+)]
+pub struct GitBranchArgs {
+    pub path: String,
+    #[serde(default = "default_git_branch_action")]
+    pub action: GitBranchAction,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+fn default_git_branch_action() -> GitBranchAction {
+    GitBranchAction::List
+}
+
+impl GitBranchArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = match (&self.action, &self.name) {
+            (GitBranchAction::List, _) => self.path.clone(),
+            (GitBranchAction::Create, Some(n)) => format!("{} {}", self.path, n),
+            (GitBranchAction::Delete, Some(n)) => format!("{} delete {}", self.path, n),
+            (GitBranchAction::Create, None) | (GitBranchAction::Delete, None) => {
+                return Ok(format!(
+                    "git_branch action={:?} requires a name.",
+                    self.action
+                ));
+            }
+        };
+        Ok(git_branch(&param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "git_checkout",
+    description = "Switch to a branch in a workspace repository (refuses unclean working directory)."
+)]
+pub struct GitCheckoutArgs {
+    pub path: String,
+    pub branch: String,
+}
+
+impl GitCheckoutArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} {}", self.path, self.branch);
+        Ok(git_checkout(&param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "git_rm",
+    description = "Stage file removal in a workspace repository (git rm)."
+)]
+pub struct GitRmArgs {
+    pub path: String,
+    pub files: String,
+}
+
+impl GitRmArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} {}", self.path, self.files);
+        Ok(git_rm(&param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "git_mv",
+    description = "git mv — tracked rename/move within a workspace repository. Preserves history and handles case-sensitive renames on case-insensitive filesystems."
+)]
+pub struct GitMvArgs {
+    pub path: String,
+    pub source: String,
+    pub destination: String,
+}
+
+impl GitMvArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} {} {}", self.path, self.source, self.destination);
+        Ok(git_mv(&param).await)
+    }
+}
+
+// -- Planning tools -----------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "plan",
+    description = "Plan management. Without fields, lists all plans. With title (and optional description), creates a new plan."
+)]
+pub struct PlanArgs {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+impl PlanArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = match (self.title, self.description) {
+            (None, _) => String::new(),
+            (Some(t), None) => t,
+            (Some(t), Some(d)) => format!("{} | {}", t, d),
+        };
+        Ok(plan(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "tasks",
+    description = "List tasks. filter narrows by plan_id or title substring."
+)]
+pub struct TasksArgs {
+    #[serde(default)]
+    pub filter: String,
+}
+
+impl TasksArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(tasks(ctx.db, &self.filter).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "task_add",
+    description = "Create a new task. plan_id associates it with an existing plan."
+)]
+pub struct TaskAddArgs {
+    pub title: String,
+    #[serde(default)]
+    pub plan_id: Option<String>,
+}
+
+impl TaskAddArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = match self.plan_id {
+            Some(p) if !p.is_empty() => format!("{} | {}", self.title, p),
+            _ => self.title,
+        };
+        Ok(task_add(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "task_done",
+    description = "Mark a task as done by its id."
+)]
+pub struct TaskDoneArgs {
+    pub id: String,
+}
+
+impl TaskDoneArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(task_done(ctx.db, &self.id).await)
+    }
+}
+
+// -- GitHub tools -------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gh_issues",
+    description = "List open GitHub issues for owner/repo (requires GITHUB_TOKEN)."
+)]
+pub struct GhIssuesArgs {
+    /// owner/repo, e.g. `Ward-Software-Defined-Systems/embraOS`.
+    pub repo: String,
+}
+
+impl GhIssuesArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(gh_issues(ctx.db, &self.repo).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gh_prs",
+    description = "List open GitHub pull requests for owner/repo (requires GITHUB_TOKEN)."
+)]
+pub struct GhPrsArgs {
+    pub repo: String,
+}
+
+impl GhPrsArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(gh_prs(ctx.db, &self.repo).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gh_issue_create",
+    description = "Create a GitHub issue in owner/repo."
+)]
+pub struct GhIssueCreateArgs {
+    pub repo: String,
+    pub title: String,
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+impl GhIssueCreateArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = match self.body {
+            Some(b) => format!("{} | {} | {}", self.repo, self.title, b),
+            None => format!("{} | {}", self.repo, self.title),
+        };
+        Ok(gh_issue_create(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gh_issue_close",
+    description = "Close a GitHub issue by owner/repo and number."
+)]
+pub struct GhIssueCloseArgs {
+    pub repo: String,
+    pub number: u32,
+}
+
+impl GhIssueCloseArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} {}", self.repo, self.number);
+        Ok(gh_issue_close(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gh_issue_reopen",
+    description = "Reopen a previously-closed GitHub issue."
+)]
+pub struct GhIssueReopenArgs {
+    pub repo: String,
+    pub number: u32,
+}
+
+impl GhIssueReopenArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} {}", self.repo, self.number);
+        Ok(gh_issue_reopen(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gh_issue_comment",
+    description = "Post a comment on a GitHub issue."
+)]
+pub struct GhIssueCommentArgs {
+    pub repo: String,
+    pub number: u32,
+    pub body: String,
+}
+
+impl GhIssueCommentArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} {} | {}", self.repo, self.number, self.body);
+        Ok(gh_issue_comment(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gh_pr_create",
+    description = "Create a GitHub pull request. head is the source branch (e.g. \"feature-foo\"), base is the target (usually \"main\")."
+)]
+pub struct GhPrCreateArgs {
+    pub repo: String,
+    pub title: String,
+    pub head: String,
+    pub base: String,
+}
+
+impl GhPrCreateArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!(
+            "{} | {} | {} | {}",
+            self.repo, self.title, self.head, self.base
+        );
+        Ok(gh_pr_create(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gh_pr_close",
+    description = "Close a GitHub pull request without merging."
+)]
+pub struct GhPrCloseArgs {
+    pub repo: String,
+    pub number: u32,
+}
+
+impl GhPrCloseArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} {}", self.repo, self.number);
+        Ok(gh_pr_close(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gh_pr_comment",
+    description = "Post a comment on a GitHub PR's conversation tab."
+)]
+pub struct GhPrCommentArgs {
+    pub repo: String,
+    pub number: u32,
+    pub body: String,
+}
+
+impl GhPrCommentArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} {} | {}", self.repo, self.number, self.body);
+        Ok(gh_pr_comment(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum PrMergeMethod {
+    Merge,
+    Squash,
+    Rebase,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gh_pr_merge",
+    description = "Merge a GitHub PR. Destructive to the upstream branch — writes to shared state. method defaults to \"merge\"; other options are \"squash\" and \"rebase\"."
+)]
+pub struct GhPrMergeArgs {
+    pub repo: String,
+    pub number: u32,
+    #[serde(default = "default_pr_merge_method")]
+    pub method: PrMergeMethod,
+}
+
+fn default_pr_merge_method() -> PrMergeMethod {
+    PrMergeMethod::Merge
+}
+
+impl GhPrMergeArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let method_str = match self.method {
+            PrMergeMethod::Merge => "merge",
+            PrMergeMethod::Squash => "squash",
+            PrMergeMethod::Rebase => "rebase",
+        };
+        let param = format!("{} {} | {}", self.repo, self.number, method_str);
+        Ok(gh_pr_merge(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gh_project_list",
+    description = "List GitHub projects for an owner (classic Projects API)."
+)]
+pub struct GhProjectListArgs {
+    pub owner: String,
+}
+
+impl GhProjectListArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(gh_project_list(ctx.db, &self.owner).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gh_project_view",
+    description = "View a specific GitHub project by owner and number."
+)]
+pub struct GhProjectViewArgs {
+    pub owner: String,
+    pub number: u32,
+}
+
+impl GhProjectViewArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} {}", self.owner, self.number);
+        Ok(gh_project_view(ctx.db, &param).await)
+    }
+}
+
+// -- Filesystem tools ---------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "file_read",
+    description = "Read a file or list a directory. offset starts the read at a byte position; limit caps the number of bytes returned. Unrestricted read path."
+)]
+pub struct FileReadArgs {
+    pub path: String,
+    #[serde(default)]
+    pub offset: Option<u64>,
+    #[serde(default)]
+    pub limit: Option<u64>,
+}
+
+impl FileReadArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let mut param = self.path;
+        if let Some(o) = self.offset {
+            param = format!("{}|{}", param, o);
+            if let Some(l) = self.limit {
+                param = format!("{}|{}", param, l);
+            }
+        } else if self.limit.is_some() {
+            // Edge case: limit without offset — retain both in the legacy format.
+            param = format!("{}|0|{}", param, self.limit.unwrap());
+        }
+        Ok(file_read(&param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "file_write",
+    description = "Write (overwrite) a file. Workspace restricted. Use \\n for newlines, \\t for tabs — these are expanded before writing."
+)]
+pub struct FileWriteArgs {
+    pub path: String,
+    pub content: String,
+}
+
+impl FileWriteArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} | {}", self.path, self.content);
+        Ok(file_write(&param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "file_append",
+    description = "Append to a file (creates if missing). Workspace restricted. Use \\n for newlines."
+)]
+pub struct FileAppendArgs {
+    pub path: String,
+    pub content: String,
+}
+
+impl FileAppendArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} | {}", self.path, self.content);
+        Ok(file_append(&param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "file_delete",
+    description = "Delete a file (files only, not directories). Workspace restricted. Handles symlinks without following them."
+)]
+pub struct FileDeleteArgs {
+    pub path: String,
+}
+
+impl FileDeleteArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(file_delete(&self.path).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "file_move",
+    description = "Move or rename a file or directory. Workspace restricted on both paths."
+)]
+pub struct FileMoveArgs {
+    pub source: String,
+    pub destination: String,
+}
+
+impl FileMoveArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{}|{}", self.source, self.destination);
+        Ok(file_move(&param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "file_rename",
+    description = "Alias for file_move. Move or rename a file or directory under the workspace."
+)]
+pub struct FileRenameArgs {
+    pub source: String,
+    pub destination: String,
+}
+
+impl FileRenameArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        FileMoveArgs {
+            source: self.source,
+            destination: self.destination,
+        }
+        .run(ctx)
+        .await
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "file_symlink",
+    description = "Create a symbolic link at link_path pointing to target. Both paths workspace-restricted; dangling targets allowed."
+)]
+pub struct FileSymlinkArgs {
+    pub target: String,
+    pub link_path: String,
+}
+
+impl FileSymlinkArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{}|{}", self.target, self.link_path);
+        Ok(file_symlink(&param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "dir_delete",
+    description = "Remove a directory. By default refuses non-empty directories; force=true recursively deletes contents. Workspace restricted."
+)]
+pub struct DirDeleteArgs {
+    pub path: String,
+    #[serde(default)]
+    pub force: bool,
+}
+
+impl DirDeleteArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = if self.force {
+            format!("{} --force", self.path)
+        } else {
+            self.path
+        };
+        Ok(dir_delete(&param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "rmdir",
+    description = "Alias for dir_delete. Remove a directory; set force=true to recursively delete contents."
+)]
+pub struct RmdirArgs {
+    pub path: String,
+    #[serde(default)]
+    pub force: bool,
+}
+
+impl RmdirArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        DirDeleteArgs {
+            path: self.path,
+            force: self.force,
+        }
+        .run(ctx)
+        .await
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "mkdir",
+    description = "Create a directory (and parents as needed). Workspace restricted."
+)]
+pub struct MkdirArgs {
+    pub path: String,
+}
+
+impl MkdirArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(mkdir(&self.path).await)
+    }
+}
+
+#[cfg(test)]
+mod native_args_tests {
+    use super::*;
+
+    #[test]
+    fn git_clone_subpath_optional() {
+        let a: GitCloneArgs =
+            serde_json::from_value(serde_json::json!({"url": "https://github.com/x/y"})).unwrap();
+        assert_eq!(a.url, "https://github.com/x/y");
+        assert_eq!(a.subpath, None);
+
+        let b: GitCloneArgs = serde_json::from_value(serde_json::json!({
+            "url": "https://github.com/x/y", "subpath": "repos/y"
+        }))
+        .unwrap();
+        assert_eq!(b.subpath.as_deref(), Some("repos/y"));
+    }
+
+    #[test]
+    fn gh_pr_merge_method_default_merge() {
+        let a: GhPrMergeArgs = serde_json::from_value(serde_json::json!({
+            "repo": "x/y", "number": 42
+        }))
+        .unwrap();
+        assert!(matches!(a.method, PrMergeMethod::Merge));
+
+        let b: GhPrMergeArgs = serde_json::from_value(serde_json::json!({
+            "repo": "x/y", "number": 42, "method": "squash"
+        }))
+        .unwrap();
+        assert!(matches!(b.method, PrMergeMethod::Squash));
+    }
+
+    #[test]
+    fn git_branch_action_roundtrip() {
+        let list: GitBranchArgs =
+            serde_json::from_value(serde_json::json!({"path": "/embra/workspace/x"})).unwrap();
+        assert!(matches!(list.action, GitBranchAction::List));
+
+        let create: GitBranchArgs = serde_json::from_value(serde_json::json!({
+            "path": "/w/x", "action": "create", "name": "feature-foo"
+        }))
+        .unwrap();
+        assert!(matches!(create.action, GitBranchAction::Create));
+        assert_eq!(create.name.as_deref(), Some("feature-foo"));
+    }
+
+    #[test]
+    fn file_read_optional_offset_limit() {
+        let a: FileReadArgs =
+            serde_json::from_value(serde_json::json!({"path": "/tmp/x"})).unwrap();
+        assert!(a.offset.is_none());
+        assert!(a.limit.is_none());
+
+        let b: FileReadArgs = serde_json::from_value(serde_json::json!({
+            "path": "/tmp/x", "offset": 100, "limit": 500
+        }))
+        .unwrap();
+        assert_eq!(b.offset, Some(100));
+        assert_eq!(b.limit, Some(500));
+    }
+
+    #[test]
+    fn dir_delete_force_default_false() {
+        let a: DirDeleteArgs =
+            serde_json::from_value(serde_json::json!({"path": "/tmp/x"})).unwrap();
+        assert!(!a.force);
+
+        let b: DirDeleteArgs = serde_json::from_value(serde_json::json!({
+            "path": "/tmp/x", "force": true
+        }))
+        .unwrap();
+        assert!(b.force);
+    }
+
+    #[test]
+    fn engineering_tools_register() {
+        let names: Vec<&'static str> = inventory::iter::<crate::tools::registry::ToolDescriptor>()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        for expected in [
+            "git_clone", "git_status", "git_log", "git_add", "git_commit",
+            "git_push", "git_pull", "git_diff", "git_branch", "git_checkout",
+            "git_rm", "git_mv",
+            "plan", "tasks", "task_add", "task_done",
+            "gh_issues", "gh_prs", "gh_issue_create", "gh_issue_close",
+            "gh_issue_reopen", "gh_issue_comment",
+            "gh_pr_create", "gh_pr_close", "gh_pr_comment", "gh_pr_merge",
+            "gh_project_list", "gh_project_view",
+            "file_read", "file_write", "file_append", "file_delete",
+            "file_move", "file_rename", "file_symlink",
+            "dir_delete", "rmdir", "mkdir",
+        ] {
+            assert!(
+                names.contains(&expected),
+                "{} not registered in tool inventory",
+                expected
+            );
+        }
+    }
+}
