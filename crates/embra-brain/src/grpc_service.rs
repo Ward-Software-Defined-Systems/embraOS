@@ -609,10 +609,11 @@ async fn handle_request(
                             let _ = tx.send(Ok(ConversationResponse {
                                 response_type: Some(conversation_response::ResponseType::Tool(
                                     ToolExecution {
+                                        tool_use_id: id.clone(),
                                         tool_name: name.clone(),
-                                        input: serde_json::to_string(input).unwrap_or_default(),
+                                        input_json: serde_json::to_string(input).unwrap_or_default(),
                                         result: content.clone(),
-                                        success: !is_error,
+                                        is_error,
                                     }
                                 )),
                             })).await;

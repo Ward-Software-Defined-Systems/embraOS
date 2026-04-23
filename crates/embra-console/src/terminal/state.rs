@@ -110,6 +110,24 @@ impl DisplayMessage {
     pub fn tool_with_tz(name: &str, result: &str, tz_str: &str) -> Self {
         Self::new_with_tz("tool", format!("[{}] {}", name, result), tz_str)
     }
+
+    /// Native-tool-use render (NATIVE-TOOLS-01 Stage 7). Includes the
+    /// typed input JSON inline when non-empty and flags errors with an
+    /// explicit "ERR" marker. Timeline row:
+    /// `[ok git_status] {"path":"/tmp"} On branch main...`
+    pub fn tool_native(name: &str, input_json: &str, result: &str, is_error: bool, tz_str: &str) -> Self {
+        let marker = if is_error { "ERR" } else { "ok" };
+        let input_summary = if input_json.is_empty() || input_json == "{}" {
+            String::new()
+        } else {
+            format!(" {}", input_json)
+        };
+        Self::new_with_tz(
+            "tool",
+            format!("[{} {}]{} {}", marker, name, input_summary, result),
+            tz_str,
+        )
+    }
 }
 
 /// Full application state for the TUI
@@ -193,6 +211,63 @@ impl AppState {
             },
             AppMode::Learning => "Talk to your intelligence...",
             AppMode::Operational { .. } => "Type a message...",
+        }
+    }
+}
+
+#[cfg(test)]
+mod native_render_tests {
+    use super::*;
+
+    #[test]
+    fn tool_native_ok_no_args() {
+        let m = DisplayMessage::tool_native("system_status", "{}", "version 0.2.0", false, "UTC");
+        assert!(m.content.contains("[ok system_status]"));
+        assert!(!m.content.contains("[TOOL:"));
+        assert!(m.content.contains("version 0.2.0"));
+    }
+
+    #[test]
+    fn tool_native_ok_with_args_inlines_json() {
+        let m = DisplayMessage::tool_native(
+            "git_status",
+            r#"{"path":"/embra/workspace"}"#,
+            "clean",
+            false,
+            "UTC",
+        );
+        assert!(m.content.contains("[ok git_status]"));
+        assert!(m.content.contains(r#"{"path":"/embra/workspace"}"#));
+        assert!(!m.content.contains("[TOOL:"));
+    }
+
+    #[test]
+    fn tool_native_error_marker() {
+        let m = DisplayMessage::tool_native(
+            "git_push",
+            r#"{"path":"/nope"}"#,
+            "fatal: not a git repository",
+            true,
+            "UTC",
+        );
+        assert!(m.content.contains("[ERR git_push]"));
+    }
+
+    #[test]
+    fn tool_native_never_emits_literal_tag_syntax() {
+        for name in ["system_status", "recall", "git_status"] {
+            for input in [r#"{}"#, r#"{"query":"alerts"}"#] {
+                for result in ["some result", r#"contains [TOOL: text"#] {
+                    let m = DisplayMessage::tool_native(name, input, result, false, "UTC");
+                    // Render MUST NOT wrap the name in [TOOL:...] — that
+                    // pattern belongs to the deleted legacy dispatcher.
+                    assert!(
+                        !m.content.starts_with("[TOOL:"),
+                        "unexpected legacy prefix in render: {:?}",
+                        m.content
+                    );
+                }
+            }
         }
     }
 }
