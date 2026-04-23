@@ -530,6 +530,8 @@ async fn handle_request(
                             )),
                         })).await;
                     }
+                    // Native tool-use events — consumed by Stage 5's loop driver.
+                    StreamEvent::BlockComplete { .. } | StreamEvent::Complete { .. } => {}
                 }
             }
 
@@ -1320,6 +1322,8 @@ async fn stream_brain_to_grpc(
                     )),
                 })).await;
             }
+            // Native tool-use events — consumed by Stage 5's loop driver.
+            StreamEvent::BlockComplete { .. } | StreamEvent::Complete { .. } => {}
         }
     }
 
