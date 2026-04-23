@@ -5,6 +5,26 @@ use serde::{Deserialize, Serialize};
 use crate::brain::Message;
 use crate::db::WardsonDbClient;
 
+/// Session document format version.
+///
+/// Set to `CURRENT_SESSION_FORMAT` on every session created post-v7
+/// migration. Sessions written pre-v7 (pre-NATIVE-TOOLS-01) have an
+/// absent or `1` marker — those are frozen read-only. Future bumps
+/// for typed-block persistence or other schema changes increment this
+/// without requiring a new format_version ladder.
+pub const CURRENT_SESSION_FORMAT: u32 = 2;
+
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    #[error(
+        "session '{0}' is legacy (format_version < {}); it is readable but cannot be appended to. Create a new session to continue.",
+        CURRENT_SESSION_FORMAT
+    )]
+    LegacyReadOnly(String),
+    #[error("session IO: {0}")]
+    Io(#[from] anyhow::Error),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum SessionState {
     Active,
@@ -24,7 +44,16 @@ pub struct SessionMeta {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionHistory {
     pub session_name: String,
+    /// Schema marker. See [`CURRENT_SESSION_FORMAT`].
+    #[serde(default = "default_legacy_format_version")]
+    pub format_version: u32,
     pub turns: Vec<Message>,
+}
+
+fn default_legacy_format_version() -> u32 {
+    // Pre-v7 session docs lack this field; serde fills with 1 (legacy)
+    // so the read-only guard in append_message correctly rejects them.
+    1
 }
 
 pub struct SessionManager {
@@ -68,6 +97,7 @@ impl SessionManager {
 
         let history = SessionHistory {
             session_name: name.to_string(),
+            format_version: CURRENT_SESSION_FORMAT,
             turns: Vec::new(),
         };
 
@@ -93,28 +123,52 @@ impl SessionManager {
         }
     }
 
-    pub async fn append_message(&self, name: &str, message: &Message) -> Result<()> {
+    pub async fn append_message(
+        &self,
+        name: &str,
+        message: &Message,
+    ) -> Result<(), SessionError> {
         let collection = format!("sessions.{}.history", name);
-        let results = self.db.query(&collection, &serde_json::json!({})).await?;
+        let results = self
+            .db
+            .query(&collection, &serde_json::json!({}))
+            .await
+            .map_err(|e| SessionError::Io(e.into()))?;
 
         if let Some(doc) = results.into_iter().next() {
-            let mut history: SessionHistory = serde_json::from_value(doc.clone())?;
+            let history: SessionHistory = serde_json::from_value(doc.clone())
+                .map_err(|e| SessionError::Io(e.into()))?;
+
+            // Legacy session freeze (NATIVE-TOOLS-01 Stage 8). Sessions
+            // created before v7 migration have format_version = 1 (either
+            // stamped by run_v7_native_tools or defaulted via serde).
+            // Their content may contain [TOOL:...] strings from the
+            // legacy dispatcher; appending new turns would interleave
+            // incompatible formats. Read-only is the locked policy.
+            if history.format_version < CURRENT_SESSION_FORMAT {
+                return Err(SessionError::LegacyReadOnly(name.to_string()));
+            }
+
+            let mut history = history;
             history.turns.push(message.clone());
 
-            // Get the document ID
             if let Some(id) = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()) {
                 self.db
-                    .update(&collection, id, &serde_json::to_value(&history)?)
-                    .await?;
+                    .update(&collection, id, &serde_json::to_value(&history)
+                        .map_err(|e| SessionError::Io(e.into()))?)
+                    .await
+                    .map_err(|e| SessionError::Io(e.into()))?;
             }
         }
 
-        // Update last_active on meta
+        // Update last_active on meta. Non-fatal if it fails — the history
+        // write is the source of truth for append_message's success.
         let meta_collection = format!("sessions.{}.meta", name);
         let meta_results = self
             .db
             .query(&meta_collection, &serde_json::json!({}))
-            .await?;
+            .await
+            .map_err(|e| SessionError::Io(e.into()))?;
         if let Some(meta_doc) = meta_results.into_iter().next() {
             let id = meta_doc
                 .get("_id")
@@ -122,11 +176,14 @@ impl SessionManager {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
             if let Some(id) = id {
-                let mut meta: SessionMeta = serde_json::from_value(meta_doc)?;
+                let mut meta: SessionMeta = serde_json::from_value(meta_doc)
+                    .map_err(|e| SessionError::Io(e.into()))?;
                 meta.last_active = Utc::now();
                 self.db
-                    .update(&meta_collection, &id, &serde_json::to_value(&meta)?)
-                    .await?;
+                    .update(&meta_collection, &id, &serde_json::to_value(&meta)
+                        .map_err(|e| SessionError::Io(e.into()))?)
+                    .await
+                    .map_err(|e| SessionError::Io(e.into()))?;
             }
         }
 
@@ -203,5 +260,57 @@ impl SessionManager {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod format_version_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn pre_v7_doc_without_format_version_defaults_to_legacy_marker() {
+        let raw = json!({
+            "session_name": "old-session",
+            "turns": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+            ],
+        });
+        let h: SessionHistory = serde_json::from_value(raw).unwrap();
+        assert_eq!(
+            h.format_version, 1,
+            "legacy docs (no format_version field) must deserialize to 1"
+        );
+        assert!(
+            h.format_version < CURRENT_SESSION_FORMAT,
+            "legacy marker must be strictly below CURRENT_SESSION_FORMAT"
+        );
+    }
+
+    #[test]
+    fn post_v7_doc_round_trips_format_version() {
+        let h = SessionHistory {
+            session_name: "new-session".into(),
+            format_version: CURRENT_SESSION_FORMAT,
+            turns: vec![],
+        };
+        let serialized = serde_json::to_value(&h).unwrap();
+        assert_eq!(serialized["format_version"], CURRENT_SESSION_FORMAT);
+        let restored: SessionHistory = serde_json::from_value(serialized).unwrap();
+        assert_eq!(restored.format_version, CURRENT_SESSION_FORMAT);
+    }
+
+    #[test]
+    fn explicitly_stamped_legacy_format_version_deserializes() {
+        // Matches what run_v7_native_tools writes when stamping
+        // pre-migration sessions.
+        let raw = json!({
+            "session_name": "stamped",
+            "format_version": 1,
+            "turns": [],
+        });
+        let h: SessionHistory = serde_json::from_value(raw).unwrap();
+        assert_eq!(h.format_version, 1);
     }
 }

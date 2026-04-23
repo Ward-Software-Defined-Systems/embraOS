@@ -4,7 +4,7 @@ use tracing::{error, info, warn};
 
 use crate::db::{WardsonDbClient, WardsonDbError};
 
-const CURRENT_SCHEMA_VERSION: u32 = 6;
+const CURRENT_SCHEMA_VERSION: u32 = 7;
 
 /// Run all pending migrations. Each migration is idempotent.
 pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
@@ -56,6 +56,15 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
         // v6: expression panel (EXPR-01) — singleton ui.expression
         run_v6_expression_panel(db).await?;
         set_schema_version(db, 6).await?;
+    }
+
+    if current_version < 7 {
+        // v7 (NATIVE-TOOLS-01): migrate crons to {command_name, command_args}
+        // and stamp format_version: 1 on pre-migration sessions (legacy,
+        // read-only post-v7). New sessions created post-migration write
+        // format_version: 2.
+        run_v7_native_tools(db).await?;
+        set_schema_version(db, 7).await?;
     }
 
     info!("Migrations complete. Schema version: {}", CURRENT_SCHEMA_VERSION);
@@ -594,4 +603,134 @@ async fn run_v6_expression_panel(db: &WardsonDbClient) -> Result<()> {
 
     info!("Migration v6: expression panel complete");
     Ok(())
+}
+
+/// Migration v7 (NATIVE-TOOLS-01): two steps.
+///
+/// 1. `crons` collection: every doc with a legacy `command` string field
+///    gets `command_name` + `command_args` fields. Naked tool names
+///    ("system_status") map to `command_args: {}`. Legacy strings with
+///    args ("recall alerts") are parsed as name + space-joined rest and
+///    stored as `command_args: {"_legacy_raw": "<rest>"}` for the operator
+///    to re-schedule after inspecting. Already-migrated docs
+///    (command_name present) are skipped.
+///
+/// 2. `sessions.*.history` collections: every doc without a
+///    `format_version` field gets stamped with `format_version: 1`. This
+///    is the legacy marker — post-migration SessionManager rejects writes
+///    to any session whose format_version is < 2.
+async fn run_v7_native_tools(db: &WardsonDbClient) -> Result<()> {
+    info!("Running migration v7: native tool-use");
+
+    // Step 1: crons schema migration.
+    if db.collection_exists("crons").await.unwrap_or(false) {
+        let docs = db
+            .query("crons", &serde_json::json!({}))
+            .await
+            .unwrap_or_default();
+        let mut migrated = 0usize;
+        let mut legacy_raw = 0usize;
+        for doc in docs {
+            if doc.get("command_name").is_some() {
+                continue; // already migrated
+            }
+            let Some(id) = doc.get("_id").and_then(|v| v.as_str()) else {
+                warn!("Migration v7: cron doc without _id, skipping");
+                continue;
+            };
+            let command = doc
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let (name, args) = match command.split_once(' ') {
+                None => (command.clone(), serde_json::json!({})),
+                Some((n, rest)) => (
+                    n.to_string(),
+                    serde_json::json!({ "_legacy_raw": rest.trim() }),
+                ),
+            };
+            if args.get("_legacy_raw").is_some() {
+                legacy_raw += 1;
+            }
+            let patch = serde_json::json!({
+                "command_name": name,
+                "command_args": args,
+            });
+            if let Err(e) = db.patch_document("crons", id, &patch).await {
+                warn!("Migration v7: failed to patch cron {}: {}", id, e);
+                continue;
+            }
+            migrated += 1;
+        }
+        info!(
+            "Migration v7: crons migrated (patched={}, legacy_raw={})",
+            migrated, legacy_raw
+        );
+    }
+
+    // Step 2: session format_version stamping.
+    let collections = db.list_collections().await.unwrap_or_default();
+    let mut stamped = 0usize;
+    for col in collections {
+        if !col.starts_with("sessions.") || !col.ends_with(".history") {
+            continue;
+        }
+        let docs = db.query(&col, &serde_json::json!({})).await.unwrap_or_default();
+        for doc in docs {
+            if doc.get("format_version").is_some() {
+                continue;
+            }
+            let Some(id) = doc.get("_id").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let patch = serde_json::json!({ "format_version": 1 });
+            if let Err(e) = db.patch_document(&col, id, &patch).await {
+                warn!("Migration v7: failed to stamp {}/{}: {}", col, id, e);
+                continue;
+            }
+            stamped += 1;
+        }
+    }
+    info!("Migration v7: stamped {} legacy session(s) with format_version=1", stamped);
+
+    info!("Migration v7: native tool-use complete");
+    Ok(())
+}
+
+#[cfg(test)]
+mod v7_tests {
+    use serde_json::{json, Value};
+
+    fn split_legacy_command(command: &str) -> (String, Value) {
+        match command.split_once(' ') {
+            None => (command.to_string(), json!({})),
+            Some((n, rest)) => (
+                n.to_string(),
+                json!({ "_legacy_raw": rest.trim() }),
+            ),
+        }
+    }
+
+    #[test]
+    fn naked_command_no_legacy_args() {
+        let (name, args) = split_legacy_command("system_status");
+        assert_eq!(name, "system_status");
+        assert_eq!(args, json!({}));
+    }
+
+    #[test]
+    fn command_with_arg_preserves_raw() {
+        let (name, args) = split_legacy_command("recall alerts");
+        assert_eq!(name, "recall");
+        assert_eq!(args["_legacy_raw"], "alerts");
+    }
+
+    #[test]
+    fn command_with_multiple_args_preserves_trailing() {
+        let (name, args) = split_legacy_command("port_scan localhost web");
+        assert_eq!(name, "port_scan");
+        assert_eq!(args["_legacy_raw"], "localhost web");
+    }
 }

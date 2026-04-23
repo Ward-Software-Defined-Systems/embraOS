@@ -663,9 +663,30 @@ async fn handle_request(
             // on re-runs if the user asks again).
             {
                 let mgr = session_mgr.read().await;
-                let _ = mgr
+                let append_outcome = mgr
                     .append_message(&session_name, &Message::user(&msg.content))
                     .await;
+                if let Err(crate::sessions::SessionError::LegacyReadOnly(ref sess)) =
+                    append_outcome
+                {
+                    warn!(
+                        target: "sessions",
+                        session = %sess,
+                        "legacy session rejected append; surfacing to client"
+                    );
+                    let _ = tx.send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::System(
+                            SystemMessage {
+                                content: format!(
+                                    "Session '{}' is legacy (pre-native-tools) and is read-only. Create a new session to continue.",
+                                    sess
+                                ),
+                                msg_type: SystemMessageType::Error as i32,
+                            }
+                        )),
+                    })).await;
+                    return Ok(());
+                }
                 let final_text = if last_response_text.trim().is_empty() {
                     "(no response)".to_string()
                 } else {

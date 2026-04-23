@@ -26,7 +26,7 @@ use grpc_service::BrainGrpcService;
 
 use embra_common::proto::brain::brain_service_server::BrainServiceServer;
 use tonic::transport::Server;
-use tracing::{info, warn, debug};
+use tracing::{info, warn, debug, error};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -90,6 +90,17 @@ async fn main() -> anyhow::Result<()> {
     // Run schema migrations
     migrations::run_migrations(&db).await?;
     info!("Migrations complete");
+
+    // Write the native tool-use registry snapshot to tools.registry. Must
+    // run after migrations (v7 stamps legacy session format_version) and
+    // before the gRPC server accepts connections. Idempotent on every boot.
+    match tools::registry::write_snapshot(&db).await {
+        Ok(_) => info!(
+            "Tools registry snapshot written ({} tools)",
+            tools::registry::tool_count()
+        ),
+        Err(e) => error!("Failed to write tools.registry snapshot: {e}"),
+    }
 
     // Set HOME to writable workspace so git/ssh config persists on DATA partition
     // SAFETY: called once at startup before multi-threaded work begins

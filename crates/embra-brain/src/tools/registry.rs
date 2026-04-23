@@ -95,3 +95,57 @@ pub async fn dispatch(
     let raw = (desc.handler)(input, ctx).await?;
     Ok(apply_max_size(raw))
 }
+
+/// Write the current tool registry snapshot to WardSONDB's `tools.registry`
+/// collection. Idempotent — overwrites any previous snapshot on every boot.
+/// Replaces the old Learning-Mode Phase 4 placeholder doc with the full
+/// macro-generated schema set (locked decision in NATIVE-TOOLS-01).
+///
+/// Called once from `main.rs` immediately after `run_migrations` completes
+/// and before the gRPC server accepts connections.
+pub async fn write_snapshot(db: &crate::db::WardsonDbClient) -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    let tools: Vec<serde_json::Value> = all_descriptors()
+        .map(|d| {
+            serde_json::json!({
+                "name": d.name,
+                "description": d.description,
+                "input_schema": (d.input_schema)(),
+            })
+        })
+        .collect();
+
+    let snapshot = serde_json::json!({
+        "_id": "registry",
+        "format_version": 2,
+        "generated_at": chrono::Utc::now().to_rfc3339(),
+        "tool_count": tools.len(),
+        "tools": tools,
+    });
+
+    if !db
+        .collection_exists("tools.registry")
+        .await
+        .unwrap_or(false)
+    {
+        db.create_collection("tools.registry")
+            .await
+            .context("create tools.registry collection")?;
+    }
+
+    // Try update first (well-known _id "registry"), fall back to write for
+    // first-ever boot. WardSONDB's update is idempotent-ish: replaces doc.
+    match db
+        .update("tools.registry", "registry", &snapshot)
+        .await
+    {
+        Ok(_) => Ok(()),
+        Err(_) => {
+            db.write("tools.registry", &snapshot)
+                .await
+                .context("write tools.registry snapshot")?;
+            Ok(())
+        }
+    }
+}
