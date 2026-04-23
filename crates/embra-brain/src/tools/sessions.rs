@@ -1222,3 +1222,245 @@ pub async fn session_extract(db: &WardsonDbClient, param: &str) -> String {
         formatted
     )
 }
+
+// ── Native tool-use registrations (NATIVE-TOOLS-01) ──
+
+use embra_tool_macro::embra_tool;
+use embra_tools_core::DispatchError;
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+use crate::tools::registry::DispatchContext;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "session_list",
+    description = "List all sessions with turn counts, status, and dates."
+)]
+pub struct SessionListArgs {}
+
+impl SessionListArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(session_list(ctx.db).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "session_read",
+    description = "Read session transcript. range is an optional turn range like \"1-20\", \"1-\", or \"5\"; when absent, the last 30 turns are returned."
+)]
+pub struct SessionReadArgs {
+    pub name: String,
+    #[serde(default)]
+    pub range: String,
+}
+
+impl SessionReadArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = if self.range.is_empty() {
+            self.name
+        } else {
+            format!("{} {}", self.name, self.range)
+        };
+        Ok(session_read(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "session_search",
+    description = "Full-text search across sessions. session (optional) narrows the scope to a single session."
+)]
+pub struct SessionSearchArgs {
+    pub query: String,
+    /// Optional session name to scope the search.
+    #[serde(default)]
+    pub session: String,
+}
+
+impl SessionSearchArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = if self.session.is_empty() {
+            self.query
+        } else {
+            format!("{} {}", self.query, self.session)
+        };
+        Ok(session_search(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "session_meta",
+    description = "Structured metadata for a session: turn count, created-at, last activity."
+)]
+pub struct SessionMetaArgs {
+    pub name: String,
+}
+
+impl SessionMetaArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(session_meta(ctx.db, &self.name).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "session_delta",
+    description = "Return turns added to a session since a given turn number (useful for incremental follow-up)."
+)]
+pub struct SessionDeltaArgs {
+    pub name: String,
+    pub since_turn: u32,
+}
+
+impl SessionDeltaArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} {}", self.name, self.since_turn);
+        Ok(session_delta(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "memory_scan",
+    description = "Inventory memory entries: counts, tags, age distribution, duplicate candidates. tag (optional) filters to entries with that tag."
+)]
+pub struct MemoryScanArgs {
+    #[serde(default)]
+    pub tag: String,
+}
+
+impl MemoryScanArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(memory_scan(ctx.db, &self.tag).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "memory_dedup",
+    description = "Find duplicate memory entries and propose merges (read-only, no writes). ids (optional) is a comma-separated list to narrow the check."
+)]
+pub struct MemoryDedupArgs {
+    /// Comma-separated memory entry ids to restrict the dedup check.
+    #[serde(default)]
+    pub ids: String,
+}
+
+impl MemoryDedupArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(memory_dedup(ctx.db, &self.ids).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "session_summarize",
+    description = "Generate or retrieve a structured summary for a session."
+)]
+pub struct SessionSummarizeArgs {
+    pub name: String,
+}
+
+impl SessionSummarizeArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(session_summarize(ctx.db, &self.name).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "session_summary_save",
+    description = "Save a generated session summary as JSON to the summaries collection."
+)]
+pub struct SessionSummarySaveArgs {
+    pub name: String,
+    /// Summary as a JSON object (serialized as string for tool transport).
+    pub summary_json: String,
+}
+
+impl SessionSummarySaveArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} | {}", self.name, self.summary_json);
+        Ok(session_summary_save(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "session_extract",
+    description = "Extract durable learnings from a session into memory. range (optional) narrows to a specific turn range like \"10-30\"."
+)]
+pub struct SessionExtractArgs {
+    pub name: String,
+    #[serde(default)]
+    pub range: String,
+}
+
+impl SessionExtractArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = if self.range.is_empty() {
+            self.name
+        } else {
+            format!("{} {}", self.name, self.range)
+        };
+        Ok(session_extract(ctx.db, &param).await)
+    }
+}
+
+#[cfg(test)]
+mod native_args_tests {
+    use super::*;
+
+    #[test]
+    fn session_read_range_optional() {
+        let a: SessionReadArgs =
+            serde_json::from_value(serde_json::json!({"name": "main"})).unwrap();
+        assert_eq!(a.name, "main");
+        assert_eq!(a.range, "");
+
+        let b: SessionReadArgs = serde_json::from_value(serde_json::json!({
+            "name": "main", "range": "1-20"
+        }))
+        .unwrap();
+        assert_eq!(b.range, "1-20");
+    }
+
+    #[test]
+    fn session_delta_requires_since_turn() {
+        let a: SessionDeltaArgs = serde_json::from_value(serde_json::json!({
+            "name": "main", "since_turn": 42
+        }))
+        .unwrap();
+        assert_eq!(a.since_turn, 42);
+
+        let err =
+            serde_json::from_value::<SessionDeltaArgs>(serde_json::json!({"name": "main"}))
+                .unwrap_err();
+        assert!(err.to_string().contains("since_turn"));
+    }
+
+    #[test]
+    fn session_tools_register() {
+        let names: Vec<&'static str> = inventory::iter::<crate::tools::registry::ToolDescriptor>()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        for expected in [
+            "session_list",
+            "session_read",
+            "session_search",
+            "session_meta",
+            "session_delta",
+            "memory_scan",
+            "memory_dedup",
+            "session_summarize",
+            "session_summary_save",
+            "session_extract",
+        ] {
+            assert!(names.contains(&expected), "{} not registered", expected);
+        }
+    }
+}
