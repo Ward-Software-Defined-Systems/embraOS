@@ -21,34 +21,6 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, warn};
 
-/// Truncate a tag string for log output so arbitrary-length user content
-/// doesn't blow up log lines.
-fn log_tag(tag: &str) -> String {
-    truncate_for_log(tag, 200)
-}
-
-/// Truncate a longer text preview (e.g. the full streamed Brain response) for
-/// log output. Larger limit than `log_tag` so correlation with an extracted
-/// tag is unambiguous — the surrounding Brain text tells the whole story.
-fn log_response_preview(text: &str) -> String {
-    truncate_for_log(text, 500)
-}
-
-/// Char-boundary-safe truncation for tracing output. Returns the input as-is
-/// when it already fits; otherwise cuts at the nearest valid char boundary
-/// under `limit` and appends a hint at how many bytes were dropped.
-fn truncate_for_log(text: &str, limit: usize) -> String {
-    if text.len() <= limit {
-        text.to_string()
-    } else {
-        let mut end = limit;
-        while end > 0 && !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        format!("{}…(+{} bytes)", &text[..end], text.len() - end)
-    }
-}
-
 pub struct BrainGrpcService {
     db: Arc<WardsonDbClient>,
     session_manager: Arc<RwLock<SessionManager>>,
@@ -561,139 +533,13 @@ async fn handle_request(
                 }
             }
 
-            // Bounded tool feedback loop — extract tags, dispatch, feed results back,
-            // then re-call Brain if tools produced output. Repeat until no more tools
-            // or MAX_TOOL_ITERATIONS is reached.
-            const MAX_TOOL_ITERATIONS: usize = 10;
-
-            let mut current_response = full_response;
-            for iteration in 0..MAX_TOOL_ITERATIONS {
-                // FIX-01 diagnostic: log the Brain-stream content the parser is
-                // about to scan. Paired with the `dispatch:start` log line below,
-                // this settles whether an unsolicited dispatch came from an echo
-                // of history content, retrieved context, or a generated tag —
-                // the preview shows the verbatim text that produced the match.
-                info!(
-                    target: "dispatch",
-                    session = %session_name,
-                    iteration = iteration,
-                    response_bytes = current_response.len(),
-                    response_preview = %log_response_preview(&current_response),
-                    "dispatch:response_preview"
-                );
-                let tags = tools::extract_tool_tags(&current_response);
-                debug!(
-                    target: "dispatch",
-                    session = %session_name,
-                    iteration = iteration,
-                    tag_count = tags.len(),
-                    "extracted tool tags"
-                );
-                if tags.is_empty() {
-                    break;
-                }
-
-                // Dispatch tools and stream ToolExecution events.
-                // Each dispatch call is bracketed by `dispatch:start` / `dispatch:end`
-                // log lines so a transient non-execution (Embra_Debug #9 finding 5)
-                // can be localized: no `dispatch:start` → drop before dispatch; no
-                // `dispatch:end` → hang during dispatch; no ToolExecution send →
-                // response-transport failure.
-                let mut tool_results = String::new();
-                for tag in &tags {
-                    let tag_preview = log_tag(tag);
-                    info!(
-                        target: "dispatch",
-                        session = %session_name,
-                        tag = %tag_preview,
-                        "dispatch:start"
-                    );
-                    let started = std::time::Instant::now();
-                    let dispatch_result =
-                        tools::dispatch(tag, db, &loaded_config, &session_name).await;
-                    let elapsed_ms = started.elapsed().as_millis() as u64;
-                    info!(
-                        target: "dispatch",
-                        session = %session_name,
-                        tag = %tag_preview,
-                        elapsed_ms,
-                        matched = dispatch_result.is_some(),
-                        "dispatch:end"
-                    );
-                    if let Some(result) = dispatch_result {
-                        debug!(
-                            target: "dispatch",
-                            session = %session_name,
-                            tag = %tag_preview,
-                            result_bytes = result.len(),
-                            "sending ToolExecution event"
-                        );
-                        let _ = tx.send(Ok(ConversationResponse {
-                            response_type: Some(conversation_response::ResponseType::Tool(
-                                ToolExecution {
-                                    tool_name: tag.clone(),
-                                    input: String::new(),
-                                    result: result.clone(),
-                                    success: true,
-                                }
-                            )),
-                        })).await;
-                        tool_results.push_str(&result);
-                        tool_results.push('\n');
-                    }
-                }
-
-                if tool_results.is_empty() {
-                    break;
-                }
-
-                // Feed tool results back to Brain for continuation.
-                // All tool outputs from this iteration are concatenated into a
-                // single [SYSTEM] message by design: this amortizes the extra
-                // Brain roundtrip across N tools. If a tool needs isolated
-                // contextual feedback, emit its [TOOL:...] tag in its own turn.
-                let feedback = format!("[SYSTEM] Tool results:\n{}", tool_results);
-                messages.push(Message::assistant(&current_response));
-                messages.push(Message::user(&feedback));
-
-                let mut brain_rx_cont = brain.send_message_streaming(&messages).await
-                    .map_err(|e| anyhow::anyhow!("Brain continuation failed (iteration {}): {}", iteration + 1, e))?;
-
-                let mut continuation = String::new();
-                while let Some(event) = brain_rx_cont.recv().await {
-                    match event {
-                        StreamEvent::Token(text) => {
-                            continuation.push_str(&text);
-                            let _ = tx.send(Ok(ConversationResponse {
-                                response_type: Some(conversation_response::ResponseType::Token(
-                                    StreamToken { text }
-                                )),
-                            })).await;
-                        }
-                        StreamEvent::Done(full) => {
-                            continuation = full;
-                            let _ = tx.send(Ok(ConversationResponse {
-                                response_type: Some(conversation_response::ResponseType::Done(
-                                    StreamDone { full_response: continuation.clone() }
-                                )),
-                            })).await;
-                        }
-                        StreamEvent::Error(err) => {
-                            let _ = tx.send(Ok(ConversationResponse {
-                                response_type: Some(conversation_response::ResponseType::System(
-                                    SystemMessage {
-                                        content: format!("Brain error: {}", err),
-                                        msg_type: SystemMessageType::Error as i32,
-                                    }
-                                )),
-                            })).await;
-                            break;
-                        }
-                    }
-                }
-
-                current_response = continuation;
-            }
+            // Tool dispatch loop deferred to Stage 5 of NATIVE-TOOLS-01 — the
+            // legacy [TOOL:...] parser has been removed in Stage 3. Stage 4
+            // adds native tool_use content blocks; Stage 5 rewrites this
+            // section as a stop_reason-driven loop that calls
+            // tools::registry::dispatch. Until Stage 5 lands, Brain responses
+            // are streamed to the user without any tool invocation pass.
+            let current_response = full_response;
 
             // Save complete conversation to session history
             {

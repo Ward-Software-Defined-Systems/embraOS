@@ -235,10 +235,39 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
             kg_traversal_depth_ceiling: 5,
             kg_edge_candidate_limit: 50,
         });
-        let tool_tag = format!("[TOOL:{}]", command);
-        let result = super::dispatch(&tool_tag, db, &cfg, "cron").await;
+        // Direct registry dispatch — no [TOOL:...] synthesis, no model round-trip.
+        // The stored `command` is a plain tool name for v0 crons (pre-v7 schema);
+        // any trailing words after the first space are discarded here with a
+        // warning. Stage 8's v7 schema migration adds structured
+        // {command_name, command_args} so complex-arg crons work cleanly.
+        let (command_name, extra) = match command.split_once(' ') {
+            Some((n, rest)) => (n.to_string(), rest.trim().to_string()),
+            None => (command.clone(), String::new()),
+        };
+        if !extra.is_empty() {
+            tracing::warn!(
+                target: "cron",
+                command = %command,
+                "legacy cron command has trailing args that the v0 executor cannot pass to registry::dispatch; re-schedule after v7 migration"
+            );
+        }
 
-        let result_text = result.unwrap_or_else(|| format!("Unknown command: {}", command));
+        let ctx = super::registry::DispatchContext {
+            db,
+            config: &cfg,
+            session_name: "cron",
+            config_tz: &cfg.timezone,
+        };
+        let result_text = match super::registry::dispatch(
+            &command_name,
+            serde_json::json!({}),
+            ctx,
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => format!("cron dispatch failed: {e}"),
+        };
         results.push(format!("embraCRON [{}]: {}", command, result_text));
 
         // Update last_run and next_run
