@@ -1736,6 +1736,7 @@ use crate::tools::registry::DispatchContext;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "git_clone",
+    is_side_effectful = true,
     description = "Clone a git repository into /embra/workspace/. HTTPS uses the stored GitHub token; SSH is also supported. subpath may be a bare directory name or a relative path like \"repos/foo\"; if omitted, the repo name is derived from the URL."
 )]
 pub struct GitCloneArgs {
@@ -1794,6 +1795,7 @@ impl GitLogArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "git_add",
+    is_side_effectful = true,
     description = "Stage files for commit in a workspace repository."
 )]
 pub struct GitAddArgs {
@@ -1812,6 +1814,7 @@ impl GitAddArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "git_commit",
+    is_side_effectful = true,
     description = "Commit staged changes in a workspace repository. The message may include \\n for newlines (expanded before git invocation) to create multi-paragraph messages with subject line + body."
 )]
 pub struct GitCommitArgs {
@@ -1829,6 +1832,7 @@ impl GitCommitArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "git_push",
+    is_side_effectful = true,
     description = "Push local commits to the remote branch of a workspace repository."
 )]
 pub struct GitPushArgs {
@@ -1844,6 +1848,7 @@ impl GitPushArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "git_pull",
+    is_side_effectful = true,
     description = "Pull from the remote branch into a workspace repository."
 )]
 pub struct GitPullArgs {
@@ -1891,6 +1896,7 @@ pub enum GitBranchAction {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "git_branch",
+    is_side_effectful = true,
     description = "List, create, or delete branches in a workspace repository. action=list returns current branches; action=create requires name; action=delete requires name and refuses unmerged branches."
 )]
 pub struct GitBranchArgs {
@@ -1925,6 +1931,7 @@ impl GitBranchArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "git_checkout",
+    is_side_effectful = true,
     description = "Switch to a branch in a workspace repository (refuses unclean working directory)."
 )]
 pub struct GitCheckoutArgs {
@@ -1942,6 +1949,7 @@ impl GitCheckoutArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "git_rm",
+    is_side_effectful = true,
     description = "Stage file removal in a workspace repository (git rm)."
 )]
 pub struct GitRmArgs {
@@ -1959,6 +1967,7 @@ impl GitRmArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "git_mv",
+    is_side_effectful = true,
     description = "git mv — tracked rename/move within a workspace repository. Preserves history and handles case-sensitive renames on case-insensitive filesystems."
 )]
 pub struct GitMvArgs {
@@ -1979,6 +1988,7 @@ impl GitMvArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "plan",
+    is_side_effectful = true,
     description = "Plan management. Without fields, lists all plans. With title (and optional description), creates a new plan."
 )]
 pub struct PlanArgs {
@@ -2018,6 +2028,7 @@ impl TasksArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "task_add",
+    is_side_effectful = true,
     description = "Create a new task. plan_id associates it with an existing plan."
 )]
 pub struct TaskAddArgs {
@@ -2039,6 +2050,7 @@ impl TaskAddArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "task_done",
+    is_side_effectful = true,
     description = "Mark a task as done by its id."
 )]
 pub struct TaskDoneArgs {
@@ -2087,6 +2099,7 @@ impl GhPrsArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "gh_issue_create",
+    is_side_effectful = true,
     description = "Create a GitHub issue in owner/repo."
 )]
 pub struct GhIssueCreateArgs {
@@ -2109,6 +2122,7 @@ impl GhIssueCreateArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "gh_issue_close",
+    is_side_effectful = true,
     description = "Close a GitHub issue by owner/repo and number."
 )]
 pub struct GhIssueCloseArgs {
@@ -2126,6 +2140,7 @@ impl GhIssueCloseArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "gh_issue_reopen",
+    is_side_effectful = true,
     description = "Reopen a previously-closed GitHub issue."
 )]
 pub struct GhIssueReopenArgs {
@@ -2143,6 +2158,7 @@ impl GhIssueReopenArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "gh_issue_comment",
+    is_side_effectful = true,
     description = "Post a comment on a GitHub issue."
 )]
 pub struct GhIssueCommentArgs {
@@ -2161,6 +2177,7 @@ impl GhIssueCommentArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "gh_pr_create",
+    is_side_effectful = true,
     description = "Create a GitHub pull request. head is the source branch (e.g. \"feature-foo\"), base is the target (usually \"main\")."
 )]
 pub struct GhPrCreateArgs {
@@ -2183,6 +2200,7 @@ impl GhPrCreateArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "gh_pr_close",
+    is_side_effectful = true,
     description = "Close a GitHub pull request without merging."
 )]
 pub struct GhPrCloseArgs {
@@ -2200,6 +2218,7 @@ impl GhPrCloseArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "gh_pr_comment",
+    is_side_effectful = true,
     description = "Post a comment on a GitHub PR's conversation tab."
 )]
 pub struct GhPrCommentArgs {
@@ -2226,6 +2245,7 @@ pub enum PrMergeMethod {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "gh_pr_merge",
+    is_side_effectful = true,
     description = "Merge a GitHub PR. Destructive to the upstream branch — writes to shared state. method defaults to \"merge\"; other options are \"squash\" and \"rebase\"."
 )]
 pub struct GhPrMergeArgs {
@@ -2317,6 +2337,7 @@ impl FileReadArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "file_write",
+    is_side_effectful = true,
     description = "Write (overwrite) a file. Workspace restricted. Use \\n for newlines, \\t for tabs — these are expanded before writing."
 )]
 pub struct FileWriteArgs {
@@ -2334,6 +2355,7 @@ impl FileWriteArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "file_append",
+    is_side_effectful = true,
     description = "Append to a file (creates if missing). Workspace restricted. Use \\n for newlines."
 )]
 pub struct FileAppendArgs {
@@ -2351,6 +2373,7 @@ impl FileAppendArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "file_delete",
+    is_side_effectful = true,
     description = "Delete a file (files only, not directories). Workspace restricted. Handles symlinks without following them."
 )]
 pub struct FileDeleteArgs {
@@ -2366,6 +2389,7 @@ impl FileDeleteArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "file_move",
+    is_side_effectful = true,
     description = "Move or rename a file or directory. Workspace restricted on both paths."
 )]
 pub struct FileMoveArgs {
@@ -2383,6 +2407,7 @@ impl FileMoveArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "file_rename",
+    is_side_effectful = true,
     description = "Alias for file_move. Move or rename a file or directory under the workspace."
 )]
 pub struct FileRenameArgs {
@@ -2404,6 +2429,7 @@ impl FileRenameArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "file_symlink",
+    is_side_effectful = true,
     description = "Create a symbolic link at link_path pointing to target. Both paths workspace-restricted; dangling targets allowed."
 )]
 pub struct FileSymlinkArgs {
@@ -2421,6 +2447,7 @@ impl FileSymlinkArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "dir_delete",
+    is_side_effectful = true,
     description = "Remove a directory. By default refuses non-empty directories; force=true recursively deletes contents. Workspace restricted."
 )]
 pub struct DirDeleteArgs {
@@ -2443,6 +2470,7 @@ impl DirDeleteArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "rmdir",
+    is_side_effectful = true,
     description = "Alias for dir_delete. Remove a directory; set force=true to recursively delete contents."
 )]
 pub struct RmdirArgs {
@@ -2465,6 +2493,7 @@ impl RmdirArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "mkdir",
+    is_side_effectful = true,
     description = "Create a directory (and parents as needed). Workspace restricted."
 )]
 pub struct MkdirArgs {

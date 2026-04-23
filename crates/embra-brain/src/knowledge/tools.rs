@@ -773,6 +773,7 @@ pub enum KnowledgePromoteKind {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "knowledge_promote",
+    is_side_effectful = true,
     description = "Promote an episodic memory entry to a semantic or procedural knowledge node. For kind=semantic, data is one of: fact, preference, decision, observation, pattern. For kind=procedural, data is a JSON object describing the procedure (preconditions, steps, outcomes)."
 )]
 pub struct KnowledgePromoteArgs {
@@ -796,6 +797,7 @@ impl KnowledgePromoteArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "knowledge_link",
+    is_side_effectful = true,
     description = "Create a directed, weighted, typed edge between two knowledge nodes. edge_type: enables | contradicts | refines | depends_on | related_to. weight is 0.0-1.0 indicating confidence."
 )]
 pub struct KnowledgeLinkArgs {
@@ -825,6 +827,7 @@ impl KnowledgeLinkArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "knowledge_unlink_edge",
+    is_side_effectful = true,
     description = "Delete edges. Provide either edge_id (removes one edge by its document id) OR the full triple — source_collection + source_id + edge_type + target_collection + target_id — which removes matching edges bidirectionally (for auto-derived symmetric types). edge_id takes precedence when both are provided."
 )]
 pub struct KnowledgeUnlinkEdgeArgs {
@@ -884,6 +887,7 @@ impl KnowledgeUnlinkEdgeArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "knowledge_unlink_node",
+    is_side_effectful = true,
     description = "Delete a semantic or procedural node and cascade-remove all edges referencing it. Prefer this over manually deleting edges when the node itself should go."
 )]
 pub struct KnowledgeUnlinkNodeArgs {
@@ -901,6 +905,7 @@ impl KnowledgeUnlinkNodeArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "knowledge_update",
+    is_side_effectful = true,
     description = "Update fields on a semantic or procedural node in place while preserving all referencing edges. Immutable fields (provenance, timestamps, access counters) are rejected. patch_json is a JSON object of the fields to patch."
 )]
 pub struct KnowledgeUpdateArgs {
@@ -1001,6 +1006,7 @@ impl KnowledgeGraphStatsArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "knowledge_sweep_orphans",
+    is_side_effectful = true,
     description = "Scan memory.edges and remove edges whose source or target doc no longer resolves. Orphans accumulate from pre-cascade forget calls and direct deletes that bypassed knowledge_unlink_node. Use dry_run=true to preview without deleting."
 )]
 pub struct KnowledgeSweepOrphansArgs {

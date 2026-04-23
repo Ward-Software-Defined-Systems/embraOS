@@ -1342,6 +1342,7 @@ impl SearchMemoryArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "remember",
+    is_side_effectful = true,
     description = "Save a note or fact to persistent memory. Hashtag tokens (e.g. #architecture, #soul) are extracted into the tags array; the remaining words become the content. Keep content to a single line."
 )]
 pub struct RememberArgs {
@@ -1358,6 +1359,7 @@ impl RememberArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "forget",
+    is_side_effectful = true,
     description = "Remove a specific memory entry by its id. Destructive; confirm with the user first."
 )]
 pub struct ForgetArgs {
@@ -1445,6 +1447,7 @@ pub enum DefineAction {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "define",
+    is_side_effectful = true,
     description = "Look up, save, or delete a definition. action=get with term to read, action=save with term+definition to create/update, action=delete with term to remove."
 )]
 pub struct DefineArgs {
@@ -1486,6 +1489,7 @@ pub enum DraftAction {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "draft",
+    is_side_effectful = true,
     description = "Save or delete a text draft. action=save with title+content creates or updates; action=delete with title removes a draft by title."
 )]
 pub struct DraftArgs {

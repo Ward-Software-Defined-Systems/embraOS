@@ -14,7 +14,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{
     parse::{Parse, ParseStream},
-    parse_macro_input, ItemStruct, LitStr, Result, Token,
+    parse_macro_input, ItemStruct, Lit, LitStr, Result, Token,
 };
 
 #[proc_macro_attribute]
@@ -24,6 +24,7 @@ pub fn embra_tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     let ident = &input.ident;
     let name = &args.name;
     let description = &args.description;
+    let is_side_effectful = args.is_side_effectful;
 
     let expanded = quote! {
         #input
@@ -33,6 +34,7 @@ pub fn embra_tool(attr: TokenStream, item: TokenStream) -> TokenStream {
                 crate::tools::registry::ToolDescriptor {
                     name: #name,
                     description: #description,
+                    is_side_effectful: #is_side_effectful,
                     input_schema: || {
                         ::serde_json::to_value(::schemars::schema_for!(#ident))
                             .expect("schema_for! must produce valid JSON")
@@ -56,25 +58,45 @@ pub fn embra_tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 struct EmbraToolArgs {
     name: LitStr,
     description: LitStr,
+    is_side_effectful: bool,
 }
 
 impl Parse for EmbraToolArgs {
     fn parse(input: ParseStream) -> Result<Self> {
         let mut name: Option<LitStr> = None;
         let mut description: Option<LitStr> = None;
+        let mut is_side_effectful: bool = false;
 
         while !input.is_empty() {
             let key: syn::Ident = input.parse()?;
             let _eq: Token![=] = input.parse()?;
-            let value: LitStr = input.parse()?;
-            match key.to_string().as_str() {
-                "name" => name = Some(value),
-                "description" => description = Some(value),
+            let key_str = key.to_string();
+            match key_str.as_str() {
+                "name" => {
+                    let v: LitStr = input.parse()?;
+                    name = Some(v);
+                }
+                "description" => {
+                    let v: LitStr = input.parse()?;
+                    description = Some(v);
+                }
+                "is_side_effectful" => {
+                    let lit: Lit = input.parse()?;
+                    match lit {
+                        Lit::Bool(b) => is_side_effectful = b.value,
+                        other => {
+                            return Err(syn::Error::new_spanned(
+                                other,
+                                "`is_side_effectful` must be a bool literal",
+                            ));
+                        }
+                    }
+                }
                 other => {
                     return Err(syn::Error::new(
                         key.span(),
                         format!(
-                            "unknown embra_tool key: `{other}` (expected `name` or `description`)"
+                            "unknown embra_tool key: `{other}` (expected `name`, `description`, or `is_side_effectful`)"
                         ),
                     ));
                 }
@@ -95,6 +117,10 @@ impl Parse for EmbraToolArgs {
             )
         })?;
 
-        Ok(EmbraToolArgs { name, description })
+        Ok(EmbraToolArgs {
+            name,
+            description,
+            is_side_effectful,
+        })
     }
 }

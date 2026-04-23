@@ -1451,6 +1451,75 @@ impl SessionExtractArgs {
     }
 }
 
+// turn_trace (NATIVE-TOOLS-01 follow-up) — expose the current turn's
+// tool-call trace to the Brain. Current turn is served from in-memory
+// state; prior turns fall back to the `tools.turn_trace` WardSONDB
+// collection populated by the dispatch site in grpc_service.rs.
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "turn_trace",
+    description = "Inspect tool calls made in the current or recent turns (tool name, args preview, outcome, elapsed_ms). turn_index_back=0 (default) returns the current turn in-memory; pass turn_index_back=1,2,... for prior turns from persisted history. session (optional) defaults to the current session."
+)]
+pub struct TurnTraceArgs {
+    /// Max entries to return (default 20, capped 100).
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Look back N turns from the current turn. 0 (default) reads the
+    /// current turn's in-memory trace; >=1 queries tools.turn_trace.
+    #[serde(default)]
+    pub turn_index_back: Option<usize>,
+    /// Narrow to a specific session. Default: current session.
+    #[serde(default)]
+    pub session: Option<String>,
+}
+
+impl TurnTraceArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let n = self.limit.unwrap_or(20).min(100);
+        let back = self.turn_index_back.unwrap_or(0);
+
+        if back == 0 && self.session.is_none() {
+            // Current turn — read the in-memory trace (cheap, no DB round-trip).
+            let entries: Vec<embra_tools_core::TraceEntry> = match ctx.trace.lock() {
+                Ok(g) => g.iter().rev().take(n).cloned().collect(),
+                Err(_) => Vec::new(),
+            };
+            if entries.is_empty() {
+                return Ok(
+                    "turn_trace (current turn): no tool calls dispatched yet this turn.".into(),
+                );
+            }
+            return Ok(
+                serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".into()),
+            );
+        }
+
+        // Prior turn or cross-session — query persistence.
+        let sess = self
+            .session
+            .unwrap_or_else(|| ctx.session_name.to_string());
+        let target_index = ctx.turn_index.saturating_sub(back);
+        let filter = serde_json::json!({
+            "filter": {"session": sess, "turn_index": target_index},
+            "limit": n,
+            "sort": {"started_at": 1},
+        });
+        let docs = ctx
+            .db
+            .query("tools.turn_trace", &filter)
+            .await
+            .unwrap_or_default();
+        if docs.is_empty() {
+            return Ok(format!(
+                "turn_trace (session='{}', turn_index={}): no entries.",
+                sess, target_index
+            ));
+        }
+        Ok(serde_json::to_string_pretty(&docs).unwrap_or_else(|_| "[]".into()))
+    }
+}
+
 #[cfg(test)]
 mod native_args_tests {
     use super::*;
@@ -1500,9 +1569,18 @@ mod native_args_tests {
             "session_summarize",
             "session_summary_save",
             "session_extract",
+            "turn_trace",
         ] {
             assert!(names.contains(&expected), "{} not registered", expected);
         }
+    }
+
+    #[test]
+    fn turn_trace_args_defaults() {
+        let a: TurnTraceArgs = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(a.limit.is_none());
+        assert!(a.turn_index_back.is_none());
+        assert!(a.session.is_none());
     }
 
     #[test]

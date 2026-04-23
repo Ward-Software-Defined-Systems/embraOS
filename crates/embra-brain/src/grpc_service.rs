@@ -497,6 +497,16 @@ async fn handle_request(
             let mut tool_iter: usize = 0;
             let mut last_response_text = String::new();
 
+            // Per-request turn trace. Interior mutability via Arc<Mutex>
+            // avoids &mut propagation through the `fn` ToolDescriptor
+            // handler signature. `turn_index` is stamped from the
+            // pre-request history length so every dispatch in this turn
+            // shares the same key (queryable later by the `turn_trace`
+            // tool).
+            let trace_handle: embra_tools_core::TurnTraceHandle =
+                embra_tools_core::new_turn_trace_handle();
+            let turn_index: usize = history.len();
+
             let first_rx = brain
                 .send_message_streaming_with_tools(&api_messages)
                 .await
@@ -516,7 +526,62 @@ async fn handle_request(
                     StopReason::EndTurn
                     | StopReason::MaxTokens
                     | StopReason::StopSequence
-                    | StopReason::Refusal => break,
+                    | StopReason::Refusal => {
+                        // #32 defense: detect empty-text terminal turns after
+                        // side-effectful work and emit a diagnostic token so
+                        // the user/model don't desync. The model legitimately
+                        // ends turn silently on pure-read flows, so the guard
+                        // requires at least one side-effectful success.
+                        let iter_has_text = current_response.content.iter().any(|b| {
+                            matches!(b, MessageBlock::Text { text } if !text.trim().is_empty())
+                        });
+                        let iter_has_tool_use = current_response
+                            .content
+                            .iter()
+                            .any(|b| matches!(b, MessageBlock::ToolUse { .. }));
+                        if !iter_has_text && !iter_has_tool_use {
+                            let side_effectful_count = trace_handle
+                                .lock()
+                                .map(|g| {
+                                    g.iter()
+                                        .filter(|e| !e.is_error)
+                                        .filter(|e| {
+                                            tools::registry::REGISTRY
+                                                .get(e.tool_name.as_str())
+                                                .map(|d| d.is_side_effectful)
+                                                .unwrap_or(false)
+                                        })
+                                        .count()
+                                })
+                                .unwrap_or(0);
+                            if side_effectful_count > 0 {
+                                let diagnostic = format!(
+                                    "(model ended turn silently after {} side-effectful tool call{}; see `turn_trace` for details)",
+                                    side_effectful_count,
+                                    if side_effectful_count == 1 { "" } else { "s" },
+                                );
+                                let _ = tx
+                                    .send(Ok(ConversationResponse {
+                                        response_type: Some(
+                                            conversation_response::ResponseType::Token(
+                                                StreamToken {
+                                                    text: diagnostic.clone(),
+                                                },
+                                            ),
+                                        ),
+                                    }))
+                                    .await;
+                                last_response_text = diagnostic;
+                                warn!(
+                                    target: "dispatch",
+                                    session = %session_name,
+                                    side_effectful_count,
+                                    "empty-text terminal turn after side-effectful tools"
+                                );
+                            }
+                        }
+                        break;
+                    }
 
                     StopReason::PauseTurn => {
                         warn!(
@@ -556,6 +621,7 @@ async fn handle_request(
                                 continue;
                             };
                             let started = std::time::Instant::now();
+                            let started_at_rfc = chrono::Utc::now().to_rfc3339();
                             info!(
                                 target: "dispatch",
                                 session = %session_name,
@@ -568,6 +634,8 @@ async fn handle_request(
                                 config: &loaded_config,
                                 session_name: &session_name,
                                 config_tz: &loaded_config.timezone,
+                                trace: &trace_handle,
+                                turn_index,
                             };
                             let outcome = tools::registry::dispatch(
                                 name,
@@ -606,12 +674,48 @@ async fn handle_request(
                                 is_error,
                                 "dispatch:end"
                             );
+
+                            // Record in the in-memory turn trace and persist
+                            // asynchronously to tools.turn_trace so cross-turn
+                            // introspection is available to the model.
+                            let input_json =
+                                serde_json::to_string(input).unwrap_or_default();
+                            let input_preview = preview_str(&input_json, 200);
+                            let result_preview = preview_str(&content, 200);
+                            let entry = embra_tools_core::TraceEntry {
+                                tool_name: name.clone(),
+                                tool_use_id: id.clone(),
+                                input_preview: input_preview.clone(),
+                                started_at: started_at_rfc.clone(),
+                                elapsed_ms,
+                                is_error,
+                                result_preview: result_preview.clone(),
+                            };
+                            if let Ok(mut guard) = trace_handle.lock() {
+                                guard.push_back(entry);
+                            }
+                            let persist_doc = serde_json::json!({
+                                "session": session_name.to_string(),
+                                "turn_index": turn_index,
+                                "tool_use_id": id.clone(),
+                                "tool_name": name.clone(),
+                                "input_preview": input_preview,
+                                "started_at": started_at_rfc,
+                                "elapsed_ms": elapsed_ms,
+                                "is_error": is_error,
+                                "result_preview": result_preview,
+                            });
+                            let db_clone = db.clone();
+                            tokio::spawn(async move {
+                                let _ = db_clone.write("tools.turn_trace", &persist_doc).await;
+                            });
+
                             let _ = tx.send(Ok(ConversationResponse {
                                 response_type: Some(conversation_response::ResponseType::Tool(
                                     ToolExecution {
                                         tool_use_id: id.clone(),
                                         tool_name: name.clone(),
-                                        input_json: serde_json::to_string(input).unwrap_or_default(),
+                                        input_json,
                                         result: content.clone(),
                                         is_error,
                                     }
@@ -1517,6 +1621,19 @@ fn legacy_message_to_api(m: &Message) -> ApiMessage {
             content: vec![block],
         },
     }
+}
+
+/// Truncate `s` to at most `max` bytes on a UTF-8 char boundary, appending an
+/// ellipsis when truncation occurred. Used to bound trace-entry previews.
+fn preview_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        return s.to_string();
+    }
+    let mut end = max;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
 }
 
 /// Extract the plain-text portion of an assistant response for session
