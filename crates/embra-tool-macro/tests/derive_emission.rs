@@ -15,6 +15,7 @@ mod tools {
         pub struct ToolDescriptor {
             pub name: &'static str,
             pub description: &'static str,
+            pub is_side_effectful: bool,
             pub input_schema: fn() -> serde_json::Value,
             pub handler: for<'a> fn(JsonValue, DispatchContext<'a>)
                 -> BoxFut<'a, Result<String, DispatchError>>,
@@ -51,6 +52,20 @@ impl TestToolArgs {
     }
 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[embra_tool(
+    name = "test_writer",
+    description = "Writer tool fixture for is_side_effectful coverage",
+    is_side_effectful = true
+)]
+pub struct TestWriterArgs {}
+
+impl TestWriterArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok("wrote".into())
+    }
+}
+
 fn find_test_descriptor() -> &'static ToolDescriptor {
     inventory::iter::<ToolDescriptor>()
         .into_iter()
@@ -63,6 +78,8 @@ fn descriptor_registered_in_inventory() {
     let d = find_test_descriptor();
     assert_eq!(d.name, "test_tool");
     assert_eq!(d.description, "A tool for macro tests");
+    // Default for `is_side_effectful` when the keyword is omitted.
+    assert!(!d.is_side_effectful);
 }
 
 #[test]
@@ -96,6 +113,15 @@ async fn handler_rejects_malformed_input() {
         Err(DispatchError::BadInput { tool, .. }) => assert_eq!(tool, "test_tool"),
         other => panic!("expected BadInput, got {other:?}"),
     }
+}
+
+#[test]
+fn writer_descriptor_marks_is_side_effectful() {
+    let d = inventory::iter::<ToolDescriptor>()
+        .into_iter()
+        .find(|d| d.name == "test_writer")
+        .expect("test_writer descriptor should be registered");
+    assert!(d.is_side_effectful);
 }
 
 #[test]
