@@ -78,9 +78,9 @@ pub async fn traverse(
             visited.insert(target_key.clone());
 
             let next_depth = depth + 1;
-            result_edges.push(edge.clone());
 
             if let Some(node) = load_graph_node(db, &edge.target_collection, &edge.target_id, next_depth).await {
+                result_edges.push(edge.clone());
                 result_nodes.push(node);
                 spawn_access_touch(
                     db.clone(),

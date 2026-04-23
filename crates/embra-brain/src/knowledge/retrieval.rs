@@ -92,18 +92,11 @@ pub async fn retrieve_relevant_knowledge(
         for doc in all_entries {
             let content = doc.get("content").and_then(|v| v.as_str()).unwrap_or("");
             if !content.to_lowercase().contains(&q_lower) { continue; }
-            // If promoted, include the promoted node instead.
-            if let Some(promoted) = doc.get("promoted_to") {
-                if !promoted.is_null() {
-                    let Some(coll) = promoted.get("collection").and_then(|v| v.as_str()) else { continue; };
-                    let Some(id) = promoted.get("id").and_then(|v| v.as_str()) else { continue; };
-                    if let Ok(pdoc) = db.read(coll, id).await {
-                        insert_collected(&mut collected, &pdoc, coll, "direct_query");
-                    }
-                    continue;
-                }
+            if let Some((pdoc, pcoll)) = redirect_if_promoted(db, &doc, "memory.entries").await {
+                insert_collected(&mut collected, &pdoc, &pcoll, "direct_query");
+            } else {
+                insert_collected(&mut collected, &doc, "memory.entries", "direct_query");
             }
-            insert_collected(&mut collected, &doc, "memory.entries", "direct_query");
         }
     }
 
@@ -116,7 +109,13 @@ pub async fn retrieve_relevant_knowledge(
                 if collected.contains_key(&key) { continue; }
                 // Load full doc for scoring fields.
                 if let Ok(doc) = db.read(&node.collection, &node.id).await {
-                    insert_collected(&mut collected, &doc, &node.collection, "graph_expansion");
+                    if let Some((pdoc, pcoll)) = redirect_if_promoted(db, &doc, &node.collection).await {
+                        let redir_key = (pcoll.clone(), pdoc.get("_id").and_then(|v| v.as_str()).unwrap_or_default().to_string());
+                        if collected.contains_key(&redir_key) { continue; }
+                        insert_collected(&mut collected, &pdoc, &pcoll, "graph_expansion");
+                    } else {
+                        insert_collected(&mut collected, &doc, &node.collection, "graph_expansion");
+                    }
                 }
             }
         }
@@ -178,6 +177,24 @@ fn insert_collected(
         node_type,
         source: source.to_string(),
     });
+}
+
+/// If `doc` is a `memory.entries` doc with a non-null `promoted_to`, resolve the
+/// target semantic/procedural node and return `(target_doc, target_collection)`.
+/// Returns `None` for non-entries, unpromoted entries, or when the target fails
+/// to load. Callers fall back to inserting the original doc when this returns None.
+async fn redirect_if_promoted(
+    db: &WardsonDbClient,
+    doc: &serde_json::Value,
+    collection: &str,
+) -> Option<(serde_json::Value, String)> {
+    if collection != "memory.entries" { return None; }
+    let promoted = doc.get("promoted_to")?;
+    if promoted.is_null() { return None; }
+    let coll = promoted.get("collection").and_then(|v| v.as_str())?;
+    let id = promoted.get("id").and_then(|v| v.as_str())?;
+    let pdoc = db.read(coll, id).await.ok()?;
+    Some((pdoc, coll.to_string()))
 }
 
 fn score_and_rank(

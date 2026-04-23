@@ -388,11 +388,26 @@ async fn forget(db: &WardsonDbClient, id: &str) -> String {
     if id.is_empty() {
         return "Provide the entry ID to forget: forget <id>".into();
     }
+    let id = id.trim();
 
-    match db.delete("memory.entries", id.trim()).await {
-        Ok(()) => format!("Memory entry {} has been removed.", id.trim()),
-        Err(e) => format!("Failed to remove entry: {}", e),
+    if let Err(e) = db.delete("memory.entries", id).await {
+        return format!("Failed to remove entry: {}", e);
     }
+
+    let edge_filter = serde_json::json!({
+        "$or": [
+            {"source_id": id, "source_collection": "memory.entries"},
+            {"target_id": id, "target_collection": "memory.entries"},
+        ]
+    });
+    let edge_count = db
+        .delete_by_query("memory.edges", &edge_filter)
+        .await
+        .unwrap_or(0);
+    format!(
+        "Memory entry {} removed; {} referencing edge(s) cascaded.",
+        id, edge_count
+    )
 }
 
 // ── Self-Awareness Tools ──
