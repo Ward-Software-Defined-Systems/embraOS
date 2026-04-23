@@ -618,3 +618,310 @@ pub async fn knowledge_graph_stats(db: &WardsonDbClient) -> String {
 
     out
 }
+
+// ── Native tool-use registrations (NATIVE-TOOLS-01) ──
+
+use embra_tool_macro::embra_tool;
+use embra_tools_core::DispatchError;
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+use crate::tools::registry::DispatchContext;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum KnowledgePromoteKind {
+    Semantic,
+    Procedural,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "knowledge_promote",
+    description = "Promote an episodic memory entry to a semantic or procedural knowledge node. For kind=semantic, data is one of: fact, preference, decision, observation, pattern. For kind=procedural, data is a JSON object describing the procedure (preconditions, steps, outcomes)."
+)]
+pub struct KnowledgePromoteArgs {
+    pub entry_id: String,
+    pub kind: KnowledgePromoteKind,
+    /// For semantic: a category string. For procedural: a JSON procedure object.
+    pub data: String,
+}
+
+impl KnowledgePromoteArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let kind_str = match self.kind {
+            KnowledgePromoteKind::Semantic => "semantic",
+            KnowledgePromoteKind::Procedural => "procedural",
+        };
+        let param = format!("{} | {} | {}", self.entry_id, kind_str, self.data);
+        Ok(knowledge_promote(&param, ctx.db, ctx.config).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "knowledge_link",
+    description = "Create a directed, weighted, typed edge between two knowledge nodes. edge_type: enables | contradicts | refines | depends_on | related_to. weight is 0.0-1.0 indicating confidence."
+)]
+pub struct KnowledgeLinkArgs {
+    pub source_collection: String,
+    pub source_id: String,
+    pub edge_type: String,
+    pub target_collection: String,
+    pub target_id: String,
+    pub weight: f64,
+}
+
+impl KnowledgeLinkArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!(
+            "{}:{} | {} | {}:{} | {}",
+            self.source_collection,
+            self.source_id,
+            self.edge_type,
+            self.target_collection,
+            self.target_id,
+            self.weight
+        );
+        Ok(knowledge_link(&param, ctx.db).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum KnowledgeUnlinkEdgeArgs {
+    /// Delete a specific edge by its document id.
+    ById { edge_id: String },
+    /// Delete matching edges by (source, edge_type, target). Bidirectional for
+    /// auto-derived symmetric types.
+    ByTriple {
+        source_collection: String,
+        source_id: String,
+        edge_type: String,
+        target_collection: String,
+        target_id: String,
+    },
+}
+
+// NB: #[embra_tool] attribute must sit on a type the macro can parse as
+// a struct or enum via syn::ItemStruct/ItemEnum. The macro's current syn
+// parse uses ItemStruct only — switching to parse either would expand the
+// macro surface. For enum-shape tools we attach #[embra_tool] to a thin
+// wrapper struct that flattens the enum.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "knowledge_unlink_edge",
+    description = "Delete an edge. mode=by_id with edge_id deletes one edge; mode=by_triple with source/edge_type/target deletes matching edges bidirectionally (for auto-derived symmetric types)."
+)]
+pub struct KnowledgeUnlinkEdgeWrapper {
+    #[serde(flatten)]
+    pub args: KnowledgeUnlinkEdgeArgs,
+}
+
+impl KnowledgeUnlinkEdgeWrapper {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = match self.args {
+            KnowledgeUnlinkEdgeArgs::ById { edge_id } => edge_id,
+            KnowledgeUnlinkEdgeArgs::ByTriple {
+                source_collection,
+                source_id,
+                edge_type,
+                target_collection,
+                target_id,
+            } => format!(
+                "{}:{} | {} | {}:{}",
+                source_collection, source_id, edge_type, target_collection, target_id
+            ),
+        };
+        Ok(knowledge_unlink_edge(&param, ctx.db).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "knowledge_unlink_node",
+    description = "Delete a semantic or procedural node and cascade-remove all edges referencing it. Prefer this over manually deleting edges when the node itself should go."
+)]
+pub struct KnowledgeUnlinkNodeArgs {
+    pub collection: String,
+    pub id: String,
+}
+
+impl KnowledgeUnlinkNodeArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{}:{}", self.collection, self.id);
+        Ok(knowledge_unlink_node(&param, ctx.db).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "knowledge_update",
+    description = "Update fields on a semantic or procedural node in place while preserving all referencing edges. Immutable fields (provenance, timestamps, access counters) are rejected. patch_json is a JSON object of the fields to patch."
+)]
+pub struct KnowledgeUpdateArgs {
+    pub collection: String,
+    pub id: String,
+    /// JSON object describing the partial patch, serialized as a string.
+    pub patch_json: String,
+}
+
+impl KnowledgeUpdateArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{}:{} | {}", self.collection, self.id, self.patch_json);
+        Ok(knowledge_update(&param, ctx.db).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "knowledge_traverse",
+    description = "BFS-explore the knowledge graph starting from <collection>:<id>. depth bounds expansion (ceiling 5). edge_types optionally restricts by type (CSV). min_weight optionally filters edges below the threshold (0.0-1.0)."
+)]
+pub struct KnowledgeTraverseArgs {
+    pub start_collection: String,
+    pub start_id: String,
+    #[serde(default)]
+    pub depth: Option<u32>,
+    /// CSV of edge types to include (same_session, temporal, tag_overlap,
+    /// derived_from, enables, contradicts, refines, depends_on, related_to).
+    #[serde(default)]
+    pub edge_types: Option<String>,
+    #[serde(default)]
+    pub min_weight: Option<f64>,
+}
+
+impl KnowledgeTraverseArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let mut parts = vec![format!("{}:{}", self.start_collection, self.start_id)];
+        if let Some(d) = self.depth {
+            parts.push(d.to_string());
+            if let Some(t) = self.edge_types {
+                parts.push(t);
+                if let Some(w) = self.min_weight {
+                    parts.push(w.to_string());
+                }
+            }
+        }
+        let param = parts.join(" ");
+        Ok(knowledge_traverse(&param, ctx.db, ctx.config).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "knowledge_query",
+    description = "Find relevant knowledge via graph-aware retrieval (multi-signal ranking with depth-2 expansion). max_results defaults to 20, capped at 100. categories is a CSV of semantic categories to filter by (fact, preference, decision, observation, pattern)."
+)]
+pub struct KnowledgeQueryArgs {
+    pub query: String,
+    #[serde(default)]
+    pub max_results: Option<u32>,
+    #[serde(default)]
+    pub categories: Option<String>,
+}
+
+impl KnowledgeQueryArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let mut parts = vec![self.query];
+        match (self.max_results, self.categories) {
+            (Some(m), Some(c)) => {
+                parts.push(m.to_string());
+                parts.push(c);
+            }
+            (Some(m), None) => parts.push(m.to_string()),
+            (None, Some(c)) => {
+                parts.push(String::new()); // empty max_results slot
+                parts.push(c);
+            }
+            (None, None) => {}
+        }
+        let param = parts.join(" | ");
+        Ok(knowledge_query(&param, ctx.db, ctx.session_name, ctx.config).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "knowledge_graph_stats",
+    description = "Return summary statistics of the knowledge graph: node counts by collection, edge counts by type, total density."
+)]
+pub struct KnowledgeGraphStatsArgs {}
+
+impl KnowledgeGraphStatsArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(knowledge_graph_stats(ctx.db).await)
+    }
+}
+
+#[cfg(test)]
+mod native_args_tests {
+    use super::*;
+
+    #[test]
+    fn knowledge_promote_kind_deserializes() {
+        let a: KnowledgePromoteArgs = serde_json::from_value(serde_json::json!({
+            "entry_id": "abc", "kind": "semantic", "data": "fact"
+        }))
+        .unwrap();
+        assert!(matches!(a.kind, KnowledgePromoteKind::Semantic));
+
+        let b: KnowledgePromoteArgs = serde_json::from_value(serde_json::json!({
+            "entry_id": "abc", "kind": "procedural", "data": "{\"steps\": []}"
+        }))
+        .unwrap();
+        assert!(matches!(b.kind, KnowledgePromoteKind::Procedural));
+    }
+
+    #[test]
+    fn knowledge_unlink_edge_tagged_enum() {
+        let by_id: KnowledgeUnlinkEdgeWrapper = serde_json::from_value(serde_json::json!({
+            "mode": "by_id", "edge_id": "edge123"
+        }))
+        .unwrap();
+        assert!(matches!(by_id.args, KnowledgeUnlinkEdgeArgs::ById { .. }));
+
+        let by_triple: KnowledgeUnlinkEdgeWrapper = serde_json::from_value(serde_json::json!({
+            "mode": "by_triple",
+            "source_collection": "memory.semantic", "source_id": "a",
+            "edge_type": "refines",
+            "target_collection": "memory.semantic", "target_id": "b"
+        }))
+        .unwrap();
+        assert!(matches!(
+            by_triple.args,
+            KnowledgeUnlinkEdgeArgs::ByTriple { .. }
+        ));
+    }
+
+    #[test]
+    fn knowledge_traverse_optional_fields() {
+        let a: KnowledgeTraverseArgs = serde_json::from_value(serde_json::json!({
+            "start_collection": "memory.semantic", "start_id": "x"
+        }))
+        .unwrap();
+        assert!(a.depth.is_none());
+        assert!(a.edge_types.is_none());
+        assert!(a.min_weight.is_none());
+    }
+
+    #[test]
+    fn knowledge_tools_register() {
+        let names: Vec<&'static str> = inventory::iter::<crate::tools::registry::ToolDescriptor>()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        for expected in [
+            "knowledge_promote",
+            "knowledge_link",
+            "knowledge_unlink_edge",
+            "knowledge_unlink_node",
+            "knowledge_update",
+            "knowledge_traverse",
+            "knowledge_query",
+            "knowledge_graph_stats",
+        ] {
+            assert!(names.contains(&expected), "{} not registered", expected);
+        }
+    }
+}
