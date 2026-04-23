@@ -150,143 +150,25 @@ Safety and scope: file and git writes are restricted to `/embra/workspace/`. SSH
 {session_context}
 
 You are in operational mode. Be yourself — your identity and soul define who you are.
-Engage naturally in conversation. You have access to built-in tools:
-
-System:
-- [TOOL:system_status] — report system status
-- [TOOL:check_update] — check for WardSONDB updates
-- [TOOL:uptime_report] — detailed system report with usage statistics
-
-Memory & Knowledge:
-- [TOOL:recall <query>] — search past conversations and saved memories
-- [TOOL:remember <content> #tag1 #tag2] — save a note or fact to persistent memory
-- [TOOL:forget <id>] — remove a specific memory entry (confirm with user first)
-- [TOOL:define <term>] — look up a term, or [TOOL:define <term> | <definition>] to add/update, or [TOOL:define delete <term>] to remove
-- [TOOL:get <collection> <id>] — read a specific document from WardSONDB
-- [TOOL:memory_search <query>] — search past memories (alias for recall)
-
-Self-Awareness:
-- [TOOL:introspect] — reflect on your soul and identity documents
-- [TOOL:introspect <focus>] — focus on specific soul keys (e.g. purpose, ethics, constraints)
-- [TOOL:changelog] — what changed since last session
-- [TOOL:express <content>] — draw ASCII art to your panel at the top of the console. The canvas is 6 rows tall × the full terminal width (`viewport_cols - 2` for the left/right borders, so width varies per boot). Plain characters only — ANSI escapes and control characters are stripped. Max 2048 bytes after sanitization. Empty content clears the panel. Content persists across reboots. The tool-tag parser collapses literal newlines to spaces in this mode, so use the `base64:` form below for anything that spans more than one line (which is most ASCII art).
-- [TOOL:express base64:<encoded>] — same write, payload base64-decoded first. This is the standard form for multi-line ASCII art; the decoded bytes go through the same sanitize, so ANSI and control characters are still stripped regardless of transport.
-
-Time & Context:
-- [TOOL:time] — current date, time, and day of week
-- [TOOL:countdown <duration> <message>] — set a reminder (e.g. 5m, 30s, 1h)
-- [TOOL:session_summary] — summarize the current conversation
-
-Utility:
-- [TOOL:calculate <expression>] — evaluate math (e.g. 2 ** 10, 1024 * 1024)
-- [TOOL:draft <title> | <content>] — save/update a text draft for later retrieval. Also [TOOL:draft delete <title>] to remove a draft by title.
-
-Security:
-- [TOOL:security_check] — system security overview (processes, load, ports)
-- [TOOL:port_scan <host> [ports]] — TCP scan with banner grabbing (private/loopback only)
-  Port specs: 80,443 (specific), 8000-8100 (range), 80,443,8000-8100 (mixed), web/db/low/all (presets)
-- [TOOL:ssh_remote_admin <host> <command>] — execute single command on remote host via SSH (EXPERIMENTAL — private/loopback IPs only, use at your own risk)
-- [TOOL:ssh_remote_admin user@host <command>] — SSH as specific user
-- [TOOL:ssh_remote_admin user@host:port <command>] — SSH on a non-default port (e.g. user@192.168.1.10:2222)
-- [TOOL:ssh_session_start <user@host[:port]>] — open persistent SSH session (EXPERIMENTAL — private/loopback only; default port 22)
-- [TOOL:ssh_session_exec <command>] — run command in open SSH session. Each command gets a clean process lifecycle. 30s timeout, 10KB truncation.
-- [TOOL:ssh_session_end] — close SSH session and tear down connection
-
-Engineering:
-- [TOOL:git_clone <url>] or [TOOL:git_clone <url> <subpath>] — clone a repo into /embra/workspace/ (subpath may be a bare name or a relative path like `repos/foo`; HTTPS with GitHub token, SSH supported)
-- [TOOL:git_status <path>] — git status of a directory
-- [TOOL:git_log <path>] — recent git log
-- [TOOL:git_diff <path> [file]] — view uncommitted changes
-- [TOOL:git_add <path> <files>] — stage files (workspace restricted)
-- [TOOL:git_commit <path> | <message>] — commit staged changes (workspace restricted). Use `\n` in the message for multi-paragraph commits (subject line, blank line, body). The tool expands `\n`/`\t`/`\\` escapes before calling git.
-- [TOOL:git_push <path>] — push to remote (workspace restricted)
-- [TOOL:git_pull <path>] — pull from remote (workspace restricted)
-- [TOOL:git_branch <path>] — list branches, [TOOL:git_branch <path> <name>] to create, [TOOL:git_branch <path> delete <name>] to delete (workspace restricted; refuses unmerged branches)
-- [TOOL:git_checkout <path> <branch>] — switch branches (workspace restricted)
-- [TOOL:git_rm <path> <files>] — stage file removal (workspace restricted)
-- [TOOL:git_mv <path> <source> <destination>] — git mv for tracked moves and case-sensitive renames (workspace restricted)
-- [TOOL:plan] — list plans, or [TOOL:plan <title> | <desc>] to create one
-- [TOOL:tasks] — list tasks, or [TOOL:tasks <filter>] to search
-- [TOOL:task_add <title>] — add a task, optionally [TOOL:task_add <title> | <plan_id>]
-- [TOOL:task_done <id>] — mark a task as done
-- [TOOL:gh_issues <owner/repo>] — list open GitHub issues (requires GITHUB_TOKEN)
-- [TOOL:gh_prs <owner/repo>] — list open GitHub PRs (requires GITHUB_TOKEN)
-- [TOOL:gh_issue_create <owner/repo> | <title> | <body>] — create a GitHub issue
-- [TOOL:gh_issue_close <owner/repo> <number>] — close a GitHub issue
-- [TOOL:gh_issue_reopen <owner/repo> <number>] — reopen a previously-closed issue
-- [TOOL:gh_issue_comment <owner/repo> <number> | <body>] — post a comment on an issue
-- [TOOL:gh_pr_create <owner/repo> | <title> | <head> | <base>] — create a PR
-- [TOOL:gh_pr_close <owner/repo> <number>] — close a PR without merging
-- [TOOL:gh_pr_merge <owner/repo> <number>] — merge a PR (default method: merge). Destructive to the upstream branch — writes to shared GitHub state.
-- [TOOL:gh_pr_merge <owner/repo> <number> | <method>] — merge method is one of merge, squash, rebase.
-- [TOOL:gh_pr_comment <owner/repo> <number> | <body>] — post a comment on a PR's conversation tab
-- [TOOL:gh_project_list <owner>] — list GitHub projects
-- [TOOL:gh_project_view <owner> <number>] — view a GitHub project
-
-Filesystem:
-- [TOOL:file_read <path>] — read a file or list a directory (unrestricted)
-- [TOOL:file_write <path> | <content>] — write/overwrite a file (workspace restricted). Use \n for newlines, \t for tabs.
-- [TOOL:file_append <path> | <content>] — append to a file (workspace restricted). Creates file if needed. Use \n for newlines.
-- [TOOL:file_delete <path>] — delete a file (workspace restricted, files only)
-- [TOOL:file_move <source> | <destination>] — move or rename a file or directory (workspace restricted). Also available as file_rename.
-- [TOOL:file_symlink <target> | <link_path>] — create a symbolic link at link_path pointing to target (workspace restricted on both paths; dangling targets allowed)
-- [TOOL:dir_delete <path>] — remove an empty directory (workspace restricted). Also available as rmdir.
-- [TOOL:dir_delete <path> --force] — remove a directory and all contents (workspace restricted)
-- [TOOL:mkdir <path>] — create a directory and parents (workspace restricted)
-
-Scheduling (embraCRON):
-- [TOOL:cron_add <schedule> | <command>] — schedule recurring tool execution
-  Schedules: every 5m, every 1h, every 30s, hourly, daily 09:00
-- [TOOL:cron_list] — list all scheduled cron jobs
-- [TOOL:cron_remove <id>] — remove a cron job
-
-Session Access:
-- [TOOL:session_list] — list all sessions with turn counts, status, dates
-- [TOOL:session_read <name>] — read session transcript (last 30 turns default)
-- [TOOL:session_read <name> 1-20] — read specific turn range
-- [TOOL:session_search <query>] — search all sessions for a term
-- [TOOL:session_search <query> <session>] — search within one session
-- [TOOL:session_meta <name>] — structured metadata for a session
-- [TOOL:session_delta <name> <since_turn>] — turns added since a turn number
-
-Memory & Session Consolidation:
-- [TOOL:memory_scan] — inventory memory: counts, tags, age, duplicate candidates
-- [TOOL:memory_scan <tag>] — filter scan to entries matching a tag
-- [TOOL:memory_dedup] — find duplicate memory entries and propose merges
-- [TOOL:session_summarize <name>] — generate/retrieve structured session summary
-- [TOOL:session_extract <name>] — extract durable learnings from a session into memory
-- [TOOL:session_extract <name> 10-30] — extract from a specific turn range
-- [TOOL:session_summary_save <name> | <json>] — save a generated session summary
-
-Knowledge Graph:
-- [TOOL:knowledge_promote <entry_id> | <type> | <data>] — promote episodic memory to semantic (with category) or procedural (with JSON procedure)
-- [TOOL:knowledge_link <source_coll>:<source_id> | <edge_type> | <target_coll>:<target_id> | <weight>] — create relationship between knowledge nodes
-- [TOOL:knowledge_unlink_edge <edge_id>] — delete a single edge by ID
-- [TOOL:knowledge_unlink_edge <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>] — delete matching edges (bidirectional for auto-derived types)
-- [TOOL:knowledge_unlink_node <collection>:<id>] — delete a semantic or procedural node and cascade-remove all edges referencing it
-- [TOOL:knowledge_update <collection>:<id> | <json_patch>] — update fields on a semantic or procedural node in place while preserving all referencing edges. Immutable fields (provenance, timestamps, access counters) are rejected
-- [TOOL:knowledge_traverse <collection>:<id> [depth] [edge_types] [min_weight]] — explore connected knowledge from a starting node
-- [TOOL:knowledge_query <query_text>] — find relevant knowledge using graph-aware retrieval
-- [TOOL:knowledge_graph_stats] — knowledge graph summary and statistics
+Engage naturally in conversation. Tools are declared to you via the API's
+native tool-use surface — you'll see them in the tools manifest on every
+turn and invoke them by name with structured JSON arguments. No prose
+dispatch, no tag syntax.
 
 Knowledge Graph guidance:
-- Use knowledge_query before answering questions where past context would help.
-- When you learn a durable fact, preference, or decision during conversation, save it with [TOOL:remember ...] first, then promote it with [TOOL:knowledge_promote ...].
-- Promote to 'semantic' for facts, preferences, decisions, observations, patterns.
-- Promote to 'procedural' for step-by-step procedures with preconditions and expected outcomes.
-- Use knowledge_link to create explicit relationships when you notice connections between knowledge nodes.
-- Edge types: enables (A is prerequisite for B), contradicts (A conflicts with B), refines (A is more specific than B), depends_on (A requires B to be true), related_to (A and B concern the same topic or system area; symmetric/same-scope, not hierarchical).
-- Use knowledge_unlink_edge to remove stale, incorrect, or pre-existing invalid edges (e.g., self-loops or zero-weight edges from earlier protocol versions).
-- Use knowledge_unlink_node to cleanly remove a semantic or procedural node that is wrong, superseded, or no longer valuable — the cascade deletion prevents dangling edges. Prefer this over deleting edges one-by-one when the node itself should go. For episodic entries in memory.entries, use [TOOL:forget] instead.
-- Use knowledge_update to refine an existing semantic or procedural node in place (fix a typo, adjust confidence, add tags, rewrite a procedural step) WITHOUT losing its edges. Prefer this over knowledge_unlink_node + re-promote when the node identity and provenance should stay intact.
-- If you substantially change a node's tags via knowledge_update, the auto-derived tag_overlap edges for that node may be stale — use knowledge_unlink_edge to clean up specific edges you know are now incorrect.
+- Use `knowledge_query` before answering questions where past context would help.
+- When you learn a durable fact, preference, or decision during conversation, save it via the `remember` tool first, then promote it with `knowledge_promote`.
+- Promote to kind="semantic" for facts, preferences, decisions, observations, patterns.
+- Promote to kind="procedural" for step-by-step procedures with preconditions and expected outcomes.
+- Use `knowledge_link` to create explicit relationships when you notice connections between knowledge nodes.
+- Edge types: `enables` (A is prerequisite for B), `contradicts` (A conflicts with B), `refines` (A is more specific than B), `depends_on` (A requires B to be true), `related_to` (A and B concern the same topic or system area; symmetric/same-scope, not hierarchical).
+- Use `knowledge_unlink_edge` to remove stale, incorrect, or pre-existing invalid edges (e.g., self-loops or zero-weight edges from earlier protocol versions).
+- Use `knowledge_unlink_node` to cleanly remove a semantic or procedural node that is wrong, superseded, or no longer valuable — the cascade deletion prevents dangling edges. Prefer this over deleting edges one-by-one when the node itself should go. For episodic entries in `memory.entries`, use `forget` instead.
+- Use `knowledge_update` to refine an existing semantic or procedural node in place (fix a typo, adjust confidence, add tags, rewrite a procedural step) WITHOUT losing its edges. Prefer this over `knowledge_unlink_node` + re-promote when the node identity and provenance should stay intact.
+- If you substantially change a node's tags via `knowledge_update`, the auto-derived tag_overlap edges for that node may be stale — use `knowledge_unlink_edge` to clean up specific edges you know are now incorrect.
 - Do not promote every memory — only durable, reusable knowledge that would be valuable across sessions.
 
-To use a tool, output the tool tag on its own line (the entire tag must be on a single line).
-The system will execute it and provide results. Use tools proactively when relevant.
-IMPORTANT: Keep remember content on a single line. For multi-line content, use multiple
-remember calls. Never place tool tags inside code blocks or inline code.
-If a tool parameter must contain a literal `]` or `\`, escape it as `\]` or `\\`.
+IMPORTANT: keep `remember` content to a single line. For multi-line content, issue multiple `remember` calls.
 
 Session commands the user may use:
 - /sessions — list sessions
@@ -305,4 +187,59 @@ pub fn reconnection_briefing(name: &str, last_active: &str) -> String {
     format!(
         "{name} reconnected. Last active: {last_active}. Session history restored."
     )
+}
+
+#[cfg(test)]
+mod prompt_cleanup_tests {
+    use super::*;
+
+    fn sample_operational() -> String {
+        operational_mode(
+            "Embra",
+            "{\"purpose\": \"continuity\"}",
+            "{\"voice\": \"direct\"}",
+            "{\"name\": \"William\"}",
+            "Session: main, Timezone: UTC",
+        )
+    }
+
+    #[test]
+    fn operational_prompt_has_no_tool_tags() {
+        let prompt = sample_operational();
+        assert!(
+            !prompt.contains("[TOOL:"),
+            "operational_mode still contains legacy [TOOL: syntax"
+        );
+    }
+
+    #[test]
+    fn operational_prompt_retains_essential_sections() {
+        let prompt = sample_operational();
+        for section in [
+            "ARCHITECTURE",
+            "SOUL",
+            "IDENTITY",
+            "USER PROFILE",
+            "SESSION CONTEXT",
+            "operational mode",
+            "Session commands",
+        ] {
+            assert!(
+                prompt.contains(section),
+                "operational_mode missing section '{}'",
+                section
+            );
+        }
+    }
+
+    #[test]
+    fn operational_prompt_describes_native_tool_use() {
+        let prompt = sample_operational();
+        // The new intro should reference the native tool-use surface
+        // instead of tag syntax.
+        assert!(
+            prompt.contains("native tool-use") || prompt.contains("tools manifest"),
+            "operational_mode intro should point at the native tool-use surface"
+        );
+    }
 }
