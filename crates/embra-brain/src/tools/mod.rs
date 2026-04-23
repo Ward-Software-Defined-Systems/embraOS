@@ -1611,3 +1611,442 @@ fn get_memory_usage_mb() -> Option<u64> {
     }
     None
 }
+
+// ── Native tool-use registrations (NATIVE-TOOLS-01) ──
+//
+// Typed args structs for every tool whose implementation lives in this
+// module. Each `#[embra_tool(name, description)]` attribute submits a
+// `ToolDescriptor` into the global inventory at compile time. The legacy
+// string dispatcher at the top of this file remains the active call path
+// through Stage 2; Stage 3 removes it and routes exclusively through
+// `registry::dispatch`.
+
+use embra_tool_macro::embra_tool;
+use embra_tools_core::DispatchError;
+use schemars::JsonSchema;
+
+use crate::tools::registry::DispatchContext;
+
+// -- No-arg tools --------------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "system_status",
+    description = "Report system status: version, uptime, WardSONDB health, collections, memory usage, soul status, and lifetime operation counters."
+)]
+pub struct SystemStatusArgs {}
+
+impl SystemStatusArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let status = system_status(ctx.db).await;
+        Ok(serde_json::to_string_pretty(&status).unwrap_or_default())
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "check_update",
+    description = "Check for available updates to WardSONDB. Returns \"up to date\" or the available version and download URL."
+)]
+pub struct CheckUpdateArgs {}
+
+impl CheckUpdateArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(match check_wardsondb_update().await {
+            Some(info) => format!(
+                "WardSONDB update available: v{} (current: v{})",
+                info.version, info.current_version
+            ),
+            None => "WardSONDB is up to date.".into(),
+        })
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "uptime_report",
+    description = "Detailed system report with uptime, memory usage, session age, and lifetime counters."
+)]
+pub struct UptimeReportArgs {}
+
+impl UptimeReportArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(uptime_report(ctx.db, ctx.session_name).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "changelog",
+    description = "Report what changed in embraOS since the previous session: new memory entries, new sessions, key activity."
+)]
+pub struct ChangelogArgs {}
+
+impl ChangelogArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(changelog(ctx.db, ctx.session_name).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "time",
+    description = "Current date, time, and day of week in the configured timezone."
+)]
+pub struct TimeArgs {}
+
+impl TimeArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(time_now(ctx.config_tz))
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "session_summary",
+    description = "Summarize the current conversation: message counts and a preview of the last 20 turns."
+)]
+pub struct SessionSummaryArgs {}
+
+impl SessionSummaryArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(session_summary(ctx.db, ctx.session_name).await)
+    }
+}
+
+// -- Single-field tools --------------------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "recall",
+    description = "Search past conversations and saved memories. Query is free-text; hashtags supported; empty query lists recent entries."
+)]
+pub struct RecallArgs {
+    /// Search query. Free-text; hashtags supported; empty to list all.
+    #[serde(default)]
+    pub query: String,
+}
+
+impl RecallArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(recall(ctx.db, &self.query).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "memory_search",
+    description = "Alias for recall. Search past memories by free-text query; hashtags supported."
+)]
+pub struct MemorySearchArgs {
+    #[serde(default)]
+    pub query: String,
+}
+
+impl MemorySearchArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        RecallArgs { query: self.query }.run(ctx).await
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "search_memory",
+    description = "Alias for recall. Search past memories by free-text query; hashtags supported."
+)]
+pub struct SearchMemoryArgs {
+    #[serde(default)]
+    pub query: String,
+}
+
+impl SearchMemoryArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        RecallArgs { query: self.query }.run(ctx).await
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "remember",
+    description = "Save a note or fact to persistent memory. Hashtag tokens (e.g. #architecture, #soul) are extracted into the tags array; the remaining words become the content. Keep content to a single line."
+)]
+pub struct RememberArgs {
+    /// Content to save. Letter-start `#tag` tokens are extracted into tags.
+    pub content: String,
+}
+
+impl RememberArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(remember(ctx.db, &self.content, ctx.session_name, ctx.config).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "forget",
+    description = "Remove a specific memory entry by its id. Destructive; confirm with the user first."
+)]
+pub struct ForgetArgs {
+    /// WardSONDB document id of the memory entry to delete.
+    pub id: String,
+}
+
+impl ForgetArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(forget(ctx.db, &self.id).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "introspect",
+    description = "Reflect on your own soul and identity documents. Pass focus to narrow the output to a specific soul key (e.g. \"purpose\", \"ethics\", \"constraints\"); omit for a full read."
+)]
+pub struct IntrospectArgs {
+    /// Optional focus keyword (soul key to read). Empty for full.
+    #[serde(default)]
+    pub focus: String,
+}
+
+impl IntrospectArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(introspect(ctx.db, &self.focus).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "countdown",
+    description = "Set a reminder to fire after a duration. duration examples: \"5m\", \"30s\", \"1h\", \"20 minutes\". message defaults to \"Reminder\" if omitted."
+)]
+pub struct CountdownArgs {
+    /// Duration: "5m", "30s", "1h", "20 minutes".
+    pub duration: String,
+    /// Reminder message shown when the countdown fires.
+    #[serde(default = "default_countdown_message")]
+    pub message: String,
+}
+
+fn default_countdown_message() -> String {
+    "Reminder".into()
+}
+
+impl CountdownArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let joined = if self.message.is_empty() {
+            self.duration
+        } else {
+            format!("{} {}", self.duration, self.message)
+        };
+        Ok(countdown(ctx.db, &joined).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "calculate",
+    description = "Evaluate a math expression. Operators: + - * / % ( ) and ** for exponent. Bare ^ is rejected (XOR is unsupported). Example: 2 ** 10 returns 1024."
+)]
+pub struct CalculateArgs {
+    /// The expression to evaluate, e.g. `2 ** 10`.
+    pub expression: String,
+}
+
+impl CalculateArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(calculate(&self.expression))
+    }
+}
+
+// -- Multi-field / sub-command tools ------------------------------------
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DefineAction {
+    Get,
+    Save,
+    Delete,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "define",
+    description = "Look up, save, or delete a definition. action=get with term to read, action=save with term+definition to create/update, action=delete with term to remove."
+)]
+pub struct DefineArgs {
+    /// get (default) | save | delete.
+    #[serde(default = "default_define_action")]
+    pub action: DefineAction,
+    /// The term (noun or phrase) to operate on.
+    pub term: String,
+    /// Required for action=save; ignored otherwise.
+    #[serde(default)]
+    pub definition: Option<String>,
+}
+
+fn default_define_action() -> DefineAction {
+    DefineAction::Get
+}
+
+impl DefineArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = match self.action {
+            DefineAction::Get => self.term,
+            DefineAction::Save => match self.definition {
+                Some(d) => format!("{} | {}", self.term, d),
+                None => self.term,
+            },
+            DefineAction::Delete => format!("delete {}", self.term),
+        };
+        Ok(define(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum DraftAction {
+    Save,
+    Delete,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "draft",
+    description = "Save or delete a text draft. action=save with title+content creates or updates; action=delete with title removes a draft by title."
+)]
+pub struct DraftArgs {
+    /// save (default) | delete.
+    #[serde(default = "default_draft_action")]
+    pub action: DraftAction,
+    /// Draft title (identifier).
+    pub title: String,
+    /// Required for action=save; ignored for delete.
+    #[serde(default)]
+    pub content: Option<String>,
+}
+
+fn default_draft_action() -> DraftAction {
+    DraftAction::Save
+}
+
+impl DraftArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = match self.action {
+            DraftAction::Save => match self.content {
+                Some(c) => format!("{} | {}", self.title, c),
+                None => self.title,
+            },
+            DraftAction::Delete => format!("delete {}", self.title),
+        };
+        Ok(draft(ctx.db, &param, ctx.session_name).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "get",
+    description = "Read a specific document from WardSONDB by collection and id."
+)]
+pub struct GetArgs {
+    /// WardSONDB collection name (e.g. `memory.entries`, `soul.invariant`).
+    pub collection: String,
+    /// Document id within the collection.
+    pub id: String,
+}
+
+impl GetArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} {}", self.collection, self.id);
+        Ok(get(ctx.db, &param).await)
+    }
+}
+
+#[cfg(test)]
+mod native_args_tests {
+    use super::*;
+
+    #[test]
+    fn recall_round_trips_empty_and_filled() {
+        let a: RecallArgs = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(a.query, "");
+        let b: RecallArgs = serde_json::from_value(serde_json::json!({"query": "alerts"})).unwrap();
+        assert_eq!(b.query, "alerts");
+    }
+
+    #[test]
+    fn recall_schema_has_optional_query() {
+        let schema = schemars::schema_for!(RecallArgs);
+        let v = serde_json::to_value(&schema).unwrap();
+        assert_eq!(v["properties"]["query"]["type"], "string");
+    }
+
+    #[test]
+    fn countdown_requires_duration_message_defaults() {
+        let a: CountdownArgs =
+            serde_json::from_value(serde_json::json!({"duration": "5m"})).unwrap();
+        assert_eq!(a.duration, "5m");
+        assert_eq!(a.message, "Reminder");
+
+        let b: CountdownArgs = serde_json::from_value(serde_json::json!({
+            "duration": "30s", "message": "check build"
+        }))
+        .unwrap();
+        assert_eq!(b.message, "check build");
+
+        // Missing required field
+        let err = serde_json::from_value::<CountdownArgs>(serde_json::json!({})).unwrap_err();
+        assert!(err.to_string().contains("duration"));
+    }
+
+    #[test]
+    fn define_action_deserializes_lowercase() {
+        let a: DefineArgs = serde_json::from_value(serde_json::json!({
+            "action": "save", "term": "soul", "definition": "identity core"
+        }))
+        .unwrap();
+        assert!(matches!(a.action, DefineAction::Save));
+        assert_eq!(a.term, "soul");
+        assert_eq!(a.definition.as_deref(), Some("identity core"));
+
+        let b: DefineArgs = serde_json::from_value(serde_json::json!({"term": "soul"})).unwrap();
+        assert!(matches!(b.action, DefineAction::Get));
+    }
+
+    #[test]
+    fn draft_default_save() {
+        let a: DraftArgs =
+            serde_json::from_value(serde_json::json!({"title": "x", "content": "y"})).unwrap();
+        assert!(matches!(a.action, DraftAction::Save));
+
+        let d: DraftArgs =
+            serde_json::from_value(serde_json::json!({"action": "delete", "title": "x"}))
+                .unwrap();
+        assert!(matches!(d.action, DraftAction::Delete));
+    }
+
+    #[test]
+    fn get_requires_collection_and_id() {
+        let a: GetArgs =
+            serde_json::from_value(serde_json::json!({"collection": "soul.invariant", "id": "soul"}))
+                .unwrap();
+        assert_eq!(a.collection, "soul.invariant");
+
+        let err =
+            serde_json::from_value::<GetArgs>(serde_json::json!({"collection": "x"})).unwrap_err();
+        assert!(err.to_string().contains("id"));
+    }
+
+    #[test]
+    fn aliases_register_distinct_names() {
+        // Descriptors are accumulated via inventory at startup; confirm the
+        // three memory-search descriptors all exist as distinct names.
+        let names: Vec<&'static str> = inventory::iter::<crate::tools::registry::ToolDescriptor>()
+            .into_iter()
+            .map(|d| d.name)
+            .filter(|n| matches!(*n, "recall" | "memory_search" | "search_memory"))
+            .collect();
+        assert!(names.contains(&"recall"), "recall registered");
+        assert!(names.contains(&"memory_search"), "memory_search alias registered");
+        assert!(names.contains(&"search_memory"), "search_memory alias registered");
+    }
+}
