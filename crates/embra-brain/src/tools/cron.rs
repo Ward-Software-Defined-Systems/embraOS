@@ -311,3 +311,94 @@ mod daily_next_tests {
         assert_eq!(next, chrono::Utc.with_ymd_and_hms(2026, 1, 15, 9, 0, 0).unwrap());
     }
 }
+
+// ── Native tool-use registrations (NATIVE-TOOLS-01) ──
+//
+// Tool DEFINITIONS only — Stage 6 rewrites the executor at the top of this
+// file to invoke the registry directly instead of synthesizing [TOOL:...]
+// strings. During Stages 2-5 the legacy executor still synthesizes and
+// calls into the old string dispatcher.
+
+use embra_tool_macro::embra_tool;
+use embra_tools_core::DispatchError;
+use schemars::JsonSchema;
+use serde::Deserialize;
+
+use crate::tools::registry::DispatchContext;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "cron_add",
+    description = "Schedule recurring tool execution. schedule accepts \"every 5m\", \"every 1h\", \"every 30s\", \"hourly\", \"daily HH:MM\" (resolved in the configured timezone; avoid 02:00-03:00 on DST days). command is the tool invocation as a single string that cron will dispatch at each fire."
+)]
+pub struct CronAddArgs {
+    pub schedule: String,
+    /// The tool-dispatch command to execute. During Stage 2 this is still a
+    /// free-form string that the legacy executor wraps in `[TOOL:...]`;
+    /// Stage 6 moves to a structured `{command_name, command_args}` doc.
+    pub command: String,
+}
+
+impl CronAddArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} | {}", self.schedule, self.command);
+        Ok(cron_add(ctx.db, &param, ctx.config_tz).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "cron_list",
+    description = "List all scheduled cron jobs with their id, schedule, command, enabled flag, and next-run timestamp."
+)]
+pub struct CronListArgs {}
+
+impl CronListArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(cron_list(ctx.db).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "cron_remove",
+    description = "Remove a cron job by id."
+)]
+pub struct CronRemoveArgs {
+    pub id: String,
+}
+
+impl CronRemoveArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(cron_remove(ctx.db, &self.id).await)
+    }
+}
+
+#[cfg(test)]
+mod native_args_tests {
+    use super::*;
+
+    #[test]
+    fn cron_add_requires_schedule_and_command() {
+        let a: CronAddArgs = serde_json::from_value(serde_json::json!({
+            "schedule": "every 5m", "command": "system_status"
+        }))
+        .unwrap();
+        assert_eq!(a.schedule, "every 5m");
+        assert_eq!(a.command, "system_status");
+
+        let err =
+            serde_json::from_value::<CronAddArgs>(serde_json::json!({"schedule": "x"})).unwrap_err();
+        assert!(err.to_string().contains("command"));
+    }
+
+    #[test]
+    fn cron_tools_register() {
+        let names: Vec<&'static str> = inventory::iter::<crate::tools::registry::ToolDescriptor>()
+            .into_iter()
+            .map(|d| d.name)
+            .filter(|n| matches!(*n, "cron_add" | "cron_list" | "cron_remove"))
+            .collect();
+        assert_eq!(names.len(), 3, "all 3 cron tools register: {:?}", names);
+    }
+}
