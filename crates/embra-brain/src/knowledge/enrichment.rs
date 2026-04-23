@@ -34,10 +34,11 @@ pub async fn build_turn_context(
     config: &SystemConfig,
 ) -> String {
     let trimmed = user_message.trim();
-    if trimmed.len() < MIN_MESSAGE_LEN
-        || trimmed.starts_with("[TOOL:")
-        || is_chatty_filler(trimmed)
-    {
+    // Post-NATIVE-TOOLS-01 the user-message channel is plain prose only —
+    // tool calls arrive as structured tool_use blocks, never as [TOOL:...]
+    // strings. The legacy guard against a "[TOOL:" prefix is deleted with
+    // the parser.
+    if trimmed.len() < MIN_MESSAGE_LEN || is_chatty_filler(trimmed) {
         return user_message.to_string();
     }
 

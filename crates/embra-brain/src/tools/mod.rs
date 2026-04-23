@@ -31,7 +31,7 @@ fn process_uptime_secs() -> u64 {
 // ── Tool Dispatch ──
 //
 // Native tool-use dispatch lives in `tools/registry.rs` — the legacy
-// `[TOOL:name args]` string parser and match-block dispatcher were removed
+// `name args` string parser and match-block dispatcher were removed
 // in Stage 3 of the NATIVE-TOOLS-01 migration. Each tool now declares a
 // typed args struct annotated with `#[embra_tool(name, description)]`, and
 // `registry::dispatch(name, input, ctx)` is the single entry point.
@@ -331,7 +331,7 @@ fn is_tag_token(word: &str) -> bool {
 
 async fn remember(db: &WardsonDbClient, content: &str, session: &str, config: &SystemConfig) -> String {
     if content.is_empty() {
-        return "Nothing to remember. Provide content after [TOOL:remember ...].".into();
+        return "Nothing to remember. Provide content after remember ....".into();
     }
 
     ensure_collection(db, "memory.entries").await;
@@ -386,7 +386,7 @@ async fn remember(db: &WardsonDbClient, content: &str, session: &str, config: &S
 
 async fn forget(db: &WardsonDbClient, id: &str) -> String {
     if id.is_empty() {
-        return "Provide the entry ID to forget: [TOOL:forget <id>]".into();
+        return "Provide the entry ID to forget: forget <id>".into();
     }
 
     match db.delete("memory.entries", id.trim()).await {
@@ -737,7 +737,7 @@ fn time_now(config_tz: &str) -> String {
 
 async fn countdown(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:countdown <duration> <message>]\nExample: [TOOL:countdown 5m Check the build]".into();
+        return "Usage: countdown <duration> <message>\nExample: countdown 5m Check the build".into();
     }
 
     // Parse: "5m Check the build" or "20 minutes reminder text"
@@ -866,7 +866,7 @@ async fn session_summary(db: &WardsonDbClient, session_name: &str) -> String {
 
 fn calculate(expression: &str) -> String {
     if expression.is_empty() {
-        return "Usage: [TOOL:calculate <expression>]\nExample: [TOOL:calculate 2 ** 10]".into();
+        return "Usage: calculate <expression>\nExample: calculate 2 ** 10".into();
     }
 
     // Exponent is ** (Python/Rust convention). Reject bare ^ up-front so it
@@ -895,7 +895,7 @@ fn calculate(expression: &str) -> String {
 
 async fn define(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:define <term>] to look up, [TOOL:define <term> | <definition>] to add/update, or [TOOL:define delete <term>] to remove".into();
+        return "Usage: define <term> to look up, define <term> | <definition> to add/update, or define delete <term> to remove".into();
     }
 
     ensure_collection(db, "knowledge.definitions").await;
@@ -938,7 +938,7 @@ async fn define(db: &WardsonDbClient, param: &str) -> String {
         let definition = param[pipe_pos + 3..].trim();
 
         if term.is_empty() || definition.is_empty() {
-            return "Usage: [TOOL:define <term> | <definition>]".into();
+            return "Usage: define <term> | <definition>".into();
         }
 
         let results = db
@@ -1006,7 +1006,7 @@ async fn define(db: &WardsonDbClient, param: &str) -> String {
 
 async fn draft(db: &WardsonDbClient, param: &str, session: &str) -> String {
     if param.is_empty() {
-        return "draft rejected (missing arguments). Usage: [TOOL:draft <title> | <content>] or [TOOL:draft delete <title>]\nSeparate title and content with ' | '.\nExample: [TOOL:draft Meeting Notes | Key decisions: ...]".into();
+        return "draft rejected (missing arguments). Usage: draft <title> | <content> or draft delete <title>\nSeparate title and content with ' | '.\nExample: draft Meeting Notes | Key decisions: ...".into();
     }
 
     ensure_collection(db, "drafts").await;
@@ -1092,12 +1092,12 @@ async fn draft(db: &WardsonDbClient, param: &str, session: &str) -> String {
 
 async fn get(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:get <collection> <id>]\nExample: [TOOL:get memory.entries abc123]".into();
+        return "Usage: get <collection> <id>\nExample: get memory.entries abc123".into();
     }
 
     let parts: Vec<&str> = param.splitn(2, ' ').collect();
     if parts.len() < 2 {
-        return "Usage: [TOOL:get <collection> <id>]".into();
+        return "Usage: get <collection> <id>".into();
     }
 
     let (collection, id) = (parts[0], parts[1].trim());

@@ -274,7 +274,7 @@ pub async fn session_list(db: &WardsonDbClient) -> String {
 /// Param: `<name> [start-end]`
 pub async fn session_read(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:session_read <name>] or [TOOL:session_read <name> <start>-<end>]".into();
+        return "Usage: session_read <name> or session_read <name> <start>-<end>".into();
     }
 
     let parts: Vec<&str> = param.splitn(2, ' ').collect();
@@ -311,7 +311,7 @@ pub async fn session_read(db: &WardsonDbClient, param: &str) -> String {
 /// Param: `<query> [session_name]`
 pub async fn session_search(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:session_search <query>] or [TOOL:session_search <query> <session>]"
+        return "Usage: session_search <query> or session_search <query> <session>"
             .into();
     }
 
@@ -412,7 +412,7 @@ pub async fn session_search(db: &WardsonDbClient, param: &str) -> String {
 /// Structured metadata for a session.
 pub async fn session_meta(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:session_meta <name>]".into();
+        return "Usage: session_meta <name>".into();
     }
 
     let name = param.trim();
@@ -483,12 +483,12 @@ pub async fn session_meta(db: &WardsonDbClient, param: &str) -> String {
 /// Param: `<name> <since_turn>`
 pub async fn session_delta(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:session_delta <name> <since_turn>]".into();
+        return "Usage: session_delta <name> <since_turn>".into();
     }
 
     let parts: Vec<&str> = param.splitn(2, ' ').collect();
     if parts.len() < 2 {
-        return "Usage: [TOOL:session_delta <name> <since_turn>]".into();
+        return "Usage: session_delta <name> <since_turn>".into();
     }
 
     let name = parts[0];
@@ -880,7 +880,7 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
     }
 
     output.push_str(
-        "To execute this plan, approve and I will use [TOOL:remember] and [TOOL:forget] to merge/delete entries.\n",
+        "To execute this plan, approve and I will use remember and forget to merge/delete entries.\n",
     );
 
     // Cross-collection duplicate detection (Sprint 2): flag unpromoted entries whose
@@ -929,7 +929,7 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
 /// Param: session name.
 pub async fn session_summarize(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:session_summarize <name>]".into();
+        return "Usage: session_summarize <name>".into();
     }
 
     let name = param.trim();
@@ -998,7 +998,13 @@ pub async fn session_summarize(db: &WardsonDbClient, param: &str) -> String {
         for i in 0..5.min(total) {
             selected.push((i, &turns[i]));
         }
-        // Turns containing [TOOL: tags
+        // Turns referencing tool activity. Post-NATIVE-TOOLS-01 sessions
+        // store tool calls as structured blocks rather than text, so this
+        // substring check is a LEGACY fallback that still catches
+        // pre-v7 session content where tool calls appear as [TOOL:...]
+        // strings. Safe to keep indefinitely: false positives on natural
+        // prose containing "[TOOL:" as a literal quote are rare and
+        // harmless (the turn is merely included in the summary corpus).
         for i in 5..total.saturating_sub(10) {
             let content = turns[i]
                 .get("content")
@@ -1034,7 +1040,7 @@ pub async fn session_summarize(db: &WardsonDbClient, param: &str) -> String {
          {}\n\n\
          Generate a summary with: (1) multi-paragraph overview, (2) key topics list, \
          (3) key decisions list, (4) important turn numbers.\n\
-         After generating, save with: [TOOL:session_summary_save {} | <your summary JSON>]\n\
+         After generating, save with: session_summary_save {} | <your summary JSON>\n\
          JSON format: {{\"summary\": \"...\", \"key_topics\": [...], \"key_decisions\": [...], \"key_turns\": [...]}}",
         name,
         total,
@@ -1048,12 +1054,12 @@ pub async fn session_summarize(db: &WardsonDbClient, param: &str) -> String {
 /// Param: `<name> | <summary_json>`
 pub async fn session_summary_save(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:session_summary_save <name> | <summary_json>]".into();
+        return "Usage: session_summary_save <name> | <summary_json>".into();
     }
 
     let pipe_pos = match param.find(" | ") {
         Some(pos) => pos,
-        None => return "Usage: [TOOL:session_summary_save <name> | <summary_json>]".into(),
+        None => return "Usage: session_summary_save <name> | <summary_json>".into(),
     };
 
     let name = param[..pipe_pos].trim();
@@ -1143,7 +1149,7 @@ pub async fn session_summary_save(db: &WardsonDbClient, param: &str) -> String {
 /// Param: `<name> [start-end]`
 pub async fn session_extract(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:session_extract <name>] or [TOOL:session_extract <name> <start>-<end>]"
+        return "Usage: session_extract <name> or session_extract <name> <start>-<end>"
             .into();
     }
 
@@ -1174,7 +1180,10 @@ pub async fn session_extract(db: &WardsonDbClient, param: &str) -> String {
         for i in 0..5.min(turn_slice.len()) {
             sel.push((start + i, &turn_slice[i]));
         }
-        // Tool-containing turns
+        // Tool-containing turns — legacy [TOOL:...] substring fallback
+        // for pre-NATIVE-TOOLS-01 session content. New sessions store
+        // tool calls as structured blocks; this path is a best-effort
+        // for frozen legacy sessions that remain readable.
         for i in 5..turn_slice.len().saturating_sub(10) {
             let content = turn_slice[i]
                 .get("content")
@@ -1213,7 +1222,7 @@ pub async fn session_extract(db: &WardsonDbClient, param: &str) -> String {
          - Suggested #tags\n\
          - Category: factual / preference / decision / action-item\n\n\
          Present the proposed extractions for approval. After approval, save each with:\n\
-         [TOOL:remember <content> #tags]",
+         remember <content> #tags",
         name,
         selected.len(),
         end - start,

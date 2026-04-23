@@ -12,7 +12,7 @@ use super::retrieval::retrieve_relevant_knowledge;
 use super::traversal::traverse;
 use super::types::{content_preview, EdgeType, NodeType, SemanticCategory};
 
-/// `[TOOL:knowledge_promote <entry_id> | <type> | <data>]`
+/// `knowledge_promote <entry_id> | <type> | <data>`
 pub async fn knowledge_promote(
     params: &str,
     db: &WardsonDbClient,
@@ -20,7 +20,7 @@ pub async fn knowledge_promote(
 ) -> String {
     let parts: Vec<&str> = params.splitn(3, '|').map(|s| s.trim()).collect();
     if parts.len() < 3 {
-        return "Error: usage [TOOL:knowledge_promote <entry_id> | <type> | <data>]".into();
+        return "Error: usage knowledge_promote <entry_id> | <type> | <data>".into();
     }
     let entry_id = parts[0];
     let ptype = parts[1].to_lowercase();
@@ -52,11 +52,11 @@ pub async fn knowledge_promote(
     }
 }
 
-/// `[TOOL:knowledge_link <source_coll>:<source_id> | <edge_type> | <target_coll>:<target_id> | <weight>]`
+/// `knowledge_link <source_coll>:<source_id> | <edge_type> | <target_coll>:<target_id> | <weight>`
 pub async fn knowledge_link(params: &str, db: &WardsonDbClient) -> String {
     let parts: Vec<&str> = params.splitn(4, '|').map(|s| s.trim()).collect();
     if parts.len() < 4 {
-        return "Error: usage [TOOL:knowledge_link <source_coll>:<source_id> | <edge_type> | <target_coll>:<target_id> | <weight>]".into();
+        return "Error: usage knowledge_link <source_coll>:<source_id> | <edge_type> | <target_coll>:<target_id> | <weight>".into();
     }
     let Some((src_coll, src_id)) = parts[0].split_once(':') else {
         return "Error: source must be <collection>:<id>".into();
@@ -126,19 +126,19 @@ pub async fn knowledge_link(params: &str, db: &WardsonDbClient) -> String {
     }
 }
 
-/// `[TOOL:knowledge_unlink_edge <edge_id>]` — delete a single edge by ID
-/// `[TOOL:knowledge_unlink_edge <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>]` — delete matching edges (bidirectional)
+/// `knowledge_unlink_edge <edge_id>` — delete a single edge by ID
+/// `knowledge_unlink_edge <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>` — delete matching edges (bidirectional)
 pub async fn knowledge_unlink_edge(params: &str, db: &WardsonDbClient) -> String {
     let trimmed = params.trim();
     if trimmed.is_empty() {
-        return "Error: usage [TOOL:knowledge_unlink_edge <edge_id>] or [TOOL:knowledge_unlink_edge <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>]".into();
+        return "Error: usage knowledge_unlink_edge <edge_id> or knowledge_unlink_edge <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>".into();
     }
 
     if trimmed.contains('|') {
         // Form 2: triple parse, bidirectional delete
         let parts: Vec<&str> = trimmed.splitn(3, '|').map(|s| s.trim()).collect();
         if parts.len() < 3 {
-            return "Error: usage [TOOL:knowledge_unlink_edge <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>]".into();
+            return "Error: usage knowledge_unlink_edge <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>".into();
         }
         let Some((src_coll, src_id)) = parts[0].split_once(':') else {
             return "Error: source must be <collection>:<id>".into();
@@ -195,15 +195,15 @@ pub async fn knowledge_unlink_edge(params: &str, db: &WardsonDbClient) -> String
     }
 }
 
-/// `[TOOL:knowledge_unlink_node <collection>:<id>]` — delete a semantic or
+/// `knowledge_unlink_node <collection>:<id>` — delete a semantic or
 /// procedural node and cascade-remove every edge referencing it (source or target).
 ///
-/// Scoped to `memory.semantic` and `memory.procedural`. Use `[TOOL:forget]` for
+/// Scoped to `memory.semantic` and `memory.procedural`. Use `forget` for
 /// episodic `memory.entries` cleanup.
 pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String {
     let trimmed = params.trim();
     if trimmed.is_empty() {
-        return "Error: usage [TOOL:knowledge_unlink_node <collection>:<id>]".into();
+        return "Error: usage knowledge_unlink_node <collection>:<id>".into();
     }
     let Some((coll, id)) = trimmed.split_once(':') else {
         return "Error: target must be <collection>:<id>".into();
@@ -212,7 +212,7 @@ pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String
     let id = id.trim();
     if coll != "memory.semantic" && coll != "memory.procedural" {
         return format!(
-            "Error: knowledge_unlink_node only operates on memory.semantic or memory.procedural (got '{}'). Use [TOOL:forget] for memory.entries.",
+            "Error: knowledge_unlink_node only operates on memory.semantic or memory.procedural (got '{}'). Use forget for memory.entries.",
             coll
         );
     }
@@ -275,7 +275,7 @@ pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String
     )
 }
 
-/// `[TOOL:knowledge_update <collection>:<id> | <json_patch>]` — update a semantic
+/// `knowledge_update <collection>:<id> | <json_patch>` — update a semantic
 /// or procedural node in place while preserving every referencing edge.
 ///
 /// JSON patch is an object containing only the fields to change. Immutable fields
@@ -291,10 +291,10 @@ pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String
 pub async fn knowledge_update(params: &str, db: &WardsonDbClient) -> String {
     let trimmed = params.trim();
     if trimmed.is_empty() {
-        return "knowledge_update rejected (missing arguments). Usage: [TOOL:knowledge_update <collection>:<id> | <json_patch>]".into();
+        return "knowledge_update rejected (missing arguments). Usage: knowledge_update <collection>:<id> | <json_patch>".into();
     }
     let Some((target, patch_str)) = trimmed.split_once('|') else {
-        return "knowledge_update rejected (missing `|` separator). Usage: [TOOL:knowledge_update <collection>:<id> | <json_patch>]".into();
+        return "knowledge_update rejected (missing `|` separator). Usage: knowledge_update <collection>:<id> | <json_patch>".into();
     };
     let Some((coll, id)) = target.trim().split_once(':') else {
         return "knowledge_update rejected (target must be <collection>:<id>)".into();
@@ -307,7 +307,7 @@ pub async fn knowledge_update(params: &str, db: &WardsonDbClient) -> String {
 
     if coll != "memory.semantic" && coll != "memory.procedural" {
         return format!(
-            "knowledge_update rejected (collection '{}' not supported — only memory.semantic or memory.procedural). Use [TOOL:forget] + [TOOL:remember] for memory.entries.",
+            "knowledge_update rejected (collection '{}' not supported — only memory.semantic or memory.procedural). Use forget + remember for memory.entries.",
             coll
         );
     }
@@ -374,7 +374,7 @@ pub async fn knowledge_update(params: &str, db: &WardsonDbClient) -> String {
     )
 }
 
-/// `[TOOL:knowledge_traverse <collection>:<id> [depth] [edge_types] [min_weight]]`
+/// `knowledge_traverse <collection>:<id> [depth [edge_types] [min_weight]]`
 pub async fn knowledge_traverse(
     params: &str,
     db: &WardsonDbClient,
@@ -383,7 +383,7 @@ pub async fn knowledge_traverse(
     // Tokenize by whitespace, first token = collection:id
     let mut toks = params.split_whitespace();
     let Some(start) = toks.next() else {
-        return "Error: usage [TOOL:knowledge_traverse <collection>:<id> [depth] [edge_types] [min_weight]]".into();
+        return "Error: usage knowledge_traverse <collection>:<id> [depth [edge_types] [min_weight]]".into();
     };
     let Some((start_coll, start_id)) = start.split_once(':') else {
         return "Error: start must be <collection>:<id>".into();
@@ -460,7 +460,7 @@ pub async fn knowledge_traverse(
     out
 }
 
-/// `[TOOL:knowledge_query <query_text> [| <max_results> [| <categories_csv>]]]`
+/// `knowledge_query <query_text> [| <max_results> [| <categories_csv>]]`
 pub async fn knowledge_query(
     params: &str,
     db: &WardsonDbClient,
@@ -471,7 +471,7 @@ pub async fn knowledge_query(
     let parts: Vec<&str> = params.splitn(3, '|').map(|s| s.trim()).collect();
     let query_text = parts.first().copied().unwrap_or("").trim();
     if query_text.is_empty() {
-        return "Error: usage [TOOL:knowledge_query <query_text> [| <max_results> [| <categories_csv>]]]".into();
+        return "Error: usage knowledge_query <query_text> [| <max_results> [| <categories_csv>]]".into();
     }
 
     let max_results: usize = parts
@@ -555,7 +555,7 @@ pub async fn knowledge_query(
     out
 }
 
-/// `[TOOL:knowledge_graph_stats]`
+/// `knowledge_graph_stats`
 pub async fn knowledge_graph_stats(db: &WardsonDbClient) -> String {
     let mut out = String::from("Knowledge Graph Statistics:\n\n");
 

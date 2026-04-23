@@ -91,16 +91,16 @@ async fn ensure_collection(db: &WardsonDbClient) {
 /// Param format: `<schedule> | <command>`
 pub async fn cron_add(db: &WardsonDbClient, param: &str, config_tz: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:cron_add <schedule> | <command>]\n\
+        return "Usage: cron_add <schedule> | <command>\n\
                 Schedules: every 5m, every 1h, every 30s, hourly, daily 09:00\n\
                 'daily HH:MM' is resolved in the configured timezone; avoid 02:00–03:00 on DST days.\n\
-                Example: [TOOL:cron_add every 5m | system_status]"
+                Example: cron_add every 5m | system_status"
             .into();
     }
 
     let parts: Vec<&str> = param.splitn(2, " | ").collect();
     if parts.len() < 2 {
-        return "Usage: [TOOL:cron_add <schedule> | <command>]".into();
+        return "Usage: cron_add <schedule> | <command>".into();
     }
 
     let schedule_str = parts[0].trim();
@@ -142,7 +142,7 @@ pub async fn cron_list(db: &WardsonDbClient) -> String {
         .unwrap_or_default();
 
     if crons.is_empty() {
-        return "No cron jobs configured. Add one with: [TOOL:cron_add <schedule> | <command>]"
+        return "No cron jobs configured. Add one with: cron_add <schedule> | <command>"
             .into();
     }
 
@@ -174,7 +174,7 @@ pub async fn cron_list(db: &WardsonDbClient) -> String {
 /// Remove a cron job by ID.
 pub async fn cron_remove(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:cron_remove <id>]".into();
+        return "Usage: cron_remove <id>".into();
     }
 
     let id = param.trim();
@@ -235,7 +235,7 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
             kg_traversal_depth_ceiling: 5,
             kg_edge_candidate_limit: 50,
         });
-        // Direct registry dispatch — no [TOOL:...] synthesis, no model round-trip.
+        // Direct registry dispatch — no ... synthesis, no model round-trip.
         // The stored `command` is a plain tool name for v0 crons (pre-v7 schema);
         // any trailing words after the first space are discarded here with a
         // warning. Stage 8's v7 schema migration adds structured
@@ -344,7 +344,7 @@ mod daily_next_tests {
 // ── Native tool-use registrations (NATIVE-TOOLS-01) ──
 //
 // Tool DEFINITIONS only — Stage 6 rewrites the executor at the top of this
-// file to invoke the registry directly instead of synthesizing [TOOL:...]
+// file to invoke the registry directly instead of synthesizing ...
 // strings. During Stages 2-5 the legacy executor still synthesizes and
 // calls into the old string dispatcher.
 
@@ -363,7 +363,7 @@ use crate::tools::registry::DispatchContext;
 pub struct CronAddArgs {
     pub schedule: String,
     /// The tool-dispatch command to execute. During Stage 2 this is still a
-    /// free-form string that the legacy executor wraps in `[TOOL:...]`;
+    /// free-form string that the legacy executor wraps in `...`;
     /// Stage 6 moves to a structured `{command_name, command_args}` doc.
     pub command: String,
 }

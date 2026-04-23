@@ -51,7 +51,7 @@ fn github_token_git_args(token: &Option<String>) -> Vec<String> {
 /// workspace (`repos/myrepo`). Absolute paths and `..` segments are rejected.
 pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:git_clone <url>] or [TOOL:git_clone <url> <subpath>]".into();
+        return "Usage: git_clone <url> or git_clone <url> <subpath>".into();
     }
 
     let parts: Vec<&str> = param.split_whitespace().collect();
@@ -195,7 +195,7 @@ pub async fn plan(db: &WardsonDbClient, param: &str) -> String {
             .unwrap_or_default();
 
         if plans.is_empty() {
-            return "No plans found. Create one with: [TOOL:plan <title> | <description>]".into();
+            return "No plans found. Create one with: plan <title> | <description>".into();
         }
 
         let mut output = format!("=== Plans ({}) ===\n", plans.len());
@@ -241,7 +241,7 @@ pub async fn tasks(db: &WardsonDbClient, param: &str) -> String {
             .unwrap_or_default();
 
         if all_tasks.is_empty() {
-            return "No tasks found. Add one with: [TOOL:task_add <title>]".into();
+            return "No tasks found. Add one with: task_add <title>".into();
         }
 
         let mut output = format!("=== Tasks ({}) ===\n", all_tasks.len());
@@ -288,7 +288,7 @@ pub async fn tasks(db: &WardsonDbClient, param: &str) -> String {
 /// Add a task.
 pub async fn task_add(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:task_add <title>] or [TOOL:task_add <title> | <plan_id>]".into();
+        return "Usage: task_add <title> or task_add <title> | <plan_id>".into();
     }
 
     ensure_collection(db, "tasks").await;
@@ -318,7 +318,7 @@ pub async fn task_add(db: &WardsonDbClient, param: &str) -> String {
 /// Mark a task as done.
 pub async fn task_done(db: &WardsonDbClient, task_id: &str) -> String {
     if task_id.is_empty() {
-        return "Usage: [TOOL:task_done <task_id>]".into();
+        return "Usage: task_done <task_id>".into();
     }
 
     match db.read("tasks", task_id.trim()).await {
@@ -345,7 +345,7 @@ pub async fn gh_issues(db: &WardsonDbClient, param: &str) -> String {
     };
 
     if param.is_empty() {
-        return "Usage: [TOOL:gh_issues <owner/repo>]\nExample: [TOOL:gh_issues ward-software-defined-systems/wardsondb]".into();
+        return "Usage: gh_issues <owner/repo>\nExample: gh_issues ward-software-defined-systems/wardsondb".into();
     }
 
     let url = format!("https://api.github.com/repos/{}/issues?state=open&per_page=10", param);
@@ -400,7 +400,7 @@ pub async fn gh_prs(db: &WardsonDbClient, param: &str) -> String {
     };
 
     if param.is_empty() {
-        return "Usage: [TOOL:gh_prs <owner/repo>]\nExample: [TOOL:gh_prs ward-software-defined-systems/wardsondb]".into();
+        return "Usage: gh_prs <owner/repo>\nExample: gh_prs ward-software-defined-systems/wardsondb".into();
     }
 
     let url = format!("https://api.github.com/repos/{}/pulls?state=open&per_page=10", param);
@@ -443,7 +443,7 @@ pub async fn gh_prs(db: &WardsonDbClient, param: &str) -> String {
 pub async fn git_add(param: &str) -> String {
     let parts: Vec<&str> = param.splitn(2, ' ').collect();
     if parts.len() < 2 {
-        return "Usage: [TOOL:git_add <path> <files>]\nExample: [TOOL:git_add /embra/workspace/repos/myrepo file.txt]".into();
+        return "Usage: git_add <path> <files>\nExample: git_add /embra/workspace/repos/myrepo file.txt".into();
     }
     let dir = match validate_workspace_path(parts[0]) {
         Ok(d) => d,
@@ -482,12 +482,12 @@ pub async fn git_add(param: &str) -> String {
 /// right before the `git commit -m` invocation. Same pattern as
 /// `file_write` / `file_append`.
 ///
-/// Example: `[TOOL:git_commit /path | Subject line\n\nBody paragraph]`
+/// Example: `git_commit /path | Subject line\n\nBody paragraph`
 /// produces a commit with a proper subject/body split.
 pub async fn git_commit(param: &str) -> String {
     let parts: Vec<&str> = param.splitn(2, " | ").collect();
     if parts.len() < 2 {
-        return "Usage: [TOOL:git_commit <path> | <message>]\nUse \\n in the message for line breaks (multi-paragraph commits).".into();
+        return "Usage: git_commit <path> | <message>\nUse \\n in the message for line breaks (multi-paragraph commits).".into();
     }
     let dir = match validate_workspace_path(parts[0].trim()) {
         Ok(d) => d,
@@ -700,7 +700,7 @@ async fn git_branch_list(dir: &str) -> String {
 pub async fn git_checkout(param: &str) -> String {
     let parts: Vec<&str> = param.split_whitespace().collect();
     if parts.len() < 2 {
-        return "Usage: [TOOL:git_checkout <path> <branch>]".into();
+        return "Usage: git_checkout <path> <branch>".into();
     }
     let dir = match validate_workspace_path(parts[0]) {
         Ok(d) => d,
@@ -740,7 +740,7 @@ pub async fn gh_issue_create(db: &WardsonDbClient, param: &str) -> String {
 
     let parts: Vec<&str> = param.splitn(3, " | ").collect();
     if parts.len() < 2 {
-        return "Usage: [TOOL:gh_issue_create <owner/repo> | <title> | <body>]".into();
+        return "Usage: gh_issue_create <owner/repo> | <title> | <body>".into();
     }
 
     let repo = parts[0].trim();
@@ -846,7 +846,7 @@ pub async fn gh_issue_comment(db: &WardsonDbClient, param: &str) -> String {
     };
     let (repo, number, body) = match parse_comment_param(param) {
         Ok(v) => v,
-        Err(e) => return format!("gh_issue_comment rejected ({}). Usage: [TOOL:gh_issue_comment <owner/repo> <number> | <body>]", e),
+        Err(e) => return format!("gh_issue_comment rejected ({}). Usage: gh_issue_comment <owner/repo> <number> | <body>", e),
     };
     match post_github_comment(&token, repo, number, body).await {
         Ok((_id, html_url)) => format!("Comment posted on issue #{} in {}: {}", number, repo, html_url),
@@ -865,7 +865,7 @@ pub async fn gh_pr_comment(db: &WardsonDbClient, param: &str) -> String {
     };
     let (repo, number, body) = match parse_comment_param(param) {
         Ok(v) => v,
-        Err(e) => return format!("gh_pr_comment rejected ({}). Usage: [TOOL:gh_pr_comment <owner/repo> <number> | <body>]", e),
+        Err(e) => return format!("gh_pr_comment rejected ({}). Usage: gh_pr_comment <owner/repo> <number> | <body>", e),
     };
     match post_github_comment(&token, repo, number, body).await {
         Ok((_id, html_url)) => format!("Comment posted on PR #{} in {}: {}", number, repo, html_url),
@@ -910,7 +910,7 @@ async fn patch_issue_or_pr_state(
 
     let parts: Vec<&str> = param.split_whitespace().collect();
     if parts.len() < 2 {
-        return format!("{} rejected (missing args). Usage: [TOOL:{} <owner/repo> <number>]", tool_name, tool_name);
+        return format!("{} rejected (missing args). Usage: {} <owner/repo> <number>", tool_name, tool_name);
     }
 
     let repo = parts[0];
@@ -956,7 +956,7 @@ pub async fn gh_pr_create(db: &WardsonDbClient, param: &str) -> String {
 
     let parts: Vec<&str> = param.splitn(4, " | ").collect();
     if parts.len() < 4 {
-        return "Usage: [TOOL:gh_pr_create <owner/repo> | <title> | <head> | <base>]".into();
+        return "Usage: gh_pr_create <owner/repo> | <title> | <head> | <base>".into();
     }
 
     let repo = parts[0].trim();
@@ -1013,7 +1013,7 @@ pub async fn gh_pr_merge(db: &WardsonDbClient, param: &str) -> String {
     };
     let parts: Vec<&str> = head.split_whitespace().collect();
     if parts.len() < 2 {
-        return "gh_pr_merge rejected (missing args). Usage: [TOOL:gh_pr_merge <owner/repo> <number>] or [TOOL:gh_pr_merge <owner/repo> <number> | <method>] where method is merge|squash|rebase".into();
+        return "gh_pr_merge rejected (missing args). Usage: gh_pr_merge <owner/repo> <number> or gh_pr_merge <owner/repo> <number> | <method> where method is merge|squash|rebase".into();
     }
     let repo = parts[0];
     let number = parts[1];
@@ -1147,7 +1147,7 @@ pub async fn gh_project_list(db: &WardsonDbClient, param: &str) -> String {
     };
 
     if param.is_empty() {
-        return "Usage: [TOOL:gh_project_list <owner>]".into();
+        return "Usage: gh_project_list <owner>".into();
     }
 
     let owner = param.trim();
@@ -1181,7 +1181,7 @@ pub async fn gh_project_view(db: &WardsonDbClient, param: &str) -> String {
 
     let parts: Vec<&str> = param.split_whitespace().collect();
     if parts.len() < 2 {
-        return "Usage: [TOOL:gh_project_view <owner> <number>]".into();
+        return "Usage: gh_project_view <owner> <number>".into();
     }
 
     let owner = parts[0];
@@ -1220,9 +1220,9 @@ const FILE_READ_MAX: usize = 2_097_152; // 2 MiB
 /// with the next slice.
 pub async fn file_read(params: &str) -> String {
     if params.is_empty() {
-        return "Usage: [TOOL:file_read <path>[|<offset>[|<limit>]]]\n\
-                Example: [TOOL:file_read /embra/workspace/repos/myrepo/README.md]\n\
-                Example: [TOOL:file_read /path/to/big.log|2097152|1048576]".into();
+        return "Usage: file_read <path>[|<offset>[|<limit>]]\n\
+                Example: file_read /embra/workspace/repos/myrepo/README.md\n\
+                Example: file_read /path/to/big.log|2097152|1048576".into();
     }
 
     let mut parts = params.splitn(3, '|').map(str::trim);
@@ -1235,7 +1235,7 @@ pub async fn file_read(params: &str) -> String {
         .min(FILE_READ_MAX);
 
     if path.is_empty() {
-        return "Usage: [TOOL:file_read <path>[|<offset>[|<limit>]]]".into();
+        return "Usage: file_read <path>[|<offset>[|<limit>]]".into();
     }
 
     let file_path = std::path::Path::new(path);
@@ -1307,7 +1307,7 @@ pub async fn file_read(params: &str) -> String {
     let content = String::from_utf8_lossy(&buf);
     let more = if read_end < size {
         format!(
-            "\n[... {} more bytes at offset {}. Continue with [TOOL:file_read {}|{}|{}] ]",
+            "\n[... {} more bytes at offset {}. Continue with file_read {}|{}|{} ]",
             size - read_end,
             read_end,
             path,
@@ -1365,15 +1365,15 @@ async fn ensure_parent_dirs(path: &str) -> Result<(), String> {
 /// Creates parent directories if they don't exist.
 pub async fn file_write(param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:file_write <path> | <content>]\n\
+        return "Usage: file_write <path> | <content>\n\
                 Use \\n for newlines, \\t for tabs.\n\
-                Example: [TOOL:file_write /embra/workspace/repos/myrepo/notes.txt | line 1\\nline 2\\nline 3]"
+                Example: file_write /embra/workspace/repos/myrepo/notes.txt | line 1\\nline 2\\nline 3"
             .into();
     }
 
     let parts: Vec<&str> = param.splitn(2, " | ").collect();
     if parts.len() < 2 {
-        return "Usage: [TOOL:file_write <path> | <content>]".into();
+        return "Usage: file_write <path> | <content>".into();
     }
 
     let path = parts[0].trim();
@@ -1402,15 +1402,15 @@ pub async fn file_write(param: &str) -> String {
 /// Creates the file (and parent directories) if it doesn't exist.
 pub async fn file_append(param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:file_append <path> | <content>]\n\
+        return "Usage: file_append <path> | <content>\n\
                 Use \\n for newlines, \\t for tabs.\n\
-                Example: [TOOL:file_append /embra/workspace/repos/myrepo/log.txt | New entry\\n]"
+                Example: file_append /embra/workspace/repos/myrepo/log.txt | New entry\\n"
             .into();
     }
 
     let parts: Vec<&str> = param.splitn(2, " | ").collect();
     if parts.len() < 2 {
-        return "Usage: [TOOL:file_append <path> | <content>]".into();
+        return "Usage: file_append <path> | <content>".into();
     }
 
     let path = parts[0].trim();
@@ -1444,7 +1444,7 @@ pub async fn file_append(param: &str) -> String {
 /// Param format: `<path>`
 pub async fn mkdir(param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:mkdir <path>]\nExample: [TOOL:mkdir /embra/workspace/repos/myrepo/src/utils]".into();
+        return "Usage: mkdir <path>\nExample: mkdir /embra/workspace/repos/myrepo/src/utils".into();
     }
 
     let path = param.trim();
@@ -1470,7 +1470,7 @@ pub async fn mkdir(param: &str) -> String {
 pub async fn file_symlink(param: &str) -> String {
     let parts: Vec<&str> = param.splitn(2, '|').collect();
     if parts.len() < 2 {
-        return "file_symlink rejected (missing arguments). Usage: [TOOL:file_symlink <target> | <link_path>]\nExample: [TOOL:file_symlink /embra/workspace/repos/foo/src | /embra/workspace/src-link]".into();
+        return "file_symlink rejected (missing arguments). Usage: file_symlink <target> | <link_path>\nExample: file_symlink /embra/workspace/repos/foo/src | /embra/workspace/src-link".into();
     }
 
     let target = parts[0].trim();
@@ -1511,7 +1511,7 @@ pub async fn file_symlink(param: &str) -> String {
 /// Param format: `<path>`
 pub async fn file_delete(param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:file_delete <path>]\nExample: [TOOL:file_delete /embra/workspace/repos/myrepo/old_file.txt]".into();
+        return "Usage: file_delete <path>\nExample: file_delete /embra/workspace/repos/myrepo/old_file.txt".into();
     }
 
     let path = param.trim();
@@ -1553,7 +1553,7 @@ pub async fn file_delete(param: &str) -> String {
 pub async fn file_move(param: &str) -> String {
     let parts: Vec<&str> = param.splitn(2, '|').collect();
     if parts.len() < 2 {
-        return "Usage: [TOOL:file_move <source> | <destination>]\nExample: [TOOL:file_move /embra/workspace/repos/myrepo/old.rs | /embra/workspace/repos/myrepo/new.rs]".into();
+        return "Usage: file_move <source> | <destination>\nExample: file_move /embra/workspace/repos/myrepo/old.rs | /embra/workspace/repos/myrepo/new.rs".into();
     }
 
     let src = parts[0].trim();
@@ -1590,7 +1590,7 @@ pub async fn file_move(param: &str) -> String {
 pub async fn git_rm(param: &str) -> String {
     let parts: Vec<&str> = param.splitn(2, char::is_whitespace).collect();
     if parts.len() < 2 {
-        return "Usage: [TOOL:git_rm <repo_path> <files>]\nExample: [TOOL:git_rm /embra/workspace/repos/myrepo old_file.txt]".into();
+        return "Usage: git_rm <repo_path> <files>\nExample: git_rm /embra/workspace/repos/myrepo old_file.txt".into();
     }
 
     let dir = match validate_workspace_path(parts[0]) {
@@ -1635,7 +1635,7 @@ pub async fn git_rm(param: &str) -> String {
 pub async fn git_mv(param: &str) -> String {
     let parts: Vec<&str> = param.splitn(3, char::is_whitespace).collect();
     if parts.len() < 3 {
-        return "Usage: [TOOL:git_mv <repo_path> <source> <destination>]\nExample: [TOOL:git_mv /embra/workspace/repos/myrepo src/Old.rs src/old.rs]".into();
+        return "Usage: git_mv <repo_path> <source> <destination>\nExample: git_mv /embra/workspace/repos/myrepo src/Old.rs src/old.rs".into();
     }
 
     let dir = match validate_workspace_path(parts[0]) {
@@ -1669,7 +1669,7 @@ pub async fn git_mv(param: &str) -> String {
 /// Param format: `<path>` or `<path> --force`
 pub async fn dir_delete(param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:dir_delete <path>] or [TOOL:dir_delete <path> --force]\nWithout --force, only empty directories are removed.".into();
+        return "Usage: dir_delete <path> or dir_delete <path> --force\nWithout --force, only empty directories are removed.".into();
     }
 
     let (path, force) = if param.trim_end().ends_with("--force") {
@@ -1705,7 +1705,7 @@ pub async fn dir_delete(param: &str) -> String {
                     || e.to_string().contains("Directory not empty")
                 {
                     format!(
-                        "Directory is not empty: {}. Use [TOOL:dir_delete {} --force] to remove with contents.",
+                        "Directory is not empty: {}. Use dir_delete {} --force to remove with contents.",
                         path, path
                     )
                 } else {

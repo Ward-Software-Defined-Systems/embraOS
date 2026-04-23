@@ -269,16 +269,16 @@ async fn grab_banner(host: &str, port: u16) -> Option<String> {
 /// `8000-8100,443` (mixed), `web`, `db`, `low`, `all`.
 pub async fn port_scan(param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:port_scan <host> [ports]]\n\
+        return "Usage: port_scan <host> [ports]\n\
                 Examples:\n  \
-                  [TOOL:port_scan localhost]              — default 17 common ports\n  \
-                  [TOOL:port_scan 192.168.1.1 80,443]     — specific ports\n  \
-                  [TOOL:port_scan localhost 8000-8100]    — port range\n  \
-                  [TOOL:port_scan localhost 8000-8100,443] — mixed range and list\n  \
-                  [TOOL:port_scan localhost web]          — preset: 80, 443, 8080, 8443\n  \
-                  [TOOL:port_scan localhost db]           — preset: 3306, 5432, 6379, 27017, 5984\n  \
-                  [TOOL:port_scan localhost low]          — well-known 1-1024\n  \
-                  [TOOL:port_scan localhost all]          — exhaustive 1-65535 (may take many minutes)\n\
+                  port_scan localhost              — default 17 common ports\n  \
+                  port_scan 192.168.1.1 80,443     — specific ports\n  \
+                  port_scan localhost 8000-8100    — port range\n  \
+                  port_scan localhost 8000-8100,443 — mixed range and list\n  \
+                  port_scan localhost web          — preset: 80, 443, 8080, 8443\n  \
+                  port_scan localhost db           — preset: 3306, 5432, 6379, 27017, 5984\n  \
+                  port_scan localhost low          — well-known 1-1024\n  \
+                  port_scan localhost all          — exhaustive 1-65535 (may take many minutes)\n\
                 Custom ranges/lists are capped at 2048 distinct ports; presets are exempt.\n\
                 Restricted to private/loopback addresses only."
             .into();
@@ -456,12 +456,12 @@ mod parse_ssh_target_tests {
 /// Param format: `<user@host> <command>` or `<host> <command>`
 pub async fn ssh_remote_admin(param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:ssh_remote_admin <host> <command>] or [TOOL:ssh_remote_admin user@host[:port] <command>]".into();
+        return "Usage: ssh_remote_admin <host> <command> or ssh_remote_admin user@host[:port <command>]".into();
     }
 
     let parts: Vec<&str> = param.splitn(2, ' ').collect();
     if parts.len() < 2 {
-        return "Usage: [TOOL:ssh_remote_admin <host> <command>]".into();
+        return "Usage: ssh_remote_admin <host> <command>".into();
     }
 
     let target = parts[0];
@@ -547,7 +547,7 @@ pub async fn ssh_remote_admin(param: &str) -> String {
 /// Param: `<user@host[:port]>` or `<host[:port]>` (default user: root, default port: 22)
 pub async fn ssh_session_start(param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:ssh_session_start <user@host>] or [TOOL:ssh_session_start <user@host:port>] or [TOOL:ssh_session_start <host>]".into();
+        return "Usage: ssh_session_start <user@host> or ssh_session_start <user@host:port> or ssh_session_start <host>".into();
     }
 
     let (user, host, port) = parse_ssh_target(param.trim());
@@ -672,7 +672,7 @@ pub async fn ssh_session_start(param: &str) -> String {
 /// Param: command to execute
 pub async fn ssh_session_exec(param: &str) -> String {
     if param.is_empty() {
-        return "Usage: [TOOL:ssh_session_exec <command>]".into();
+        return "Usage: ssh_session_exec <command>".into();
     }
 
     let lock = ssh_session_lock().lock().await;
