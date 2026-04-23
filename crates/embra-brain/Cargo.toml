@@ -6,6 +6,8 @@ license.workspace = true
 
 [dependencies]
 embra-common = { workspace = true }
+embra-tool-macro = { path = "../embra-tool-macro" }
+embra-tools-core = { path = "../embra-tools-core" }
 tokio = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
@@ -20,6 +22,9 @@ chrono = { workspace = true }
 chrono-tz = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+schemars = { workspace = true }
+inventory = { workspace = true }
+once_cell = { workspace = true }
 meval = "0.2"
 uuid = { version = "1", features = ["v4"] }
 tokio-stream = "0.1"
