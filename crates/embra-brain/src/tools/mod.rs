@@ -1293,7 +1293,7 @@ impl SessionSummaryArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "recall",
-    description = "Search past conversations and saved memories. Query is free-text; hashtags supported; empty query lists recent entries."
+    description = "Search past conversations and saved memories. Free-text query; unquoted terms AND-match (all must appear); hashtags supported; empty query lists recent entries."
 )]
 pub struct RecallArgs {
     /// Search query. Free-text; hashtags supported; empty to list all.
@@ -1310,7 +1310,7 @@ impl RecallArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "memory_search",
-    description = "Alias for recall. Search past memories by free-text query; hashtags supported."
+    description = "Alias for recall. Search past memories by free-text query; unquoted terms AND-match; hashtags supported."
 )]
 pub struct MemorySearchArgs {
     #[serde(default)]

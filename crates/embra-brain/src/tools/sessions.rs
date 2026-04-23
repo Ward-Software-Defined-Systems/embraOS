@@ -308,47 +308,23 @@ pub async fn session_read(db: &WardsonDbClient, param: &str) -> String {
 }
 
 /// Full-text search across sessions.
-/// Param: `<query> [session_name]`
-pub async fn session_search(db: &WardsonDbClient, param: &str) -> String {
-    if param.is_empty() {
-        return "Usage: session_search <query> or session_search <query> <session>"
-            .into();
-    }
-
-    // Strip surrounding double quotes (phrase delimiter support)
-    let param = if param.starts_with('"') && param.ends_with('"') && param.len() >= 2 {
-        &param[1..param.len() - 1]
-    } else {
-        param
+///
+/// Query semantics:
+/// - Double-quoted (`"tool sweep"`): literal phrase match.
+/// - Unquoted (`tool sweep`): whitespace-tokenized; all tokens must appear
+///   in the same turn (AND). Matches `recall`'s token semantics.
+pub async fn session_search(
+    db: &WardsonDbClient,
+    query: &str,
+    session: Option<&str>,
+) -> String {
+    let Some(plan) = SessionQueryPlan::parse(query) else {
+        return "Usage: session_search <query> (unquoted terms AND-match; wrap in double quotes for literal phrase). Pass `session` to narrow to a single session.".into();
     };
 
-    // Check if the last word is a session name
-    let parts: Vec<&str> = param.rsplitn(2, ' ').collect();
-    let (query, specific_session) = if parts.len() == 2 {
-        // Could be "query session" or "multi word query"
-        // Check if the last word matches a session name
-        let candidate = parts[0];
-        let names = session_names(db).await;
-        if names.iter().any(|n| n == candidate) {
-            (parts[1], Some(candidate.to_string()))
-        } else {
-            (param, None)
-        }
-    } else {
-        (param, None)
-    };
-
-    // Also strip quotes from the resolved query (handles `"phrase" session` form)
-    let query = query
-        .strip_prefix('"')
-        .and_then(|q| q.strip_suffix('"'))
-        .unwrap_or(query);
-
-    let query_lower = query.to_lowercase();
-    let names_to_search = if let Some(ref s) = specific_session {
-        vec![s.clone()]
-    } else {
-        session_names(db).await
+    let names_to_search = match session {
+        Some(s) if !s.is_empty() => vec![s.to_string()],
+        _ => session_names(db).await,
     };
 
     let mut results = Vec::new();
@@ -362,18 +338,14 @@ pub async fn session_search(db: &WardsonDbClient, param: &str) -> String {
                 .unwrap_or("");
             let content_lower = content.to_lowercase();
 
-            if let Some(match_pos) = content_lower.find(&query_lower) {
-                let role = turn
-                    .get("role")
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("?");
+            if let Some((anchor_pos, anchor_len)) = plan.match_turn(&content_lower) {
+                let role = turn.get("role").and_then(|r| r.as_str()).unwrap_or("?");
 
-                // Extract context around match (snap to char boundaries)
-                let mut start = match_pos.saturating_sub(50);
+                let mut start = anchor_pos.saturating_sub(50);
                 while start > 0 && !content.is_char_boundary(start) {
                     start -= 1;
                 }
-                let mut end = (match_pos + query.len() + 50).min(content.len());
+                let mut end = (anchor_pos + anchor_len + 50).min(content.len());
                 while end < content.len() && !content.is_char_boundary(end) {
                     end += 1;
                 }
@@ -398,15 +370,80 @@ pub async fn session_search(db: &WardsonDbClient, param: &str) -> String {
     }
 
     if results.is_empty() {
-        return format!("No matches found for '{}'.", query);
+        return format!(
+            "No matches found for '{}'. Unquoted terms AND-match (all must appear in the same turn); wrap in double quotes for literal phrase.",
+            plan.display
+        );
     }
 
-    let mut output = format!("Search results for '{}' ({} matches):\n\n", query, results.len());
+    let mut output = format!(
+        "Search results for '{}' ({} matches):\n\n",
+        plan.display,
+        results.len()
+    );
     for r in &results {
         output.push_str(r);
         output.push('\n');
     }
     output
+}
+
+/// Parsed query plan. Phrase mode captures the literal substring; AND mode
+/// captures whitespace-split tokens. Both match against already-lowercased
+/// turn content.
+#[derive(Debug)]
+struct SessionQueryPlan {
+    phrase_mode: bool,
+    core_lower: String,
+    tokens: Vec<String>,
+    display: String,
+}
+
+impl SessionQueryPlan {
+    fn parse(query: &str) -> Option<Self> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let (phrase_mode, core) =
+            if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
+                (true, &trimmed[1..trimmed.len() - 1])
+            } else {
+                (false, trimmed)
+            };
+        let core_lower = core.to_lowercase();
+        let tokens: Vec<String> = if phrase_mode {
+            Vec::new()
+        } else {
+            core_lower.split_whitespace().map(|s| s.to_string()).collect()
+        };
+        if !phrase_mode && tokens.is_empty() {
+            return None;
+        }
+        Some(Self {
+            phrase_mode,
+            core_lower,
+            tokens,
+            display: trimmed.to_string(),
+        })
+    }
+
+    /// `content_lower` must be already lowercased. Returns the snippet anchor
+    /// `(pos, len)` — phrase uses the substring match, AND uses the first
+    /// token's position so the snippet centers on something relevant.
+    fn match_turn(&self, content_lower: &str) -> Option<(usize, usize)> {
+        if self.phrase_mode {
+            content_lower
+                .find(&self.core_lower)
+                .map(|p| (p, self.core_lower.len()))
+        } else if self.tokens.iter().all(|t| content_lower.contains(t)) {
+            let first = &self.tokens[0];
+            let p = content_lower.find(first.as_str()).unwrap_or(0);
+            Some((p, first.len()))
+        } else {
+            None
+        }
+    }
 }
 
 /// Structured metadata for a session.
@@ -1279,23 +1316,18 @@ impl SessionReadArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "session_search",
-    description = "Full-text search across sessions. session (optional) narrows the scope to a single session."
+    description = "Full-text search across sessions. Unquoted terms AND-match (all must appear in the same turn); wrap in double quotes for literal phrase. `session` (optional) narrows the scope to a single session."
 )]
 pub struct SessionSearchArgs {
     pub query: String,
     /// Optional session name to scope the search.
     #[serde(default)]
-    pub session: String,
+    pub session: Option<String>,
 }
 
 impl SessionSearchArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = if self.session.is_empty() {
-            self.query
-        } else {
-            format!("{} {}", self.query, self.session)
-        };
-        Ok(session_search(ctx.db, &param).await)
+        Ok(session_search(ctx.db, &self.query, self.session.as_deref()).await)
     }
 }
 
@@ -1471,5 +1503,84 @@ mod native_args_tests {
         ] {
             assert!(names.contains(&expected), "{} not registered", expected);
         }
+    }
+
+    #[test]
+    fn session_search_args_session_optional() {
+        let a: SessionSearchArgs =
+            serde_json::from_value(serde_json::json!({"query": "foo"})).unwrap();
+        assert_eq!(a.query, "foo");
+        assert!(a.session.is_none());
+
+        let b: SessionSearchArgs = serde_json::from_value(serde_json::json!({
+            "query": "foo", "session": "main"
+        }))
+        .unwrap();
+        assert_eq!(b.session.as_deref(), Some("main"));
+    }
+}
+
+#[cfg(test)]
+mod session_query_plan_tests {
+    use super::SessionQueryPlan;
+
+    fn lower(s: &str) -> String {
+        s.to_lowercase()
+    }
+
+    #[test]
+    fn empty_query_is_none() {
+        assert!(SessionQueryPlan::parse("").is_none());
+        assert!(SessionQueryPlan::parse("   ").is_none());
+    }
+
+    #[test]
+    fn single_token_matches_substring() {
+        let p = SessionQueryPlan::parse("Anthropic").unwrap();
+        assert!(!p.phrase_mode);
+        assert!(p.match_turn(&lower("we called the Anthropic API")).is_some());
+        assert!(p.match_turn(&lower("something unrelated")).is_none());
+    }
+
+    #[test]
+    fn unquoted_multi_word_is_and_match() {
+        // Closes #34: the previous behavior treated "tool sweep" as a phrase
+        // and missed turns where both words appeared non-adjacent.
+        let p = SessionQueryPlan::parse("tool sweep").unwrap();
+        assert!(!p.phrase_mode);
+        assert!(p
+            .match_turn(&lower("the Sprint 3 TOOL verification SWEEP finished"))
+            .is_some());
+        assert!(p.match_turn(&lower("only mentions tool")).is_none());
+        assert!(p.match_turn(&lower("only mentions sweep")).is_none());
+    }
+
+    #[test]
+    fn quoted_multi_word_is_phrase_match() {
+        let p = SessionQueryPlan::parse("\"tool sweep\"").unwrap();
+        assert!(p.phrase_mode);
+        assert!(p.match_turn(&lower("the tool sweep happened")).is_some());
+        // AND-style non-adjacent should NOT match in phrase mode.
+        assert!(p
+            .match_turn(&lower("tool verification sweep"))
+            .is_none());
+    }
+
+    #[test]
+    fn phrase_anchor_points_at_substring() {
+        let p = SessionQueryPlan::parse("\"tool sweep\"").unwrap();
+        let (pos, len) = p.match_turn(&lower("the tool sweep was clean")).unwrap();
+        assert_eq!(pos, 4); // "the " prefix
+        assert_eq!(len, 10); // "tool sweep"
+    }
+
+    #[test]
+    fn and_mode_anchor_points_at_first_token() {
+        let p = SessionQueryPlan::parse("sweep tool").unwrap();
+        let (pos, len) = p
+            .match_turn(&lower("the tool verification sweep"))
+            .unwrap();
+        // First token is "sweep" — its position in content_lower
+        assert_eq!(&"the tool verification sweep".to_lowercase()[pos..pos + len], "sweep");
     }
 }
