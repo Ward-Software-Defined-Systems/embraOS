@@ -267,6 +267,41 @@ mod tests {
         }
     }
 
+    /// Regression guard for the Anthropic API's explicit rejection of
+    /// `oneOf`, `allOf`, or `anyOf` at the top level of `input_schema`
+    /// (error encountered post-deploy: "tools.N.custom.input_schema:
+    /// input_schema does not support oneOf, allOf, or anyOf at the top
+    /// level"). schemars emits these when a tool args struct uses
+    /// `#[serde(flatten)]` over a tagged enum — every args struct must
+    /// deserialize to a plain object schema.
+    #[test]
+    fn every_tool_schema_is_plain_object_no_top_level_combinators() {
+        let snapshot = build_tools_snapshot();
+        for tool in &snapshot {
+            let name = tool
+                .get("name")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unknown>");
+            let schema = &tool["input_schema"];
+            assert!(
+                schema.get("oneOf").is_none(),
+                "{name}: input_schema has top-level oneOf — Anthropic will 400 on this tool"
+            );
+            assert!(
+                schema.get("allOf").is_none(),
+                "{name}: input_schema has top-level allOf — Anthropic will 400 on this tool"
+            );
+            assert!(
+                schema.get("anyOf").is_none(),
+                "{name}: input_schema has top-level anyOf — Anthropic will 400 on this tool"
+            );
+            assert_eq!(
+                schema["type"], "object",
+                "{name}: input_schema root type must be \"object\""
+            );
+        }
+    }
+
     #[test]
     fn tools_snapshot_is_nonempty_and_includes_known_tools() {
         let snapshot = build_tools_snapshot();

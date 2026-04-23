@@ -688,50 +688,59 @@ impl KnowledgeLinkArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-#[serde(tag = "mode", rename_all = "snake_case")]
-pub enum KnowledgeUnlinkEdgeArgs {
-    /// Delete a specific edge by its document id.
-    ById { edge_id: String },
-    /// Delete matching edges by (source, edge_type, target). Bidirectional for
-    /// auto-derived symmetric types.
-    ByTriple {
-        source_collection: String,
-        source_id: String,
-        edge_type: String,
-        target_collection: String,
-        target_id: String,
-    },
-}
-
-// NB: #[embra_tool] attribute must sit on a type the macro can parse as
-// a struct or enum via syn::ItemStruct/ItemEnum. The macro's current syn
-// parse uses ItemStruct only — switching to parse either would expand the
-// macro surface. For enum-shape tools we attach #[embra_tool] to a thin
-// wrapper struct that flattens the enum.
-#[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "knowledge_unlink_edge",
-    description = "Delete an edge. mode=by_id with edge_id deletes one edge; mode=by_triple with source/edge_type/target deletes matching edges bidirectionally (for auto-derived symmetric types)."
+    description = "Delete edges. Provide either edge_id (removes one edge by its document id) OR the full triple — source_collection + source_id + edge_type + target_collection + target_id — which removes matching edges bidirectionally (for auto-derived symmetric types). edge_id takes precedence when both are provided."
 )]
-pub struct KnowledgeUnlinkEdgeWrapper {
-    #[serde(flatten)]
-    pub args: KnowledgeUnlinkEdgeArgs,
+pub struct KnowledgeUnlinkEdgeArgs {
+    /// Specific edge document id. When set, the triple fields are ignored.
+    #[serde(default)]
+    pub edge_id: Option<String>,
+    /// Triple form: source collection. Required together with the other
+    /// four triple fields when edge_id is absent.
+    #[serde(default)]
+    pub source_collection: Option<String>,
+    #[serde(default)]
+    pub source_id: Option<String>,
+    #[serde(default)]
+    pub edge_type: Option<String>,
+    #[serde(default)]
+    pub target_collection: Option<String>,
+    #[serde(default)]
+    pub target_id: Option<String>,
 }
 
-impl KnowledgeUnlinkEdgeWrapper {
+impl KnowledgeUnlinkEdgeArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = match self.args {
-            KnowledgeUnlinkEdgeArgs::ById { edge_id } => edge_id,
-            KnowledgeUnlinkEdgeArgs::ByTriple {
-                source_collection,
-                source_id,
-                edge_type,
-                target_collection,
-                target_id,
-            } => format!(
-                "{}:{} | {} | {}:{}",
-                source_collection, source_id, edge_type, target_collection, target_id
-            ),
+        // Legacy impl takes either "<edge_id>" OR
+        // "<src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>".
+        // Reconstruct whichever form the caller provided.
+        let param = if let Some(eid) = self.edge_id.filter(|s| !s.is_empty()) {
+            eid
+        } else {
+            match (
+                self.source_collection.as_deref(),
+                self.source_id.as_deref(),
+                self.edge_type.as_deref(),
+                self.target_collection.as_deref(),
+                self.target_id.as_deref(),
+            ) {
+                (Some(sc), Some(si), Some(et), Some(tc), Some(ti))
+                    if !sc.is_empty()
+                        && !si.is_empty()
+                        && !et.is_empty()
+                        && !tc.is_empty()
+                        && !ti.is_empty() =>
+                {
+                    format!("{}:{} | {} | {}:{}", sc, si, et, tc, ti)
+                }
+                _ => {
+                    return Ok(
+                        "knowledge_unlink_edge rejected (missing arguments). Provide edge_id OR the full triple: source_collection, source_id, edge_type, target_collection, target_id."
+                            .into(),
+                    );
+                }
+            }
         };
         Ok(knowledge_unlink_edge(&param, ctx.db).await)
     }
@@ -874,24 +883,51 @@ mod native_args_tests {
     }
 
     #[test]
-    fn knowledge_unlink_edge_tagged_enum() {
-        let by_id: KnowledgeUnlinkEdgeWrapper = serde_json::from_value(serde_json::json!({
-            "mode": "by_id", "edge_id": "edge123"
-        }))
-        .unwrap();
-        assert!(matches!(by_id.args, KnowledgeUnlinkEdgeArgs::ById { .. }));
+    fn knowledge_unlink_edge_accepts_edge_id_only() {
+        let a: KnowledgeUnlinkEdgeArgs =
+            serde_json::from_value(serde_json::json!({"edge_id": "edge123"})).unwrap();
+        assert_eq!(a.edge_id.as_deref(), Some("edge123"));
+        assert!(a.source_collection.is_none());
+    }
 
-        let by_triple: KnowledgeUnlinkEdgeWrapper = serde_json::from_value(serde_json::json!({
-            "mode": "by_triple",
-            "source_collection": "memory.semantic", "source_id": "a",
+    #[test]
+    fn knowledge_unlink_edge_accepts_triple_only() {
+        let a: KnowledgeUnlinkEdgeArgs = serde_json::from_value(serde_json::json!({
+            "source_collection": "memory.semantic",
+            "source_id": "a",
             "edge_type": "refines",
-            "target_collection": "memory.semantic", "target_id": "b"
+            "target_collection": "memory.semantic",
+            "target_id": "b"
         }))
         .unwrap();
-        assert!(matches!(
-            by_triple.args,
-            KnowledgeUnlinkEdgeArgs::ByTriple { .. }
-        ));
+        assert!(a.edge_id.is_none());
+        assert_eq!(a.source_id.as_deref(), Some("a"));
+        assert_eq!(a.target_id.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn knowledge_unlink_edge_schema_has_no_top_level_oneof() {
+        // Regression guard for the Anthropic "input_schema does not support
+        // oneOf, allOf, or anyOf at the top level" rejection. schemars must
+        // render KnowledgeUnlinkEdgeArgs as a plain object schema.
+        let schema = schemars::schema_for!(KnowledgeUnlinkEdgeArgs);
+        let v = serde_json::to_value(&schema).unwrap();
+        assert!(
+            v.get("oneOf").is_none(),
+            "top-level oneOf present: {}",
+            v
+        );
+        assert!(
+            v.get("allOf").is_none(),
+            "top-level allOf present: {}",
+            v
+        );
+        assert!(
+            v.get("anyOf").is_none(),
+            "top-level anyOf present: {}",
+            v
+        );
+        assert_eq!(v["type"], "object", "schema should be a plain object");
     }
 
     #[test]
