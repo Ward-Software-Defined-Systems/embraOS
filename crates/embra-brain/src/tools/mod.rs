@@ -9,6 +9,7 @@ use crate::knowledge;
 pub mod cron;
 pub mod engineering;
 pub mod express;
+pub mod registry;
 pub mod security;
 pub mod sessions;
 
