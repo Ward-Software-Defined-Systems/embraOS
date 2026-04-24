@@ -15,6 +15,50 @@ fn validate_workspace_path(path: &str) -> Result<String, String> {
     Ok(dir.to_string())
 }
 
+/// Resolve a `git_*` tool path. Accepts either an absolute path under
+/// `/embra/workspace/` or a path relative to `/embra/workspace/` (matching
+/// the convention `git_clone`'s `subpath` already uses). Returns the
+/// canonical absolute path or a uniform `Denied:` rejection message.
+///
+/// Empty input resolves to the workspace root. Leading `./` is stripped
+/// before joining so `./repo` and `repo` are equivalent.
+///
+/// Closes Embra_Debug #45 — git_clone accepted relative subpaths while
+/// every other git_* tool required absolute paths, with three different
+/// rejection voices (workspace-validated vs. git's "not a git repository"
+/// vs. silent success-against-CWD). This resolver is the single entry
+/// point that all git_* tools route through.
+fn resolve_workspace_path(path: &str) -> Result<String, String> {
+    let trimmed = path.trim();
+    let resolved = if trimmed.is_empty() {
+        WORKSPACE_ROOT.to_string()
+    } else if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        let rel = trimmed.trim_start_matches("./");
+        format!("{}/{}", WORKSPACE_ROOT, rel)
+    };
+    // Defeat path traversal in either form: `../etc/passwd` (relative) and
+    // `/embra/workspace/../etc/passwd` (absolute) both contain a `..` segment
+    // that would let the resolved path escape WORKSPACE_ROOT after kernel
+    // canonicalization. The `starts_with(WORKSPACE_ROOT)` check below is a
+    // string-prefix check, not a filesystem-canonical one — so we reject `..`
+    // outright to keep the contract honest.
+    if resolved.split('/').any(|seg| seg == "..") {
+        return Err(format!(
+            "Denied: path '{}' contains a '..' component",
+            resolved
+        ));
+    }
+    if !resolved.starts_with(WORKSPACE_ROOT) {
+        return Err(format!(
+            "Denied: path '{}' resolves outside {}",
+            resolved, WORKSPACE_ROOT
+        ));
+    }
+    Ok(resolved)
+}
+
 /// Resolve `base` to a ref usable by `merge-base --is-ancestor`. Prefers the
 /// local branch (`<base>`); falls back to `origin/<base>` if the local copy
 /// is missing. Returns Err with a clear message if neither exists. Used by
@@ -157,9 +201,12 @@ pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
 
 /// Run `git status` on a path.
 pub async fn git_status(path: &str) -> String {
-    let dir = if path.is_empty() { "." } else { path };
+    let dir = match resolve_workspace_path(path) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
     match tokio::process::Command::new("git")
-        .args(["-C", dir, "status", "--short"])
+        .args(["-C", &dir, "status", "--short"])
         .output()
         .await
     {
@@ -179,20 +226,22 @@ pub async fn git_status(path: &str) -> String {
     }
 }
 
-/// Run `git log` with optional params.
+/// Run `git log` with optional params. First whitespace token is the path
+/// (resolved through `resolve_workspace_path`); remaining tokens pass through
+/// as git-log flags (e.g. `-n 20 --oneline`).
 pub async fn git_log(param: &str) -> String {
     let parts: Vec<&str> = param.split_whitespace().collect();
-
-    // First arg may be a path, rest are git log args
-    let (dir, extra_args) = if parts.is_empty() {
-        (".", vec![])
-    } else if std::path::Path::new(parts[0]).is_dir() {
-        (parts[0], parts[1..].to_vec())
+    let (path_token, extra_args): (&str, Vec<&str>) = if parts.is_empty() {
+        ("", vec![])
     } else {
-        (".", parts)
+        (parts[0], parts[1..].to_vec())
+    };
+    let dir = match resolve_workspace_path(path_token) {
+        Ok(d) => d,
+        Err(e) => return e,
     };
 
-    let mut args = vec!["-C", dir, "log", "--oneline", "-20"];
+    let mut args = vec!["-C", &dir, "log", "--oneline", "-20"];
     for a in &extra_args {
         args.push(a);
     }
@@ -533,7 +582,7 @@ pub async fn git_add(param: &str) -> String {
     if parts.len() < 2 {
         return "Usage: git_add <path> <files>\nExample: git_add /embra/workspace/repos/myrepo file.txt".into();
     }
-    let dir = match validate_workspace_path(parts[0]) {
+    let dir = match resolve_workspace_path(parts[0]) {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -577,7 +626,7 @@ pub async fn git_commit(param: &str) -> String {
     if parts.len() < 2 {
         return "Usage: git_commit <path> | <message>\nUse \\n in the message for line breaks (multi-paragraph commits).".into();
     }
-    let dir = match validate_workspace_path(parts[0].trim()) {
+    let dir = match resolve_workspace_path(parts[0].trim()) {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -603,7 +652,7 @@ pub async fn git_commit(param: &str) -> String {
 /// Run `git push`. Write operation — workspace restricted.
 /// Param format: `<path>`
 pub async fn git_push(db: &WardsonDbClient, param: &str) -> String {
-    let dir = match validate_workspace_path(param.trim()) {
+    let dir = match resolve_workspace_path(param.trim()) {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -637,7 +686,7 @@ pub async fn git_push(db: &WardsonDbClient, param: &str) -> String {
 /// Run `git pull`. Write operation — workspace restricted.
 /// Param format: `<path>`
 pub async fn git_pull(db: &WardsonDbClient, param: &str) -> String {
-    let dir = match validate_workspace_path(param.trim()) {
+    let dir = match resolve_workspace_path(param.trim()) {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -663,19 +712,23 @@ pub async fn git_pull(db: &WardsonDbClient, param: &str) -> String {
     }
 }
 
-/// Run `git diff`. Read-only — unrestricted.
+/// Run `git diff`. Workspace restricted.
 /// Param format: `<path> [file]`
 pub async fn git_diff(param: &str) -> String {
     let parts: Vec<&str> = param.split_whitespace().collect();
-    let (dir, file) = if parts.is_empty() {
-        (".", None)
+    let (path_token, file) = if parts.is_empty() {
+        ("", None)
     } else if parts.len() == 1 {
         (parts[0], None)
     } else {
         (parts[0], Some(parts[1]))
     };
+    let dir = match resolve_workspace_path(path_token) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
 
-    let mut args = vec!["-C", dir, "diff"];
+    let mut args = vec!["-C", &dir, "diff"];
     if let Some(f) = file {
         args.push("--");
         args.push(f);
@@ -717,21 +770,20 @@ pub async fn git_diff(param: &str) -> String {
 pub async fn git_branch(param: &str) -> String {
     let parts: Vec<&str> = param.split_whitespace().collect();
     if parts.is_empty() {
-        // List in current dir
-        return git_branch_list(".").await;
+        return git_branch_list(WORKSPACE_ROOT).await;
     }
-    let dir = parts[0];
+    let dir = match resolve_workspace_path(parts[0]) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
 
     // Delete form: `<path> delete <name>` or `<path> delete <name> <base>`
     if parts.len() >= 3 && parts[1].eq_ignore_ascii_case("delete") {
         let name = parts[2];
         let base = parts.get(3).copied().unwrap_or("main");
-        if let Err(e) = validate_workspace_path(dir) {
-            return e;
-        }
 
         // Resolve a usable base ref: prefer local, fall back to origin/<base>.
-        let base_ref = match resolve_base_ref(dir, base).await {
+        let base_ref = match resolve_base_ref(&dir, base).await {
             Ok(r) => r,
             Err(e) => return e,
         };
@@ -741,7 +793,7 @@ pub async fn git_branch(param: &str) -> String {
         let ancestor = tokio::process::Command::new("git")
             .args([
                 "-C",
-                dir,
+                &dir,
                 "merge-base",
                 "--is-ancestor",
                 &format!("refs/heads/{}", name),
@@ -771,7 +823,7 @@ pub async fn git_branch(param: &str) -> String {
         }
 
         return match tokio::process::Command::new("git")
-            .args(["-C", dir, "branch", "-d", name])
+            .args(["-C", &dir, "branch", "-d", name])
             .output()
             .await
         {
@@ -789,11 +841,8 @@ pub async fn git_branch(param: &str) -> String {
     // Create form: `<path> <name>`
     if parts.len() >= 2 {
         let name = parts[1];
-        if let Err(e) = validate_workspace_path(dir) {
-            return e;
-        }
         return match tokio::process::Command::new("git")
-            .args(["-C", dir, "branch", name])
+            .args(["-C", &dir, "branch", name])
             .output()
             .await
         {
@@ -809,7 +858,7 @@ pub async fn git_branch(param: &str) -> String {
     }
 
     // Single arg: list form
-    git_branch_list(dir).await
+    git_branch_list(&dir).await
 }
 
 async fn git_branch_list(dir: &str) -> String {
@@ -837,7 +886,7 @@ pub async fn git_checkout(param: &str) -> String {
     if parts.len() < 2 {
         return "Usage: git_checkout <path> <branch>".into();
     }
-    let dir = match validate_workspace_path(parts[0]) {
+    let dir = match resolve_workspace_path(parts[0]) {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -1728,7 +1777,7 @@ pub async fn git_rm(param: &str) -> String {
         return "Usage: git_rm <repo_path> <files>\nExample: git_rm /embra/workspace/repos/myrepo old_file.txt".into();
     }
 
-    let dir = match validate_workspace_path(parts[0]) {
+    let dir = match resolve_workspace_path(parts[0]) {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -1773,7 +1822,7 @@ pub async fn git_mv(param: &str) -> String {
         return "Usage: git_mv <repo_path> <source> <destination>\nExample: git_mv /embra/workspace/repos/myrepo src/Old.rs src/old.rs".into();
     }
 
-    let dir = match validate_workspace_path(parts[0]) {
+    let dir = match resolve_workspace_path(parts[0]) {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -1893,7 +1942,7 @@ impl GitCloneArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "git_status",
-    description = "Show `git status` for a directory under /embra/workspace."
+    description = "Show `git status` for a directory under /embra/workspace. path may be absolute (`/embra/workspace/repo`) or relative (`repo`)."
 )]
 pub struct GitStatusArgs {
     pub path: String,
@@ -1908,7 +1957,7 @@ impl GitStatusArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "git_log",
-    description = "Show recent git log for a directory. args is an optional free-form git-log argument string (e.g. `-n 20 --oneline`)."
+    description = "Show recent git log for a directory under /embra/workspace. args is an optional free-form git-log argument string (e.g. `-n 20 --oneline`). path may be absolute (`/embra/workspace/repo`) or relative (`repo`)."
 )]
 pub struct GitLogArgs {
     pub path: String,
@@ -1931,7 +1980,7 @@ impl GitLogArgs {
 #[embra_tool(
     name = "git_add",
     is_side_effectful = true,
-    description = "Stage files for commit in a workspace repository."
+    description = "Stage files for commit in a workspace repository. path may be absolute (`/embra/workspace/repo`) or relative (`repo`)."
 )]
 pub struct GitAddArgs {
     pub path: String,
@@ -1950,7 +1999,7 @@ impl GitAddArgs {
 #[embra_tool(
     name = "git_commit",
     is_side_effectful = true,
-    description = "Commit staged changes in a workspace repository. The message may include \\n for newlines (expanded before git invocation) to create multi-paragraph messages with subject line + body."
+    description = "Commit staged changes in a workspace repository. The message may include \\n for newlines (expanded before git invocation) to create multi-paragraph messages with subject line + body. path may be absolute (`/embra/workspace/repo`) or relative (`repo`)."
 )]
 pub struct GitCommitArgs {
     pub path: String,
@@ -1968,7 +2017,7 @@ impl GitCommitArgs {
 #[embra_tool(
     name = "git_push",
     is_side_effectful = true,
-    description = "Push local commits to the remote branch of a workspace repository."
+    description = "Push local commits to the remote branch of a workspace repository. path may be absolute (`/embra/workspace/repo`) or relative (`repo`)."
 )]
 pub struct GitPushArgs {
     pub path: String,
@@ -1984,7 +2033,7 @@ impl GitPushArgs {
 #[embra_tool(
     name = "git_pull",
     is_side_effectful = true,
-    description = "Pull from the remote branch into a workspace repository."
+    description = "Pull from the remote branch into a workspace repository. path may be absolute (`/embra/workspace/repo`) or relative (`repo`)."
 )]
 pub struct GitPullArgs {
     pub path: String,
@@ -1999,7 +2048,7 @@ impl GitPullArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "git_diff",
-    description = "Show uncommitted changes in a workspace repository. Optional file narrows the diff to a single path."
+    description = "Show uncommitted changes in a workspace repository. Optional file narrows the diff to a single path. path may be absolute (`/embra/workspace/repo`) or relative (`repo`)."
 )]
 pub struct GitDiffArgs {
     pub path: String,
@@ -2032,7 +2081,7 @@ pub enum GitBranchAction {
 #[embra_tool(
     name = "git_branch",
     is_side_effectful = true,
-    description = "List, create, or delete branches in a workspace repository. action=list returns current branches; action=create requires name; action=delete requires name and refuses any branch with commits not yet merged into the base ref (default `main`, override via `base`). The merge check falls back to `origin/<base>` if no local copy exists."
+    description = "List, create, or delete branches in a workspace repository. action=list returns current branches; action=create requires name; action=delete requires name and refuses any branch with commits not yet merged into the base ref (default `main`, override via `base`). The merge check falls back to `origin/<base>` if no local copy exists. path may be absolute (`/embra/workspace/repo`) or relative (`repo`)."
 )]
 pub struct GitBranchArgs {
     pub path: String,
@@ -2074,7 +2123,7 @@ impl GitBranchArgs {
 #[embra_tool(
     name = "git_checkout",
     is_side_effectful = true,
-    description = "Switch to a branch in a workspace repository (refuses unclean working directory)."
+    description = "Switch to a branch in a workspace repository (refuses unclean working directory). path may be absolute (`/embra/workspace/repo`) or relative (`repo`)."
 )]
 pub struct GitCheckoutArgs {
     pub path: String,
@@ -2092,7 +2141,7 @@ impl GitCheckoutArgs {
 #[embra_tool(
     name = "git_rm",
     is_side_effectful = true,
-    description = "Stage file removal in a workspace repository (git rm)."
+    description = "Stage file removal in a workspace repository (git rm). path may be absolute (`/embra/workspace/repo`) or relative (`repo`)."
 )]
 pub struct GitRmArgs {
     pub path: String,
@@ -2110,7 +2159,7 @@ impl GitRmArgs {
 #[embra_tool(
     name = "git_mv",
     is_side_effectful = true,
-    description = "git mv — tracked rename/move within a workspace repository. Preserves history and handles case-sensitive renames on case-insensitive filesystems."
+    description = "git mv — tracked rename/move within a workspace repository. Preserves history and handles case-sensitive renames on case-insensitive filesystems. path may be absolute (`/embra/workspace/repo`) or relative (`repo`)."
 )]
 pub struct GitMvArgs {
     pub path: String,
@@ -2685,6 +2734,55 @@ impl MkdirArgs {
 #[cfg(test)]
 mod native_args_tests {
     use super::*;
+
+    #[test]
+    fn resolve_workspace_path_accepts_absolute_and_relative() {
+        // Embra_Debug #45: git_* tools accept either form, with one
+        // resolver doing the joining + the prefix check + traversal
+        // rejection in one place.
+        assert_eq!(
+            resolve_workspace_path("").unwrap(),
+            "/embra/workspace"
+        );
+        assert_eq!(
+            resolve_workspace_path("/embra/workspace/repo").unwrap(),
+            "/embra/workspace/repo"
+        );
+        assert_eq!(
+            resolve_workspace_path("repo").unwrap(),
+            "/embra/workspace/repo"
+        );
+        assert_eq!(
+            resolve_workspace_path("./repo").unwrap(),
+            "/embra/workspace/repo"
+        );
+        assert_eq!(
+            resolve_workspace_path("repos/foo/bar").unwrap(),
+            "/embra/workspace/repos/foo/bar"
+        );
+
+        // Outside the workspace — absolute escape path.
+        let denied = resolve_workspace_path("/etc/passwd").unwrap_err();
+        assert!(denied.contains("Denied:"), "got: {}", denied);
+
+        // Path traversal — relative form.
+        let traversal_rel = resolve_workspace_path("../etc/passwd").unwrap_err();
+        assert!(
+            traversal_rel.contains("'..'"),
+            "expected traversal rejection, got: {}",
+            traversal_rel
+        );
+
+        // Path traversal — absolute form (would slip past a naive
+        // starts_with check before kernel canonicalization).
+        let traversal_abs =
+            resolve_workspace_path("/embra/workspace/../etc/passwd").unwrap_err();
+        assert!(
+            traversal_abs.contains("'..'"),
+            "expected traversal rejection, got: {}",
+            traversal_abs
+        );
+    }
 
     #[test]
     fn git_clone_subpath_optional() {
