@@ -4,30 +4,22 @@ use crate::db::WardsonDbClient;
 
 const WORKSPACE_ROOT: &str = "/embra/workspace";
 
-fn validate_workspace_path(path: &str) -> Result<String, String> {
-    let dir = if path.is_empty() { WORKSPACE_ROOT } else { path };
-    if !dir.starts_with(WORKSPACE_ROOT) {
-        return Err(format!(
-            "Denied: path '{}' is not under {}",
-            dir, WORKSPACE_ROOT
-        ));
-    }
-    Ok(dir.to_string())
-}
-
-/// Resolve a `git_*` tool path. Accepts either an absolute path under
-/// `/embra/workspace/` or a path relative to `/embra/workspace/` (matching
-/// the convention `git_clone`'s `subpath` already uses). Returns the
-/// canonical absolute path or a uniform `Denied:` rejection message.
+/// Resolve a workspace-scoped tool path. Accepts either an absolute path
+/// under `/embra/workspace/` or a path relative to `/embra/workspace/`
+/// (so `repo`, `./repo`, and `/embra/workspace/repo` all resolve to the
+/// same canonical form). Returns the canonical absolute path or a uniform
+/// `Denied:` rejection message.
 ///
 /// Empty input resolves to the workspace root. Leading `./` is stripped
-/// before joining so `./repo` and `repo` are equivalent.
+/// before joining so `./repo` and `repo` are equivalent. `..` segments
+/// in either form are rejected outright as a defense against traversal.
 ///
-/// Closes Embra_Debug #45 — git_clone accepted relative subpaths while
-/// every other git_* tool required absolute paths, with three different
-/// rejection voices (workspace-validated vs. git's "not a git repository"
-/// vs. silent success-against-CWD). This resolver is the single entry
-/// point that all git_* tools route through.
+/// Every git_*, file_*, and dir_* tool routes through this resolver so the
+/// accepted path shapes are uniform across the tool surface. Closes
+/// Embra_Debug #45 (git_* unification) and #52/#53 (file_* / dir_*
+/// unification) — prior to these fixes, git_clone took relative subpaths,
+/// the rest of the git family required absolute, and the file/dir family
+/// required absolute with a looser helper that skipped the `..` check.
 fn resolve_workspace_path(path: &str) -> Result<String, String> {
     let trimmed = path.trim();
     let resolved = if trimmed.is_empty() {
@@ -121,8 +113,10 @@ fn github_token_git_args(token: &Option<String>) -> Vec<String> {
 
 /// Clone a git repository into /embra/workspace/.
 /// Format: `<url>` or `<url> <subpath>`
-/// `<subpath>` may be a bare dirname (`myrepo`) or a relative path under the
-/// workspace (`repos/myrepo`). Absolute paths and `..` segments are rejected.
+/// `<subpath>` may be a bare dirname (`myrepo`), a relative path under the
+/// workspace (`repos/myrepo`), or an absolute path that lives under
+/// `/embra/workspace/` (`/embra/workspace/repos/myrepo`). `..` segments are
+/// rejected. A trailing `/` on the subpath appends the URL-derived repo name.
 pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
         return "Usage: git_clone <url> or git_clone <url> <subpath>".into();
@@ -138,17 +132,8 @@ pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
         .trim_end_matches(".git")
         .to_string();
 
-    let subpath = if parts.len() > 1 {
+    let subpath_input = if parts.len() > 1 {
         let raw = parts[1];
-        if raw.starts_with('/') {
-            return format!("Denied: subpath '{}' must be relative to {}", raw, WORKSPACE_ROOT);
-        }
-        if std::path::Path::new(raw)
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
-        {
-            return format!("Denied: subpath '{}' contains '..' segments", raw);
-        }
         if raw.ends_with('/') {
             format!("{}{}", raw, derived_name)
         } else {
@@ -158,11 +143,10 @@ pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
         derived_name
     };
 
-    let dest = format!("{}/{}", WORKSPACE_ROOT, subpath);
-
-    if let Err(e) = validate_workspace_path(&dest) {
-        return e;
-    }
+    let dest = match resolve_workspace_path(&subpath_input) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
 
     if std::path::Path::new(&dest).exists() {
         return format!("Directory already exists: {}", dest);
@@ -1560,18 +1544,19 @@ pub async fn file_write(param: &str) -> String {
         return "Usage: file_write <path> | <content>".into();
     }
 
-    let path = parts[0].trim();
+    let raw_path = parts[0].trim();
     let content = expand_escapes(parts[1]);
 
-    if let Err(e) = validate_workspace_path(path) {
+    let path = match resolve_workspace_path(raw_path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+
+    if let Err(e) = ensure_parent_dirs(&path).await {
         return e;
     }
 
-    if let Err(e) = ensure_parent_dirs(path).await {
-        return e;
-    }
-
-    match tokio::fs::write(path, &content).await {
+    match tokio::fs::write(&path, &content).await {
         Ok(()) => {
             let line_count = content.lines().count();
             format!("Written {} bytes ({} lines) to {}", content.len(), line_count, path)
@@ -1597,14 +1582,15 @@ pub async fn file_append(param: &str) -> String {
         return "Usage: file_append <path> | <content>".into();
     }
 
-    let path = parts[0].trim();
+    let raw_path = parts[0].trim();
     let content = expand_escapes(parts[1]);
 
-    if let Err(e) = validate_workspace_path(path) {
-        return e;
-    }
+    let path = match resolve_workspace_path(raw_path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
 
-    if let Err(e) = ensure_parent_dirs(path).await {
+    if let Err(e) = ensure_parent_dirs(&path).await {
         return e;
     }
 
@@ -1612,7 +1598,7 @@ pub async fn file_append(param: &str) -> String {
     let result = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path)
+        .open(&path)
         .await;
 
     match result {
@@ -1631,17 +1617,18 @@ pub async fn mkdir(param: &str) -> String {
         return "Usage: mkdir <path>\nExample: mkdir /embra/workspace/repos/myrepo/src/utils".into();
     }
 
-    let path = param.trim();
+    let raw_path = param.trim();
 
-    if let Err(e) = validate_workspace_path(path) {
-        return e;
-    }
+    let path = match resolve_workspace_path(raw_path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
 
-    if std::path::Path::new(path).exists() {
+    if std::path::Path::new(&path).exists() {
         return format!("Directory already exists: {}", path);
     }
 
-    match tokio::fs::create_dir_all(path).await {
+    match tokio::fs::create_dir_all(&path).await {
         Ok(()) => format!("Created directory: {}", path),
         Err(e) => format!("Failed to create directory: {}", e),
     }
@@ -1657,28 +1644,30 @@ pub async fn file_symlink(param: &str) -> String {
         return "file_symlink rejected (missing arguments). Usage: file_symlink <target> | <link_path>\nExample: file_symlink /embra/workspace/repos/foo/src | /embra/workspace/src-link".into();
     }
 
-    let target = parts[0].trim();
-    let link = parts[1].trim();
+    let raw_target = parts[0].trim();
+    let raw_link = parts[1].trim();
 
-    if target.is_empty() {
+    if raw_target.is_empty() {
         return "file_symlink rejected (target is empty before the '|')".into();
     }
-    if link.is_empty() {
+    if raw_link.is_empty() {
         return "file_symlink rejected (link path is empty after the '|')".into();
     }
 
-    if let Err(e) = validate_workspace_path(target) {
-        return e;
-    }
-    if let Err(e) = validate_workspace_path(link) {
-        return e;
-    }
+    let target = match resolve_workspace_path(raw_target) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let link = match resolve_workspace_path(raw_link) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
 
-    if std::path::Path::new(link).exists() {
+    if std::path::Path::new(&link).exists() {
         return format!("file_symlink rejected (link path already exists: {})", link);
     }
 
-    match tokio::fs::symlink(target, link).await {
+    match tokio::fs::symlink(&target, &link).await {
         Ok(()) => format!("Symlink created: {} → {}", link, target),
         Err(e) => format!("file_symlink failed: {}", e),
     }
@@ -1698,15 +1687,16 @@ pub async fn file_delete(param: &str) -> String {
         return "Usage: file_delete <path>\nExample: file_delete /embra/workspace/repos/myrepo/old_file.txt".into();
     }
 
-    let path = param.trim();
+    let raw_path = param.trim();
 
-    if let Err(e) = validate_workspace_path(path) {
-        return e;
-    }
+    let path = match resolve_workspace_path(raw_path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
 
     // symlink_metadata does NOT follow symlinks — critical for correct handling
     // of dangling links and links pointing at directories.
-    let meta = match tokio::fs::symlink_metadata(path).await {
+    let meta = match tokio::fs::symlink_metadata(&path).await {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return format!("File not found: {}", path);
@@ -1716,7 +1706,7 @@ pub async fn file_delete(param: &str) -> String {
 
     if meta.file_type().is_symlink() {
         // Unlink the link itself. Target state is irrelevant.
-        return match tokio::fs::remove_file(path).await {
+        return match tokio::fs::remove_file(&path).await {
             Ok(()) => format!("Deleted symlink: {}", path),
             Err(e) => format!("Failed to delete {}: {}", path, e),
         };
@@ -1726,7 +1716,7 @@ pub async fn file_delete(param: &str) -> String {
         return format!("Cannot delete directory with file_delete (use a shell command for recursive removal): {}", path);
     }
 
-    match tokio::fs::remove_file(path).await {
+    match tokio::fs::remove_file(&path).await {
         Ok(()) => format!("Deleted: {}", path),
         Err(e) => format!("Failed to delete {}: {}", path, e),
     }
@@ -1740,30 +1730,32 @@ pub async fn file_move(param: &str) -> String {
         return "Usage: file_move <source> | <destination>\nExample: file_move /embra/workspace/repos/myrepo/old.rs | /embra/workspace/repos/myrepo/new.rs".into();
     }
 
-    let src = parts[0].trim();
-    let dst = parts[1].trim();
+    let raw_src = parts[0].trim();
+    let raw_dst = parts[1].trim();
 
-    if let Err(e) = validate_workspace_path(src) {
-        return e;
-    }
-    if let Err(e) = validate_workspace_path(dst) {
-        return e;
-    }
+    let src = match resolve_workspace_path(raw_src) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let dst = match resolve_workspace_path(raw_dst) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
 
-    if !std::path::Path::new(src).exists() {
+    if !std::path::Path::new(&src).exists() {
         return format!("Source not found: {}", src);
     }
 
-    if std::path::Path::new(dst).exists() {
+    if std::path::Path::new(&dst).exists() {
         return format!("Destination already exists: {}", dst);
     }
 
     // Ensure parent directory of destination exists
-    if let Err(e) = ensure_parent_dirs(dst).await {
+    if let Err(e) = ensure_parent_dirs(&dst).await {
         return e;
     }
 
-    match tokio::fs::rename(src, dst).await {
+    match tokio::fs::rename(&src, &dst).await {
         Ok(()) => format!("Moved: {} → {}", src, dst),
         Err(e) => format!("Failed to move {} → {}: {}", src, dst, e),
     }
@@ -1856,17 +1848,18 @@ pub async fn dir_delete(param: &str) -> String {
         return "Usage: dir_delete <path> or dir_delete <path> --force\nWithout --force, only empty directories are removed.".into();
     }
 
-    let (path, force) = if param.trim_end().ends_with("--force") {
+    let (raw_path, force) = if param.trim_end().ends_with("--force") {
         (param.trim_end().trim_end_matches("--force").trim(), true)
     } else {
         (param.trim(), false)
     };
 
-    if let Err(e) = validate_workspace_path(path) {
-        return e;
-    }
+    let path = match resolve_workspace_path(raw_path) {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
 
-    let p = std::path::Path::new(path);
+    let p = std::path::Path::new(&path);
     if !p.exists() {
         return format!("Directory not found: {}", path);
     }
@@ -1876,12 +1869,12 @@ pub async fn dir_delete(param: &str) -> String {
     }
 
     if force {
-        match tokio::fs::remove_dir_all(path).await {
+        match tokio::fs::remove_dir_all(&path).await {
             Ok(()) => format!("Deleted directory and all contents: {}", path),
             Err(e) => format!("Failed to delete directory {}: {}", path, e),
         }
     } else {
-        match tokio::fs::remove_dir(path).await {
+        match tokio::fs::remove_dir(&path).await {
             Ok(()) => format!("Deleted empty directory: {}", path),
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::DirectoryNotEmpty
@@ -1921,7 +1914,7 @@ use crate::tools::registry::DispatchContext;
 #[embra_tool(
     name = "git_clone",
     is_side_effectful = true,
-    description = "Clone a git repository into /embra/workspace/. HTTPS uses the stored GitHub token; SSH is also supported. subpath may be a bare directory name or a relative path like \"repos/foo\"; if omitted, the repo name is derived from the URL."
+    description = "Clone a git repository into /embra/workspace/. HTTPS uses the stored GitHub token; SSH is also supported. subpath may be a bare directory name (`myrepo`), a workspace-relative path (`repos/myrepo`), or an absolute path under the workspace (`/embra/workspace/repos/myrepo`); if omitted, the repo name is derived from the URL."
 )]
 pub struct GitCloneArgs {
     pub url: String,
@@ -2563,7 +2556,7 @@ impl FileReadArgs {
 #[embra_tool(
     name = "file_write",
     is_side_effectful = true,
-    description = "Write (overwrite) a file. Workspace restricted. Use \\n for newlines, \\t for tabs — these are expanded before writing."
+    description = "Write (overwrite) a file under /embra/workspace. path may be absolute (`/embra/workspace/repo/notes.txt`) or workspace-relative (`repo/notes.txt`). Use \\n for newlines, \\t for tabs — these are expanded before writing."
 )]
 pub struct FileWriteArgs {
     pub path: String,
@@ -2581,7 +2574,7 @@ impl FileWriteArgs {
 #[embra_tool(
     name = "file_append",
     is_side_effectful = true,
-    description = "Append to a file (creates if missing). Workspace restricted. Use \\n for newlines."
+    description = "Append to a file under /embra/workspace (creates if missing). path may be absolute or workspace-relative. Use \\n for newlines."
 )]
 pub struct FileAppendArgs {
     pub path: String,
@@ -2599,7 +2592,7 @@ impl FileAppendArgs {
 #[embra_tool(
     name = "file_delete",
     is_side_effectful = true,
-    description = "Delete a file (files only, not directories). Workspace restricted. Handles symlinks without following them."
+    description = "Delete a file under /embra/workspace (files only, not directories). path may be absolute or workspace-relative. Handles symlinks without following them."
 )]
 pub struct FileDeleteArgs {
     pub path: String,
@@ -2615,7 +2608,7 @@ impl FileDeleteArgs {
 #[embra_tool(
     name = "file_move",
     is_side_effectful = true,
-    description = "Move or rename a file or directory. Workspace restricted on both paths."
+    description = "Move or rename a file or directory under /embra/workspace. source and destination may each be absolute or workspace-relative."
 )]
 pub struct FileMoveArgs {
     pub source: String,
@@ -2633,7 +2626,7 @@ impl FileMoveArgs {
 #[embra_tool(
     name = "file_rename",
     is_side_effectful = true,
-    description = "Alias for file_move. Move or rename a file or directory under the workspace."
+    description = "Alias for file_move. Move or rename a file or directory under /embra/workspace. source and destination may each be absolute or workspace-relative."
 )]
 pub struct FileRenameArgs {
     pub source: String,
@@ -2655,7 +2648,7 @@ impl FileRenameArgs {
 #[embra_tool(
     name = "file_symlink",
     is_side_effectful = true,
-    description = "Create a symbolic link at link_path pointing to target. Both paths workspace-restricted; dangling targets allowed."
+    description = "Create a symbolic link at link_path pointing to target. Both paths must resolve under /embra/workspace and may each be absolute or workspace-relative. Dangling targets allowed."
 )]
 pub struct FileSymlinkArgs {
     pub target: String,
@@ -2673,7 +2666,7 @@ impl FileSymlinkArgs {
 #[embra_tool(
     name = "dir_delete",
     is_side_effectful = true,
-    description = "Remove a directory. By default refuses non-empty directories; force=true recursively deletes contents. Workspace restricted."
+    description = "Remove a directory under /embra/workspace. path may be absolute or workspace-relative. By default refuses non-empty directories; force=true recursively deletes contents."
 )]
 pub struct DirDeleteArgs {
     pub path: String,
@@ -2696,7 +2689,7 @@ impl DirDeleteArgs {
 #[embra_tool(
     name = "rmdir",
     is_side_effectful = true,
-    description = "Alias for dir_delete. Remove a directory; set force=true to recursively delete contents."
+    description = "Alias for dir_delete. Remove a directory under /embra/workspace; path may be absolute or workspace-relative. Set force=true to recursively delete contents."
 )]
 pub struct RmdirArgs {
     pub path: String,
@@ -2719,7 +2712,7 @@ impl RmdirArgs {
 #[embra_tool(
     name = "mkdir",
     is_side_effectful = true,
-    description = "Create a directory (and parents as needed). Workspace restricted."
+    description = "Create a directory (and parents as needed) under /embra/workspace. path may be absolute or workspace-relative."
 )]
 pub struct MkdirArgs {
     pub path: String,
@@ -2781,6 +2774,45 @@ mod native_args_tests {
             traversal_abs.contains("'..'"),
             "expected traversal rejection, got: {}",
             traversal_abs
+        );
+    }
+
+    #[tokio::test]
+    async fn file_family_rejects_traversal_uniformly() {
+        // Embra_Debug #52/#53: the file_* and dir_* families now share the
+        // same resolver as the git_* family, so traversal rejections carry
+        // the uniform `'..'` message (from resolve_workspace_path) instead
+        // of silently slipping past the old prefix-only check.
+        let rejections = [
+            file_write("../etc/passwd | content").await,
+            file_append("../etc/passwd | content").await,
+            file_delete("../etc/passwd").await,
+            file_move("../src|../dst").await,
+            file_symlink("/embra/workspace/a|../etc/foo").await,
+            mkdir("../etc").await,
+            dir_delete("../etc").await,
+        ];
+        for msg in rejections.iter() {
+            assert!(
+                msg.contains("'..'"),
+                "expected uniform traversal rejection, got: {}",
+                msg
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn file_family_accepts_relative_workspace_paths() {
+        // Relative inputs should join through resolve_workspace_path and
+        // surface filesystem-level errors (not the old "is not under
+        // /embra/workspace" rejection) when /embra/workspace/ is unavailable
+        // on the test host. A filesystem error proves the resolver let the
+        // path through and the kernel rejected it — the outcome we want.
+        let msg = file_write("Embra_Debug/_relpath_probe.txt | ok").await;
+        assert!(
+            !msg.contains("is not under"),
+            "old validate_workspace_path rejection leaked back in, got: {}",
+            msg
         );
     }
 
