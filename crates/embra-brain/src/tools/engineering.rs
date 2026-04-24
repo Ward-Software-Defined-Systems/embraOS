@@ -15,6 +15,36 @@ fn validate_workspace_path(path: &str) -> Result<String, String> {
     Ok(dir.to_string())
 }
 
+/// Resolve `base` to a ref usable by `merge-base --is-ancestor`. Prefers the
+/// local branch (`<base>`); falls back to `origin/<base>` if the local copy
+/// is missing. Returns Err with a clear message if neither exists. Used by
+/// `git_branch delete` to enforce the documented merged-into-base contract.
+async fn resolve_base_ref(dir: &str, base: &str) -> Result<String, String> {
+    let local_check = tokio::process::Command::new("git")
+        .args(["-C", dir, "rev-parse", "--verify", "--quiet", base])
+        .output()
+        .await;
+    if let Ok(out) = &local_check {
+        if out.status.success() {
+            return Ok(base.to_string());
+        }
+    }
+    let remote = format!("origin/{}", base);
+    let remote_check = tokio::process::Command::new("git")
+        .args(["-C", dir, "rev-parse", "--verify", "--quiet", &remote])
+        .output()
+        .await;
+    if let Ok(out) = &remote_check {
+        if out.status.success() {
+            return Ok(remote);
+        }
+    }
+    Err(format!(
+        "Cannot verify merge status: neither '{}' nor 'origin/{}' exists locally. Fetch first.",
+        base, base
+    ))
+}
+
 /// Resolve GITHUB_TOKEN: env var first, then WardSONDB config.system.github_token.
 pub async fn resolve_github_token(db: &WardsonDbClient) -> Option<String> {
     if let Ok(t) = std::env::var("GITHUB_TOKEN") {
@@ -614,11 +644,18 @@ pub async fn git_diff(param: &str) -> String {
     }
 }
 
-/// Run `git branch`. Three forms:
-/// - `<path>`              → list branches (read-only, unrestricted path)
-/// - `<path> <name>`       → create a branch (workspace restricted)
-/// - `<path> delete <name>` → delete a branch (workspace restricted, `-d` only
-///   so unmerged branches require manual removal; operator safety)
+/// Run `git branch`. Forms:
+/// - `<path>`                       → list branches (read-only, unrestricted path)
+/// - `<path> <name>`                → create a branch (workspace restricted)
+/// - `<path> delete <name>`         → delete a branch, requires merge into `main`
+/// - `<path> delete <name> <base>`  → delete a branch, requires merge into `<base>`
+///
+/// Delete enforces an explicit merge-base check before invoking `git branch -d`.
+/// Git's own `-d` safe-delete is permissive — any tracking ref (including
+/// `origin/<branch>`) makes a branch deletable, so a pushed-but-unmerged branch
+/// would slip through. We pre-check `git merge-base --is-ancestor` against the
+/// base ref (default `main`, falling back to `origin/<base>` if no local copy).
+/// Closes Embra_Debug #49.
 pub async fn git_branch(param: &str) -> String {
     let parts: Vec<&str> = param.split_whitespace().collect();
     if parts.is_empty() {
@@ -627,12 +664,54 @@ pub async fn git_branch(param: &str) -> String {
     }
     let dir = parts[0];
 
-    // Delete form: `<path> delete <name>`
+    // Delete form: `<path> delete <name>` or `<path> delete <name> <base>`
     if parts.len() >= 3 && parts[1].eq_ignore_ascii_case("delete") {
         let name = parts[2];
+        let base = parts.get(3).copied().unwrap_or("main");
         if let Err(e) = validate_workspace_path(dir) {
             return e;
         }
+
+        // Resolve a usable base ref: prefer local, fall back to origin/<base>.
+        let base_ref = match resolve_base_ref(dir, base).await {
+            Ok(r) => r,
+            Err(e) => return e,
+        };
+
+        // merge-base --is-ancestor exits 0 if branch tip is reachable from base,
+        // 1 if not. Anything else is an unexpected git error.
+        let ancestor = tokio::process::Command::new("git")
+            .args([
+                "-C",
+                dir,
+                "merge-base",
+                "--is-ancestor",
+                &format!("refs/heads/{}", name),
+                &base_ref,
+            ])
+            .output()
+            .await;
+        match ancestor {
+            Ok(out) => match out.status.code() {
+                Some(0) => {} // merged — fall through to delete
+                Some(1) => {
+                    return format!(
+                        "Refusing delete: branch '{}' has commits not reachable from '{}'. \
+                         Merge it first, or pass a different base if you're targeting a non-default integration branch.",
+                        name, base_ref
+                    );
+                }
+                _ => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    return format!(
+                        "Cannot verify merge status of '{}' against '{}': {}",
+                        name, base_ref, stderr.trim()
+                    );
+                }
+            },
+            Err(e) => return format!("Failed to run git merge-base: {}", e),
+        }
+
         return match tokio::process::Command::new("git")
             .args(["-C", dir, "branch", "-d", name])
             .output()
@@ -641,11 +720,9 @@ pub async fn git_branch(param: &str) -> String {
             Ok(out) => {
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 if !out.status.success() {
-                    // `-d` refuses unmerged branches — surface the error verbatim
-                    // so the operator knows why and can decide whether to act.
                     return format!("git branch failed: {}", stderr.trim());
                 }
-                format!("Deleted branch '{}' in {}", name, dir)
+                format!("Deleted branch '{}' in {} (verified merged into '{}')", name, dir, base_ref)
             }
             Err(e) => format!("Failed to run git: {}", e),
         };
@@ -1897,7 +1974,7 @@ pub enum GitBranchAction {
 #[embra_tool(
     name = "git_branch",
     is_side_effectful = true,
-    description = "List, create, or delete branches in a workspace repository. action=list returns current branches; action=create requires name; action=delete requires name and refuses unmerged branches."
+    description = "List, create, or delete branches in a workspace repository. action=list returns current branches; action=create requires name; action=delete requires name and refuses any branch with commits not yet merged into the base ref (default `main`, override via `base`). The merge check falls back to `origin/<base>` if no local copy exists."
 )]
 pub struct GitBranchArgs {
     pub path: String,
@@ -1905,6 +1982,10 @@ pub struct GitBranchArgs {
     pub action: GitBranchAction,
     #[serde(default)]
     pub name: Option<String>,
+    /// Integration base for the merged-into check on action=delete.
+    /// Defaults to `main`. Ignored for list/create.
+    #[serde(default)]
+    pub base: Option<String>,
 }
 
 fn default_git_branch_action() -> GitBranchAction {
@@ -1916,7 +1997,10 @@ impl GitBranchArgs {
         let param = match (&self.action, &self.name) {
             (GitBranchAction::List, _) => self.path.clone(),
             (GitBranchAction::Create, Some(n)) => format!("{} {}", self.path, n),
-            (GitBranchAction::Delete, Some(n)) => format!("{} delete {}", self.path, n),
+            (GitBranchAction::Delete, Some(n)) => {
+                let base = self.base.as_deref().unwrap_or("main");
+                format!("{} delete {} {}", self.path, n, base)
+            }
             (GitBranchAction::Create, None) | (GitBranchAction::Delete, None) => {
                 return Ok(format!(
                     "git_branch action={:?} requires a name.",
@@ -2544,6 +2628,7 @@ mod native_args_tests {
         let list: GitBranchArgs =
             serde_json::from_value(serde_json::json!({"path": "/embra/workspace/x"})).unwrap();
         assert!(matches!(list.action, GitBranchAction::List));
+        assert!(list.base.is_none());
 
         let create: GitBranchArgs = serde_json::from_value(serde_json::json!({
             "path": "/w/x", "action": "create", "name": "feature-foo"
@@ -2551,6 +2636,22 @@ mod native_args_tests {
         .unwrap();
         assert!(matches!(create.action, GitBranchAction::Create));
         assert_eq!(create.name.as_deref(), Some("feature-foo"));
+        assert!(create.base.is_none());
+
+        // Embra_Debug #49: delete accepts an optional `base` for the
+        // merged-into check; default is treated as `main` at dispatch time.
+        let delete_default: GitBranchArgs = serde_json::from_value(serde_json::json!({
+            "path": "/w/x", "action": "delete", "name": "feature-foo"
+        }))
+        .unwrap();
+        assert!(matches!(delete_default.action, GitBranchAction::Delete));
+        assert!(delete_default.base.is_none());
+
+        let delete_explicit: GitBranchArgs = serde_json::from_value(serde_json::json!({
+            "path": "/w/x", "action": "delete", "name": "feature-foo", "base": "develop"
+        }))
+        .unwrap();
+        assert_eq!(delete_explicit.base.as_deref(), Some("develop"));
     }
 
     #[test]
