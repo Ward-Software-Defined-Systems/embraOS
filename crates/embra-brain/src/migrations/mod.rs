@@ -4,7 +4,7 @@ use tracing::{error, info, warn};
 
 use crate::db::{WardsonDbClient, WardsonDbError};
 
-const CURRENT_SCHEMA_VERSION: u32 = 7;
+const CURRENT_SCHEMA_VERSION: u32 = 8;
 
 /// Run all pending migrations. Each migration is idempotent.
 pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
@@ -65,6 +65,20 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
         // format_version: 2.
         run_v7_native_tools(db).await?;
         set_schema_version(db, 7).await?;
+    }
+
+    if current_version < 8 {
+        // v8: reset tools.turn_trace after the Embra_Debug #44 fix. Pre-fix
+        // docs were persisted with `turn_index = history.len()` (message
+        // count, incrementing by 2 per logical turn). Post-fix docs use
+        // `history.len() / 2` (logical turn count). Mixing both schemes in a
+        // single collection means `turn_trace back=1` can return documents
+        // from a wrong turn (even-value hit under the new math that actually
+        // belongs to a different turn) or empty (odd-value miss). Since
+        // these are diagnostic logs with no downstream referents, a one-shot
+        // clear is simpler than trying to re-label.
+        run_v8_turn_trace_reset(db).await?;
+        set_schema_version(db, 8).await?;
     }
 
     info!("Migrations complete. Schema version: {}", CURRENT_SCHEMA_VERSION);
@@ -696,6 +710,50 @@ async fn run_v7_native_tools(db: &WardsonDbClient) -> Result<()> {
     info!("Migration v7: stamped {} legacy session(s) with format_version=1", stamped);
 
     info!("Migration v7: native tool-use complete");
+    Ok(())
+}
+
+/// Migration v8: clear `tools.turn_trace` after the Embra_Debug #44 fix.
+///
+/// Pre-fix docs were keyed by `turn_index = history.len()` (message count,
+/// step 2/turn). Post-fix docs use `history.len() / 2` (logical turn count,
+/// step 1/turn). A session that spans the upgrade ends up with both schemes
+/// mingled in the same collection — `turn_trace back=N` then lands on
+/// documents from the wrong logical turn (an even-index hit under the new
+/// math that was actually written for a different turn under the old math)
+/// or on nothing at all (odd-index miss). Both failure modes look like
+/// "turn_trace is broken" to the operator.
+///
+/// These docs are purely diagnostic — no downstream referents, no history
+/// replay depends on them — so a one-shot clear is the cheapest resolution.
+/// New traces written after this migration are all logical-turn-indexed and
+/// agree with the read path.
+async fn run_v8_turn_trace_reset(db: &WardsonDbClient) -> Result<()> {
+    info!("Running migration v8: tools.turn_trace reset (Embra_Debug #44 follow-up)");
+
+    if !db.collection_exists("tools.turn_trace").await.unwrap_or(false) {
+        info!("Migration v8: tools.turn_trace does not exist — nothing to reset");
+        return Ok(());
+    }
+
+    match db
+        .delete_by_query("tools.turn_trace", &serde_json::json!({}))
+        .await
+    {
+        Ok(n) => {
+            info!(
+                "Migration v8: cleared {} pre-fix turn_trace document(s)",
+                n
+            );
+        }
+        Err(e) => {
+            warn!(
+                "Migration v8: delete_by_query on tools.turn_trace failed: {} \
+                 (continuing — stale docs will cause wrong-turn hits until resolved manually)",
+                e
+            );
+        }
+    }
     Ok(())
 }
 
