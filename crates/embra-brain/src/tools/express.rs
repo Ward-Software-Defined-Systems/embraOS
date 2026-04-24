@@ -236,6 +236,7 @@ use crate::tools::registry::DispatchContext;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "express",
+    is_side_effectful = true,
     description = "Draw ASCII art to the expression panel above the console. Canvas is 6 rows tall × (terminal width - 2). Plain characters only; ANSI escapes and control characters are stripped. Max 2048 bytes after sanitization. Empty content clears the panel; content persists across reboots. To transport multi-line ASCII art reliably, prefix the content with `base64:` followed by the base64-encoded payload — the decoded bytes still go through sanitization."
 )]
 pub struct ExpressArgs {

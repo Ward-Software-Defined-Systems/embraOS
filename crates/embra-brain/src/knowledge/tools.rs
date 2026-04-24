@@ -613,10 +613,145 @@ pub async fn knowledge_graph_stats(db: &WardsonDbClient) -> String {
     let node_total = sem_all.len() + proc_all.len() + total;
     if node_total > 0 {
         let density = edges_all.len() as f64 / node_total as f64;
-        out.push_str(&format!("Graph density: {:.1} edges/node", density));
+        out.push_str(&format!("Graph density: {:.1} edges/node\n", density));
+    }
+
+    // Orphan edges (endpoints that don't resolve) — surfaces the #40 issue
+    // passively so users don't have to call knowledge_sweep_orphans to know.
+    let (scanned, orphans) = find_orphan_edges(db, 100_000).await;
+    if scanned > 0 {
+        out.push_str(&format!(
+            "Orphan edges: {} of {} scanned{}",
+            orphans.len(),
+            scanned,
+            if !orphans.is_empty() {
+                " (run knowledge_sweep_orphans to clean up)"
+            } else {
+                ""
+            }
+        ));
     }
 
     out
+}
+
+/// Scan up to `limit` edges and return `(scanned, orphan_edge_ids)` where
+/// orphans are edges whose source or target doc fails to resolve. Batches
+/// endpoint reads per collection via `{"_id": {"$in": [...]}}` so we run
+/// at most one extra query per endpoint collection.
+async fn find_orphan_edges(db: &WardsonDbClient, limit: usize) -> (usize, Vec<String>) {
+    use std::collections::{HashMap, HashSet};
+
+    let edges = db
+        .query("memory.edges", &json!({ "filter": {}, "limit": limit }))
+        .await
+        .unwrap_or_default();
+    let scanned = edges.len();
+    if scanned == 0 {
+        return (0, Vec::new());
+    }
+
+    // Collect unique (collection, id) endpoints per collection.
+    let mut endpoints: HashMap<String, HashSet<String>> = HashMap::new();
+    for edge in &edges {
+        for (coll_key, id_key) in [
+            ("source_collection", "source_id"),
+            ("target_collection", "target_id"),
+        ] {
+            let (Some(coll), Some(id)) = (
+                edge.get(coll_key).and_then(|v| v.as_str()),
+                edge.get(id_key).and_then(|v| v.as_str()),
+            ) else {
+                continue;
+            };
+            endpoints
+                .entry(coll.to_string())
+                .or_default()
+                .insert(id.to_string());
+        }
+    }
+
+    // For each collection, batch-resolve and set-diff to find missing ids.
+    let mut missing: HashMap<String, HashSet<String>> = HashMap::new();
+    for (coll, ids) in &endpoints {
+        if ids.is_empty() {
+            continue;
+        }
+        let id_list: Vec<String> = ids.iter().cloned().collect();
+        let filter = json!({
+            "filter": {"_id": {"$in": id_list}},
+            "limit": ids.len(),
+        });
+        let found = db.query(coll, &filter).await.unwrap_or_default();
+        let found_ids: HashSet<String> = found
+            .iter()
+            .filter_map(|d| d.get("_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .collect();
+        let missing_ids: HashSet<String> = ids.difference(&found_ids).cloned().collect();
+        if !missing_ids.is_empty() {
+            missing.insert(coll.clone(), missing_ids);
+        }
+    }
+
+    // Identify edges whose source or target is missing.
+    let mut orphan_ids: Vec<String> = Vec::new();
+    for edge in &edges {
+        let src_missing = match (
+            edge.get("source_collection").and_then(|v| v.as_str()),
+            edge.get("source_id").and_then(|v| v.as_str()),
+        ) {
+            (Some(c), Some(i)) => missing.get(c).map(|s| s.contains(i)).unwrap_or(false),
+            _ => false,
+        };
+        let tgt_missing = match (
+            edge.get("target_collection").and_then(|v| v.as_str()),
+            edge.get("target_id").and_then(|v| v.as_str()),
+        ) {
+            (Some(c), Some(i)) => missing.get(c).map(|s| s.contains(i)).unwrap_or(false),
+            _ => false,
+        };
+        if (src_missing || tgt_missing)
+            && let Some(eid) = edge.get("_id").and_then(|v| v.as_str())
+        {
+            orphan_ids.push(eid.to_string());
+        }
+    }
+
+    (scanned, orphan_ids)
+}
+
+/// Scan `memory.edges` for edges whose endpoints no longer resolve. Used to
+/// clean up residue from historical `forget` calls (pre-cascade fix) or from
+/// any direct-delete that bypassed `knowledge_unlink_node`.
+pub async fn knowledge_sweep_orphans(
+    db: &WardsonDbClient,
+    dry_run: bool,
+    limit: usize,
+) -> String {
+    let limit = limit.clamp(1, 100_000);
+    let (scanned, orphans) = find_orphan_edges(db, limit).await;
+    let orphan_count = orphans.len();
+
+    if dry_run {
+        return format!(
+            "knowledge_sweep_orphans (dry_run):\n  scanned: {}\n  orphan_count: {}\n  deleted: 0",
+            scanned, orphan_count
+        );
+    }
+
+    let mut deleted: u64 = 0;
+    for chunk in orphans.chunks(100) {
+        let id_list: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
+        let filter = json!({"_id": {"$in": id_list}});
+        if let Ok(n) = db.delete_by_query("memory.edges", &filter).await {
+            deleted += n;
+        }
+    }
+
+    format!(
+        "knowledge_sweep_orphans:\n  scanned: {}\n  orphan_count: {}\n  deleted: {}",
+        scanned, orphan_count, deleted
+    )
 }
 
 // ── Native tool-use registrations (NATIVE-TOOLS-01) ──
@@ -638,6 +773,7 @@ pub enum KnowledgePromoteKind {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "knowledge_promote",
+    is_side_effectful = true,
     description = "Promote an episodic memory entry to a semantic or procedural knowledge node. For kind=semantic, data is one of: fact, preference, decision, observation, pattern. For kind=procedural, data is a JSON object describing the procedure (preconditions, steps, outcomes)."
 )]
 pub struct KnowledgePromoteArgs {
@@ -661,6 +797,7 @@ impl KnowledgePromoteArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "knowledge_link",
+    is_side_effectful = true,
     description = "Create a directed, weighted, typed edge between two knowledge nodes. edge_type: enables | contradicts | refines | depends_on | related_to. weight is 0.0-1.0 indicating confidence."
 )]
 pub struct KnowledgeLinkArgs {
@@ -690,6 +827,7 @@ impl KnowledgeLinkArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "knowledge_unlink_edge",
+    is_side_effectful = true,
     description = "Delete edges. Provide either edge_id (removes one edge by its document id) OR the full triple — source_collection + source_id + edge_type + target_collection + target_id — which removes matching edges bidirectionally (for auto-derived symmetric types). edge_id takes precedence when both are provided."
 )]
 pub struct KnowledgeUnlinkEdgeArgs {
@@ -749,6 +887,7 @@ impl KnowledgeUnlinkEdgeArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "knowledge_unlink_node",
+    is_side_effectful = true,
     description = "Delete a semantic or procedural node and cascade-remove all edges referencing it. Prefer this over manually deleting edges when the node itself should go."
 )]
 pub struct KnowledgeUnlinkNodeArgs {
@@ -766,6 +905,7 @@ impl KnowledgeUnlinkNodeArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "knowledge_update",
+    is_side_effectful = true,
     description = "Update fields on a semantic or procedural node in place while preserving all referencing edges. Immutable fields (provenance, timestamps, access counters) are rejected. patch_json is a JSON object of the fields to patch."
 )]
 pub struct KnowledgeUpdateArgs {
@@ -853,13 +993,38 @@ impl KnowledgeQueryArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "knowledge_graph_stats",
-    description = "Return summary statistics of the knowledge graph: node counts by collection, edge counts by type, total density."
+    description = "Return summary statistics of the knowledge graph: node counts by collection, edge counts by type, total density, and orphan-edge count."
 )]
 pub struct KnowledgeGraphStatsArgs {}
 
 impl KnowledgeGraphStatsArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
         Ok(knowledge_graph_stats(ctx.db).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "knowledge_sweep_orphans",
+    is_side_effectful = true,
+    description = "Scan memory.edges and remove edges whose source or target doc no longer resolves. Orphans accumulate from pre-cascade forget calls and direct deletes that bypassed knowledge_unlink_node. Use dry_run=true to preview without deleting."
+)]
+pub struct KnowledgeSweepOrphansArgs {
+    /// Preview orphan edges without deleting.
+    #[serde(default)]
+    pub dry_run: bool,
+    /// Cap edges scanned per invocation; clamped to [1, 100000].
+    #[serde(default = "default_sweep_limit")]
+    pub limit: usize,
+}
+
+fn default_sweep_limit() -> usize {
+    10_000
+}
+
+impl KnowledgeSweepOrphansArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(knowledge_sweep_orphans(ctx.db, self.dry_run, self.limit).await)
     }
 }
 
@@ -956,8 +1121,41 @@ mod native_args_tests {
             "knowledge_traverse",
             "knowledge_query",
             "knowledge_graph_stats",
+            "knowledge_sweep_orphans",
         ] {
             assert!(names.contains(&expected), "{} not registered", expected);
         }
+    }
+
+    #[test]
+    fn sweep_orphans_defaults() {
+        let a: KnowledgeSweepOrphansArgs =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!a.dry_run);
+        assert_eq!(a.limit, 10_000);
+    }
+
+    #[test]
+    fn sweep_orphans_explicit_dry_run_and_limit() {
+        let a: KnowledgeSweepOrphansArgs = serde_json::from_value(serde_json::json!({
+            "dry_run": true,
+            "limit": 500,
+        }))
+        .unwrap();
+        assert!(a.dry_run);
+        assert_eq!(a.limit, 500);
+    }
+
+    #[test]
+    fn sweep_orphans_schema_is_plain_object() {
+        // Regression guard (same shape as the knowledge_unlink_edge guard) —
+        // the universal brain::tests variant also covers this, but keeping an
+        // inline copy lets this module stay self-testing.
+        let schema = schemars::schema_for!(KnowledgeSweepOrphansArgs);
+        let v = serde_json::to_value(&schema).unwrap();
+        assert!(v.get("oneOf").is_none());
+        assert!(v.get("allOf").is_none());
+        assert!(v.get("anyOf").is_none());
+        assert_eq!(v["type"], "object");
     }
 }

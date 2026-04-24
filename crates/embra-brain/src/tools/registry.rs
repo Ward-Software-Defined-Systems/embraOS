@@ -10,7 +10,7 @@
 //! legacy string dispatcher at `tools/mod.rs`. Stage 3 removes the legacy
 //! dispatcher and makes [`dispatch`] the single entry point.
 
-use embra_tools_core::{BoxFut, DispatchError, JsonValue};
+use embra_tools_core::{BoxFut, DispatchError, JsonValue, TurnTraceHandle};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 
@@ -22,11 +22,18 @@ use crate::db::WardsonDbClient;
 /// Replaces the `(db, config, session_name)` tuple threaded through the
 /// legacy string dispatcher at `tools/mod.rs:34-180`. `config_tz` is hoisted
 /// so tools that need the timezone don't have to re-derive it from `config`.
+///
+/// `trace` + `turn_index` (NATIVE-TOOLS-01 follow-up) expose the
+/// current turn's in-memory tool-call trace so tools like `turn_trace` can
+/// introspect what the model has done this turn without round-tripping
+/// through session history.
 pub struct DispatchContext<'a> {
     pub db: &'a WardsonDbClient,
     pub config: &'a SystemConfig,
     pub session_name: &'a str,
     pub config_tz: &'a str,
+    pub trace: &'a TurnTraceHandle,
+    pub turn_index: usize,
 }
 
 /// Inventory-collected tool descriptor.
@@ -36,9 +43,15 @@ pub struct DispatchContext<'a> {
 /// block next to each args struct and pays no runtime cost beyond static
 /// data — the map build in [`REGISTRY`] is `O(n)` over the descriptor count
 /// and runs once per process.
+///
+/// `is_side_effectful` classifies writer tools (`remember`, `git_commit`,
+/// `file_write`, etc.) separately from pure readers. The empty-text-turn
+/// defense in `grpc_service.rs` consults this to decide whether a silent
+/// end-turn after tool use is worth surfacing as a diagnostic.
 pub struct ToolDescriptor {
     pub name: &'static str,
     pub description: &'static str,
+    pub is_side_effectful: bool,
     pub input_schema: fn() -> serde_json::Value,
     pub handler: for<'a> fn(JsonValue, DispatchContext<'a>)
         -> BoxFut<'a, Result<String, DispatchError>>,
@@ -111,6 +124,7 @@ pub async fn write_snapshot(db: &crate::db::WardsonDbClient) -> anyhow::Result<(
             serde_json::json!({
                 "name": d.name,
                 "description": d.description,
+                "is_side_effectful": d.is_side_effectful,
                 "input_schema": (d.input_schema)(),
             })
         })
@@ -132,6 +146,20 @@ pub async fn write_snapshot(db: &crate::db::WardsonDbClient) -> anyhow::Result<(
         db.create_collection("tools.registry")
             .await
             .context("create tools.registry collection")?;
+    }
+
+    // Ensure tools.turn_trace exists so the fire-and-forget dispatch persist
+    // path (grpc_service.rs) doesn't race with first-write collection
+    // creation. The trace docs are small per-dispatch records keyed by
+    // (session, turn_index) and queryable by the `turn_trace` tool.
+    if !db
+        .collection_exists("tools.turn_trace")
+        .await
+        .unwrap_or(false)
+    {
+        db.create_collection("tools.turn_trace")
+            .await
+            .context("create tools.turn_trace collection")?;
     }
 
     // Try update first (well-known _id "registry"), fall back to write for

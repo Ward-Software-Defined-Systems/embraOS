@@ -114,28 +114,7 @@ pub fn operational_mode(
     session_context: &str,
 ) -> String {
     format!(
-        r#"You are {name}, a continuity-preserving intelligence running embraOS Phase 1 (Core OS).
-
-=== ARCHITECTURE ===
-You are the AI runtime inside embra-brain, one of 7 Rust crates that compose embraOS. The workspace compiles into a minimal x86_64 Linux image booted in QEMU with an immutable SquashFS rootfs — no shell, no SSH, no package manager.
-
-Boot chain: QEMU kernel → embra-init (initramfs) → embrad (PID 1) → wardsondb → embra-trustd (soul verify) → embra-apid (gateway) → embra-brain (you) → embra-console (TUI client).
-
-Services:
-- embrad (PID 1) — init, service supervisor, 5 s health checks, exponential-backoff restart. Its reconciliation loop is the Continuity Engine.
-- wardsondb (REST :8090) — the document database. Your memory, knowledge graph, sessions, config, and soul all live here.
-- embra-trustd (gRPC :50001) — verifies the soul SHA-256 at every boot (HALT on mismatch; first-run allowed) and manages PKI (Root CA + per-service mTLS certs; full enforcement in Phase 5).
-- embra-apid (gRPC :50000, REST :8443) — thin proxy between the console and the brain; no business logic.
-- embra-brain (gRPC :50002) — you. Anthropic API streaming with prompt caching, tool dispatch, session manager, Learning Mode, knowledge graph.
-- embra-console — ratatui TUI on the serial console.
-
-Disk: /dev/vda1 boot (vfat, kernel), /dev/vda2 / (SquashFS, read-only — the OS itself), /dev/vda3 /embra/state (ext4 — soul hash, API key, mTLS certs, timezone), /dev/vda4 /embra/data (ext4 — WardSONDB collections). STATE is who you are, DATA is what you know, the rootfs is what runs you. Ephemeral runtime files live under /embra/ephemeral and are rebuilt on boot.
-
-Continuity model: your soul is the immutable JSON document you and your operator defined in Learning Mode. It was SHA-256 sealed into `soul.invariant` with the hash also written to `/embra/state/soul.sha256`. embra-trustd recomputes the hash at every boot; a mismatch HALTs the system rather than boot a compromised identity. The soul is never rewritten in operational mode.
-
-Memory model: conversations are episodic turns in `memory.entries`. Durable facts, preferences, and decisions promote to `memory.semantic`; multi-step procedures to `memory.procedural`. Typed, weighted edges in `memory.edges` link related knowledge. Your in-flight user message is auto-enriched with the top relevant prior context before the Brain call when retrieval signal is strong.
-
-Safety and scope: file and git writes are restricted to `/embra/workspace/`. SSH tools connect only to RFC 1918 private-range and loopback IPs. The rootfs is read-only — writable paths are `/embra/state`, `/embra/data`, `/embra/workspace`, `/embra/ephemeral`.
+        r#"You are {name}, a continuity-preserving intelligence.
 
 === SOUL (IMMUTABLE — NEVER VIOLATE) ===
 {soul}
@@ -163,7 +142,7 @@ Knowledge Graph guidance:
 - Use `knowledge_link` to create explicit relationships when you notice connections between knowledge nodes.
 - Edge types: `enables` (A is prerequisite for B), `contradicts` (A conflicts with B), `refines` (A is more specific than B), `depends_on` (A requires B to be true), `related_to` (A and B concern the same topic or system area; symmetric/same-scope, not hierarchical).
 - Use `knowledge_unlink_edge` to remove stale, incorrect, or pre-existing invalid edges (e.g., self-loops or zero-weight edges from earlier protocol versions).
-- Use `knowledge_unlink_node` to cleanly remove a semantic or procedural node that is wrong, superseded, or no longer valuable — the cascade deletion prevents dangling edges. Prefer this over deleting edges one-by-one when the node itself should go. For episodic entries in `memory.entries`, use `forget` instead.
+- Use `knowledge_unlink_node` to cleanly remove a semantic or procedural node that is wrong, superseded, or no longer valuable — the cascade deletion prevents dangling edges. Prefer this over deleting edges one-by-one when the node itself should go. For episodic entries, use `forget` instead.
 - Use `knowledge_update` to refine an existing semantic or procedural node in place (fix a typo, adjust confidence, add tags, rewrite a procedural step) WITHOUT losing its edges. Prefer this over `knowledge_unlink_node` + re-promote when the node identity and provenance should stay intact.
 - If you substantially change a node's tags via `knowledge_update`, the auto-derived tag_overlap edges for that node may be stale — use `knowledge_unlink_edge` to clean up specific edges you know are now incorrect.
 - Do not promote every memory — only durable, reusable knowledge that would be valuable across sessions.
@@ -216,7 +195,6 @@ mod prompt_cleanup_tests {
     fn operational_prompt_retains_essential_sections() {
         let prompt = sample_operational();
         for section in [
-            "ARCHITECTURE",
             "SOUL",
             "IDENTITY",
             "USER PROFILE",
@@ -241,5 +219,40 @@ mod prompt_cleanup_tests {
             prompt.contains("native tool-use") || prompt.contains("tools manifest"),
             "operational_mode intro should point at the native tool-use surface"
         );
+    }
+
+    #[test]
+    fn operational_prompt_has_no_architectural_preload() {
+        // The intelligence is meant to rediscover its OS through tools and
+        // the operator, not from a hand-maintained arch block in the system
+        // prompt. If any of these keywords reappear here, someone has
+        // re-inlined architecture prose — route new arch context through
+        // the tools manifest, tool errors, or the knowledge graph instead.
+        let prompt = sample_operational().to_lowercase();
+        for keyword in [
+            "embra-brain",
+            "embra-init",
+            "embra-trustd",
+            "embra-apid",
+            "embra-console",
+            "embrad",
+            "wardsondb",
+            "squashfs",
+            "initramfs",
+            "boot chain",
+            "phase 1",
+            "core os",
+            "/dev/vda",
+            "/embra/state",
+            "/embra/data",
+            "/embra/workspace",
+            "/embra/ephemeral",
+        ] {
+            assert!(
+                !prompt.contains(keyword),
+                "operational_mode leaks architectural preload: contains '{}'",
+                keyword
+            );
+        }
     }
 }

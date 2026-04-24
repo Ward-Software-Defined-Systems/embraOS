@@ -252,11 +252,18 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
             );
         }
 
+        // Crons fire outside a user turn, so there's no in-turn trace to
+        // record into. A fresh empty handle + turn_index 0 keeps the
+        // DispatchContext signature satisfied without polluting user
+        // turn traces.
+        let cron_trace = embra_tools_core::new_turn_trace_handle();
         let ctx = super::registry::DispatchContext {
             db,
             config: &cfg,
             session_name: "cron",
             config_tz: &cfg.timezone,
+            trace: &cron_trace,
+            turn_index: 0,
         };
         let result_text = match super::registry::dispatch(
             &command_name,
@@ -358,6 +365,7 @@ use crate::tools::registry::DispatchContext;
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "cron_add",
+    is_side_effectful = true,
     description = "Schedule recurring tool execution. schedule accepts \"every 5m\", \"every 1h\", \"every 30s\", \"hourly\", \"daily HH:MM\" (resolved in the configured timezone; avoid 02:00-03:00 on DST days). command is the tool invocation as a single string that cron will dispatch at each fire."
 )]
 pub struct CronAddArgs {
@@ -391,6 +399,7 @@ impl CronListArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "cron_remove",
+    is_side_effectful = true,
     description = "Remove a cron job by id."
 )]
 pub struct CronRemoveArgs {

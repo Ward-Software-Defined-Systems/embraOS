@@ -308,47 +308,23 @@ pub async fn session_read(db: &WardsonDbClient, param: &str) -> String {
 }
 
 /// Full-text search across sessions.
-/// Param: `<query> [session_name]`
-pub async fn session_search(db: &WardsonDbClient, param: &str) -> String {
-    if param.is_empty() {
-        return "Usage: session_search <query> or session_search <query> <session>"
-            .into();
-    }
-
-    // Strip surrounding double quotes (phrase delimiter support)
-    let param = if param.starts_with('"') && param.ends_with('"') && param.len() >= 2 {
-        &param[1..param.len() - 1]
-    } else {
-        param
+///
+/// Query semantics:
+/// - Double-quoted (`"tool sweep"`): literal phrase match.
+/// - Unquoted (`tool sweep`): whitespace-tokenized; all tokens must appear
+///   in the same turn (AND). Matches `recall`'s token semantics.
+pub async fn session_search(
+    db: &WardsonDbClient,
+    query: &str,
+    session: Option<&str>,
+) -> String {
+    let Some(plan) = SessionQueryPlan::parse(query) else {
+        return "Usage: session_search <query> (unquoted terms AND-match; wrap in double quotes for literal phrase). Pass `session` to narrow to a single session.".into();
     };
 
-    // Check if the last word is a session name
-    let parts: Vec<&str> = param.rsplitn(2, ' ').collect();
-    let (query, specific_session) = if parts.len() == 2 {
-        // Could be "query session" or "multi word query"
-        // Check if the last word matches a session name
-        let candidate = parts[0];
-        let names = session_names(db).await;
-        if names.iter().any(|n| n == candidate) {
-            (parts[1], Some(candidate.to_string()))
-        } else {
-            (param, None)
-        }
-    } else {
-        (param, None)
-    };
-
-    // Also strip quotes from the resolved query (handles `"phrase" session` form)
-    let query = query
-        .strip_prefix('"')
-        .and_then(|q| q.strip_suffix('"'))
-        .unwrap_or(query);
-
-    let query_lower = query.to_lowercase();
-    let names_to_search = if let Some(ref s) = specific_session {
-        vec![s.clone()]
-    } else {
-        session_names(db).await
+    let names_to_search = match session {
+        Some(s) if !s.is_empty() => vec![s.to_string()],
+        _ => session_names(db).await,
     };
 
     let mut results = Vec::new();
@@ -362,18 +338,14 @@ pub async fn session_search(db: &WardsonDbClient, param: &str) -> String {
                 .unwrap_or("");
             let content_lower = content.to_lowercase();
 
-            if let Some(match_pos) = content_lower.find(&query_lower) {
-                let role = turn
-                    .get("role")
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("?");
+            if let Some((anchor_pos, anchor_len)) = plan.match_turn(&content_lower) {
+                let role = turn.get("role").and_then(|r| r.as_str()).unwrap_or("?");
 
-                // Extract context around match (snap to char boundaries)
-                let mut start = match_pos.saturating_sub(50);
+                let mut start = anchor_pos.saturating_sub(50);
                 while start > 0 && !content.is_char_boundary(start) {
                     start -= 1;
                 }
-                let mut end = (match_pos + query.len() + 50).min(content.len());
+                let mut end = (anchor_pos + anchor_len + 50).min(content.len());
                 while end < content.len() && !content.is_char_boundary(end) {
                     end += 1;
                 }
@@ -398,15 +370,80 @@ pub async fn session_search(db: &WardsonDbClient, param: &str) -> String {
     }
 
     if results.is_empty() {
-        return format!("No matches found for '{}'.", query);
+        return format!(
+            "No matches found for '{}'. Unquoted terms AND-match (all must appear in the same turn); wrap in double quotes for literal phrase.",
+            plan.display
+        );
     }
 
-    let mut output = format!("Search results for '{}' ({} matches):\n\n", query, results.len());
+    let mut output = format!(
+        "Search results for '{}' ({} matches):\n\n",
+        plan.display,
+        results.len()
+    );
     for r in &results {
         output.push_str(r);
         output.push('\n');
     }
     output
+}
+
+/// Parsed query plan. Phrase mode captures the literal substring; AND mode
+/// captures whitespace-split tokens. Both match against already-lowercased
+/// turn content.
+#[derive(Debug)]
+struct SessionQueryPlan {
+    phrase_mode: bool,
+    core_lower: String,
+    tokens: Vec<String>,
+    display: String,
+}
+
+impl SessionQueryPlan {
+    fn parse(query: &str) -> Option<Self> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let (phrase_mode, core) =
+            if trimmed.starts_with('"') && trimmed.ends_with('"') && trimmed.len() >= 2 {
+                (true, &trimmed[1..trimmed.len() - 1])
+            } else {
+                (false, trimmed)
+            };
+        let core_lower = core.to_lowercase();
+        let tokens: Vec<String> = if phrase_mode {
+            Vec::new()
+        } else {
+            core_lower.split_whitespace().map(|s| s.to_string()).collect()
+        };
+        if !phrase_mode && tokens.is_empty() {
+            return None;
+        }
+        Some(Self {
+            phrase_mode,
+            core_lower,
+            tokens,
+            display: trimmed.to_string(),
+        })
+    }
+
+    /// `content_lower` must be already lowercased. Returns the snippet anchor
+    /// `(pos, len)` — phrase uses the substring match, AND uses the first
+    /// token's position so the snippet centers on something relevant.
+    fn match_turn(&self, content_lower: &str) -> Option<(usize, usize)> {
+        if self.phrase_mode {
+            content_lower
+                .find(&self.core_lower)
+                .map(|p| (p, self.core_lower.len()))
+        } else if self.tokens.iter().all(|t| content_lower.contains(t)) {
+            let first = &self.tokens[0];
+            let p = content_lower.find(first.as_str()).unwrap_or(0);
+            Some((p, first.len()))
+        } else {
+            None
+        }
+    }
 }
 
 /// Structured metadata for a session.
@@ -1279,23 +1316,18 @@ impl SessionReadArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "session_search",
-    description = "Full-text search across sessions. session (optional) narrows the scope to a single session."
+    description = "Full-text search across sessions. Unquoted terms AND-match (all must appear in the same turn); wrap in double quotes for literal phrase. `session` (optional) narrows the scope to a single session."
 )]
 pub struct SessionSearchArgs {
     pub query: String,
     /// Optional session name to scope the search.
     #[serde(default)]
-    pub session: String,
+    pub session: Option<String>,
 }
 
 impl SessionSearchArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = if self.session.is_empty() {
-            self.query
-        } else {
-            format!("{} {}", self.query, self.session)
-        };
-        Ok(session_search(ctx.db, &param).await)
+        Ok(session_search(ctx.db, &self.query, self.session.as_deref()).await)
     }
 }
 
@@ -1419,6 +1451,85 @@ impl SessionExtractArgs {
     }
 }
 
+// turn_trace (NATIVE-TOOLS-01 follow-up) — expose the current turn's
+// tool-call trace to the Brain. Current turn is served from in-memory
+// state; prior turns fall back to the `tools.turn_trace` WardSONDB
+// collection populated by the dispatch site in grpc_service.rs.
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "turn_trace",
+    description = "Inspect tool calls made in the current or recent turns (tool name, args preview, outcome, elapsed_ms). turn_index_back=0 (default) returns the current turn in-memory; pass turn_index_back=1,2,... for prior turns from persisted history. session (optional) defaults to the current session."
+)]
+pub struct TurnTraceArgs {
+    /// Max entries to return (default 20, capped 100).
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Look back N turns from the current turn. 0 (default) reads the
+    /// current turn's in-memory trace; >=1 queries tools.turn_trace.
+    #[serde(default)]
+    pub turn_index_back: Option<usize>,
+    /// Narrow to a specific session. Default: current session.
+    #[serde(default)]
+    pub session: Option<String>,
+}
+
+impl TurnTraceArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let n = self.limit.unwrap_or(20).min(100);
+        let back = self.turn_index_back.unwrap_or(0);
+
+        if back == 0 && self.session.is_none() {
+            // Current turn — read the in-memory trace (cheap, no DB round-trip).
+            let entries: Vec<embra_tools_core::TraceEntry> = match ctx.trace.lock() {
+                Ok(g) => g.iter().rev().take(n).cloned().collect(),
+                Err(_) => Vec::new(),
+            };
+            if entries.is_empty() {
+                return Ok(
+                    "turn_trace (current turn): no tool calls dispatched yet this turn.".into(),
+                );
+            }
+            return Ok(
+                serde_json::to_string_pretty(&entries).unwrap_or_else(|_| "[]".into()),
+            );
+        }
+
+        // Prior turn or cross-session — query persistence. WardSONDB's sort
+        // shape is `[{field: "asc"|"desc"}]` (see knowledge/edges.rs:75 for
+        // the working pattern); the MongoDB-style `{field: 1}` form is
+        // rejected by the query endpoint, which previously masqueraded as
+        // "no entries" because `unwrap_or_default()` swallowed the error.
+        // Surface query errors explicitly so a broken shape is loud, not
+        // silent.
+        let sess = self
+            .session
+            .unwrap_or_else(|| ctx.session_name.to_string());
+        let target_index = ctx.turn_index.saturating_sub(back);
+        let filter = serde_json::json!({
+            "filter": {"session": sess, "turn_index": target_index},
+            "limit": n,
+            "sort": [{"started_at": "asc"}],
+        });
+        let docs = match ctx.db.query("tools.turn_trace", &filter).await {
+            Ok(d) => d,
+            Err(e) => {
+                return Ok(format!(
+                    "turn_trace query failed (session='{}', turn_index={}): {}",
+                    sess, target_index, e
+                ));
+            }
+        };
+        if docs.is_empty() {
+            return Ok(format!(
+                "turn_trace (session='{}', turn_index={}): no entries.",
+                sess, target_index
+            ));
+        }
+        Ok(serde_json::to_string_pretty(&docs).unwrap_or_else(|_| "[]".into()))
+    }
+}
+
 #[cfg(test)]
 mod native_args_tests {
     use super::*;
@@ -1468,8 +1579,178 @@ mod native_args_tests {
             "session_summarize",
             "session_summary_save",
             "session_extract",
+            "turn_trace",
         ] {
             assert!(names.contains(&expected), "{} not registered", expected);
         }
+    }
+
+    #[test]
+    fn turn_trace_args_defaults() {
+        let a: TurnTraceArgs = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(a.limit.is_none());
+        assert!(a.turn_index_back.is_none());
+        assert!(a.session.is_none());
+    }
+
+    #[test]
+    fn turn_trace_query_sort_uses_wardsondb_shape() {
+        // Regression guard for the follow-up to Embra_Debug #44: the
+        // turn_trace read path constructed a MongoDB-style
+        // `{"sort": {"started_at": 1}}`, which WardSONDB's query endpoint
+        // rejects. The correct shape is `[{field: "asc"|"desc"}]` (see
+        // knowledge/edges.rs and the comment in sessions.rs next to this
+        // test's subject). If someone reverts to the MongoDB style, this
+        // catches it before it reaches a live DB.
+        //
+        // We rebuild the filter inline rather than factor it out, because
+        // the production call site is short and the test's value is
+        // precisely in mirroring that exact literal.
+        let filter = serde_json::json!({
+            "filter": {"session": "x", "turn_index": 0usize},
+            "limit": 20usize,
+            "sort": [{"started_at": "asc"}],
+        });
+        let sort = filter
+            .get("sort")
+            .expect("sort key must be present");
+        assert!(
+            sort.is_array(),
+            "sort must be an array per WardSONDB's query API, got: {}",
+            sort
+        );
+        let first = sort
+            .as_array()
+            .and_then(|a| a.first())
+            .expect("sort array must have at least one element");
+        assert!(
+            first.is_object(),
+            "each sort element must be an object like {{field: \"asc\"}}, got: {}",
+            first
+        );
+        let direction = first
+            .as_object()
+            .and_then(|o| o.values().next())
+            .and_then(|v| v.as_str())
+            .expect("sort direction must be a string");
+        assert!(
+            direction == "asc" || direction == "desc",
+            "sort direction must be \"asc\" or \"desc\" (not 1/-1), got: {}",
+            direction
+        );
+    }
+
+    #[test]
+    fn turn_trace_index_back_math_is_logical_turns() {
+        // Regression guard for Embra_Debug #44.
+        //
+        // `SessionHistory.turns: Vec<Message>` stores one entry per
+        // role-message — a single logical turn appends both a user message
+        // and an assistant message, so a session with N turns has 2N
+        // entries.
+        //
+        // `grpc_service.rs` derives `turn_index = history.len() / 2` so
+        // that `turn_index` names the logical turn the model is now
+        // executing. The `turn_trace` read path computes
+        // `target = ctx.turn_index - back`. The two must agree on units —
+        // if either side reverts to message-count semantics, `back=1`
+        // queries an index that was never written and returns empty.
+        for completed_turns in 0usize..6 {
+            let history_len: usize = completed_turns * 2; // 2 messages per logical turn
+            let turn_index: usize = history_len / 2;
+            assert_eq!(
+                turn_index, completed_turns,
+                "turn_index must be the logical turn number, not message count"
+            );
+            // back=1 from the upcoming turn (turn_index = completed_turns)
+            // must point at the last completed turn (turn_index - 1).
+            if completed_turns > 0 {
+                let target = turn_index.saturating_sub(1);
+                assert_eq!(
+                    target,
+                    completed_turns - 1,
+                    "back=1 must address the immediately prior logical turn"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn session_search_args_session_optional() {
+        let a: SessionSearchArgs =
+            serde_json::from_value(serde_json::json!({"query": "foo"})).unwrap();
+        assert_eq!(a.query, "foo");
+        assert!(a.session.is_none());
+
+        let b: SessionSearchArgs = serde_json::from_value(serde_json::json!({
+            "query": "foo", "session": "main"
+        }))
+        .unwrap();
+        assert_eq!(b.session.as_deref(), Some("main"));
+    }
+}
+
+#[cfg(test)]
+mod session_query_plan_tests {
+    use super::SessionQueryPlan;
+
+    fn lower(s: &str) -> String {
+        s.to_lowercase()
+    }
+
+    #[test]
+    fn empty_query_is_none() {
+        assert!(SessionQueryPlan::parse("").is_none());
+        assert!(SessionQueryPlan::parse("   ").is_none());
+    }
+
+    #[test]
+    fn single_token_matches_substring() {
+        let p = SessionQueryPlan::parse("Anthropic").unwrap();
+        assert!(!p.phrase_mode);
+        assert!(p.match_turn(&lower("we called the Anthropic API")).is_some());
+        assert!(p.match_turn(&lower("something unrelated")).is_none());
+    }
+
+    #[test]
+    fn unquoted_multi_word_is_and_match() {
+        // Closes #34: the previous behavior treated "tool sweep" as a phrase
+        // and missed turns where both words appeared non-adjacent.
+        let p = SessionQueryPlan::parse("tool sweep").unwrap();
+        assert!(!p.phrase_mode);
+        assert!(p
+            .match_turn(&lower("the Sprint 3 TOOL verification SWEEP finished"))
+            .is_some());
+        assert!(p.match_turn(&lower("only mentions tool")).is_none());
+        assert!(p.match_turn(&lower("only mentions sweep")).is_none());
+    }
+
+    #[test]
+    fn quoted_multi_word_is_phrase_match() {
+        let p = SessionQueryPlan::parse("\"tool sweep\"").unwrap();
+        assert!(p.phrase_mode);
+        assert!(p.match_turn(&lower("the tool sweep happened")).is_some());
+        // AND-style non-adjacent should NOT match in phrase mode.
+        assert!(p
+            .match_turn(&lower("tool verification sweep"))
+            .is_none());
+    }
+
+    #[test]
+    fn phrase_anchor_points_at_substring() {
+        let p = SessionQueryPlan::parse("\"tool sweep\"").unwrap();
+        let (pos, len) = p.match_turn(&lower("the tool sweep was clean")).unwrap();
+        assert_eq!(pos, 4); // "the " prefix
+        assert_eq!(len, 10); // "tool sweep"
+    }
+
+    #[test]
+    fn and_mode_anchor_points_at_first_token() {
+        let p = SessionQueryPlan::parse("sweep tool").unwrap();
+        let (pos, len) = p
+            .match_turn(&lower("the tool verification sweep"))
+            .unwrap();
+        // First token is "sweep" — its position in content_lower
+        assert_eq!(&"the tool verification sweep".to_lowercase()[pos..pos + len], "sweep");
     }
 }

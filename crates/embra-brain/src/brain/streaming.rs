@@ -255,12 +255,22 @@ async fn emit_complete(
         .into_iter()
         .map(|(_, acc)| acc.finalize())
         .collect();
+    let effective_stop = stop_reason.unwrap_or_else(|| {
+        // A missing message_delta means the SSE stream ended without the
+        // final message_delta/message_stop pair — could be a dropped
+        // connection, a truncated response, or an API-side hiccup. We still
+        // default to EndTurn for UX safety (otherwise the loop hangs), but
+        // surface the condition so downstream desync (#32) is debuggable.
+        tracing::warn!(
+            target: "streaming",
+            "stream closed without message_delta; defaulting stop_reason to EndTurn"
+        );
+        StopReason::EndTurn
+    });
     let response = AssistantResponse {
         id: None,
         content,
-        // Default to end_turn when message_delta was missing — this matches
-        // the historical "stream ended, no tools" behavior.
-        stop_reason: stop_reason.unwrap_or(StopReason::EndTurn),
+        stop_reason: effective_stop,
         stop_sequence: None,
     };
     let _ = tx

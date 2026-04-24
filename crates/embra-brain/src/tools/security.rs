@@ -885,6 +885,7 @@ impl PortScanArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "ssh_remote_admin",
+    is_side_effectful = true,
     description = "Execute a single command on a remote host via SSH (EXPERIMENTAL). Restricted to RFC 1918 private ranges and loopback. target format: host OR user@host OR user@host:port. 30s timeout."
 )]
 pub struct SshRemoteAdminArgs {
@@ -904,6 +905,7 @@ impl SshRemoteAdminArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "ssh_session_start",
+    is_side_effectful = true,
     description = "Open a persistent SSH session (EXPERIMENTAL; private/loopback only). target format: user@host or user@host:port or host. At most one session open at a time."
 )]
 pub struct SshSessionStartArgs {
@@ -920,6 +922,7 @@ impl SshSessionStartArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "ssh_session_exec",
+    is_side_effectful = true,
     description = "Run a command in the open SSH session. 30s timeout, 10KB output truncation. Each command runs in a fresh process; state between commands is not preserved by the shell."
 )]
 pub struct SshSessionExecArgs {
