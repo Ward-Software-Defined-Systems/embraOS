@@ -1031,8 +1031,19 @@ pub async fn git_branch(param: &str) -> String {
             Err(e) => return format!("Failed to run git merge-base: {}", e),
         }
 
+        // Our `merge-base --is-ancestor` check above is the authoritative
+        // merge validation against the caller-supplied base — exit 0 means
+        // every commit reachable from the branch is reachable from base_ref,
+        // which is the git definition of "merged into base_ref". git's own
+        // `-d` check is narrower (HEAD or the branch's upstream only) and
+        // cannot consult an arbitrary third ref, so it refuses valid-per-our-
+        // contract deletions when base_ref is neither HEAD nor upstream.
+        // Use `-D` here to finalize what our pre-check already authorized —
+        // this is not a force-delete semantically (the merged-into-base
+        // guarantee still holds), it just bypasses a redundant narrower
+        // check. Closes Embra_Debug #56.
         return match tokio::process::Command::new("git")
-            .args(["-C", &dir, "branch", "-d", name])
+            .args(["-C", &dir, "branch", "-D", name])
             .output()
             .await
         {
