@@ -499,13 +499,16 @@ async fn handle_request(
 
             // Per-request turn trace. Interior mutability via Arc<Mutex>
             // avoids &mut propagation through the `fn` ToolDescriptor
-            // handler signature. `turn_index` is stamped from the
-            // pre-request history length so every dispatch in this turn
-            // shares the same key (queryable later by the `turn_trace`
-            // tool).
+            // handler signature. `turn_index` is the *logical* turn number
+            // (history is per-role-message; one user + one assistant = one
+            // turn, so `len() / 2` names the turn the model is now starting).
+            // The `turn_trace` tool's read path computes `target = ctx.turn_index
+            // - back` and matches `back=1` to the immediately prior turn's
+            // persisted entries — that arithmetic only holds under logical
+            // (not message-count) units.
             let trace_handle: embra_tools_core::TurnTraceHandle =
                 embra_tools_core::new_turn_trace_handle();
-            let turn_index: usize = history.len();
+            let turn_index: usize = history.len() / 2;
 
             let first_rx = brain
                 .send_message_streaming_with_tools(&api_messages)

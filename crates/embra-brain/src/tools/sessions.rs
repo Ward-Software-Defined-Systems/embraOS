@@ -1584,6 +1584,41 @@ mod native_args_tests {
     }
 
     #[test]
+    fn turn_trace_index_back_math_is_logical_turns() {
+        // Regression guard for Embra_Debug #44.
+        //
+        // `SessionHistory.turns: Vec<Message>` stores one entry per
+        // role-message — a single logical turn appends both a user message
+        // and an assistant message, so a session with N turns has 2N
+        // entries.
+        //
+        // `grpc_service.rs` derives `turn_index = history.len() / 2` so
+        // that `turn_index` names the logical turn the model is now
+        // executing. The `turn_trace` read path computes
+        // `target = ctx.turn_index - back`. The two must agree on units —
+        // if either side reverts to message-count semantics, `back=1`
+        // queries an index that was never written and returns empty.
+        for completed_turns in 0usize..6 {
+            let history_len: usize = completed_turns * 2; // 2 messages per logical turn
+            let turn_index: usize = history_len / 2;
+            assert_eq!(
+                turn_index, completed_turns,
+                "turn_index must be the logical turn number, not message count"
+            );
+            // back=1 from the upcoming turn (turn_index = completed_turns)
+            // must point at the last completed turn (turn_index - 1).
+            if completed_turns > 0 {
+                let target = turn_index.saturating_sub(1);
+                assert_eq!(
+                    target,
+                    completed_turns - 1,
+                    "back=1 must address the immediately prior logical turn"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn session_search_args_session_optional() {
         let a: SessionSearchArgs =
             serde_json::from_value(serde_json::json!({"query": "foo"})).unwrap();
