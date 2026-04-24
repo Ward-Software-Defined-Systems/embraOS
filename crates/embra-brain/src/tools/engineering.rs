@@ -513,6 +513,126 @@ pub async fn gh_issues(db: &WardsonDbClient, param: &str) -> String {
     }
 }
 
+/// Fetch the conversation-thread comments on an issue or PR. GitHub stores
+/// both behind `/repos/<repo>/issues/<number>/comments` — the `/pulls/.../comments`
+/// endpoint returns review comments on the diff, not the conversation tab.
+///
+/// Returns a list of `{ id, author, created_at, body }` objects. Silently
+/// returns an empty Vec on HTTP error so a missing/gated comment thread does
+/// not fail the parent view call — the absence is obvious in the rendered
+/// response.
+async fn fetch_issue_thread_comments(
+    client: &reqwest::Client,
+    token: &str,
+    repo: &str,
+    number: &str,
+) -> Vec<serde_json::Value> {
+    let url = format!(
+        "https://api.github.com/repos/{}/issues/{}/comments?per_page=100",
+        repo, number
+    );
+    let resp = client
+        .get(&url)
+        .header("User-Agent", "embraOS/0.1.0")
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await;
+    let raw: Vec<serde_json::Value> = match resp {
+        Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    raw.into_iter()
+        .map(|c| {
+            serde_json::json!({
+                "id": c.get("id").and_then(|v| v.as_u64()),
+                "author": c.get("user").and_then(|u| u.get("login")).and_then(|l| l.as_str()),
+                "created_at": c.get("created_at").and_then(|v| v.as_str()),
+                "body": c.get("body").and_then(|v| v.as_str()),
+            })
+        })
+        .collect()
+}
+
+/// View a single GitHub issue with its comment thread.
+/// Param format: `<owner/repo> <number>`
+pub async fn gh_issue_view(db: &WardsonDbClient, param: &str) -> String {
+    let token = match resolve_github_token(db).await {
+        Some(t) => t,
+        None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
+    };
+
+    let parts: Vec<&str> = param.split_whitespace().collect();
+    if parts.len() < 2 {
+        return "Usage: gh_issue_view <owner/repo> <number>".into();
+    }
+    let repo = parts[0];
+    let number = parts[1];
+
+    let client = reqwest::Client::new();
+
+    let issue_url = format!("https://api.github.com/repos/{}/issues/{}", repo, number);
+    let issue: serde_json::Value = match client
+        .get(&issue_url)
+        .header("User-Agent", "embraOS/0.1.0")
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => match resp.json().await {
+            Ok(v) => v,
+            Err(e) => return format!("Failed to parse issue response: {}", e),
+        },
+        Ok(resp) => return format!("GitHub API error: {}", resp.status()),
+        Err(e) => return format!("Failed to fetch issue: {}", e),
+    };
+
+    // GitHub returns PRs from the /issues/ endpoint too (they carry a
+    // `pull_request` field). Redirect the caller to the PR tool so they get
+    // head/base/merge state instead of a silently truncated view.
+    if issue.get("pull_request").is_some() {
+        return format!(
+            "Item #{} in {} is a pull request, not an issue — use gh_pr_view for the full PR view.",
+            number, repo
+        );
+    }
+
+    let comments = fetch_issue_thread_comments(&client, &token, repo, number).await;
+
+    let labels: Vec<&str> = issue
+        .get("labels")
+        .and_then(|arr| arr.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|l| l.get("name").and_then(|n| n.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let assignees: Vec<&str> = issue
+        .get("assignees")
+        .and_then(|arr| arr.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|u| u.get("login").and_then(|l| l.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let result = serde_json::json!({
+        "number": issue.get("number").and_then(|v| v.as_u64()),
+        "title": issue.get("title").and_then(|v| v.as_str()),
+        "state": issue.get("state").and_then(|v| v.as_str()),
+        "author": issue.get("user").and_then(|u| u.get("login")).and_then(|l| l.as_str()),
+        "created_at": issue.get("created_at").and_then(|v| v.as_str()),
+        "updated_at": issue.get("updated_at").and_then(|v| v.as_str()),
+        "closed_at": issue.get("closed_at").and_then(|v| v.as_str()),
+        "labels": labels,
+        "assignees": assignees,
+        "body": issue.get("body").and_then(|v| v.as_str()),
+        "comments": comments,
+    });
+    serde_json::to_string_pretty(&result).unwrap_or_else(|_| "Failed to format issue".into())
+}
+
 /// Fetch GitHub PRs via API.
 pub async fn gh_prs(db: &WardsonDbClient, param: &str) -> String {
     let token = match resolve_github_token(db).await {
@@ -557,6 +677,82 @@ pub async fn gh_prs(db: &WardsonDbClient, param: &str) -> String {
         }
         Err(e) => format!("Failed to fetch PRs: {}", e),
     }
+}
+
+/// View a single GitHub pull request with its conversation-thread comments.
+/// Param format: `<owner/repo> <number>`
+pub async fn gh_pr_view(db: &WardsonDbClient, param: &str) -> String {
+    let token = match resolve_github_token(db).await {
+        Some(t) => t,
+        None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
+    };
+
+    let parts: Vec<&str> = param.split_whitespace().collect();
+    if parts.len() < 2 {
+        return "Usage: gh_pr_view <owner/repo> <number>".into();
+    }
+    let repo = parts[0];
+    let number = parts[1];
+
+    let client = reqwest::Client::new();
+
+    let pr_url = format!("https://api.github.com/repos/{}/pulls/{}", repo, number);
+    let pr: serde_json::Value = match client
+        .get(&pr_url)
+        .header("User-Agent", "embraOS/0.1.0")
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => match resp.json().await {
+            Ok(v) => v,
+            Err(e) => return format!("Failed to parse PR response: {}", e),
+        },
+        Ok(resp) => return format!("GitHub API error: {}", resp.status()),
+        Err(e) => return format!("Failed to fetch PR: {}", e),
+    };
+
+    let comments = fetch_issue_thread_comments(&client, &token, repo, number).await;
+
+    let labels: Vec<&str> = pr
+        .get("labels")
+        .and_then(|arr| arr.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|l| l.get("name").and_then(|n| n.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let assignees: Vec<&str> = pr
+        .get("assignees")
+        .and_then(|arr| arr.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|u| u.get("login").and_then(|l| l.as_str()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let result = serde_json::json!({
+        "number": pr.get("number").and_then(|v| v.as_u64()),
+        "title": pr.get("title").and_then(|v| v.as_str()),
+        "state": pr.get("state").and_then(|v| v.as_str()),
+        "author": pr.get("user").and_then(|u| u.get("login")).and_then(|l| l.as_str()),
+        "created_at": pr.get("created_at").and_then(|v| v.as_str()),
+        "updated_at": pr.get("updated_at").and_then(|v| v.as_str()),
+        "closed_at": pr.get("closed_at").and_then(|v| v.as_str()),
+        "merged_at": pr.get("merged_at").and_then(|v| v.as_str()),
+        "labels": labels,
+        "assignees": assignees,
+        "head_ref": pr.get("head").and_then(|h| h.get("ref")).and_then(|r| r.as_str()),
+        "base_ref": pr.get("base").and_then(|b| b.get("ref")).and_then(|r| r.as_str()),
+        "merged": pr.get("merged").and_then(|v| v.as_bool()),
+        "mergeable": pr.get("mergeable").and_then(|v| v.as_bool()),
+        "draft": pr.get("draft").and_then(|v| v.as_bool()),
+        "body": pr.get("body").and_then(|v| v.as_str()),
+        "comments": comments,
+    });
+    serde_json::to_string_pretty(&result).unwrap_or_else(|_| "Failed to format PR".into())
 }
 
 /// Run `git add` on files. Write operation — workspace restricted.
@@ -2301,6 +2497,24 @@ impl GhIssuesArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
+    name = "gh_issue_view",
+    description = "Fetch a single GitHub issue by number. Returns title, body, author, state, labels, assignees, and the full conversation-thread comments as JSON. Use this before acting on an issue so the body and prior discussion are in context — the list view only carries the title."
+)]
+pub struct GhIssueViewArgs {
+    /// owner/repo, e.g. `Ward-Software-Defined-Systems/embraOS`.
+    pub repo: String,
+    pub number: u32,
+}
+
+impl GhIssueViewArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} {}", self.repo, self.number);
+        Ok(gh_issue_view(ctx.db, &param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
     name = "gh_prs",
     description = "List open GitHub pull requests for owner/repo (requires GITHUB_TOKEN)."
 )]
@@ -2311,6 +2525,24 @@ pub struct GhPrsArgs {
 impl GhPrsArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
         Ok(gh_prs(ctx.db, &self.repo).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gh_pr_view",
+    description = "Fetch a single GitHub pull request by number. Returns title, body, author, state, head/base refs, merge status (merged, mergeable, draft), labels, assignees, and the conversation-thread comments as JSON. Symmetric with gh_issue_view — same core fields plus PR-specific merge metadata."
+)]
+pub struct GhPrViewArgs {
+    /// owner/repo, e.g. `Ward-Software-Defined-Systems/embraOS`.
+    pub repo: String,
+    pub number: u32,
+}
+
+impl GhPrViewArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let param = format!("{} {}", self.repo, self.number);
+        Ok(gh_pr_view(ctx.db, &param).await)
     }
 }
 
@@ -2831,6 +3063,40 @@ mod native_args_tests {
     }
 
     #[test]
+    fn gh_issue_view_args_require_repo_and_number() {
+        let a: GhIssueViewArgs = serde_json::from_value(serde_json::json!({
+            "repo": "Ward-Software-Defined-Systems/Embra_Debug",
+            "number": 52
+        }))
+        .unwrap();
+        assert_eq!(a.repo, "Ward-Software-Defined-Systems/Embra_Debug");
+        assert_eq!(a.number, 52);
+
+        // Missing number → error; missing repo → error.
+        assert!(
+            serde_json::from_value::<GhIssueViewArgs>(serde_json::json!({"repo": "x/y"})).is_err()
+        );
+        assert!(
+            serde_json::from_value::<GhIssueViewArgs>(serde_json::json!({"number": 1})).is_err()
+        );
+    }
+
+    #[test]
+    fn gh_pr_view_args_require_repo_and_number() {
+        let a: GhPrViewArgs = serde_json::from_value(serde_json::json!({
+            "repo": "Ward-Software-Defined-Systems/embraOS",
+            "number": 1
+        }))
+        .unwrap();
+        assert_eq!(a.repo, "Ward-Software-Defined-Systems/embraOS");
+        assert_eq!(a.number, 1);
+
+        assert!(
+            serde_json::from_value::<GhPrViewArgs>(serde_json::json!({"repo": "x/y"})).is_err()
+        );
+    }
+
+    #[test]
     fn gh_pr_merge_method_default_merge() {
         let a: GhPrMergeArgs = serde_json::from_value(serde_json::json!({
             "repo": "x/y", "number": 42
@@ -2931,7 +3197,8 @@ mod native_args_tests {
             "git_push", "git_pull", "git_diff", "git_branch", "git_checkout",
             "git_rm", "git_mv",
             "plan", "plan_delete", "tasks", "task_add", "task_done", "task_delete",
-            "gh_issues", "gh_prs", "gh_issue_create", "gh_issue_close",
+            "gh_issues", "gh_issue_view", "gh_prs", "gh_pr_view",
+            "gh_issue_create", "gh_issue_close",
             "gh_issue_reopen", "gh_issue_comment",
             "gh_pr_create", "gh_pr_close", "gh_pr_comment", "gh_pr_merge",
             "gh_project_list", "gh_project_view",
