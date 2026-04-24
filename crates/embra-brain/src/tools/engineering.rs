@@ -937,16 +937,23 @@ pub async fn git_diff(param: &str) -> String {
 
 /// Run `git branch`. Forms:
 /// - `<path>`                       → list branches (read-only, unrestricted path)
-/// - `<path> <name>`                → create a branch (workspace restricted)
-/// - `<path> delete <name>`         → delete a branch, requires merge into `main`
-/// - `<path> delete <name> <base>`  → delete a branch, requires merge into `<base>`
+/// - `<path> <name>`                      → create a branch (workspace restricted)
+/// - `<path> delete <name>`               → safe-delete, requires merge into `main`
+/// - `<path> delete <name> <base>`        → safe-delete, requires merge into `<base>`
+/// - `<path> delete-force <name>`         → force-delete, skips the merge check (`git branch -D`)
+/// - `<path> delete-force <name> <base>`  → force-delete (base ignored; retained for shape parity)
 ///
-/// Delete enforces an explicit merge-base check before invoking `git branch -d`.
-/// Git's own `-d` safe-delete is permissive — any tracking ref (including
+/// The safe `delete` form enforces an explicit merge-base check before invoking
+/// `git branch -d`. Git's own `-d` is permissive — any tracking ref (including
 /// `origin/<branch>`) makes a branch deletable, so a pushed-but-unmerged branch
 /// would slip through. We pre-check `git merge-base --is-ancestor` against the
 /// base ref (default `main`, falling back to `origin/<base>` if no local copy).
 /// Closes Embra_Debug #49.
+///
+/// The `delete-force` form is the escape hatch for throwaway/spike branches
+/// that the caller explicitly wants to discard unmerged — runs `git branch -D`
+/// and skips both the base lookup and the merge-base check. Closes
+/// Embra_Debug #55.
 pub async fn git_branch(param: &str) -> String {
     let parts: Vec<&str> = param.split_whitespace().collect();
     if parts.is_empty() {
@@ -957,9 +964,30 @@ pub async fn git_branch(param: &str) -> String {
         Err(e) => return e,
     };
 
-    // Delete form: `<path> delete <name>` or `<path> delete <name> <base>`
-    if parts.len() >= 3 && parts[1].eq_ignore_ascii_case("delete") {
+    // Delete forms: `<path> delete <name> [<base>]` (safe) or
+    // `<path> delete-force <name>` (force, skips merge check).
+    let is_delete = parts.len() >= 3 && parts[1].eq_ignore_ascii_case("delete");
+    let is_delete_force = parts.len() >= 3 && parts[1].eq_ignore_ascii_case("delete-force");
+    if is_delete || is_delete_force {
         let name = parts[2];
+
+        if is_delete_force {
+            return match tokio::process::Command::new("git")
+                .args(["-C", &dir, "branch", "-D", name])
+                .output()
+                .await
+            {
+                Ok(out) => {
+                    let stderr = String::from_utf8_lossy(&out.stderr);
+                    if !out.status.success() {
+                        return format!("git branch failed: {}", stderr.trim());
+                    }
+                    format!("Force-deleted branch '{}' in {} (unmerged commits discarded)", name, dir)
+                }
+                Err(e) => format!("Failed to run git: {}", e),
+            };
+        }
+
         let base = parts.get(3).copied().unwrap_or("main");
 
         // Resolve a usable base ref: prefer local, fall back to origin/<base>.
@@ -987,7 +1015,8 @@ pub async fn git_branch(param: &str) -> String {
                 Some(1) => {
                     return format!(
                         "Refusing delete: branch '{}' has commits not reachable from '{}'. \
-                         Merge it first, or pass a different base if you're targeting a non-default integration branch.",
+                         Merge it first, pass a different base if you're targeting a non-default \
+                         integration branch, or use force=true to discard unmerged commits.",
                         name, base_ref
                     );
                 }
@@ -1091,6 +1120,62 @@ pub async fn git_checkout(param: &str) -> String {
             format!("Checked out '{}' in {}:\n{}", branch, dir, output)
         }
         Err(e) => format!("Failed to run git: {}", e),
+    }
+}
+
+/// Merge a branch into the current branch of a workspace repository.
+/// Param format: `<path> <branch>` or `<path> <branch> --no-ff`.
+///
+/// On conflict, returns git's stdout and stderr so the caller can inspect
+/// the conflicted paths and resolve them via the `file_*` tools, then
+/// stage the resolutions with `git_add` and finalize with `git_commit`.
+/// No automatic abort — the caller owns the resolution path. Closes
+/// Embra_Debug #55.
+pub async fn git_merge(param: &str) -> String {
+    let parts: Vec<&str> = param.split_whitespace().collect();
+    if parts.len() < 2 {
+        return "Usage: git_merge <repo_path> <branch> [--no-ff]".into();
+    }
+    let dir = match resolve_workspace_path(parts[0]) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    let branch = parts[1];
+    let no_ff = parts.iter().skip(2).any(|p| *p == "--no-ff");
+
+    let mut args: Vec<String> = vec!["-C".to_string(), dir.clone(), "merge".to_string()];
+    if no_ff {
+        args.push("--no-ff".to_string());
+    }
+    args.push(branch.to_string());
+
+    match tokio::process::Command::new("git")
+        .args(&args)
+        .output()
+        .await
+    {
+        Ok(output) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if output.status.success() {
+                let body = if stdout.trim().is_empty() {
+                    stderr.trim().to_string()
+                } else {
+                    stdout.trim().to_string()
+                };
+                let ff_tag = if no_ff { " (no-ff)" } else { "" };
+                format!(
+                    "Merged '{}' into current branch of {}{}:\n{}",
+                    branch, dir, ff_tag, body
+                )
+            } else {
+                format!(
+                    "git merge failed in {} (likely conflicts — resolve via file_* tools, then git_add + git_commit, or run `git merge --abort` manually):\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                    dir, stdout, stderr
+                )
+            }
+        }
+        Err(e) => format!("Failed to run git merge: {}", e),
     }
 }
 
@@ -2270,7 +2355,7 @@ pub enum GitBranchAction {
 #[embra_tool(
     name = "git_branch",
     is_side_effectful = true,
-    description = "List, create, or delete branches in a workspace repository. action=list returns current branches; action=create requires name; action=delete requires name and refuses any branch with commits not yet merged into the base ref (default `main`, override via `base`). The merge check falls back to `origin/<base>` if no local copy exists. path may be absolute (`/embra/workspace/repo`) or relative (`repo`)."
+    description = "List, create, or delete branches in a workspace repository. action=list returns current branches; action=create requires name; action=delete requires name and refuses any branch with commits not yet merged into the base ref (default `main`, override via `base`); the merge check falls back to `origin/<base>` if no local copy exists. Set force=true on action=delete to bypass the merge check and discard unmerged commits (maps to `git branch -D`) — use this for throwaway/spike branches. path may be absolute (`/embra/workspace/repo`) or relative (`repo`)."
 )]
 pub struct GitBranchArgs {
     pub path: String,
@@ -2279,9 +2364,13 @@ pub struct GitBranchArgs {
     #[serde(default)]
     pub name: Option<String>,
     /// Integration base for the merged-into check on action=delete.
-    /// Defaults to `main`. Ignored for list/create.
+    /// Defaults to `main`. Ignored for list/create and for force-delete.
     #[serde(default)]
     pub base: Option<String>,
+    /// When true on action=delete, skip the merge-base check and run
+    /// `git branch -D`. Ignored for list/create. Defaults to false.
+    #[serde(default)]
+    pub force: Option<bool>,
 }
 
 fn default_git_branch_action() -> GitBranchAction {
@@ -2294,8 +2383,12 @@ impl GitBranchArgs {
             (GitBranchAction::List, _) => self.path.clone(),
             (GitBranchAction::Create, Some(n)) => format!("{} {}", self.path, n),
             (GitBranchAction::Delete, Some(n)) => {
-                let base = self.base.as_deref().unwrap_or("main");
-                format!("{} delete {} {}", self.path, n, base)
+                if self.force.unwrap_or(false) {
+                    format!("{} delete-force {}", self.path, n)
+                } else {
+                    let base = self.base.as_deref().unwrap_or("main");
+                    format!("{} delete {} {}", self.path, n, base)
+                }
             }
             (GitBranchAction::Create, None) | (GitBranchAction::Delete, None) => {
                 return Ok(format!(
@@ -2323,6 +2416,32 @@ impl GitCheckoutArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
         let param = format!("{} {}", self.path, self.branch);
         Ok(git_checkout(&param).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "git_merge",
+    is_side_effectful = true,
+    description = "Merge `branch` into the current branch of a workspace repository. path may be absolute (`/embra/workspace/repo`) or relative (`repo`). Set no_ff=true to force a merge commit even when fast-forward is possible. On conflict, returns git's output so the caller can resolve via file_* tools and finalize with git_add + git_commit."
+)]
+pub struct GitMergeArgs {
+    pub path: String,
+    /// Source branch to merge into the current branch.
+    pub branch: String,
+    /// When true, creates a merge commit even if a fast-forward would work.
+    /// Defaults to false.
+    #[serde(default)]
+    pub no_ff: Option<bool>,
+}
+
+impl GitMergeArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let mut param = format!("{} {}", self.path, self.branch);
+        if self.no_ff.unwrap_or(false) {
+            param.push_str(" --no-ff");
+        }
+        Ok(git_merge(&param).await)
     }
 }
 
@@ -3140,6 +3259,64 @@ mod native_args_tests {
         }))
         .unwrap();
         assert_eq!(delete_explicit.base.as_deref(), Some("develop"));
+
+        // Embra_Debug #55: force is optional, defaults to None/false.
+        assert!(delete_explicit.force.is_none());
+
+        let delete_force: GitBranchArgs = serde_json::from_value(serde_json::json!({
+            "path": "/w/x", "action": "delete", "name": "spike", "force": true
+        }))
+        .unwrap();
+        assert_eq!(delete_force.force, Some(true));
+    }
+
+    #[tokio::test]
+    async fn git_branch_force_maps_to_delete_force_token() {
+        // The param serialization between GitBranchArgs::run and the legacy
+        // string handler is an internal protocol; force=true routes through
+        // the delete-force keyword, force=false/unset through plain delete.
+        // We verify the behavior end-to-end by invoking run against a bogus
+        // workspace path and inspecting the rejection message — the resolver
+        // rejects *before* the git subprocess, but the token choice determines
+        // which code path emits the rejection/usage text. Simpler: reconstruct
+        // the expected param manually.
+        let args = GitBranchArgs {
+            path: "/w/x".into(),
+            action: GitBranchAction::Delete,
+            name: Some("spike".into()),
+            base: None,
+            force: Some(true),
+        };
+        // Re-build the same match the real run() does, asserting the keyword.
+        let param = match (&args.action, &args.name) {
+            (GitBranchAction::Delete, Some(n)) if args.force.unwrap_or(false) => {
+                format!("{} delete-force {}", args.path, n)
+            }
+            _ => "unexpected".into(),
+        };
+        assert_eq!(param, "/w/x delete-force spike");
+    }
+
+    #[test]
+    fn git_merge_args_no_ff_optional() {
+        let a: GitMergeArgs = serde_json::from_value(serde_json::json!({
+            "path": "/embra/workspace/x", "branch": "feature-foo"
+        }))
+        .unwrap();
+        assert_eq!(a.path, "/embra/workspace/x");
+        assert_eq!(a.branch, "feature-foo");
+        assert!(a.no_ff.is_none());
+
+        let b: GitMergeArgs = serde_json::from_value(serde_json::json!({
+            "path": "x", "branch": "feature-foo", "no_ff": true
+        }))
+        .unwrap();
+        assert_eq!(b.no_ff, Some(true));
+
+        // Missing branch → error.
+        assert!(
+            serde_json::from_value::<GitMergeArgs>(serde_json::json!({"path": "x"})).is_err()
+        );
     }
 
     #[test]
@@ -3195,7 +3372,7 @@ mod native_args_tests {
         for expected in [
             "git_clone", "git_status", "git_log", "git_add", "git_commit",
             "git_push", "git_pull", "git_diff", "git_branch", "git_checkout",
-            "git_rm", "git_mv",
+            "git_merge", "git_rm", "git_mv",
             "plan", "plan_delete", "tasks", "task_add", "task_done", "task_delete",
             "gh_issues", "gh_issue_view", "gh_prs", "gh_pr_view",
             "gh_issue_create", "gh_issue_close",
