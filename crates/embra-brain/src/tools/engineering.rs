@@ -367,6 +367,64 @@ pub async fn task_done(db: &WardsonDbClient, task_id: &str) -> String {
     }
 }
 
+/// Delete a task by id (irreversible). Read first so we can echo the title
+/// in the success message — gives the operator confirmation that the right
+/// row went away.
+pub async fn task_delete(db: &WardsonDbClient, task_id: &str) -> String {
+    let id = task_id.trim();
+    if id.is_empty() {
+        return "Usage: task_delete <task_id>".into();
+    }
+    let title = match db.read("tasks", id).await {
+        Ok(doc) => doc
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(no title)")
+            .to_string(),
+        Err(e) => return format!("Task not found: {}", e),
+    };
+    match db.delete("tasks", id).await {
+        Ok(()) => format!("Task deleted: '{}' (ID: {})", title, id),
+        Err(e) => format!("Failed to delete task: {}", e),
+    }
+}
+
+/// Delete a plan by id. When `cascade_tasks` is true, also remove every task
+/// whose `plan_id` matches — useful for clearing a throwaway diagnostic plan
+/// in one call. Default behavior leaves child tasks orphaned (their `plan_id`
+/// will dangle but they remain queryable).
+pub async fn plan_delete(db: &WardsonDbClient, plan_id: &str, cascade_tasks: bool) -> String {
+    let id = plan_id.trim();
+    if id.is_empty() {
+        return "Usage: plan_delete <plan_id> [cascade_tasks=true]".into();
+    }
+    let title = match db.read("plans", id).await {
+        Ok(doc) => doc
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(no title)")
+            .to_string(),
+        Err(e) => return format!("Plan not found: {}", e),
+    };
+
+    let cascade_msg = if cascade_tasks {
+        match db
+            .delete_by_query("tasks", &serde_json::json!({"plan_id": id}))
+            .await
+        {
+            Ok(n) => format!(" (cascade removed {} task(s))", n),
+            Err(e) => return format!("Failed to cascade-delete tasks: {}", e),
+        }
+    } else {
+        String::new()
+    };
+
+    match db.delete("plans", id).await {
+        Ok(()) => format!("Plan deleted: '{}' (ID: {}){}", title, id, cascade_msg),
+        Err(e) => format!("Failed to delete plan: {}", e),
+    }
+}
+
 /// Fetch GitHub issues via API.
 pub async fn gh_issues(db: &WardsonDbClient, param: &str) -> String {
     let token = match resolve_github_token(db).await {
@@ -2147,6 +2205,40 @@ impl TaskDoneArgs {
     }
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "task_delete",
+    is_side_effectful = true,
+    description = "Delete a task by id (irreversible). Use task_done if you only want to mark it complete."
+)]
+pub struct TaskDeleteArgs {
+    pub id: String,
+}
+
+impl TaskDeleteArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(task_delete(ctx.db, &self.id).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "plan_delete",
+    is_side_effectful = true,
+    description = "Delete a plan by id (irreversible). cascade_tasks=true also removes tasks whose plan_id matches; default false leaves them orphaned."
+)]
+pub struct PlanDeleteArgs {
+    pub id: String,
+    #[serde(default)]
+    pub cascade_tasks: bool,
+}
+
+impl PlanDeleteArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(plan_delete(ctx.db, &self.id, self.cascade_tasks).await)
+    }
+}
+
 // -- GitHub tools -------------------------------------------------------
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -2683,6 +2775,22 @@ mod native_args_tests {
     }
 
     #[test]
+    fn plan_delete_cascade_tasks_defaults_false() {
+        // Embra_Debug #46: cascade is opt-in to avoid surprising the operator
+        // when they only meant to clear a plan record.
+        let a: PlanDeleteArgs =
+            serde_json::from_value(serde_json::json!({"id": "plan-1"})).unwrap();
+        assert_eq!(a.id, "plan-1");
+        assert!(!a.cascade_tasks);
+
+        let b: PlanDeleteArgs = serde_json::from_value(serde_json::json!({
+            "id": "plan-1", "cascade_tasks": true
+        }))
+        .unwrap();
+        assert!(b.cascade_tasks);
+    }
+
+    #[test]
     fn engineering_tools_register() {
         let names: Vec<&'static str> = inventory::iter::<crate::tools::registry::ToolDescriptor>()
             .into_iter()
@@ -2692,7 +2800,7 @@ mod native_args_tests {
             "git_clone", "git_status", "git_log", "git_add", "git_commit",
             "git_push", "git_pull", "git_diff", "git_branch", "git_checkout",
             "git_rm", "git_mv",
-            "plan", "tasks", "task_add", "task_done",
+            "plan", "plan_delete", "tasks", "task_add", "task_done", "task_delete",
             "gh_issues", "gh_prs", "gh_issue_create", "gh_issue_close",
             "gh_issue_reopen", "gh_issue_comment",
             "gh_pr_create", "gh_pr_close", "gh_pr_comment", "gh_pr_merge",
