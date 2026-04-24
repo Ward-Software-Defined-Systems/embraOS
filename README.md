@@ -17,7 +17,7 @@
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — dense multigraph with auto-derived edges" width="100%">
 </p>
 
-**Current Status:** Phase 1 — Core OS (Sprint 3 Complete on `phase1-sprint3`, pending close-merge to `main`) | Phase 0 — Stable
+**Current Status:** Phase 1 — Core OS (Sprint 3 merged to `main` 2026-04-24 at tag `v0.3.0-phase1`; Sprint 4 starting on `phase1-sprint4`) | Phase 0 — Stable
 
 ---
 
@@ -72,7 +72,7 @@ rustup target add x86_64-unknown-linux-musl
 # Clone and configure
 git clone https://github.com/Ward-Software-Defined-Systems/embraOS.git
 cd embraOS
-git checkout phase1-sprint3        # active development (Phase 1 Sprint 3)
+git checkout phase1-sprint4        # active development (Phase 1 Sprint 4)
 
 # Configure musl linker (per-machine, only needed once)
 cat >> ~/.cargo/config.toml << 'EOF'
@@ -515,7 +515,7 @@ Cross-session knowledge graph — the intelligence can now promote episodic memo
 
 ### Phase 1 Sprint 3 Scope
 
-> **✅ Complete** on `phase1-sprint3`, awaiting close-merge to `main`. Sprint 3 PR #1 (through NATIVE-TOOLS-01 and the post-merge tool-fix pass) merged to `main` 2026-04-22. Four subsequent post-merge passes landed on `phase1-sprint3`: 2026-04-23 tool-fix closing 9 Embra_Debug issues; 2026-04-24 pass #1 post-verification + arch-strip closing #44/#45/#46/#49; 2026-04-24 pass #2 closing #52/#53/#54/#55; 2026-04-24 pass #3 closing #56/#57. 15 Embra_Debug issues closed in total. QEMU E2E smoke verified across all three post-verification passes.
+> **✅ Complete.** Merged to `main` 2026-04-24 at tag `v0.3.0-phase1` (PR #2, merge commit `da469a6`). Sprint 3 PR #1 (through NATIVE-TOOLS-01 and the post-merge tool-fix pass) merged to `main` 2026-04-22. Four subsequent post-merge passes landed on `phase1-sprint3`: 2026-04-23 tool-fix closing 9 Embra_Debug issues; 2026-04-24 pass #1 post-verification + arch-strip closing #44/#45/#46/#49; 2026-04-24 pass #2 closing #52/#53/#54/#55; 2026-04-24 pass #3 closing #56/#57. 15 Embra_Debug issues closed in total. QEMU E2E smoke verified across all three post-verification passes.
 
 Workspace grows 7 → 9 crates; registry 75 → 90 tools; 80 → 142 unit tests. The sprint delivers a pluggable WardSONDB storage engine, a persistent expression panel, and a full migration from legacy text-tag tool dispatch to Anthropic's native tool-use API.
 
@@ -528,7 +528,7 @@ Workspace grows 7 → 9 crates; registry 75 → 90 tools; 80 → 142 unit tests.
 - **Post-verification pass #2 (2026-04-24)** — file/dir path unification completes what pass #1 scoped to git_* only: `file_write`, `file_append`, `file_delete`, `file_move`, `file_symlink`, `mkdir`, `dir_delete`, and `git_clone` all now route through `resolve_workspace_path` (the older `validate_workspace_path` helper is deleted — one resolver for the whole workspace-restricted surface). `gh_issue_view` + `gh_pr_view` added for single-item GitHub reads with conversation-thread comments (shared `fetch_issue_thread_comments` helper; the intelligence no longer has to ask the operator to paste issue bodies into the conversation). `git_merge(path, branch, no_ff?)` added to integrate branches; `git_branch` action=delete gains an optional `force: bool` that routes to `git branch -D` through a new "delete-force" internal keyword (the safe path from #49 is preserved verbatim). Closes Embra_Debug #52/#53/#54/#55. Pushed to origin at `47caba6`.
 - **Post-verification pass #3 (2026-04-24)** — two behavior-only fixes on top of pass #2. `git_branch` delete now honors the `base` override end-to-end: the finalizing git invocation switches from `-d` to `-D` on the verified-merged path because `-d`'s built-in check only consults HEAD/upstream and was refusing valid-per-our-contract deletes when `base` was a third ref. Our `merge-base --is-ancestor` pre-check is the authoritative validation, so `-D` here is not a force-delete semantically — it's bypassing a redundant narrower gate. `file_read` joins workspace-relative paths to `/embra/workspace/` while absolute paths still pass through literally (the "unrestricted reads" contract for `/etc`, `/proc`, `/var/log` is preserved). Registry unchanged at 90. Closes Embra_Debug #56/#57. Pushed to origin at `8a9d8ad`.
 
-**Status:** Sprint 3 complete on `phase1-sprint3` (tip `4958a11`, 22 commits since Sprint 3 PR #1 on 2026-04-22). Sprint 3 PR #1 merged to `main` 2026-04-22 (NATIVE-TOOLS-01 + post-merge tool-fix pass). Post-verification pass #1 pushed to origin at `6bb6871`; pass #2 at `47caba6`; pass #3 at `8a9d8ad`. QEMU E2E smoke verified against the live stack across all three passes (#44–#49, #52–#55, #56–#57) on 2026-04-23 and 2026-04-24. `cargo clippy --workspace --all-targets` clean (112 warnings, baseline unchanged). Ready to close-merge to `main`.
+**Status:** Sprint 3 complete, close-merged to `main` 2026-04-24 at tag `v0.3.0-phase1` (PR #2, merge commit `da469a6`, 23 commits since Sprint 3 PR #1 on 2026-04-22). Sprint 3 PR #1 merged to `main` 2026-04-22 (NATIVE-TOOLS-01 + post-merge tool-fix pass). Post-verification pass #1 pushed to origin at `6bb6871`; pass #2 at `47caba6`; pass #3 at `8a9d8ad`. QEMU E2E smoke verified against the live stack across all three passes (#44–#49, #52–#55, #56–#57) on 2026-04-23 and 2026-04-24. `cargo clippy --workspace --all-targets` clean (112 warnings, baseline unchanged).
 
 ---
 
