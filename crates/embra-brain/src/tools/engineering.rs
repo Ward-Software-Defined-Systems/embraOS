@@ -1669,10 +1669,13 @@ pub async fn gh_project_view(db: &WardsonDbClient, param: &str) -> String {
 /// tool's internal limit and the wrapper's truncation.
 const FILE_READ_MAX: usize = 2_097_152; // 2 MiB
 
-/// Read a file's contents. Unrestricted path.
+/// Read a file's contents. Reads are unrestricted — absolute paths can reach
+/// anywhere on the system (/etc, /proc, /var/log, etc.). Relative paths
+/// resolve against `/embra/workspace/` so the call shape matches the rest of
+/// the file_* family post #53. Closes Embra_Debug #57.
 ///
 /// Param format: `<path>[|<offset>[|<limit>]]`
-/// - `path`: file or directory path
+/// - `path`: absolute path (anywhere) or workspace-relative
 /// - `offset`: byte offset to start reading (default 0)
 /// - `limit`: max bytes to read (default and ceiling: FILE_READ_MAX)
 ///
@@ -1682,11 +1685,12 @@ pub async fn file_read(params: &str) -> String {
     if params.is_empty() {
         return "Usage: file_read <path>[|<offset>[|<limit>]]\n\
                 Example: file_read /embra/workspace/repos/myrepo/README.md\n\
+                Example: file_read test/probe.txt  (resolves under /embra/workspace)\n\
                 Example: file_read /path/to/big.log|2097152|1048576".into();
     }
 
     let mut parts = params.splitn(3, '|').map(str::trim);
-    let path = parts.next().unwrap_or("");
+    let raw_path = parts.next().unwrap_or("");
     let offset: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
     let limit: usize = parts
         .next()
@@ -1694,18 +1698,28 @@ pub async fn file_read(params: &str) -> String {
         .unwrap_or(FILE_READ_MAX)
         .min(FILE_READ_MAX);
 
-    if path.is_empty() {
+    if raw_path.is_empty() {
         return "Usage: file_read <path>[|<offset>[|<limit>]]".into();
     }
 
-    let file_path = std::path::Path::new(path);
+    // Relative paths resolve to /embra/workspace/<path> so callers can match
+    // the shape of file_write / mkdir / the rest of the file_* family.
+    // Absolute paths pass through untouched — reads remain unrestricted by
+    // design so /etc, /proc, /var/log, etc. still work.
+    let path: String = if raw_path.starts_with('/') {
+        raw_path.to_string()
+    } else {
+        format!("{}/{}", WORKSPACE_ROOT, raw_path.trim_start_matches("./"))
+    };
+
+    let file_path = std::path::Path::new(&path);
 
     if !file_path.exists() {
         return format!("File not found: {}", path);
     }
     if file_path.is_dir() {
         // List directory contents instead — offset/limit are meaningless here.
-        match tokio::fs::read_dir(path).await {
+        match tokio::fs::read_dir(&path).await {
             Ok(mut entries) => {
                 let mut listing = format!("=== Directory: {} ===\n", path);
                 let mut count = 0u32;
@@ -1730,7 +1744,7 @@ pub async fn file_read(params: &str) -> String {
     }
 
     // File branch — seek + read_exact the requested slice.
-    let meta = match tokio::fs::metadata(path).await {
+    let meta = match tokio::fs::metadata(&path).await {
         Ok(m) => m,
         Err(e) => return format!("Failed to stat file: {}", e),
     };
@@ -1745,7 +1759,7 @@ pub async fn file_read(params: &str) -> String {
     let read_bytes = (read_end - offset) as usize;
 
     use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
-    let mut f = match tokio::fs::File::open(path).await {
+    let mut f = match tokio::fs::File::open(&path).await {
         Ok(f) => f,
         Err(e) => return format!("Failed to open file: {}", e),
     };
@@ -2888,7 +2902,7 @@ impl GhProjectViewArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "file_read",
-    description = "Read a file or list a directory. offset starts the read at a byte position; limit caps the number of bytes returned. Unrestricted read path."
+    description = "Read a file or list a directory. path may be absolute (reads are unrestricted — `/etc`, `/proc`, `/var/log` all work) or workspace-relative (resolves under /embra/workspace/, matching file_write / mkdir / etc.). offset starts the read at a byte position; limit caps the number of bytes returned."
 )]
 pub struct FileReadArgs {
     pub path: String,
@@ -3161,6 +3175,40 @@ mod native_args_tests {
                 msg
             );
         }
+    }
+
+    #[tokio::test]
+    async fn file_read_resolves_relative_to_workspace() {
+        // Embra_Debug #57: relative paths under file_read now join to
+        // /embra/workspace/ rather than the service cwd, matching the rest
+        // of the file_* family. We exercise this by reading a guaranteed-
+        // missing file and asserting the "File not found" message echoes
+        // the resolved absolute path, not the raw input.
+        let msg = file_read("nonexistent-zzz-embra-debug-57").await;
+        assert!(
+            msg.contains("/embra/workspace/nonexistent-zzz-embra-debug-57"),
+            "expected resolved workspace path in rejection, got: {}",
+            msg
+        );
+        assert!(
+            !msg.starts_with("File not found: nonexistent-zzz"),
+            "raw relative input should have been resolved before stat, got: {}",
+            msg
+        );
+
+        // Absolute paths still pass through unchanged — the "unrestricted"
+        // contract for reads outside /embra/workspace/ is preserved.
+        let abs_msg = file_read("/definitely/not/a/real/path/abs-probe").await;
+        assert!(
+            abs_msg.contains("/definitely/not/a/real/path/abs-probe"),
+            "absolute path should echo literally, got: {}",
+            abs_msg
+        );
+        assert!(
+            !abs_msg.contains("/embra/workspace/definitely"),
+            "absolute path should NOT have been joined to workspace, got: {}",
+            abs_msg
+        );
     }
 
     #[tokio::test]
