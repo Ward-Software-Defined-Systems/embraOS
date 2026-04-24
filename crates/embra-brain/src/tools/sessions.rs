@@ -1495,7 +1495,13 @@ impl TurnTraceArgs {
             );
         }
 
-        // Prior turn or cross-session — query persistence.
+        // Prior turn or cross-session — query persistence. WardSONDB's sort
+        // shape is `[{field: "asc"|"desc"}]` (see knowledge/edges.rs:75 for
+        // the working pattern); the MongoDB-style `{field: 1}` form is
+        // rejected by the query endpoint, which previously masqueraded as
+        // "no entries" because `unwrap_or_default()` swallowed the error.
+        // Surface query errors explicitly so a broken shape is loud, not
+        // silent.
         let sess = self
             .session
             .unwrap_or_else(|| ctx.session_name.to_string());
@@ -1503,13 +1509,17 @@ impl TurnTraceArgs {
         let filter = serde_json::json!({
             "filter": {"session": sess, "turn_index": target_index},
             "limit": n,
-            "sort": {"started_at": 1},
+            "sort": [{"started_at": "asc"}],
         });
-        let docs = ctx
-            .db
-            .query("tools.turn_trace", &filter)
-            .await
-            .unwrap_or_default();
+        let docs = match ctx.db.query("tools.turn_trace", &filter).await {
+            Ok(d) => d,
+            Err(e) => {
+                return Ok(format!(
+                    "turn_trace query failed (session='{}', turn_index={}): {}",
+                    sess, target_index, e
+                ));
+            }
+        };
         if docs.is_empty() {
             return Ok(format!(
                 "turn_trace (session='{}', turn_index={}): no entries.",
@@ -1581,6 +1591,53 @@ mod native_args_tests {
         assert!(a.limit.is_none());
         assert!(a.turn_index_back.is_none());
         assert!(a.session.is_none());
+    }
+
+    #[test]
+    fn turn_trace_query_sort_uses_wardsondb_shape() {
+        // Regression guard for the follow-up to Embra_Debug #44: the
+        // turn_trace read path constructed a MongoDB-style
+        // `{"sort": {"started_at": 1}}`, which WardSONDB's query endpoint
+        // rejects. The correct shape is `[{field: "asc"|"desc"}]` (see
+        // knowledge/edges.rs and the comment in sessions.rs next to this
+        // test's subject). If someone reverts to the MongoDB style, this
+        // catches it before it reaches a live DB.
+        //
+        // We rebuild the filter inline rather than factor it out, because
+        // the production call site is short and the test's value is
+        // precisely in mirroring that exact literal.
+        let filter = serde_json::json!({
+            "filter": {"session": "x", "turn_index": 0usize},
+            "limit": 20usize,
+            "sort": [{"started_at": "asc"}],
+        });
+        let sort = filter
+            .get("sort")
+            .expect("sort key must be present");
+        assert!(
+            sort.is_array(),
+            "sort must be an array per WardSONDB's query API, got: {}",
+            sort
+        );
+        let first = sort
+            .as_array()
+            .and_then(|a| a.first())
+            .expect("sort array must have at least one element");
+        assert!(
+            first.is_object(),
+            "each sort element must be an object like {{field: \"asc\"}}, got: {}",
+            first
+        );
+        let direction = first
+            .as_object()
+            .and_then(|o| o.values().next())
+            .and_then(|v| v.as_str())
+            .expect("sort direction must be a string");
+        assert!(
+            direction == "asc" || direction == "desc",
+            "sort direction must be \"asc\" or \"desc\" (not 1/-1), got: {}",
+            direction
+        );
     }
 
     #[test]
