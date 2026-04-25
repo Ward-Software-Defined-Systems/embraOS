@@ -530,8 +530,8 @@ pub async fn session_delta(db: &WardsonDbClient, param: &str) -> String {
 
     let name = parts[0];
     let since_turn = match parts[1].trim().parse::<usize>() {
-        Ok(n) if n >= 1 => n,
-        _ => return "since_turn must be a positive integer.".into(),
+        Ok(n) => n,
+        Err(_) => return "since_turn must be a non-negative integer.".into(),
     };
 
     let (turns, total) = fetch_turns(db, name).await;
@@ -539,16 +539,20 @@ pub async fn session_delta(db: &WardsonDbClient, param: &str) -> String {
         return format!("No conversation history found for session '{}'.", name);
     }
 
-    let start_0 = (since_turn - 1).min(total);
+    // since_turn=N returns turns ≥ N (inclusive). 0 is treated as "from
+    // turn #1" so callers can request the full session without knowing
+    // the 1-indexed lower bound.
+    let display_since = since_turn.max(1);
+    let start_0 = since_turn.saturating_sub(1).min(total);
     let new_turns = total - start_0;
 
     if new_turns == 0 {
-        return format!("No new turns in '{}' since turn #{}.", name, since_turn);
+        return format!("No new turns in '{}' since turn #{}.", name, display_since);
     }
 
     let mut output = format!(
         "Delta for '{}' since turn #{}: {} new turns\n\n",
-        name, since_turn, new_turns
+        name, display_since, new_turns
     );
 
     for (i, turn) in turns[start_0..].iter().enumerate() {
@@ -1349,7 +1353,7 @@ impl SessionMetaArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "session_delta",
-    description = "Return turns added to a session since a given turn number (useful for incremental follow-up)."
+    description = "Return turns added to a session since a given turn number (inclusive: since_turn=N returns turns ≥ N). Use 0 or 1 to return the full session."
 )]
 pub struct SessionDeltaArgs {
     pub name: String,
@@ -1560,6 +1564,19 @@ mod native_args_tests {
             serde_json::from_value::<SessionDeltaArgs>(serde_json::json!({"name": "main"}))
                 .unwrap_err();
         assert!(err.to_string().contains("since_turn"));
+    }
+
+    #[test]
+    fn session_delta_accepts_since_turn_zero() {
+        // Embra_Debug #62: schemars-derived u32 minimum is 0, but the
+        // validator used to reject 0 with "must be a positive integer."
+        // Args still deserialize for 0; semantics now treat 0 as
+        // "from turn #1" (full session).
+        let a: SessionDeltaArgs = serde_json::from_value(serde_json::json!({
+            "name": "main", "since_turn": 0
+        }))
+        .unwrap();
+        assert_eq!(a.since_turn, 0);
     }
 
     #[test]
