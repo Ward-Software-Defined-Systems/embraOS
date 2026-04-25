@@ -502,13 +502,19 @@ async fn handle_request(
 
             // Construct the right provider per-turn based on the
             // persisted config. Stage 8's /provider switch updates
-            // config.system.api_provider; subsequent turns observe
-            // the new provider here. Per-turn construction is the
-            // status quo (mirrors pre-refactor Brain::new) — Stage
-            // 8's swap mechanism doesn't need a long-lived provider
-            // because the loop driver re-reads config every turn.
+            // config.system.api_provider AND mirrors the target's
+            // per-provider key into loaded_config.api_key — so we
+            // resolve the active key from the persisted config
+            // rather than the brain-startup parameter (which holds
+            // whatever key was on STATE at boot, NOT the post-swap
+            // key). key_for falls back to legacy api_key when the
+            // active provider matches, which is the post-swap case.
             let provider_kind = ProviderKind::from_str(&loaded_config.api_provider)
                 .unwrap_or(ProviderKind::Anthropic);
+            let active_key = loaded_config
+                .key_for(provider_kind)
+                .map(str::to_string)
+                .unwrap_or_else(|| api_key.to_string());
             let provider: Arc<dyn LlmProvider> = match provider_kind {
                 ProviderKind::Gemini => {
                     let model_id = resolve_gemini_model_id(&loaded_config);
@@ -519,11 +525,11 @@ async fn handle_request(
                         "gemini turn starting"
                     );
                     Arc::new(
-                        GeminiProvider::with_model(api_key.to_string(), model_id)
+                        GeminiProvider::with_model(active_key, model_id)
                             .with_cache(db.clone()),
                     )
                 }
-                ProviderKind::Anthropic => Arc::new(AnthropicProvider::new(api_key.to_string())),
+                ProviderKind::Anthropic => Arc::new(AnthropicProvider::new(active_key)),
             };
             let descriptors: Vec<&'static tools::registry::ToolDescriptor> =
                 tools::registry::all_descriptors().collect();
@@ -1929,6 +1935,10 @@ async fn run_learning_loop(
     // persisted config (or its anthropic default for first-run).
     let provider_kind = ProviderKind::from_str(&config.api_provider)
         .unwrap_or(ProviderKind::Anthropic);
+    let active_key = config
+        .key_for(provider_kind)
+        .map(str::to_string)
+        .unwrap_or_else(|| api_key.to_string());
     let provider: Arc<dyn LlmProvider> = match provider_kind {
         ProviderKind::Gemini => {
             let model_id = resolve_gemini_model_id(config);
@@ -1938,10 +1948,10 @@ async fn run_learning_loop(
                 "gemini learning turn starting"
             );
             Arc::new(
-                GeminiProvider::with_model(api_key.to_string(), model_id).with_cache(db.clone()),
+                GeminiProvider::with_model(active_key, model_id).with_cache(db.clone()),
             )
         }
-        ProviderKind::Anthropic => Arc::new(AnthropicProvider::new(api_key.to_string())),
+        ProviderKind::Anthropic => Arc::new(AnthropicProvider::new(active_key)),
     };
     let empty_manifest: ToolManifest = provider.build_tool_manifest(&[]);
 
