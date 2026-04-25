@@ -592,12 +592,23 @@ pub async fn run_config_wizard_grpc(
     } else {
         OperatingMode::Learning
     };
+    // Sprint 4: include the active model so the console status bar
+    // refreshes from its default ("opus-4.7") to whatever provider
+    // the operator just selected. Inline match — display_model_for
+    // lives in grpc_service.rs and we don't want a circular dep.
+    let model = match config.api_provider.as_str() {
+        "gemini" => "gemini-3.1-pro",
+        _ => "opus-4.7",
+    };
     let _ = tx.send(Ok(ConversationResponse {
         response_type: Some(conversation_response::ResponseType::ModeChange(
             ModeTransition {
                 from_mode: OperatingMode::Setup as i32,
                 to_mode: next_mode as i32,
-                message: format!("Setup complete — Name: {} — TZ: {}", config.name, config.timezone),
+                message: format!(
+                    "Setup complete — Name: {} — TZ: {} — Brain: {}",
+                    config.name, config.timezone, model
+                ),
             }
         )),
     })).await;

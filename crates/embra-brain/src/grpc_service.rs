@@ -2025,13 +2025,22 @@ async fn run_learning_loop(
         return Ok(());
     }
 
-    // Send mode transition
+    // Send mode transition. Sprint 4: include Brain: <model> so the
+    // console status bar refreshes during learning (would otherwise
+    // sit on the default "opus-4.7" until next session-attach).
+    let learning_model = display_model_for(&config.api_provider);
     let _ = tx.send(Ok(ConversationResponse {
         response_type: Some(conversation_response::ResponseType::ModeChange(
             ModeTransition {
                 from_mode: OperatingMode::Setup as i32,
                 to_mode: OperatingMode::Learning as i32,
-                message: format!("Learning Mode — Name: {} — Phase: {} — TZ: {}", config.name, learning::phase_label(&state.phase), config.timezone),
+                message: format!(
+                    "Learning Mode — Name: {} — Phase: {} — TZ: {} — Brain: {}",
+                    config.name,
+                    learning::phase_label(&state.phase),
+                    config.timezone,
+                    learning_model
+                ),
             }
         )),
     })).await;
@@ -2160,7 +2169,12 @@ async fn run_learning_loop(
                         ModeTransition {
                             from_mode: OperatingMode::Learning as i32,
                             to_mode: OperatingMode::Operational as i32,
-                            message: format!("Soul sealed — Name: {} — TZ: {}", config.name, config.timezone),
+                            message: format!(
+                                "Soul sealed — Name: {} — TZ: {} — Brain: {}",
+                                config.name,
+                                config.timezone,
+                                display_model_for(&config.api_provider)
+                            ),
                         }
                     )),
                 })).await;
@@ -2231,7 +2245,12 @@ async fn run_learning_loop(
                                             ModeTransition {
                                                 from_mode: OperatingMode::Learning as i32,
                                                 to_mode: OperatingMode::Operational as i32,
-                                                message: format!("Soul sealed — Name: {} — TZ: {}", config.name, config.timezone),
+                                                message: format!(
+                                                    "Soul sealed — Name: {} — TZ: {} — Brain: {}",
+                                                    config.name,
+                                                    config.timezone,
+                                                    display_model_for(&config.api_provider)
+                                                ),
                                             }
                                         )),
                                     })).await;
