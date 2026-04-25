@@ -1,29 +1,29 @@
-//! Anthropic SSE stream parser for native tool-use (NATIVE-TOOLS-01 Stage 4).
+//! Anthropic SSE stream parser.
 //!
 //! Accumulates per-block state across `content_block_start`,
-//! `content_block_delta`, and `content_block_stop` events to reconstruct
-//! structured `MessageBlock`s (text, thinking+signature, tool_use+input_json).
-//! At `message_stop`, emits a `StreamEvent::Complete { response }` carrying
-//! the full typed `AssistantResponse` for the native loop driver.
+//! `content_block_delta`, and `content_block_stop` events to
+//! reconstruct structured [`MessageBlock`]s. At `message_stop`, emits
+//! a [`AnthropicStreamEvent::Complete`] carrying the full typed
+//! [`AssistantResponse`].
 //!
-//! Legacy `StreamEvent::Token` / `Done` events are still emitted from
-//! `text_delta` so the existing gRPC UX streaming path keeps working
-//! unchanged during the migration.
+//! This module is internal to the Anthropic provider. The provider's
+//! `stream_turn` translates these wire events into the neutral
+//! [`crate::provider::StreamEvent`].
 
 use anyhow::Result;
 use futures_util::StreamExt;
 use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
-use super::types::{AssistantResponse, MessageBlock, StopReason, StreamEvent};
+use super::wire::{AnthropicStreamEvent, AssistantResponse, MessageBlock, StopReason};
 
 #[derive(Debug)]
 enum BlockKind {
     Text,
     Thinking,
     ToolUse,
-    /// Any `content_block` type we don't explicitly handle. Finalized as
-    /// Text with whatever body arrived so we never drop a block silently.
+    /// Any `content_block` type we don't explicitly handle. Finalized
+    /// as Text with whatever body arrived so we never drop silently.
     Unknown,
 }
 
@@ -58,10 +58,11 @@ impl BlockAccumulator {
             BlockKind::Text | BlockKind::Unknown => MessageBlock::Text { text: self.text },
             BlockKind::Thinking => MessageBlock::Thinking {
                 thinking: self.thinking,
-                // A thinking block without a signature would be rejected by
-                // the API on the follow-up request. We preserve whatever we
-                // got; if it's empty the downstream request will fail and
-                // produce a clear error.
+                // A thinking block without a signature would be
+                // rejected by the API on the follow-up request. We
+                // preserve whatever we got; if it's empty the
+                // downstream request will fail and produce a clear
+                // error.
                 signature: self.signature.unwrap_or_default(),
             },
             BlockKind::ToolUse => {
@@ -78,11 +79,41 @@ impl BlockAccumulator {
             }
         }
     }
+
+    /// Rehydrate an accumulator from an already-finalized block so we
+    /// can re-emit it as part of the final `Complete` event without
+    /// cloning the finalization logic.
+    fn from_finalized(block: MessageBlock) -> Self {
+        let mut acc = Self::new(BlockKind::Text);
+        match block {
+            MessageBlock::Text { text } => {
+                acc.kind = BlockKind::Text;
+                acc.text = text;
+            }
+            MessageBlock::Thinking { thinking, signature } => {
+                acc.kind = BlockKind::Thinking;
+                acc.thinking = thinking;
+                acc.signature = Some(signature);
+            }
+            MessageBlock::ToolUse { id, name, input } => {
+                acc.kind = BlockKind::ToolUse;
+                acc.id = Some(id);
+                acc.name = Some(name);
+                acc.input_json = serde_json::to_string(&input).unwrap_or_default();
+            }
+            MessageBlock::ToolResult { .. } => {
+                // Tool results are client-originated; should never
+                // appear in an assistant stream. Fall back to Text.
+                acc.kind = BlockKind::Text;
+            }
+        }
+        acc
+    }
 }
 
 pub async fn process_sse_stream(
     response: reqwest::Response,
-    tx: mpsc::Sender<StreamEvent>,
+    tx: mpsc::Sender<AnthropicStreamEvent>,
 ) -> Result<()> {
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
@@ -139,12 +170,15 @@ pub async fn process_sse_stream(
                             .get("name")
                             .and_then(|v| v.as_str())
                             .map(str::to_string);
-                        // Thinking blocks may carry the signature on the
-                        // initial block or via signature_delta — capture both.
+                        // Thinking blocks may carry the signature on
+                        // the initial block or via signature_delta —
+                        // capture both paths.
                         if let Some(sig) = cb.get("signature").and_then(|v| v.as_str()) {
                             acc.signature = Some(sig.to_string());
                         }
-                        // Initial tool_use input may arrive inline as `{}`.
+                        // Initial tool_use input may arrive inline as
+                        // `{}`; only seed when non-empty so the delta
+                        // accumulator path doesn't have to undo it.
                         if let Some(input) = cb.get("input") {
                             if let Ok(s) = serde_json::to_string(input) {
                                 if s != "{}" {
@@ -172,7 +206,7 @@ pub async fn process_sse_stream(
                             if let Some(t) = delta.get("text").and_then(|v| v.as_str()) {
                                 acc.text.push_str(t);
                                 full_text.push_str(t);
-                                let _ = tx.send(StreamEvent::Token(t.to_string())).await;
+                                let _ = tx.send(AnthropicStreamEvent::Token(t.to_string())).await;
                             }
                         }
                         "thinking_delta" => {
@@ -204,13 +238,13 @@ pub async fn process_sse_stream(
                     if let Some(acc) = blocks.remove(&index) {
                         let block = acc.finalize();
                         let _ = tx
-                            .send(StreamEvent::BlockComplete {
+                            .send(AnthropicStreamEvent::BlockComplete {
                                 block_index: index,
                                 block: block.clone(),
                             })
                             .await;
-                        // Reinsert the finalized block so the final Complete
-                        // event carries every block in order.
+                        // Reinsert the finalized block so the final
+                        // Complete event carries every block in order.
                         blocks.insert(index, BlockAccumulator::from_finalized(block));
                     }
                 }
@@ -231,7 +265,7 @@ pub async fn process_sse_stream(
                         .and_then(|e| e.get("message"))
                         .and_then(|m| m.as_str())
                         .unwrap_or("Unknown stream error");
-                    let _ = tx.send(StreamEvent::Error(msg.to_string())).await;
+                    let _ = tx.send(AnthropicStreamEvent::Error(msg.to_string())).await;
                     return Ok(());
                 }
                 _ => {}
@@ -239,14 +273,14 @@ pub async fn process_sse_stream(
         }
     }
 
-    // Stream ended without message_stop — emit Complete anyway so consumers
-    // don't hang.
+    // Stream ended without message_stop — emit Complete anyway so
+    // consumers don't hang.
     emit_complete(&tx, &mut blocks, stop_reason, &full_text).await;
     Ok(())
 }
 
 async fn emit_complete(
-    tx: &mpsc::Sender<StreamEvent>,
+    tx: &mpsc::Sender<AnthropicStreamEvent>,
     blocks: &mut BTreeMap<usize, BlockAccumulator>,
     stop_reason: Option<StopReason>,
     full_text: &str,
@@ -256,11 +290,11 @@ async fn emit_complete(
         .map(|(_, acc)| acc.finalize())
         .collect();
     let effective_stop = stop_reason.unwrap_or_else(|| {
-        // A missing message_delta means the SSE stream ended without the
-        // final message_delta/message_stop pair — could be a dropped
-        // connection, a truncated response, or an API-side hiccup. We still
-        // default to EndTurn for UX safety (otherwise the loop hangs), but
-        // surface the condition so downstream desync (#32) is debuggable.
+        // A missing message_delta means the SSE stream ended without
+        // the final message_delta/message_stop pair — could be a
+        // dropped connection, a truncated response, or an API-side
+        // hiccup. Default to EndTurn for UX safety (otherwise the loop
+        // hangs), but surface the condition for debug.
         tracing::warn!(
             target: "streaming",
             "stream closed without message_delta; defaulting stop_reason to EndTurn"
@@ -274,11 +308,13 @@ async fn emit_complete(
         stop_sequence: None,
     };
     let _ = tx
-        .send(StreamEvent::Complete {
+        .send(AnthropicStreamEvent::Complete {
             response: response.clone(),
         })
         .await;
-    let _ = tx.send(StreamEvent::Done(full_text.to_string())).await;
+    let _ = tx
+        .send(AnthropicStreamEvent::Done(full_text.to_string()))
+        .await;
 }
 
 fn parse_stop_reason(s: &str) -> Option<StopReason> {
@@ -293,47 +329,13 @@ fn parse_stop_reason(s: &str) -> Option<StopReason> {
     })
 }
 
-impl BlockAccumulator {
-    /// Rehydrate an accumulator from an already-finalized block so we can
-    /// re-emit it as part of the final `Complete` event without cloning the
-    /// finalization logic.
-    fn from_finalized(block: MessageBlock) -> Self {
-        let mut acc = Self::new(BlockKind::Text);
-        match block {
-            MessageBlock::Text { text } => {
-                acc.kind = BlockKind::Text;
-                acc.text = text;
-            }
-            MessageBlock::Thinking {
-                thinking,
-                signature,
-            } => {
-                acc.kind = BlockKind::Thinking;
-                acc.thinking = thinking;
-                acc.signature = Some(signature);
-            }
-            MessageBlock::ToolUse { id, name, input } => {
-                acc.kind = BlockKind::ToolUse;
-                acc.id = Some(id);
-                acc.name = Some(name);
-                acc.input_json = serde_json::to_string(&input).unwrap_or_default();
-            }
-            MessageBlock::ToolResult { .. } => {
-                // Tool results are client-originated; should never appear in
-                // an assistant stream. Fall back to Text representation.
-                acc.kind = BlockKind::Text;
-            }
-        }
-        acc
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    async fn run_stream(events: &[&str]) -> Vec<StreamEvent> {
-        // Build a synthetic SSE response body.
+    async fn run_stream(events: &[&str]) -> Vec<AnthropicStreamEvent> {
+        // Build a synthetic SSE response body and drive the parser by
+        // bypassing reqwest::Response (which is opaque).
         let mut body = String::new();
         for e in events {
             body.push_str("data: ");
@@ -341,12 +343,6 @@ mod tests {
             body.push_str("\n\n");
         }
         let (tx, mut rx) = mpsc::channel(128);
-        // Simulate by feeding bytes into a reqwest::Response — instead,
-        // call the inner logic directly via a fake Response-shaped path.
-        // Simplification: spawn a task that pushes events through the
-        // same buffer-and-line parser by calling the public function with
-        // a mock. Since reqwest::Response is opaque, we inline the core
-        // parse loop for tests.
         let body_arc = body.clone();
         tokio::spawn(async move {
             let _ = drive_fake(body_arc, tx).await;
@@ -359,8 +355,9 @@ mod tests {
     }
 
     // Drive the SSE parser against an in-memory body string by reusing
-    // the state-machine logic manually (the prod fn takes a reqwest body).
-    async fn drive_fake(body: String, tx: mpsc::Sender<StreamEvent>) -> Result<()> {
+    // the state-machine logic manually (the prod fn takes a reqwest
+    // body).
+    async fn drive_fake(body: String, tx: mpsc::Sender<AnthropicStreamEvent>) -> Result<()> {
         let mut buffer = String::new();
         let mut full_text = String::new();
         let mut blocks: BTreeMap<usize, BlockAccumulator> = BTreeMap::new();
@@ -430,7 +427,7 @@ mod tests {
                             if let Some(t) = delta.get("text").and_then(|v| v.as_str()) {
                                 acc.text.push_str(t);
                                 full_text.push_str(t);
-                                let _ = tx.send(StreamEvent::Token(t.to_string())).await;
+                                let _ = tx.send(AnthropicStreamEvent::Token(t.to_string())).await;
                             }
                         }
                         "thinking_delta" => {
@@ -462,7 +459,7 @@ mod tests {
                     if let Some(acc) = blocks.remove(&index) {
                         let block = acc.finalize();
                         let _ = tx
-                            .send(StreamEvent::BlockComplete {
+                            .send(AnthropicStreamEvent::BlockComplete {
                                 block_index: index,
                                 block: block.clone(),
                             })
@@ -499,11 +496,10 @@ mod tests {
             r#"{"type":"message_stop"}"#,
         ];
         let out = run_stream(&events).await;
-        // Expect 2 Token events, 1 BlockComplete, 1 Complete, 1 Done
         let tokens: Vec<_> = out
             .iter()
             .filter_map(|e| match e {
-                StreamEvent::Token(t) => Some(t.clone()),
+                AnthropicStreamEvent::Token(t) => Some(t.clone()),
                 _ => None,
             })
             .collect();
@@ -512,7 +508,7 @@ mod tests {
         let complete = out
             .iter()
             .find_map(|e| match e {
-                StreamEvent::Complete { response } => Some(response.clone()),
+                AnthropicStreamEvent::Complete { response } => Some(response.clone()),
                 _ => None,
             })
             .expect("Complete event");
@@ -539,16 +535,13 @@ mod tests {
         let complete = out
             .iter()
             .find_map(|e| match e {
-                StreamEvent::Complete { response } => Some(response.clone()),
+                AnthropicStreamEvent::Complete { response } => Some(response.clone()),
                 _ => None,
             })
             .expect("Complete event");
         assert_eq!(complete.content.len(), 1);
         match &complete.content[0] {
-            MessageBlock::Thinking {
-                thinking,
-                signature,
-            } => {
+            MessageBlock::Thinking { thinking, signature } => {
                 assert_eq!(thinking, "Let me reason...");
                 assert_eq!(signature, "sig-abc-xyz");
             }
@@ -570,7 +563,7 @@ mod tests {
         let complete = out
             .iter()
             .find_map(|e| match e {
-                StreamEvent::Complete { response } => Some(response.clone()),
+                AnthropicStreamEvent::Complete { response } => Some(response.clone()),
                 _ => None,
             })
             .expect("Complete event");
@@ -604,7 +597,7 @@ mod tests {
         let complete = out
             .iter()
             .find_map(|e| match e {
-                StreamEvent::Complete { response } => Some(response.clone()),
+                AnthropicStreamEvent::Complete { response } => Some(response.clone()),
                 _ => None,
             })
             .expect("Complete event");

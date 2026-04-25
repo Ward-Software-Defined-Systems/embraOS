@@ -11,6 +11,7 @@
 //! - `anthropic` (Stage 2) — refactored from `crate::brain`.
 //! - `gemini` (Stages 3–6) — new.
 
+pub mod anthropic;
 pub mod ir;
 
 pub use ir::*;

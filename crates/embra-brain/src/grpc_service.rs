@@ -2,12 +2,14 @@
 //!
 //! Bridges Phase 0 Brain + tools + sessions into a gRPC streaming interface.
 
-use crate::brain::{ApiMessage, AssistantResponse, Brain, Message, MessageBlock, StopReason, StreamEvent};
+use crate::brain::Message;
 use crate::config;
 use crate::db::WardsonDbClient;
 use crate::learning;
 use crate::proactive::Notification;
-use crate::provider::ProviderKind;
+use crate::provider::anthropic::AnthropicProvider;
+use crate::provider::ir::{ApiMessage, AssistantTurn, Block, EarlyStopReason, TurnOutcome};
+use crate::provider::{LlmProvider, ProviderKind, StreamEvent, SystemPromptBundle, ToolManifest};
 use crate::sessions::SessionManager;
 use crate::tools;
 
@@ -15,9 +17,10 @@ use embra_common::proto::brain::brain_service_server::BrainService;
 use embra_common::proto::brain::*;
 use embra_common::proto::common;
 
+use futures::stream::BoxStream;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
@@ -81,6 +84,7 @@ impl BrainService for BrainGrpcService {
         let config_tz = self.config_tz.clone();
         let api_key = self.api_key.clone();
         let proactive_rx = self.proactive_rx.clone();
+        let in_turn = self.in_turn.clone();
 
         tokio::spawn(async move {
             let mut config_tz = config_tz;
@@ -189,7 +193,7 @@ impl BrainService for BrainGrpcService {
                         match msg {
                             Some(Ok(req)) => {
                                 if let Err(e) = handle_request(
-                                    req, &tx, &db, &session_mgr, &config_tz, &api_key
+                                    req, &tx, &db, &session_mgr, &config_tz, &api_key, &in_turn
                                 ).await {
                                     error!("Error handling request: {}", e);
                                     let _ = tx.send(Ok(ConversationResponse {
@@ -404,7 +408,9 @@ async fn handle_request(
     session_mgr: &Arc<RwLock<SessionManager>>,
     config_tz: &str,
     api_key: &str,
+    in_turn: &Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
+    let self_in_turn = in_turn.clone();
     match req.request_type {
         Some(conversation_request::RequestType::UserMessage(msg)) => {
             // Get active session name
@@ -462,8 +468,24 @@ async fn handle_request(
                 "You are in Learning Mode. The system prompt will be set once the soul is defined.".to_string()
             };
 
-            // Create Brain and send message
-            let brain = Brain::new(api_key.to_string(), system_prompt);
+            // Construct the Anthropic provider + tool manifest for this
+            // turn. Sprint 4 Stage 8 will lift this into a long-lived
+            // BrainGrpcService field so /provider switches are atomic.
+            let provider: Arc<dyn LlmProvider> =
+                Arc::new(AnthropicProvider::new(api_key.to_string()));
+            let descriptors: Vec<&'static tools::registry::ToolDescriptor> =
+                tools::registry::all_descriptors().collect();
+            let tool_manifest: ToolManifest = provider.build_tool_manifest(&descriptors);
+            let system_bundle = SystemPromptBundle {
+                fingerprint: prompt_fingerprint(&system_prompt),
+                text: system_prompt,
+            };
+
+            // Set the in-flight flag so /provider commands queue
+            // instead of swapping mid-turn. Cleared in a drop guard so
+            // the flag never sticks if this future is cancelled.
+            self_in_turn.store(true, Ordering::SeqCst);
+            let in_turn_guard = InTurnGuard(self_in_turn.clone());
 
             // Load session history
             let history = {
@@ -484,12 +506,13 @@ async fn handle_request(
             )
             .await;
 
-            // Build typed-message conversation for the native tool-use loop.
-            // Legacy history (role+String content) maps to text-only ApiMessage
-            // blocks; thinking signatures were never persisted, so cross-turn
-            // preservation is out of scope. Within a single turn's loop the
-            // assistant response (thinking blocks included) is pushed back
-            // verbatim between iterations — the API requires this.
+            // Build neutral-IR message history. Legacy persistence shape
+            // (role+String) maps to text-only `Block::Text`; thinking
+            // signatures were never persisted so cross-turn replay is
+            // out of scope. Within a single turn, the loop pushes the
+            // assistant turn's full content (including any
+            // ProviderOpaque thinking blocks) verbatim between
+            // iterations — the API requires this.
             let mut api_messages: Vec<ApiMessage> = history
                 .iter()
                 .map(legacy_message_to_api)
@@ -503,7 +526,7 @@ async fn handle_request(
                 )),
             })).await;
 
-            // Native tool-use loop driven by stop_reason.
+            // Native tool-use loop driven by TurnOutcome.
             const MAX_TOOL_ITERATIONS: usize = 10;
             let mut tool_iter: usize = 0;
             let mut last_response_text = String::new();
@@ -521,39 +544,33 @@ async fn handle_request(
                 embra_tools_core::new_turn_trace_handle();
             let turn_index: usize = history.len() / 2;
 
-            let first_rx = brain
-                .send_message_streaming_with_tools(&api_messages)
+            let first_stream = provider
+                .stream_turn(&api_messages, &system_bundle, &tool_manifest)
                 .await
                 .map_err(|e| anyhow::anyhow!("Brain call failed: {}", e))?;
-            let Some(mut current_response) =
-                collect_response(first_rx, &tx, &config_name).await?
+            let Some(mut current_turn) =
+                collect_response(first_stream, &tx, &config_name).await?
             else {
                 // Stream closed without Complete — treat as error and save nothing.
+                drop(in_turn_guard);
                 return Ok(());
             };
-            // Track text from the most recent response for persistence fallback.
-            last_response_text = response_text(&current_response);
-            api_messages.push(ApiMessage::assistant_blocks(current_response.content.clone()));
+            // Track text from the most recent turn for persistence fallback.
+            last_response_text = turn_text(&current_turn);
+            api_messages.push(ApiMessage::assistant_blocks(current_turn.content.clone()));
 
             loop {
-                match current_response.stop_reason {
-                    StopReason::EndTurn
-                    | StopReason::MaxTokens
-                    | StopReason::StopSequence
-                    | StopReason::Refusal => {
-                        // #32 defense: detect empty-text terminal turns after
-                        // side-effectful work and emit a diagnostic token so
-                        // the user/model don't desync. The model legitimately
-                        // ends turn silently on pure-read flows, so the guard
-                        // requires at least one side-effectful success.
-                        let iter_has_text = current_response.content.iter().any(|b| {
-                            matches!(b, MessageBlock::Text { text } if !text.trim().is_empty())
-                        });
-                        let iter_has_tool_use = current_response
-                            .content
-                            .iter()
-                            .any(|b| matches!(b, MessageBlock::ToolUse { .. }));
-                        if !iter_has_text && !iter_has_tool_use {
+                match current_turn.outcome {
+                    TurnOutcome::EndTurn
+                    | TurnOutcome::MaxTokens
+                    | TurnOutcome::EarlyStop(_) => {
+                        // #32 defense: detect empty-text terminal turns
+                        // after side-effectful work and emit a diagnostic
+                        // token so the user/model don't desync. The model
+                        // legitimately ends turn silently on pure-read
+                        // flows, so the guard requires at least one
+                        // side-effectful success.
+                        if !current_turn.has_text() && !current_turn.has_tool_call() {
                             let side_effectful_count = trace_handle
                                 .lock()
                                 .map(|g| {
@@ -597,28 +614,28 @@ async fn handle_request(
                         break;
                     }
 
-                    StopReason::PauseTurn => {
+                    TurnOutcome::Pause => {
                         warn!(
                             target: "dispatch",
                             session = %session_name,
                             "stop_reason=pause_turn; resuming conversation"
                         );
-                        let rx = brain
-                            .send_message_streaming_with_tools(&api_messages)
+                        let stream = provider
+                            .stream_turn(&api_messages, &system_bundle, &tool_manifest)
                             .await
                             .map_err(|e| anyhow::anyhow!("Brain pause-resume failed: {}", e))?;
-                        let Some(resp) = collect_response(rx, &tx, &config_name).await? else {
+                        let Some(resp) = collect_response(stream, &tx, &config_name).await? else {
                             break;
                         };
-                        current_response = resp;
-                        last_response_text = response_text(&current_response);
+                        current_turn = resp;
+                        last_response_text = turn_text(&current_turn);
                         api_messages.push(ApiMessage::assistant_blocks(
-                            current_response.content.clone(),
+                            current_turn.content.clone(),
                         ));
                         continue;
                     }
 
-                    StopReason::ToolUse => {
+                    TurnOutcome::ToolUse => {
                         if tool_iter >= MAX_TOOL_ITERATIONS {
                             warn!(
                                 target: "dispatch",
@@ -629,9 +646,9 @@ async fn handle_request(
                         }
                         tool_iter += 1;
 
-                        let mut result_blocks: Vec<MessageBlock> = Vec::new();
-                        for block in &current_response.content {
-                            let MessageBlock::ToolUse { id, name, input } = block else {
+                        let mut result_blocks: Vec<Block> = Vec::new();
+                        for block in &current_turn.content {
+                            let Block::ToolCall { id, name, args, .. } = block else {
                                 continue;
                             };
                             let started = std::time::Instant::now();
@@ -653,7 +670,7 @@ async fn handle_request(
                             };
                             let outcome = tools::registry::dispatch(
                                 name,
-                                input.clone(),
+                                args.clone(),
                                 ctx,
                             )
                             .await;
@@ -693,7 +710,7 @@ async fn handle_request(
                             // asynchronously to tools.turn_trace so cross-turn
                             // introspection is available to the model.
                             let input_json =
-                                serde_json::to_string(input).unwrap_or_default();
+                                serde_json::to_string(args).unwrap_or_default();
                             let input_preview = preview_str(&input_json, 200);
                             let result_preview = preview_str(&content, 200);
                             let entry = embra_tools_core::TraceEntry {
@@ -735,39 +752,40 @@ async fn handle_request(
                                     }
                                 )),
                             })).await;
-                            result_blocks.push(MessageBlock::ToolResult {
-                                tool_use_id: id.clone(),
+                            result_blocks.push(Block::ToolResult {
+                                call_id: id.clone(),
                                 content,
                                 is_error,
                             });
                         }
 
                         if result_blocks.is_empty() {
-                            // stop_reason claimed tool_use but no ToolUse blocks
+                            // outcome claimed ToolUse but no ToolCall blocks
                             // were present — treat as a terminal state and exit.
                             break;
                         }
 
                         api_messages.push(ApiMessage::user_tool_results(result_blocks));
-                        let rx = brain
-                            .send_message_streaming_with_tools(&api_messages)
+                        let stream = provider
+                            .stream_turn(&api_messages, &system_bundle, &tool_manifest)
                             .await
                             .map_err(|e| {
                                 anyhow::anyhow!(
                                     "Brain continuation failed (iter {tool_iter}): {e}"
                                 )
                             })?;
-                        let Some(resp) = collect_response(rx, &tx, &config_name).await? else {
+                        let Some(resp) = collect_response(stream, &tx, &config_name).await? else {
                             break;
                         };
-                        current_response = resp;
-                        last_response_text = response_text(&current_response);
+                        current_turn = resp;
+                        last_response_text = turn_text(&current_turn);
                         api_messages.push(ApiMessage::assistant_blocks(
-                            current_response.content.clone(),
+                            current_turn.content.clone(),
                         ));
                     }
                 }
             }
+            drop(in_turn_guard);
 
             // Save conversation to session history.
             //
@@ -829,7 +847,7 @@ async fn handle_request(
                     )),
                 };
                 Box::pin(handle_request(
-                    synthetic, tx, db, session_mgr, config_tz, api_key
+                    synthetic, tx, db, session_mgr, config_tz, api_key, in_turn
                 )).await?;
             }
             Ok(())
@@ -1296,6 +1314,12 @@ async fn run_learning_loop(
 ) -> anyhow::Result<()> {
     let mut state = learning::LearningState::new();
 
+    // Construct the provider once. Learning never invokes tools; pass
+    // an empty tool manifest so the request body omits `tools` and
+    // `tool_choice` (the provider handles that gating).
+    let provider: Arc<dyn LlmProvider> = Arc::new(AnthropicProvider::new(api_key.to_string()));
+    let empty_manifest: ToolManifest = provider.build_tool_manifest(&[]);
+
     // Resume support: load any previously persisted documents
     if let Ok(profile) = db.read("memory.user", "user").await {
         state.user_profile = Some(profile);
@@ -1365,7 +1389,10 @@ async fn run_learning_loop(
 
         // Build system prompt for current phase
         let system_prompt = learning::system_prompt_for_phase(&state, config);
-        let brain = Brain::new(api_key.to_string(), system_prompt);
+        let system_bundle = SystemPromptBundle {
+            fingerprint: prompt_fingerprint(&system_prompt),
+            text: system_prompt,
+        };
 
         // Send phase kickoff as first message
         let kickoff = learning::phase_kickoff(&state.phase);
@@ -1390,8 +1417,15 @@ async fn run_learning_loop(
             )),
         })).await;
 
-        // Call Brain with conversation history
-        let mut brain_rx = brain.send_message_streaming(&state.conversation_history).await
+        // Call Brain with conversation history (text-only neutral IR).
+        let messages: Vec<ApiMessage> = state
+            .conversation_history
+            .iter()
+            .map(legacy_message_to_api)
+            .collect();
+        let mut brain_rx = provider
+            .stream_turn(&messages, &system_bundle, &empty_manifest)
+            .await
             .map_err(|e| anyhow::anyhow!("Brain call failed in learning: {}", e))?;
 
         let full_response = stream_brain_to_grpc(&mut brain_rx, tx, &config.name).await;
@@ -1460,7 +1494,10 @@ async fn run_learning_loop(
 
                             // Rebuild system prompt (may include newly extracted docs)
                             let system_prompt = learning::system_prompt_for_phase(&state, config);
-                            let brain = Brain::new(api_key.to_string(), system_prompt);
+                            let system_bundle = SystemPromptBundle {
+                                fingerprint: prompt_fingerprint(&system_prompt),
+                                text: system_prompt,
+                            };
 
                             let _ = tx.send(Ok(ConversationResponse {
                                 response_type: Some(conversation_response::ResponseType::Thinking(
@@ -1468,7 +1505,14 @@ async fn run_learning_loop(
                                 )),
                             })).await;
 
-                            let mut brain_rx = brain.send_message_streaming(&state.conversation_history).await
+                            let messages: Vec<ApiMessage> = state
+                                .conversation_history
+                                .iter()
+                                .map(legacy_message_to_api)
+                                .collect();
+                            let mut brain_rx = provider
+                                .stream_turn(&messages, &system_bundle, &empty_manifest)
+                                .await
                                 .map_err(|e| anyhow::anyhow!("Brain call failed: {}", e))?;
 
                             let full_response = stream_brain_to_grpc(&mut brain_rx, tx, &config.name).await;
@@ -1525,18 +1569,19 @@ async fn run_learning_loop(
     Ok(())
 }
 
-/// Stream Brain response tokens to gRPC, return the full response text.
+/// Stream a provider response to gRPC for the learning loop, return
+/// the full response text (concatenation of all `TextDelta`s).
 async fn stream_brain_to_grpc(
-    brain_rx: &mut mpsc::Receiver<StreamEvent>,
+    brain_rx: &mut BoxStream<'static, StreamEvent>,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
-    name: &str,
+    _name: &str,
 ) -> String {
     let mut full_response = String::new();
     let mut first_token = true;
 
-    while let Some(event) = brain_rx.recv().await {
+    while let Some(event) = brain_rx.next().await {
         match event {
-            StreamEvent::Token(text) => {
+            StreamEvent::TextDelta(text) => {
                 if first_token {
                     let _ = tx.send(Ok(ConversationResponse {
                         response_type: Some(conversation_response::ResponseType::Thinking(
@@ -1552,16 +1597,6 @@ async fn stream_brain_to_grpc(
                     )),
                 })).await;
             }
-            StreamEvent::Done(full) => {
-                full_response = full.clone();
-                // Strip [PHASE_COMPLETE] from the Done message sent to client
-                let clean = full.replace("[PHASE_COMPLETE]", "").trim().to_string();
-                let _ = tx.send(Ok(ConversationResponse {
-                    response_type: Some(conversation_response::ResponseType::Done(
-                        StreamDone { full_response: clean }
-                    )),
-                })).await;
-            }
             StreamEvent::Error(err) => {
                 let _ = tx.send(Ok(ConversationResponse {
                     response_type: Some(conversation_response::ResponseType::System(
@@ -1572,8 +1607,25 @@ async fn stream_brain_to_grpc(
                     )),
                 })).await;
             }
-            // Native tool-use events — consumed by Stage 5's loop driver.
-            StreamEvent::BlockComplete { .. } | StreamEvent::Complete { .. } => {}
+            StreamEvent::Complete(turn) => {
+                // Use the assembled turn for the Done payload — this is
+                // the equivalent of the pre-refactor `Done(full)` event.
+                let full = if full_response.is_empty() {
+                    turn_text(&turn)
+                } else {
+                    full_response.clone()
+                };
+                let clean = full.replace("[PHASE_COMPLETE]", "").trim().to_string();
+                let _ = tx.send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::Done(
+                        StreamDone { full_response: clean }
+                    )),
+                })).await;
+                if full_response.is_empty() {
+                    full_response = full;
+                }
+            }
+            StreamEvent::BlockComplete | StreamEvent::ToolArgsDelta { .. } => {}
         }
     }
 
@@ -1617,16 +1669,36 @@ async fn save_learning_history(db: &Arc<WardsonDbClient>, history: &[Message]) -
 
 // ── NATIVE-TOOLS-01 helpers ──
 
-/// Convert a legacy on-disk `Message` (role + String content) to a typed
-/// `ApiMessage`. Used to build the conversation history for the native
-/// tool-use loop. Thinking signatures were never persisted, so every
-/// historical turn becomes a text-only block. This is the migration-era
-/// shim; Stage 8 introduces typed-block persistence and deprecates this
-/// conversion path for post-v7 sessions.
+/// Drop guard that clears the per-service `in_turn` flag when the
+/// future scope ends — including cancellation paths. Without this, a
+/// dropped client connection mid-loop would leave `/provider` queued
+/// forever.
+struct InTurnGuard(Arc<AtomicBool>);
+
+impl Drop for InTurnGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// SHA-256 fingerprint over the system prompt text, truncated to 16
+/// hex chars. Used by Gemini's context-cache manager (Stage 6) to
+/// detect staleness; harmless for Anthropic (the fingerprint is just
+/// computed, never inspected).
+fn prompt_fingerprint(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(text.as_bytes());
+    let digest = h.finalize();
+    hex::encode(&digest[..8])
+}
+
+/// Convert a legacy on-disk `Message` (role + String content) to the
+/// neutral `ApiMessage` IR. Thinking signatures were never persisted,
+/// so every historical turn becomes a text-only block. Migration-era
+/// shim; future schema bump introduces typed-block persistence.
 fn legacy_message_to_api(m: &Message) -> ApiMessage {
-    let block = MessageBlock::Text {
-        text: m.content.clone(),
-    };
+    let block = Block::Text(m.content.clone());
     match m.role.as_str() {
         "user" => ApiMessage::User {
             content: vec![block],
@@ -1650,39 +1722,40 @@ fn preview_str(s: &str, max: usize) -> String {
     format!("{}…", &s[..end])
 }
 
-/// Extract the plain-text portion of an assistant response for session
+/// Extract the plain-text portion of an assistant turn for session
 /// persistence. Concatenates all `Text` blocks; thinking signatures and
-/// tool_use blocks are dropped.
-fn response_text(response: &AssistantResponse) -> String {
-    response
-        .content
+/// tool calls are dropped.
+fn turn_text(turn: &AssistantTurn) -> String {
+    turn.content
         .iter()
         .filter_map(|b| match b {
-            MessageBlock::Text { text } => Some(text.as_str()),
+            Block::Text(t) => Some(t.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
         .join("")
 }
 
-/// Drive a Brain SSE stream, forwarding `Token` events to the gRPC UX
-/// channel (`tx`) and returning the final typed `AssistantResponse` when
-/// the stream completes. Also clears the thinking indicator on first token
-/// and forwards Done frames to the console as before.
+/// Drive a provider stream, forwarding `TextDelta` events to the gRPC
+/// UX channel (`tx`) and returning the final neutral `AssistantTurn`
+/// when the stream completes. Synthesizes a gRPC `Done` from the
+/// terminal `Complete(turn)` event so the TUI's typing animation
+/// behavior matches pre-refactor.
 ///
 /// Returns `Ok(None)` when the stream ended without a `Complete` event
 /// (e.g. connection dropped or fatal error mid-stream).
 async fn collect_response(
-    mut brain_rx: mpsc::Receiver<StreamEvent>,
+    mut brain_rx: BoxStream<'static, StreamEvent>,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
     config_name: &str,
-) -> anyhow::Result<Option<AssistantResponse>> {
+) -> anyhow::Result<Option<AssistantTurn>> {
     let mut first_token = true;
-    let mut full_response: Option<AssistantResponse> = None;
+    let mut full_turn: Option<AssistantTurn> = None;
+    let mut accum_text = String::new();
 
-    while let Some(event) = brain_rx.recv().await {
+    while let Some(event) = brain_rx.next().await {
         match event {
-            StreamEvent::Token(text) => {
+            StreamEvent::TextDelta(text) => {
                 if first_token {
                     let _ = tx
                         .send(Ok(ConversationResponse {
@@ -1696,19 +1769,11 @@ async fn collect_response(
                         .await;
                     first_token = false;
                 }
+                accum_text.push_str(&text);
                 let _ = tx
                     .send(Ok(ConversationResponse {
                         response_type: Some(conversation_response::ResponseType::Token(
                             StreamToken { text },
-                        )),
-                    }))
-                    .await;
-            }
-            StreamEvent::Done(full) => {
-                let _ = tx
-                    .send(Ok(ConversationResponse {
-                        response_type: Some(conversation_response::ResponseType::Done(
-                            StreamDone { full_response: full },
                         )),
                     }))
                     .await;
@@ -1730,20 +1795,37 @@ async fn collect_response(
                     }))
                     .await;
             }
-            StreamEvent::BlockComplete { .. } => {}
-            StreamEvent::Complete { response } => {
-                full_response = Some(response);
+            StreamEvent::BlockComplete => {}
+            StreamEvent::ToolArgsDelta { .. } => {}
+            StreamEvent::Complete(turn) => {
+                // Synthesize a gRPC Done from the assembled turn so the
+                // TUI gets a terminal "full text" frame for its
+                // streaming animation, matching pre-refactor behavior.
+                let full_text = if accum_text.is_empty() {
+                    turn_text(&turn)
+                } else {
+                    accum_text.clone()
+                };
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::Done(
+                            StreamDone {
+                                full_response: full_text,
+                            },
+                        )),
+                    }))
+                    .await;
+                full_turn = Some(turn);
             }
         }
     }
 
-    Ok(full_response)
+    Ok(full_turn)
 }
 
 #[cfg(test)]
 mod native_loop_tests {
     use super::*;
-    use crate::brain::{AssistantResponse, MessageBlock, StopReason};
 
     #[test]
     fn legacy_user_message_converts_to_user_text_block() {
@@ -1753,7 +1835,7 @@ mod native_loop_tests {
             ApiMessage::User { content } => {
                 assert_eq!(content.len(), 1);
                 match &content[0] {
-                    MessageBlock::Text { text } => assert_eq!(text, "hello"),
+                    Block::Text(text) => assert_eq!(text, "hello"),
                     other => panic!("expected Text, got {other:?}"),
                 }
             }
@@ -1769,43 +1851,40 @@ mod native_loop_tests {
     }
 
     #[test]
-    fn response_text_concatenates_text_blocks_skipping_thinking_and_tool_use() {
-        let resp = AssistantResponse {
-            id: None,
+    fn turn_text_concatenates_text_blocks_skipping_thinking_and_tool_call() {
+        let turn = AssistantTurn {
             content: vec![
-                MessageBlock::Thinking {
-                    thinking: String::new(),
-                    signature: "sig".into(),
-                },
-                MessageBlock::Text {
-                    text: "Hello".into(),
-                },
-                MessageBlock::ToolUse {
+                Block::ProviderOpaque(serde_json::json!({
+                    "type": "thinking",
+                    "thinking": "",
+                    "signature": "sig"
+                })),
+                Block::Text("Hello".into()),
+                Block::ToolCall {
                     id: "t1".into(),
                     name: "time".into(),
-                    input: serde_json::json!({}),
+                    args: serde_json::json!({}),
+                    provider_opaque: None,
                 },
-                MessageBlock::Text {
-                    text: ", world".into(),
-                },
+                Block::Text(", world".into()),
             ],
-            stop_reason: StopReason::EndTurn,
-            stop_sequence: None,
+            outcome: TurnOutcome::EndTurn,
+            usage: None,
         };
-        assert_eq!(response_text(&resp), "Hello, world");
+        assert_eq!(turn_text(&turn), "Hello, world");
     }
 
     #[test]
-    fn response_text_empty_without_text_blocks() {
-        let resp = AssistantResponse {
-            id: None,
-            content: vec![MessageBlock::Thinking {
-                thinking: String::new(),
-                signature: "sig".into(),
-            }],
-            stop_reason: StopReason::ToolUse,
-            stop_sequence: None,
+    fn turn_text_empty_without_text_blocks() {
+        let turn = AssistantTurn {
+            content: vec![Block::ProviderOpaque(serde_json::json!({
+                "type": "thinking",
+                "thinking": "",
+                "signature": "sig"
+            }))],
+            outcome: TurnOutcome::ToolUse,
+            usage: None,
         };
-        assert_eq!(response_text(&resp), "");
+        assert_eq!(turn_text(&turn), "");
     }
 }
