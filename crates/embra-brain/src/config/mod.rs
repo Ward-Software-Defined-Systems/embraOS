@@ -235,6 +235,19 @@ enum ApiKeyCheck {
     Invalid(String),
 }
 
+/// Public-to-crate adapter that returns `Result<(), String>`.
+/// Used by `/provider --setup` (Sprint 4 D2) to share the wizard's
+/// validation path without exposing the module-private `ApiKeyCheck`.
+pub(crate) async fn check_api_key(
+    provider: ProviderKind,
+    key: &str,
+) -> Result<(), String> {
+    match validate_api_key_for(provider, key).await {
+        ApiKeyCheck::Valid => Ok(()),
+        ApiKeyCheck::Invalid(msg) => Err(msg),
+    }
+}
+
 /// Probe the chosen provider's model-listing endpoint with the given
 /// key. Single source of truth — the providers' own `validate_key`
 /// impls (constructed with an empty key for the probe) carry the

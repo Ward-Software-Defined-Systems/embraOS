@@ -41,6 +41,12 @@ pub struct BrainGrpcService {
     /// Operator's queued provider switch. Drained between turns by the
     /// loop driver after `in_turn` clears. Stage 8 populates it.
     pending_provider: Arc<Mutex<Option<ProviderKind>>>,
+    /// Set by `/provider --setup [<kind>]` to indicate that the next
+    /// user message should be treated as a candidate API key for the
+    /// given provider rather than a regular conversation turn. The
+    /// UserMessage handler intercepts and clears this before the
+    /// loop driver runs.
+    pending_key_setup: Arc<Mutex<Option<ProviderKind>>>,
 }
 
 impl BrainGrpcService {
@@ -64,6 +70,7 @@ impl BrainGrpcService {
             start_time: std::time::Instant::now(),
             in_turn: Arc::new(AtomicBool::new(false)),
             pending_provider: Arc::new(Mutex::new(None)),
+            pending_key_setup: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -87,6 +94,7 @@ impl BrainService for BrainGrpcService {
         let proactive_rx = self.proactive_rx.clone();
         let in_turn = self.in_turn.clone();
         let pending_provider = self.pending_provider.clone();
+        let pending_key_setup = self.pending_key_setup.clone();
 
         tokio::spawn(async move {
             let mut config_tz = config_tz;
@@ -199,7 +207,7 @@ impl BrainService for BrainGrpcService {
                         match msg {
                             Some(Ok(req)) => {
                                 if let Err(e) = handle_request(
-                                    req, &tx, &db, &session_mgr, &config_tz, &api_key, &in_turn, &pending_provider
+                                    req, &tx, &db, &session_mgr, &config_tz, &api_key, &in_turn, &pending_provider, &pending_key_setup
                                 ).await {
                                     error!("Error handling request: {}", e);
                                     let _ = tx.send(Ok(ConversationResponse {
@@ -416,10 +424,23 @@ async fn handle_request(
     api_key: &str,
     in_turn: &Arc<AtomicBool>,
     pending_provider: &Arc<Mutex<Option<ProviderKind>>>,
+    pending_key_setup: &Arc<Mutex<Option<ProviderKind>>>,
 ) -> anyhow::Result<()> {
     let self_in_turn = in_turn.clone();
     match req.request_type {
         Some(conversation_request::RequestType::UserMessage(msg)) => {
+            // D2: intercept the user message as a candidate API key
+            // when /provider --setup queued a target. Validates,
+            // persists per-provider key + STATE file, clears flag.
+            // On invalid: keeps flag set so the operator can retry
+            // with the next message.
+            let pending_target = pending_key_setup.lock().await.clone();
+            if let Some(target) = pending_target {
+                let candidate = msg.content.trim().to_string();
+                handle_pending_key_setup(target, candidate, tx, db, pending_key_setup).await;
+                return Ok(());
+            }
+
             // Get active session name
             let session_name = {
                 let mgr = session_mgr.read().await;
@@ -900,7 +921,7 @@ async fn handle_request(
 
         Some(conversation_request::RequestType::SlashCommand(cmd)) => {
             if let Some(synthetic_prompt) = handle_slash_command(
-                &cmd.command, &cmd.args, tx, db, session_mgr, config_tz, api_key, in_turn, pending_provider
+                &cmd.command, &cmd.args, tx, db, session_mgr, config_tz, api_key, in_turn, pending_provider, pending_key_setup
             ).await {
                 // Slash command requested a synthetic user turn — feed it through the Brain.
                 let synthetic = ConversationRequest {
@@ -909,7 +930,7 @@ async fn handle_request(
                     )),
                 };
                 Box::pin(handle_request(
-                    synthetic, tx, db, session_mgr, config_tz, api_key, in_turn, pending_provider
+                    synthetic, tx, db, session_mgr, config_tz, api_key, in_turn, pending_provider, pending_key_setup
                 )).await?;
             }
             Ok(())
@@ -1039,6 +1060,7 @@ async fn handle_slash_command(
     _api_key: &str,
     in_turn: &Arc<AtomicBool>,
     pending_provider: &Arc<Mutex<Option<ProviderKind>>>,
+    pending_key_setup: &Arc<Mutex<Option<ProviderKind>>>,
 ) -> Option<String> {
     // Helper to send a system message
     let send_msg = |tx: &mpsc::Sender<Result<ConversationResponse, Status>>, content: String| {
@@ -1100,7 +1122,7 @@ async fn handle_slash_command(
             return Some(build_feedback_loop_prompt());
         }
         "/provider" => {
-            handle_provider_command(args, tx, db, session_mgr, in_turn, pending_provider).await;
+            handle_provider_command(args, tx, db, session_mgr, in_turn, pending_provider, pending_key_setup).await;
         }
         "/status" => {
             let status = tools::system_status(db).await;
@@ -1402,6 +1424,7 @@ async fn handle_provider_command(
     session_mgr: &Arc<RwLock<SessionManager>>,
     in_turn: &Arc<AtomicBool>,
     pending_provider: &Arc<Mutex<Option<ProviderKind>>>,
+    pending_key_setup: &Arc<Mutex<Option<ProviderKind>>>,
 ) {
     let send_msg = |content: String, kind: SystemMessageType| {
         let tx = tx.clone();
@@ -1420,6 +1443,87 @@ async fn handle_provider_command(
     };
 
     let action = args.trim();
+
+    // /provider --setup [<kind>] — multi-turn key add. Sets the
+    // pending_key_setup flag and prompts; the operator's next user
+    // message is intercepted in handle_request as the candidate key.
+    if let Some(rest) = action.strip_prefix("--setup") {
+        let cfg = match config::load_config(&**db).await {
+            Ok(c) => c,
+            Err(_) => {
+                send_msg(
+                    "No system config found — run setup wizard first.".to_string(),
+                    SystemMessageType::Error,
+                )
+                .await;
+                return;
+            }
+        };
+        let explicit = rest.trim();
+        let target = if explicit.is_empty() {
+            // Auto-target the provider whose per-provider key is
+            // missing. If both are set, require explicit form.
+            let anth_present = cfg.key_for(ProviderKind::Anthropic).is_some();
+            let gem_present = cfg.key_for(ProviderKind::Gemini).is_some();
+            match (anth_present, gem_present) {
+                (true, false) => ProviderKind::Gemini,
+                (false, true) => ProviderKind::Anthropic,
+                (true, true) => {
+                    send_msg(
+                        "Both providers already have keys. Use /provider --setup <anthropic|gemini> to replace one.".to_string(),
+                        SystemMessageType::Error,
+                    ).await;
+                    return;
+                }
+                (false, false) => {
+                    // Pre-wizard / cleared state.
+                    send_msg(
+                        "No keys recorded yet. Re-run setup wizard first.".to_string(),
+                        SystemMessageType::Error,
+                    )
+                    .await;
+                    return;
+                }
+            }
+        } else {
+            match ProviderKind::from_str(explicit) {
+                Some(k) => k,
+                None => {
+                    send_msg(
+                        format!(
+                            "Unknown provider '{}'. Use 'anthropic' or 'gemini'.",
+                            explicit
+                        ),
+                        SystemMessageType::Error,
+                    )
+                    .await;
+                    return;
+                }
+            }
+        };
+        // Set the flag (replacing any prior pending setup).
+        *pending_key_setup.lock().await = Some(target);
+        // Prompt for the key. Console renders as a system message;
+        // the next user input will be intercepted.
+        let prompt_text = match target {
+            ProviderKind::Anthropic => "Enter your Anthropic API key (next message):",
+            ProviderKind::Gemini => "Enter your Gemini API key (next message):",
+        };
+        let _ = tx
+            .send(Ok(ConversationResponse {
+                response_type: Some(conversation_response::ResponseType::Setup(
+                    SetupPrompt {
+                        field_type: SetupFieldType::Text as i32,
+                        prompt: prompt_text.to_string(),
+                        options: vec![],
+                        default_value: String::new(),
+                    },
+                )),
+            }))
+            .await;
+        return;
+    }
+
     match action {
         "" | "status" => {
             let cfg = config::load_config(&**db).await.ok();
@@ -1611,6 +1715,114 @@ fn display_model_for(provider: &str) -> &'static str {
         "gemini" => "gemini-3.1-pro",
         _ => "opus-4.7",
     }
+}
+
+/// Validate + persist a candidate API key submitted via the
+/// `/provider --setup` multi-turn flow. On valid, writes the per-
+/// provider config field and STATE file, clears the pending flag,
+/// and acknowledges. On invalid, leaves the flag set so the next
+/// message is re-intercepted (the operator can retype without
+/// re-running --setup).
+async fn handle_pending_key_setup(
+    target: ProviderKind,
+    candidate: String,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    db: &Arc<WardsonDbClient>,
+    pending_key_setup: &Arc<Mutex<Option<ProviderKind>>>,
+) {
+    let send_msg = |content: String, kind: SystemMessageType| {
+        let tx = tx.clone();
+        async move {
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage {
+                            content,
+                            msg_type: kind as i32,
+                        },
+                    )),
+                }))
+                .await;
+        }
+    };
+
+    if candidate.is_empty() {
+        send_msg(
+            format!(
+                "Empty key — type the {} API key on the next message, or use a non-/provider command to abort setup.",
+                target.as_str()
+            ),
+            SystemMessageType::Error,
+        )
+        .await;
+        return;
+    }
+
+    // Validate via the same probe path the wizard uses.
+    if let Err(msg) = config::check_api_key(target, &candidate).await {
+        send_msg(
+            format!(
+                "{} Try again on the next message, or use a non-/provider command to abort.",
+                msg
+            ),
+            SystemMessageType::Error,
+        )
+        .await;
+        return;
+    }
+
+    // Persist into config.
+    let mut cfg = match config::load_config(&**db).await {
+        Ok(c) => c,
+        Err(_) => {
+            send_msg(
+                "No system config found — re-run setup wizard first.".to_string(),
+                SystemMessageType::Error,
+            )
+            .await;
+            // Clear flag — config is broken, bailing entirely.
+            *pending_key_setup.lock().await = None;
+            return;
+        }
+    };
+    match target {
+        ProviderKind::Anthropic => cfg.anthropic_api_key = Some(candidate.clone()),
+        ProviderKind::Gemini => cfg.gemini_api_key = Some(candidate.clone()),
+    }
+    if let Err(e) = config::save_config(&**db, &cfg).await {
+        send_msg(
+            format!("Failed to persist key: {}", e),
+            SystemMessageType::Error,
+        )
+        .await;
+        return;
+    }
+
+    // Persist to per-provider STATE file.
+    let state_path = match target {
+        ProviderKind::Anthropic => "/embra/state/api_key_anthropic",
+        ProviderKind::Gemini => "/embra/state/api_key_gemini",
+    };
+    if let Err(e) = std::fs::write(state_path, &candidate) {
+        warn!(
+            target: "config",
+            "Could not write per-provider key to {}: {}",
+            state_path,
+            e
+        );
+    }
+
+    // Clear flag and acknowledge.
+    *pending_key_setup.lock().await = None;
+    send_msg(
+        format!(
+            "Key for {} recorded. Use /provider {} to switch, or stay on the current provider.",
+            target.as_str(),
+            target.as_str()
+        ),
+        SystemMessageType::Info,
+    )
+    .await;
 }
 
 /// Pick the Gemini model id, honoring (in priority order):
