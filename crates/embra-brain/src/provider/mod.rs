@@ -12,6 +12,7 @@
 //! - `gemini` (Stages 3–6) — new.
 
 pub mod anthropic;
+pub mod gemini;
 pub mod ir;
 
 pub use ir::*;
