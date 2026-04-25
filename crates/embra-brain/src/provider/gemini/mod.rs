@@ -11,5 +11,6 @@
 //! `GeminiProvider` itself lands in Stage 5; this module is the
 //! Stage 3 skeleton.
 
+pub mod streaming;
 pub mod tool_schema;
 pub mod wire;
