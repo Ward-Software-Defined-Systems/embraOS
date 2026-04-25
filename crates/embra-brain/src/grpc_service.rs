@@ -7,6 +7,7 @@ use crate::config;
 use crate::db::WardsonDbClient;
 use crate::learning;
 use crate::proactive::Notification;
+use crate::provider::ProviderKind;
 use crate::sessions::SessionManager;
 use crate::tools;
 
@@ -16,6 +17,7 @@ use embra_common::proto::common;
 
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use tokio::sync::{mpsc, Mutex, RwLock};
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
@@ -28,6 +30,13 @@ pub struct BrainGrpcService {
     api_key: String,
     proactive_rx: Arc<Mutex<mpsc::Receiver<Notification>>>,
     start_time: std::time::Instant,
+    /// True while a tool-iteration loop is in flight. `/provider`
+    /// switches block on this and queue via `pending_provider`. Wired
+    /// into the loop driver in Stage 2; idle in this stage.
+    in_turn: Arc<AtomicBool>,
+    /// Operator's queued provider switch. Drained between turns by the
+    /// loop driver after `in_turn` clears. Stage 8 populates it.
+    pending_provider: Arc<Mutex<Option<ProviderKind>>>,
 }
 
 impl BrainGrpcService {
@@ -49,6 +58,8 @@ impl BrainGrpcService {
             api_key,
             proactive_rx: Arc::new(Mutex::new(proactive_rx)),
             start_time: std::time::Instant::now(),
+            in_turn: Arc::new(AtomicBool::new(false)),
+            pending_provider: Arc::new(Mutex::new(None)),
         }
     }
 }

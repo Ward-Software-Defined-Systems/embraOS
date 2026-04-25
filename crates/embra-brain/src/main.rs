@@ -21,6 +21,7 @@ mod config;
 mod learning;
 mod knowledge;
 mod grpc_service;
+mod provider;
 
 use grpc_service::BrainGrpcService;
 
