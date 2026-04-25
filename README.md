@@ -17,7 +17,7 @@
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — dense multigraph with auto-derived edges" width="100%">
 </p>
 
-**Current Status:** Phase 1 — Core OS (Sprint 3 merged to `main` 2026-04-24 at tag `v0.3.0-phase1`; Sprint 4 starting on `phase1-sprint4`) | Phase 0 — Stable
+**Current Status:** Phase 1 — Core OS (Sprint 4 merged to `main` 2026-04-25 at tag `v0.4.0-phase1`) | Phase 0 — Stable
 
 ---
 
@@ -72,7 +72,6 @@ rustup target add x86_64-unknown-linux-musl
 # Clone and configure
 git clone https://github.com/Ward-Software-Defined-Systems/embraOS.git
 cd embraOS
-git checkout phase1-sprint4        # active development (Phase 1 Sprint 4)
 
 # Configure musl linker (per-machine, only needed once)
 cat >> ~/.cargo/config.toml << 'EOF'
@@ -83,8 +82,7 @@ EOF
 # Clone WardSONDB (separate repo, required dependency — build-image.sh builds and copies it)
 cd ..
 git clone https://github.com/Ward-Software-Defined-Systems/wardsondb.git WardSONDB
-cd WardSONDB
-cd ../embraOS
+cd embraOS
 ```
 
 ```bash
