@@ -23,6 +23,8 @@ pub struct SetupState {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SetupStep {
     Name,
+    /// Sprint 4: provider selector step (Anthropic vs Gemini).
+    Provider,
     ApiKey,
     Timezone,
     Confirm,
@@ -185,12 +187,19 @@ impl AppState {
         }
     }
 
-    /// Infer setup step from a SetupPrompt prompt string
+    /// Infer setup step from a SetupPrompt prompt string. Order
+    /// matters — provider check runs before api-key because the
+    /// "Anthropic"/"Gemini" tokens appear in both prompts; provider
+    /// is identified by the explicit "provider" keyword.
     pub fn infer_setup_step(prompt: &str) -> SetupStep {
         let lower = prompt.to_lowercase();
-        if lower.contains("name") && !lower.contains("api") {
+        if lower.contains("provider")
+            || (lower.contains("which") && (lower.contains("gemini") || lower.contains("claude")))
+        {
+            SetupStep::Provider
+        } else if lower.contains("name") && !lower.contains("api") {
             SetupStep::Name
-        } else if lower.contains("api key") || lower.contains("anthropic") {
+        } else if lower.contains("api key") || lower.contains("anthropic") || lower.contains("gemini") {
             SetupStep::ApiKey
         } else if lower.contains("timezone") {
             SetupStep::Timezone
@@ -205,7 +214,8 @@ impl AppState {
         match &self.mode {
             AppMode::Setup(s) => match s.step {
                 SetupStep::Name => "Enter a name (or press Enter for default)...",
-                SetupStep::ApiKey => "Enter your Anthropic API key...",
+                SetupStep::Provider => "↑/↓ to choose, Enter to confirm",
+                SetupStep::ApiKey => "Enter your API key...",
                 SetupStep::Timezone => "Enter timezone (or press Enter for default)...",
                 SetupStep::Confirm => "Enter 1 to confirm or 2 to restart...",
             },
@@ -251,6 +261,47 @@ mod native_render_tests {
             "UTC",
         );
         assert!(m.content.contains("[ERR git_push]"));
+    }
+
+    #[test]
+    fn infer_setup_step_recognizes_provider_prompt() {
+        assert_eq!(
+            AppState::infer_setup_step("Which AI provider would you like to use?"),
+            SetupStep::Provider
+        );
+        assert_eq!(
+            AppState::infer_setup_step("Select your provider"),
+            SetupStep::Provider
+        );
+        // Variant: prompt with model names but no explicit "provider" word.
+        assert_eq!(
+            AppState::infer_setup_step("Which would you like — Claude or Gemini?"),
+            SetupStep::Provider
+        );
+    }
+
+    #[test]
+    fn infer_setup_step_distinguishes_provider_from_api_key() {
+        assert_eq!(
+            AppState::infer_setup_step("Enter your Anthropic API key:"),
+            SetupStep::ApiKey
+        );
+        assert_eq!(
+            AppState::infer_setup_step("Enter your Gemini API key:"),
+            SetupStep::ApiKey
+        );
+        assert_eq!(
+            AppState::infer_setup_step("What would you like to name your intelligence?"),
+            SetupStep::Name
+        );
+        assert_eq!(
+            AppState::infer_setup_step("What timezone are you in?"),
+            SetupStep::Timezone
+        );
+        assert_eq!(
+            AppState::infer_setup_step("Configuration summary: …. Confirm?"),
+            SetupStep::Confirm
+        );
     }
 
     #[test]

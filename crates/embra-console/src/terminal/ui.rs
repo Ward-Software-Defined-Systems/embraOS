@@ -109,6 +109,7 @@ fn draw_header(f: &mut Frame, area: Rect, app: &AppState) {
         AppMode::Setup(setup) => {
             let step_label = match setup.step {
                 SetupStep::Name => "Name",
+                SetupStep::Provider => "Provider",
                 SetupStep::ApiKey => "API Key",
                 SetupStep::Timezone => "Timezone",
                 SetupStep::Confirm => "Confirm",

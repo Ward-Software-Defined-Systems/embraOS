@@ -158,6 +158,7 @@ impl BrainService for BrainGrpcService {
                     kg_max_traversal_depth: 3,
                     kg_traversal_depth_ceiling: 5,
                     kg_edge_candidate_limit: 50,
+                    api_provider: "anthropic".to_string(),
                 });
                 match run_learning_loop(&tx, &mut incoming, &db, &loaded_config, &api_key).await {
                     Ok(()) => {
@@ -432,6 +433,7 @@ async fn handle_request(
                 kg_max_traversal_depth: 3,
                 kg_traversal_depth_ceiling: 5,
                 kg_edge_candidate_limit: 50,
+                api_provider: "anthropic".to_string(),
             });
             let config_name = loaded_config.name.clone();
 

@@ -234,6 +234,7 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
             kg_max_traversal_depth: 3,
             kg_traversal_depth_ceiling: 5,
             kg_edge_candidate_limit: 50,
+            api_provider: "anthropic".to_string(),
         });
         // Direct registry dispatch — no ... synthesis, no model round-trip.
         // The stored `command` is a plain tool name for v0 crons (pre-v7 schema);
