@@ -144,6 +144,19 @@ impl EdgeType {
                 | Self::RelatedTo
         )
     }
+
+    /// Symmetric edge types — auto-derived edges are inserted
+    /// bidirectionally (see `knowledge::edges::push_bidirectional`), and
+    /// `related_to` is documented as same-scope/non-hierarchical. The
+    /// remaining brain-created types (`enables`, `contradicts`, `refines`,
+    /// `depends_on`) plus `derived_from` (provenance from promotion) are
+    /// directional and must not be deleted bidirectionally.
+    pub fn is_symmetric(&self) -> bool {
+        matches!(
+            self,
+            Self::SameSession | Self::Temporal | Self::TagOverlap | Self::RelatedTo
+        )
+    }
 }
 
 #[cfg(test)]
@@ -180,6 +193,35 @@ mod edge_type_tests {
     fn auto_derived_not_brain_created() {
         for t in [EdgeType::SameSession, EdgeType::Temporal, EdgeType::TagOverlap] {
             assert!(!t.is_brain_created());
+        }
+    }
+
+    #[test]
+    fn directional_types_not_symmetric() {
+        // Embra_Debug #63: `enables`, `contradicts`, `refines`,
+        // `depends_on`, and `derived_from` are documented directional.
+        // `knowledge_unlink_edge`'s triple form must not bidirectional-
+        // delete them.
+        for t in [
+            EdgeType::Enables,
+            EdgeType::Contradicts,
+            EdgeType::Refines,
+            EdgeType::DependsOn,
+            EdgeType::DerivedFrom,
+        ] {
+            assert!(!t.is_symmetric(), "{:?} should be directional", t);
+        }
+    }
+
+    #[test]
+    fn auto_derived_and_related_to_are_symmetric() {
+        for t in [
+            EdgeType::SameSession,
+            EdgeType::Temporal,
+            EdgeType::TagOverlap,
+            EdgeType::RelatedTo,
+        ] {
+            assert!(t.is_symmetric(), "{:?} should be symmetric", t);
         }
     }
 }

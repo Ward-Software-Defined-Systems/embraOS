@@ -127,7 +127,11 @@ pub async fn knowledge_link(params: &str, db: &WardsonDbClient) -> String {
 }
 
 /// `knowledge_unlink_edge <edge_id>` — delete a single edge by ID
-/// `knowledge_unlink_edge <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>` — delete matching edges (bidirectional)
+/// `knowledge_unlink_edge <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>` —
+/// delete matching edges. Symmetric edge types
+/// (`same_session`/`temporal`/`tag_overlap`/`related_to`) are removed
+/// bidirectionally; directional types (`enables`/`contradicts`/`refines`/
+/// `depends_on`/`derived_from`) only remove the forward direction.
 pub async fn knowledge_unlink_edge(params: &str, db: &WardsonDbClient) -> String {
     let trimmed = params.trim();
     if trimmed.is_empty() {
@@ -135,7 +139,8 @@ pub async fn knowledge_unlink_edge(params: &str, db: &WardsonDbClient) -> String
     }
 
     if trimmed.contains('|') {
-        // Form 2: triple parse, bidirectional delete
+        // Form 2: triple parse. Bidirectional only for symmetric edge
+        // types (Embra_Debug #63 — was unconditionally bidirectional).
         let parts: Vec<&str> = trimmed.splitn(3, '|').map(|s| s.trim()).collect();
         if parts.len() < 3 {
             return "Error: usage knowledge_unlink_edge <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>".into();
@@ -144,19 +149,28 @@ pub async fn knowledge_unlink_edge(params: &str, db: &WardsonDbClient) -> String
             return "Error: source must be <collection>:<id>".into();
         };
         let Some(edge_type) = EdgeType::from_str(parts[1]) else {
-            return format!("Error: Invalid edge type '{}'. Valid types: same_session, temporal, tag_overlap, derived_from, enables, contradicts, refines, depends_on", parts[1]);
+            return format!("Error: Invalid edge type '{}'. Valid types: same_session, temporal, tag_overlap, derived_from, enables, contradicts, refines, depends_on, related_to", parts[1]);
         };
         let Some((tgt_coll, tgt_id)) = parts[2].split_once(':') else {
             return "Error: target must be <collection>:<id>".into();
         };
 
         let etype = edge_type.as_str();
-        let filter = json!({
-            "$or": [
-                {"source_id": src_id, "target_id": tgt_id, "edge_type": etype},
-                {"source_id": tgt_id, "target_id": src_id, "edge_type": etype}
-            ]
-        });
+        let symmetric = edge_type.is_symmetric();
+        let filter = if symmetric {
+            json!({
+                "$or": [
+                    {"source_id": src_id, "target_id": tgt_id, "edge_type": etype},
+                    {"source_id": tgt_id, "target_id": src_id, "edge_type": etype}
+                ]
+            })
+        } else {
+            json!({
+                "source_id": src_id,
+                "target_id": tgt_id,
+                "edge_type": etype,
+            })
+        };
         match db.delete_by_query("memory.edges", &filter).await {
             Ok(0) => format!(
                 "Error: No edge found from {}:{} to {}:{} with type {}",
@@ -166,10 +180,14 @@ pub async fn knowledge_unlink_edge(params: &str, db: &WardsonDbClient) -> String
                 "Removed 1 edge:\n  {}:{} --[{}]--> {}:{}",
                 src_coll, src_id, etype, tgt_coll, tgt_id
             ),
-            Ok(n) => format!(
+            Ok(n) if symmetric => format!(
                 "Removed {} edges (bidirectional):\n  {}:{} --[{}]--> {}:{}\n  {}:{} --[{}]--> {}:{}",
                 n, src_coll, src_id, etype, tgt_coll, tgt_id,
                 tgt_coll, tgt_id, etype, src_coll, src_id
+            ),
+            Ok(n) => format!(
+                "Removed {} edges (forward, possible duplicates):\n  {}:{} --[{}]--> {}:{}",
+                n, src_coll, src_id, etype, tgt_coll, tgt_id
             ),
             Err(e) => format!("Error: delete failed: {}", e),
         }
@@ -828,7 +846,7 @@ impl KnowledgeLinkArgs {
 #[embra_tool(
     name = "knowledge_unlink_edge",
     is_side_effectful = true,
-    description = "Delete edges. Provide either edge_id (removes one edge by its document id) OR the full triple — source_collection + source_id + edge_type + target_collection + target_id — which removes matching edges bidirectionally (for auto-derived symmetric types). edge_id takes precedence when both are provided."
+    description = "Delete edges. Provide either edge_id (removes one edge by its document id) OR the full triple — source_collection + source_id + edge_type + target_collection + target_id. Symmetric edge types (same_session, temporal, tag_overlap, related_to) are removed bidirectionally; directional types (enables, contradicts, refines, depends_on, derived_from) remove only the forward direction. edge_id takes precedence when both are provided."
 )]
 pub struct KnowledgeUnlinkEdgeArgs {
     /// Specific edge document id. When set, the triple fields are ignored.
