@@ -4,7 +4,7 @@ use tracing::{error, info, warn};
 
 use crate::db::{WardsonDbClient, WardsonDbError};
 
-const CURRENT_SCHEMA_VERSION: u32 = 9;
+const CURRENT_SCHEMA_VERSION: u32 = 10;
 
 /// Run all pending migrations. Each migration is idempotent.
 pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
@@ -89,6 +89,18 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
         // see consistent values everywhere.
         run_v9_pluggable_provider(db).await?;
         set_schema_version(db, 9).await?;
+    }
+
+    if current_version < 10 {
+        // v10 (Sprint 4 D2): backfill per-provider API key fields on
+        // config.system from the legacy `api_key` + `api_provider`
+        // pair. Pre-D2, only one key was stored at a time; switching
+        // providers required re-running the wizard. Post-D2, the
+        // wizard and /provider --setup populate per-provider fields
+        // so /provider <kind> switches can pick the right one
+        // without losing the other.
+        run_v10_per_provider_keys(db).await?;
+        set_schema_version(db, 10).await?;
     }
 
     info!("Migrations complete. Schema version: {}", CURRENT_SCHEMA_VERSION);
@@ -879,6 +891,182 @@ async fn run_v9_pluggable_provider(db: &WardsonDbClient) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Migration v10 (Sprint 4 D2): backfill per-provider API key fields
+/// on `config.system:config`. Reads the existing `api_key` +
+/// `api_provider` and writes into the matching `<provider>_api_key`
+/// field. Idempotent — re-running on a post-v10 doc is a no-op
+/// because the per-provider field is already populated.
+async fn run_v10_per_provider_keys(db: &WardsonDbClient) -> Result<()> {
+    info!("Running migration v10: backfill per-provider API keys");
+
+    let mut cfg_doc = match db.read("config.system", "config").await {
+        Ok(doc) => doc,
+        Err(_) => {
+            info!("Migration v10: no config.system:config — nothing to backfill");
+            return Ok(());
+        }
+    };
+
+    let api_key = cfg_doc
+        .get("api_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let api_provider = cfg_doc
+        .get("api_provider")
+        .and_then(|v| v.as_str())
+        .unwrap_or("anthropic")
+        .to_string();
+
+    if api_key.is_empty() {
+        info!("Migration v10: api_key is empty; skipping per-provider backfill");
+        return Ok(());
+    }
+
+    let target_field = match api_provider.as_str() {
+        "gemini" => "gemini_api_key",
+        _ => "anthropic_api_key",
+    };
+
+    let already_set = cfg_doc
+        .get(target_field)
+        .and_then(|v| v.as_str())
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+    if already_set {
+        info!(
+            "Migration v10: {} already populated — no-op",
+            target_field
+        );
+        return Ok(());
+    }
+
+    if let Some(obj) = cfg_doc.as_object_mut() {
+        obj.insert(
+            target_field.to_string(),
+            serde_json::Value::String(api_key),
+        );
+    }
+
+    if let Err(e) = db.update("config.system", "config", &cfg_doc).await {
+        warn!("Migration v10: config.system update failed: {e}");
+    } else {
+        info!(
+            "Migration v10: backfilled {} from legacy api_key + api_provider",
+            target_field
+        );
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod v10_tests {
+    use serde_json::json;
+
+    /// Pure-fn test of the backfill transform applied to a JSON doc.
+    /// Mirrors what `run_v10_per_provider_keys` does in-memory before
+    /// writing.
+    fn backfill(cfg_doc: &mut serde_json::Value) -> bool {
+        let api_key = cfg_doc
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let api_provider = cfg_doc
+            .get("api_provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("anthropic")
+            .to_string();
+        if api_key.is_empty() {
+            return false;
+        }
+        let target_field = match api_provider.as_str() {
+            "gemini" => "gemini_api_key",
+            _ => "anthropic_api_key",
+        };
+        let already_set = cfg_doc
+            .get(target_field)
+            .and_then(|v| v.as_str())
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        if already_set {
+            return false;
+        }
+        if let Some(obj) = cfg_doc.as_object_mut() {
+            obj.insert(
+                target_field.to_string(),
+                serde_json::Value::String(api_key),
+            );
+        }
+        true
+    }
+
+    #[test]
+    fn v10_backfills_anthropic_key_when_provider_is_anthropic() {
+        let mut doc = json!({
+            "api_key": "sk-test-key",
+            "api_provider": "anthropic"
+        });
+        assert!(backfill(&mut doc));
+        assert_eq!(doc["anthropic_api_key"], "sk-test-key");
+        assert!(doc.get("gemini_api_key").is_none());
+    }
+
+    #[test]
+    fn v10_backfills_gemini_key_when_provider_is_gemini() {
+        let mut doc = json!({
+            "api_key": "AIza-test-key",
+            "api_provider": "gemini"
+        });
+        assert!(backfill(&mut doc));
+        assert_eq!(doc["gemini_api_key"], "AIza-test-key");
+        assert!(doc.get("anthropic_api_key").is_none());
+    }
+
+    #[test]
+    fn v10_defaults_to_anthropic_when_provider_missing() {
+        let mut doc = json!({
+            "api_key": "sk-legacy-key"
+        });
+        assert!(backfill(&mut doc));
+        assert_eq!(doc["anthropic_api_key"], "sk-legacy-key");
+    }
+
+    #[test]
+    fn v10_skip_when_target_already_populated() {
+        let mut doc = json!({
+            "api_key": "sk-active",
+            "api_provider": "anthropic",
+            "anthropic_api_key": "sk-existing"
+        });
+        assert!(!backfill(&mut doc));
+        // Existing value preserved.
+        assert_eq!(doc["anthropic_api_key"], "sk-existing");
+    }
+
+    #[test]
+    fn v10_skip_when_api_key_empty() {
+        let mut doc = json!({
+            "api_key": "",
+            "api_provider": "anthropic"
+        });
+        assert!(!backfill(&mut doc));
+        assert!(doc.get("anthropic_api_key").is_none());
+    }
+
+    #[test]
+    fn v10_is_idempotent() {
+        let mut doc = json!({
+            "api_key": "sk-active",
+            "api_provider": "anthropic"
+        });
+        assert!(backfill(&mut doc));
+        // Second run is a no-op — target is already populated.
+        assert!(!backfill(&mut doc));
+    }
 }
 
 #[cfg(test)]

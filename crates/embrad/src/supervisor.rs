@@ -184,14 +184,19 @@ impl Supervisor {
             .unwrap_or_default()
             .trim().to_string();
 
-        // API key: read from /embra/state/api_key file or
-        // {ANTHROPIC,GEMINI}_API_KEY env (the right one based on
-        // active provider).
+        // API key: prefer the per-provider STATE file (D2). Falls
+        // back to the legacy /embra/state/api_key (mirrors active),
+        // then to {ANTHROPIC,GEMINI}_API_KEY env.
+        let per_provider_path = match api_provider.as_str() {
+            "gemini" => "/embra/state/api_key_gemini",
+            _ => "/embra/state/api_key_anthropic",
+        };
         let env_key_name = match api_provider.as_str() {
             "gemini" => "GEMINI_API_KEY",
             _ => "ANTHROPIC_API_KEY",
         };
-        let api_key = std::fs::read_to_string("/embra/state/api_key")
+        let api_key = std::fs::read_to_string(per_provider_path)
+            .or_else(|_| std::fs::read_to_string("/embra/state/api_key"))
             .or_else(|_| std::env::var(env_key_name))
             .unwrap_or_default()
             .trim().to_string();

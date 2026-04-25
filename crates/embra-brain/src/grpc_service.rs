@@ -162,6 +162,8 @@ impl BrainService for BrainGrpcService {
                     kg_edge_candidate_limit: 50,
                     api_provider: "anthropic".to_string(),
                     gemini_model: None,
+                    anthropic_api_key: None,
+                    gemini_api_key: None,
                 });
                 match run_learning_loop(&tx, &mut incoming, &db, &loaded_config, &api_key).await {
                     Ok(()) => {
@@ -439,6 +441,8 @@ async fn handle_request(
                 kg_edge_candidate_limit: 50,
                 api_provider: "anthropic".to_string(),
                 gemini_model: None,
+                anthropic_api_key: None,
+                gemini_api_key: None,
             });
             let config_name = loaded_config.name.clone();
 
@@ -1464,25 +1468,17 @@ async fn handle_provider_command(
                 .await;
                 return;
             }
-            // Single-key model — switching to a provider whose key
-            // shape doesn't match the stored key won't work at
-            // runtime. Surface the deferred D2 limitation explicitly.
-            // (A key-per-provider redesign is /provider --setup,
-            // tracked as deferred.)
-            let key_looks_compatible = match target {
-                ProviderKind::Anthropic => cfg.api_key.starts_with("sk-"),
-                ProviderKind::Gemini => !cfg.api_key.is_empty()
-                    && !cfg.api_key.starts_with("sk-"),
-            };
-            if !key_looks_compatible {
+            // Per-provider key check (Sprint 4 D2). Replaces the
+            // pre-D2 prefix heuristic with an actual presence check
+            // against the per-provider field. Uses cfg.key_for(target)
+            // which falls back to the legacy api_key when the active
+            // provider matches.
+            if cfg.key_for(target).is_none() {
                 send_msg(
                     format!(
-                        "No API key recorded for {}. Wipe /embra/state/api_key and reboot to re-run the setup wizard, or restart with the {} env var set.",
+                        "No API key recorded for {}. Run /provider --setup {} to add one.",
                         target.as_str(),
-                        match target {
-                            ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
-                            ProviderKind::Gemini => "GEMINI_API_KEY",
-                        }
+                        target.as_str()
                     ),
                     SystemMessageType::Error,
                 )
@@ -1525,9 +1521,34 @@ async fn perform_provider_swap(
     session_mgr: &Arc<RwLock<SessionManager>>,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
 ) {
-    // 1. Update config doc.
+    // 1. Update config doc — set api_provider AND mirror the
+    //    target's per-provider key into the legacy api_key field so
+    //    existing read paths see the right value. Also mirror to
+    //    /embra/state/api_key so the supervisor's existing read path
+    //    keeps working until a future change teaches embrad about
+    //    per-provider STATE.
     if let Ok(mut cfg) = config::load_config(&**db).await {
+        let target_key = match cfg.key_for(target) {
+            Some(k) => k.to_string(),
+            None => {
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::System(
+                            SystemMessage {
+                                content: format!(
+                                    "Cannot switch — no API key recorded for {}.",
+                                    target.as_str()
+                                ),
+                                msg_type: SystemMessageType::Error as i32,
+                            },
+                        )),
+                    }))
+                    .await;
+                return;
+            }
+        };
         cfg.api_provider = target.as_str().to_string();
+        cfg.api_key = target_key.clone();
         if let Err(e) = config::save_config(&**db, &cfg).await {
             let _ = tx
                 .send(Ok(ConversationResponse {
@@ -1541,6 +1562,7 @@ async fn perform_provider_swap(
                 .await;
             return;
         }
+        let _ = std::fs::write("/embra/state/api_key", &target_key);
     }
 
     // 2. Update active session's meta.provider / meta.model so

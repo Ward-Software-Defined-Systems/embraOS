@@ -44,6 +44,37 @@ pub struct SystemConfig {
     /// env var which takes precedence over this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gemini_model: Option<String>,
+    /// Per-provider API keys (Sprint 4 schema v10, spec D2). The
+    /// legacy `api_key` field above mirrors whichever of these is
+    /// active so existing read paths keep working; new writes
+    /// populate both. `/provider --setup <kind>` sets one of these
+    /// without touching `api_provider`, letting an operator stash a
+    /// key for later use without switching.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gemini_api_key: Option<String>,
+}
+
+impl SystemConfig {
+    /// Look up the recorded key for the given provider. Per-provider
+    /// fields are preferred; falls back to the legacy `api_key` field
+    /// when the active provider matches `kind` (handles pre-v10 docs
+    /// before migration runs).
+    pub fn key_for(&self, kind: ProviderKind) -> Option<&str> {
+        match kind {
+            ProviderKind::Anthropic => self
+                .anthropic_api_key
+                .as_deref()
+                .or_else(|| (self.api_provider == "anthropic").then_some(self.api_key.as_str()))
+                .filter(|s| !s.is_empty()),
+            ProviderKind::Gemini => self
+                .gemini_api_key
+                .as_deref()
+                .or_else(|| (self.api_provider == "gemini").then_some(self.api_key.as_str()))
+                .filter(|s| !s.is_empty()),
+        }
+    }
 }
 
 fn default_kg_temporal_window() -> u64 { 1800 }
@@ -118,6 +149,8 @@ pub async fn run_config_wizard() -> Result<SystemConfig> {
         kg_edge_candidate_limit: default_kg_candidate_limit(),
         api_provider: default_api_provider(),
         gemini_model: None,
+        anthropic_api_key: None,
+        gemini_api_key: None,
     };
 
     println!();
@@ -466,7 +499,13 @@ pub async fn run_config_wizard_grpc(
         return Box::pin(run_config_wizard_grpc(tx, response_rx, db)).await;
     }
 
-    // Save config
+    // Save config — populate the legacy api_key (active provider's
+    // key) AND the matching per-provider field so post-v10 reads
+    // resolve correctly.
+    let (anthropic_api_key, gemini_api_key) = match provider_kind {
+        ProviderKind::Anthropic => (Some(api_key.clone()), None),
+        ProviderKind::Gemini => (None, Some(api_key.clone())),
+    };
     let config = SystemConfig {
         name,
         api_key,
@@ -481,6 +520,8 @@ pub async fn run_config_wizard_grpc(
         kg_edge_candidate_limit: default_kg_candidate_limit(),
         api_provider: provider_kind.as_str().to_string(),
         gemini_model: None,
+        anthropic_api_key,
+        gemini_api_key,
     };
     save_config(db, &config).await?;
     info!("Config wizard complete, saved to WardSONDB");
@@ -513,6 +554,24 @@ pub async fn run_config_wizard_grpc(
         info!("Provider written to {} ({})", provider_path, &config.api_provider);
     }
 
+    // D2 schema v10: also write the per-provider key STATE file so
+    // /provider switches between reboots find a recorded key for the
+    // alternate provider. Wizard only writes the key for the active
+    // provider; the alternate is added later via /provider --setup.
+    let per_provider_state_path = match provider_kind {
+        ProviderKind::Anthropic => "/embra/state/api_key_anthropic",
+        ProviderKind::Gemini => "/embra/state/api_key_gemini",
+    };
+    if let Err(e) = std::fs::write(per_provider_state_path, &config.api_key) {
+        tracing::warn!(
+            "Could not write per-provider key to {}: {}",
+            per_provider_state_path,
+            e
+        );
+    } else {
+        info!("Per-provider key written to {}", per_provider_state_path);
+    }
+
     // Transition to next mode
     let soul_sealed = crate::learning::is_soul_sealed(db).await.unwrap_or(false);
     let next_mode = if soul_sealed {
@@ -531,6 +590,71 @@ pub async fn run_config_wizard_grpc(
     })).await;
 
     Ok(config)
+}
+
+#[cfg(test)]
+mod key_lookup_tests {
+    use super::*;
+
+    fn cfg(api_key: &str, provider: &str, anth: Option<&str>, gem: Option<&str>) -> SystemConfig {
+        SystemConfig {
+            name: "Embra".into(),
+            api_key: api_key.into(),
+            timezone: "UTC".into(),
+            deployment_mode: "phase1".into(),
+            created_at: String::new(),
+            version: "test".into(),
+            github_token: None,
+            kg_temporal_window_secs: 1800,
+            kg_max_traversal_depth: 3,
+            kg_traversal_depth_ceiling: 5,
+            kg_edge_candidate_limit: 50,
+            api_provider: provider.into(),
+            gemini_model: None,
+            anthropic_api_key: anth.map(str::to_string),
+            gemini_api_key: gem.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn key_for_returns_per_provider_field_when_set() {
+        let c = cfg("active-key", "anthropic", Some("sk-anth"), Some("ai-gem"));
+        assert_eq!(c.key_for(ProviderKind::Anthropic), Some("sk-anth"));
+        assert_eq!(c.key_for(ProviderKind::Gemini), Some("ai-gem"));
+    }
+
+    #[test]
+    fn key_for_falls_back_to_legacy_for_active_provider() {
+        // Pre-v10 doc — only legacy api_key + api_provider populated.
+        let c = cfg("sk-legacy", "anthropic", None, None);
+        assert_eq!(c.key_for(ProviderKind::Anthropic), Some("sk-legacy"));
+        // Other provider has no key recorded.
+        assert_eq!(c.key_for(ProviderKind::Gemini), None);
+    }
+
+    #[test]
+    fn key_for_returns_none_when_inactive_provider_has_no_per_provider_key() {
+        // Active = anthropic, gemini key was never set; legacy
+        // api_key is the anthropic key. Gemini lookup must NOT
+        // return the anthropic key as a fallback.
+        let c = cfg("sk-anth-active", "anthropic", None, None);
+        assert_eq!(c.key_for(ProviderKind::Gemini), None);
+    }
+
+    #[test]
+    fn key_for_per_provider_wins_over_legacy() {
+        // Per-provider field set explicitly via /provider --setup;
+        // legacy api_key is something else (active provider's key).
+        let c = cfg("sk-active", "anthropic", None, Some("ai-stashed"));
+        assert_eq!(c.key_for(ProviderKind::Gemini), Some("ai-stashed"));
+        assert_eq!(c.key_for(ProviderKind::Anthropic), Some("sk-active"));
+    }
+
+    #[test]
+    fn key_for_filters_empty_strings() {
+        let c = cfg("", "anthropic", Some(""), None);
+        assert!(c.key_for(ProviderKind::Anthropic).is_none());
+    }
 }
 
 fn detect_timezone() -> String {
