@@ -317,6 +317,7 @@ pub async fn session_search(
     db: &WardsonDbClient,
     query: &str,
     session: Option<&str>,
+    include_tool_metadata: bool,
 ) -> String {
     let Some(plan) = SessionQueryPlan::parse(query) else {
         return "Usage: session_search <query> (unquoted terms AND-match; wrap in double quotes for literal phrase). Pass `session` to narrow to a single session.".into();
@@ -366,6 +367,69 @@ pub async fn session_search(
         }
         if results.len() >= 20 {
             break;
+        }
+
+        // Embra_Debug #66: optional second pass over tools.turn_trace.
+        // Each trace doc is a single (tool_name, input_preview,
+        // result_preview, turn_index) record; we match on the
+        // concatenation and tag the result line with [tool/<name>] so
+        // the caller can distinguish it from a content match.
+        if include_tool_metadata {
+            let trace_filter = serde_json::json!({
+                "filter": {"session": name.clone()},
+                "limit": 500usize,
+            });
+            let trace_docs = db
+                .query("tools.turn_trace", &trace_filter)
+                .await
+                .unwrap_or_default();
+            for doc in trace_docs {
+                let tool_name = doc.get("tool_name").and_then(|v| v.as_str()).unwrap_or("?");
+                let input_preview = doc
+                    .get("input_preview")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let result_preview = doc
+                    .get("result_preview")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let turn_index = doc
+                    .get("turn_index")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+
+                let haystack = format!(
+                    "tool:{} input:{} result:{}",
+                    tool_name, input_preview, result_preview
+                );
+                let haystack_lower = haystack.to_lowercase();
+                if let Some((anchor_pos, anchor_len)) = plan.match_turn(&haystack_lower) {
+                    let mut start = anchor_pos.saturating_sub(50);
+                    while start > 0 && !haystack.is_char_boundary(start) {
+                        start -= 1;
+                    }
+                    let mut end = (anchor_pos + anchor_len + 50).min(haystack.len());
+                    while end < haystack.len() && !haystack.is_char_boundary(end) {
+                        end += 1;
+                    }
+                    let snippet = &haystack[start..end];
+
+                    results.push(format!(
+                        "{} turn #{} [tool/{}]: ...{}...",
+                        name,
+                        turn_index + 1,
+                        tool_name,
+                        snippet
+                    ));
+                }
+
+                if results.len() >= 20 {
+                    break;
+                }
+            }
+            if results.len() >= 20 {
+                break;
+            }
         }
     }
 
@@ -1320,18 +1384,29 @@ impl SessionReadArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "session_search",
-    description = "Full-text search across sessions. Unquoted terms AND-match (all must appear in the same turn); wrap in double quotes for literal phrase. `session` (optional) narrows the scope to a single session."
+    description = "Full-text search across sessions. Unquoted terms AND-match (all must appear in the same turn); wrap in double quotes for literal phrase. `session` (optional) narrows the scope to a single session. `include_tool_metadata` (optional, default false) also matches tool_name / input_preview / result_preview from tools.turn_trace; matches there are tagged `[tool/<name>]` in the result line."
 )]
 pub struct SessionSearchArgs {
     pub query: String,
     /// Optional session name to scope the search.
     #[serde(default)]
     pub session: Option<String>,
+    /// When true, additionally search tool_name / input_preview /
+    /// result_preview from `tools.turn_trace`. Defaults to false to
+    /// preserve the original textual-only behavior.
+    #[serde(default)]
+    pub include_tool_metadata: bool,
 }
 
 impl SessionSearchArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        Ok(session_search(ctx.db, &self.query, self.session.as_deref()).await)
+        Ok(session_search(
+            ctx.db,
+            &self.query,
+            self.session.as_deref(),
+            self.include_tool_metadata,
+        )
+        .await)
     }
 }
 
@@ -1698,12 +1773,28 @@ mod native_args_tests {
             serde_json::from_value(serde_json::json!({"query": "foo"})).unwrap();
         assert_eq!(a.query, "foo");
         assert!(a.session.is_none());
+        assert!(!a.include_tool_metadata);
 
         let b: SessionSearchArgs = serde_json::from_value(serde_json::json!({
             "query": "foo", "session": "main"
         }))
         .unwrap();
         assert_eq!(b.session.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn session_search_args_include_tool_metadata_optional() {
+        // Embra_Debug #66: optional flag, default false; old call sites
+        // omit it without breaking.
+        let a: SessionSearchArgs = serde_json::from_value(serde_json::json!({
+            "query": "foo", "include_tool_metadata": true
+        }))
+        .unwrap();
+        assert!(a.include_tool_metadata);
+
+        let b: SessionSearchArgs =
+            serde_json::from_value(serde_json::json!({"query": "foo"})).unwrap();
+        assert!(!b.include_tool_metadata);
     }
 }
 
