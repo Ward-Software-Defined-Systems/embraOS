@@ -337,7 +337,7 @@ impl BrainService for BrainGrpcService {
 
     async fn get_system_status(&self, _req: Request<GetSystemStatusRequest>) -> Result<Response<GetSystemStatusResponse>, Status> {
         Ok(Response::new(GetSystemStatusResponse {
-            version: "0.2.0-phase1".to_string(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
             uptime_seconds: self.start_time.elapsed().as_secs(),
             soul: None,
             wardsondb_status: if self.db.health().await.unwrap_or(false) { "healthy" } else { "unhealthy" }.to_string(),
@@ -1121,7 +1121,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /github-token <token>    Set GitHub token\n  /ssh-keygen              Generate SSH key pair\n  /ssh-copy-id <user@host> Copy SSH key to host\n  /git-setup <name> | <email>  Set git user config\n  /feedback-loop           (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini>       Switch provider for future turns\n  /provider --setup [<kind>]         Add an alternate provider's API key (multi-turn)\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;

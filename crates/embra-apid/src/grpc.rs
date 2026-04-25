@@ -187,8 +187,8 @@ impl EmbraApi for EmbraApiImpl {
 
     async fn get_version(&self, _request: Request<GetVersionRequest>) -> Result<Response<GetVersionResponse>, Status> {
         Ok(Response::new(GetVersionResponse {
-            embraos_version: "0.2.0-phase1".to_string(),
-            embrad_version: "0.2.0-phase1".to_string(),
+            embraos_version: env!("CARGO_PKG_VERSION").to_string(),
+            embrad_version: env!("CARGO_PKG_VERSION").to_string(),
             wardsondb_version: "0.1.0".to_string(),
             kernel_version: String::new(),
         }))

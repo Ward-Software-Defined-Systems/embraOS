@@ -243,6 +243,9 @@ All sessions share the same intelligence — same memory, same identity, same so
 | `/ssh-keygen` | Generate ed25519 SSH key pair and display public key |
 | `/ssh-copy-id <user@host>` | Copy SSH public key to remote host (RFC 1918 only) |
 | `/git-setup <name> \| <email>` | Set git user.name and user.email |
+| `/provider` | Show active LLM provider, model, and session |
+| `/provider <anthropic\|gemini>` | Switch provider for future turns (idle → swap immediately; mid-tool-loop → queue and apply after the loop completes) |
+| `/provider --setup [<kind>]` | Add an alternate provider's API key without re-running the wizard — multi-turn flow: type the command, then type the key on the next message. Auto-targets the missing provider when `<kind>` is omitted |
 | `/feedback-loop` | **(EXPERIMENTAL)** Trigger Phase 3 Continuity Engine self-evaluation protocol — the Brain walks through a multi-step gather/evaluate/reconcile/execute sequence using existing tools |
 | `/copy` | Copy conversation to clipboard via OSC 52 — `/copy 5` for last 5 messages (disabled — Sprint 5) |
 

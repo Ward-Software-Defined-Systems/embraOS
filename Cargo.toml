@@ -13,7 +13,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0-phase1"
+version = "0.4.0-phase1"
 edition = "2024"
 license = "MPL-2.0"
 repository = "https://github.com/Ward-Software-Defined-Systems/embraOS"

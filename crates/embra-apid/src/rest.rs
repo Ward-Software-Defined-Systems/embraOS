@@ -24,7 +24,7 @@ async fn version() -> Json<serde_json::Value> {
     Json(json!({
         "ok": true,
         "data": {
-            "embraos_version": "0.2.0-phase1",
+            "embraos_version": env!("CARGO_PKG_VERSION"),
             "service": "embra-apid"
         }
     }))

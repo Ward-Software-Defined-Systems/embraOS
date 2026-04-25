@@ -110,11 +110,16 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 }
 
 // Single source of truth for Phase 4 tool category counts.
-// (json_key, display_label, count). Sums to 85 — matches the descriptor count
+// (json_key, display_label, count). Sums to 90 — matches the descriptor count
 // in `tools::registry::REGISTRY`. Aliases (`memory_search`, `search_memory`,
 // `file_rename`, `rmdir`) are folded into their target's category so the
 // displayed total matches what the model sees in the tools manifest. Keep in
 // sync with `tools::registry::REGISTRY.len()` when tools are added or removed.
+//
+// Engineering went 28 → 33 across Sprint 3 post-merge passes:
+//   pass #1 added `plan_delete` + `task_delete` (+2),
+//   pass #2 added `gh_issue_view` + `gh_pr_view` + `git_merge` (+3).
+// Sprint 4 (GEMINI-PROVIDER-01) did not add or remove any tools.
 const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
     ("system", "System", 3),
     ("memory_knowledge", "Memory & Knowledge", 7),
@@ -122,7 +127,7 @@ const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
     ("time_context", "Time & Context", 3),
     ("utility", "Utility", 2),
     ("security", "Security", 6),
-    ("engineering", "Engineering", 28),
+    ("engineering", "Engineering", 33),
     ("filesystem", "Filesystem", 10),
     ("scheduling", "Scheduling", 3),
     ("sessions", "Sessions", 10),
