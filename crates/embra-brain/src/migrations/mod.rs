@@ -4,7 +4,7 @@ use tracing::{error, info, warn};
 
 use crate::db::{WardsonDbClient, WardsonDbError};
 
-const CURRENT_SCHEMA_VERSION: u32 = 8;
+const CURRENT_SCHEMA_VERSION: u32 = 9;
 
 /// Run all pending migrations. Each migration is idempotent.
 pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
@@ -79,6 +79,16 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
         // clear is simpler than trying to re-label.
         run_v8_turn_trace_reset(db).await?;
         set_schema_version(db, 8).await?;
+    }
+
+    if current_version < 9 {
+        // v9 (GEMINI-PROVIDER-01): create the provider.gemini_cache
+        // collection and stamp pluggable-provider defaults on
+        // existing config.system + sessions.<name>.meta docs so the
+        // post-v9 code paths that read api_provider / meta.provider
+        // see consistent values everywhere.
+        run_v9_pluggable_provider(db).await?;
+        set_schema_version(db, 9).await?;
     }
 
     info!("Migrations complete. Schema version: {}", CURRENT_SCHEMA_VERSION);
@@ -755,6 +765,194 @@ async fn run_v8_turn_trace_reset(db: &WardsonDbClient) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Migration v9 (GEMINI-PROVIDER-01): pluggable provider scaffolding.
+///
+/// Three idempotent passes:
+/// 1. Create `provider.gemini_cache` collection (singleton handle
+///    storage; 409 conflict on create is success).
+/// 2. Stamp `config.system:config` with `api_provider = "anthropic"`
+///    if the field is missing. Pre-v9 configs had no provider field;
+///    every existing install becomes Anthropic-by-default.
+/// 3. Iterate every `sessions.<name>.meta` doc; if `provider` or
+///    `model` is missing, patch with the Anthropic defaults.
+///
+/// All three steps tolerate already-applied state — re-running v9
+/// after a clean run is a no-op.
+async fn run_v9_pluggable_provider(db: &WardsonDbClient) -> Result<()> {
+    info!("Running migration v9: pluggable provider scaffolding");
+
+    // 1. Provider cache collection.
+    if !db
+        .collection_exists("provider.gemini_cache")
+        .await
+        .unwrap_or(false)
+    {
+        match db.create_collection("provider.gemini_cache").await {
+            Ok(_) => info!("Migration v9: created provider.gemini_cache"),
+            Err(e) => {
+                let already_exists = matches!(
+                    e.downcast_ref::<WardsonDbError>(),
+                    Some(WardsonDbError::Api { status: 409, .. })
+                );
+                if !already_exists {
+                    error!("Migration v9: create_collection failed: {e}");
+                    return Err(e);
+                }
+                info!("Migration v9: provider.gemini_cache already exists");
+            }
+        }
+    }
+
+    // 2. Stamp config.system:config with api_provider if missing.
+    if let Ok(mut cfg_doc) = db.read("config.system", "config").await {
+        let needs_patch = cfg_doc.get("api_provider").and_then(|v| v.as_str()).is_none();
+        if needs_patch {
+            if let Some(obj) = cfg_doc.as_object_mut() {
+                obj.insert(
+                    "api_provider".into(),
+                    serde_json::Value::String("anthropic".to_string()),
+                );
+            }
+            match db.update("config.system", "config", &cfg_doc).await {
+                Ok(_) => info!("Migration v9: stamped config.system api_provider=anthropic"),
+                Err(e) => warn!("Migration v9: config.system update failed: {e}"),
+            }
+        }
+    }
+
+    // 3. Iterate sessions.<name>.meta. WardSONDB exposes
+    //    list_collections to enumerate; meta collections are named
+    //    `sessions.<name>.meta`.
+    if let Ok(collections) = db.list_collections().await {
+        let meta_collections: Vec<&String> = collections
+            .iter()
+            .filter(|c| c.starts_with("sessions.") && c.ends_with(".meta"))
+            .collect();
+        info!(
+            "Migration v9: found {} session meta collection(s) to inspect",
+            meta_collections.len()
+        );
+        for collection in meta_collections {
+            // The meta doc uses the session name as its `_id` — the
+            // session-create path always writes `_id == name`.
+            let session_name = collection
+                .strip_prefix("sessions.")
+                .and_then(|s| s.strip_suffix(".meta"))
+                .unwrap_or("");
+            if session_name.is_empty() {
+                continue;
+            }
+            let mut meta_doc = match db.read(collection, session_name).await {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let mut mutated = false;
+            if let Some(obj) = meta_doc.as_object_mut() {
+                if obj.get("provider").and_then(|v| v.as_str()).is_none() {
+                    obj.insert(
+                        "provider".into(),
+                        serde_json::Value::String("anthropic".to_string()),
+                    );
+                    mutated = true;
+                }
+                if obj.get("model").and_then(|v| v.as_str()).is_none() {
+                    obj.insert(
+                        "model".into(),
+                        serde_json::Value::String("opus-4.7".to_string()),
+                    );
+                    mutated = true;
+                }
+            }
+            if mutated {
+                if let Err(e) = db.update(collection, session_name, &meta_doc).await {
+                    warn!(
+                        "Migration v9: failed to update {}: {}",
+                        collection, e
+                    );
+                }
+            }
+        }
+    } else {
+        warn!("Migration v9: list_collections failed; skipping session meta backfill");
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod v9_tests {
+    use serde_json::json;
+
+    /// Pure-fn tests covering the v9 transform shape on an isolated
+    /// JSON document. Integration with WardSONDB lives in Stage 11
+    /// QEMU smoke (the migration runs once at brain startup against
+    /// real state).
+    fn patch_meta_doc(meta: &mut serde_json::Value) -> bool {
+        let mut mutated = false;
+        if let Some(obj) = meta.as_object_mut() {
+            if obj.get("provider").and_then(|v| v.as_str()).is_none() {
+                obj.insert("provider".into(), json!("anthropic"));
+                mutated = true;
+            }
+            if obj.get("model").and_then(|v| v.as_str()).is_none() {
+                obj.insert("model".into(), json!("opus-4.7"));
+                mutated = true;
+            }
+        }
+        mutated
+    }
+
+    #[test]
+    fn v9_meta_patch_stamps_defaults_on_legacy_doc() {
+        let mut doc = json!({
+            "id": "abc",
+            "name": "main",
+            "state": "Active",
+            "created_at": "2026-04-01T00:00:00Z",
+            "last_active": "2026-04-01T00:00:00Z"
+        });
+        assert!(patch_meta_doc(&mut doc));
+        assert_eq!(doc["provider"], "anthropic");
+        assert_eq!(doc["model"], "opus-4.7");
+    }
+
+    #[test]
+    fn v9_meta_patch_preserves_existing_provider() {
+        let mut doc = json!({
+            "id": "abc",
+            "name": "main",
+            "provider": "gemini",
+            "model": "gemini-3.1-pro"
+        });
+        assert!(!patch_meta_doc(&mut doc));
+        assert_eq!(doc["provider"], "gemini");
+        assert_eq!(doc["model"], "gemini-3.1-pro");
+    }
+
+    #[test]
+    fn v9_meta_patch_partial_only_fills_missing() {
+        let mut doc = json!({
+            "id": "abc",
+            "name": "main",
+            "provider": "gemini"
+        });
+        assert!(patch_meta_doc(&mut doc));
+        assert_eq!(doc["provider"], "gemini"); // preserved
+        assert_eq!(doc["model"], "opus-4.7"); // added
+    }
+
+    #[test]
+    fn v9_meta_patch_is_idempotent() {
+        let mut doc = json!({
+            "id": "abc",
+            "name": "main",
+        });
+        assert!(patch_meta_doc(&mut doc));
+        // Second run is a no-op.
+        assert!(!patch_meta_doc(&mut doc));
+    }
 }
 
 #[cfg(test)]

@@ -39,6 +39,15 @@ pub struct SessionMeta {
     pub state: SessionState,
     pub created_at: DateTime<Utc>,
     pub last_active: DateTime<Utc>,
+    /// Active provider when the session was last written. `None` on
+    /// pre-v9 docs; v9 migration backfills with `"anthropic"` for
+    /// every existing meta. Sprint 4 adds the field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Display model name (e.g. `"opus-4.7"`, `"gemini-3.1-pro"`).
+    /// Same defaulting rule as `provider`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,6 +102,8 @@ impl SessionManager {
             state: SessionState::Active,
             created_at: now,
             last_active: now,
+            provider: None,
+            model: None,
         };
 
         let history = SessionHistory {
