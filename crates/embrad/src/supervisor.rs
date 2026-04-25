@@ -176,9 +176,23 @@ impl Supervisor {
         });
 
         // 4. embra-brain — depends on wardsondb, embra-apid
-        // API key: read from /embra/state/api_key file or ANTHROPIC_API_KEY env
+        // Provider selection (Sprint 4): STATE file wins over env var
+        // (persisted config is authoritative). When neither is set,
+        // default to Anthropic for backward compat.
+        let api_provider = std::fs::read_to_string("/embra/state/api_provider")
+            .or_else(|_| std::env::var("EMBRA_PROVIDER"))
+            .unwrap_or_default()
+            .trim().to_string();
+
+        // API key: read from /embra/state/api_key file or
+        // {ANTHROPIC,GEMINI}_API_KEY env (the right one based on
+        // active provider).
+        let env_key_name = match api_provider.as_str() {
+            "gemini" => "GEMINI_API_KEY",
+            _ => "ANTHROPIC_API_KEY",
+        };
         let api_key = std::fs::read_to_string("/embra/state/api_key")
-            .or_else(|_| std::env::var("ANTHROPIC_API_KEY"))
+            .or_else(|_| std::env::var(env_key_name))
             .unwrap_or_default()
             .trim().to_string();
         let mut brain_args = vec![
@@ -188,6 +202,10 @@ impl Supervisor {
         if !api_key.is_empty() {
             brain_args.push("--api-key".to_string());
             brain_args.push(api_key);
+        }
+        if !api_provider.is_empty() {
+            brain_args.push("--api-provider".to_string());
+            brain_args.push(api_provider);
         }
         // GitHub token: read from STATE partition for boot propagation
         let github_token = std::fs::read_to_string("/embra/state/github_token")

@@ -8,6 +8,7 @@ use crate::db::WardsonDbClient;
 use crate::learning;
 use crate::proactive::Notification;
 use crate::provider::anthropic::AnthropicProvider;
+use crate::provider::gemini::GeminiProvider;
 use crate::provider::ir::{ApiMessage, AssistantTurn, Block, EarlyStopReason, TurnOutcome};
 use crate::provider::{LlmProvider, ProviderKind, StreamEvent, SystemPromptBundle, ToolManifest};
 use crate::sessions::SessionManager;
@@ -472,11 +473,21 @@ async fn handle_request(
                 "You are in Learning Mode. The system prompt will be set once the soul is defined.".to_string()
             };
 
-            // Construct the Anthropic provider + tool manifest for this
-            // turn. Sprint 4 Stage 8 will lift this into a long-lived
-            // BrainGrpcService field so /provider switches are atomic.
-            let provider: Arc<dyn LlmProvider> =
-                Arc::new(AnthropicProvider::new(api_key.to_string()));
+            // Construct the right provider per-turn based on the
+            // persisted config. Stage 8's /provider switch updates
+            // config.system.api_provider; subsequent turns observe
+            // the new provider here. Per-turn construction is the
+            // status quo (mirrors pre-refactor Brain::new) — Stage
+            // 8's swap mechanism doesn't need a long-lived provider
+            // because the loop driver re-reads config every turn.
+            let provider_kind = ProviderKind::from_str(&loaded_config.api_provider)
+                .unwrap_or(ProviderKind::Anthropic);
+            let provider: Arc<dyn LlmProvider> = match provider_kind {
+                ProviderKind::Gemini => Arc::new(
+                    GeminiProvider::new(api_key.to_string()).with_cache(db.clone()),
+                ),
+                ProviderKind::Anthropic => Arc::new(AnthropicProvider::new(api_key.to_string())),
+            };
             let descriptors: Vec<&'static tools::registry::ToolDescriptor> =
                 tools::registry::all_descriptors().collect();
             let tool_manifest: ToolManifest = provider.build_tool_manifest(&descriptors);
@@ -957,15 +968,20 @@ async fn handle_request(
             let cfg = config::load_config(&**db).await.ok();
             let tz = cfg.as_ref().map(|c| c.timezone.clone()).unwrap_or_else(|| config_tz.to_string());
             let name = cfg.as_ref().map(|c| c.name.clone()).unwrap_or_else(|| "Embra".to_string());
+            let active_provider = cfg.as_ref().map(|c| c.api_provider.clone()).unwrap_or_else(|| "anthropic".to_string());
+            let model = display_model_for(&active_provider);
             let _ = tx.send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::ModeChange(
                     ModeTransition {
                         from_mode: OperatingMode::Unspecified as i32,
                         to_mode: mode as i32,
                         message: if is_sealed {
-                            format!("Operational — Name: {} — Session: {} — TZ: {}", name, session_name, tz)
+                            format!(
+                                "Operational — Name: {} — Session: {} — TZ: {} — Brain: {}",
+                                name, session_name, tz, model
+                            )
                         } else {
-                            format!("Learning Mode — Name: {} — TZ: {}", name, tz)
+                            format!("Learning Mode — Name: {} — TZ: {} — Brain: {}", name, tz, model)
                         },
                     }
                 )),
@@ -1001,10 +1017,20 @@ async fn handle_slash_command(
         }
     };
 
-    // Helper to send a ModeTransition with updated session name
+    // Helper to send a ModeTransition with updated session name.
+    // Sprint 4: includes the active model in the message so the
+    // console status bar can render it without a separate event.
     let tz = config_tz.to_string();
-    let config_name = config::load_config(&**db).await
-        .map(|c| c.name).unwrap_or_else(|_| "Embra".to_string());
+    let cfg_loaded = config::load_config(&**db).await.ok();
+    let config_name = cfg_loaded
+        .as_ref()
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| "Embra".to_string());
+    let active_provider = cfg_loaded
+        .as_ref()
+        .map(|c| c.api_provider.clone())
+        .unwrap_or_else(|| "anthropic".to_string());
+    let model = display_model_for(&active_provider).to_string();
     let send_session_update = {
         let config_name = config_name.clone();
         move |tx: &mpsc::Sender<Result<ConversationResponse, Status>>, session_name: &str| {
@@ -1012,13 +1038,17 @@ async fn handle_slash_command(
             let session = session_name.to_string();
             let tz = tz.clone();
             let config_name = config_name.clone();
+            let model = model.clone();
             async move {
                 let _ = tx.send(Ok(ConversationResponse {
                     response_type: Some(conversation_response::ResponseType::ModeChange(
                         ModeTransition {
                             from_mode: OperatingMode::Operational as i32,
                             to_mode: OperatingMode::Operational as i32,
-                            message: format!("Operational — Name: {} — Session: {} — TZ: {}", config_name, session, tz),
+                            message: format!(
+                                "Operational — Name: {} — Session: {} — TZ: {} — Brain: {}",
+                                config_name, session, tz, model
+                            ),
                         }
                     )),
                 })).await;
@@ -1595,10 +1625,19 @@ async fn run_learning_loop(
 ) -> anyhow::Result<()> {
     let mut state = learning::LearningState::new();
 
-    // Construct the provider once. Learning never invokes tools; pass
-    // an empty tool manifest so the request body omits `tools` and
-    // `tool_choice` (the provider handles that gating).
-    let provider: Arc<dyn LlmProvider> = Arc::new(AnthropicProvider::new(api_key.to_string()));
+    // Construct the right provider once per learning session.
+    // Learning never invokes tools; pass an empty tool manifest so
+    // the request body omits `tools` / `tool_choice` (the provider
+    // handles that gating). Provider selection comes from the
+    // persisted config (or its anthropic default for first-run).
+    let provider_kind = ProviderKind::from_str(&config.api_provider)
+        .unwrap_or(ProviderKind::Anthropic);
+    let provider: Arc<dyn LlmProvider> = match provider_kind {
+        ProviderKind::Gemini => Arc::new(
+            GeminiProvider::new(api_key.to_string()).with_cache(db.clone()),
+        ),
+        ProviderKind::Anthropic => Arc::new(AnthropicProvider::new(api_key.to_string())),
+    };
     let empty_manifest: ToolManifest = provider.build_tool_manifest(&[]);
 
     // Resume support: load any previously persisted documents

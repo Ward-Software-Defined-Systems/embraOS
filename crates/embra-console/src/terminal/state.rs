@@ -149,6 +149,11 @@ pub struct AppState {
     pub config_name: String,
     pub config_version: String,
     pub config_tz: String,
+    /// Active LLM model display name (e.g. `"opus-4.7"`,
+    /// `"gemini-3.1-pro"`). Updated from the `Brain: …` token in
+    /// ModeTransition messages; defaults to opus-4.7 for first-paint
+    /// before any transition arrives.
+    pub provider_model: String,
     pub pasted_lines: Option<Vec<String>>,
     pub multiline_mode: bool,
     // EXPR-01 expression panel — cached state polled from brain every 3s
@@ -178,6 +183,7 @@ impl AppState {
             config_name: "embraOS".to_string(),
             config_version: env!("CARGO_PKG_VERSION").to_string(),
             config_tz: "UTC".to_string(),
+            provider_model: "opus-4.7".to_string(),
             pasted_lines: None,
             multiline_mode: false,
             expression_content: String::new(),

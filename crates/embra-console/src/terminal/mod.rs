@@ -197,6 +197,17 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
                 }
             }
 
+            // Parse brain model from message (format: "... — Brain: <model>")
+            // Added in Sprint 4 so the status bar reflects the active
+            // provider after wizard / /provider switches without a
+            // proto-level addition.
+            if let Some(brain_part) = message.split("Brain: ").nth(1) {
+                let model = brain_part.split(" — ").next().unwrap_or(brain_part).trim().to_string();
+                if !model.is_empty() {
+                    app.provider_model = model;
+                }
+            }
+
             // to_mode: 1=Setup, 2=Learning, 3=Operational
             match to_mode {
                 1 => {

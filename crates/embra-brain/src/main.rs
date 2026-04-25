@@ -45,6 +45,16 @@ async fn main() -> anyhow::Result<()> {
             "--port" => { port = args[i+1].parse().expect("Invalid port"); i += 2; }
             "--wardsondb-url" => { wardsondb_url = args[i+1].clone(); i += 2; }
             "--api-key" => { api_key = Some(args[i+1].clone()); i += 2; }
+            "--api-provider" => {
+                // Sprint 4: persist provider selection to a process
+                // env var so handle_request / run_learning_loop can
+                // read it without threading another parameter.
+                let provider = args[i+1].clone();
+                // SAFETY: called once at startup before tokio runtime is multi-threaded
+                unsafe { std::env::set_var("EMBRA_PROVIDER", &provider); }
+                info!("API provider configured: {}", provider);
+                i += 2;
+            }
             "--github-token" => {
                 let token = args[i+1].clone();
                 // SAFETY: called once at startup before tokio runtime is multi-threaded
