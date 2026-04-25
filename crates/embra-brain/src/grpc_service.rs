@@ -1624,7 +1624,10 @@ async fn handle_provider_command(
 /// Apply a provider switch. Runs after `in_turn` has cleared (either
 /// because the loop just ended or because the command arrived idle).
 /// Updates config.system.api_provider, the active session's
-/// meta.provider/meta.model, and /embra/state/api_provider.
+/// meta.provider/meta.model, and /embra/state/api_provider, then
+/// emits a `ModeTransition` carrying the new `Brain: <model>` token
+/// so the console's status-bar `provider_model` refreshes immediately
+/// (without waiting for the next session-attach).
 async fn perform_provider_swap(
     target: ProviderKind,
     db: &Arc<WardsonDbClient>,
@@ -1677,10 +1680,10 @@ async fn perform_provider_swap(
 
     // 2. Update active session's meta.provider / meta.model so
     //    cross-session resume sees the right provider.
-    let active = session_mgr.read().await.active_session.clone();
-    if let Some(name) = active {
+    let active_session = session_mgr.read().await.active_session.clone();
+    if let Some(ref name) = active_session {
         let collection = format!("sessions.{}.meta", name);
-        if let Ok(meta_doc) = db.read(&collection, &name).await {
+        if let Ok(meta_doc) = db.read(&collection, name).await {
             let mut doc = meta_doc;
             if let Some(obj) = doc.as_object_mut() {
                 obj.insert(
@@ -1692,7 +1695,7 @@ async fn perform_provider_swap(
                     serde_json::Value::String(display_model_for(target.as_str()).to_string()),
                 );
             }
-            let _ = db.update(&collection, &name, &doc).await;
+            let _ = db.update(&collection, name, &doc).await;
         }
     }
 
@@ -1710,6 +1713,59 @@ async fn perform_provider_swap(
                         display_model_for(target.as_str())
                     ),
                     msg_type: SystemMessageType::Info as i32,
+                },
+            )),
+        }))
+        .await;
+
+    // 4. Emit a ModeTransition with the new `Brain: <model>` token
+    //    so the console's status bar updates immediately. Without
+    //    this, AppState.provider_model only refreshes on the next
+    //    session-attach / `/switch` / `/new`, leaving the bar
+    //    showing the old model until then.
+    //
+    //    Mirrors the session-attach handler's shape: Operational
+    //    when soul is sealed, Learning otherwise. The console parser
+    //    extracts Name / Session / TZ / Brain tokens regardless of
+    //    other prose; we use the same delimited format the rest of
+    //    the codebase emits.
+    let cfg_after = config::load_config(&**db).await.ok();
+    let name = cfg_after
+        .as_ref()
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| "Embra".to_string());
+    let tz = cfg_after
+        .as_ref()
+        .map(|c| c.timezone.clone())
+        .unwrap_or_else(|| "Etc/UTC".to_string());
+    let model = display_model_for(target.as_str());
+    let is_sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
+    let mode = if is_sealed {
+        OperatingMode::Operational
+    } else {
+        OperatingMode::Learning
+    };
+    let message = if is_sealed {
+        let session = active_session
+            .clone()
+            .unwrap_or_else(|| "<none>".to_string());
+        format!(
+            "Operational — Name: {} — Session: {} — TZ: {} — Brain: {}",
+            name, session, tz, model
+        )
+    } else {
+        format!(
+            "Learning Mode — Name: {} — TZ: {} — Brain: {}",
+            name, tz, model
+        )
+    };
+    let _ = tx
+        .send(Ok(ConversationResponse {
+            response_type: Some(conversation_response::ResponseType::ModeChange(
+                ModeTransition {
+                    from_mode: mode as i32,
+                    to_mode: mode as i32,
+                    message,
                 },
             )),
         }))
