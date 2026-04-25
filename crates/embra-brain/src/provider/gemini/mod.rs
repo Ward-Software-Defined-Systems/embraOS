@@ -9,26 +9,30 @@
 //! - [`conv`] — neutral IR → Gemini wire converter.
 //! - `cache` (Stage 6) — explicit Context Cache lifecycle manager.
 
+pub mod cache;
 mod conv;
 pub mod streaming;
 pub mod tool_schema;
 pub mod wire;
 
-use anyhow::Result;
 use async_trait::async_trait;
-use futures::stream::{BoxStream, StreamExt};
+use futures::stream::BoxStream;
 use reqwest::Client;
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, warn};
 
+use crate::db::WardsonDbClient;
 use crate::provider::{
     ApiMessage, LlmProvider, ProviderError, ProviderKind, StreamEvent, SystemPromptBundle,
     ToolManifest, ValidationResult,
 };
 use crate::tools::registry::ToolDescriptor;
+
+use cache::GeminiCacheManager;
 
 use wire::{
     GeminiContent, GeminiFunctionCallingConfig, GeminiGenerateRequest, GeminiGenerationConfig,
@@ -56,6 +60,10 @@ pub struct GeminiProvider {
     http: Client,
     model_id: String,
     display_name: String,
+    /// Optional context-cache lifecycle manager. `None` if Brain
+    /// construction couldn't acquire a WardSONDB handle, in which
+    /// case every turn pays the full system+tools cost.
+    cache: Option<Arc<GeminiCacheManager>>,
 }
 
 impl GeminiProvider {
@@ -77,6 +85,29 @@ impl GeminiProvider {
             http: Client::new(),
             model_id,
             display_name,
+            cache: None,
+        }
+    }
+
+    /// Attach a Context Cache lifecycle manager. Stage 10 Brain
+    /// construction calls this when the WardSONDB handle is
+    /// available. Idempotent — replaces any existing cache.
+    pub fn with_cache(mut self, db: Arc<WardsonDbClient>) -> Self {
+        let manager = Arc::new(GeminiCacheManager::new(
+            self.api_key.clone(),
+            db,
+            self.model_id.clone(),
+        ));
+        self.cache = Some(manager);
+        self
+    }
+
+    /// Run the boot self-heal probe so a stored cache handle that
+    /// no longer exists server-side is cleared. Safe to call even
+    /// when no cache is attached (no-op).
+    pub async fn boot_self_heal(&self) {
+        if let Some(cache) = &self.cache {
+            cache.boot_self_heal().await;
         }
     }
 
@@ -140,15 +171,39 @@ impl LlmProvider for GeminiProvider {
         // / tool_config fields entirely.
         let tools_empty = matches!(&tools.wire_json, serde_json::Value::Array(a) if a.is_empty());
 
+        // Try to reuse a cached system+tools handle. On hit, omit
+        // systemInstruction and tools from the request body — the
+        // server prepends them from the cache. Errors and 4xx
+        // ineligibility fall through to per-request system+tools.
+        let cache_handle = match &self.cache {
+            Some(cache) => match cache.ensure_cache(system, tools).await {
+                Ok(maybe) => maybe,
+                Err(e) => {
+                    warn!(target: "gemini::cache", "ensure_cache failed: {e}; falling back uncached");
+                    None
+                }
+            },
+            None => None,
+        };
+        let cache_active = cache_handle.is_some();
+
         let request_body = GeminiGenerateRequest {
             contents: &contents,
-            system_instruction: Some(GeminiSystemInstruction {
-                parts: vec![GeminiSystemPart {
-                    text: system.text.clone(),
-                }],
-            }),
-            tools: if tools_empty { None } else { Some(&tools.wire_json) },
-            tool_config: if tools_empty {
+            system_instruction: if cache_active {
+                None
+            } else {
+                Some(GeminiSystemInstruction {
+                    parts: vec![GeminiSystemPart {
+                        text: system.text.clone(),
+                    }],
+                })
+            },
+            tools: if cache_active || tools_empty {
+                None
+            } else {
+                Some(&tools.wire_json)
+            },
+            tool_config: if cache_active || tools_empty {
                 None
             } else {
                 Some(GeminiToolConfig {
@@ -163,10 +218,7 @@ impl LlmProvider for GeminiProvider {
                     thinking_level: THINKING_LEVEL.to_string(),
                 },
             }),
-            // Stage 6 wires cache_handle here. Stage 5 ships with no
-            // cache reuse — every turn pays the full system+tools
-            // cost until the lifecycle manager lands.
-            cached_content: None,
+            cached_content: cache_handle.as_ref().map(|h| h.cache_name.clone()),
         };
 
         let body_json = serde_json::to_value(&request_body)

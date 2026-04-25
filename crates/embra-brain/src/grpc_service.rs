@@ -479,6 +479,7 @@ async fn handle_request(
             let system_bundle = SystemPromptBundle {
                 fingerprint: prompt_fingerprint(&system_prompt),
                 text: system_prompt,
+                session_name: session_name.clone(),
             };
 
             // Set the in-flight flag so /provider commands queue
@@ -1392,6 +1393,7 @@ async fn run_learning_loop(
         let system_bundle = SystemPromptBundle {
             fingerprint: prompt_fingerprint(&system_prompt),
             text: system_prompt,
+            session_name: "learning".to_string(),
         };
 
         // Send phase kickoff as first message
@@ -1497,6 +1499,7 @@ async fn run_learning_loop(
                             let system_bundle = SystemPromptBundle {
                                 fingerprint: prompt_fingerprint(&system_prompt),
                                 text: system_prompt,
+                                session_name: "learning".to_string(),
                             };
 
                             let _ = tx.send(Ok(ConversationResponse {

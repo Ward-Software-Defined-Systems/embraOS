@@ -64,6 +64,10 @@ pub struct ToolManifest {
 pub struct SystemPromptBundle {
     pub text: String,
     pub fingerprint: String,
+    /// Active session name. The Anthropic provider ignores this; the
+    /// Gemini provider uses it to scope its Context Cache (switching
+    /// sessions invalidates and recreates the cache).
+    pub session_name: String,
 }
 
 /// One event from a streaming turn. `Complete` carries the assembled
