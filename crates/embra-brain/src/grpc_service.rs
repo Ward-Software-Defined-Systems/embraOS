@@ -589,6 +589,12 @@ async fn handle_request(
             const MAX_TOOL_ITERATIONS: usize = 10;
             let mut tool_iter: usize = 0;
             let mut last_response_text = String::new();
+            // Embra_Debug #70: collect tool names dispatched across the
+            // full user-turn loop (deduped, first-seen order). Used to
+            // synthesize a placeholder when the assistant's last
+            // iteration has no Text blocks — `(no response)` is the
+            // historical fallback and is misleading when real work fired.
+            let mut tool_names_in_turn: Vec<String> = Vec::new();
 
             // Per-request turn trace. Interior mutability via Arc<Mutex>
             // avoids &mut propagation through the `fn` ToolDescriptor
@@ -710,6 +716,14 @@ async fn handle_request(
                             let Block::ToolCall { id, name, args, .. } = block else {
                                 continue;
                             };
+                            // Embra_Debug #70: dedupe-first-seen tool
+                            // name accumulator for the (no response)
+                            // placeholder. Pushed before dispatch so a
+                            // failing tool still appears in the
+                            // transcript signal.
+                            if !tool_names_in_turn.iter().any(|n| n == name) {
+                                tool_names_in_turn.push(name.clone());
+                            }
                             let started = std::time::Instant::now();
                             let started_at_rfc = chrono::Utc::now().to_rfc3339();
                             info!(
@@ -912,10 +926,12 @@ async fn handle_request(
                     })).await;
                     return Ok(());
                 }
-                let final_text = if last_response_text.trim().is_empty() {
-                    "(no response)".to_string()
-                } else {
+                let final_text = if !last_response_text.trim().is_empty() {
                     last_response_text.clone()
+                } else if !tool_names_in_turn.is_empty() {
+                    render_tool_only_placeholder(&tool_names_in_turn)
+                } else {
+                    "(no response)".to_string()
                 };
                 let _ = mgr
                     .append_message(&session_name, &Message::assistant(&final_text))
@@ -2450,6 +2466,65 @@ fn turn_text(turn: &AssistantTurn) -> String {
         })
         .collect::<Vec<_>>()
         .join("")
+}
+
+/// Render the placeholder persisted to the session transcript when an
+/// assistant turn fired tool calls but produced no text in its terminal
+/// iteration. Embra_Debug #70: previously persisted as `(no response)`,
+/// which made tool-only turns look like silence on session reload.
+///
+/// First eight names are rendered verbatim (deduped first-seen order at
+/// the call site); a trailing `, …` is appended when more names exist.
+fn render_tool_only_placeholder(names: &[String]) -> String {
+    const MAX_NAMES: usize = 8;
+    let head = names
+        .iter()
+        .take(MAX_NAMES)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let suffix = if names.len() > MAX_NAMES { ", …" } else { "" };
+    format!("[tool calls: {}{}]", head, suffix)
+}
+
+#[cfg(test)]
+mod tool_only_placeholder_tests {
+    use super::render_tool_only_placeholder;
+
+    #[test]
+    fn single_tool_name() {
+        assert_eq!(
+            render_tool_only_placeholder(&["file_read".to_string()]),
+            "[tool calls: file_read]"
+        );
+    }
+
+    #[test]
+    fn multiple_names_join_in_order() {
+        let names = vec![
+            "knowledge_query".to_string(),
+            "file_read".to_string(),
+            "git_status".to_string(),
+        ];
+        assert_eq!(
+            render_tool_only_placeholder(&names),
+            "[tool calls: knowledge_query, file_read, git_status]"
+        );
+    }
+
+    #[test]
+    fn caps_at_eight_with_ellipsis() {
+        let names: Vec<String> = (0..10).map(|i| format!("tool_{}", i)).collect();
+        let out = render_tool_only_placeholder(&names);
+        assert!(out.starts_with("[tool calls: tool_0, tool_1, tool_2, tool_3, tool_4, tool_5, tool_6, tool_7, …]"));
+    }
+
+    #[test]
+    fn exactly_eight_no_ellipsis() {
+        let names: Vec<String> = (0..8).map(|i| format!("t{}", i)).collect();
+        let out = render_tool_only_placeholder(&names);
+        assert!(!out.contains("…"));
+    }
 }
 
 /// Drive a provider stream, forwarding `TextDelta` events to the gRPC
