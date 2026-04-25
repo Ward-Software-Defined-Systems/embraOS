@@ -185,55 +185,51 @@ impl LlmProvider for GeminiProvider {
             },
             None => None,
         };
-        let cache_active = cache_handle.is_some();
-
-        let request_body = GeminiGenerateRequest {
-            contents: &contents,
-            system_instruction: if cache_active {
-                None
-            } else {
-                Some(GeminiSystemInstruction {
-                    parts: vec![GeminiSystemPart {
-                        text: system.text.clone(),
-                    }],
-                })
-            },
-            tools: if cache_active || tools_empty {
-                None
-            } else {
-                Some(&tools.wire_json)
-            },
-            tool_config: if cache_active || tools_empty {
-                None
-            } else {
-                Some(GeminiToolConfig {
-                    function_calling_config: GeminiFunctionCallingConfig {
-                        mode: "AUTO".to_string(),
-                    },
-                })
-            },
-            generation_config: Some(GeminiGenerationConfig {
-                max_output_tokens: MAX_OUTPUT_TOKENS,
-                thinking_config: GeminiThinkingConfig {
-                    thinking_level: THINKING_LEVEL.to_string(),
-                },
-            }),
-            cached_content: cache_handle.as_ref().map(|h| h.cache_name.clone()),
-        };
-
-        let body_json = serde_json::to_value(&request_body)
-            .map_err(|e| ProviderError::Decode(format!("request serialization: {e}")))?;
 
         let url = self.stream_url();
         let api_key = self.api_key.clone();
         let http = self.http.clone();
 
-        // Retry the initial request with exponential backoff on
-        // 429 / 5xx. Mid-stream errors are surfaced via
-        // StreamEvent::Error and not retried (the SSE state can't be
-        // safely resumed).
-        let response = match send_with_retry(&http, &url, &api_key, &body_json).await {
+        // First attempt: with cache (if active). On a stale-cache
+        // error from the server, invalidate the local handle and
+        // retry uncached. The server can delete a cachedContents
+        // resource ahead of our recorded TTL (its own GC, billing
+        // boundary, etc.); when it does, our handle still says the
+        // cache is fresh but using it returns
+        //   403 PERMISSION_DENIED "CachedContent not found"
+        // (or a similar 404). Defensive recovery — never propagate
+        // a cache-stale error to the user when we can just resend
+        // with systemInstruction + tools inline.
+        let body_with_cache = build_request_body(
+            &contents,
+            system,
+            tools,
+            tools_empty,
+            cache_handle.as_ref(),
+        );
+        let body_with_cache_json = serde_json::to_value(&body_with_cache)
+            .map_err(|e| ProviderError::Decode(format!("request serialization: {e}")))?;
+
+        let response = match send_with_retry(&http, &url, &api_key, &body_with_cache_json).await {
             Ok(r) => r,
+            Err(ProviderError::Http { status, body })
+                if cache_handle.is_some() && is_cache_stale_error(status, &body) =>
+            {
+                warn!(
+                    target: "gemini::cache",
+                    status,
+                    "cached_content rejected by server; invalidating local handle and retrying uncached"
+                );
+                if let Some(cache) = &self.cache {
+                    cache.invalidate_local().await;
+                }
+                let body_no_cache =
+                    build_request_body(&contents, system, tools, tools_empty, None);
+                let body_no_cache_json = serde_json::to_value(&body_no_cache).map_err(|e| {
+                    ProviderError::Decode(format!("retry serialization: {e}"))
+                })?;
+                send_with_retry(&http, &url, &api_key, &body_no_cache_json).await?
+            }
             Err(e) => return Err(e),
         };
 
@@ -266,6 +262,68 @@ impl LlmProvider for GeminiProvider {
             fingerprint,
         }
     }
+}
+
+/// Build the Gemini request body with or without a cache handle.
+/// Extracted so `stream_turn` can call it twice when the first
+/// attempt fails with a stale-cache error and we need to retry
+/// uncached.
+fn build_request_body<'a>(
+    contents: &'a [GeminiContent],
+    system: &SystemPromptBundle,
+    tools: &'a ToolManifest,
+    tools_empty: bool,
+    cache_handle: Option<&cache::CacheHandle>,
+) -> GeminiGenerateRequest<'a> {
+    let cache_active = cache_handle.is_some();
+    GeminiGenerateRequest {
+        contents,
+        system_instruction: if cache_active {
+            None
+        } else {
+            Some(GeminiSystemInstruction {
+                parts: vec![GeminiSystemPart {
+                    text: system.text.clone(),
+                }],
+            })
+        },
+        tools: if cache_active || tools_empty {
+            None
+        } else {
+            Some(&tools.wire_json)
+        },
+        tool_config: if cache_active || tools_empty {
+            None
+        } else {
+            Some(GeminiToolConfig {
+                function_calling_config: GeminiFunctionCallingConfig {
+                    mode: "AUTO".to_string(),
+                },
+            })
+        },
+        generation_config: Some(GeminiGenerationConfig {
+            max_output_tokens: MAX_OUTPUT_TOKENS,
+            thinking_config: GeminiThinkingConfig {
+                thinking_level: THINKING_LEVEL.to_string(),
+            },
+        }),
+        cached_content: cache_handle.map(|h| h.cache_name.clone()),
+    }
+}
+
+/// Detect the "you sent a cached_content reference but the server
+/// no longer has that cache" error class. Server returns either
+/// 403 PERMISSION_DENIED or 404 with a `CachedContent`-mentioning
+/// body. We only treat 4xx as cache-stale when the body explicitly
+/// names cached content — a plain 403 with no cache reference is
+/// a real auth/billing problem and should propagate.
+fn is_cache_stale_error(status: u16, body: &str) -> bool {
+    if !matches!(status, 403 | 404) {
+        return false;
+    }
+    body.contains("CachedContent")
+        || body.contains("cached_content")
+        || body.contains("cachedContent")
 }
 
 /// POST the request body and retry on 429 / 5xx with the documented
@@ -404,5 +462,33 @@ mod tests {
         let arr = manifest.wire_json.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert!(arr[0]["functionDeclarations"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn is_cache_stale_error_matches_documented_403_message() {
+        let body = r#"{"error":{"code":403,"message":"CachedContent not found (or permission denied)","status":"PERMISSION_DENIED"}}"#;
+        assert!(is_cache_stale_error(403, body));
+    }
+
+    #[test]
+    fn is_cache_stale_error_matches_404_with_cache_reference() {
+        let body = r#"{"error":{"code":404,"message":"cachedContents/abc123 not found"}}"#;
+        assert!(is_cache_stale_error(404, body));
+    }
+
+    #[test]
+    fn is_cache_stale_error_rejects_403_without_cache_reference() {
+        // Plain auth/billing 403 — must propagate, not be silently
+        // retried as a cache miss.
+        let body = r#"{"error":{"code":403,"message":"API key not authorized","status":"PERMISSION_DENIED"}}"#;
+        assert!(!is_cache_stale_error(403, body));
+    }
+
+    #[test]
+    fn is_cache_stale_error_rejects_other_status_codes() {
+        let body = r#"{"error":{"message":"CachedContent not found"}}"#;
+        assert!(!is_cache_stale_error(401, body));
+        assert!(!is_cache_stale_error(500, body));
+        assert!(!is_cache_stale_error(429, body));
     }
 }

@@ -216,6 +216,17 @@ impl GeminiCacheManager {
         }
     }
 
+    /// Drop only the locally-stored handle without any remote
+    /// DELETE. Used by `stream_turn` when the server returns
+    /// 403/404 on a cached_content reference — the server-side
+    /// resource is already gone, so attempting a remote DELETE
+    /// would just produce another 404. The next ensure_cache will
+    /// recreate fresh.
+    pub async fn invalidate_local(&self) {
+        let _ = self.db.delete(COLLECTION, HANDLE_ID).await;
+        info!(target: "gemini::cache", "cache:delete reason=server_stale (local only)");
+    }
+
     /// Delete a cache handle remote-side. Tolerant of 404 (already
     /// gone).
     pub async fn delete(&self, cache_name: &str) -> Result<(), ProviderError> {
