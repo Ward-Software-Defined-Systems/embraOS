@@ -95,6 +95,22 @@ impl SessionManager {
             self.db.create_collection(&history_collection).await?;
         }
 
+        // Stamp the active provider on the new session so cross-provider
+        // attach checks on subsequent boots have a real value to match
+        // against (Sprint 4: previously left as None, which read_session_provider
+        // defaulted to "anthropic" — incorrect for sessions created under
+        // a Gemini-configured brain).
+        let (provider, model) = match crate::config::load_config(&self.db).await {
+            Ok(cfg) => {
+                let m = match cfg.api_provider.as_str() {
+                    "gemini" => "gemini-3.1-pro",
+                    _ => "opus-4.7",
+                };
+                (Some(cfg.api_provider), Some(m.to_string()))
+            }
+            Err(_) => (None, None),
+        };
+
         let now = Utc::now();
         let meta = SessionMeta {
             id: uuid::Uuid::new_v4().to_string(),
@@ -102,8 +118,8 @@ impl SessionManager {
             state: SessionState::Active,
             created_at: now,
             last_active: now,
-            provider: None,
-            model: None,
+            provider,
+            model,
         };
 
         let history = SessionHistory {

@@ -1919,19 +1919,23 @@ fn resolve_gemini_model_id_inner(env: Option<&str>, cfg_field: Option<&str>) -> 
     "gemini-3.1-pro-preview".to_string()
 }
 
-/// Read `meta.provider` for a session, defaulting to `"anthropic"`
-/// for pre-v9 docs that don't carry the field. Stage 9's migration
-/// stamps the field on every session meta; until then this default
-/// preserves backward compatibility.
+/// Read `meta.provider` for a session. Returns `""` when the field
+/// is absent — `providers_compatible` then short-circuits to true so
+/// missing-field is treated as "compatible with anything" rather
+/// than "I'm anthropic". Pre-v9 docs are stamped by the v9 migration
+/// at boot; new sessions are stamped at create time (see
+/// `SessionManager::create`). The empty-default catches the edge
+/// case where neither has run for a given session (e.g. a session
+/// created post-v10 by a code path that bypasses `SessionManager`).
 async fn read_session_provider(db: &Arc<WardsonDbClient>, session_name: &str) -> String {
     let collection = format!("sessions.{}.meta", session_name);
     match db.read(&collection, session_name).await {
         Ok(meta_doc) => meta_doc
             .get("provider")
             .and_then(|v| v.as_str())
-            .unwrap_or("anthropic")
+            .unwrap_or("")
             .to_string(),
-        Err(_) => "anthropic".to_string(),
+        Err(_) => String::new(),
     }
 }
 
