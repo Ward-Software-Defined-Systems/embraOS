@@ -36,6 +36,14 @@ pub struct SystemConfig {
     /// backward compatibility.
     #[serde(default = "default_api_provider")]
     pub api_provider: String,
+    /// Optional override for the Gemini model id. Defaults to
+    /// `gemini-3.1-pro-preview`. Operators set this to
+    /// `gemini-3.1-pro-preview-customtools` (per spec D8) when the
+    /// standard model is observed ignoring custom tools in favor of
+    /// bash invocations. The brain also honors `EMBRA_GEMINI_MODEL`
+    /// env var which takes precedence over this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gemini_model: Option<String>,
 }
 
 fn default_kg_temporal_window() -> u64 { 1800 }
@@ -109,6 +117,7 @@ pub async fn run_config_wizard() -> Result<SystemConfig> {
         kg_traversal_depth_ceiling: default_kg_depth_ceiling(),
         kg_edge_candidate_limit: default_kg_candidate_limit(),
         api_provider: default_api_provider(),
+        gemini_model: None,
     };
 
     println!();
@@ -471,6 +480,7 @@ pub async fn run_config_wizard_grpc(
         kg_traversal_depth_ceiling: default_kg_depth_ceiling(),
         kg_edge_candidate_limit: default_kg_candidate_limit(),
         api_provider: provider_kind.as_str().to_string(),
+        gemini_model: None,
     };
     save_config(db, &config).await?;
     info!("Config wizard complete, saved to WardSONDB");

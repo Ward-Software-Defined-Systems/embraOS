@@ -161,6 +161,7 @@ impl BrainService for BrainGrpcService {
                     kg_traversal_depth_ceiling: 5,
                     kg_edge_candidate_limit: 50,
                     api_provider: "anthropic".to_string(),
+                    gemini_model: None,
                 });
                 match run_learning_loop(&tx, &mut incoming, &db, &loaded_config, &api_key).await {
                     Ok(()) => {
@@ -437,6 +438,7 @@ async fn handle_request(
                 kg_traversal_depth_ceiling: 5,
                 kg_edge_candidate_limit: 50,
                 api_provider: "anthropic".to_string(),
+                gemini_model: None,
             });
             let config_name = loaded_config.name.clone();
 
@@ -483,9 +485,19 @@ async fn handle_request(
             let provider_kind = ProviderKind::from_str(&loaded_config.api_provider)
                 .unwrap_or(ProviderKind::Anthropic);
             let provider: Arc<dyn LlmProvider> = match provider_kind {
-                ProviderKind::Gemini => Arc::new(
-                    GeminiProvider::new(api_key.to_string()).with_cache(db.clone()),
-                ),
+                ProviderKind::Gemini => {
+                    let model_id = resolve_gemini_model_id(&loaded_config);
+                    info!(
+                        target: "gemini::diag",
+                        model = %model_id,
+                        session = %session_name,
+                        "gemini turn starting"
+                    );
+                    Arc::new(
+                        GeminiProvider::with_model(api_key.to_string(), model_id)
+                            .with_cache(db.clone()),
+                    )
+                }
                 ProviderKind::Anthropic => Arc::new(AnthropicProvider::new(api_key.to_string())),
             };
             let descriptors: Vec<&'static tools::registry::ToolDescriptor> =
@@ -801,6 +813,25 @@ async fn handle_request(
                     }
                 }
             }
+            // Per-turn telemetry — surfaces the customtools-needed
+            // pattern (spec D8). Operators can grep journalctl for
+            // turns where Gemini emitted text but zero tool calls
+            // and consider swapping to gemini-3.1-pro-preview-customtools.
+            if provider_kind == ProviderKind::Gemini {
+                let tool_call_count = trace_handle
+                    .lock()
+                    .map(|g| g.len())
+                    .unwrap_or(0);
+                info!(
+                    target: "gemini::diag",
+                    session = %session_name,
+                    text_chars = last_response_text.len(),
+                    tool_calls = tool_call_count,
+                    iters = tool_iter,
+                    "gemini turn complete"
+                );
+            }
+
             drop(in_turn_guard);
 
             // Drain any /provider switch the operator queued
@@ -1560,6 +1591,38 @@ fn display_model_for(provider: &str) -> &'static str {
     }
 }
 
+/// Pick the Gemini model id, honoring (in priority order):
+/// 1. `EMBRA_GEMINI_MODEL` env var (set by --api-provider startup or
+///    by the operator before brain restart).
+/// 2. `config.system.gemini_model` (persistent, set via wizard or
+///    future `/provider --gemini-model` command).
+/// 3. The provider crate's default constant (`gemini-3.1-pro-preview`).
+///
+/// Used by both the operational and learning paths to bias toward
+/// `gemini-3.1-pro-preview-customtools` when standard Gemini ignores
+/// custom tools (spec D8). Reads env once via the wrapper; the
+/// pure inner is unit-tested directly to avoid env-mutation races
+/// across the test suite.
+fn resolve_gemini_model_id(cfg: &config::SystemConfig) -> String {
+    let env_override = std::env::var("EMBRA_GEMINI_MODEL").ok();
+    resolve_gemini_model_id_inner(env_override.as_deref(), cfg.gemini_model.as_deref())
+}
+
+fn resolve_gemini_model_id_inner(env: Option<&str>, cfg_field: Option<&str>) -> String {
+    if let Some(s) = env {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if let Some(s) = cfg_field {
+        if !s.is_empty() {
+            return s.to_string();
+        }
+    }
+    "gemini-3.1-pro-preview".to_string()
+}
+
 /// Read `meta.provider` for a session, defaulting to `"anthropic"`
 /// for pre-v9 docs that don't carry the field. Stage 9's migration
 /// stamps the field on every session meta; until then this default
@@ -1633,9 +1696,17 @@ async fn run_learning_loop(
     let provider_kind = ProviderKind::from_str(&config.api_provider)
         .unwrap_or(ProviderKind::Anthropic);
     let provider: Arc<dyn LlmProvider> = match provider_kind {
-        ProviderKind::Gemini => Arc::new(
-            GeminiProvider::new(api_key.to_string()).with_cache(db.clone()),
-        ),
+        ProviderKind::Gemini => {
+            let model_id = resolve_gemini_model_id(config);
+            info!(
+                target: "gemini::diag",
+                model = %model_id,
+                "gemini learning turn starting"
+            );
+            Arc::new(
+                GeminiProvider::with_model(api_key.to_string(), model_id).with_cache(db.clone()),
+            )
+        }
         ProviderKind::Anthropic => Arc::new(AnthropicProvider::new(api_key.to_string())),
     };
     let empty_manifest: ToolManifest = provider.build_tool_manifest(&[]);
@@ -2203,6 +2274,44 @@ mod native_loop_tests {
         // Unknown defaults to anthropic display (defensive — never
         // shows an empty model name).
         assert_eq!(display_model_for("unknown"), "opus-4.7");
+    }
+
+    #[test]
+    fn resolve_gemini_model_falls_back_to_default() {
+        assert_eq!(
+            resolve_gemini_model_id_inner(None, None),
+            "gemini-3.1-pro-preview"
+        );
+    }
+
+    #[test]
+    fn resolve_gemini_model_uses_config_field_when_no_env() {
+        assert_eq!(
+            resolve_gemini_model_id_inner(None, Some("gemini-3.1-pro-preview-customtools")),
+            "gemini-3.1-pro-preview-customtools"
+        );
+    }
+
+    #[test]
+    fn resolve_gemini_model_env_overrides_config() {
+        assert_eq!(
+            resolve_gemini_model_id_inner(Some("env-override-id"), Some("config-id")),
+            "env-override-id"
+        );
+    }
+
+    #[test]
+    fn resolve_gemini_model_empty_strings_skip_to_next_layer() {
+        // Whitespace-only env value falls through to config; empty
+        // config field falls through to the default.
+        assert_eq!(
+            resolve_gemini_model_id_inner(Some("   "), Some("from-config")),
+            "from-config"
+        );
+        assert_eq!(
+            resolve_gemini_model_id_inner(Some(""), Some("")),
+            "gemini-3.1-pro-preview"
+        );
     }
 
     #[test]
