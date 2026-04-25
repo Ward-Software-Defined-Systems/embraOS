@@ -85,6 +85,7 @@ impl BrainService for BrainGrpcService {
         let api_key = self.api_key.clone();
         let proactive_rx = self.proactive_rx.clone();
         let in_turn = self.in_turn.clone();
+        let pending_provider = self.pending_provider.clone();
 
         tokio::spawn(async move {
             let mut config_tz = config_tz;
@@ -194,7 +195,7 @@ impl BrainService for BrainGrpcService {
                         match msg {
                             Some(Ok(req)) => {
                                 if let Err(e) = handle_request(
-                                    req, &tx, &db, &session_mgr, &config_tz, &api_key, &in_turn
+                                    req, &tx, &db, &session_mgr, &config_tz, &api_key, &in_turn, &pending_provider
                                 ).await {
                                     error!("Error handling request: {}", e);
                                     let _ = tx.send(Ok(ConversationResponse {
@@ -410,6 +411,7 @@ async fn handle_request(
     config_tz: &str,
     api_key: &str,
     in_turn: &Arc<AtomicBool>,
+    pending_provider: &Arc<Mutex<Option<ProviderKind>>>,
 ) -> anyhow::Result<()> {
     let self_in_turn = in_turn.clone();
     match req.request_type {
@@ -790,6 +792,17 @@ async fn handle_request(
             }
             drop(in_turn_guard);
 
+            // Drain any /provider switch the operator queued
+            // mid-loop. Performed after in_turn clears and before
+            // we save history so the next user-message handler
+            // observes the new provider state.
+            {
+                let mut guard = pending_provider.lock().await;
+                if let Some(target) = guard.take() {
+                    perform_provider_swap(target, db, session_mgr, &tx).await;
+                }
+            }
+
             // Save conversation to session history.
             //
             // Persistence still uses the legacy Message { role, content: String }
@@ -841,7 +854,7 @@ async fn handle_request(
 
         Some(conversation_request::RequestType::SlashCommand(cmd)) => {
             if let Some(synthetic_prompt) = handle_slash_command(
-                &cmd.command, &cmd.args, tx, db, session_mgr, config_tz, api_key
+                &cmd.command, &cmd.args, tx, db, session_mgr, config_tz, api_key, in_turn, pending_provider
             ).await {
                 // Slash command requested a synthetic user turn — feed it through the Brain.
                 let synthetic = ConversationRequest {
@@ -850,7 +863,7 @@ async fn handle_request(
                     )),
                 };
                 Box::pin(handle_request(
-                    synthetic, tx, db, session_mgr, config_tz, api_key, in_turn
+                    synthetic, tx, db, session_mgr, config_tz, api_key, in_turn, pending_provider
                 )).await?;
             }
             Ok(())
@@ -871,11 +884,44 @@ async fn handle_request(
             };
 
             // Ensure session exists
-            if !mgr.session_exists(&session_name).await.unwrap_or(false) {
+            let new_session = !mgr.session_exists(&session_name).await.unwrap_or(false);
+            if new_session {
                 let _ = mgr.create(&session_name).await;
             }
-            mgr.active_session = Some(session_name.clone());
             drop(mgr);
+
+            // Cross-provider session-resume hard-block (locked
+            // decision #3). For an existing session whose meta
+            // recorded a different provider than the active
+            // process-level provider, refuse the attach with a
+            // clear error rather than silently corrupting state on
+            // the first turn.
+            if !new_session {
+                let session_provider = read_session_provider(db, &session_name).await;
+                let active_provider = config::load_config(&**db)
+                    .await
+                    .map(|c| c.api_provider)
+                    .unwrap_or_else(|_| "anthropic".to_string());
+                if !providers_compatible(&session_provider, &active_provider) {
+                    let _ = tx
+                        .send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::System(
+                                SystemMessage {
+                                    content: format!(
+                                        "Session '{}' was recorded under {}. Use /provider {} to continue, or /new <name> to start a fresh session.",
+                                        session_name, session_provider, session_provider
+                                    ),
+                                    msg_type: SystemMessageType::Error as i32,
+                                },
+                            )),
+                        }))
+                        .await;
+                    return Ok(());
+                }
+            }
+
+            // Mark active only after the cross-provider check passes.
+            session_mgr.write().await.active_session = Some(session_name.clone());
 
             // Load and send session history so console displays prior conversation
             {
@@ -940,6 +986,8 @@ async fn handle_slash_command(
     session_mgr: &Arc<RwLock<SessionManager>>,
     config_tz: &str,
     _api_key: &str,
+    in_turn: &Arc<AtomicBool>,
+    pending_provider: &Arc<Mutex<Option<ProviderKind>>>,
 ) -> Option<String> {
     // Helper to send a system message
     let send_msg = |tx: &mpsc::Sender<Result<ConversationResponse, Status>>, content: String| {
@@ -985,6 +1033,9 @@ async fn handle_slash_command(
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
             return Some(build_feedback_loop_prompt());
+        }
+        "/provider" => {
+            handle_provider_command(args, tx, db, session_mgr, in_turn, pending_provider).await;
         }
         "/status" => {
             let status = tools::system_status(db).await;
@@ -1273,6 +1324,233 @@ async fn handle_slash_command(
         }
     }
     None
+}
+
+/// `/provider` command surface: status, switch, and (as deferred via
+/// spec D2) a deny-then-instruct path when no key is recorded for the
+/// alternate provider. Idle switches apply immediately; in-turn
+/// switches queue via `pending_provider` and drain after the loop.
+async fn handle_provider_command(
+    args: &str,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    db: &Arc<WardsonDbClient>,
+    session_mgr: &Arc<RwLock<SessionManager>>,
+    in_turn: &Arc<AtomicBool>,
+    pending_provider: &Arc<Mutex<Option<ProviderKind>>>,
+) {
+    let send_msg = |content: String, kind: SystemMessageType| {
+        let tx = tx.clone();
+        async move {
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage {
+                            content,
+                            msg_type: kind as i32,
+                        },
+                    )),
+                }))
+                .await;
+        }
+    };
+
+    let action = args.trim();
+    match action {
+        "" | "status" => {
+            let cfg = config::load_config(&**db).await.ok();
+            let provider = cfg
+                .as_ref()
+                .map(|c| c.api_provider.clone())
+                .unwrap_or_else(|| "anthropic".to_string());
+            let model = display_model_for(&provider);
+            let session = session_mgr
+                .read()
+                .await
+                .active_session
+                .clone()
+                .unwrap_or_else(|| "<none>".to_string());
+            send_msg(
+                format!(
+                    "Active provider: {}. Model: {}. Session: {}.",
+                    provider, model, session
+                ),
+                SystemMessageType::Info,
+            )
+            .await;
+        }
+        "anthropic" | "gemini" => {
+            let target = ProviderKind::from_str(action).unwrap();
+            // Pre-check: do we have a key for the target? Currently
+            // config.system.api_key is single-key, so switching to a
+            // provider whose key was never wizard-validated would
+            // fail at the next turn. Surface that early.
+            let cfg = match config::load_config(&**db).await {
+                Ok(c) => c,
+                Err(_) => {
+                    send_msg(
+                        "No system config found — re-run setup wizard first.".to_string(),
+                        SystemMessageType::Error,
+                    )
+                    .await;
+                    return;
+                }
+            };
+            if cfg.api_provider == target.as_str() {
+                send_msg(
+                    format!("Already using {}. No change.", target.as_str()),
+                    SystemMessageType::Info,
+                )
+                .await;
+                return;
+            }
+            // Single-key model — switching to a provider whose key
+            // shape doesn't match the stored key won't work at
+            // runtime. Surface the deferred D2 limitation explicitly.
+            // (A key-per-provider redesign is /provider --setup,
+            // tracked as deferred.)
+            let key_looks_compatible = match target {
+                ProviderKind::Anthropic => cfg.api_key.starts_with("sk-"),
+                ProviderKind::Gemini => !cfg.api_key.is_empty()
+                    && !cfg.api_key.starts_with("sk-"),
+            };
+            if !key_looks_compatible {
+                send_msg(
+                    format!(
+                        "No API key recorded for {}. Wipe /embra/state/api_key and reboot to re-run the setup wizard, or restart with the {} env var set.",
+                        target.as_str(),
+                        match target {
+                            ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
+                            ProviderKind::Gemini => "GEMINI_API_KEY",
+                        }
+                    ),
+                    SystemMessageType::Error,
+                )
+                .await;
+                return;
+            }
+
+            if in_turn.load(Ordering::SeqCst) {
+                let mut guard = pending_provider.lock().await;
+                let prev = guard.replace(target);
+                let body = match prev {
+                    Some(p) if p != target => format!(
+                        "Switch queued — replacing previously queued switch to {}.",
+                        p.as_str()
+                    ),
+                    _ => "Switch queued. Will apply after current turn completes.".to_string(),
+                };
+                send_msg(body, SystemMessageType::Info).await;
+                return;
+            }
+            perform_provider_swap(target, db, session_mgr, tx).await;
+        }
+        _ => {
+            send_msg(
+                format!("Unknown provider '{}'. Use 'anthropic' or 'gemini'.", action),
+                SystemMessageType::Error,
+            )
+            .await;
+        }
+    }
+}
+
+/// Apply a provider switch. Runs after `in_turn` has cleared (either
+/// because the loop just ended or because the command arrived idle).
+/// Updates config.system.api_provider, the active session's
+/// meta.provider/meta.model, and /embra/state/api_provider.
+async fn perform_provider_swap(
+    target: ProviderKind,
+    db: &Arc<WardsonDbClient>,
+    session_mgr: &Arc<RwLock<SessionManager>>,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+) {
+    // 1. Update config doc.
+    if let Ok(mut cfg) = config::load_config(&**db).await {
+        cfg.api_provider = target.as_str().to_string();
+        if let Err(e) = config::save_config(&**db, &cfg).await {
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage {
+                            content: format!("Failed to persist provider switch: {}", e),
+                            msg_type: SystemMessageType::Error as i32,
+                        },
+                    )),
+                }))
+                .await;
+            return;
+        }
+    }
+
+    // 2. Update active session's meta.provider / meta.model so
+    //    cross-session resume sees the right provider.
+    let active = session_mgr.read().await.active_session.clone();
+    if let Some(name) = active {
+        let collection = format!("sessions.{}.meta", name);
+        if let Ok(meta_doc) = db.read(&collection, &name).await {
+            let mut doc = meta_doc;
+            if let Some(obj) = doc.as_object_mut() {
+                obj.insert(
+                    "provider".into(),
+                    serde_json::Value::String(target.as_str().to_string()),
+                );
+                obj.insert(
+                    "model".into(),
+                    serde_json::Value::String(display_model_for(target.as_str()).to_string()),
+                );
+            }
+            let _ = db.update(&collection, &name, &doc).await;
+        }
+    }
+
+    // 3. Persist to STATE so embrad picks the right provider on the
+    //    next boot.
+    let _ = std::fs::write("/embra/state/api_provider", target.as_str());
+
+    let _ = tx
+        .send(Ok(ConversationResponse {
+            response_type: Some(conversation_response::ResponseType::System(
+                SystemMessage {
+                    content: format!(
+                        "Provider switched to {}. Next turn will use {}.",
+                        target.as_str(),
+                        display_model_for(target.as_str())
+                    ),
+                    msg_type: SystemMessageType::Info as i32,
+                },
+            )),
+        }))
+        .await;
+}
+
+fn display_model_for(provider: &str) -> &'static str {
+    match provider {
+        "gemini" => "gemini-3.1-pro",
+        _ => "opus-4.7",
+    }
+}
+
+/// Read `meta.provider` for a session, defaulting to `"anthropic"`
+/// for pre-v9 docs that don't carry the field. Stage 9's migration
+/// stamps the field on every session meta; until then this default
+/// preserves backward compatibility.
+async fn read_session_provider(db: &Arc<WardsonDbClient>, session_name: &str) -> String {
+    let collection = format!("sessions.{}.meta", session_name);
+    match db.read(&collection, session_name).await {
+        Ok(meta_doc) => meta_doc
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .unwrap_or("anthropic")
+            .to_string(),
+        Err(_) => "anthropic".to_string(),
+    }
+}
+
+/// Two providers are compatible if they're the same string or one
+/// side is empty. Treats blank/missing as "no constraint" so attach
+/// of a freshly-created session against any active provider works.
+fn providers_compatible(a: &str, b: &str) -> bool {
+    a.is_empty() || b.is_empty() || a == b
 }
 
 /// Embedded feedback-loop protocol spec (Phase 3 preview, v2).
@@ -1877,6 +2155,28 @@ mod native_loop_tests {
             usage: None,
         };
         assert_eq!(turn_text(&turn), "Hello, world");
+    }
+
+    #[test]
+    fn display_model_maps_known_providers() {
+        assert_eq!(display_model_for("anthropic"), "opus-4.7");
+        assert_eq!(display_model_for("gemini"), "gemini-3.1-pro");
+        // Unknown defaults to anthropic display (defensive — never
+        // shows an empty model name).
+        assert_eq!(display_model_for("unknown"), "opus-4.7");
+    }
+
+    #[test]
+    fn providers_compatible_handles_empty_and_match() {
+        assert!(providers_compatible("anthropic", "anthropic"));
+        assert!(providers_compatible("gemini", "gemini"));
+        assert!(!providers_compatible("anthropic", "gemini"));
+        assert!(!providers_compatible("gemini", "anthropic"));
+        // Either side empty (e.g. brand-new session before v9 migration)
+        // is permissive — no false-positive blocks.
+        assert!(providers_compatible("", "anthropic"));
+        assert!(providers_compatible("gemini", ""));
+        assert!(providers_compatible("", ""));
     }
 
     #[test]
