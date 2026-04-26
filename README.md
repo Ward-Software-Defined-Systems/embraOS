@@ -253,7 +253,7 @@ All sessions share the same intelligence — same memory, same identity, same so
 | `/ssh-copy-id <user@host>` | Copy SSH public key to remote host (RFC 1918 only) |
 | `/git-setup <name> \| <email>` | Set git user.name and user.email |
 | `/provider` | Show active LLM provider, model, and session |
-| `/provider <anthropic\|gemini>` | Switch provider for future turns (idle → swap immediately; mid-tool-loop → queue and apply after the loop completes) |
+| `/provider <anthropic\|gemini>` | Switch provider for future turns. Requires no active session — close the current one with `/close` first. Autonomous in-turn switches queue and apply after the loop completes |
 | `/provider --setup [<kind>]` | Add an alternate provider's API key without re-running the wizard — multi-turn flow: type the command, then type the key on the next message. Auto-targets the missing provider when `<kind>` is omitted |
 | `/feedback-loop` | **(EXPERIMENTAL)** Trigger Phase 3 Continuity Engine self-evaluation protocol — the Brain walks through a multi-step gather/evaluate/reconcile/execute sequence using existing tools |
 | `/copy` | Copy conversation to clipboard via OSC 52 — `/copy 5` for last 5 messages (disabled — Sprint 5) |
@@ -439,7 +439,7 @@ Phase 1 includes 90 internal tools the intelligence invokes during conversation.
 | **Phase 1 — Sprint 1** | Bug fixes & UX — tool feedback loop, timezone display, multi-line input, git/SSH/GitHub setup commands, input word-wrap, tool output truncation, Unicode crash fix | ✅ **Complete** |
 | **Phase 1 — Sprint 2** | Cross-session knowledge graph — semantic/procedural promotion, typed/weighted edges, BFS traversal, graph-aware retrieval, 6 KG tools, `/feedback-loop` command | ✅ **Complete** |
 | **Phase 1 — Sprint 3** | WardSONDB pluggable storage engine (`--storage-engine <fjall\|rocksdb>`), EXPR-01 expression panel, NATIVE-TOOLS-01 Anthropic native tool-use migration, tool-coverage expansion, four post-merge fix passes closing 15 Embra_Debug issues (90 tools, 142 tests) | ✅ **Complete** |
-| **Phase 1 — Sprint 4** | GEMINI-PROVIDER-01 — pluggable LLM provider abstraction, Anthropic + Google Gemini 3.1 Pro backends, neutral IR loop driver, Gemini explicit context cache lifecycle, per-provider API keys (schema v10), `/provider [status\|<kind>\|--setup]` slash command, wizard provider step (90 tools, 211 tests) | ✅ **Complete** |
+| **Phase 1 — Sprint 4** | GEMINI-PROVIDER-01 — pluggable LLM provider abstraction, Anthropic + Google Gemini 3.1 Pro backends, neutral IR loop driver, Gemini explicit context cache lifecycle, per-provider API keys (schema v10), `/provider [status\|<kind>\|--setup]` slash command, wizard provider step + post-merge cross-provider guard hotfix (90 tools, 219 tests) | ✅ **Complete** |
 | **Pit Stop** | Code review branch — security audit, AI slop cleanup, refactoring | Planned |
 | **Phase 2** | Terminal & Sessions — Full TUI rewrite, API Web Searches via `embra-guardian` v1 (including additional prompt injection protection for the returned results) | Planned |
 | **Phase 3** | Module System — `embra-guardian` v2, `embractl` management CLI (the `talosctl` equivalent), `embra-brain` Local/Hybrid option via external Ollama but default/recommended remains Anthropic API, LLM-driven Continuity Engine feedback loop (local/API/Hybrid options), MCP server modules via `embra-guardian` governance proxy, containerd runtime, governed capability expansion | Planned |
