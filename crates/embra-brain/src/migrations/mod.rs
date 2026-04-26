@@ -847,18 +847,27 @@ async fn run_v9_pluggable_provider(db: &WardsonDbClient) -> Result<()> {
             meta_collections.len()
         );
         for collection in meta_collections {
-            // The meta doc uses the session name as its `_id` — the
-            // session-create path always writes `_id == name`.
-            let session_name = collection
-                .strip_prefix("sessions.")
-                .and_then(|s| s.strip_suffix(".meta"))
-                .unwrap_or("");
-            if session_name.is_empty() {
-                continue;
-            }
-            let mut meta_doc = match db.read(collection, session_name).await {
-                Ok(d) => d,
+            // Session-meta docs are written without an explicit `_id`,
+            // so WardSONDB auto-generates one — `db.read(_, session_name)`
+            // would 404. Query the collection for its single doc and
+            // update by the discovered `_id` (matches the pattern in
+            // `SessionManager::update_state` / `::reattach`).
+            let results = match db.query(collection, &serde_json::json!({})).await {
+                Ok(r) => r,
                 Err(_) => continue,
+            };
+            let mut meta_doc = match results.into_iter().next() {
+                Some(d) => d,
+                None => continue,
+            };
+            let id = meta_doc
+                .get("_id")
+                .or_else(|| meta_doc.get("id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let id = match id {
+                Some(i) => i,
+                None => continue,
             };
             let mut mutated = false;
             if let Some(obj) = meta_doc.as_object_mut() {
@@ -878,7 +887,7 @@ async fn run_v9_pluggable_provider(db: &WardsonDbClient) -> Result<()> {
                 }
             }
             if mutated {
-                if let Err(e) = db.update(collection, session_name, &meta_doc).await {
+                if let Err(e) = db.update(collection, &id, &meta_doc).await {
                     warn!(
                         "Migration v9: failed to update {}: {}",
                         collection, e

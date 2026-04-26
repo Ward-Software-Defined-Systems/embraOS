@@ -296,6 +296,20 @@ impl BrainService for BrainGrpcService {
 
     async fn switch_session(&self, request: Request<SwitchSessionRequest>) -> Result<Response<SwitchSessionResponse>, Status> {
         let name = request.into_inner().name;
+
+        // Cross-provider guard — same rule as SessionAttach. The check
+        // runs before any state mutation so a rejected switch leaves
+        // the existing active session intact.
+        if let Err((session_provider, active_provider)) =
+            check_session_provider(&self.db, &name).await
+        {
+            return Err(Status::failed_precondition(format!(
+                "Session '{}' was recorded under {}, but the active provider is {}. \
+                 Switch providers via /provider {} (with no active session) before re-attaching.",
+                name, session_provider, active_provider, session_provider
+            )));
+        }
+
         let mut mgr = self.session_manager.write().await;
 
         // Detach current session if any
@@ -986,12 +1000,9 @@ async fn handle_request(
             // clear error rather than silently corrupting state on
             // the first turn.
             if !new_session {
-                let session_provider = read_session_provider(db, &session_name).await;
-                let active_provider = config::load_config(&**db)
-                    .await
-                    .map(|c| c.api_provider)
-                    .unwrap_or_else(|_| "anthropic".to_string());
-                if !providers_compatible(&session_provider, &active_provider) {
+                if let Err((session_provider, _)) =
+                    check_session_provider(db, &session_name).await
+                {
                     let _ = tx
                         .send(Ok(ConversationResponse {
                             response_type: Some(conversation_response::ResponseType::System(
@@ -1197,6 +1208,21 @@ async fn handle_slash_command(
             } else {
                 let mut mgr = session_mgr.write().await;
                 if mgr.session_exists(args).await.unwrap_or(false) {
+                    // Cross-provider guard — same rule as SessionAttach.
+                    if let Err((session_provider, _)) =
+                        check_session_provider(db, args).await
+                    {
+                        drop(mgr);
+                        send_msg(
+                            tx,
+                            format!(
+                                "Session '{}' was recorded under {}. Use /provider {} to continue, or /new <name> to start a fresh session.",
+                                args, session_provider, session_provider
+                            ),
+                        )
+                        .await;
+                        return None;
+                    }
                     let _ = mgr.reattach(args).await;
                     mgr.active_session = Some(args.to_string());
                     // Load and send session history
@@ -1612,6 +1638,25 @@ async fn handle_provider_command(
                 return;
             }
 
+            // Cross-provider invariant: a session is bound to the
+            // provider it was created under. Switching providers
+            // mid-session would mutate the active session's meta and
+            // corrupt the very state the SessionAttach load-guard
+            // exists to protect.
+            if let Some(ref active) = session_mgr.read().await.active_session {
+                send_msg(
+                    format!(
+                        "Cannot switch providers while a session is active (current: '{}'). \
+                         Run /close to close it first, then /provider {}.",
+                        active,
+                        target.as_str()
+                    ),
+                    SystemMessageType::Error,
+                )
+                .await;
+                return;
+            }
+
             if in_turn.load(Ordering::SeqCst) {
                 let mut guard = pending_provider.lock().await;
                 let prev = guard.replace(target);
@@ -1695,23 +1740,39 @@ async fn perform_provider_swap(
     }
 
     // 2. Update active session's meta.provider / meta.model so
-    //    cross-session resume sees the right provider.
+    //    cross-session resume sees the right provider. With the
+    //    cross-provider guard in `handle_provider_command` rejecting
+    //    swaps while a session is active, this block is defensive —
+    //    `active_session` should be `None` at this point. Kept in
+    //    place so the meta stays correct if the guard is ever bypassed.
+    //    Uses query (not `db.read(_, name)`) because session-meta docs
+    //    have auto-generated `_id`s, not the session name.
     let active_session = session_mgr.read().await.active_session.clone();
     if let Some(ref name) = active_session {
         let collection = format!("sessions.{}.meta", name);
-        if let Ok(meta_doc) = db.read(&collection, name).await {
-            let mut doc = meta_doc;
-            if let Some(obj) = doc.as_object_mut() {
-                obj.insert(
-                    "provider".into(),
-                    serde_json::Value::String(target.as_str().to_string()),
-                );
-                obj.insert(
-                    "model".into(),
-                    serde_json::Value::String(display_model_for(target.as_str()).to_string()),
-                );
+        if let Ok(results) = db.query(&collection, &serde_json::json!({})).await {
+            if let Some(mut doc) = results.into_iter().next() {
+                let id = doc
+                    .get("_id")
+                    .or_else(|| doc.get("id"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                if let Some(id) = id {
+                    if let Some(obj) = doc.as_object_mut() {
+                        obj.insert(
+                            "provider".into(),
+                            serde_json::Value::String(target.as_str().to_string()),
+                        );
+                        obj.insert(
+                            "model".into(),
+                            serde_json::Value::String(
+                                display_model_for(target.as_str()).to_string(),
+                            ),
+                        );
+                    }
+                    let _ = db.update(&collection, &id, &doc).await;
+                }
             }
-            let _ = db.update(&collection, name, &doc).await;
         }
     }
 
@@ -1935,31 +1996,69 @@ fn resolve_gemini_model_id_inner(env: Option<&str>, cfg_field: Option<&str>) -> 
     "gemini-3.1-pro-preview".to_string()
 }
 
-/// Read `meta.provider` for a session. Returns `""` when the field
-/// is absent — `providers_compatible` then short-circuits to true so
-/// missing-field is treated as "compatible with anything" rather
-/// than "I'm anthropic". Pre-v9 docs are stamped by the v9 migration
-/// at boot; new sessions are stamped at create time (see
-/// `SessionManager::create`). The empty-default catches the edge
-/// case where neither has run for a given session (e.g. a session
-/// created post-v10 by a code path that bypasses `SessionManager`).
-async fn read_session_provider(db: &Arc<WardsonDbClient>, session_name: &str) -> String {
-    let collection = format!("sessions.{}.meta", session_name);
-    match db.read(&collection, session_name).await {
-        Ok(meta_doc) => meta_doc
-            .get("provider")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-        Err(_) => String::new(),
+/// Check that `session_name`'s recorded provider matches the
+/// currently-active provider. Returns `Ok(())` when compatible (or
+/// when the active provider can't be loaded — fail-open on config
+/// errors so the existing user-facing errors elsewhere surface them).
+/// Returns `Err((session_provider, active_provider))` when the user
+/// must take action — caller formats the error message to include
+/// the session name and any UX-specific context.
+///
+/// Every session-activation path must call this before setting
+/// `active_session`: `SessionAttach` handler, `/switch` slash command,
+/// and the `switch_session` gRPC RPC. `SessionManager::create` does
+/// not need it (just-created sessions are stamped from the active
+/// provider by definition).
+async fn check_session_provider(
+    db: &Arc<WardsonDbClient>,
+    session_name: &str,
+) -> Result<(), (String, String)> {
+    let session_provider = read_session_provider(db, session_name).await;
+    let active_provider = config::load_config(&**db)
+        .await
+        .map(|c| c.api_provider)
+        .unwrap_or_else(|_| "anthropic".to_string());
+    if providers_compatible(&session_provider, &active_provider) {
+        Ok(())
+    } else {
+        Err((session_provider, active_provider))
     }
 }
 
-/// Two providers are compatible if they're the same string or one
-/// side is empty. Treats blank/missing as "no constraint" so attach
-/// of a freshly-created session against any active provider works.
+/// Read `meta.provider` for a session. Defaults to `"anthropic"`
+/// when the field is absent — pre-Sprint-4 sessions are by definition
+/// anthropic (no other provider existed). The v9 migration backfills
+/// legacy docs and `SessionManager::create` stamps new sessions at
+/// create time, so the default only applies to the rare edge case
+/// where a meta doc exists with no provider field at all.
+async fn read_session_provider(db: &Arc<WardsonDbClient>, session_name: &str) -> String {
+    // Session-meta docs are written via `db.write` with no explicit
+    // `_id`, so WardSONDB auto-generates one — `db.read(collection, name)`
+    // would 404. Every other reader of `sessions.<name>.meta`
+    // (`SessionManager::update_state`, `::reattach`, `::list`) uses
+    // `db.query` for this reason. Match that pattern here, then default
+    // to `"anthropic"` if the doc lacks a provider field (legacy pre-Sprint-4
+    // session that v9 migration also missed for the same _id reason).
+    let collection = format!("sessions.{}.meta", session_name);
+    match db.query(&collection, &serde_json::json!({})).await {
+        Ok(results) => results
+            .into_iter()
+            .next()
+            .and_then(|doc| {
+                doc.get("provider")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "anthropic".to_string()),
+        Err(_) => "anthropic".to_string(),
+    }
+}
+
+/// Strict equality. The caller (`read_session_provider`) is
+/// responsible for normalising missing values to a concrete provider
+/// before reaching this function — there is no wildcard.
 fn providers_compatible(a: &str, b: &str) -> bool {
-    a.is_empty() || b.is_empty() || a == b
+    a == b
 }
 
 /// Embedded feedback-loop protocol spec (Phase 3 preview, v2).
@@ -2713,16 +2812,18 @@ mod native_loop_tests {
     }
 
     #[test]
-    fn providers_compatible_handles_empty_and_match() {
+    fn providers_compatible_strict_equality() {
         assert!(providers_compatible("anthropic", "anthropic"));
         assert!(providers_compatible("gemini", "gemini"));
         assert!(!providers_compatible("anthropic", "gemini"));
         assert!(!providers_compatible("gemini", "anthropic"));
-        // Either side empty (e.g. brand-new session before v9 migration)
-        // is permissive — no false-positive blocks.
-        assert!(providers_compatible("", "anthropic"));
-        assert!(providers_compatible("gemini", ""));
-        assert!(providers_compatible("", ""));
+        // Empty/missing is no longer a wildcard. The caller
+        // (`read_session_provider`) defaults missing fields to
+        // `"anthropic"` before reaching this function, so empty
+        // values reaching this function only happen on programmer
+        // error and should NOT match.
+        assert!(!providers_compatible("", "anthropic"));
+        assert!(!providers_compatible("gemini", ""));
     }
 
     #[test]
