@@ -27,6 +27,13 @@ use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, warn};
 
+/// Default per-turn tool-iteration cap (Embra_Debug #80). Operators can
+/// override via `/iter-cap`, which writes `SystemConfig.max_tool_iterations`;
+/// the loop driver reads `loaded_config.max_tool_iterations.unwrap_or(DEFAULT_MAX_TOOL_ITERATIONS)`
+/// fresh each turn. Used by both the cap site and the `/iter-cap` handler so
+/// the canonical default lives in exactly one place.
+const DEFAULT_MAX_TOOL_ITERATIONS: usize = 100;
+
 pub struct BrainGrpcService {
     db: Arc<WardsonDbClient>,
     session_manager: Arc<RwLock<SessionManager>>,
@@ -172,6 +179,7 @@ impl BrainService for BrainGrpcService {
                     gemini_model: None,
                     anthropic_api_key: None,
                     gemini_api_key: None,
+                    max_tool_iterations: None,
                 });
                 match run_learning_loop(&tx, &mut incoming, &db, &loaded_config, &api_key).await {
                     Ok(()) => {
@@ -478,6 +486,7 @@ async fn handle_request(
                 gemini_model: None,
                 anthropic_api_key: None,
                 gemini_api_key: None,
+                max_tool_iterations: None,
             });
             let config_name = loaded_config.name.clone();
 
@@ -599,8 +608,16 @@ async fn handle_request(
                 )),
             })).await;
 
-            // Native tool-use loop driven by TurnOutcome.
-            const MAX_TOOL_ITERATIONS: usize = 10;
+            // Native tool-use loop driven by TurnOutcome. Cap default sized
+            // for multi-file code-review traversals (Embra_Debug #80) — at
+            // 10 the model regularly truncated mid-loop on real review
+            // sessions. Operators can override per-install via `/iter-cap`
+            // (persisted in SystemConfig). Clamp(1, 1000) is defense-in-
+            // depth against hand-edited bogus values.
+            let max_tool_iterations: usize = loaded_config
+                .max_tool_iterations
+                .unwrap_or(DEFAULT_MAX_TOOL_ITERATIONS)
+                .clamp(1, 1000);
             let mut tool_iter: usize = 0;
             let mut last_response_text = String::new();
             // Embra_Debug #70: collect tool names dispatched across the
@@ -715,12 +732,132 @@ async fn handle_request(
                     }
 
                     TurnOutcome::ToolUse => {
-                        if tool_iter >= MAX_TOOL_ITERATIONS {
+                        if tool_iter >= max_tool_iterations {
+                            // Embra_Debug #80: graceful cap termination.
+                            // Silent break here used to leave undispatched
+                            // ToolCall blocks dangling in `api_messages` and
+                            // gave the model no chance to wrap up — the UI
+                            // surfaced `(no response)` or the tool-name
+                            // placeholder. Now we (1) surface a Warning
+                            // frame, (2) synthesize is_error=true ToolResults
+                            // for every undispatched call so the next request
+                            // is wire-valid, (3) make one final stream_turn
+                            // letting the model summarize, then break
+                            // unconditionally regardless of outcome.
                             warn!(
                                 target: "dispatch",
                                 session = %session_name,
-                                "tool iteration cap hit ({MAX_TOOL_ITERATIONS})"
+                                "tool iteration cap hit ({max_tool_iterations})"
                             );
+                            let _ = tx
+                                .send(Ok(ConversationResponse {
+                                    response_type: Some(
+                                        conversation_response::ResponseType::System(
+                                            SystemMessage {
+                                                content: format!(
+                                                    "Tool iteration cap of {max_tool_iterations} reached — asking the model to summarize and stop."
+                                                ),
+                                                msg_type: SystemMessageType::Warning as i32,
+                                            },
+                                        ),
+                                    ),
+                                }))
+                                .await;
+                            let cap_msg = format!(
+                                "System: tool iteration cap of {max_tool_iterations} reached. \
+                                 No further tool calls will be dispatched in this turn. \
+                                 Summarize your findings to the user now, or ask the operator for guidance."
+                            );
+                            let synthetic =
+                                synthesize_cap_results(&current_turn.content, &cap_msg);
+                            if !synthetic.is_empty() {
+                                api_messages
+                                    .push(ApiMessage::user_tool_results(synthetic));
+                            }
+                            match provider
+                                .stream_turn(&api_messages, &system_bundle, &tool_manifest)
+                                .await
+                            {
+                                Ok(stream) => {
+                                    if let Some(final_turn) =
+                                        collect_response(stream, &tx, &config_name).await?
+                                    {
+                                        let final_text = turn_text(&final_turn);
+                                        api_messages.push(ApiMessage::assistant_blocks(
+                                            final_turn.content,
+                                        ));
+                                        if !final_text.is_empty() {
+                                            last_response_text = final_text;
+                                        } else {
+                                            // Model produced no text on the final
+                                            // summary turn (another ToolUse, or
+                                            // pure thinking). Stream a synthetic
+                                            // token so the UI doesn't go silent
+                                            // after the Warning frame.
+                                            let fallback = format!(
+                                                "(tool iteration cap of {max_tool_iterations} reached; model did not produce a final summary)"
+                                            );
+                                            let _ = tx
+                                                .send(Ok(ConversationResponse {
+                                                    response_type: Some(
+                                                        conversation_response::ResponseType::Token(
+                                                            StreamToken {
+                                                                text: fallback.clone(),
+                                                            },
+                                                        ),
+                                                    ),
+                                                }))
+                                                .await;
+                                            last_response_text = fallback;
+                                        }
+                                    } else {
+                                        let fallback = format!(
+                                            "(tool iteration cap of {max_tool_iterations} reached; no final response received)"
+                                        );
+                                        let _ = tx
+                                            .send(Ok(ConversationResponse {
+                                                response_type: Some(
+                                                    conversation_response::ResponseType::Token(
+                                                        StreamToken {
+                                                            text: fallback.clone(),
+                                                        },
+                                                    ),
+                                                ),
+                                            }))
+                                            .await;
+                                        if last_response_text.is_empty() {
+                                            last_response_text = fallback;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        target: "dispatch",
+                                        session = %session_name,
+                                        error = %e,
+                                        "final summary call failed after iteration cap"
+                                    );
+                                    let _ = tx
+                                        .send(Ok(ConversationResponse {
+                                            response_type: Some(
+                                                conversation_response::ResponseType::System(
+                                                    SystemMessage {
+                                                        content: format!(
+                                                            "Final summary call failed after iteration cap: {e}"
+                                                        ),
+                                                        msg_type: SystemMessageType::Error as i32,
+                                                    },
+                                                ),
+                                            ),
+                                        }))
+                                        .await;
+                                    if last_response_text.is_empty() {
+                                        last_response_text = format!(
+                                            "(tool iteration cap of {max_tool_iterations} reached; final summary call errored)"
+                                        );
+                                    }
+                                }
+                            }
                             break;
                         }
                         tool_iter += 1;
@@ -1148,7 +1285,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini>       Switch provider for future turns\n  /provider --setup [<kind>]         Add an alternate provider's API key (multi-turn)\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini>       Switch provider for future turns\n  /provider --setup [<kind>]         Add an alternate provider's API key (multi-turn)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -1156,6 +1293,9 @@ async fn handle_slash_command(
         }
         "/provider" => {
             handle_provider_command(args, tx, db, session_mgr, in_turn, pending_provider, pending_key_setup).await;
+        }
+        "/iter-cap" => {
+            handle_iter_cap_command(args, tx, db).await;
         }
         "/status" => {
             let status = tools::system_status(db).await;
@@ -1680,6 +1820,137 @@ async fn handle_provider_command(
             .await;
         }
     }
+}
+
+/// `/iter-cap [<N> | reset]` — show, set, or reset the per-turn tool
+/// iteration cap. Persisted via `SystemConfig.max_tool_iterations`;
+/// the loop driver reads `loaded_config.max_tool_iterations` fresh
+/// each turn so changes take effect on the next user message
+/// (Embra_Debug #80 follow-up).
+async fn handle_iter_cap_command(
+    args: &str,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    db: &Arc<WardsonDbClient>,
+) {
+    let send_msg = |content: String, kind: SystemMessageType| {
+        let tx = tx.clone();
+        async move {
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage {
+                            content,
+                            msg_type: kind as i32,
+                        },
+                    )),
+                }))
+                .await;
+        }
+    };
+
+    let mut cfg = match config::load_config(&**db).await {
+        Ok(c) => c,
+        Err(e) => {
+            send_msg(
+                format!("/iter-cap: failed to load config: {e}"),
+                SystemMessageType::Error,
+            )
+            .await;
+            return;
+        }
+    };
+
+    let trimmed = args.trim();
+
+    // No args → status
+    if trimmed.is_empty() {
+        let current = cfg
+            .max_tool_iterations
+            .unwrap_or(DEFAULT_MAX_TOOL_ITERATIONS);
+        let suffix = if cfg.max_tool_iterations.is_some() {
+            "set"
+        } else {
+            "default"
+        };
+        send_msg(
+            format!(
+                "Tool iteration cap: {current} ({suffix}). Default {DEFAULT_MAX_TOOL_ITERATIONS}. \
+                 Use `/iter-cap <N>` (1..=1000) to change, `/iter-cap reset` to restore default."
+            ),
+            SystemMessageType::Info,
+        )
+        .await;
+        return;
+    }
+
+    // Reset / default → clear the override
+    if trimmed.eq_ignore_ascii_case("reset") || trimmed.eq_ignore_ascii_case("default") {
+        cfg.max_tool_iterations = None;
+        if let Err(e) = config::save_config(&**db, &cfg).await {
+            send_msg(
+                format!("/iter-cap: failed to save: {e}"),
+                SystemMessageType::Error,
+            )
+            .await;
+            return;
+        }
+        send_msg(
+            format!(
+                "Tool iteration cap reset to default ({DEFAULT_MAX_TOOL_ITERATIONS}). \
+                 Takes effect on the next user message."
+            ),
+            SystemMessageType::Info,
+        )
+        .await;
+        return;
+    }
+
+    // Numeric set
+    match parse_iter_cap_value(trimmed) {
+        Ok(n) => {
+            cfg.max_tool_iterations = Some(n);
+            if let Err(e) = config::save_config(&**db, &cfg).await {
+                send_msg(
+                    format!("/iter-cap: failed to save: {e}"),
+                    SystemMessageType::Error,
+                )
+                .await;
+                return;
+            }
+            send_msg(
+                format!(
+                    "Tool iteration cap set to {n}. Takes effect on the next user message."
+                ),
+                SystemMessageType::Info,
+            )
+            .await;
+        }
+        Err(msg) => {
+            let current = cfg
+                .max_tool_iterations
+                .unwrap_or(DEFAULT_MAX_TOOL_ITERATIONS);
+            send_msg(
+                format!(
+                    "/iter-cap: {msg}. Usage: `/iter-cap [<N> | reset]` (current: {current})."
+                ),
+                SystemMessageType::Error,
+            )
+            .await;
+        }
+    }
+}
+
+/// Parse a positive integer in the inclusive range 1..=1000. Pure
+/// free-fn so the parser can be unit-tested without spinning up a
+/// gRPC channel.
+fn parse_iter_cap_value(s: &str) -> Result<usize, String> {
+    let n: usize = s
+        .parse()
+        .map_err(|_| format!("'{s}' is not a positive integer"))?;
+    if !(1..=1000).contains(&n) {
+        return Err(format!("value {n} out of range (expected 1..=1000)"));
+    }
+    Ok(n)
 }
 
 /// Apply a provider switch. Runs after `in_turn` has cleared (either
@@ -2586,6 +2857,29 @@ fn render_tool_only_placeholder(names: &[String]) -> String {
     format!("[tool calls: {}{}]", head, suffix)
 }
 
+/// When the loop driver hits its iteration cap with `current_turn` carrying
+/// undispatched `ToolCall` blocks, synthesize one `Block::ToolResult` per
+/// call so the next API request satisfies Anthropic's "every tool_use must
+/// be answered by a tool_result" invariant. Embra_Debug #80.
+///
+/// `cap_msg` is replayed verbatim into every result with `is_error: true`,
+/// instructing the model to summarize and stop. Non-`ToolCall` blocks in
+/// `blocks` are ignored. An empty input yields an empty output — callers
+/// must skip pushing a degenerate `user_tool_results(vec![])`.
+fn synthesize_cap_results(blocks: &[Block], cap_msg: &str) -> Vec<Block> {
+    blocks
+        .iter()
+        .filter_map(|b| match b {
+            Block::ToolCall { id, .. } => Some(Block::ToolResult {
+                call_id: id.clone(),
+                content: cap_msg.to_string(),
+                is_error: true,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tool_only_placeholder_tests {
     use super::render_tool_only_placeholder;
@@ -2623,6 +2917,130 @@ mod tool_only_placeholder_tests {
         let names: Vec<String> = (0..8).map(|i| format!("t{}", i)).collect();
         let out = render_tool_only_placeholder(&names);
         assert!(!out.contains("…"));
+    }
+}
+
+#[cfg(test)]
+mod cap_results_tests {
+    use super::synthesize_cap_results;
+    use crate::provider::ir::Block;
+    use serde_json::json;
+
+    fn tool_call(id: &str, name: &str) -> Block {
+        Block::ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            args: json!({}),
+            provider_opaque: None,
+        }
+    }
+
+    #[test]
+    fn empty_input_yields_empty_output() {
+        let out = synthesize_cap_results(&[], "cap reached");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn ignores_non_toolcall_blocks() {
+        let blocks = vec![
+            Block::Text("model thinking out loud".into()),
+            Block::ProviderOpaque(json!({"thinking": "..."})),
+        ];
+        let out = synthesize_cap_results(&blocks, "cap reached");
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn one_synthetic_result_per_toolcall() {
+        let blocks = vec![
+            tool_call("call_a", "file_read"),
+            Block::Text("interleaved prose".into()),
+            tool_call("call_b", "git_log"),
+            tool_call("call_c", "knowledge_query"),
+        ];
+        let out = synthesize_cap_results(&blocks, "cap reached");
+        assert_eq!(out.len(), 3);
+        let ids: Vec<&str> = out
+            .iter()
+            .map(|b| match b {
+                Block::ToolResult { call_id, .. } => call_id.as_str(),
+                _ => panic!("expected only ToolResult blocks"),
+            })
+            .collect();
+        assert_eq!(ids, vec!["call_a", "call_b", "call_c"]);
+        for b in &out {
+            match b {
+                Block::ToolResult {
+                    content, is_error, ..
+                } => {
+                    assert!(*is_error, "synthesized result must be flagged is_error");
+                    assert_eq!(content, "cap reached");
+                }
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn preserves_original_call_id_order() {
+        let blocks: Vec<Block> = (0..5)
+            .map(|i| tool_call(&format!("c{i}"), "any_tool"))
+            .collect();
+        let out = synthesize_cap_results(&blocks, "cap");
+        let ids: Vec<String> = out
+            .iter()
+            .map(|b| match b {
+                Block::ToolResult { call_id, .. } => call_id.clone(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(ids, vec!["c0", "c1", "c2", "c3", "c4"]);
+    }
+}
+
+#[cfg(test)]
+mod iter_cap_parser_tests {
+    use super::parse_iter_cap_value;
+
+    #[test]
+    fn valid_mid_range() {
+        assert_eq!(parse_iter_cap_value("250"), Ok(250));
+    }
+
+    #[test]
+    fn boundary_low_inclusive() {
+        assert_eq!(parse_iter_cap_value("1"), Ok(1));
+    }
+
+    #[test]
+    fn boundary_high_inclusive() {
+        assert_eq!(parse_iter_cap_value("1000"), Ok(1000));
+    }
+
+    #[test]
+    fn zero_is_out_of_range() {
+        let err = parse_iter_cap_value("0").unwrap_err();
+        assert!(err.contains("out of range"), "got: {err}");
+    }
+
+    #[test]
+    fn above_thousand_is_out_of_range() {
+        let err = parse_iter_cap_value("1001").unwrap_err();
+        assert!(err.contains("out of range"), "got: {err}");
+    }
+
+    #[test]
+    fn non_numeric_is_parse_error() {
+        let err = parse_iter_cap_value("abc").unwrap_err();
+        assert!(err.contains("not a positive integer"), "got: {err}");
+    }
+
+    #[test]
+    fn negative_is_parse_error() {
+        // usize parse fails on the leading '-' before any range check
+        let err = parse_iter_cap_value("-5").unwrap_err();
+        assert!(err.contains("not a positive integer"), "got: {err}");
     }
 }
 

@@ -54,6 +54,13 @@ pub struct SystemConfig {
     pub anthropic_api_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gemini_api_key: Option<String>,
+    /// Maximum tool-use iterations per user turn. Read fresh each turn
+    /// at the loop driver's `loaded_config` site; falls back to
+    /// `DEFAULT_MAX_TOOL_ITERATIONS` (100) when unset. Settable at
+    /// runtime via `/iter-cap`. Clamped to 1..=1000 at the read site
+    /// so a hand-edited bogus value can't break the loop driver.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tool_iterations: Option<usize>,
 }
 
 impl SystemConfig {
@@ -151,6 +158,7 @@ pub async fn run_config_wizard() -> Result<SystemConfig> {
         gemini_model: None,
         anthropic_api_key: None,
         gemini_api_key: None,
+        max_tool_iterations: None,
     };
 
     println!();
@@ -535,6 +543,7 @@ pub async fn run_config_wizard_grpc(
         gemini_model: None,
         anthropic_api_key,
         gemini_api_key,
+        max_tool_iterations: None,
     };
     save_config(db, &config).await?;
     info!("Config wizard complete, saved to WardSONDB");
@@ -637,6 +646,7 @@ mod key_lookup_tests {
             gemini_model: None,
             anthropic_api_key: anth.map(str::to_string),
             gemini_api_key: gem.map(str::to_string),
+            max_tool_iterations: None,
         }
     }
 
@@ -696,4 +706,80 @@ fn detect_timezone() -> String {
         }
     }
     "UTC".into()
+}
+
+#[cfg(test)]
+mod max_tool_iterations_serde_tests {
+    use super::SystemConfig;
+    use serde_json::json;
+
+    fn minimal_cfg() -> SystemConfig {
+        SystemConfig {
+            name: "Embra".into(),
+            api_key: "k".into(),
+            timezone: "UTC".into(),
+            deployment_mode: "phase1".into(),
+            created_at: String::new(),
+            version: "test".into(),
+            github_token: None,
+            kg_temporal_window_secs: 1800,
+            kg_max_traversal_depth: 3,
+            kg_traversal_depth_ceiling: 5,
+            kg_edge_candidate_limit: 50,
+            api_provider: "anthropic".into(),
+            gemini_model: None,
+            anthropic_api_key: None,
+            gemini_api_key: None,
+            max_tool_iterations: None,
+        }
+    }
+
+    #[test]
+    fn none_serializes_without_field() {
+        let cfg = minimal_cfg();
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert!(
+            json.get("max_tool_iterations").is_none(),
+            "None should serialize as absent (skip_serializing_if): {json:?}"
+        );
+    }
+
+    #[test]
+    fn some_serializes_value() {
+        let mut cfg = minimal_cfg();
+        cfg.max_tool_iterations = Some(250);
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(json.get("max_tool_iterations"), Some(&json!(250)));
+    }
+
+    #[test]
+    fn missing_field_deserializes_as_none() {
+        // Pre-existing config docs in production WardSONDB lack the field
+        // entirely. Serde must accept that and yield None (no migration
+        // needed). Round-trip a minimal doc shape:
+        let doc = json!({
+            "name": "Embra",
+            "api_key": "k",
+            "timezone": "UTC",
+            "deployment_mode": "phase1",
+            "created_at": "",
+            "version": "test",
+            "kg_temporal_window_secs": 1800,
+            "kg_max_traversal_depth": 3,
+            "kg_traversal_depth_ceiling": 5,
+            "kg_edge_candidate_limit": 50,
+            "api_provider": "anthropic",
+        });
+        let cfg: SystemConfig = serde_json::from_value(doc).unwrap();
+        assert!(cfg.max_tool_iterations.is_none());
+    }
+
+    #[test]
+    fn explicit_value_round_trips() {
+        let mut cfg = minimal_cfg();
+        cfg.max_tool_iterations = Some(42);
+        let json = serde_json::to_value(&cfg).unwrap();
+        let back: SystemConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(back.max_tool_iterations, Some(42));
+    }
 }

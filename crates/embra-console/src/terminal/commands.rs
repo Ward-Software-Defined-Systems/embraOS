@@ -31,6 +31,11 @@ Provider:
   /provider <anthropic|gemini>   Switch provider for future turns
   /provider --setup [<kind>]     Add an alternate provider's API key (multi-turn)
 
+Tool loop:
+  /iter-cap                      Show the per-turn tool iteration cap
+  /iter-cap <N>                  Set the cap (1..=1000, default 100)
+  /iter-cap reset                Restore the default cap
+
 Setup:
   /github-token <token>          Set GitHub token
   /ssh-keygen                    Generate SSH key pair

@@ -255,6 +255,9 @@ All sessions share the same intelligence — same memory, same identity, same so
 | `/provider` | Show active LLM provider, model, and session |
 | `/provider <anthropic\|gemini>` | Switch provider for future turns. Requires no active session — close the current one with `/close` first. Autonomous in-turn switches queue and apply after the loop completes |
 | `/provider --setup [<kind>]` | Add an alternate provider's API key without re-running the wizard — multi-turn flow: type the command, then type the key on the next message. Auto-targets the missing provider when `<kind>` is omitted |
+| `/iter-cap` | Show the current per-turn tool iteration cap (default 100) |
+| `/iter-cap <N>` | Set the per-turn tool iteration cap (1..=1000). Persisted via `SystemConfig`; takes effect on the next user message. On cap-hit the loop emits a warning frame, asks the model to summarize, and terminates gracefully |
+| `/iter-cap reset` | Restore the default iteration cap (100) |
 | `/feedback-loop` | **(EXPERIMENTAL)** Trigger Phase 3 Continuity Engine self-evaluation protocol — the Brain walks through a multi-step gather/evaluate/reconcile/execute sequence using existing tools |
 | `/copy` | Copy conversation to clipboard via OSC 52 — `/copy 5` for last 5 messages (disabled — Sprint 5) |
 
