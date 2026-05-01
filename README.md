@@ -37,7 +37,7 @@ Think of it as an AI that lives somewhere and is always there when you need it.
 
 Phase 1 builds a QEMU-bootable x86_64 disk image with an immutable SquashFS rootfs, service supervision, and soul verification at boot.
 
-#### Ubuntu 24.04 (Recommended — Full Build Pipeline)
+#### Ubuntu 24.04 / 26.04 (Recommended — Full Build Pipeline)
 
 ```bash
 # Install dependencies
@@ -92,6 +92,8 @@ cd embraOS
 ```
 
 > **Storage engine:** The `--storage-engine` flag is required and is baked into the embrad binary at build time. WardSONDB locks the choice into the DATA partition on first boot via a `.engine` marker file — switching engines later requires wiping DATA.
+
+> **Buildroot version:** Defaults to `2026.02.1` (LTS, designed for Ubuntu 26.04 era). Override with `BUILDROOT_VERSION=2024.02 ./scripts/build-image.sh ...` if you need to fall back on an older host.
 
 On first boot, the Config Wizard runs — name your intelligence, choose your LLM provider (Anthropic Claude or Google Gemini), enter the corresponding API key, set your timezone. Each field is validated before commit — an invalid API key or garbage timezone re-prompts instead of persisting. After setup, you're in a full TUI conversation with styled text, thinking indicators, and tool execution.
 
