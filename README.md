@@ -46,7 +46,7 @@ Phase 1 builds a QEMU-bootable x86_64 disk image with an immutable SquashFS root
 sudo apt-get update && sudo apt-get install -y \
   build-essential gcc g++ unzip bc cpio rsync wget python3 file \
   protobuf-compiler musl-tools clang libclang-dev \
-  qemu-system-x86 libelf-dev libssl-dev genext2fs
+  qemu-system-x86 libcrypt-dev libelf-dev libssl-dev genext2fs
 
 # Install musl cross-toolchain (gcc+g++ with a matching musl libstdc++).
 # Ubuntu's musl-tools only wraps the host gcc and drags in a glibc-linked

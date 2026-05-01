@@ -20,6 +20,9 @@
 
 set -euo pipefail
 
+# Buildroot release pin. Override at runtime: BUILDROOT_VERSION=2025.02.13 ./scripts/build-image.sh ...
+BUILDROOT_VERSION="${BUILDROOT_VERSION:-2026.02.1}"
+
 # macOS-compatible nproc
 nproc_compat() {
     if command -v nproc &>/dev/null; then
@@ -126,8 +129,15 @@ fi
 BUILDROOT_DIR="${BUILDROOT_DIR:-buildroot-src}"
 if [ ! -d "$BUILDROOT_DIR" ]; then
     git clone https://github.com/buildroot/buildroot.git "$BUILDROOT_DIR"
-    (cd "$BUILDROOT_DIR" && git checkout 2024.02)  # Use a stable release
 fi
+# Ensure the clone is at the pinned version; if not, switch and wipe stale build state.
+(cd "$BUILDROOT_DIR" && \
+    current=$(git describe --tags --exact-match 2>/dev/null || echo "") ; \
+    if [ "$current" != "$BUILDROOT_VERSION" ]; then \
+        git fetch --tags && \
+        git checkout "$BUILDROOT_VERSION" && \
+        rm -rf output/ ; \
+    fi)
 
 # Clean stale Buildroot package caches so fresh binaries are picked up
 # Includes embraOS packages AND upstream packages whose config may have changed
