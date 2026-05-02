@@ -43,6 +43,8 @@ Phase 1 builds a QEMU-bootable x86_64 disk image with an immutable SquashFS root
 # Install dependencies
 # clang + libclang-dev are required by bindgen (pulled in by WardSONDB's
 # rocksdb → zstd-sys dep chain) to parse C headers at build time.
+# libcrypt-dev provides crypt.h for Buildroot's host-mkpasswd build —
+# Ubuntu 26.04 split crypt.h out of glibc into the standalone libxcrypt.
 sudo apt-get update && sudo apt-get install -y \
   build-essential gcc g++ unzip bc cpio rsync wget python3 file \
   protobuf-compiler musl-tools clang libclang-dev \
