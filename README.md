@@ -37,16 +37,18 @@ Think of it as an AI that lives somewhere and is always there when you need it.
 
 Phase 1 builds a QEMU-bootable x86_64 disk image with an immutable SquashFS rootfs, service supervision, and soul verification at boot.
 
-#### Ubuntu 24.04 (Recommended — Full Build Pipeline)
+#### Ubuntu 24.04 / 26.04 (Recommended — Full Build Pipeline)
 
 ```bash
 # Install dependencies
 # clang + libclang-dev are required by bindgen (pulled in by WardSONDB's
 # rocksdb → zstd-sys dep chain) to parse C headers at build time.
+# libcrypt-dev provides crypt.h for Buildroot's host-mkpasswd build —
+# Ubuntu 26.04 split crypt.h out of glibc into the standalone libxcrypt.
 sudo apt-get update && sudo apt-get install -y \
   build-essential gcc g++ unzip bc cpio rsync wget python3 file \
   protobuf-compiler musl-tools clang libclang-dev \
-  qemu-system-x86 libelf-dev libssl-dev genext2fs
+  qemu-system-x86 libcrypt-dev libelf-dev libssl-dev genext2fs
 
 # Install musl cross-toolchain (gcc+g++ with a matching musl libstdc++).
 # Ubuntu's musl-tools only wraps the host gcc and drags in a glibc-linked
@@ -92,6 +94,8 @@ cd embraOS
 ```
 
 > **Storage engine:** The `--storage-engine` flag is required and is baked into the embrad binary at build time. WardSONDB locks the choice into the DATA partition on first boot via a `.engine` marker file — switching engines later requires wiping DATA.
+
+> **Buildroot version:** Defaults to `2026.02.1` (LTS, designed for Ubuntu 26.04 era). Override with `BUILDROOT_VERSION=2024.02 ./scripts/build-image.sh ...` if you need to fall back on an older host.
 
 On first boot, the Config Wizard runs — name your intelligence, choose your LLM provider (Anthropic Claude or Google Gemini), enter the corresponding API key, set your timezone. Each field is validated before commit — an invalid API key or garbage timezone re-prompts instead of persisting. After setup, you're in a full TUI conversation with styled text, thinking indicators, and tool execution.
 

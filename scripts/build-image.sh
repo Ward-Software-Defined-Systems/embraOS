@@ -20,6 +20,9 @@
 
 set -euo pipefail
 
+# Buildroot release pin. Override at runtime: BUILDROOT_VERSION=2024.02 ./scripts/build-image.sh ...
+BUILDROOT_VERSION="${BUILDROOT_VERSION:-2026.02.1}"
+
 # macOS-compatible nproc
 nproc_compat() {
     if command -v nproc &>/dev/null; then
@@ -126,8 +129,25 @@ fi
 BUILDROOT_DIR="${BUILDROOT_DIR:-buildroot-src}"
 if [ ! -d "$BUILDROOT_DIR" ]; then
     git clone https://github.com/buildroot/buildroot.git "$BUILDROOT_DIR"
-    (cd "$BUILDROOT_DIR" && git checkout 2024.02)  # Use a stable release
 fi
+# Ensure the clone is at the pinned version. Switching versions wipes
+# output/ to avoid mixing stale Buildroot state across releases; refuse
+# the switch if the user has local changes in $BUILDROOT_DIR.
+(
+    cd "$BUILDROOT_DIR"
+    current=$(git describe --tags --exact-match 2>/dev/null || echo "")
+    if [ "$current" != "$BUILDROOT_VERSION" ]; then
+        if ! git diff-index --quiet HEAD --; then
+            echo "ERROR: $BUILDROOT_DIR has local changes; refusing to switch to $BUILDROOT_VERSION." >&2
+            echo "       Commit/stash them, or set BUILDROOT_VERSION=${current:-<your-version>} to pin to the current checkout." >&2
+            exit 1
+        fi
+        echo "=== Buildroot: switching ${current:-unknown} -> $BUILDROOT_VERSION (wiping output/) ==="
+        git fetch --tags
+        git checkout "$BUILDROOT_VERSION"
+        rm -rf output/
+    fi
+)
 
 # Clean stale Buildroot package caches so fresh binaries are picked up
 # Includes embraOS packages AND upstream packages whose config may have changed
