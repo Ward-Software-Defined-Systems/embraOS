@@ -14,6 +14,7 @@
 pub mod anthropic;
 pub mod gemini;
 pub mod ir;
+pub mod openai_compat;
 pub mod schema_util;
 
 pub use ir::*;
