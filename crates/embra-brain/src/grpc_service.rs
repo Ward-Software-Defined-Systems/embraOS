@@ -492,11 +492,39 @@ async fn handle_request(
             });
             let config_name = loaded_config.name.clone();
 
-            if api_key.is_empty() {
+            // Provider-aware credential precheck. For Anthropic/Gemini,
+            // require a key (either boot-time --api-key or the resolved
+            // per-provider field). For OpenAI-compat presets, no api_key
+            // is expected — endpoint+model presence is the relevant
+            // configuration check, handled per-call in
+            // build_openai_compat_provider.
+            let active_kind = ProviderKind::from_str(&loaded_config.api_provider)
+                .unwrap_or(ProviderKind::Anthropic);
+            let needs_api_key = matches!(
+                active_kind,
+                ProviderKind::Anthropic | ProviderKind::Gemini
+            );
+            if needs_api_key
+                && api_key.is_empty()
+                && loaded_config.key_for(active_kind).is_none()
+            {
+                let provider_label = match active_kind {
+                    ProviderKind::Anthropic => "Anthropic",
+                    ProviderKind::Gemini => "Gemini",
+                    _ => unreachable!(),
+                };
+                let env_var = match active_kind {
+                    ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
+                    ProviderKind::Gemini => "GEMINI_API_KEY",
+                    _ => unreachable!(),
+                };
                 let _ = tx.send(Ok(ConversationResponse {
                     response_type: Some(conversation_response::ResponseType::System(
                         SystemMessage {
-                            content: "No Anthropic API key configured. Set ANTHROPIC_API_KEY or run config wizard.".to_string(),
+                            content: format!(
+                                "No {provider_label} API key configured. Set {env_var}, run /provider --setup {}, or re-run the wizard.",
+                                active_kind.as_str()
+                            ),
                             msg_type: SystemMessageType::Error as i32,
                         }
                     )),
