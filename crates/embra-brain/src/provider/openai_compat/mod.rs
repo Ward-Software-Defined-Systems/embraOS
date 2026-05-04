@@ -315,8 +315,13 @@ impl LlmProvider for OpenAICompatProvider {
             messages: wire_messages,
             stream: true,
             tools: if has_tools { Some(tools_vec) } else { None },
+            // OpenAI canonical `tool_choice`: plain string `"auto"`,
+            // NOT Anthropic's `{"type":"auto"}` object form. LM Studio
+            // emits `Invalid tool_choice type: 'object'. Supported
+            // string values: none, auto, required` for the object form.
+            // Stage 3 copied Anthropic's syntax by mistake.
             tool_choice: if has_tools {
-                Some(json!({"type": "auto"}))
+                Some(json!("auto"))
             } else {
                 None
             },
@@ -1248,6 +1253,95 @@ mod tests {
         // (only the canonical OpenAI o-series-mini/pro/preview names).
         assert!(!model_supports_reasoning_effort("hello1"));
         assert!(!model_supports_reasoning_effort("o3"));
+    }
+
+    #[tokio::test]
+    async fn stream_turn_sends_tool_choice_as_string_not_object() {
+        // LM Studio rejects `tool_choice: {"type":"auto"}` with
+        // `Invalid tool_choice type: 'object'`. OpenAI canonical
+        // form is the plain string `"auto"`. This test asserts the
+        // wire body sends the string form when tools are present.
+        let server = MockServer::start().await;
+        let body = sse_body(&[
+            r#"{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
+        ]);
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(body)
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        let provider =
+            OpenAICompatProvider::lm_studio(server.uri(), None, "qwen3.6:35b".to_string());
+        // Manifest with one tool so has_tools is true and tool_choice
+        // is emitted.
+        let manifest = ToolManifest {
+            wire_json: json!([{
+                "type": "function",
+                "function": {"name": "test", "description": "x", "parameters": {"type":"object","properties":{}}}
+            }]),
+            fingerprint: "0".to_string(),
+        };
+        let _stream = provider
+            .stream_turn(
+                &[ApiMessage::user_text("hi")],
+                &system_bundle(),
+                &manifest,
+            )
+            .await
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        let body_json: JsonValue = serde_json::from_slice(&requests[0].body).unwrap();
+        // Must be the string "auto", NOT an object {"type":"auto"}.
+        assert_eq!(
+            body_json["tool_choice"],
+            json!("auto"),
+            "tool_choice must be the canonical OpenAI string form"
+        );
+        assert!(
+            !body_json["tool_choice"].is_object(),
+            "tool_choice must not be an object (LM Studio rejects)"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_turn_omits_tool_choice_when_no_tools() {
+        // No tools → tool_choice must be absent, not "none".
+        let server = MockServer::start().await;
+        let body = sse_body(&[
+            r#"{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
+        ]);
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(body)
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        let provider = OpenAICompatProvider::ollama(server.uri(), None, "m".to_string());
+        let _stream = provider
+            .stream_turn(
+                &[ApiMessage::user_text("hi")],
+                &system_bundle(),
+                &empty_manifest(),
+            )
+            .await
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        let body_json: JsonValue = serde_json::from_slice(&requests[0].body).unwrap();
+        assert!(
+            body_json.get("tool_choice").is_none(),
+            "tool_choice must be omitted when no tools are present"
+        );
+        assert!(
+            body_json.get("tools").is_none(),
+            "tools array must also be omitted"
+        );
     }
 
     #[tokio::test]
