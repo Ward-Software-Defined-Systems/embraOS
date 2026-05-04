@@ -206,6 +206,48 @@ impl OpenAICompatProvider {
     }
 }
 
+/// Heuristic on `model_id` to decide whether `reasoning_effort` is
+/// meaningful for this model. Per Locked Decision #4, the parameter
+/// is sent only to reasoning-effort-aware models and omitted entirely
+/// for everything else. False negatives (a reasoning model we miss)
+/// degrade to no-effort-control output; false positives (sending to
+/// a non-reasoning model) produce server-side log warnings without
+/// affecting the response.
+///
+/// Pattern criteria — case-insensitive substring or prefix match:
+/// - **gpt-oss family** (`gpt-oss:`, `*/gpt-oss-*`): OpenAI's
+///   launch-partner reasoning model on Ollama.
+/// - **OpenAI o-series** (`o1-mini`, `o1-preview`, `o3-mini`,
+///   `o3-pro`, `o4-mini`): small reasoning models hosted via LM
+///   Studio per its 0.3.23+ alignment-with-o3-mini changelog note.
+/// - **`-thinking`**: Qwen3-thinking variants, Claude-thinking-style
+///   models, etc.
+/// - **`deepseek-r1`** / **`deepseek-r2`**: DeepSeek's reasoning family.
+///
+/// Standard non-reasoning models (Qwen3.6 base, Llama 3.x, Mistral)
+/// fall through to `false`.
+pub(crate) fn model_supports_reasoning_effort(model_id: &str) -> bool {
+    let lower = model_id.to_lowercase();
+    if lower.starts_with("gpt-oss") || lower.contains("/gpt-oss") {
+        return true;
+    }
+    if lower.contains("o1-mini")
+        || lower.contains("o1-preview")
+        || lower.contains("o3-mini")
+        || lower.contains("o3-pro")
+        || lower.contains("o4-mini")
+    {
+        return true;
+    }
+    if lower.contains("-thinking") || lower.contains("_thinking") {
+        return true;
+    }
+    if lower.contains("deepseek-r1") || lower.contains("deepseek-r2") {
+        return true;
+    }
+    false
+}
+
 /// Decide whether a failed attempt warrants one retry. Connection
 /// errors and 5xx responses retry once after a 1s delay; everything
 /// else propagates immediately.
@@ -278,10 +320,18 @@ impl LlmProvider for OpenAICompatProvider {
             } else {
                 None
             },
-            // Locked Decision #4: send "high" when we have a reasoning-
-            // capable model. Servers that don't honor this either
-            // silently drop or 400; we let the error path surface.
-            reasoning_effort: Some("high".to_string()),
+            // Locked Decision #4: send "high" only when the active
+            // model is reasoning-effort-aware. Sending to a non-
+            // reasoning model produces a `No valid custom reasoning
+            // fields found` warning on the server side (LM Studio)
+            // and is silently dropped (Ollama). Omit entirely when
+            // unsupported — matches the spec's "parameter omitted
+            // entirely when it doesn't" wording verbatim.
+            reasoning_effort: if model_supports_reasoning_effort(&self.model_id) {
+                Some("high".to_string())
+            } else {
+                None
+            },
             max_tokens: None,
         };
 
@@ -1144,6 +1194,138 @@ mod tests {
         assert_eq!(
             OpenAiCompatPreset::LmStudio.default_base_url(),
             "http://localhost:1234"
+        );
+    }
+
+    #[test]
+    fn model_supports_reasoning_effort_recognizes_gpt_oss() {
+        assert!(model_supports_reasoning_effort("gpt-oss:20b"));
+        assert!(model_supports_reasoning_effort("gpt-oss:120b"));
+        assert!(model_supports_reasoning_effort("openai/gpt-oss-120b"));
+    }
+
+    #[test]
+    fn model_supports_reasoning_effort_recognizes_o_series() {
+        assert!(model_supports_reasoning_effort("o1-mini"));
+        assert!(model_supports_reasoning_effort("o1-preview"));
+        assert!(model_supports_reasoning_effort("o3-mini"));
+        assert!(model_supports_reasoning_effort("o3-pro-2026"));
+        assert!(model_supports_reasoning_effort("o4-mini-preview"));
+    }
+
+    #[test]
+    fn model_supports_reasoning_effort_recognizes_thinking_variants() {
+        assert!(model_supports_reasoning_effort(
+            "qwen3.6-32b-thinking-mlx-4bit"
+        ));
+        assert!(model_supports_reasoning_effort("Claude-3.5-thinking"));
+        assert!(model_supports_reasoning_effort(
+            "unsloth/Qwen3-thinking-32b"
+        ));
+    }
+
+    #[test]
+    fn model_supports_reasoning_effort_recognizes_deepseek_r() {
+        assert!(model_supports_reasoning_effort("deepseek-r1:32b"));
+        assert!(model_supports_reasoning_effort("DeepSeek-r2-7B"));
+    }
+
+    #[test]
+    fn model_supports_reasoning_effort_rejects_standard_models() {
+        // Non-reasoning models — sending reasoning_effort to these
+        // produces "No valid custom reasoning fields found" warnings
+        // in LM Studio's server logs.
+        assert!(!model_supports_reasoning_effort(
+            "unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit"
+        ));
+        assert!(!model_supports_reasoning_effort("qwen3.6:35b"));
+        assert!(!model_supports_reasoning_effort("llama3.2:8b"));
+        assert!(!model_supports_reasoning_effort("mistral:7b"));
+        assert!(!model_supports_reasoning_effort(
+            "mlx-community/Llama-3.3-70B-Instruct"
+        ));
+        // Bare `o1` / `o3` / `o4` substrings shouldn't false-positive
+        // (only the canonical OpenAI o-series-mini/pro/preview names).
+        assert!(!model_supports_reasoning_effort("hello1"));
+        assert!(!model_supports_reasoning_effort("o3"));
+    }
+
+    #[tokio::test]
+    async fn stream_turn_omits_reasoning_effort_for_non_reasoning_model() {
+        // Capture the request body LM Studio receives and assert the
+        // reasoning_effort field is absent for a standard model.
+        let server = MockServer::start().await;
+        let body = sse_body(&[
+            r#"{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
+        ]);
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .and(wiremock::matchers::body_partial_json(json!({
+                "stream": true,
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(body)
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        let provider = OpenAICompatProvider::lm_studio(
+            server.uri(),
+            None,
+            "unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit".to_string(),
+        );
+        let _stream = provider
+            .stream_turn(
+                &[ApiMessage::user_text("hi")],
+                &system_bundle(),
+                &empty_manifest(),
+            )
+            .await
+            .unwrap();
+        // Inspect the captured request via wiremock's received_requests.
+        let requests = server.received_requests().await.unwrap();
+        let req = requests.first().expect("expected one request");
+        let body_str = std::str::from_utf8(&req.body).unwrap();
+        let body_json: JsonValue = serde_json::from_str(body_str).unwrap();
+        assert!(
+            body_json.get("reasoning_effort").is_none(),
+            "reasoning_effort must be omitted for non-reasoning models, got: {}",
+            body_str
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_turn_sends_reasoning_effort_for_gpt_oss() {
+        let server = MockServer::start().await;
+        let body = sse_body(&[
+            r#"{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
+        ]);
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(body)
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        let provider =
+            OpenAICompatProvider::ollama(server.uri(), None, "gpt-oss:20b".to_string());
+        let _stream = provider
+            .stream_turn(
+                &[ApiMessage::user_text("hi")],
+                &system_bundle(),
+                &empty_manifest(),
+            )
+            .await
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        let req = requests.first().expect("expected one request");
+        let body_json: JsonValue = serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(
+            body_json.get("reasoning_effort").and_then(|v| v.as_str()),
+            Some("high")
         );
     }
 
