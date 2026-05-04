@@ -23,11 +23,8 @@
 
 use serde_json::Value as JsonValue;
 
+use crate::provider::schema_util::{self, InlineRefsError};
 use crate::tools::registry::ToolDescriptor;
-
-/// Recursion ceiling for `$ref` expansion. Higher than any plausible
-/// real schema; finite to ensure we exit cyclic graphs cleanly.
-const MAX_INLINE_DEPTH: usize = 32;
 
 /// Schema-meta keywords that schemars or upstream callers may emit
 /// but Gemini does NOT document as accepted in
@@ -62,12 +59,8 @@ const STRIP_KEYS: &[&str] = &[
 pub enum TranslateError {
     #[error("tool '{tool}': unsupported combinator '{kw}' (Gemini accepts only anyOf)")]
     UnsupportedCombinator { tool: String, kw: &'static str },
-    #[error("tool '{tool}': $ref '{reference}' could not be resolved (no matching definition)")]
-    MissingDefinition { tool: String, reference: String },
-    #[error("tool '{tool}': cyclic $ref expansion in schema")]
-    CyclicRef { tool: String },
-    #[error("tool '{tool}': unsupported $ref pointer '{reference}' (only #/definitions/* and #/$defs/* are inlined)")]
-    UnsupportedRef { tool: String, reference: String },
+    #[error(transparent)]
+    InlineRefs(#[from] InlineRefsError),
 }
 
 /// Translate every descriptor and return the Gemini `tools` array shape:
@@ -94,81 +87,14 @@ pub fn translate(descriptors: &[&'static ToolDescriptor]) -> Result<JsonValue, T
 /// Translate one tool's schema. Public so the universal-coverage test
 /// can pin individual offenders when something fails.
 pub fn translate_schema(tool_name: &str, mut schema: JsonValue) -> Result<JsonValue, TranslateError> {
-    let definitions = extract_definitions(&mut schema);
-    inline_refs(tool_name, &mut schema, &definitions, 0)?;
+    let definitions = schema_util::extract_definitions(&mut schema);
+    schema_util::inline_refs(tool_name, &mut schema, &definitions)?;
     collapse_single_all_of(&mut schema);
     collapse_literal_enum_oneof(&mut schema);
     reject_combinators(tool_name, &schema)?;
     uppercase_types(&mut schema);
     strip_unsupported(&mut schema);
     Ok(schema)
-}
-
-/// Pull the `definitions` and `$defs` maps off the root and merge
-/// them. `$defs` wins on collision (newer keyword).
-fn extract_definitions(schema: &mut JsonValue) -> serde_json::Map<String, JsonValue> {
-    let mut combined = serde_json::Map::new();
-    if let JsonValue::Object(map) = schema {
-        if let Some(JsonValue::Object(defs)) = map.remove("definitions") {
-            for (k, v) in defs {
-                combined.insert(k, v);
-            }
-        }
-        if let Some(JsonValue::Object(defs)) = map.remove("$defs") {
-            for (k, v) in defs {
-                combined.insert(k, v);
-            }
-        }
-    }
-    combined
-}
-
-/// Recursively replace `{"$ref": "#/definitions/Foo"}` with the
-/// content of `definitions["Foo"]`. Bounded recursion catches cycles.
-fn inline_refs(
-    tool: &str,
-    schema: &mut JsonValue,
-    definitions: &serde_json::Map<String, JsonValue>,
-    depth: usize,
-) -> Result<(), TranslateError> {
-    if depth > MAX_INLINE_DEPTH {
-        return Err(TranslateError::CyclicRef {
-            tool: tool.to_string(),
-        });
-    }
-    match schema {
-        JsonValue::Object(map) => {
-            // If this object IS a $ref, replace it wholesale.
-            if let Some(reference) = map.get("$ref").and_then(|v| v.as_str()).map(str::to_string) {
-                let key = reference
-                    .strip_prefix("#/definitions/")
-                    .or_else(|| reference.strip_prefix("#/$defs/"))
-                    .ok_or_else(|| TranslateError::UnsupportedRef {
-                        tool: tool.to_string(),
-                        reference: reference.clone(),
-                    })?;
-                let resolved = definitions.get(key).cloned().ok_or_else(|| {
-                    TranslateError::MissingDefinition {
-                        tool: tool.to_string(),
-                        reference: reference.clone(),
-                    }
-                })?;
-                *schema = resolved;
-                inline_refs(tool, schema, definitions, depth + 1)?;
-                return Ok(());
-            }
-            for (_, v) in map.iter_mut() {
-                inline_refs(tool, v, definitions, depth)?;
-            }
-        }
-        JsonValue::Array(arr) => {
-            for v in arr.iter_mut() {
-                inline_refs(tool, v, definitions, depth)?;
-            }
-        }
-        _ => {}
-    }
-    Ok(())
 }
 
 /// Collapse single-element `allOf: [X]` into the parent. schemars 0.8
@@ -525,7 +451,10 @@ mod tests {
             }
         });
         let err = translate_schema("synthetic", schema).unwrap_err();
-        assert!(matches!(err, TranslateError::MissingDefinition { .. }));
+        assert!(matches!(
+            err,
+            TranslateError::InlineRefs(InlineRefsError::MissingDefinition { .. })
+        ));
     }
 
     #[test]
@@ -537,7 +466,10 @@ mod tests {
             }
         });
         let err = translate_schema("synthetic", schema).unwrap_err();
-        assert!(matches!(err, TranslateError::UnsupportedRef { .. }));
+        assert!(matches!(
+            err,
+            TranslateError::InlineRefs(InlineRefsError::UnsupportedRef { .. })
+        ));
     }
 
     #[test]
