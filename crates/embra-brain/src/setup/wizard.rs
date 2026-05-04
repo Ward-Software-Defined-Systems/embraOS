@@ -100,21 +100,46 @@ async fn prompt_endpoint(
     Ok(endpoint)
 }
 
-/// Bearer step: optional, empty submission → None.
+/// Bearer step: a yes/no Selector first ("Configure a bearer token?")
+/// followed by a Text prompt for the actual token only when the
+/// operator picks Yes. Selector-then-Text is required because the
+/// console enforces non-empty Text submissions — a single empty-string
+/// Text prompt for "leave empty for no auth" is unreachable on the
+/// console side. The Selector defaults to No so Enter without arrowing
+/// accepts no-auth in the typical case.
 async fn prompt_bearer(
     preset: OpenAiCompatPreset,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
     response_rx: &mut mpsc::Receiver<String>,
 ) -> Result<Option<String>> {
-    let prompt_text = format!(
-        "Enter your {} bearer token (optional, leave empty for no auth):",
-        preset.label()
-    );
+    // Step 1: yes/no choice.
+    let _ = tx
+        .send(Ok(ConversationResponse {
+            response_type: Some(conversation_response::ResponseType::Setup(SetupPrompt {
+                field_type: SetupFieldType::Selector as i32,
+                prompt: format!("Configure a bearer token for {}?", preset.label()),
+                options: vec!["No".to_string(), "Yes".to_string()],
+                default_value: "No".to_string(),
+            })),
+        }))
+        .await;
+
+    let choice = response_rx
+        .recv()
+        .await
+        .ok_or_else(|| anyhow!("setup channel closed during bearer choice step"))?;
+    let want_bearer = choice.trim().eq_ignore_ascii_case("yes");
+    if !want_bearer {
+        return Ok(None);
+    }
+
+    // Step 2: text prompt for the actual token. Console enforces
+    // non-empty so this branch always returns Some(<non-empty>).
     let _ = tx
         .send(Ok(ConversationResponse {
             response_type: Some(conversation_response::ResponseType::Setup(SetupPrompt {
                 field_type: SetupFieldType::Text as i32,
-                prompt: prompt_text,
+                prompt: format!("Enter your {} bearer token:", preset.label()),
                 options: vec![],
                 default_value: String::new(),
             })),
@@ -124,13 +149,15 @@ async fn prompt_bearer(
     let raw = response_rx
         .recv()
         .await
-        .ok_or_else(|| anyhow!("setup channel closed during bearer step"))?;
+        .ok_or_else(|| anyhow!("setup channel closed during bearer token step"))?;
     let trimmed = raw.trim();
-    Ok(if trimmed.is_empty() {
-        None
+    if trimmed.is_empty() {
+        // Defensive: if the console somehow emits empty here, treat
+        // as no-bearer rather than a hard error.
+        Ok(None)
     } else {
-        Some(trimmed.to_string())
-    })
+        Ok(Some(trimmed.to_string()))
+    }
 }
 
 /// Probe-and-Select step: hit `GET /v1/models`, surface errors back to
@@ -337,9 +364,10 @@ mod tests {
         let (resp_tx, mut resp_rx) = mpsc::channel(32);
         let (user_tx, user_rx) = mpsc::channel(32);
 
-        // Operator inputs — ordered: endpoint URL, bearer, model selection.
+        // Operator inputs — ordered: endpoint URL, bearer-yes/no (No),
+        // model selection. New 2-step bearer flow short-circuits on No.
         user_tx.send(server.uri()).await.unwrap();
-        user_tx.send("".to_string()).await.unwrap();
+        user_tx.send("No".to_string()).await.unwrap();
         user_tx.send("qwen3.6:35b".to_string()).await.unwrap();
 
         let mut user_rx = user_rx;
@@ -385,12 +413,12 @@ mod tests {
         let (resp_tx, mut resp_rx) = mpsc::channel(32);
         let (user_tx, user_rx) = mpsc::channel(32);
 
-        // First attempt: endpoint, bearer (empty) → probe returns 0 → re-prompt.
-        // Second attempt: endpoint, bearer (empty), model.
+        // First attempt: endpoint, bearer-no, → probe returns 0 → re-prompt.
+        // Second attempt: endpoint, bearer-no, model.
         user_tx.send(server.uri()).await.unwrap();
-        user_tx.send("".to_string()).await.unwrap();
+        user_tx.send("No".to_string()).await.unwrap();
         user_tx.send(server.uri()).await.unwrap();
-        user_tx.send("".to_string()).await.unwrap();
+        user_tx.send("No".to_string()).await.unwrap();
         user_tx.send("m".to_string()).await.unwrap();
 
         let mut user_rx = user_rx;
@@ -419,14 +447,14 @@ mod tests {
         let (resp_tx, mut resp_rx) = mpsc::channel(32);
         let (user_tx, user_rx) = mpsc::channel(32);
 
-        // First attempt: endpoint, bearer, "not_in_list" — fails validation
-        // and re-prompts from endpoint.
-        // Second attempt: endpoint, bearer, valid pick.
+        // First attempt: endpoint, bearer-no, "not_in_list" — fails
+        // validation and re-prompts from endpoint.
+        // Second attempt: endpoint, bearer-no, valid pick.
         user_tx.send(server.uri()).await.unwrap();
-        user_tx.send("".to_string()).await.unwrap();
+        user_tx.send("No".to_string()).await.unwrap();
         user_tx.send("not_in_list".to_string()).await.unwrap();
         user_tx.send(server.uri()).await.unwrap();
-        user_tx.send("".to_string()).await.unwrap();
+        user_tx.send("No".to_string()).await.unwrap();
         user_tx.send("m2".to_string()).await.unwrap();
 
         let mut user_rx = user_rx;
@@ -455,7 +483,9 @@ mod tests {
         let (resp_tx, mut resp_rx) = mpsc::channel(32);
         let (user_tx, user_rx) = mpsc::channel(32);
 
+        // New flow: endpoint, bearer-yes, token text, model selection.
         user_tx.send(server.uri()).await.unwrap();
+        user_tx.send("Yes".to_string()).await.unwrap();
         user_tx.send("secret-token".to_string()).await.unwrap();
         user_tx.send("m".to_string()).await.unwrap();
 
@@ -466,6 +496,78 @@ mod tests {
         assert_eq!(out.bearer.as_deref(), Some("secret-token"));
 
         while resp_rx.try_recv().is_ok() {}
+    }
+
+    #[tokio::test]
+    async fn subflow_bearer_choice_defaults_no() {
+        // Operator presses Enter on the yes/no Selector without arrowing —
+        // console emits the default option ("No") so bearer = None.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "object": "list",
+                "data": [{"id": "m"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let (resp_tx, mut resp_rx) = mpsc::channel(32);
+        let (user_tx, user_rx) = mpsc::channel(32);
+
+        user_tx.send(server.uri()).await.unwrap();
+        user_tx.send("No".to_string()).await.unwrap();
+        user_tx.send("m".to_string()).await.unwrap();
+
+        let mut user_rx = user_rx;
+        let result =
+            run_openai_compat_subflow(OpenAiCompatPreset::Ollama, &resp_tx, &mut user_rx).await;
+        let out = result.expect("subflow should succeed");
+        assert_eq!(out.bearer, None);
+        while resp_rx.try_recv().is_ok() {}
+    }
+
+    #[tokio::test]
+    async fn subflow_bearer_choice_yes_case_insensitive() {
+        // "yes" / "YES" / "Yes" all accepted — eq_ignore_ascii_case on the
+        // selector value. Console renders the option label verbatim
+        // ("Yes"), but lowercase is also tolerated for resilience.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "object": "list",
+                "data": [{"id": "m"}]
+            })))
+            .mount(&server)
+            .await;
+
+        for variant in ["yes", "YES", "Yes"] {
+            let (resp_tx, mut resp_rx) = mpsc::channel(32);
+            let (user_tx, user_rx) = mpsc::channel(32);
+            user_tx.send(server.uri()).await.unwrap();
+            user_tx.send(variant.to_string()).await.unwrap();
+            user_tx.send("token".to_string()).await.unwrap();
+            user_tx.send("m".to_string()).await.unwrap();
+            let mut user_rx = user_rx;
+            let out = run_openai_compat_subflow(
+                OpenAiCompatPreset::Ollama,
+                &resp_tx,
+                &mut user_rx,
+            )
+            .await
+            .expect("subflow should succeed");
+            assert_eq!(
+                out.bearer.as_deref(),
+                Some("token"),
+                "variant {variant:?} should reach the token prompt"
+            );
+            while resp_rx.try_recv().is_ok() {}
+        }
     }
 
     #[tokio::test]
