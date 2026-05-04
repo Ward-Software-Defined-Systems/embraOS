@@ -479,7 +479,7 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 
 [[package]]
 name = "embra-apid"
-version = "0.4.0-phase1"
+version = "0.5.0-phase1"
 dependencies = [
  "anyhow",
  "axum 0.8.8",
@@ -499,7 +499,7 @@ dependencies = [
 
 [[package]]
 name = "embra-brain"
-version = "0.4.0-phase1"
+version = "0.5.0-phase1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -535,7 +535,7 @@ dependencies = [
 
 [[package]]
 name = "embra-common"
-version = "0.4.0-phase1"
+version = "0.5.0-phase1"
 dependencies = [
  "prost",
  "prost-types",
@@ -547,7 +547,7 @@ dependencies = [
 
 [[package]]
 name = "embra-console"
-version = "0.4.0-phase1"
+version = "0.5.0-phase1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -572,14 +572,14 @@ dependencies = [
 
 [[package]]
 name = "embra-init"
-version = "0.4.0-phase1"
+version = "0.5.0-phase1"
 dependencies = [
  "nix",
 ]
 
 [[package]]
 name = "embra-tool-macro"
-version = "0.4.0-phase1"
+version = "0.5.0-phase1"
 dependencies = [
  "embra-tools-core",
  "inventory",
@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "embra-tools-core"
-version = "0.4.0-phase1"
+version = "0.5.0-phase1"
 dependencies = [
  "serde",
  "serde_json",
@@ -603,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "embra-trustd"
-version = "0.4.0-phase1"
+version = "0.5.0-phase1"
 dependencies = [
  "anyhow",
  "embra-common",
@@ -625,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "embrad"
-version = "0.4.0-phase1"
+version = "0.5.0-phase1"
 dependencies = [
  "anyhow",
  "embra-common",
