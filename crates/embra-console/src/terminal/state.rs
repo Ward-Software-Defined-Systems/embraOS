@@ -23,9 +23,17 @@ pub struct SetupState {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SetupStep {
     Name,
-    /// Sprint 4: provider selector step (Anthropic vs Gemini).
+    /// Sprint 4 → Sprint 5: provider selector step (Anthropic / Gemini /
+    /// Ollama / LM Studio).
     Provider,
     ApiKey,
+    /// Sprint 5: OpenAI-compat sub-flow — endpoint URL prompt.
+    Endpoint,
+    /// Sprint 5: OpenAI-compat sub-flow — bearer token prompt.
+    BearerToken,
+    /// Sprint 5: OpenAI-compat sub-flow — model selector populated
+    /// from the probe.
+    ModelSelect,
     Timezone,
     Confirm,
 }
@@ -196,13 +204,21 @@ impl AppState {
     /// Infer setup step from a SetupPrompt prompt string. Order
     /// matters — provider check runs before api-key because the
     /// "Anthropic"/"Gemini" tokens appear in both prompts; provider
-    /// is identified by the explicit "provider" keyword.
+    /// is identified by the explicit "provider" keyword. OpenAI-compat
+    /// sub-flow steps (Endpoint / BearerToken / ModelSelect) check
+    /// before the generic ApiKey/Anthropic/Gemini fallback.
     pub fn infer_setup_step(prompt: &str) -> SetupStep {
         let lower = prompt.to_lowercase();
         if lower.contains("provider")
             || (lower.contains("which") && (lower.contains("gemini") || lower.contains("claude")))
         {
             SetupStep::Provider
+        } else if lower.contains("endpoint") || lower.contains("base url") {
+            SetupStep::Endpoint
+        } else if lower.contains("bearer") || lower.contains("auth") {
+            SetupStep::BearerToken
+        } else if lower.contains("select a model") || lower.contains("which model") {
+            SetupStep::ModelSelect
         } else if lower.contains("name") && !lower.contains("api") {
             SetupStep::Name
         } else if lower.contains("api key") || lower.contains("anthropic") || lower.contains("gemini") {
@@ -222,6 +238,9 @@ impl AppState {
                 SetupStep::Name => "Enter a name (or press Enter for default)...",
                 SetupStep::Provider => "↑/↓ to choose, Enter to confirm",
                 SetupStep::ApiKey => "Enter your API key...",
+                SetupStep::Endpoint => "Enter the endpoint URL (or press Enter for default)...",
+                SetupStep::BearerToken => "Enter bearer token (or press Enter for no auth)...",
+                SetupStep::ModelSelect => "↑/↓ to choose model, Enter to confirm",
                 SetupStep::Timezone => "Enter timezone (or press Enter for default)...",
                 SetupStep::Confirm => "Enter 1 to confirm or 2 to restart...",
             },
@@ -307,6 +326,35 @@ mod native_render_tests {
         assert_eq!(
             AppState::infer_setup_step("Configuration summary: …. Confirm?"),
             SetupStep::Confirm
+        );
+    }
+
+    #[test]
+    fn infer_setup_step_recognizes_openai_compat_subflow_prompts() {
+        // Sprint 5: Endpoint / BearerToken / ModelSelect new variants.
+        assert_eq!(
+            AppState::infer_setup_step("Enter the Ollama endpoint URL (default: http://localhost:11434):"),
+            SetupStep::Endpoint
+        );
+        assert_eq!(
+            AppState::infer_setup_step("Enter base URL"),
+            SetupStep::Endpoint
+        );
+        assert_eq!(
+            AppState::infer_setup_step("Enter your LM Studio bearer token (optional, leave empty for no auth):"),
+            SetupStep::BearerToken
+        );
+        assert_eq!(
+            AppState::infer_setup_step("Configure auth"),
+            SetupStep::BearerToken
+        );
+        assert_eq!(
+            AppState::infer_setup_step("Select a model:"),
+            SetupStep::ModelSelect
+        );
+        assert_eq!(
+            AppState::infer_setup_step("Which model do you want?"),
+            SetupStep::ModelSelect
         );
     }
 

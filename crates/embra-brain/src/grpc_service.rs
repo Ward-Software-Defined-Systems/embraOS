@@ -180,6 +180,7 @@ impl BrainService for BrainGrpcService {
                     anthropic_api_key: None,
                     gemini_api_key: None,
                     max_tool_iterations: None,
+                    openai_compat: crate::config::OpenAiCompatConfig::default(),
                 });
                 match run_learning_loop(&tx, &mut incoming, &db, &loaded_config, &api_key).await {
                     Ok(()) => {
@@ -487,6 +488,7 @@ async fn handle_request(
                 anthropic_api_key: None,
                 gemini_api_key: None,
                 max_tool_iterations: None,
+                openai_compat: crate::config::OpenAiCompatConfig::default(),
             });
             let config_name = loaded_config.name.clone();
 

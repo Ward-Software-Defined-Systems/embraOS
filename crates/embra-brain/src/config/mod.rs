@@ -61,6 +61,49 @@ pub struct SystemConfig {
     /// so a hand-edited bogus value can't break the loop driver.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tool_iterations: Option<usize>,
+    /// OpenAI-compat preset configuration (Sprint 5 schema v11).
+    /// Holds endpoint URL and selected model id per preset; bearer
+    /// tokens are NOT here (STATE-only per Locked Decision #8).
+    /// Empty strings on individual fields signal unconfigured; the
+    /// presence of either preset's pair is unrelated to which provider
+    /// is active (`api_provider`).
+    #[serde(default)]
+    pub openai_compat: OpenAiCompatConfig,
+}
+
+/// Per-preset OpenAI-compat config. Endpoint and model name only;
+/// bearers live in STATE files at `/embra/state/bearer_<preset>` and
+/// are sourced from env vars at brain startup (Stage 5).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OpenAiCompatConfig {
+    #[serde(default)]
+    pub ollama_endpoint: String,
+    #[serde(default)]
+    pub ollama_model: String,
+    #[serde(default)]
+    pub lm_studio_endpoint: String,
+    #[serde(default)]
+    pub lm_studio_model: String,
+}
+
+impl OpenAiCompatConfig {
+    /// Endpoint and model for the given preset. Returns `None` when
+    /// either field is empty (unconfigured).
+    pub fn for_preset(
+        &self,
+        preset: crate::provider::openai_compat::OpenAiCompatPreset,
+    ) -> Option<(&str, &str)> {
+        use crate::provider::openai_compat::OpenAiCompatPreset;
+        let (endpoint, model) = match preset {
+            OpenAiCompatPreset::Ollama => (&self.ollama_endpoint, &self.ollama_model),
+            OpenAiCompatPreset::LmStudio => (&self.lm_studio_endpoint, &self.lm_studio_model),
+        };
+        if endpoint.is_empty() || model.is_empty() {
+            None
+        } else {
+            Some((endpoint.as_str(), model.as_str()))
+        }
+    }
 }
 
 impl SystemConfig {
@@ -169,6 +212,7 @@ pub async fn run_config_wizard() -> Result<SystemConfig> {
         anthropic_api_key: None,
         gemini_api_key: None,
         max_tool_iterations: None,
+        openai_compat: crate::config::OpenAiCompatConfig::default(),
     };
 
     println!();
@@ -375,7 +419,7 @@ pub async fn run_config_wizard_grpc(
     };
     info!("Config wizard: name = {}", name);
 
-    // Step 2: Provider selection (Sprint 4) — Selector UI.
+    // Step 2: Provider selection (Sprint 4 → Sprint 5 4-way) — Selector UI.
     let _ = tx.send(Ok(ConversationResponse {
         response_type: Some(conversation_response::ResponseType::Setup(
             SetupPrompt {
@@ -384,6 +428,8 @@ pub async fn run_config_wizard_grpc(
                 options: vec![
                     PROVIDER_ANTHROPIC_LABEL.to_string(),
                     PROVIDER_GEMINI_LABEL.to_string(),
+                    PROVIDER_OLLAMA_LABEL.to_string(),
+                    PROVIDER_LM_STUDIO_LABEL.to_string(),
                 ],
                 default_value: PROVIDER_ANTHROPIC_LABEL.to_string(),
             }
@@ -399,6 +445,29 @@ pub async fn run_config_wizard_grpc(
         provider_kind.as_str()
     );
 
+    // Sprint 5: OpenAI-compat presets dispatch into the new sub-flow
+    // (Endpoint → Bearer → Probe-and-Select). Existing 2-way path
+    // covers Anthropic/Gemini unchanged.
+    let openai_compat_setup = match provider_kind {
+        ProviderKind::Ollama => Some(
+            crate::setup::wizard::run_openai_compat_subflow(
+                crate::provider::openai_compat::OpenAiCompatPreset::Ollama,
+                tx,
+                response_rx,
+            )
+            .await?,
+        ),
+        ProviderKind::LmStudio => Some(
+            crate::setup::wizard::run_openai_compat_subflow(
+                crate::provider::openai_compat::OpenAiCompatPreset::LmStudio,
+                tx,
+                response_rx,
+            )
+            .await?,
+        ),
+        _ => None,
+    };
+
     // Honor an env-var of the wrong shape with a clear info message
     // rather than silently accepting it.
     let env_var_name = match provider_kind {
@@ -411,12 +480,16 @@ pub async fn run_config_wizard_grpc(
         ProviderKind::Anthropic => "GEMINI_API_KEY",
         ProviderKind::Gemini => "ANTHROPIC_API_KEY",
         // For OpenAI-compat presets there isn't a single "the other"
-        // env var (the wizard 4-way flow handles its own prompts in
-        // Stage 4). Use the cross-preset alternative as the placeholder.
+        // env var (the wizard 4-way flow handles its own prompts).
+        // Use the cross-preset alternative as the placeholder.
         ProviderKind::Ollama => "EMBRA_LM_STUDIO_BEARER",
         ProviderKind::LmStudio => "EMBRA_OLLAMA_BEARER",
     };
-    if std::env::var(other_env_name).map(|v| !v.is_empty()).unwrap_or(false) {
+    // Skip env-var "other" warning for OpenAI-compat — bearer flow
+    // already gathered the relevant credential via prompts.
+    if openai_compat_setup.is_none()
+        && std::env::var(other_env_name).map(|v| !v.is_empty()).unwrap_or(false)
+    {
         let _ = tx.send(Ok(ConversationResponse {
             response_type: Some(conversation_response::ResponseType::System(
                 SystemMessage {
@@ -429,75 +502,85 @@ pub async fn run_config_wizard_grpc(
             )),
         })).await;
     }
+    let _ = env_var_name; // silence unused-variable warning for OpenAI-compat path
 
     // Step 3: API Key — re-prompts until provider's validate_key returns Valid.
-    let api_key = loop {
-        let (candidate, from_env) = match std::env::var(env_var_name) {
-            Ok(k) if !k.is_empty() => (k, true),
-            _ => {
-                let prompt_text = match provider_kind {
-                    ProviderKind::Anthropic => "Enter your Anthropic API key:",
-                    ProviderKind::Gemini => "Enter your Gemini API key:",
-                    ProviderKind::Ollama => {
-                        "Enter your Ollama bearer token (or empty for no auth):"
-                    }
-                    ProviderKind::LmStudio => {
-                        "Enter your LM Studio bearer token (or empty for no auth):"
-                    }
-                };
+    // Skipped entirely for OpenAI-compat presets (Sprint 5): bearer was
+    // already collected in the sub-flow and is held in `openai_compat_setup`.
+    // The legacy `api_key` field stays empty for OpenAI-compat configs.
+    let api_key = if openai_compat_setup.is_some() {
+        String::new()
+    } else {
+        loop {
+            let (candidate, from_env) = match std::env::var(env_var_name) {
+                Ok(k) if !k.is_empty() => (k, true),
+                _ => {
+                    let prompt_text = match provider_kind {
+                        ProviderKind::Anthropic => "Enter your Anthropic API key:",
+                        ProviderKind::Gemini => "Enter your Gemini API key:",
+                        // OpenAI-compat presets are handled via the
+                        // sub-flow above and never reach this prompt.
+                        // Arms exist for exhaustive-match completeness.
+                        ProviderKind::Ollama | ProviderKind::LmStudio => {
+                            unreachable!(
+                                "openai_compat presets bypass api_key loop via openai_compat_setup branch"
+                            )
+                        }
+                    };
+                    let _ = tx.send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::Setup(
+                            SetupPrompt {
+                                field_type: SetupFieldType::Text as i32,
+                                prompt: prompt_text.to_string(),
+                                options: vec![],
+                                default_value: String::new(),
+                            }
+                        )),
+                    })).await;
+                    (response_rx.recv().await.unwrap_or_default(), false)
+                }
+            };
+            if from_env {
                 let _ = tx.send(Ok(ConversationResponse {
-                    response_type: Some(conversation_response::ResponseType::Setup(
-                        SetupPrompt {
-                            field_type: SetupFieldType::Text as i32,
-                            prompt: prompt_text.to_string(),
-                            options: vec![],
-                            default_value: String::new(),
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage {
+                            content: format!(
+                                "{env_var_name} detected from environment."
+                            ),
+                            msg_type: SystemMessageType::Info as i32,
                         }
                     )),
                 })).await;
-                (response_rx.recv().await.unwrap_or_default(), false)
             }
-        };
-        if from_env {
             let _ = tx.send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::System(
                     SystemMessage {
                         content: format!(
-                            "{env_var_name} detected from environment."
+                            "Validating API key with {}…",
+                            provider_label(provider_kind)
                         ),
                         msg_type: SystemMessageType::Info as i32,
                     }
                 )),
             })).await;
-        }
-        let _ = tx.send(Ok(ConversationResponse {
-            response_type: Some(conversation_response::ResponseType::System(
-                SystemMessage {
-                    content: format!(
-                        "Validating API key with {}…",
-                        provider_label(provider_kind)
-                    ),
-                    msg_type: SystemMessageType::Info as i32,
+            match validate_api_key_for(provider_kind, &candidate).await {
+                ApiKeyCheck::Valid => break candidate,
+                ApiKeyCheck::Invalid(msg) => {
+                    let _ = tx.send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::System(
+                            SystemMessage {
+                                content: msg,
+                                msg_type: SystemMessageType::Error as i32,
+                            }
+                        )),
+                    })).await;
+                    if from_env {
+                        // Stop trusting the env var; fall through to prompting next iteration.
+                        // SAFETY: single-threaded access to env at wizard time.
+                        unsafe { std::env::remove_var(env_var_name); }
+                    }
+                    continue;
                 }
-            )),
-        })).await;
-        match validate_api_key_for(provider_kind, &candidate).await {
-            ApiKeyCheck::Valid => break candidate,
-            ApiKeyCheck::Invalid(msg) => {
-                let _ = tx.send(Ok(ConversationResponse {
-                    response_type: Some(conversation_response::ResponseType::System(
-                        SystemMessage {
-                            content: msg,
-                            msg_type: SystemMessageType::Error as i32,
-                        }
-                    )),
-                })).await;
-                if from_env {
-                    // Stop trusting the env var; fall through to prompting next iteration.
-                    // SAFETY: single-threaded access to env at wizard time.
-                    unsafe { std::env::remove_var(env_var_name); }
-                }
-                continue;
             }
         }
     };
@@ -568,6 +651,21 @@ pub async fn run_config_wizard_grpc(
         // bearer goes to STATE only (Stage 5 wiring).
         ProviderKind::Ollama | ProviderKind::LmStudio => (None, None),
     };
+    // Populate OpenAI-compat fields per preset when the sub-flow ran.
+    let mut openai_compat = OpenAiCompatConfig::default();
+    if let Some(setup) = &openai_compat_setup {
+        use crate::provider::openai_compat::OpenAiCompatPreset;
+        match setup.preset {
+            OpenAiCompatPreset::Ollama => {
+                openai_compat.ollama_endpoint = setup.endpoint.clone();
+                openai_compat.ollama_model = setup.model_id.clone();
+            }
+            OpenAiCompatPreset::LmStudio => {
+                openai_compat.lm_studio_endpoint = setup.endpoint.clone();
+                openai_compat.lm_studio_model = setup.model_id.clone();
+            }
+        }
+    }
     let config = SystemConfig {
         name,
         api_key,
@@ -585,6 +683,7 @@ pub async fn run_config_wizard_grpc(
         anthropic_api_key,
         gemini_api_key,
         max_tool_iterations: None,
+        openai_compat,
     };
     save_config(db, &config).await?;
     info!("Config wizard complete, saved to WardSONDB");
@@ -597,15 +696,20 @@ pub async fn run_config_wizard_grpc(
         info!("Timezone written to {} ({})", tz_path, &config.timezone);
     }
 
-    // Also write API key to STATE partition so embrad can pass it on subsequent boots
-    let key_path = "/embra/state/api_key";
-    if let Some(parent) = std::path::Path::new(key_path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    if let Err(e) = std::fs::write(key_path, &config.api_key) {
-        tracing::warn!("Could not write API key to STATE: {}", e);
-    } else {
-        info!("API key written to {}", key_path);
+    // Also write API key to STATE partition so embrad can pass it on
+    // subsequent boots — only for Anthropic/Gemini (OpenAI-compat
+    // bearer is written separately below at /embra/state/bearer_<preset>
+    // with restricted mode per Locked Decision #8).
+    if openai_compat_setup.is_none() {
+        let key_path = "/embra/state/api_key";
+        if let Some(parent) = std::path::Path::new(key_path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(key_path, &config.api_key) {
+            tracing::warn!("Could not write API key to STATE: {}", e);
+        } else {
+            info!("API key written to {}", key_path);
+        }
     }
 
     // Sprint 4: persist active provider to STATE so embrad picks the
@@ -617,27 +721,67 @@ pub async fn run_config_wizard_grpc(
         info!("Provider written to {} ({})", provider_path, &config.api_provider);
     }
 
+    // OpenAI-compat bearer write: STATE file at /embra/state/bearer_<preset>
+    // with mode 0600 per Locked Decision #8. Empty bearer → no file
+    // written; existing file removed if present.
+    if let Some(setup) = &openai_compat_setup {
+        let path = match setup.preset {
+            crate::provider::openai_compat::OpenAiCompatPreset::Ollama => {
+                "/embra/state/bearer_ollama"
+            }
+            crate::provider::openai_compat::OpenAiCompatPreset::LmStudio => {
+                "/embra/state/bearer_lm_studio"
+            }
+        };
+        if let Some(parent) = std::path::Path::new(path).parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match &setup.bearer {
+            Some(token) if !token.is_empty() => {
+                if let Err(e) = std::fs::write(path, token) {
+                    tracing::warn!("Could not write bearer to STATE: {}", e);
+                } else {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Err(e) =
+                        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                    {
+                        tracing::warn!("Could not set 0600 mode on {}: {}", path, e);
+                    }
+                    info!("Bearer written to {} (mode 0600)", path);
+                }
+            }
+            _ => {
+                // Empty / None bearer — remove any existing file so a
+                // re-run wizard with no auth doesn't leave stale creds.
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+
     // D2 schema v10: also write the per-provider key STATE file so
     // /provider switches between reboots find a recorded key for the
     // alternate provider. Wizard only writes the key for the active
     // provider; the alternate is added later via /provider --setup.
-    let per_provider_state_path = match provider_kind {
-        ProviderKind::Anthropic => "/embra/state/api_key_anthropic",
-        ProviderKind::Gemini => "/embra/state/api_key_gemini",
-        // OpenAI-compat presets use bearer files at these paths once
-        // Stage 4 expands the wizard. Today's 2-way wizard never reaches
-        // this site for these presets, but the match must be exhaustive.
-        ProviderKind::Ollama => "/embra/state/bearer_ollama",
-        ProviderKind::LmStudio => "/embra/state/bearer_lm_studio",
-    };
-    if let Err(e) = std::fs::write(per_provider_state_path, &config.api_key) {
-        tracing::warn!(
-            "Could not write per-provider key to {}: {}",
-            per_provider_state_path,
-            e
-        );
-    } else {
-        info!("Per-provider key written to {}", per_provider_state_path);
+    // Skipped for OpenAI-compat — bearer landed at
+    // /embra/state/bearer_<preset> above (Sprint 5).
+    if openai_compat_setup.is_none() {
+        let per_provider_state_path = match provider_kind {
+            ProviderKind::Anthropic => "/embra/state/api_key_anthropic",
+            ProviderKind::Gemini => "/embra/state/api_key_gemini",
+            // Unreachable: gated by `openai_compat_setup.is_none()`.
+            ProviderKind::Ollama | ProviderKind::LmStudio => unreachable!(
+                "openai_compat presets bypass legacy per-provider api_key path"
+            ),
+        };
+        if let Err(e) = std::fs::write(per_provider_state_path, &config.api_key) {
+            tracing::warn!(
+                "Could not write per-provider key to {}: {}",
+                per_provider_state_path,
+                e
+            );
+        } else {
+            info!("Per-provider key written to {}", per_provider_state_path);
+        }
     }
 
     // Transition to next mode
@@ -651,9 +795,25 @@ pub async fn run_config_wizard_grpc(
     // refreshes from its default ("opus-4.7") to whatever provider
     // the operator just selected. Inline match — display_model_for
     // lives in grpc_service.rs and we don't want a circular dep.
-    let model = match config.api_provider.as_str() {
-        "gemini" => "gemini-3.1-pro",
-        _ => "opus-4.7",
+    // Sprint 5: OpenAI-compat presets show the operator-selected
+    // model id (Ollama/LM Studio) populated from the sub-flow.
+    let model: String = match config.api_provider.as_str() {
+        "gemini" => "gemini-3.1-pro".to_string(),
+        "ollama" => {
+            if config.openai_compat.ollama_model.is_empty() {
+                "ollama".to_string()
+            } else {
+                config.openai_compat.ollama_model.clone()
+            }
+        }
+        "lm_studio" => {
+            if config.openai_compat.lm_studio_model.is_empty() {
+                "lm_studio".to_string()
+            } else {
+                config.openai_compat.lm_studio_model.clone()
+            }
+        }
+        _ => "opus-4.7".to_string(),
     };
     let _ = tx.send(Ok(ConversationResponse {
         response_type: Some(conversation_response::ResponseType::ModeChange(
@@ -693,6 +853,7 @@ mod key_lookup_tests {
             anthropic_api_key: anth.map(str::to_string),
             gemini_api_key: gem.map(str::to_string),
             max_tool_iterations: None,
+            openai_compat: crate::config::OpenAiCompatConfig::default(),
         }
     }
 
@@ -777,6 +938,7 @@ mod max_tool_iterations_serde_tests {
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
+            openai_compat: crate::config::OpenAiCompatConfig::default(),
         }
     }
 
