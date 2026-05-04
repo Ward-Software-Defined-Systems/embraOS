@@ -533,4 +533,171 @@ mod tests {
         let err = ir_messages_to_wire(&[msg]).unwrap_err();
         assert!(matches!(err, ConvError::MixedUserBlocks));
     }
+
+    // ===========================================================
+    // Reasoning lifecycle (Sprint 5 Locked Decision #10) — verifies
+    // the cookbook preserve/drop rules for CoT round-trip.
+    // ===========================================================
+
+    #[test]
+    fn lifecycle_preserve_through_tool_call_iteration() {
+        // Cookbook rule (verbatim): "If the last message by the
+        // assistant was a tool call of any type, the analysis
+        // messages until the previous `final` message should be
+        // preserved on subsequent sampling until a `final` message
+        // gets issued."
+        //
+        // The IR mechanism is: the assistant turn carries
+        // Block::ProviderOpaque alongside Block::ToolCall, and the
+        // loop driver pushes that turn verbatim into the message list
+        // for the next iteration's request.
+        let assistant_with_reasoning_and_tool = ApiMessage::Assistant {
+            content: vec![
+                reasoning_block("considering options"),
+                Block::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "git_status".to_string(),
+                    args: json!({"path": "."}),
+                    provider_opaque: None,
+                },
+            ],
+        };
+        let user_tool_result = ApiMessage::user_tool_results(vec![Block::ToolResult {
+            call_id: "call_1".to_string(),
+            content: "On branch main".to_string(),
+            is_error: false,
+        }]);
+        let messages = vec![
+            ApiMessage::user_text("status?"),
+            assistant_with_reasoning_and_tool,
+            user_tool_result,
+        ];
+        let wire = ir_messages_to_wire(&messages).unwrap();
+        // 4 messages on wire: user, assistant (text-empty + reasoning +
+        // tool_calls), tool result.
+        assert_eq!(wire.len(), 3);
+        // Assistant turn carries reasoning verbatim from prior turn.
+        let OpenAIMessage::Assistant {
+            reasoning,
+            tool_calls,
+            ..
+        } = &wire[1]
+        else {
+            panic!("expected Assistant");
+        };
+        assert_eq!(reasoning.as_deref(), Some("considering options"));
+        let calls = tool_calls.as_ref().unwrap();
+        assert_eq!(calls[0].id, "call_1");
+    }
+
+    #[test]
+    fn lifecycle_drop_after_final_no_reasoning_in_next_user_initiated_turn() {
+        // Cookbook rule (verbatim): "After a message to the `final`
+        // channel in a subsequent sampling turn all `analysis` messages
+        // should be dropped."
+        //
+        // The IR mechanism is: at session-persistence time, only Text
+        // blocks are extracted (response_text() in sessions). On the
+        // next user-initiated turn, the persisted history reloads
+        // without ProviderOpaque blocks. We simulate this by NOT
+        // including the reasoning block in the persisted-and-reloaded
+        // assistant turn.
+        let prior_persisted_assistant = ApiMessage::Assistant {
+            content: vec![Block::Text("answer".to_string())],
+            // ^ ProviderOpaque NOT here — was dropped at persistence.
+        };
+        let new_user_msg = ApiMessage::user_text("follow-up");
+        let messages = vec![prior_persisted_assistant, new_user_msg];
+        let wire = ir_messages_to_wire(&messages).unwrap();
+        // No reasoning field on the prior assistant — round-trip through
+        // persistence drops it as the cookbook requires.
+        let OpenAIMessage::Assistant { reasoning, .. } = &wire[0] else {
+            panic!("expected Assistant");
+        };
+        assert!(
+            reasoning.is_none(),
+            "reasoning must NOT appear on next user-initiated turn"
+        );
+    }
+
+    #[test]
+    fn lifecycle_multi_iteration_concatenates_reasoning_within_turn() {
+        // Within a single user turn that spans multiple tool-use
+        // iterations, the assistant emits reasoning at each iteration.
+        // Each iteration's AssistantTurn carries its OWN reasoning
+        // ProviderOpaque, and the loop driver replays them sequentially
+        // (NOT concatenated into one block). This preserves the
+        // model-emitted boundaries.
+        let messages = vec![
+            ApiMessage::user_text("multi-step"),
+            ApiMessage::Assistant {
+                content: vec![
+                    reasoning_block("step 1: need to check status"),
+                    Block::ToolCall {
+                        id: "call_1".to_string(),
+                        name: "git_status".to_string(),
+                        args: json!({}),
+                        provider_opaque: None,
+                    },
+                ],
+            },
+            ApiMessage::user_tool_results(vec![Block::ToolResult {
+                call_id: "call_1".to_string(),
+                content: "clean".to_string(),
+                is_error: false,
+            }]),
+            ApiMessage::Assistant {
+                content: vec![
+                    reasoning_block("step 2: now check log"),
+                    Block::ToolCall {
+                        id: "call_2".to_string(),
+                        name: "git_log".to_string(),
+                        args: json!({}),
+                        provider_opaque: None,
+                    },
+                ],
+            },
+        ];
+        let wire = ir_messages_to_wire(&messages).unwrap();
+        let OpenAIMessage::Assistant {
+            reasoning: r1, ..
+        } = &wire[1]
+        else {
+            panic!("expected Assistant at idx 1");
+        };
+        let OpenAIMessage::Assistant {
+            reasoning: r2, ..
+        } = &wire[3]
+        else {
+            panic!("expected Assistant at idx 3");
+        };
+        // Each iteration's reasoning is preserved verbatim, NOT
+        // concatenated into a single block.
+        assert_eq!(r1.as_deref(), Some("step 1: need to check status"));
+        assert_eq!(r2.as_deref(), Some("step 2: now check log"));
+    }
+
+    #[test]
+    fn lifecycle_reasoning_never_emitted_to_user_via_text_field() {
+        // Defensive: even if a translator bug accidentally pushed
+        // reasoning into the visible content path, this round-trip
+        // test asserts it lands in `reasoning`, NOT `content`.
+        let assistant = ApiMessage::Assistant {
+            content: vec![
+                reasoning_block("private CoT"),
+                Block::Text("public answer".to_string()),
+            ],
+        };
+        let wire = ir_messages_to_wire(&[assistant]).unwrap();
+        let OpenAIMessage::Assistant {
+            content, reasoning, ..
+        } = &wire[0]
+        else {
+            panic!("expected Assistant");
+        };
+        assert_eq!(content.as_deref(), Some("public answer"));
+        assert_eq!(reasoning.as_deref(), Some("private CoT"));
+        // The visible content must NEVER contain the CoT text.
+        assert!(!content.as_deref().unwrap_or("").contains("private CoT"));
+    }
 }

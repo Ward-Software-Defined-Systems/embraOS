@@ -67,12 +67,31 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // API key: --api-key flag > ANTHROPIC_API_KEY env var > WardSONDB config
+    // API key: --api-key flag > ANTHROPIC_API_KEY env var > WardSONDB config.
+    // OpenAI-compat presets (Ollama / LM Studio) don't use api_key — bearer
+    // is plumbed via EMBRA_OLLAMA_BEARER / EMBRA_LM_STUDIO_BEARER env vars
+    // set by the supervisor at boot. Skip the missing-key warning for those.
     let mut api_key = api_key
         .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
         .unwrap_or_default();
+    let active_provider = std::env::var("EMBRA_PROVIDER").unwrap_or_default();
+    let is_openai_compat = matches!(active_provider.as_str(), "ollama" | "lm_studio");
     if api_key.is_empty() {
-        warn!("No API key provided (--api-key or ANTHROPIC_API_KEY). Brain calls will fail until config wizard runs.");
+        if is_openai_compat {
+            let bearer_env = match active_provider.as_str() {
+                "ollama" => "EMBRA_OLLAMA_BEARER",
+                "lm_studio" => "EMBRA_LM_STUDIO_BEARER",
+                _ => unreachable!(),
+            };
+            let bearer_present = std::env::var(bearer_env).map(|s| !s.is_empty()).unwrap_or(false);
+            info!(
+                "OpenAI-compat provider '{}' configured (bearer {})",
+                active_provider,
+                if bearer_present { "present" } else { "absent" }
+            );
+        } else {
+            warn!("No API key provided (--api-key or ANTHROPIC_API_KEY). Brain calls will fail until config wizard runs.");
+        }
     } else {
         info!("API key configured ({}...)", &api_key[..std::cmp::min(10, api_key.len())]);
     }

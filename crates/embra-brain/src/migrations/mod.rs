@@ -4,7 +4,7 @@ use tracing::{error, info, warn};
 
 use crate::db::{WardsonDbClient, WardsonDbError};
 
-const CURRENT_SCHEMA_VERSION: u32 = 10;
+const CURRENT_SCHEMA_VERSION: u32 = 11;
 
 /// Run all pending migrations. Each migration is idempotent.
 pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
@@ -101,6 +101,19 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
         // without losing the other.
         run_v10_per_provider_keys(db).await?;
         set_schema_version(db, 10).await?;
+    }
+
+    if current_version < 11 {
+        // v11 (Sprint 5 OPENAI-COMPAT-PROVIDER-01): stamp empty
+        // `openai_compat: {ollama_endpoint, ollama_model,
+        // lm_studio_endpoint, lm_studio_model}` on existing
+        // config.system docs. Pre-v11 docs deserialize fine via
+        // #[serde(default)], but stamping the field on disk makes it
+        // visible to operators inspecting the doc directly. No
+        // session-doc walk needed — pre-v11 sessions are always
+        // anthropic / gemini and naturally remain so.
+        run_v11_openai_compat(db).await?;
+        set_schema_version(db, 11).await?;
     }
 
     info!("Migrations complete. Schema version: {}", CURRENT_SCHEMA_VERSION);
@@ -1185,5 +1198,144 @@ mod v7_tests {
         let (name, args) = split_legacy_command("port_scan localhost web");
         assert_eq!(name, "port_scan");
         assert_eq!(args["_legacy_raw"], "localhost web");
+    }
+}
+
+/// Migration v11 (Sprint 5 OPENAI-COMPAT-PROVIDER-01): stamp the empty
+/// `openai_compat` sub-document on `config.system:config` so
+/// post-migration reads see the field with all four leaf strings
+/// (Ollama / LM Studio endpoint + model). Pre-v11 docs deserialize via
+/// `#[serde(default)]`, but stamping makes the schema visible to
+/// operators inspecting the doc directly.
+///
+/// Idempotent: re-running on a doc that already carries the field
+/// (or any subset of its leaves) is a no-op.
+async fn run_v11_openai_compat(db: &WardsonDbClient) -> Result<()> {
+    info!("Running migration v11: stamp openai_compat on config.system");
+
+    let mut cfg_doc = match db.read("config.system", "config").await {
+        Ok(doc) => doc,
+        Err(_) => {
+            info!("Migration v11: no config.system:config — nothing to stamp");
+            return Ok(());
+        }
+    };
+
+    let changed = stamp_openai_compat(&mut cfg_doc);
+    if !changed {
+        info!("Migration v11: openai_compat already complete — no-op");
+        return Ok(());
+    }
+
+    if let Err(e) = db.update("config.system", "config", &cfg_doc).await {
+        warn!("Migration v11: config.system update failed: {e}");
+    } else {
+        info!("Migration v11: stamped empty openai_compat on config.system");
+    }
+    Ok(())
+}
+
+/// Pure transform behind `run_v11_openai_compat`. Inserts any of the
+/// four leaf string fields that are missing under `openai_compat`,
+/// creating the parent object if absent. Returns true when the doc
+/// was modified, false when it was already complete (idempotent).
+fn stamp_openai_compat(cfg_doc: &mut serde_json::Value) -> bool {
+    let Some(obj) = cfg_doc.as_object_mut() else {
+        return false;
+    };
+    // Ensure parent exists.
+    let parent_was_missing = !obj.contains_key("openai_compat");
+    let parent = obj
+        .entry("openai_compat".to_string())
+        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+    let Some(parent_obj) = parent.as_object_mut() else {
+        // Parent exists but isn't an object — overwrite with a fresh
+        // empty object. This shouldn't happen in practice; defensive.
+        *parent = serde_json::Value::Object(serde_json::Map::new());
+        // Re-borrow.
+        let parent_obj = parent.as_object_mut().expect("just inserted");
+        parent_obj.insert("ollama_endpoint".into(), serde_json::Value::String(String::new()));
+        parent_obj.insert("ollama_model".into(), serde_json::Value::String(String::new()));
+        parent_obj.insert("lm_studio_endpoint".into(), serde_json::Value::String(String::new()));
+        parent_obj.insert("lm_studio_model".into(), serde_json::Value::String(String::new()));
+        return true;
+    };
+
+    let mut changed = parent_was_missing;
+    for key in [
+        "ollama_endpoint",
+        "ollama_model",
+        "lm_studio_endpoint",
+        "lm_studio_model",
+    ] {
+        if !parent_obj.contains_key(key) {
+            parent_obj.insert(key.into(), serde_json::Value::String(String::new()));
+            changed = true;
+        }
+    }
+    changed
+}
+
+#[cfg(test)]
+mod v11_tests {
+    use super::stamp_openai_compat;
+    use serde_json::json;
+
+    #[test]
+    fn missing_field_gets_full_stamp() {
+        let mut doc = json!({"name": "Embra", "api_provider": "anthropic"});
+        let changed = stamp_openai_compat(&mut doc);
+        assert!(changed);
+        let oc = &doc["openai_compat"];
+        assert_eq!(oc["ollama_endpoint"], "");
+        assert_eq!(oc["ollama_model"], "");
+        assert_eq!(oc["lm_studio_endpoint"], "");
+        assert_eq!(oc["lm_studio_model"], "");
+    }
+
+    #[test]
+    fn partial_field_only_fills_missing_leaves() {
+        let mut doc = json!({
+            "openai_compat": {
+                "ollama_endpoint": "http://localhost:11434",
+                "ollama_model": "gpt-oss:20b",
+            }
+        });
+        let changed = stamp_openai_compat(&mut doc);
+        assert!(changed);
+        let oc = &doc["openai_compat"];
+        // Existing values preserved.
+        assert_eq!(oc["ollama_endpoint"], "http://localhost:11434");
+        assert_eq!(oc["ollama_model"], "gpt-oss:20b");
+        // Missing leaves stamped with empty string.
+        assert_eq!(oc["lm_studio_endpoint"], "");
+        assert_eq!(oc["lm_studio_model"], "");
+    }
+
+    #[test]
+    fn full_field_is_idempotent_no_op() {
+        let mut doc = json!({
+            "openai_compat": {
+                "ollama_endpoint": "http://localhost:11434",
+                "ollama_model": "gpt-oss:20b",
+                "lm_studio_endpoint": "http://localhost:1234",
+                "lm_studio_model": "qwen3.6:35b",
+            }
+        });
+        let before = doc.clone();
+        let changed = stamp_openai_compat(&mut doc);
+        assert!(!changed, "full doc should be no-op");
+        assert_eq!(doc, before, "no-op must not mutate");
+    }
+
+    #[test]
+    fn second_invocation_after_first_is_idempotent() {
+        let mut doc = json!({"name": "Embra"});
+        let changed1 = stamp_openai_compat(&mut doc);
+        assert!(changed1);
+        let after_first = doc.clone();
+        let changed2 = stamp_openai_compat(&mut doc);
+        assert!(!changed2, "second pass must be no-op");
+        assert_eq!(doc, after_first);
     }
 }

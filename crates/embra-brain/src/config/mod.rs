@@ -106,6 +106,24 @@ impl OpenAiCompatConfig {
     }
 }
 
+/// Write a credential file to the STATE partition with mode `0600`
+/// (read/write for owner only). Used for API keys and bearer tokens
+/// per Locked Decision #8 — STATE files holding secrets must not be
+/// world-readable, even on the otherwise-immutable embraOS rootfs.
+///
+/// Creates parent directories as needed. Writes content first, then
+/// applies permissions. Returns the file's final mode on success for
+/// caller-side telemetry / assertion in tests.
+pub(crate) fn write_credential_state(path: &str, contents: &str) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(path, contents)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
 impl SystemConfig {
     /// Look up the recorded key for the given provider. Per-provider
     /// fields are preferred; falls back to the legacy `api_key` field
@@ -698,17 +716,15 @@ pub async fn run_config_wizard_grpc(
 
     // Also write API key to STATE partition so embrad can pass it on
     // subsequent boots — only for Anthropic/Gemini (OpenAI-compat
-    // bearer is written separately below at /embra/state/bearer_<preset>
-    // with restricted mode per Locked Decision #8).
+    // bearer is written separately below at /embra/state/bearer_<preset>).
+    // Mode 0600 per Locked Decision #8 (Sprint 5 retroactive fix to
+    // existing api_key writes that previously used default umask).
     if openai_compat_setup.is_none() {
         let key_path = "/embra/state/api_key";
-        if let Some(parent) = std::path::Path::new(key_path).parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Err(e) = std::fs::write(key_path, &config.api_key) {
+        if let Err(e) = write_credential_state(key_path, &config.api_key) {
             tracing::warn!("Could not write API key to STATE: {}", e);
         } else {
-            info!("API key written to {}", key_path);
+            info!("API key written to {} (mode 0600)", key_path);
         }
     }
 
@@ -733,20 +749,11 @@ pub async fn run_config_wizard_grpc(
                 "/embra/state/bearer_lm_studio"
             }
         };
-        if let Some(parent) = std::path::Path::new(path).parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         match &setup.bearer {
             Some(token) if !token.is_empty() => {
-                if let Err(e) = std::fs::write(path, token) {
+                if let Err(e) = write_credential_state(path, token) {
                     tracing::warn!("Could not write bearer to STATE: {}", e);
                 } else {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Err(e) =
-                        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-                    {
-                        tracing::warn!("Could not set 0600 mode on {}: {}", path, e);
-                    }
                     info!("Bearer written to {} (mode 0600)", path);
                 }
             }
@@ -773,14 +780,14 @@ pub async fn run_config_wizard_grpc(
                 "openai_compat presets bypass legacy per-provider api_key path"
             ),
         };
-        if let Err(e) = std::fs::write(per_provider_state_path, &config.api_key) {
+        if let Err(e) = write_credential_state(per_provider_state_path, &config.api_key) {
             tracing::warn!(
                 "Could not write per-provider key to {}: {}",
                 per_provider_state_path,
                 e
             );
         } else {
-            info!("Per-provider key written to {}", per_provider_state_path);
+            info!("Per-provider key written to {} (mode 0600)", per_provider_state_path);
         }
     }
 

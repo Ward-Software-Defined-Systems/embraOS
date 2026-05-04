@@ -555,16 +555,25 @@ async fn handle_request(
                     )
                 }
                 ProviderKind::Anthropic => Arc::new(AnthropicProvider::new(active_key)),
-                // OpenAI-compat dispatch lands in Stage 5 with bearer +
-                // endpoint + model plumbing through STATE/env. Until then
-                // this arm is unreachable (the wizard 4-way that writes
-                // "ollama" / "lm_studio" to api_provider is Stage 4 work).
                 ProviderKind::Ollama | ProviderKind::LmStudio => {
-                    unimplemented!(
-                        "OpenAI-compat provider dispatch is Stage 5 wiring; \
-                         api_provider was set to {} but no construction path exists yet",
-                        provider_kind.as_str()
-                    );
+                    match build_openai_compat_provider(provider_kind, &loaded_config) {
+                        Ok(p) => p,
+                        Err(msg) => {
+                            let _ = tx
+                                .send(Ok(ConversationResponse {
+                                    response_type: Some(
+                                        conversation_response::ResponseType::System(
+                                            SystemMessage {
+                                                content: msg,
+                                                msg_type: SystemMessageType::Error as i32,
+                                            },
+                                        ),
+                                    ),
+                                }))
+                                .await;
+                            return Ok(());
+                        }
+                    }
                 }
             };
             let descriptors: Vec<&'static tools::registry::ToolDescriptor> =
@@ -1208,7 +1217,10 @@ async fn handle_request(
             let tz = cfg.as_ref().map(|c| c.timezone.clone()).unwrap_or_else(|| config_tz.to_string());
             let name = cfg.as_ref().map(|c| c.name.clone()).unwrap_or_else(|| "Embra".to_string());
             let active_provider = cfg.as_ref().map(|c| c.api_provider.clone()).unwrap_or_else(|| "anthropic".to_string());
-            let model = display_model_for(&active_provider);
+            let model = match cfg.as_ref() {
+                Some(c) => display_model_for(&active_provider, c),
+                None => "opus-4.7".to_string(),
+            };
             let _ = tx.send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::ModeChange(
                     ModeTransition {
@@ -1270,7 +1282,10 @@ async fn handle_slash_command(
         .as_ref()
         .map(|c| c.api_provider.clone())
         .unwrap_or_else(|| "anthropic".to_string());
-    let model = display_model_for(&active_provider).to_string();
+    let model = match cfg_loaded.as_ref() {
+        Some(c) => display_model_for(&active_provider, c),
+        None => "opus-4.7".to_string(),
+    };
     let send_session_update = {
         let config_name = config_name.clone();
         move |tx: &mpsc::Sender<Result<ConversationResponse, Status>>, session_name: &str| {
@@ -1298,7 +1313,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini>       Switch provider for future turns\n  /provider --setup [<kind>]         Add an alternate provider's API key (multi-turn)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup [<kind>]         Add an alternate provider's API key (multi-turn)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -1692,7 +1707,7 @@ async fn handle_provider_command(
                 None => {
                     send_msg(
                         format!(
-                            "Unknown provider '{}'. Use 'anthropic' or 'gemini'.",
+                            "Unknown provider '{}'. Use 'anthropic', 'gemini', 'ollama', or 'lm_studio'.",
                             explicit
                         ),
                         SystemMessageType::Error,
@@ -1745,7 +1760,10 @@ async fn handle_provider_command(
                 .as_ref()
                 .map(|c| c.api_provider.clone())
                 .unwrap_or_else(|| "anthropic".to_string());
-            let model = display_model_for(&provider);
+            let model = match cfg.as_ref() {
+                Some(c) => display_model_for(&provider, c),
+                None => "opus-4.7".to_string(),
+            };
             let session = session_mgr
                 .read()
                 .await
@@ -1840,7 +1858,7 @@ async fn handle_provider_command(
         }
         _ => {
             send_msg(
-                format!("Unknown provider '{}'. Use 'anthropic' or 'gemini'.", action),
+                format!("Unknown provider '{}'. Use 'anthropic', 'gemini', 'ollama', or 'lm_studio'.", action),
                 SystemMessageType::Error,
             )
             .await;
@@ -1999,23 +2017,57 @@ async fn perform_provider_swap(
     //    keeps working until a future change teaches embrad about
     //    per-provider STATE.
     if let Ok(mut cfg) = config::load_config(&**db).await {
-        let target_key = match cfg.key_for(target) {
-            Some(k) => k.to_string(),
-            None => {
-                let _ = tx
-                    .send(Ok(ConversationResponse {
-                        response_type: Some(conversation_response::ResponseType::System(
-                            SystemMessage {
-                                content: format!(
-                                    "Cannot switch — no API key recorded for {}.",
-                                    target.as_str()
-                                ),
-                                msg_type: SystemMessageType::Error as i32,
-                            },
-                        )),
-                    }))
-                    .await;
-                return;
+        // Sprint 5: OpenAI-compat presets are pre-checked for
+        // endpoint + model configuration rather than api_key presence.
+        // Bearer comes from runtime env; absence is OK (no-auth path).
+        let target_key: String = match target {
+            ProviderKind::Anthropic | ProviderKind::Gemini => match cfg.key_for(target) {
+                Some(k) => k.to_string(),
+                None => {
+                    let _ = tx
+                        .send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::System(
+                                SystemMessage {
+                                    content: format!(
+                                        "Cannot switch — no API key recorded for {}.",
+                                        target.as_str()
+                                    ),
+                                    msg_type: SystemMessageType::Error as i32,
+                                },
+                            )),
+                        }))
+                        .await;
+                    return;
+                }
+            },
+            ProviderKind::Ollama | ProviderKind::LmStudio => {
+                let preset = match target {
+                    ProviderKind::Ollama => {
+                        crate::provider::openai_compat::OpenAiCompatPreset::Ollama
+                    }
+                    ProviderKind::LmStudio => {
+                        crate::provider::openai_compat::OpenAiCompatPreset::LmStudio
+                    }
+                    _ => unreachable!(),
+                };
+                if cfg.openai_compat.for_preset(preset).is_none() {
+                    let _ = tx
+                        .send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::System(
+                                SystemMessage {
+                                    content: format!(
+                                        "Cannot switch — {} is not configured. \
+                                         Re-run setup wizard to configure endpoint + model.",
+                                        preset.label()
+                                    ),
+                                    msg_type: SystemMessageType::Error as i32,
+                                },
+                            )),
+                        }))
+                        .await;
+                    return;
+                }
+                String::new()
             }
         };
         cfg.api_provider = target.as_str().to_string();
@@ -2033,7 +2085,12 @@ async fn perform_provider_swap(
                 .await;
             return;
         }
-        let _ = std::fs::write("/embra/state/api_key", &target_key);
+        // Skip mirroring an empty target_key — that would clobber a
+        // previously-recorded Anthropic/Gemini key in STATE when an
+        // operator swaps to an OpenAI-compat preset.
+        if !target_key.is_empty() {
+            let _ = config::write_credential_state("/embra/state/api_key", &target_key);
+        }
     }
 
     // 2. Update active session's meta.provider / meta.model so
@@ -2055,6 +2112,10 @@ async fn perform_provider_swap(
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
                 if let Some(id) = id {
+                    let model_str = match config::load_config(&**db).await {
+                        Ok(c) => display_model_for(target.as_str(), &c),
+                        Err(_) => target.as_str().to_string(),
+                    };
                     if let Some(obj) = doc.as_object_mut() {
                         obj.insert(
                             "provider".into(),
@@ -2062,9 +2123,7 @@ async fn perform_provider_swap(
                         );
                         obj.insert(
                             "model".into(),
-                            serde_json::Value::String(
-                                display_model_for(target.as_str()).to_string(),
-                            ),
+                            serde_json::Value::String(model_str),
                         );
                     }
                     let _ = db.update(&collection, &id, &doc).await;
@@ -2077,6 +2136,11 @@ async fn perform_provider_swap(
     //    next boot.
     let _ = std::fs::write("/embra/state/api_provider", target.as_str());
 
+    let cfg_after = config::load_config(&**db).await.ok();
+    let model_for_swap_msg = match cfg_after.as_ref() {
+        Some(c) => display_model_for(target.as_str(), c),
+        None => target.as_str().to_string(),
+    };
     let _ = tx
         .send(Ok(ConversationResponse {
             response_type: Some(conversation_response::ResponseType::System(
@@ -2084,7 +2148,7 @@ async fn perform_provider_swap(
                     content: format!(
                         "Provider switched to {}. Next turn will use {}.",
                         target.as_str(),
-                        display_model_for(target.as_str())
+                        model_for_swap_msg
                     ),
                     msg_type: SystemMessageType::Info as i32,
                 },
@@ -2103,7 +2167,6 @@ async fn perform_provider_swap(
     //    extracts Name / Session / TZ / Brain tokens regardless of
     //    other prose; we use the same delimited format the rest of
     //    the codebase emits.
-    let cfg_after = config::load_config(&**db).await.ok();
     let name = cfg_after
         .as_ref()
         .map(|c| c.name.clone())
@@ -2112,7 +2175,7 @@ async fn perform_provider_swap(
         .as_ref()
         .map(|c| c.timezone.clone())
         .unwrap_or_else(|| "Etc/UTC".to_string());
-    let model = display_model_for(target.as_str());
+    let model = model_for_swap_msg.clone();
     let is_sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
     let mode = if is_sealed {
         OperatingMode::Operational
@@ -2146,10 +2209,75 @@ async fn perform_provider_swap(
         .await;
 }
 
-fn display_model_for(provider: &str) -> &'static str {
+/// Construct an `OpenAICompatProvider` for the given `ProviderKind`
+/// (Ollama or LmStudio) from the loaded config + runtime env vars.
+/// Returns an error message suitable for surfacing to the operator
+/// when the preset is unconfigured (empty endpoint or model).
+///
+/// Bearer is read per-call from `EMBRA_OLLAMA_BEARER` /
+/// `EMBRA_LM_STUDIO_BEARER` rather than boot-time captured values,
+/// matching the post-`9b4b64d` resolve-fresh pattern Anthropic and
+/// Gemini use to avoid stale-after-swap bugs.
+fn build_openai_compat_provider(
+    kind: ProviderKind,
+    config: &config::SystemConfig,
+) -> Result<Arc<dyn LlmProvider>, String> {
+    use crate::provider::openai_compat::{OpenAICompatProvider, OpenAiCompatPreset};
+    let preset = match kind {
+        ProviderKind::Ollama => OpenAiCompatPreset::Ollama,
+        ProviderKind::LmStudio => OpenAiCompatPreset::LmStudio,
+        _ => unreachable!("build_openai_compat_provider called with non-OpenAI-compat kind"),
+    };
+    let (endpoint, model) = config.openai_compat.for_preset(preset).ok_or_else(|| {
+        format!(
+            "Cannot start a turn — {} is not configured. \
+             Re-run setup wizard to configure endpoint + model.",
+            preset.label()
+        )
+    })?;
+    let bearer_env = match preset {
+        OpenAiCompatPreset::Ollama => "EMBRA_OLLAMA_BEARER",
+        OpenAiCompatPreset::LmStudio => "EMBRA_LM_STUDIO_BEARER",
+    };
+    let bearer = std::env::var(bearer_env)
+        .ok()
+        .filter(|s| !s.is_empty());
+    let provider = match preset {
+        OpenAiCompatPreset::Ollama => {
+            OpenAICompatProvider::ollama(endpoint.to_string(), bearer, model.to_string())
+        }
+        OpenAiCompatPreset::LmStudio => {
+            OpenAICompatProvider::lm_studio(endpoint.to_string(), bearer, model.to_string())
+        }
+    };
+    Ok(Arc::new(provider))
+}
+
+/// Display name shown in `Brain: <model>` status-bar tokens. For
+/// fixed-model providers (Anthropic, Gemini) the model id is hardcoded.
+/// For OpenAI-compat presets the model id is operator-selected via the
+/// wizard and lives in `config.openai_compat`; falls back to the preset
+/// label when unconfigured (e.g., on first boot before the wizard
+/// finishes). Sprint 5: signature changed from `-> &'static str` to
+/// `-> String` because OpenAI-compat models can't be hardcoded literals.
+fn display_model_for(provider: &str, config: &config::SystemConfig) -> String {
     match provider {
-        "gemini" => "gemini-3.1-pro",
-        _ => "opus-4.7",
+        "gemini" => "gemini-3.1-pro".to_string(),
+        "ollama" => {
+            if config.openai_compat.ollama_model.is_empty() {
+                "ollama".to_string()
+            } else {
+                config.openai_compat.ollama_model.clone()
+            }
+        }
+        "lm_studio" => {
+            if config.openai_compat.lm_studio_model.is_empty() {
+                "lm_studio".to_string()
+            } else {
+                config.openai_compat.lm_studio_model.clone()
+            }
+        }
+        _ => "opus-4.7".to_string(),
     }
 }
 
@@ -2241,7 +2369,9 @@ async fn handle_pending_key_setup(
         return;
     }
 
-    // Persist to per-provider STATE file.
+    // Persist to per-provider STATE file with mode 0600 per Locked
+    // Decision #8 (Sprint 5 retroactive fix to existing api_key_*
+    // writes that previously used default umask).
     let state_path = match target {
         ProviderKind::Anthropic => "/embra/state/api_key_anthropic",
         ProviderKind::Gemini => "/embra/state/api_key_gemini",
@@ -2249,7 +2379,7 @@ async fn handle_pending_key_setup(
         ProviderKind::Ollama => "/embra/state/bearer_ollama",
         ProviderKind::LmStudio => "/embra/state/bearer_lm_studio",
     };
-    if let Err(e) = std::fs::write(state_path, &candidate) {
+    if let Err(e) = config::write_credential_state(state_path, &candidate) {
         warn!(
             target: "config",
             "Could not write per-provider key to {}: {}",
@@ -2434,15 +2564,13 @@ async fn run_learning_loop(
             )
         }
         ProviderKind::Anthropic => Arc::new(AnthropicProvider::new(active_key)),
-        // OpenAI-compat learning is Stage 5 wiring (mirror of handle_request
-        // dispatch). Today the wizard 4-way isn't open yet, so this arm
-        // is unreachable in practice.
         ProviderKind::Ollama | ProviderKind::LmStudio => {
-            unimplemented!(
-                "OpenAI-compat learning loop dispatch is Stage 5 wiring; \
-                 api_provider was set to {} but no construction path exists yet",
-                provider_kind.as_str()
-            );
+            match build_openai_compat_provider(provider_kind, config) {
+                Ok(p) => p,
+                Err(msg) => {
+                    return Err(anyhow::anyhow!(msg));
+                }
+            }
         }
     };
     let empty_manifest: ToolManifest = provider.build_tool_manifest(&[]);
@@ -2464,7 +2592,7 @@ async fn run_learning_loop(
     // Send mode transition. Sprint 4: include Brain: <model> so the
     // console status bar refreshes during learning (would otherwise
     // sit on the default "opus-4.7" until next session-attach).
-    let learning_model = display_model_for(&config.api_provider);
+    let learning_model = display_model_for(&config.api_provider, config);
     let _ = tx.send(Ok(ConversationResponse {
         response_type: Some(conversation_response::ResponseType::ModeChange(
             ModeTransition {
@@ -2609,7 +2737,7 @@ async fn run_learning_loop(
                                 "Soul sealed — Name: {} — TZ: {} — Brain: {}",
                                 config.name,
                                 config.timezone,
-                                display_model_for(&config.api_provider)
+                                display_model_for(&config.api_provider, config)
                             ),
                         }
                     )),
@@ -2685,7 +2813,7 @@ async fn run_learning_loop(
                                                     "Soul sealed — Name: {} — TZ: {} — Brain: {}",
                                                     config.name,
                                                     config.timezone,
-                                                    display_model_for(&config.api_provider)
+                                                    display_model_for(&config.api_provider, config)
                                                 ),
                                             }
                                         )),
@@ -3230,11 +3358,52 @@ mod native_loop_tests {
 
     #[test]
     fn display_model_maps_known_providers() {
-        assert_eq!(display_model_for("anthropic"), "opus-4.7");
-        assert_eq!(display_model_for("gemini"), "gemini-3.1-pro");
+        let cfg = empty_config();
+        assert_eq!(display_model_for("anthropic", &cfg), "opus-4.7");
+        assert_eq!(display_model_for("gemini", &cfg), "gemini-3.1-pro");
         // Unknown defaults to anthropic display (defensive — never
         // shows an empty model name).
-        assert_eq!(display_model_for("unknown"), "opus-4.7");
+        assert_eq!(display_model_for("unknown", &cfg), "opus-4.7");
+    }
+
+    #[test]
+    fn display_model_openai_compat_uses_configured_model_id() {
+        let mut cfg = empty_config();
+        cfg.openai_compat.ollama_model = "gpt-oss:20b".to_string();
+        cfg.openai_compat.lm_studio_model = "qwen3.6:35b".to_string();
+        assert_eq!(display_model_for("ollama", &cfg), "gpt-oss:20b");
+        assert_eq!(display_model_for("lm_studio", &cfg), "qwen3.6:35b");
+    }
+
+    #[test]
+    fn display_model_openai_compat_unconfigured_falls_back_to_label() {
+        // Empty model field → falls back to a sensible placeholder
+        // rather than emitting empty Brain: token in the status bar.
+        let cfg = empty_config();
+        assert_eq!(display_model_for("ollama", &cfg), "ollama");
+        assert_eq!(display_model_for("lm_studio", &cfg), "lm_studio");
+    }
+
+    fn empty_config() -> config::SystemConfig {
+        config::SystemConfig {
+            name: "Embra".to_string(),
+            api_key: String::new(),
+            timezone: "UTC".to_string(),
+            deployment_mode: "test".to_string(),
+            created_at: String::new(),
+            version: String::new(),
+            github_token: None,
+            kg_temporal_window_secs: 1800,
+            kg_max_traversal_depth: 3,
+            kg_traversal_depth_ceiling: 5,
+            kg_edge_candidate_limit: 50,
+            api_provider: "anthropic".to_string(),
+            gemini_model: None,
+            anthropic_api_key: None,
+            gemini_api_key: None,
+            max_tool_iterations: None,
+            openai_compat: config::OpenAiCompatConfig::default(),
+        }
     }
 
     #[test]
@@ -3288,6 +3457,117 @@ mod native_loop_tests {
         // error and should NOT match.
         assert!(!providers_compatible("", "anthropic"));
         assert!(!providers_compatible("gemini", ""));
+    }
+
+    #[test]
+    fn providers_compatible_openai_compat_self_pairs() {
+        // Sprint 5: each OpenAI-compat preset is compatible only with
+        // itself (Locked Decision #2: distinct cross-provider session
+        // groups, hard-block on mismatch).
+        assert!(providers_compatible("ollama", "ollama"));
+        assert!(providers_compatible("lm_studio", "lm_studio"));
+    }
+
+    #[test]
+    fn providers_compatible_openai_compat_cross_pairs_blocked() {
+        // Ollama and LM Studio are distinct providers — sessions
+        // started under one cannot resume under the other.
+        assert!(!providers_compatible("ollama", "lm_studio"));
+        assert!(!providers_compatible("lm_studio", "ollama"));
+    }
+
+    #[test]
+    fn providers_compatible_openai_compat_vs_anthropic_gemini_blocked() {
+        // OpenAI-compat presets cross-block against Anthropic/Gemini.
+        for openai_compat in ["ollama", "lm_studio"] {
+            for other in ["anthropic", "gemini"] {
+                assert!(
+                    !providers_compatible(openai_compat, other),
+                    "{openai_compat} vs {other} should not match"
+                );
+                assert!(
+                    !providers_compatible(other, openai_compat),
+                    "{other} vs {openai_compat} should not match"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn build_openai_compat_provider_unconfigured_errors() {
+        // Empty endpoint/model in config → preset reports unconfigured.
+        let cfg = empty_config();
+        let err = build_openai_compat_provider(ProviderKind::Ollama, &cfg)
+            .err()
+            .expect("expected error");
+        assert!(err.contains("not configured"), "got: {err}");
+        let err = build_openai_compat_provider(ProviderKind::LmStudio, &cfg)
+            .err()
+            .expect("expected error");
+        assert!(err.contains("not configured"), "got: {err}");
+    }
+
+    #[test]
+    fn build_openai_compat_provider_configured_succeeds() {
+        let mut cfg = empty_config();
+        cfg.openai_compat.ollama_endpoint = "http://localhost:11434".to_string();
+        cfg.openai_compat.ollama_model = "gpt-oss:20b".to_string();
+        let provider = build_openai_compat_provider(ProviderKind::Ollama, &cfg).unwrap();
+        assert_eq!(provider.kind(), ProviderKind::Ollama);
+        assert_eq!(provider.display_name(), "gpt-oss:20b");
+    }
+
+    #[test]
+    fn build_openai_compat_provider_reads_bearer_from_env_per_call() {
+        use std::sync::Mutex;
+        // Serialize env-var access across tests in this file to avoid
+        // races. Only this and one sister test mutate this var.
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+        let mut cfg = empty_config();
+        cfg.openai_compat.ollama_endpoint = "http://localhost:11434".to_string();
+        cfg.openai_compat.ollama_model = "m".to_string();
+        // SAFETY: serialized via LOCK; single-threaded test runtime here.
+        unsafe {
+            std::env::set_var("EMBRA_OLLAMA_BEARER", "secret-from-env");
+        }
+        // build_openai_compat_provider reads env each call; we can't
+        // observe the bearer field directly (it's private) but we can
+        // verify construction succeeds without panic.
+        let _ = build_openai_compat_provider(ProviderKind::Ollama, &cfg).unwrap();
+        unsafe {
+            std::env::remove_var("EMBRA_OLLAMA_BEARER");
+        }
+    }
+
+    #[test]
+    fn write_credential_state_sets_0600_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmpdir = std::env::temp_dir().join(format!("embra-test-{}", std::process::id()));
+        std::fs::create_dir_all(&tmpdir).unwrap();
+        let path = tmpdir.join("test_credential");
+        let path_str = path.to_str().unwrap();
+        config::write_credential_state(path_str, "secret").unwrap();
+        let metadata = std::fs::metadata(&path).unwrap();
+        let mode = metadata.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected mode 0600, got {:o}", mode);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&tmpdir);
+    }
+
+    #[test]
+    fn write_credential_state_creates_parent_dirs() {
+        let tmpdir = std::env::temp_dir().join(format!(
+            "embra-test-deep-{}",
+            std::process::id()
+        ));
+        let nested = tmpdir.join("a").join("b");
+        let path = nested.join("creds");
+        let path_str = path.to_str().unwrap();
+        config::write_credential_state(path_str, "x").unwrap();
+        assert!(path.exists());
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&tmpdir);
     }
 
     #[test]

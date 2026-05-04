@@ -187,19 +187,27 @@ impl Supervisor {
         // API key: prefer the per-provider STATE file (D2). Falls
         // back to the legacy /embra/state/api_key (mirrors active),
         // then to {ANTHROPIC,GEMINI}_API_KEY env.
+        // OpenAI-compat presets don't have an api_key; bearer is read
+        // separately below and threaded via EMBRA_*_BEARER env vars.
         let per_provider_path = match api_provider.as_str() {
             "gemini" => "/embra/state/api_key_gemini",
+            "ollama" | "lm_studio" => "", // no api_key for OpenAI-compat
             _ => "/embra/state/api_key_anthropic",
         };
         let env_key_name = match api_provider.as_str() {
             "gemini" => "GEMINI_API_KEY",
+            "ollama" | "lm_studio" => "", // no api_key env for OpenAI-compat
             _ => "ANTHROPIC_API_KEY",
         };
-        let api_key = std::fs::read_to_string(per_provider_path)
-            .or_else(|_| std::fs::read_to_string("/embra/state/api_key"))
-            .or_else(|_| std::env::var(env_key_name))
-            .unwrap_or_default()
-            .trim().to_string();
+        let api_key = if per_provider_path.is_empty() {
+            String::new()
+        } else {
+            std::fs::read_to_string(per_provider_path)
+                .or_else(|_| std::fs::read_to_string("/embra/state/api_key"))
+                .or_else(|_| std::env::var(env_key_name))
+                .unwrap_or_default()
+                .trim().to_string()
+        };
         let mut brain_args = vec![
             "--port".to_string(), "50002".to_string(),
             "--wardsondb-url".to_string(), "http://127.0.0.1:8090".to_string(),
@@ -210,7 +218,7 @@ impl Supervisor {
         }
         if !api_provider.is_empty() {
             brain_args.push("--api-provider".to_string());
-            brain_args.push(api_provider);
+            brain_args.push(api_provider.clone());
         }
         // GitHub token: read from STATE partition for boot propagation
         let github_token = std::fs::read_to_string("/embra/state/github_token")
@@ -220,11 +228,35 @@ impl Supervisor {
             brain_args.push("--github-token".to_string());
             brain_args.push(github_token);
         }
+
+        // Sprint 5: read OpenAI-compat bearers from STATE files (preferred)
+        // or env-var fallback, thread to brain via EMBRA_*_BEARER env vars.
+        // STATE wins over env per Locked Decision #8 precedence rules.
+        // Read for BOTH presets unconditionally so post-`/provider`-swap
+        // turns find the bearer they need without a brain restart.
+        let mut brain_env: Vec<(String, String)> = Vec::new();
+        let ollama_bearer = std::fs::read_to_string("/embra/state/bearer_ollama")
+            .or_else(|_| std::env::var("EMBRA_OLLAMA_BEARER"))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if !ollama_bearer.is_empty() {
+            brain_env.push(("EMBRA_OLLAMA_BEARER".to_string(), ollama_bearer));
+        }
+        let lm_studio_bearer = std::fs::read_to_string("/embra/state/bearer_lm_studio")
+            .or_else(|_| std::env::var("EMBRA_LM_STUDIO_BEARER"))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if !lm_studio_bearer.is_empty() {
+            brain_env.push(("EMBRA_LM_STUDIO_BEARER".to_string(), lm_studio_bearer));
+        }
+
         self.add_service(ServiceDef {
             name: "embra-brain".to_string(),
             binary: "/usr/bin/embra-brain".to_string(),
             args: brain_args,
-            env: vec![],
+            env: brain_env,
             health_check: HealthCheck::Grpc {
                 port: 50002,
                 timeout: Duration::from_secs(30),
