@@ -21,5 +21,6 @@
 
 pub mod conv;
 pub mod sanitize;
+pub mod streaming;
 pub mod tool_schema;
 pub mod wire;
