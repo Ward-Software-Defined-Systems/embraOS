@@ -553,6 +553,17 @@ async fn handle_request(
                     )
                 }
                 ProviderKind::Anthropic => Arc::new(AnthropicProvider::new(active_key)),
+                // OpenAI-compat dispatch lands in Stage 5 with bearer +
+                // endpoint + model plumbing through STATE/env. Until then
+                // this arm is unreachable (the wizard 4-way that writes
+                // "ollama" / "lm_studio" to api_provider is Stage 4 work).
+                ProviderKind::Ollama | ProviderKind::LmStudio => {
+                    unimplemented!(
+                        "OpenAI-compat provider dispatch is Stage 5 wiring; \
+                         api_provider was set to {} but no construction path exists yet",
+                        provider_kind.as_str()
+                    );
+                }
             };
             let descriptors: Vec<&'static tools::registry::ToolDescriptor> =
                 tools::registry::all_descriptors().collect();
@@ -1696,6 +1707,19 @@ async fn handle_provider_command(
         let prompt_text = match target {
             ProviderKind::Anthropic => "Enter your Anthropic API key (next message):",
             ProviderKind::Gemini => "Enter your Gemini API key (next message):",
+            // /provider --setup ollama|lm_studio is reserved for Stage 4
+            // wizard expansion; reject explicitly until then.
+            ProviderKind::Ollama | ProviderKind::LmStudio => {
+                send_msg(
+                    "OpenAI-compat providers configure via the wizard (re-run setup). \
+                     /provider --setup is reserved for Anthropic and Gemini today."
+                        .to_string(),
+                    SystemMessageType::Error,
+                )
+                .await;
+                *pending_key_setup.lock().await = None;
+                return;
+            }
         };
         let _ = tx
             .send(Ok(ConversationResponse {
@@ -2198,6 +2222,13 @@ async fn handle_pending_key_setup(
     match target {
         ProviderKind::Anthropic => cfg.anthropic_api_key = Some(candidate.clone()),
         ProviderKind::Gemini => cfg.gemini_api_key = Some(candidate.clone()),
+        // OpenAI-compat presets reach this site only if /provider --setup
+        // accepted them above. Today's gating refuses them outright; this
+        // arm exists for exhaustive-match completeness only.
+        ProviderKind::Ollama | ProviderKind::LmStudio => {
+            // No-op: Stage 5 will route the bearer to STATE files instead
+            // of SystemConfig fields.
+        }
     }
     if let Err(e) = config::save_config(&**db, &cfg).await {
         send_msg(
@@ -2212,6 +2243,9 @@ async fn handle_pending_key_setup(
     let state_path = match target {
         ProviderKind::Anthropic => "/embra/state/api_key_anthropic",
         ProviderKind::Gemini => "/embra/state/api_key_gemini",
+        // Stage 4/5: bearer file routing for OpenAI-compat presets.
+        ProviderKind::Ollama => "/embra/state/bearer_ollama",
+        ProviderKind::LmStudio => "/embra/state/bearer_lm_studio",
     };
     if let Err(e) = std::fs::write(state_path, &candidate) {
         warn!(
@@ -2398,6 +2432,16 @@ async fn run_learning_loop(
             )
         }
         ProviderKind::Anthropic => Arc::new(AnthropicProvider::new(active_key)),
+        // OpenAI-compat learning is Stage 5 wiring (mirror of handle_request
+        // dispatch). Today the wizard 4-way isn't open yet, so this arm
+        // is unreachable in practice.
+        ProviderKind::Ollama | ProviderKind::LmStudio => {
+            unimplemented!(
+                "OpenAI-compat learning loop dispatch is Stage 5 wiring; \
+                 api_provider was set to {} but no construction path exists yet",
+                provider_kind.as_str()
+            );
+        }
     };
     let empty_manifest: ToolManifest = provider.build_tool_manifest(&[]);
 

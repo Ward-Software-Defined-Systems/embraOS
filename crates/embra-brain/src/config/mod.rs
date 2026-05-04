@@ -80,6 +80,10 @@ impl SystemConfig {
                 .as_deref()
                 .or_else(|| (self.api_provider == "gemini").then_some(self.api_key.as_str()))
                 .filter(|s| !s.is_empty()),
+            // OpenAI-compat presets keep their bearer in STATE files only
+            // (Stage 5 wiring); never in SystemConfig. `key_for` returns
+            // None — callers fall through to env-var lookup.
+            ProviderKind::Ollama | ProviderKind::LmStudio => None,
         }
     }
 }
@@ -92,17 +96,23 @@ fn default_api_provider() -> String { "anthropic".to_string() }
 
 const PROVIDER_ANTHROPIC_LABEL: &str = "Anthropic Claude Opus 4.7";
 const PROVIDER_GEMINI_LABEL: &str = "Google Gemini 3.1 Pro";
+const PROVIDER_OLLAMA_LABEL: &str = "Ollama (OpenAI-compat)";
+const PROVIDER_LM_STUDIO_LABEL: &str = "LM Studio (OpenAI-compat)";
 
 fn provider_label(kind: ProviderKind) -> &'static str {
     match kind {
         ProviderKind::Anthropic => PROVIDER_ANTHROPIC_LABEL,
         ProviderKind::Gemini => PROVIDER_GEMINI_LABEL,
+        ProviderKind::Ollama => PROVIDER_OLLAMA_LABEL,
+        ProviderKind::LmStudio => PROVIDER_LM_STUDIO_LABEL,
     }
 }
 
 fn provider_from_label(label: &str) -> ProviderKind {
     match label {
         PROVIDER_GEMINI_LABEL => ProviderKind::Gemini,
+        PROVIDER_OLLAMA_LABEL => ProviderKind::Ollama,
+        PROVIDER_LM_STUDIO_LABEL => ProviderKind::LmStudio,
         _ => ProviderKind::Anthropic,
     }
 }
@@ -275,6 +285,15 @@ async fn validate_api_key_for(provider: ProviderKind, key: &str) -> ApiKeyCheck 
             AnthropicProvider::new(String::new()).validate_key(key).await
         }
         ProviderKind::Gemini => GeminiProvider::new(String::new()).validate_key(key).await,
+        // OpenAI-compat presets validate via endpoint+bearer probe in the
+        // wizard's Stage 4 flow, not via this api-key path. This arm is
+        // unreachable from the current 2-way wizard but kept for
+        // exhaustive-match completeness.
+        ProviderKind::Ollama | ProviderKind::LmStudio => {
+            return ApiKeyCheck::Invalid(
+                "OpenAI-compat providers use the endpoint+bearer wizard flow.".into(),
+            );
+        }
     };
     match (result, provider) {
         (ValidationResult::Valid, _) => ApiKeyCheck::Valid,
@@ -284,6 +303,9 @@ async fn validate_api_key_for(provider: ProviderKind, key: &str) -> ApiKeyCheck 
         (ValidationResult::InvalidKey, ProviderKind::Gemini) => ApiKeyCheck::Invalid(
             "Invalid Gemini API key — check the key and try again.".into(),
         ),
+        (ValidationResult::InvalidKey, ProviderKind::Ollama | ProviderKind::LmStudio) => {
+            ApiKeyCheck::Invalid("OpenAI-compat bearer rejected.".into())
+        }
         (ValidationResult::Forbidden, ProviderKind::Anthropic) => ApiKeyCheck::Invalid(
             "Anthropic API rejected the key (403). Verify it's active and try again.".into(),
         ),
@@ -292,6 +314,9 @@ async fn validate_api_key_for(provider: ProviderKind, key: &str) -> ApiKeyCheck 
              Verify at aistudio.google.com — gemini-3.1-pro-preview requires a billed account."
                 .into(),
         ),
+        (ValidationResult::Forbidden, ProviderKind::Ollama | ProviderKind::LmStudio) => {
+            ApiKeyCheck::Invalid("OpenAI-compat endpoint refused the bearer (403).".into())
+        }
         (ValidationResult::NetworkError, _) => ApiKeyCheck::Invalid(
             "Could not verify key — check network and try again.".into(),
         ),
@@ -379,10 +404,17 @@ pub async fn run_config_wizard_grpc(
     let env_var_name = match provider_kind {
         ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
         ProviderKind::Gemini => "GEMINI_API_KEY",
+        ProviderKind::Ollama => "EMBRA_OLLAMA_BEARER",
+        ProviderKind::LmStudio => "EMBRA_LM_STUDIO_BEARER",
     };
     let other_env_name = match provider_kind {
         ProviderKind::Anthropic => "GEMINI_API_KEY",
         ProviderKind::Gemini => "ANTHROPIC_API_KEY",
+        // For OpenAI-compat presets there isn't a single "the other"
+        // env var (the wizard 4-way flow handles its own prompts in
+        // Stage 4). Use the cross-preset alternative as the placeholder.
+        ProviderKind::Ollama => "EMBRA_LM_STUDIO_BEARER",
+        ProviderKind::LmStudio => "EMBRA_OLLAMA_BEARER",
     };
     if std::env::var(other_env_name).map(|v| !v.is_empty()).unwrap_or(false) {
         let _ = tx.send(Ok(ConversationResponse {
@@ -406,6 +438,12 @@ pub async fn run_config_wizard_grpc(
                 let prompt_text = match provider_kind {
                     ProviderKind::Anthropic => "Enter your Anthropic API key:",
                     ProviderKind::Gemini => "Enter your Gemini API key:",
+                    ProviderKind::Ollama => {
+                        "Enter your Ollama bearer token (or empty for no auth):"
+                    }
+                    ProviderKind::LmStudio => {
+                        "Enter your LM Studio bearer token (or empty for no auth):"
+                    }
                 };
                 let _ = tx.send(Ok(ConversationResponse {
                     response_type: Some(conversation_response::ResponseType::Setup(
@@ -526,6 +564,9 @@ pub async fn run_config_wizard_grpc(
     let (anthropic_api_key, gemini_api_key) = match provider_kind {
         ProviderKind::Anthropic => (Some(api_key.clone()), None),
         ProviderKind::Gemini => (None, Some(api_key.clone())),
+        // OpenAI-compat presets don't populate either api_key field;
+        // bearer goes to STATE only (Stage 5 wiring).
+        ProviderKind::Ollama | ProviderKind::LmStudio => (None, None),
     };
     let config = SystemConfig {
         name,
@@ -583,6 +624,11 @@ pub async fn run_config_wizard_grpc(
     let per_provider_state_path = match provider_kind {
         ProviderKind::Anthropic => "/embra/state/api_key_anthropic",
         ProviderKind::Gemini => "/embra/state/api_key_gemini",
+        // OpenAI-compat presets use bearer files at these paths once
+        // Stage 4 expands the wizard. Today's 2-way wizard never reaches
+        // this site for these presets, but the match must be exhaustive.
+        ProviderKind::Ollama => "/embra/state/bearer_ollama",
+        ProviderKind::LmStudio => "/embra/state/bearer_lm_studio",
     };
     if let Err(e) = std::fs::write(per_provider_state_path, &config.api_key) {
         tracing::warn!(

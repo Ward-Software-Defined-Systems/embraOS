@@ -36,3 +36,6 @@ base64 = "0.22"
 
 [build-dependencies]
 tonic-build = { workspace = true }
+
+[dev-dependencies]
+wiremock = "0.6"

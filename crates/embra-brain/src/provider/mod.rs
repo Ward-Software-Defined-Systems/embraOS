@@ -29,6 +29,8 @@ use serde_json::Value as JsonValue;
 pub enum ProviderKind {
     Anthropic,
     Gemini,
+    Ollama,
+    LmStudio,
 }
 
 impl ProviderKind {
@@ -36,6 +38,8 @@ impl ProviderKind {
         match self {
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::Gemini => "gemini",
+            ProviderKind::Ollama => "ollama",
+            ProviderKind::LmStudio => "lm_studio",
         }
     }
 
@@ -43,6 +47,8 @@ impl ProviderKind {
         match s {
             "anthropic" => Some(Self::Anthropic),
             "gemini" => Some(Self::Gemini),
+            "ollama" => Some(Self::Ollama),
+            "lm_studio" => Some(Self::LmStudio),
             _ => None,
         }
     }
