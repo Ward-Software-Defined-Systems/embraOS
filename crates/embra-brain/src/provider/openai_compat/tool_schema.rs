@@ -65,6 +65,7 @@ pub fn translate_schema(
     let definitions = schema_util::extract_definitions(&mut schema);
     schema_util::inline_refs(tool_name, &mut schema, &definitions)?;
     strip_root_meta_keys(&mut schema);
+    ensure_object_has_properties(&mut schema);
     Ok(schema)
 }
 
@@ -75,6 +76,38 @@ fn strip_root_meta_keys(schema: &mut JsonValue) {
     if let JsonValue::Object(map) = schema {
         map.remove("$schema");
         map.remove("$id");
+    }
+}
+
+/// Ensure an object-typed root schema carries a `properties` field,
+/// even when the args struct is unit-like (no fields). LM Studio's
+/// zod-based tool-schema validator rejects requests with
+/// `tools[N].function.parameters.properties` missing — error message:
+/// `Required (received undefined)` at `[N, "function", "parameters",
+/// "properties"]`. schemars's default emission for parameterless
+/// structs (e.g., `SystemStatusArgs {}`) is `{"type": "object"}` with
+/// no `properties` key; we add an empty object so LM Studio accepts.
+///
+/// Only stamps when the root has `type: "object"` (or no `type` —
+/// schemars's default for record-shaped structs). Non-object roots
+/// (rare; would be schemars output for primitive args) pass through.
+fn ensure_object_has_properties(schema: &mut JsonValue) {
+    let JsonValue::Object(map) = schema else {
+        return;
+    };
+    let is_object_typed = map
+        .get("type")
+        .and_then(|v| v.as_str())
+        .map(|t| t == "object")
+        .unwrap_or(true);
+    if !is_object_typed {
+        return;
+    }
+    if !map.contains_key("properties") {
+        map.insert(
+            "properties".to_string(),
+            JsonValue::Object(serde_json::Map::new()),
+        );
     }
 }
 
@@ -206,6 +239,89 @@ mod tests {
         assert!(out.get("definitions").is_none());
         assert!(out.get("$schema").is_none());
         assert_eq!(out["required"][0], "path");
+    }
+
+    #[test]
+    fn parameterless_struct_gets_empty_properties() {
+        // Mirrors schemars's default emission for unit-like args
+        // structs (SystemStatusArgs {}, UptimeReportArgs {}, etc.).
+        // LM Studio's zod validator rejects when `properties` is
+        // missing — we stamp an empty object so it round-trips.
+        let schema = json!({
+            "type": "object",
+            "title": "SystemStatusArgs"
+        });
+        let out = translate_schema("synthetic", schema).unwrap();
+        assert_eq!(out["type"], "object");
+        assert_eq!(out["properties"], json!({}));
+    }
+
+    #[test]
+    fn parameterless_with_explicit_empty_properties_is_idempotent() {
+        let schema = json!({
+            "type": "object",
+            "properties": {}
+        });
+        let out = translate_schema("synthetic", schema).unwrap();
+        assert_eq!(out["properties"], json!({}));
+    }
+
+    #[test]
+    fn schema_with_no_type_field_gets_properties() {
+        // schemars sometimes emits no `type` for record-shaped args.
+        // We treat that as object-shaped and stamp properties.
+        let schema = json!({
+            "title": "FooArgs"
+        });
+        let out = translate_schema("synthetic", schema).unwrap();
+        assert!(out["properties"].is_object());
+    }
+
+    #[test]
+    fn schema_with_existing_properties_is_unchanged() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"}
+            },
+            "required": ["path"]
+        });
+        let out = translate_schema("synthetic", schema).unwrap();
+        // Existing properties preserved exactly.
+        assert_eq!(out["properties"]["path"]["type"], "string");
+        assert_eq!(out["required"][0], "path");
+    }
+
+    #[test]
+    fn non_object_root_schema_passes_through_without_properties_stamp() {
+        // Defensive: if a tool somehow declared primitive root args,
+        // we don't force an `object`-shaped schema onto it.
+        let schema = json!({
+            "type": "string"
+        });
+        let out = translate_schema("synthetic", schema).unwrap();
+        assert_eq!(out["type"], "string");
+        assert!(out.get("properties").is_none());
+    }
+
+    #[test]
+    fn all_registry_tools_have_properties_field_for_lm_studio() {
+        // Universal regression for the LM Studio zod validator:
+        // every translated tool schema MUST carry `properties` at
+        // the root (even if empty). Catches the bug class for any
+        // future parameterless args struct.
+        let descriptors: Vec<&'static ToolDescriptor> = registry::all_descriptors().collect();
+        let JsonValue::Array(arr) = translate(&descriptors).unwrap() else {
+            panic!("expected array");
+        };
+        for tool in &arr {
+            let name = tool["function"]["name"].as_str().unwrap();
+            let params = &tool["function"]["parameters"];
+            assert!(
+                params["properties"].is_object(),
+                "tool '{name}' missing properties on parameters: {params}"
+            );
+        }
     }
 
     #[test]
