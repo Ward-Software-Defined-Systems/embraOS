@@ -48,11 +48,12 @@ pub struct BrainGrpcService {
     /// Operator's queued provider switch. Drained between turns by the
     /// loop driver after `in_turn` clears. Stage 8 populates it.
     pending_provider: Arc<Mutex<Option<ProviderKind>>>,
-    /// Set by `/provider --setup [<kind>]` to indicate that the next
-    /// user message should be treated as a candidate API key for the
-    /// given provider rather than a regular conversation turn. The
-    /// UserMessage handler intercepts and clears this before the
-    /// loop driver runs.
+    /// Set by `/provider --setup <anthropic|gemini>` to indicate that
+    /// the next user message should be treated as a candidate API key
+    /// for the given provider rather than a regular conversation turn.
+    /// The UserMessage handler intercepts and clears this before the
+    /// loop driver runs. OpenAI-compat presets use the parallel
+    /// `pending_openai_compat_setup` multi-step state machine instead.
     pending_key_setup: Arc<Mutex<Option<ProviderKind>>>,
     /// Multi-step state machine for `/provider --setup <ollama|lm_studio>`.
     /// Parallel to `pending_key_setup` but for OpenAI-compat presets'
@@ -1790,9 +1791,15 @@ async fn handle_provider_command(
 
     let action = args.trim();
 
-    // /provider --setup [<kind>] — multi-turn key add. Sets the
-    // pending_key_setup flag and prompts; the operator's next user
-    // message is intercepted in handle_request as the candidate key.
+    // /provider --setup <kind> — multi-turn flow.
+    // - <anthropic|gemini>: single-step API-key add via pending_key_setup;
+    //   handle_pending_key_setup intercepts the next user message.
+    // - <ollama|lm_studio>: 4-step reconfigure (Endpoint → Bearer →
+    //   Model) via pending_openai_compat_setup; intercepted N user
+    //   messages by handle_pending_openai_compat_step.
+    // No-arg form auto-targets between Anthropic/Gemini only (see
+    // auto-target match below). OpenAI-compat presets must be
+    // specified explicitly.
     if let Some(rest) = action.strip_prefix("--setup") {
         let cfg = match config::load_config(&**db).await {
             Ok(c) => c,
@@ -1816,7 +1823,10 @@ async fn handle_provider_command(
                 (false, true) => ProviderKind::Anthropic,
                 (true, true) => {
                     send_msg(
-                        "Both providers already have keys. Use /provider --setup <anthropic|gemini> to replace one.".to_string(),
+                        "Both Anthropic and Gemini already have API keys. \
+                         Use /provider --setup <anthropic|gemini> to replace one, \
+                         or /provider --setup <ollama|lm_studio> to (re)configure an OpenAI-compat preset."
+                            .to_string(),
                         SystemMessageType::Error,
                     ).await;
                     return;

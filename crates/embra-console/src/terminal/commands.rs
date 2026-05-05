@@ -27,9 +27,11 @@ Commands:
   /mode                          Show operating mode
 
 Provider:
-  /provider                      Show active provider, model, session
-  /provider <anthropic|gemini>   Switch provider for future turns
-  /provider --setup [<kind>]     Add an alternate provider's API key (multi-turn)
+  /provider                              Show active provider, model, session
+  /provider <anthropic|gemini|ollama|lm_studio>
+                                         Switch provider for future turns
+  /provider --setup <anthropic|gemini>   Add/replace an API key (multi-turn)
+  /provider --setup <ollama|lm_studio>   Reconfigure endpoint, bearer, model (multi-turn)
 
 Tool loop:
   /iter-cap                      Show the per-turn tool iteration cap
