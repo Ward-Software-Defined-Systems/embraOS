@@ -1923,12 +1923,14 @@ async fn handle_provider_command(
             )
             .await;
         }
-        "anthropic" | "gemini" => {
+        "anthropic" | "gemini" | "ollama" | "lm_studio" => {
             let target = ProviderKind::from_str(action).unwrap();
-            // Pre-check: do we have a key for the target? Currently
-            // config.system.api_key is single-key, so switching to a
-            // provider whose key was never wizard-validated would
-            // fail at the next turn. Surface that early.
+            // Pre-check: is the target configured? For Anthropic/Gemini
+            // that's a recorded API key; for OpenAI-compat presets it's
+            // an endpoint + model in `config.system.openai_compat`.
+            // Surface a missing-config error early so the operator gets
+            // a useful hint instead of a per-call failure on the next
+            // turn.
             let cfg = match config::load_config(&**db).await {
                 Ok(c) => c,
                 Err(_) => {
@@ -1948,21 +1950,46 @@ async fn handle_provider_command(
                 .await;
                 return;
             }
-            // Per-provider key check (Sprint 4 D2). Replaces the
-            // pre-D2 prefix heuristic with an actual presence check
-            // against the per-provider field. Uses cfg.key_for(target)
-            // which falls back to the legacy api_key when the active
-            // provider matches.
-            if cfg.key_for(target).is_none() {
-                send_msg(
-                    format!(
+            // Per-provider configuration check.
+            // - Anthropic/Gemini: per-provider API-key field via
+            //   `cfg.key_for` (Sprint 4 D2), falling back to the legacy
+            //   `api_key` when the active provider matches.
+            // - Ollama/LmStudio: endpoint + model presence in
+            //   `cfg.openai_compat` via `for_preset` (Sprint 5).
+            //   Bearer is intentionally NOT required — no-auth Ollama
+            //   is a valid configuration.
+            let configured = match target {
+                ProviderKind::Anthropic | ProviderKind::Gemini => {
+                    cfg.key_for(target).is_some()
+                }
+                ProviderKind::Ollama | ProviderKind::LmStudio => {
+                    let preset = match target {
+                        ProviderKind::Ollama => {
+                            crate::provider::openai_compat::OpenAiCompatPreset::Ollama
+                        }
+                        ProviderKind::LmStudio => {
+                            crate::provider::openai_compat::OpenAiCompatPreset::LmStudio
+                        }
+                        _ => unreachable!(),
+                    };
+                    cfg.openai_compat.for_preset(preset).is_some()
+                }
+            };
+            if !configured {
+                let body = match target {
+                    ProviderKind::Anthropic | ProviderKind::Gemini => format!(
                         "No API key recorded for {}. Run /provider --setup {} to add one.",
                         target.as_str(),
                         target.as_str()
                     ),
-                    SystemMessageType::Error,
-                )
-                .await;
+                    ProviderKind::Ollama | ProviderKind::LmStudio => format!(
+                        "{} is not configured (endpoint + model missing). \
+                         Run /provider --setup {} to set them.",
+                        target.as_str(),
+                        target.as_str()
+                    ),
+                };
+                send_msg(body, SystemMessageType::Error).await;
                 return;
             }
 
