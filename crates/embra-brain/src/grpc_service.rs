@@ -54,6 +54,53 @@ pub struct BrainGrpcService {
     /// UserMessage handler intercepts and clears this before the
     /// loop driver runs.
     pending_key_setup: Arc<Mutex<Option<ProviderKind>>>,
+    /// Multi-step state machine for `/provider --setup <ollama|lm_studio>`.
+    /// Parallel to `pending_key_setup` but for OpenAI-compat presets'
+    /// 4-step reconfigure flow (Endpoint → Bearer choice → Bearer
+    /// token? → Model selection). Cleared on completion or any slash
+    /// command cancel hatch.
+    pending_openai_compat_setup: Arc<Mutex<Option<OpenAiCompatSetupState>>>,
+}
+
+/// Sprint 5 follow-up: post-wizard reconfigure for OpenAI-compat
+/// presets. Set by `/provider --setup <ollama|lm_studio>`; advanced
+/// one transition per intercepted UserMessage; cleared on completion
+/// or any non-reentry slash command.
+#[derive(Debug, Clone)]
+pub struct OpenAiCompatSetupState {
+    pub preset: crate::provider::openai_compat::OpenAiCompatPreset,
+    /// Whether the preset already had a config when --setup started.
+    /// Drives default-value selection on each prompt.
+    pub pre_existed: bool,
+    pub current_endpoint: Option<String>,
+    pub current_bearer: Option<String>,
+    pub current_model: Option<String>,
+    pub step: OpenAiCompatSetupStep,
+}
+
+#[derive(Debug, Clone)]
+pub enum OpenAiCompatSetupStep {
+    AwaitingEndpoint,
+    AwaitingBearerChoice {
+        endpoint: String,
+    },
+    AwaitingBearerToken {
+        endpoint: String,
+    },
+    AwaitingModelSelection {
+        endpoint: String,
+        bearer: Option<String>,
+        models: Vec<String>,
+    },
+}
+
+/// Outcome of one state-machine step. `Advance` reinstates the state
+/// in the Mutex; `Complete` and `Error` leave the Mutex empty so the
+/// next user message goes to the regular conversation path.
+enum SetupStepOutcome {
+    Advance,
+    Complete,
+    Error,
 }
 
 impl BrainGrpcService {
@@ -78,6 +125,7 @@ impl BrainGrpcService {
             in_turn: Arc::new(AtomicBool::new(false)),
             pending_provider: Arc::new(Mutex::new(None)),
             pending_key_setup: Arc::new(Mutex::new(None)),
+            pending_openai_compat_setup: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -102,6 +150,7 @@ impl BrainService for BrainGrpcService {
         let in_turn = self.in_turn.clone();
         let pending_provider = self.pending_provider.clone();
         let pending_key_setup = self.pending_key_setup.clone();
+        let pending_openai_compat_setup = self.pending_openai_compat_setup.clone();
 
         tokio::spawn(async move {
             let mut config_tz = config_tz;
@@ -216,7 +265,7 @@ impl BrainService for BrainGrpcService {
                         match msg {
                             Some(Ok(req)) => {
                                 if let Err(e) = handle_request(
-                                    req, &tx, &db, &session_mgr, &config_tz, &api_key, &in_turn, &pending_provider, &pending_key_setup
+                                    req, &tx, &db, &session_mgr, &config_tz, &api_key, &in_turn, &pending_provider, &pending_key_setup, &pending_openai_compat_setup
                                 ).await {
                                     error!("Error handling request: {}", e);
                                     let _ = tx.send(Ok(ConversationResponse {
@@ -448,6 +497,7 @@ async fn handle_request(
     in_turn: &Arc<AtomicBool>,
     pending_provider: &Arc<Mutex<Option<ProviderKind>>>,
     pending_key_setup: &Arc<Mutex<Option<ProviderKind>>>,
+    pending_openai_compat_setup: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
 ) -> anyhow::Result<()> {
     let self_in_turn = in_turn.clone();
     match req.request_type {
@@ -457,6 +507,31 @@ async fn handle_request(
             // persists per-provider key + STATE file, clears flag.
             // On invalid: keeps flag set so the operator can retry
             // with the next message.
+            // Sprint 5 follow-up: intercept user messages while the
+            // OpenAI-compat reconfigure state machine is active.
+            // Each message advances one step; on completion or error
+            // the state is cleared.
+            {
+                let mut state_opt = pending_openai_compat_setup.lock().await.take();
+                if let Some(mut state) = state_opt.take() {
+                    let outcome = handle_pending_openai_compat_step(
+                        &mut state,
+                        &msg.content,
+                        tx,
+                        db,
+                        pending_openai_compat_setup,
+                    )
+                    .await;
+                    if matches!(outcome, SetupStepOutcome::Advance) {
+                        *pending_openai_compat_setup.lock().await = Some(state);
+                    }
+                    // Complete and Error already cleared the Mutex
+                    // (or didn't reinstate it). Either way the flow ends
+                    // here without invoking the regular conversation path.
+                    return Ok(());
+                }
+            }
+
             let pending_target = pending_key_setup.lock().await.clone();
             if let Some(target) = pending_target {
                 let candidate = msg.content.trim().to_string();
@@ -1143,8 +1218,33 @@ async fn handle_request(
         }
 
         Some(conversation_request::RequestType::SlashCommand(cmd)) => {
+            // Sprint 5 follow-up: cancel any in-flight OpenAI-compat
+            // reconfigure when a slash command arrives — except when
+            // the new command is itself /provider --setup (re-entry,
+            // handled by enter_openai_compat_setup which replaces the
+            // state). All other slash commands surface a SystemMessage
+            // before dispatching to the regular handler.
+            {
+                let cancelled = pending_openai_compat_setup.lock().await.take();
+                if cancelled.is_some() {
+                    let is_reentry = cmd.command == "/provider"
+                        && cmd.args.contains("--setup");
+                    if !is_reentry {
+                        let _ = tx
+                            .send(Ok(ConversationResponse {
+                                response_type: Some(conversation_response::ResponseType::System(
+                                    SystemMessage {
+                                        content: "OpenAI-compat setup cancelled.".to_string(),
+                                        msg_type: SystemMessageType::Info as i32,
+                                    },
+                                )),
+                            }))
+                            .await;
+                    }
+                }
+            }
             if let Some(synthetic_prompt) = handle_slash_command(
-                &cmd.command, &cmd.args, tx, db, session_mgr, config_tz, api_key, in_turn, pending_provider, pending_key_setup
+                &cmd.command, &cmd.args, tx, db, session_mgr, config_tz, api_key, in_turn, pending_provider, pending_key_setup, pending_openai_compat_setup
             ).await {
                 // Slash command requested a synthetic user turn — feed it through the Brain.
                 let synthetic = ConversationRequest {
@@ -1153,7 +1253,7 @@ async fn handle_request(
                     )),
                 };
                 Box::pin(handle_request(
-                    synthetic, tx, db, session_mgr, config_tz, api_key, in_turn, pending_provider, pending_key_setup
+                    synthetic, tx, db, session_mgr, config_tz, api_key, in_turn, pending_provider, pending_key_setup, pending_openai_compat_setup
                 )).await?;
             }
             Ok(())
@@ -1284,6 +1384,7 @@ async fn handle_slash_command(
     in_turn: &Arc<AtomicBool>,
     pending_provider: &Arc<Mutex<Option<ProviderKind>>>,
     pending_key_setup: &Arc<Mutex<Option<ProviderKind>>>,
+    pending_openai_compat_setup: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
 ) -> Option<String> {
     // Helper to send a system message
     let send_msg = |tx: &mpsc::Sender<Result<ConversationResponse, Status>>, content: String| {
@@ -1341,14 +1442,14 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup [<kind>]         Add an alternate provider's API key (multi-turn)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
             return Some(build_feedback_loop_prompt());
         }
         "/provider" => {
-            handle_provider_command(args, tx, db, session_mgr, in_turn, pending_provider, pending_key_setup).await;
+            handle_provider_command(args, tx, db, session_mgr, in_turn, pending_provider, pending_key_setup, pending_openai_compat_setup).await;
         }
         "/iter-cap" => {
             handle_iter_cap_command(args, tx, db).await;
@@ -1669,6 +1770,7 @@ async fn handle_provider_command(
     in_turn: &Arc<AtomicBool>,
     pending_provider: &Arc<Mutex<Option<ProviderKind>>>,
     pending_key_setup: &Arc<Mutex<Option<ProviderKind>>>,
+    pending_openai_compat_setup: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
 ) {
     let send_msg = |content: String, kind: SystemMessageType| {
         let tx = tx.clone();
@@ -1745,26 +1847,30 @@ async fn handle_provider_command(
                 }
             }
         };
-        // Set the flag (replacing any prior pending setup).
-        *pending_key_setup.lock().await = Some(target);
+        // OpenAI-compat presets dispatch to the multi-step
+        // reconfigure flow (Sprint 5 follow-up). Anthropic/Gemini
+        // continue with the single-step pending_key_setup pattern.
+        match target {
+            ProviderKind::Ollama | ProviderKind::LmStudio => {
+                // Clear any other pending state — only one --setup
+                // flow at a time.
+                *pending_key_setup.lock().await = None;
+                enter_openai_compat_setup(target, tx, db, pending_openai_compat_setup).await;
+                return;
+            }
+            ProviderKind::Anthropic | ProviderKind::Gemini => {
+                // Clear any in-flight OpenAI-compat reconfigure too.
+                *pending_openai_compat_setup.lock().await = None;
+                *pending_key_setup.lock().await = Some(target);
+            }
+        }
         // Prompt for the key. Console renders as a system message;
         // the next user input will be intercepted.
         let prompt_text = match target {
             ProviderKind::Anthropic => "Enter your Anthropic API key (next message):",
             ProviderKind::Gemini => "Enter your Gemini API key (next message):",
-            // /provider --setup ollama|lm_studio is reserved for Stage 4
-            // wizard expansion; reject explicitly until then.
-            ProviderKind::Ollama | ProviderKind::LmStudio => {
-                send_msg(
-                    "OpenAI-compat providers configure via the wizard (re-run setup). \
-                     /provider --setup is reserved for Anthropic and Gemini today."
-                        .to_string(),
-                    SystemMessageType::Error,
-                )
-                .await;
-                *pending_key_setup.lock().await = None;
-                return;
-            }
+            // Unreachable — handled by the dispatch match above.
+            ProviderKind::Ollama | ProviderKind::LmStudio => unreachable!(),
         };
         let _ = tx
             .send(Ok(ConversationResponse {
@@ -2307,6 +2413,484 @@ fn display_model_for(provider: &str, config: &config::SystemConfig) -> String {
         }
         _ => "opus-4.7".to_string(),
     }
+}
+
+// ============================================================
+// OpenAI-compat post-wizard reconfigure (Sprint 5 follow-up)
+// ============================================================
+
+/// Bearer choice selector option labels. 3-way when a current bearer
+/// exists; 2-way otherwise.
+const BEARER_KEEP: &str = "Keep";
+const BEARER_CHANGE: &str = "Change";
+const BEARER_REMOVE: &str = "Remove";
+const BEARER_SET: &str = "Set";
+const BEARER_SKIP: &str = "Skip";
+
+fn bearer_state_path(preset: crate::provider::openai_compat::OpenAiCompatPreset) -> &'static str {
+    use crate::provider::openai_compat::OpenAiCompatPreset;
+    match preset {
+        OpenAiCompatPreset::Ollama => "/embra/state/bearer_ollama",
+        OpenAiCompatPreset::LmStudio => "/embra/state/bearer_lm_studio",
+    }
+}
+
+fn bearer_env_var(preset: crate::provider::openai_compat::OpenAiCompatPreset) -> &'static str {
+    use crate::provider::openai_compat::OpenAiCompatPreset;
+    match preset {
+        OpenAiCompatPreset::Ollama => "EMBRA_OLLAMA_BEARER",
+        OpenAiCompatPreset::LmStudio => "EMBRA_LM_STUDIO_BEARER",
+    }
+}
+
+/// Initialize the OpenAI-compat reconfigure state machine. Loads
+/// current config + env-var bearer, captures snapshot defaults,
+/// emits the initial Endpoint Text prompt.
+async fn enter_openai_compat_setup(
+    target: ProviderKind,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    db: &Arc<WardsonDbClient>,
+    pending: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
+) {
+    use crate::provider::openai_compat::OpenAiCompatPreset;
+    let preset = match target {
+        ProviderKind::Ollama => OpenAiCompatPreset::Ollama,
+        ProviderKind::LmStudio => OpenAiCompatPreset::LmStudio,
+        _ => unreachable!("enter_openai_compat_setup called with non-OpenAI-compat kind"),
+    };
+
+    let cfg = config::load_config(&**db).await.ok();
+    let (current_endpoint, current_model) = match (cfg.as_ref(), preset) {
+        (Some(c), OpenAiCompatPreset::Ollama) => (
+            non_empty(&c.openai_compat.ollama_endpoint),
+            non_empty(&c.openai_compat.ollama_model),
+        ),
+        (Some(c), OpenAiCompatPreset::LmStudio) => (
+            non_empty(&c.openai_compat.lm_studio_endpoint),
+            non_empty(&c.openai_compat.lm_studio_model),
+        ),
+        _ => (None, None),
+    };
+    let current_bearer = std::env::var(bearer_env_var(preset))
+        .ok()
+        .filter(|s| !s.is_empty());
+
+    let pre_existed = current_endpoint.is_some() && current_model.is_some();
+
+    let default_endpoint = current_endpoint
+        .clone()
+        .unwrap_or_else(|| preset.default_base_url().to_string());
+    let prompt_text = format!(
+        "Enter the {} endpoint URL (current: {}):",
+        preset.label(),
+        current_endpoint.as_deref().unwrap_or("<unconfigured>"),
+    );
+
+    *pending.lock().await = Some(OpenAiCompatSetupState {
+        preset,
+        pre_existed,
+        current_endpoint,
+        current_bearer,
+        current_model,
+        step: OpenAiCompatSetupStep::AwaitingEndpoint,
+    });
+
+    let _ = tx
+        .send(Ok(ConversationResponse {
+            response_type: Some(conversation_response::ResponseType::Setup(SetupPrompt {
+                field_type: SetupFieldType::Text as i32,
+                prompt: prompt_text,
+                options: vec![],
+                default_value: default_endpoint,
+            })),
+        }))
+        .await;
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+/// Advance the OpenAI-compat reconfigure state machine by one step
+/// based on the captured user input. Caller is responsible for
+/// reinstating the state in the Mutex on `Advance`; `Complete` and
+/// `Error` indicate the state was already cleared.
+async fn handle_pending_openai_compat_step(
+    state: &mut OpenAiCompatSetupState,
+    input: &str,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    db: &Arc<WardsonDbClient>,
+    pending: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
+) -> SetupStepOutcome {
+    use crate::provider::openai_compat::OpenAiCompatPreset;
+    let trimmed = input.trim();
+
+    let next_step = std::mem::replace(&mut state.step, OpenAiCompatSetupStep::AwaitingEndpoint);
+
+    match next_step {
+        OpenAiCompatSetupStep::AwaitingEndpoint => {
+            let endpoint_input = if trimmed.is_empty() {
+                state
+                    .current_endpoint
+                    .clone()
+                    .unwrap_or_else(|| state.preset.default_base_url().to_string())
+            } else {
+                crate::setup::wizard::normalize_endpoint(trimmed, state.preset)
+            };
+            // Build bearer-choice prompt — 3-way if current bearer exists,
+            // 2-way otherwise.
+            let (options, default_value) = if state.current_bearer.is_some() {
+                (
+                    vec![
+                        BEARER_KEEP.to_string(),
+                        BEARER_CHANGE.to_string(),
+                        BEARER_REMOVE.to_string(),
+                    ],
+                    BEARER_KEEP.to_string(),
+                )
+            } else {
+                (
+                    vec![BEARER_SET.to_string(), BEARER_SKIP.to_string()],
+                    BEARER_SKIP.to_string(),
+                )
+            };
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::Setup(SetupPrompt {
+                        field_type: SetupFieldType::Selector as i32,
+                        prompt: format!(
+                            "Bearer token for {}? (current: {})",
+                            state.preset.label(),
+                            if state.current_bearer.is_some() {
+                                "set"
+                            } else {
+                                "none"
+                            }
+                        ),
+                        options,
+                        default_value,
+                    })),
+                }))
+                .await;
+            state.step = OpenAiCompatSetupStep::AwaitingBearerChoice {
+                endpoint: endpoint_input,
+            };
+            SetupStepOutcome::Advance
+        }
+
+        OpenAiCompatSetupStep::AwaitingBearerChoice { endpoint } => {
+            match trimmed {
+                BEARER_KEEP => {
+                    let bearer = state.current_bearer.clone();
+                    advance_to_probe(state, endpoint, bearer, tx, pending).await
+                }
+                BEARER_CHANGE | BEARER_SET => {
+                    let _ = tx
+                        .send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::Setup(
+                                SetupPrompt {
+                                    field_type: SetupFieldType::Text as i32,
+                                    prompt: format!(
+                                        "Enter the {} bearer token:",
+                                        state.preset.label()
+                                    ),
+                                    options: vec![],
+                                    default_value: String::new(),
+                                },
+                            )),
+                        }))
+                        .await;
+                    state.step = OpenAiCompatSetupStep::AwaitingBearerToken { endpoint };
+                    SetupStepOutcome::Advance
+                }
+                BEARER_REMOVE | BEARER_SKIP => {
+                    advance_to_probe(state, endpoint, None, tx, pending).await
+                }
+                other => {
+                    // Unrecognized choice — re-emit the Selector at the
+                    // same step. Conservatively treat as Keep when one
+                    // exists, Skip otherwise.
+                    let _ = tx
+                        .send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::System(
+                                SystemMessage {
+                                    content: format!(
+                                        "Unknown bearer choice '{other}'. Pick from the options."
+                                    ),
+                                    msg_type: SystemMessageType::Error as i32,
+                                },
+                            )),
+                        }))
+                        .await;
+                    state.step = OpenAiCompatSetupStep::AwaitingBearerChoice { endpoint };
+                    SetupStepOutcome::Advance
+                }
+            }
+        }
+
+        OpenAiCompatSetupStep::AwaitingBearerToken { endpoint } => {
+            // Console enforces non-empty Text; defensive empty=None.
+            let bearer = if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            };
+            advance_to_probe(state, endpoint, bearer, tx, pending).await
+        }
+
+        OpenAiCompatSetupStep::AwaitingModelSelection {
+            endpoint,
+            bearer,
+            models,
+        } => {
+            // Operator picked a model. Validate it's in the offered list.
+            let chosen = if trimmed.is_empty() {
+                models.first().cloned().unwrap_or_default()
+            } else if models.iter().any(|m| m == trimmed) {
+                trimmed.to_string()
+            } else {
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::System(
+                            SystemMessage {
+                                content: format!(
+                                    "Selection '{trimmed}' is not in the offered list of {} models. Restart from endpoint.",
+                                    models.len()
+                                ),
+                                msg_type: SystemMessageType::Error as i32,
+                            },
+                        )),
+                    }))
+                    .await;
+                return reset_to_endpoint_step(state, tx).await;
+            };
+            complete_openai_compat_setup(state, endpoint, bearer, chosen, tx, db, pending).await
+        }
+    }
+}
+
+/// Run probe_models against the gathered endpoint+bearer; on success,
+/// emit the Model Selector and advance state. On failure or 0 models,
+/// emit an error message and reset to AwaitingEndpoint.
+async fn advance_to_probe(
+    state: &mut OpenAiCompatSetupState,
+    endpoint: String,
+    bearer: Option<String>,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    _pending: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
+) -> SetupStepOutcome {
+    let _ = tx
+        .send(Ok(ConversationResponse {
+            response_type: Some(conversation_response::ResponseType::System(SystemMessage {
+                content: format!("Probing {endpoint} for available models…"),
+                msg_type: SystemMessageType::Info as i32,
+            })),
+        }))
+        .await;
+
+    let probe = crate::provider::openai_compat::OpenAICompatProvider::probe_models(
+        state.preset,
+        &endpoint,
+        bearer.as_deref(),
+    )
+    .await;
+    let models = match probe {
+        Ok(m) if m.is_empty() => {
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage {
+                            content: format!(
+                                "No models found at {endpoint}. Pull or load a model on the server, then try again."
+                            ),
+                            msg_type: SystemMessageType::Error as i32,
+                        },
+                    )),
+                }))
+                .await;
+            return reset_to_endpoint_step(state, tx).await;
+        }
+        Ok(m) => m,
+        Err(e) => {
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage {
+                            content: format!("Probe failed: {e}. Re-entering endpoint step."),
+                            msg_type: SystemMessageType::Error as i32,
+                        },
+                    )),
+                }))
+                .await;
+            return reset_to_endpoint_step(state, tx).await;
+        }
+    };
+
+    // Pre-select current model if still in the list, else first.
+    let default_model = state
+        .current_model
+        .as_ref()
+        .filter(|m| models.iter().any(|x| x == *m))
+        .cloned()
+        .unwrap_or_else(|| models[0].clone());
+
+    let _ = tx
+        .send(Ok(ConversationResponse {
+            response_type: Some(conversation_response::ResponseType::Setup(SetupPrompt {
+                field_type: SetupFieldType::Selector as i32,
+                prompt: "Select a model:".to_string(),
+                options: models.clone(),
+                default_value: default_model,
+            })),
+        }))
+        .await;
+
+    state.step = OpenAiCompatSetupStep::AwaitingModelSelection {
+        endpoint,
+        bearer,
+        models,
+    };
+    SetupStepOutcome::Advance
+}
+
+/// Reset state to AwaitingEndpoint and re-emit the Endpoint Text prompt
+/// (used as a recovery path for probe-fail / 0-models / invalid model).
+async fn reset_to_endpoint_step(
+    state: &mut OpenAiCompatSetupState,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+) -> SetupStepOutcome {
+    let default_endpoint = state
+        .current_endpoint
+        .clone()
+        .unwrap_or_else(|| state.preset.default_base_url().to_string());
+    let _ = tx
+        .send(Ok(ConversationResponse {
+            response_type: Some(conversation_response::ResponseType::Setup(SetupPrompt {
+                field_type: SetupFieldType::Text as i32,
+                prompt: format!("Re-enter the {} endpoint URL:", state.preset.label()),
+                options: vec![],
+                default_value: default_endpoint,
+            })),
+        }))
+        .await;
+    state.step = OpenAiCompatSetupStep::AwaitingEndpoint;
+    SetupStepOutcome::Advance
+}
+
+/// Persist endpoint+model to config, bearer to STATE file (with env
+/// hot-reload), emit a summary, clear the pending state.
+async fn complete_openai_compat_setup(
+    state: &OpenAiCompatSetupState,
+    endpoint: String,
+    bearer: Option<String>,
+    model: String,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    db: &Arc<WardsonDbClient>,
+    pending: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
+) -> SetupStepOutcome {
+    use crate::provider::openai_compat::OpenAiCompatPreset;
+
+    // 1. Persist endpoint + model on config; api_provider untouched.
+    let mut cfg = match config::load_config(&**db).await {
+        Ok(c) => c,
+        Err(_) => {
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage {
+                            content: "No system config — re-run setup wizard first.".to_string(),
+                            msg_type: SystemMessageType::Error as i32,
+                        },
+                    )),
+                }))
+                .await;
+            *pending.lock().await = None;
+            return SetupStepOutcome::Error;
+        }
+    };
+    match state.preset {
+        OpenAiCompatPreset::Ollama => {
+            cfg.openai_compat.ollama_endpoint = endpoint.clone();
+            cfg.openai_compat.ollama_model = model.clone();
+        }
+        OpenAiCompatPreset::LmStudio => {
+            cfg.openai_compat.lm_studio_endpoint = endpoint.clone();
+            cfg.openai_compat.lm_studio_model = model.clone();
+        }
+    }
+    if let Err(e) = config::save_config(&**db, &cfg).await {
+        let _ = tx
+            .send(Ok(ConversationResponse {
+                response_type: Some(conversation_response::ResponseType::System(SystemMessage {
+                    content: format!("Failed to persist config: {e}"),
+                    msg_type: SystemMessageType::Error as i32,
+                })),
+            }))
+            .await;
+        *pending.lock().await = None;
+        return SetupStepOutcome::Error;
+    }
+
+    // 2. Bearer STATE + env hot-reload.
+    let bearer_path = bearer_state_path(state.preset);
+    let env_var = bearer_env_var(state.preset);
+    let bearer_change_label = match (&state.current_bearer, &bearer) {
+        (Some(prev), Some(new)) if prev == new => "kept",
+        (_, Some(_)) => "set",
+        (Some(_), None) => "removed",
+        (None, None) => "none",
+    };
+    match &bearer {
+        Some(token) if !token.is_empty() => {
+            if let Err(e) = config::write_credential_state(bearer_path, token) {
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::System(
+                            SystemMessage {
+                                content: format!("Could not write bearer to STATE: {e}"),
+                                msg_type: SystemMessageType::Error as i32,
+                            },
+                        )),
+                    }))
+                    .await;
+            }
+            // SAFETY: slash-command handler context, single-threaded
+            // env access at this point. Hot-reload so the next
+            // build_openai_compat_provider call picks up the new
+            // bearer without a brain restart.
+            unsafe {
+                std::env::set_var(env_var, token);
+            }
+        }
+        _ => {
+            let _ = std::fs::remove_file(bearer_path);
+            unsafe {
+                std::env::remove_var(env_var);
+            }
+        }
+    }
+
+    // 3. Acknowledge and clear state.
+    let _ = tx
+        .send(Ok(ConversationResponse {
+            response_type: Some(conversation_response::ResponseType::System(SystemMessage {
+                content: format!(
+                    "{} reconfigured: endpoint={endpoint}, bearer={bearer_change_label}, model={model}. \
+                     Switch to it with /provider {} when ready.",
+                    state.preset.label(),
+                    state.preset.as_kind().as_str(),
+                ),
+                msg_type: SystemMessageType::Info as i32,
+            })),
+        }))
+        .await;
+
+    *pending.lock().await = None;
+    SetupStepOutcome::Complete
 }
 
 /// Validate + persist a candidate API key submitted via the
@@ -3610,5 +4194,457 @@ mod native_loop_tests {
             usage: None,
         };
         assert_eq!(turn_text(&turn), "");
+    }
+}
+
+#[cfg(test)]
+mod setup_reconfigure_tests {
+    //! Tests for the OpenAI-compat post-wizard reconfigure state
+    //! machine (`/provider --setup <ollama|lm_studio>`). State-machine
+    //! transitions that don't hit WardSONDB are exercised here; the
+    //! complete-and-persist path depends on a live WardSONDB and is
+    //! covered by QEMU E2E smoke.
+    use super::*;
+    use crate::provider::openai_compat::OpenAiCompatPreset;
+    use embra_common::proto::brain::ConversationResponse;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn fake_db() -> Arc<WardsonDbClient> {
+        // Connection is never made in tests that don't reach
+        // complete_openai_compat_setup. Port 1 won't connect.
+        Arc::new(WardsonDbClient::from_url("http://127.0.0.1:1"))
+    }
+
+    fn make_state(
+        preset: OpenAiCompatPreset,
+        endpoint: Option<&str>,
+        bearer: Option<&str>,
+        model: Option<&str>,
+        step: OpenAiCompatSetupStep,
+    ) -> OpenAiCompatSetupState {
+        OpenAiCompatSetupState {
+            preset,
+            pre_existed: endpoint.is_some() && model.is_some(),
+            current_endpoint: endpoint.map(String::from),
+            current_bearer: bearer.map(String::from),
+            current_model: model.map(String::from),
+            step,
+        }
+    }
+
+    async fn run_step(
+        state: &mut OpenAiCompatSetupState,
+        input: &str,
+    ) -> (Vec<ConversationResponse>, SetupStepOutcome) {
+        let (tx, mut rx) = mpsc::channel::<Result<ConversationResponse, Status>>(64);
+        let pending = Arc::new(Mutex::new(None));
+        let db = fake_db();
+        let outcome =
+            handle_pending_openai_compat_step(state, input, &tx, &db, &pending).await;
+        drop(tx);
+        let mut events = Vec::new();
+        while let Some(Ok(r)) = rx.recv().await {
+            events.push(r);
+        }
+        (events, outcome)
+    }
+
+    fn last_setup_prompt(events: &[ConversationResponse]) -> Option<&SetupPrompt> {
+        events.iter().rev().find_map(|e| match &e.response_type {
+            Some(conversation_response::ResponseType::Setup(p)) => Some(p),
+            _ => None,
+        })
+    }
+
+    // ===========================================================
+    // Helper-fn tests
+    // ===========================================================
+
+    #[test]
+    fn bearer_state_path_mappings() {
+        assert_eq!(
+            bearer_state_path(OpenAiCompatPreset::Ollama),
+            "/embra/state/bearer_ollama"
+        );
+        assert_eq!(
+            bearer_state_path(OpenAiCompatPreset::LmStudio),
+            "/embra/state/bearer_lm_studio"
+        );
+    }
+
+    #[test]
+    fn bearer_env_var_mappings() {
+        assert_eq!(
+            bearer_env_var(OpenAiCompatPreset::Ollama),
+            "EMBRA_OLLAMA_BEARER"
+        );
+        assert_eq!(
+            bearer_env_var(OpenAiCompatPreset::LmStudio),
+            "EMBRA_LM_STUDIO_BEARER"
+        );
+    }
+
+    #[test]
+    fn non_empty_returns_some_for_non_empty_string() {
+        assert_eq!(non_empty("hello"), Some("hello".to_string()));
+        assert_eq!(non_empty(""), None);
+    }
+
+    // ===========================================================
+    // AwaitingEndpoint transitions
+    // ===========================================================
+
+    #[tokio::test]
+    async fn endpoint_with_existing_bearer_emits_3way_selector() {
+        let mut state = make_state(
+            OpenAiCompatPreset::Ollama,
+            Some("http://old:11434"),
+            Some("old-token"),
+            Some("gpt-oss:20b"),
+            OpenAiCompatSetupStep::AwaitingEndpoint,
+        );
+        let (events, _) = run_step(&mut state, "http://new:11434").await;
+        let prompt = last_setup_prompt(&events).expect("expected SetupPrompt");
+        assert_eq!(prompt.field_type, SetupFieldType::Selector as i32);
+        assert_eq!(prompt.options.len(), 3);
+        assert_eq!(prompt.options[0], BEARER_KEEP);
+        assert_eq!(prompt.options[1], BEARER_CHANGE);
+        assert_eq!(prompt.options[2], BEARER_REMOVE);
+        assert_eq!(prompt.default_value, BEARER_KEEP);
+        assert!(matches!(
+            state.step,
+            OpenAiCompatSetupStep::AwaitingBearerChoice { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn endpoint_no_existing_bearer_emits_2way_selector() {
+        let mut state = make_state(
+            OpenAiCompatPreset::LmStudio,
+            None,
+            None,
+            None,
+            OpenAiCompatSetupStep::AwaitingEndpoint,
+        );
+        let (events, _) = run_step(&mut state, "http://localhost:1234").await;
+        let prompt = last_setup_prompt(&events).expect("expected SetupPrompt");
+        assert_eq!(prompt.options.len(), 2);
+        assert_eq!(prompt.options[0], BEARER_SET);
+        assert_eq!(prompt.options[1], BEARER_SKIP);
+        assert_eq!(prompt.default_value, BEARER_SKIP);
+    }
+
+    #[tokio::test]
+    async fn endpoint_empty_falls_back_to_current() {
+        let mut state = make_state(
+            OpenAiCompatPreset::Ollama,
+            Some("http://existing:11434"),
+            None,
+            None,
+            OpenAiCompatSetupStep::AwaitingEndpoint,
+        );
+        let (_, _) = run_step(&mut state, "").await;
+        // Endpoint captured into next step's state.
+        let OpenAiCompatSetupStep::AwaitingBearerChoice { endpoint } = &state.step else {
+            panic!("expected AwaitingBearerChoice");
+        };
+        assert_eq!(endpoint, "http://existing:11434");
+    }
+
+    #[tokio::test]
+    async fn endpoint_empty_falls_back_to_preset_default_when_no_current() {
+        let mut state = make_state(
+            OpenAiCompatPreset::LmStudio,
+            None,
+            None,
+            None,
+            OpenAiCompatSetupStep::AwaitingEndpoint,
+        );
+        let (_, _) = run_step(&mut state, "").await;
+        let OpenAiCompatSetupStep::AwaitingBearerChoice { endpoint } = &state.step else {
+            panic!("expected AwaitingBearerChoice");
+        };
+        assert_eq!(endpoint, "http://localhost:1234");
+    }
+
+    #[tokio::test]
+    async fn endpoint_normalizes_bare_host() {
+        let mut state = make_state(
+            OpenAiCompatPreset::Ollama,
+            None,
+            None,
+            None,
+            OpenAiCompatSetupStep::AwaitingEndpoint,
+        );
+        let (_, _) = run_step(&mut state, "myserver").await;
+        let OpenAiCompatSetupStep::AwaitingBearerChoice { endpoint } = &state.step else {
+            panic!("expected AwaitingBearerChoice");
+        };
+        assert_eq!(endpoint, "http://myserver:11434");
+    }
+
+    // ===========================================================
+    // AwaitingBearerChoice transitions
+    // ===========================================================
+
+    #[tokio::test]
+    async fn bearer_choice_change_advances_to_token_step() {
+        let mut state = make_state(
+            OpenAiCompatPreset::Ollama,
+            Some("http://x:11434"),
+            Some("old"),
+            None,
+            OpenAiCompatSetupStep::AwaitingBearerChoice {
+                endpoint: "http://x:11434".to_string(),
+            },
+        );
+        let (events, _) = run_step(&mut state, BEARER_CHANGE).await;
+        let prompt = last_setup_prompt(&events).expect("expected SetupPrompt");
+        assert_eq!(prompt.field_type, SetupFieldType::Text as i32);
+        assert!(matches!(
+            state.step,
+            OpenAiCompatSetupStep::AwaitingBearerToken { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn bearer_choice_set_no_current_advances_to_token_step() {
+        let mut state = make_state(
+            OpenAiCompatPreset::LmStudio,
+            None,
+            None,
+            None,
+            OpenAiCompatSetupStep::AwaitingBearerChoice {
+                endpoint: "http://localhost:1234".to_string(),
+            },
+        );
+        let (_, _) = run_step(&mut state, BEARER_SET).await;
+        assert!(matches!(
+            state.step,
+            OpenAiCompatSetupStep::AwaitingBearerToken { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn bearer_choice_unknown_value_re_emits_selector() {
+        let mut state = make_state(
+            OpenAiCompatPreset::Ollama,
+            Some("http://x"),
+            Some("t"),
+            None,
+            OpenAiCompatSetupStep::AwaitingBearerChoice {
+                endpoint: "http://x".to_string(),
+            },
+        );
+        let (events, _) = run_step(&mut state, "definitely-not-a-choice").await;
+        // Got an Error system message; state still AwaitingBearerChoice.
+        let has_error = events.iter().any(|e| matches!(
+            &e.response_type,
+            Some(conversation_response::ResponseType::System(m)) if m.msg_type == SystemMessageType::Error as i32
+        ));
+        assert!(has_error);
+        assert!(matches!(
+            state.step,
+            OpenAiCompatSetupStep::AwaitingBearerChoice { .. }
+        ));
+    }
+
+    // ===========================================================
+    // AwaitingBearerChoice → probe via wiremock
+    // ===========================================================
+
+    #[tokio::test]
+    async fn bearer_choice_remove_advances_to_probe_then_model_selection() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "object": "list",
+                "data": [{"id": "m1"}, {"id": "m2"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut state = make_state(
+            OpenAiCompatPreset::Ollama,
+            Some(&server.uri()),
+            Some("had-bearer"),
+            Some("m1"),
+            OpenAiCompatSetupStep::AwaitingBearerChoice {
+                endpoint: server.uri(),
+            },
+        );
+        let (events, _) = run_step(&mut state, BEARER_REMOVE).await;
+
+        let prompt = last_setup_prompt(&events).expect("expected SetupPrompt");
+        assert_eq!(prompt.field_type, SetupFieldType::Selector as i32);
+        assert_eq!(prompt.options, vec!["m1".to_string(), "m2".to_string()]);
+        // Default-prefer the current model when still in list.
+        assert_eq!(prompt.default_value, "m1");
+
+        let OpenAiCompatSetupStep::AwaitingModelSelection {
+            bearer, models, ..
+        } = &state.step
+        else {
+            panic!("expected AwaitingModelSelection");
+        };
+        assert!(bearer.is_none(), "Remove path → bearer = None");
+        assert_eq!(models.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn bearer_choice_keep_advances_to_probe_with_current_bearer() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "Bearer keep-me",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "object": "list",
+                "data": [{"id": "m1"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let mut state = make_state(
+            OpenAiCompatPreset::Ollama,
+            Some(&server.uri()),
+            Some("keep-me"),
+            None,
+            OpenAiCompatSetupStep::AwaitingBearerChoice {
+                endpoint: server.uri(),
+            },
+        );
+        let (_, _) = run_step(&mut state, BEARER_KEEP).await;
+        let OpenAiCompatSetupStep::AwaitingModelSelection { bearer, .. } = &state.step
+        else {
+            panic!("expected AwaitingModelSelection");
+        };
+        assert_eq!(bearer.as_deref(), Some("keep-me"));
+    }
+
+    #[tokio::test]
+    async fn bearer_token_captures_value_and_advances_to_probe() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .and(wiremock::matchers::header("authorization", "Bearer fresh"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "object": "list", "data": [{"id": "x"}]
+            })))
+            .mount(&server)
+            .await;
+        let mut state = make_state(
+            OpenAiCompatPreset::Ollama,
+            None,
+            None,
+            None,
+            OpenAiCompatSetupStep::AwaitingBearerToken {
+                endpoint: server.uri(),
+            },
+        );
+        let (_, _) = run_step(&mut state, "fresh").await;
+        let OpenAiCompatSetupStep::AwaitingModelSelection { bearer, .. } = &state.step
+        else {
+            panic!("expected AwaitingModelSelection");
+        };
+        assert_eq!(bearer.as_deref(), Some("fresh"));
+    }
+
+    // ===========================================================
+    // Recovery paths (probe failure / 0 models / invalid model)
+    // ===========================================================
+
+    #[tokio::test]
+    async fn probe_failure_resets_to_endpoint() {
+        let mut state = make_state(
+            OpenAiCompatPreset::Ollama,
+            Some("http://127.0.0.1:1"), // unreachable
+            None,
+            None,
+            OpenAiCompatSetupStep::AwaitingBearerChoice {
+                endpoint: "http://127.0.0.1:1".to_string(),
+            },
+        );
+        let (events, _) = run_step(&mut state, BEARER_SKIP).await;
+        // Saw an Error message + reset.
+        assert!(matches!(state.step, OpenAiCompatSetupStep::AwaitingEndpoint));
+        // Final SetupPrompt is the re-emitted Endpoint Text prompt.
+        let prompt = last_setup_prompt(&events).expect("expected SetupPrompt");
+        assert_eq!(prompt.field_type, SetupFieldType::Text as i32);
+    }
+
+    #[tokio::test]
+    async fn zero_models_resets_to_endpoint() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "object": "list", "data": []
+            })))
+            .mount(&server)
+            .await;
+        let mut state = make_state(
+            OpenAiCompatPreset::Ollama,
+            Some(&server.uri()),
+            None,
+            None,
+            OpenAiCompatSetupStep::AwaitingBearerChoice {
+                endpoint: server.uri(),
+            },
+        );
+        let (_, _) = run_step(&mut state, BEARER_SKIP).await;
+        assert!(matches!(state.step, OpenAiCompatSetupStep::AwaitingEndpoint));
+    }
+
+    #[tokio::test]
+    async fn invalid_model_selection_resets_to_endpoint() {
+        let mut state = make_state(
+            OpenAiCompatPreset::Ollama,
+            Some("http://x:11434"),
+            None,
+            None,
+            OpenAiCompatSetupStep::AwaitingModelSelection {
+                endpoint: "http://x:11434".to_string(),
+                bearer: None,
+                models: vec!["a".to_string(), "b".to_string()],
+            },
+        );
+        let (events, _) = run_step(&mut state, "not-in-list").await;
+        assert!(matches!(state.step, OpenAiCompatSetupStep::AwaitingEndpoint));
+        let has_error = events.iter().any(|e| matches!(
+            &e.response_type,
+            Some(conversation_response::ResponseType::System(m)) if m.msg_type == SystemMessageType::Error as i32
+        ));
+        assert!(has_error);
+    }
+
+    #[tokio::test]
+    async fn model_selection_default_falls_to_first_when_current_not_in_list() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "object": "list",
+                "data": [{"id": "new-a"}, {"id": "new-b"}]
+            })))
+            .mount(&server)
+            .await;
+        let mut state = make_state(
+            OpenAiCompatPreset::Ollama,
+            Some(&server.uri()),
+            None,
+            Some("stale-model-not-on-server"),
+            OpenAiCompatSetupStep::AwaitingBearerChoice {
+                endpoint: server.uri(),
+            },
+        );
+        let (events, _) = run_step(&mut state, BEARER_SKIP).await;
+        let prompt = last_setup_prompt(&events).expect("expected Selector");
+        assert_eq!(prompt.default_value, "new-a");
     }
 }
