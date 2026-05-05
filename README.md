@@ -17,7 +17,7 @@
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — dense multigraph with auto-derived edges" width="100%">
 </p>
 
-**Current Status:** Phase 1 — Core OS (Sprint 4 merged to `main` 2026-04-25 at tag `v0.4.0-phase1`) | Phase 0 — Stable
+**Current Status:** Phase 1 — Core OS (Sprint 5 ready to merge — `phase1-sprint5` branch; Sprint 4 merged to `main` 2026-04-25 at tag `v0.4.0-phase1`) | Phase 0 — Stable
 
 ---
 
@@ -97,7 +97,7 @@ cd embraOS
 
 > **Buildroot version:** Defaults to `2026.02.1` (LTS, designed for Ubuntu 26.04 era). Override with `BUILDROOT_VERSION=2024.02 ./scripts/build-image.sh ...` if you need to fall back on an older host.
 
-On first boot, the Config Wizard runs — name your intelligence, choose your LLM provider (Anthropic Claude or Google Gemini), enter the corresponding API key, set your timezone. Each field is validated before commit — an invalid API key or garbage timezone re-prompts instead of persisting. After setup, you're in a full TUI conversation with styled text, thinking indicators, and tool execution.
+On first boot, the Config Wizard runs — name your intelligence, choose your LLM provider (Anthropic Claude, Google Gemini, Ollama, or LM Studio), enter the corresponding credentials (API key for Anthropic/Gemini; endpoint URL + optional bearer + selected model for the OpenAI-compat presets), set your timezone. Each field is validated before commit — an invalid API key, unreachable endpoint, or garbage timezone re-prompts instead of persisting. The Ollama / LM Studio sub-flow probes `GET /v1/models` against your endpoint and presents a model selector populated from the live server response. After setup, you're in a full TUI conversation with styled text, thinking indicators, and tool execution.
 
 #### Post-Boot Setup
 
@@ -162,7 +162,7 @@ All tokens persist across reboots (stored on the STATE partition). Git `safe.dir
 ## What Happens When You Run It
 
 ### 1. Configuration
-A minimal setup: name the intelligence, choose your LLM provider (Anthropic Claude or Google Gemini), provide the corresponding API key, confirm your timezone.
+A minimal setup: name the intelligence, choose your LLM provider (Anthropic Claude, Google Gemini, Ollama, or LM Studio), provide the corresponding credentials (API key for Anthropic/Gemini, or endpoint URL + optional bearer + model selection for OpenAI-compat presets), confirm your timezone.
 
 ### 2. Learning Mode
 The intelligence is born. It asks you who you are. It explores its own identity with you. Together, you define its soul — the non-negotiable values and constraints that will guide everything it does. Once you approve the soul, it's sealed. The intelligence can never modify it.
@@ -190,12 +190,21 @@ embraOS is built on a 7-layer continuity architecture:
 
 **Persistence:** [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a high-performance JSON document database built in Rust. It's not just a backend — it's the AI's memory, identity store, and state of consciousness.
 
-**AI Model:** A pluggable LLM provider abstraction routes the Brain through one of two flagship backends, selected at first boot and switchable at runtime via `/provider`:
+**AI Model:** A pluggable LLM provider abstraction routes the Brain through one of four backends, selected at first boot and switchable at runtime via `/provider <kind>`:
 
-- **Anthropic Claude Opus 4.7** (default) — requests sent with `output_config.effort=max` and `thinking.display=omitted`.
-- **Google Gemini 3.1 Pro** — requests sent with `thinkingLevel=high` and `maxOutputTokens=64000` (Gemini 3.1 Pro defaults; temperature left at the recommended 1.0).
+- **Anthropic Claude Opus 4.7** (default) — requests sent with `output_config.effort=max` and `thinking.display=omitted`. Native ephemeral prompt caching with breakpoints on system + penultimate user message + last tool entry.
+- **Google Gemini 3.1 Pro** — requests sent with `thinkingLevel=high` and `maxOutputTokens=64000`. Native explicit context cache via a `GeminiCacheManager` singleton with `(session, fingerprint, TTL)` validation.
+- **Ollama** (Sprint 5) — local or remote-style OpenAI-compat backend. `/v1/chat/completions` POST to the configured endpoint (default `http://localhost:11434`). Supports gpt-oss family (with `reasoning_effort: "high"`), DeepSeek-R1/R2, and standard non-reasoning models. Bearer authentication optional.
+- **LM Studio** (Sprint 5) — local OpenAI-compat backend, default `http://localhost:1234`. Same wire shape as Ollama. Recommended for Apple Silicon hosts via the `llmster` daemon (~2× faster than Ollama on Mac M4 Max thanks to MLX backend).
 
-The loop driver consumes a neutral intermediate representation (`Block::{Text, ToolCall, ToolResult, ProviderOpaque}` and `TurnOutcome::{EndTurn, ToolUse, MaxTokens, Pause, EarlyStop}`); each provider owns its own wire types, streaming parser, and tool schema translator. All 90 tools work identically across both backends. Sessions are pinned to the provider that recorded them — cross-provider session attach is hard-blocked.
+The loop driver consumes a neutral intermediate representation (`Block::{Text, ToolCall, ToolResult, ProviderOpaque}` and `TurnOutcome::{EndTurn, ToolUse, MaxTokens, Pause, EarlyStop}`); each provider owns its own wire types, streaming parser, and tool schema translator. All 90 tools work identically across all four backends. Sessions are pinned to the provider that recorded them — cross-provider session attach is hard-blocked. Ollama and LM Studio share a single `OpenAICompatProvider` with a `ProviderKind` discriminator; future OpenAI-compat backends (vLLM, Together, Fireworks, OpenRouter) drop in as additional preset variants.
+
+**Reasoning controls per family:**
+- **gpt-oss / OpenAI o-series / DeepSeek-R1·R2 / `-thinking` variants** — embraOS sends OpenAI-compat `reasoning_effort: "high"` automatically (gated on `model_supports_reasoning_effort` heuristic).
+- **Qwen3 family** (Qwen3, Qwen3.6, including `*-A3B` MoE) — thinking is integrated into the same model and toggled via `/think` and `/no_think` directives in user/system messages. `reasoning_effort` is omitted to avoid `No valid custom reasoning fields found` server warnings. See `docs/RECOMMENDED-MODELS.md` for full per-family details.
+- **Standard non-reasoning models** — no reasoning controls; embraOS omits all reasoning parameters.
+
+**Bearer storage (OpenAI-compat):** STATE files at `/embra/state/bearer_<preset>` with mode `0600` (security retroactively applied to Anthropic/Gemini api_key files in Sprint 5). Per-call resolution from `EMBRA_OLLAMA_BEARER` / `EMBRA_LM_STUDIO_BEARER` env vars so post-swap turns pick up the new value without a brain restart.
 
 **Prompt Caching:** embraOS uses each provider's native caching mechanism to minimize token costs.
 
@@ -209,6 +218,10 @@ Cache TTL is 5 minutes (ephemeral), refreshed on every hit. Active conversations
 *Gemini — explicit context caching* (one cache handle per session):
 
 A `GeminiCacheManager` singleton stores one cached-content handle in WardSONDB at `provider.gemini_cache:current`. On each turn, the stored handle is validated by `(session, fingerprint, TTL)` and either reused (`cache:hit`), deleted-and-recreated (`cache:miss` — `session_changed` / `stale` / `expired`), or freshly created (`cache:create`). The fingerprint is `sha256(system_prompt || \x00 || tools_json)` truncated to 16 hex chars, so any soul/tool drift produces a clean miss. If `cachedContents.create` returns 4xx (Gemini 3.1 Pro Preview is not explicitly listed as caching-eligible in Google's docs), the call falls back to per-request `systemInstruction` + `tools` and the system continues to function. Server-side GC of a cache mid-session is detected at request time (`403/404 CachedContent not found`) and recovered with a single inline retry.
+
+*Ollama / LM Studio — server-side keep-warm* (no client-side cache):
+
+OpenAI-compat backends don't expose a caching mechanism on the wire. Ollama keeps the model warm via `OLLAMA_KEEP_ALIVE` (operator-configured server-side, transparent to embraOS); LM Studio handles resident model state internally. embraOS sends the full system + history on every request — the cost optimization happens server-side via the loaded model staying in GPU/Metal memory between turns. No mid-turn cache invalidation race because there's no cache handle to invalidate.
 
 
 ---
@@ -257,8 +270,9 @@ All sessions share the same intelligence — same memory, same identity, same so
 | `/ssh-copy-id <user@host>` | Copy SSH public key to remote host (RFC 1918 only) |
 | `/git-setup <name> \| <email>` | Set git user.name and user.email |
 | `/provider` | Show active LLM provider, model, and session |
-| `/provider <anthropic\|gemini>` | Switch provider for future turns. Requires no active session — close the current one with `/close` first. Autonomous in-turn switches queue and apply after the loop completes |
-| `/provider --setup [<kind>]` | Add an alternate provider's API key without re-running the wizard — multi-turn flow: type the command, then type the key on the next message. Auto-targets the missing provider when `<kind>` is omitted |
+| `/provider <anthropic\|gemini\|ollama\|lm_studio>` | Switch provider for future turns. Requires no active session — close the current one with `/close` first. Autonomous in-turn switches queue and apply after the loop completes |
+| `/provider --setup <anthropic\|gemini>` | Add/replace an API key for the named provider without re-running the wizard — multi-turn flow: type the command, then type the key on the next message. Auto-targets the missing provider when `<kind>` is omitted |
+| `/provider --setup <ollama\|lm_studio>` | Reconfigure endpoint URL, bearer token, and selected model for an OpenAI-compat preset — 4-step flow (Endpoint → Bearer choice → Bearer token? → Model selection). Pre-fills current values; cancel anytime with any other slash command. Bearer hot-reloads via `EMBRA_<PRESET>_BEARER` env var (no brain restart) |
 | `/iter-cap` | Show the current per-turn tool iteration cap (default 100) |
 | `/iter-cap <N>` | Set the per-turn tool iteration cap (1..=1000). Persisted via `SystemConfig`; takes effect on the next user message. On cap-hit the loop emits a warning frame, asks the model to summarize, and terminates gracefully |
 | `/iter-cap reset` | Restore the default iteration cap (100) |
@@ -289,15 +303,15 @@ All sessions share the same intelligence — same memory, same identity, same so
 
 ## Current Limitations
 
-- **API only** — requires internet connectivity and a Claude or Gemini API key
+- **API or remote-style local LLM** — Anthropic Claude / Google Gemini require internet + a paid API key. Ollama and LM Studio (Sprint 5) connect to a local-network OpenAI-compat server you operate (typically a Mac Studio or similar). Inference still happens on a separate host — true on-device inference inside embraOS itself comes in Phase 5.
 - **QEMU x86_64 (recommended)** — an experimental aarch64/Apple Silicon build is available under [`embraOS_aarch64_AppleSilicon_Experimental_Build/`](./embraOS_aarch64_AppleSilicon_Experimental_Build/EMBRAOS_AARCH64_BUILD_GUIDE.md) (verified end-to-end on MacBook Air M1, 2026-04-15); bare metal and broader architecture support come in Phase 4
 - **Tested on limited platforms** — built and verified on Ubuntu 24.04 + 26.04 under QEMU 8.2.2; bootable image also runs under QEMU on Intel and Apple Silicon Macs
 - **Built-in tools only** — no MCP server modules (yet)
-- **No local LLM** — coming in a future phase
+- **No on-device LLM inference** — Phase 5 will add `embraOS-QNM` for sovereign on-host inference. Sprint 5's OpenAI-compat support is the foundation for Phase 3's hybrid local/API routing.
 
 ### Default Tools
 
-Phase 1 includes 90 internal tools the intelligence invokes during conversation. They are organized below by category.
+Phase 1 includes 90 internal tools the intelligence invokes during conversation. All 90 work identically across all four LLM providers (Anthropic, Gemini, Ollama, LM Studio) via per-provider tool-schema translators that share a common JSON Schema cleanup pipeline (`provider/schema_util.rs::inline_refs`). They are organized below by category.
 
 > **⚠️ Testing Notice:** The default tools and slash commands are actively being tested. If you encounter bugs or unexpected behavior, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
@@ -447,6 +461,7 @@ Phase 1 includes 90 internal tools the intelligence invokes during conversation.
 | **Phase 1 — Sprint 2** | Cross-session knowledge graph — semantic/procedural promotion, typed/weighted edges, BFS traversal, graph-aware retrieval, 6 KG tools, `/feedback-loop` command | ✅ **Complete** |
 | **Phase 1 — Sprint 3** | WardSONDB pluggable storage engine (`--storage-engine <fjall\|rocksdb>`), EXPR-01 expression panel, NATIVE-TOOLS-01 Anthropic native tool-use migration, tool-coverage expansion, four post-merge fix passes closing 15 Embra_Debug issues (90 tools, 142 tests) | ✅ **Complete** |
 | **Phase 1 — Sprint 4** | GEMINI-PROVIDER-01 — pluggable LLM provider abstraction, Anthropic + Google Gemini 3.1 Pro backends, neutral IR loop driver, Gemini explicit context cache lifecycle, per-provider API keys (schema v10), `/provider [status\|<kind>\|--setup]` slash command, wizard provider step + post-merge cross-provider guard hotfix + Embra_Debug #80 graceful tool-iteration cap with `/iter-cap` runtime knob (90 tools, 234 tests) | ✅ **Complete** |
+| **Phase 1 — Sprint 5** | OPENAI-COMPAT-PROVIDER-01 — Ollama + LM Studio as additional `LlmProvider` implementations via single `OpenAICompatProvider` with `OpenAiCompatPreset` discriminator, schema v11 with `openai_compat` config, STATE bearer plumbing (mode 0600 retroactively applied to api_key files), 4-way wizard with Endpoint → Bearer → Probe-and-Select sub-flow, defensive multi-key reasoning parser (`delta.reasoning` cookbook-primary first, `delta.reasoning_content` LM Studio newer-default fallback), `Block::ProviderOpaque{kind:"reasoning"}` CoT round-trip per OpenAI cookbook preserve/drop rules, `/provider --setup <ollama\|lm_studio>` runtime reconfigure (Endpoint → Bearer choice → Bearer token? → Model selection with bearer env hot-reload), model-aware `reasoning_effort` gating (gpt-oss / o-series / DeepSeek-R / `-thinking` variants), parameterless tool-schema `properties:{}` stamping for LM Studio zod validator, `tool_choice:"auto"` string form for OpenAI canonical, `docs/RECOMMENDED-MODELS.md` operator-facing starter doc (90 tools, 390 tests, workspace v0.5.0-phase1) | ✅ **Complete** |
 | **Pit Stop** | Code review branch — security audit, AI slop cleanup, refactoring | Planned |
 | **Phase 2** | Terminal & Sessions — Full TUI rewrite, API Web Searches via `embra-guardian` v1 (including additional prompt injection protection for the returned results) | Planned |
 | **Phase 3** | Module System — `embra-guardian` v2, `embractl` management CLI (the `talosctl` equivalent), `embra-brain` Local/Hybrid option via external Ollama but default/recommended remains Anthropic API, LLM-driven Continuity Engine feedback loop (local/API/Hybrid options), MCP server modules via `embra-guardian` governance proxy, containerd runtime, governed capability expansion | Planned |
