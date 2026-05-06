@@ -82,13 +82,29 @@ embraOS's wizard prompts for an optional bearer; supply the same token the serve
 
 ## Active Testing Roster
 
+Models selected for embraOS smoke-testing, ordered by recommendation priority. The **Result** column gets populated as operator testing confirms behavior against the 90-tool registry. All entries below are pre-validation — none have been embraOS-confirmed against the full tool surface yet.
+
 ### Ollama (Mac Mini, 16 GB)
 
-- TBD — testing in progress
+| Pick | Model | Tag | Size | Native ctx | Rationale | Result |
+|---|---|---|---|---|---|---|
+| 1 | IBM Granite 4.1 8B | `granite4.1:8b` | ~5 GB (Q4_K_M) | 128 K | OpenAI-tool-format-native (lowest wire-format risk on Sprint 5's OpenAI-compat path); BFCL V3 = 68.27; modern training (Oct 2025+) | TBD |
+| 2 | Hermes 3 Llama 3.1 8B | `hermes3:8b` | ~4.7 GB (Q4_0) | 128 K (Llama 3.1 + YaRN) | Highest measured 8B-class tool-call reliability (~88% single-turn / ~91% valid JSON per BFCL v3 May 2026); uses `<tool_call>` chat-template tags — verify Ollama bridges to `delta.tool_calls` before relying | TBD |
+| 3 | Qwen2.5-Coder 7B | `qwen2.5-coder:7b` | ~4.5 GB (Q4_K_M) | 32 K (128 K with YaRN) | Established option; function call template updated March 2025; HumanEval 88.4% | TBD |
+| — | Qwen3 14B | `qwen3:14b` | ~9 GB (Q4_K_M) | 32 K | Currently in test. Default-thinking-on (needs `/no_think` per prompt). KV grows fast on dense 14B — practical ceiling ~32 K on 16 GB regardless of `OLLAMA_CONTEXT_LENGTH` setting. Lower tool-call quality vs the 8B-class tool-tuned alternatives above | In progress |
 
 ### LM Studio (Mac Studio, 128 GB)
 
-- TBD — testing in progress
+| Pick | Model | Hugging Face tag | Size | Native ctx | Rationale | Result |
+|---|---|---|---|---|---|---|
+| 1 | OpenAI gpt-oss 120B | `mlx-community/gpt-oss-120b-4bit` | ~60–65 GB (MLX 4-bit) | 128 K | OpenAI-trained for tool calling, native OpenAI tool format (lowest wire-format risk); MMLU-Pro 90.0%; Apache 2.0 license | TBD |
+| 2 | Qwen3-Coder 30B-A3B | `lmstudio-community/Qwen3-Coder-30B-A3B-Instruct-MLX-4bit` | ~17 GB (MLX 4-bit) | 256 K (1 M with YaRN) | "Most agentic code model in the Qwen series"; 30 B / 3.3 B active MoE = inference cost of a 3 B model; designed for repository-scale tool use | TBD |
+| 3 | Qwen3.6 35B-A3B | `unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit` | ~20 GB (MLX 4-bit) | 256 K | Existing reference from earlier Sprint 5 testing pass; default-thinking-on (use `/no_think` for clean tool-test passes) | TBD |
+
+**Cross-platform caveats:**
+- "<14 B models prone to issues for tool calling" per multiple 2026 surveys, with explicit exceptions for tool-tuned models (Hermes 3, Granite 4.1 fit the exception; vanilla Qwen2.5/Llama 3.1 8B do not)
+- Format risk varies: gpt-oss + Granite are clean OpenAI format; Hermes uses `<tool_call>` tags (Ollama bridges); Qwen3 family is `/think` / `/no_think` prompt-toggled
+- None of the above are validated against embraOS's 90-tool registry specifically — operator testing populates the Result column
 
 ---
 
