@@ -23,8 +23,20 @@ use embra_console_core::commands;
 use embra_console_core::events::handle_console_event;
 use embra_console_core::grpc::ConsoleEvent;
 use embra_console_core::state::{AppState, DisplayMessage};
+use iced::widget::{operation, Id};
 use iced::{Element, Size, Subscription, Task, Theme};
+use once_cell::sync::Lazy;
 use tokio::sync::mpsc;
+
+/// Stable ID for the conversation scrollable so `operation::snap_to_end`
+/// can target it from `update`. `Id::unique()` would generate a fresh
+/// ID per `view()` call, breaking the link between update and the live
+/// widget.
+static CONVERSATION_SCROLL_ID: Lazy<Id> = Lazy::new(Id::unique);
+
+pub fn conversation_scroll_id() -> &'static Id {
+    &CONVERSATION_SCROLL_ID
+}
 
 #[derive(Parser, Debug, Clone)]
 #[command(version, about = "embra-desktop — iced GUI client for embraOS")]
@@ -104,6 +116,7 @@ impl EmbraDesktop {
             }
             Message::Submit => {
                 self.handle_submit();
+                return Self::scroll_to_end_task();
             }
             Message::ArrowUp => {
                 if let Some(sel) = self.state.selector.as_mut() {
@@ -134,7 +147,17 @@ impl EmbraDesktop {
                 self.state.status_message = "OK".to_string();
             }
             Message::GrpcEvent(event) => {
+                let scrollable_event = matches!(
+                    event,
+                    ConsoleEvent::ResponseDone(_)
+                        | ConsoleEvent::SystemMessage { .. }
+                        | ConsoleEvent::ToolExecution { .. }
+                        | ConsoleEvent::SetupPrompt { .. }
+                );
                 handle_console_event(event, &mut self.state);
+                if scrollable_event {
+                    return operation::snap_to_end(conversation_scroll_id().clone());
+                }
             }
             Message::ExpressionTick => {
                 // Stage 4c: BrainClient::get_expression poll. Currently
@@ -213,6 +236,10 @@ impl EmbraDesktop {
             .push(DisplayMessage::new_with_tz("user", &input, &self.state.config_tz));
         self.state.live_reasoning.clear();
         self.send_user_message(input);
+    }
+
+    fn scroll_to_end_task() -> Task<Message> {
+        operation::snap_to_end(conversation_scroll_id().clone())
     }
 
     fn send_user_message(&mut self, content: String) {

@@ -11,7 +11,7 @@ use iced::widget::{
 };
 use iced::{Background, Border, Color, Element, Length, Padding, Theme};
 
-use crate::Message;
+use crate::{conversation_scroll_id, Message};
 
 const HEADER_BG: Color = Color::from_rgb(0.18, 0.18, 0.22);
 const STATUS_BG: Color = Color::from_rgb(0.18, 0.18, 0.22);
@@ -158,9 +158,14 @@ fn draw_conversation(state: &AppState) -> Container<'_, Message> {
         }
     }
 
-    container(scrollable(col).width(Length::Fill).height(Length::Fill))
-        .width(Length::Fill)
-        .height(Length::Fill)
+    container(
+        scrollable(col)
+            .id(conversation_scroll_id().clone())
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .width(Length::Fill)
+    .height(Length::Fill)
 }
 
 fn render_message(msg: &DisplayMessage) -> Element<'_, Message> {
