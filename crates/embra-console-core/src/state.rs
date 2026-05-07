@@ -1,7 +1,8 @@
-//! Console-local state types for the TUI.
+//! Console-local application state.
 //!
-//! These mirror Phase 0's AppState/AppMode but without backend dependencies.
-//! All data comes from gRPC ConsoleEvents.
+//! Pure data + parser. UI-front-ends read/write these structs and render
+//! them with their own toolkit. All data ultimately comes from gRPC
+//! ConsoleEvents and operator key/mouse input.
 
 use chrono::Utc;
 use chrono_tz::Tz;
@@ -140,7 +141,7 @@ impl DisplayMessage {
     }
 }
 
-/// Full application state for the TUI
+/// Full application state for the console
 pub struct AppState {
     pub mode: AppMode,
     pub messages: Vec<DisplayMessage>,
@@ -259,6 +260,12 @@ impl AppState {
             AppMode::Learning => "Talk to your intelligence...",
             AppMode::Operational { .. } => "Type a message...",
         }
+    }
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

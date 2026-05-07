@@ -3,25 +3,30 @@
 //! ratatui-based terminal driven by gRPC ConsoleEvents from embra-apid.
 //! Renders the full Phase 0 visual experience: styled text, JSON highlighting,
 //! thinking indicator, multi-line input, selectors, and mode transitions.
+//!
+//! All UI-agnostic logic (gRPC client, app state, console-event reduction,
+//! reasoning buffer, slash-command parsing, styled-text parsers) lives in
+//! `embra-console-core`. This module owns only the ratatui draw functions
+//! and the crossterm-driven keyboard event loop.
 
-mod commands;
 mod input;
 mod render;
-pub mod state;
 mod ui;
 
-use state::*;
-use crate::grpc_client::{BrainClient, ConsoleEvent};
+use embra_console_core::commands;
+use embra_console_core::events::handle_console_event;
+use embra_console_core::grpc::BrainClient;
+use embra_console_core::reasoning::{char_count, char_to_byte_pos};
+use embra_console_core::state::{AppState, DisplayMessage};
 use embra_common::proto::apid::*;
 
 use anyhow::Result;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
-    terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-    ExecutableCommand,
+    terminal::{self, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
-use std::io::{self, stdout};
+use std::io::stdout;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -136,174 +141,6 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
     // Cleanup
     disable_raw_mode()?;
     Ok(())
-}
-
-fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
-    match event {
-        ConsoleEvent::Token(text) => {
-            app.thinking = false;
-            match &mut app.streaming_text {
-                Some(s) => s.push_str(&text),
-                None => app.streaming_text = Some(text),
-            }
-        }
-        ConsoleEvent::ResponseDone(full) => {
-            app.streaming_text = None;
-            app.thinking = false;
-            // Live reasoning is intentionally NOT cleared here — the
-            // operator can keep reading the last turn's reasoning until
-            // they submit their next message (clear sites: user submit,
-            // SystemMessage::Error, ModeTransition).
-            app.messages.push(DisplayMessage::new_with_tz(&app.config_name, &full, &app.config_tz));
-            app.scroll_offset = 0;
-        }
-        ConsoleEvent::SystemMessage { content, msg_type } => {
-            // SYSTEM_MESSAGE_TYPE_ERROR == 3. Brain failures during a
-            // turn should not leave stale reasoning on the panel.
-            if msg_type == "3" {
-                app.live_reasoning.clear();
-            }
-            app.messages.push(DisplayMessage::system_with_tz(&content, &app.config_tz));
-            app.scroll_offset = 0;
-        }
-        ConsoleEvent::ToolExecution {
-            name,
-            input_json,
-            result,
-            is_error,
-            ..
-        } => {
-            app.messages.push(DisplayMessage::tool_native(
-                &name,
-                &input_json,
-                &result,
-                is_error,
-                &app.config_tz,
-            ));
-            app.scroll_offset = 0;
-        }
-        ConsoleEvent::ThinkingState { is_thinking, name } => {
-            app.thinking = is_thinking;
-            if !name.is_empty() {
-                app.thinking_name = name;
-            }
-        }
-        ConsoleEvent::ModeTransition { from_mode: _, to_mode, message } => {
-            // Mode change resets per-turn UI context — drop any pending
-            // reasoning from the prior phase.
-            app.live_reasoning.clear();
-            // Parse name from message (format: "... — Name: <name> — ...")
-            if let Some(name_part) = message.split("Name: ").nth(1) {
-                let name = name_part.split(" — ").next().unwrap_or(name_part).trim().to_string();
-                if !name.is_empty() {
-                    app.config_name = name.clone();
-                    app.thinking_name = name;
-                }
-            }
-
-            // Parse timezone from message (format: "... — TZ: <tz>")
-            if let Some(tz_part) = message.split("TZ: ").nth(1) {
-                let tz = tz_part.split(" — ").next().unwrap_or(tz_part).trim().to_string();
-                if !tz.is_empty() {
-                    app.config_tz = tz;
-                }
-            }
-
-            // Parse brain model from message (format: "... — Brain: <model>")
-            // Added in Sprint 4 so the status bar reflects the active
-            // provider after wizard / /provider switches without a
-            // proto-level addition.
-            if let Some(brain_part) = message.split("Brain: ").nth(1) {
-                let model = brain_part.split(" — ").next().unwrap_or(brain_part).trim().to_string();
-                if !model.is_empty() {
-                    app.provider_model = model;
-                }
-            }
-
-            // to_mode: 1=Setup, 2=Learning, 3=Operational
-            match to_mode {
-                1 => {
-                    app.mode = AppMode::Setup(SetupState { step: SetupStep::Name });
-                }
-                2 => {
-                    app.mode = AppMode::Learning;
-                }
-                3 => {
-                    // Extract session name (format: "Operational — Name: <name> — Session: <name> — TZ: <tz>")
-                    let session = message.split("Session: ")
-                        .nth(1)
-                        .and_then(|s| s.split(" — ").next())
-                        .unwrap_or("main")
-                        .to_string();
-                    app.mode = AppMode::Operational { session_name: session };
-                }
-                _ => {}
-            }
-            // Don't display the raw ModeTransition message (it has internal metadata)
-            app.scroll_offset = 0;
-        }
-        ConsoleEvent::SetupPrompt { field_type, prompt, options, default_value } => {
-            app.messages.push(DisplayMessage::system_with_tz(&prompt, &app.config_tz));
-
-            if field_type == "confirm" || field_type == "selector" {
-                if !options.is_empty() {
-                    app.selector = Some(Selector::new(options));
-                }
-            }
-
-            if !default_value.is_empty() {
-                app.setup_default = Some(default_value);
-            }
-
-            // Update setup step
-            if let AppMode::Setup(ref mut setup) = app.mode {
-                setup.step = AppState::infer_setup_step(&prompt);
-            }
-
-            app.scroll_offset = 0;
-        }
-        ConsoleEvent::ReasoningDelta(text) => {
-            append_live_reasoning(&mut app.live_reasoning, &text);
-        }
-    }
-}
-
-/// Append a reasoning shard to the live buffer, hard-capping at
-/// `MAX_LIVE_REASONING_BYTES` (64 KiB). When the cap would be
-/// exceeded we drop the oldest content (UTF-8 boundary safe via
-/// `char_indices`). The buffer is transient — cleared at turn end —
-/// so the cap exists only to prevent pathological streams from
-/// growing console memory unbounded.
-fn append_live_reasoning(buffer: &mut String, shard: &str) {
-    const MAX_LIVE_REASONING_BYTES: usize = 64 * 1024;
-    if shard.is_empty() {
-        return;
-    }
-    if shard.len() >= MAX_LIVE_REASONING_BYTES {
-        // Single shard already exceeds cap — keep only its tail.
-        let tail_start = shard.len() - MAX_LIVE_REASONING_BYTES;
-        let safe_start = shard
-            .char_indices()
-            .find(|(i, _)| *i >= tail_start)
-            .map(|(i, _)| i)
-            .unwrap_or(shard.len());
-        buffer.clear();
-        buffer.push_str(&shard[safe_start..]);
-        return;
-    }
-    let needed = buffer.len() + shard.len();
-    if needed > MAX_LIVE_REASONING_BYTES {
-        // Drop oldest bytes to make room. Walk forward to a UTF-8
-        // boundary >= drop_amount so we never split a char.
-        let drop_amount = needed - MAX_LIVE_REASONING_BYTES;
-        let safe_drop = buffer
-            .char_indices()
-            .find(|(i, _)| *i >= drop_amount)
-            .map(|(i, _)| i)
-            .unwrap_or(buffer.len());
-        buffer.replace_range(..safe_drop, "");
-    }
-    buffer.push_str(shard);
 }
 
 async fn handle_key_event(
@@ -517,131 +354,4 @@ async fn handle_key_event(
     }
 
     Ok(())
-}
-
-/// Convert a char index to a byte index in a string.
-/// cursor_pos is a character offset; String::insert/remove need byte offsets.
-fn char_to_byte_pos(s: &str, char_pos: usize) -> usize {
-    s.char_indices()
-        .nth(char_pos)
-        .map(|(byte_idx, _)| byte_idx)
-        .unwrap_or(s.len())
-}
-
-/// Return the number of characters in a string (not bytes).
-fn char_count(s: &str) -> usize {
-    s.chars().count()
-}
-
-#[cfg(test)]
-mod reasoning_tests {
-    use super::*;
-
-    #[test]
-    fn reasoning_delta_appends_to_live_buffer() {
-        let mut app = AppState::new();
-        handle_console_event(ConsoleEvent::ReasoningDelta("first ".to_string()), &mut app);
-        handle_console_event(ConsoleEvent::ReasoningDelta("second".to_string()), &mut app);
-        assert_eq!(app.live_reasoning, "first second");
-    }
-
-    #[test]
-    fn response_done_preserves_live_reasoning() {
-        // Lifecycle: live reasoning persists past ResponseDone so the
-        // operator can keep reading the last turn's reasoning between
-        // turns. Cleared only on the next user submit (or error /
-        // mode change).
-        let mut app = AppState::new();
-        app.live_reasoning = "kept across the gap".to_string();
-        handle_console_event(ConsoleEvent::ResponseDone("ok".to_string()), &mut app);
-        assert_eq!(app.live_reasoning, "kept across the gap");
-    }
-
-    #[test]
-    fn error_system_message_clears_live_reasoning() {
-        let mut app = AppState::new();
-        app.live_reasoning = "in flight".to_string();
-        handle_console_event(
-            ConsoleEvent::SystemMessage {
-                content: "boom".to_string(),
-                msg_type: "3".to_string(), // SYSTEM_MESSAGE_TYPE_ERROR
-            },
-            &mut app,
-        );
-        assert!(app.live_reasoning.is_empty());
-    }
-
-    #[test]
-    fn info_system_message_does_not_clear_live_reasoning() {
-        let mut app = AppState::new();
-        app.live_reasoning = "in flight".to_string();
-        handle_console_event(
-            ConsoleEvent::SystemMessage {
-                content: "fyi".to_string(),
-                msg_type: "1".to_string(), // SYSTEM_MESSAGE_TYPE_INFO
-            },
-            &mut app,
-        );
-        assert_eq!(app.live_reasoning, "in flight");
-    }
-
-    #[test]
-    fn mode_transition_clears_live_reasoning() {
-        let mut app = AppState::new();
-        app.live_reasoning = "old phase".to_string();
-        handle_console_event(
-            ConsoleEvent::ModeTransition {
-                from_mode: 2,
-                to_mode: 3,
-                message: "Operational — Name: Embra — Session: main — TZ: UTC".to_string(),
-            },
-            &mut app,
-        );
-        assert!(app.live_reasoning.is_empty());
-    }
-
-    #[test]
-    fn append_live_reasoning_caps_at_64_kib_with_tail_keep() {
-        // Pathological single-shard input larger than the cap should
-        // truncate to the tail.
-        let mut buf = String::new();
-        let big = "a".repeat(64 * 1024 + 100);
-        append_live_reasoning(&mut buf, &big);
-        assert_eq!(buf.len(), 64 * 1024);
-        // Tail of the original input is what remains.
-        assert!(buf.ends_with(&"a".repeat(10)));
-    }
-
-    #[test]
-    fn append_live_reasoning_drops_oldest_to_fit_within_cap() {
-        let mut buf = "x".repeat(64 * 1024 - 5);
-        append_live_reasoning(&mut buf, "yyyyyyyyyy"); // 10 bytes
-        assert_eq!(buf.len(), 64 * 1024 - 5 + 10 - 5);
-        // Note: 5 bytes dropped from the front; the new shard's full
-        // 10 bytes are appended.
-        assert!(buf.ends_with("yyyyyyyyyy"));
-    }
-
-    #[test]
-    fn append_live_reasoning_handles_utf8_drop_safely() {
-        // Multi-byte chars at the drop boundary must not be split.
-        let mut buf = "é".repeat(32 * 1024); // 2 bytes per é = 64 KiB exactly
-        let original_byte_len = buf.len();
-        append_live_reasoning(&mut buf, "abc");
-        assert!(buf.len() <= 64 * 1024);
-        assert!(buf.ends_with("abc"));
-        // Ensure no panic from splitting a multi-byte char — buffer
-        // remains valid UTF-8 (which String guarantees structurally
-        // anyway, but the test crashes if `replace_range` were called
-        // on a non-boundary).
-        assert!(std::str::from_utf8(buf.as_bytes()).is_ok());
-        assert!(buf.len() < original_byte_len + 3 + 1); // grew by ≤ shard+1
-    }
-
-    #[test]
-    fn empty_shard_is_no_op() {
-        let mut buf = "kept".to_string();
-        append_live_reasoning(&mut buf, "");
-        assert_eq!(buf, "kept");
-    }
 }

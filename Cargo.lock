@@ -550,24 +550,31 @@ name = "embra-console"
 version = "0.5.0-phase1"
 dependencies = [
  "anyhow",
- "chrono",
- "chrono-tz",
  "crossterm",
  "embra-common",
- "futures",
- "futures-util",
+ "embra-console-core",
  "libc",
- "prost",
  "ratatui",
- "serde",
- "serde_json",
  "tokio",
- "tokio-stream",
  "tonic",
- "tonic-build",
  "tracing",
  "tracing-subscriber",
  "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "embra-console-core"
+version = "0.5.0-phase1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "chrono-tz",
+ "embra-common",
+ "prost",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
 ]
 
 [[package]]

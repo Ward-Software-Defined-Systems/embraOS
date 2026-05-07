@@ -1,9 +1,8 @@
 //! embra-console — TUI client for serial console.
 
 mod terminal;
-mod grpc_client;
 
-use grpc_client::BrainClient;
+use embra_console_core::grpc::BrainClient;
 
 #[tokio::main]
 async fn main() {

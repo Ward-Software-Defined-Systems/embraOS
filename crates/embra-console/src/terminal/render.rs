@@ -1,9 +1,18 @@
-// Render utilities for terminal display
-// Provides rich rendering for JSON, markdown headers, bold, and inline code.
+//! TUI adapter for `embra-console-core`'s neutral styled-text parsers.
+//!
+//! The core crate's parsers emit `StyledSegment`s carrying neutral
+//! `TextStyle` values; this layer translates them into ratatui `Style`s
+//! so the rendering code (`ui.rs`) can treat them as native ratatui
+//! types. The TUI module imports `parse_styled_line`, `parse_json_line`,
+//! `StyledSegment`, and `StyledLine` through this adapter, so adding or
+//! changing core parsers requires no churn in `ui.rs`.
 
+use embra_console_core::render as core_render;
+use embra_console_core::style::{
+    Color as CoreColor, Modifier as CoreModifier, TextStyle,
+};
 use ratatui::style::{Color, Modifier, Style};
 
-/// A single styled segment within a line
 #[derive(Debug, Clone)]
 pub struct StyledSegment {
     pub text: String,
@@ -19,237 +28,114 @@ impl StyledSegment {
     }
 }
 
-/// A line composed of multiple styled segments
 pub type StyledLine = Vec<StyledSegment>;
 
-/// Strip ANSI escape codes from text for width calculation
-pub fn visible_width(text: &str) -> usize {
-    let mut width = 0;
-    let mut in_escape = false;
-    for ch in text.chars() {
-        if in_escape {
-            if ch.is_ascii_alphabetic() {
-                in_escape = false;
-            }
-        } else if ch == '\x1b' {
-            in_escape = true;
-        } else {
-            width += 1;
-        }
-    }
-    width
-}
-
-/// Parse a line of text into styled segments, handling markdown-like formatting.
-/// base_style is the default style for unformatted text.
 pub fn parse_styled_line(line: &str, base_style: Style) -> StyledLine {
-    let trimmed = line.trim_start();
+    let base_core = ratatui_to_core(base_style);
+    core_render::parse_styled_line(line, base_core)
+        .into_iter()
+        .map(|seg| StyledSegment {
+            text: seg.text,
+            style: core_to_ratatui(seg.style),
+        })
+        .collect()
+}
 
-    // Markdown headers
-    if trimmed.starts_with("### ") {
-        return vec![StyledSegment::new(
-            line.to_string(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        )];
-    }
-    if trimmed.starts_with("## ") {
-        return vec![StyledSegment::new(
-            line.to_string(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        )];
-    }
-    if trimmed.starts_with("# ") {
-        return vec![StyledSegment::new(
-            line.to_string(),
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-        )];
-    }
+pub fn parse_json_line(line: &str) -> StyledLine {
+    core_render::parse_json_line(line)
+        .into_iter()
+        .map(|seg| StyledSegment {
+            text: seg.text,
+            style: core_to_ratatui(seg.style),
+        })
+        .collect()
+}
 
-    // Parse inline formatting: **bold** and `code`
-    let mut segments = Vec::new();
-    let mut current = String::new();
-    let chars: Vec<char> = line.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-
-    while i < len {
-        // Bold: **text**
-        if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
-            // Flush current
-            if !current.is_empty() {
-                segments.push(StyledSegment::new(current.clone(), base_style));
-                current.clear();
-            }
-            // Find closing **
-            let start = i + 2;
-            let mut end = None;
-            let mut j = start;
-            while j + 1 < len {
-                if chars[j] == '*' && chars[j + 1] == '*' {
-                    end = Some(j);
-                    break;
-                }
-                j += 1;
-            }
-            if let Some(end_pos) = end {
-                let bold_text: String = chars[start..end_pos].iter().collect();
-                segments.push(StyledSegment::new(
-                    bold_text,
-                    base_style.add_modifier(Modifier::BOLD),
-                ));
-                i = end_pos + 2;
-            } else {
-                current.push(chars[i]);
-                i += 1;
-            }
-        }
-        // Inline code: `text`
-        else if chars[i] == '`' {
-            if !current.is_empty() {
-                segments.push(StyledSegment::new(current.clone(), base_style));
-                current.clear();
-            }
-            let start = i + 1;
-            let mut end = None;
-            for j in start..len {
-                if chars[j] == '`' {
-                    end = Some(j);
-                    break;
-                }
-            }
-            if let Some(end_pos) = end {
-                let code_text: String = chars[start..end_pos].iter().collect();
-                segments.push(StyledSegment::new(
-                    code_text,
-                    Style::default().fg(Color::Gray),
-                ));
-                i = end_pos + 1;
-            } else {
-                current.push(chars[i]);
-                i += 1;
-            }
-        } else {
-            current.push(chars[i]);
-            i += 1;
-        }
+fn ratatui_to_core(s: Style) -> TextStyle {
+    let fg = s.fg.map(map_color_to_core).unwrap_or(CoreColor::Reset);
+    let mut m = CoreModifier::empty();
+    if s.add_modifier.contains(Modifier::BOLD) {
+        m = m.union(CoreModifier::BOLD);
     }
-
-    if !current.is_empty() {
-        segments.push(StyledSegment::new(current, base_style));
+    if s.add_modifier.contains(Modifier::ITALIC) {
+        m = m.union(CoreModifier::ITALIC);
     }
+    if s.add_modifier.contains(Modifier::UNDERLINED) {
+        m = m.union(CoreModifier::UNDERLINE);
+    }
+    if s.add_modifier.contains(Modifier::DIM) {
+        m = m.union(CoreModifier::DIM);
+    }
+    if s.add_modifier.contains(Modifier::SLOW_BLINK) {
+        m = m.union(CoreModifier::SLOW_BLINK);
+    }
+    TextStyle { fg, modifier: m }
+}
 
-    if segments.is_empty() {
-        vec![StyledSegment::new(String::new(), base_style)]
-    } else {
-        segments
+fn core_to_ratatui(ts: TextStyle) -> Style {
+    let mut s = Style::default();
+    if ts.fg != CoreColor::Reset {
+        s = s.fg(map_color_from_core(ts.fg));
+    }
+    if ts.modifier.contains(CoreModifier::BOLD) {
+        s = s.add_modifier(Modifier::BOLD);
+    }
+    if ts.modifier.contains(CoreModifier::ITALIC) {
+        s = s.add_modifier(Modifier::ITALIC);
+    }
+    if ts.modifier.contains(CoreModifier::UNDERLINE) {
+        s = s.add_modifier(Modifier::UNDERLINED);
+    }
+    if ts.modifier.contains(CoreModifier::DIM) {
+        s = s.add_modifier(Modifier::DIM);
+    }
+    if ts.modifier.contains(CoreModifier::SLOW_BLINK) {
+        s = s.add_modifier(Modifier::SLOW_BLINK);
+    }
+    s
+}
+
+fn map_color_to_core(c: Color) -> CoreColor {
+    match c {
+        Color::Reset => CoreColor::Reset,
+        Color::Black => CoreColor::Black,
+        Color::Red => CoreColor::Red,
+        Color::Green => CoreColor::Green,
+        Color::Yellow => CoreColor::Yellow,
+        Color::Blue => CoreColor::Blue,
+        Color::Magenta => CoreColor::Magenta,
+        Color::Cyan => CoreColor::Cyan,
+        Color::Gray => CoreColor::Gray,
+        Color::DarkGray => CoreColor::DarkGray,
+        Color::LightRed => CoreColor::LightRed,
+        Color::LightGreen => CoreColor::LightGreen,
+        Color::LightYellow => CoreColor::LightYellow,
+        Color::LightBlue => CoreColor::LightBlue,
+        Color::LightMagenta => CoreColor::LightMagenta,
+        Color::LightCyan => CoreColor::LightCyan,
+        Color::White => CoreColor::White,
+        _ => CoreColor::Reset,
     }
 }
 
-/// Parse a JSON block for syntax highlighting.
-/// Returns styled segments per line.
-pub fn parse_json_line(line: &str) -> StyledLine {
-    let mut segments = Vec::new();
-    let chars: Vec<char> = line.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-    let mut current = String::new();
-
-    let base_style = Style::default().fg(Color::White);
-
-    while i < len {
-        let ch = chars[i];
-
-        // String literals
-        if ch == '"' {
-            // Flush current as punctuation
-            if !current.is_empty() {
-                segments.push(StyledSegment::new(current.clone(), base_style));
-                current.clear();
-            }
-            // Collect the full string including quotes
-            let mut s = String::new();
-            s.push(ch);
-            i += 1;
-            while i < len && chars[i] != '"' {
-                if chars[i] == '\\' && i + 1 < len {
-                    s.push(chars[i]);
-                    i += 1;
-                    s.push(chars[i]);
-                } else {
-                    s.push(chars[i]);
-                }
-                i += 1;
-            }
-            if i < len {
-                s.push(chars[i]); // closing quote
-                i += 1;
-            }
-
-            // Check if this is a key (followed by ':')
-            let mut j = i;
-            while j < len && chars[j] == ' ' {
-                j += 1;
-            }
-            let is_key = j < len && chars[j] == ':';
-
-            let color = if is_key { Color::Cyan } else { Color::Green };
-            segments.push(StyledSegment::new(s, Style::default().fg(color)));
-        }
-        // Numbers
-        else if (ch.is_ascii_digit() || ch == '-') && (current.trim().is_empty() || current.ends_with(": ") || current.ends_with(',')) {
-            if !current.is_empty() {
-                segments.push(StyledSegment::new(current.clone(), base_style));
-                current.clear();
-            }
-            let mut num = String::new();
-            num.push(ch);
-            i += 1;
-            while i < len && (chars[i].is_ascii_digit() || chars[i] == '.' || chars[i] == 'e' || chars[i] == 'E' || chars[i] == '+' || chars[i] == '-') {
-                num.push(chars[i]);
-                i += 1;
-            }
-            segments.push(StyledSegment::new(num, Style::default().fg(Color::Yellow)));
-            continue; // don't increment i again
-        }
-        // Boolean/null keywords — check from chars array, not byte-indexed line slice
-        else if i + 4 <= len && matches!(
-            (chars[i], chars.get(i+1), chars.get(i+2), chars.get(i+3)),
-            ('t', Some('r'), Some('u'), Some('e'))
-            | ('n', Some('u'), Some('l'), Some('l'))
-        ) {
-            if !current.is_empty() {
-                segments.push(StyledSegment::new(current.clone(), base_style));
-                current.clear();
-            }
-            let word: String = chars[i..i + 4].iter().collect();
-            segments.push(StyledSegment::new(word, Style::default().fg(Color::Yellow)));
-            i += 4;
-            continue;
-        }
-        else if i + 5 <= len && (chars[i], chars.get(i+1), chars.get(i+2), chars.get(i+3), chars.get(i+4))
-            == ('f', Some(&'a'), Some(&'l'), Some(&'s'), Some(&'e'))
-        {
-            if !current.is_empty() {
-                segments.push(StyledSegment::new(current.clone(), base_style));
-                current.clear();
-            }
-            let word: String = chars[i..i + 5].iter().collect();
-            segments.push(StyledSegment::new(word, Style::default().fg(Color::Yellow)));
-            i += 5;
-            continue;
-        } else {
-            current.push(ch);
-            i += 1;
-        }
-    }
-
-    if !current.is_empty() {
-        segments.push(StyledSegment::new(current, base_style));
-    }
-
-    if segments.is_empty() {
-        vec![StyledSegment::new(String::new(), base_style)]
-    } else {
-        segments
+fn map_color_from_core(c: CoreColor) -> Color {
+    match c {
+        CoreColor::Reset => Color::Reset,
+        CoreColor::Black => Color::Black,
+        CoreColor::Red => Color::Red,
+        CoreColor::Green => Color::Green,
+        CoreColor::Yellow => Color::Yellow,
+        CoreColor::Blue => Color::Blue,
+        CoreColor::Magenta => Color::Magenta,
+        CoreColor::Cyan => Color::Cyan,
+        CoreColor::Gray => Color::Gray,
+        CoreColor::DarkGray => Color::DarkGray,
+        CoreColor::LightRed => Color::LightRed,
+        CoreColor::LightGreen => Color::LightGreen,
+        CoreColor::LightYellow => Color::LightYellow,
+        CoreColor::LightBlue => Color::LightBlue,
+        CoreColor::LightMagenta => Color::LightMagenta,
+        CoreColor::LightCyan => Color::LightCyan,
+        CoreColor::White => Color::White,
     }
 }

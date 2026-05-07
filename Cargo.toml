@@ -7,6 +7,7 @@ members = [
     "crates/embra-trustd",
     "crates/embra-brain",
     "crates/embra-console",
+    "crates/embra-console-core",
     "crates/embra-common",
     "crates/embra-tool-macro",
     "crates/embra-tools-core",
@@ -63,5 +64,6 @@ schemars = "0.8"
 inventory = "0.3"
 once_cell = "1"
 
-# Shared crate
+# Shared crates
 embra-common = { path = "crates/embra-common" }
+embra-console-core = { path = "crates/embra-console-core" }

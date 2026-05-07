@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use super::render::{self, StyledLine, StyledSegment};
-use super::state::{AppMode, AppState, SetupStep};
+use embra_console_core::state::{AppMode, AppState, SetupStep};
 
 pub fn draw(f: &mut Frame, app: &AppState) {
     let available_width = f.area().width.saturating_sub(2) as usize; // minus borders

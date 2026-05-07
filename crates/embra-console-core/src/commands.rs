@@ -1,6 +1,6 @@
-//! Slash command handling for embra-console.
+//! Slash command handling for embraOS console clients.
 //!
-//! Only local commands (/help, /copy) are handled here.
+//! Only local commands (/help, /copy, /ml) are handled here.
 //! All other commands are forwarded to embra-brain via gRPC.
 
 /// Returns true if this command is handled locally (not sent to brain)

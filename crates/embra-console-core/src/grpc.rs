@@ -8,13 +8,13 @@ use prost::Message;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
-use tracing::{info, error};
+use tracing::{error, info};
 
 pub struct BrainClient {
     client: EmbraApiClient<Channel>,
 }
 
-/// Events that the TUI consumes (replaces Phase 0's StreamEvent + proactive notifications)
+/// Events that a UI consumes (replaces Phase 0's StreamEvent + proactive notifications)
 #[derive(Debug)]
 pub enum ConsoleEvent {
     Token(String),
