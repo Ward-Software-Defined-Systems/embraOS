@@ -16,12 +16,35 @@
 
 use embra_common::proto::apid::ConversationRequest;
 use embra_console_core::grpc::{BrainClient, ConsoleEvent};
+use iced::event::{self, Event};
 use iced::futures::SinkExt;
+use iced::keyboard::{self, key::Named, Key};
 use iced::Subscription;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::Message;
+
+/// Global keyboard shortcuts. Fires regardless of focus, so behaviors
+/// must be context-aware in `update()` (e.g. ArrowUp navigates a
+/// selector when one is active and scrolls history otherwise). The
+/// text_input widget keeps its own character handling on top.
+pub fn keyboard() -> Subscription<Message> {
+    event::listen_with(|event, _status, _window_id| {
+        let Event::Keyboard(keyboard::Event::KeyPressed { key, modifiers, .. }) = event else {
+            return None;
+        };
+        match key.as_ref() {
+            Key::Named(Named::ArrowUp) => Some(Message::ArrowUp),
+            Key::Named(Named::ArrowDown) => Some(Message::ArrowDown),
+            Key::Named(Named::PageUp) => Some(Message::PageUp),
+            Key::Named(Named::PageDown) => Some(Message::PageDown),
+            Key::Character("c") if modifiers.control() => Some(Message::Quit),
+            Key::Character("d") if modifiers.control() => Some(Message::Quit),
+            _ => None,
+        }
+    })
+}
 
 pub fn grpc(apid_addr: String) -> Subscription<Message> {
     // `Subscription::run_with` wants a non-capturing `fn(&D) -> S` pointer.

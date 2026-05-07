@@ -45,13 +45,21 @@ pub enum Message {
     GrpcConnected(mpsc::Sender<ConversationRequest>),
     /// One brain-side event arrived over the stream.
     GrpcEvent(ConsoleEvent),
-    /// Selector navigation.
-    SelectorUp,
-    SelectorDown,
-    /// 3-second tick for the expression-panel poll (Stage 4c will hook up
+    /// Up arrow pressed. If a selector is active, navigates it; else
+    /// scrolls conversation history up.
+    ArrowUp,
+    /// Down arrow pressed. If a selector is active, navigates it; else
+    /// scrolls conversation history down.
+    ArrowDown,
+    /// PageUp / PageDown — scroll history by 10 lines.
+    PageUp,
+    PageDown,
+    /// Ctrl+C / Ctrl+D — quit the application gracefully.
+    Quit,
+    /// 3-second tick for the expression-panel poll (Stage 4d will hook up
     /// `BrainClient::get_expression`).
     ExpressionTick,
-    /// 200 ms tick for thinking-dot animation (no-op until Stage 4c
+    /// 200 ms tick for thinking-dot animation (no-op until Stage 4d
     /// renders the dots).
     AnimationTick,
 }
@@ -97,15 +105,29 @@ impl EmbraDesktop {
             Message::Submit => {
                 self.handle_submit();
             }
-            Message::SelectorUp => {
+            Message::ArrowUp => {
                 if let Some(sel) = self.state.selector.as_mut() {
                     sel.up();
+                } else {
+                    self.state.scroll_offset = self.state.scroll_offset.saturating_add(1);
                 }
             }
-            Message::SelectorDown => {
+            Message::ArrowDown => {
                 if let Some(sel) = self.state.selector.as_mut() {
                     sel.down();
+                } else {
+                    self.state.scroll_offset = self.state.scroll_offset.saturating_sub(1);
                 }
+            }
+            Message::PageUp => {
+                self.state.scroll_offset = self.state.scroll_offset.saturating_add(10);
+            }
+            Message::PageDown => {
+                self.state.scroll_offset = self.state.scroll_offset.saturating_sub(10);
+            }
+            Message::Quit => {
+                tracing::info!("ctrl-c received, exiting");
+                return iced::exit();
             }
             Message::GrpcConnected(tx) => {
                 self.grpc_in = Some(tx);
@@ -227,6 +249,7 @@ impl EmbraDesktop {
     fn subscription(&self) -> Subscription<Message> {
         Subscription::batch(vec![
             subscription::grpc(self.apid_addr.clone()),
+            subscription::keyboard(),
             iced::time::every(std::time::Duration::from_secs(3))
                 .map(|_| Message::ExpressionTick),
             iced::time::every(std::time::Duration::from_millis(200))
