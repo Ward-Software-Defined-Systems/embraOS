@@ -1,0 +1,24 @@
+[package]
+name = "embra-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "iced GUI client for embraOS"
+
+[dependencies]
+embra-console-core = { workspace = true }
+embra-common = { workspace = true }
+# iced 0.14 — additive `tiny-skia` feature enables the software renderer
+# alongside the default wgpu path. Stage 0 locked tiny-skia for the
+# experiment (smaller binary, no Vulkan loader needed); iced selects
+# renderer at runtime so wgpu is acceptable as a fallback. `tokio`
+# feature lets subscriptions drive the async gRPC stream. Defaults left
+# on so winit's X11/Wayland platform features (and softbuffer's
+# matching platform backends) flow through.
+iced = { version = "0.14", features = ["tiny-skia", "tokio"] }
+tokio = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+clap = { version = "4", features = ["derive"] }

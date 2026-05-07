@@ -10,6 +10,7 @@ members = [
     "crates/embra-console",
     "crates/embra-console-core",
     "crates/embra-common",
+    "crates/embra-desktop",
     "crates/embra-tool-macro",
     "crates/embra-tools-core",
 ]
