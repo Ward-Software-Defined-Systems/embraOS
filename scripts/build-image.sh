@@ -158,9 +158,19 @@ fi
     done && \
     rm -f output/images/rootfs.squashfs output/images/embraos.img)
 
+# Defconfig selection — embra-desktop (default, with graphics stack) vs
+# minimal (TUI-only fallback).
+if [ "${EMBRA_NO_DESKTOP:-0}" = "1" ]; then
+    DEFCONFIG_NAME="embraos_x86_64_minimal_defconfig"
+    echo "=== Defconfig: $DEFCONFIG_NAME (TUI-only fallback) ==="
+else
+    DEFCONFIG_NAME="embraos_x86_64_defconfig"
+    echo "=== Defconfig: $DEFCONFIG_NAME (embra-desktop graphics stack) ==="
+fi
+
 # Configure and build
 (cd "$BUILDROOT_DIR" && \
-    make BR2_EXTERNAL="$(pwd)/../buildroot" embraos_x86_64_defconfig && \
+    make BR2_EXTERNAL="$(pwd)/../buildroot" "$DEFCONFIG_NAME" && \
     make -j$(nproc_compat))
 
 echo "=== Step 5: Copy outputs ==="

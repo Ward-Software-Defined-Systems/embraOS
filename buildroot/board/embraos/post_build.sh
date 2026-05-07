@@ -28,6 +28,15 @@ echo "nameserver 10.0.2.3" > "${TARGET_DIR}/etc/resolv.conf"
 # Workspace mount point (embrad bind-mounts /embra/data/workspace here at boot)
 mkdir -p "${TARGET_DIR}/embra/workspace"
 
+# embra-desktop (Stage 2): runtime dir for the Wayland socket + seatd state.
+# Wayland clients default to $XDG_RUNTIME_DIR/wayland-0; the spec mandates
+# 0700 + owned by the session uid. embra-comp + embra-desktop both run as
+# root so uid 0 is correct here. Created on the read-only rootfs as a
+# placeholder; embrad mounts a tmpfs over /run early in boot so the dir
+# is writable at runtime.
+mkdir -p "${TARGET_DIR}/run/user/0"
+chmod 0700 "${TARGET_DIR}/run/user/0"
+
 # Defense-in-depth: lock the root account.
 # The Buildroot skeleton leaves /etc/shadow with an empty root password,
 # which means anyone with shell access can become root without credentials.

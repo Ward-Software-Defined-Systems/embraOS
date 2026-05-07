@@ -1,5 +1,14 @@
-# embraOS x86_64 Buildroot defconfig
+# embraOS x86_64 Buildroot minimal defconfig
 # Base: QEMU x86_64
+#
+# This defconfig is the pre-embra-desktop baseline — TUI on serial only,
+# no graphics stack. Use it via:
+#
+#   EMBRA_NO_DESKTOP=1 ./scripts/build-image.sh ...
+#
+# It exists as a fallback while the embra-desktop experiment is in flight,
+# so a quick "does the TUI still work" build doesn't pull in the full
+# Mesa3D / Wayland / fontconfig closure.
 
 BR2_x86_64=y
 BR2_TOOLCHAIN_BUILDROOT_MUSL=y
@@ -54,41 +63,3 @@ BR2_PACKAGE_EMBRA_TRUSTD=y
 BR2_PACKAGE_EMBRA_BRAIN=y
 BR2_PACKAGE_EMBRA_CONSOLE=y
 BR2_PACKAGE_WARDSONDB=y
-
-# === embra-desktop graphics stack (Stage 2 — experimental) ===
-# Single-fullscreen-client Wayland kiosk: smithay compositor + iced
-# tiny_skia client. Software rendering only — no virgl, no GPU passthrough.
-# Mesa3D + llvmpipe ship in the rootfs for any transitive GL touch even
-# though iced's tiny_skia path bypasses Mesa entirely.
-
-# LLVM (required by Mesa3D's llvmpipe Gallium driver)
-BR2_PACKAGE_LLVM=y
-
-# Mesa3D with llvmpipe software rasterizer
-BR2_PACKAGE_MESA3D=y
-BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LLVMPIPE=y
-BR2_PACKAGE_MESA3D_OPENGL_EGL=y
-BR2_PACKAGE_MESA3D_OPENGL_ES=y
-
-# Wayland protocol + KMS userspace
-BR2_PACKAGE_WAYLAND=y
-BR2_PACKAGE_WAYLAND_PROTOCOLS=y
-BR2_PACKAGE_LIBDRM=y
-
-# Input handling
-BR2_PACKAGE_LIBINPUT=y
-BR2_PACKAGE_LIBEVDEV=y
-BR2_PACKAGE_LIBXKBCOMMON=y
-BR2_PACKAGE_XKEYBOARD_CONFIG=y
-
-# Session manager (graceful handover of /dev/dri/card0 + /dev/input/*)
-BR2_PACKAGE_SEATD=y
-
-# Font stack
-BR2_PACKAGE_FONTCONFIG=y
-BR2_PACKAGE_FREETYPE=y
-BR2_PACKAGE_HARFBUZZ=y
-BR2_PACKAGE_DEJAVU=y
-
-# Pixel format helpers
-BR2_PACKAGE_PIXMAN=y

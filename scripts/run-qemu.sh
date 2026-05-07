@@ -51,6 +51,39 @@ elif [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     ACCEL_NAME="KVM (Linux)"
 fi
 
+# embra-desktop (Stage 2): graphical session selection.
+# When EMBRA_DESKTOP=1, swap the serial-only TUI launch for a GTK-windowed
+# 1280x720 graphical session backed by virtio-gpu (Mesa llvmpipe path) and
+# virtio keyboard + tablet input. The serial line is redirected to a file
+# so embrad's stdio still has somewhere to land after embra-comp takes
+# /dev/tty1. Use Ctrl-Alt-G to release the QEMU pointer grab.
+DESKTOP_MODE="${EMBRA_DESKTOP:-0}"
+
+# Detect host terminal size and pass to guest via kernel cmdline
+HOST_COLS=$(stty size 2>/dev/null | awk '{print $2}')
+HOST_ROWS=$(stty size 2>/dev/null | awk '{print $1}')
+HOST_COLS=${HOST_COLS:-80}
+HOST_ROWS=${HOST_ROWS:-24}
+
+if [ "$DESKTOP_MODE" = "1" ]; then
+    DISPLAY_ARGS=(
+        -display gtk,gl=off
+        -device virtio-gpu-pci,xres=1280,yres=720
+        -device virtio-keyboard-pci
+        -device virtio-tablet-pci
+    )
+    SERIAL_ARGS=(-serial "file:/tmp/embra-serial.log")
+    KERNEL_CMDLINE="root=/dev/vda2 ro quiet"
+    DISPLAY_DESC="GTK 1280x720 (virtio-gpu, llvmpipe)"
+    SERIAL_DESC="/tmp/embra-serial.log"
+else
+    DISPLAY_ARGS=(-nographic)
+    SERIAL_ARGS=(-serial mon:stdio)
+    KERNEL_CMDLINE="console=ttyS0 root=/dev/vda2 ro quiet embra.cols=$HOST_COLS embra.rows=$HOST_ROWS"
+    DISPLAY_DESC="serial only (-nographic)"
+    SERIAL_DESC="this terminal"
+fi
+
 echo "Starting embraOS in QEMU..."
 echo "  Image: $IMAGE"
 echo "  Kernel: $KERNEL"
@@ -58,17 +91,16 @@ echo "  Initrd: $INITRD"
 echo "  Memory: $MEMORY"
 echo "  CPUs: $CPUS"
 echo "  Acceleration: $ACCEL_NAME"
-echo "  Serial console: this terminal"
+echo "  Display: $DISPLAY_DESC"
+echo "  Serial console: $SERIAL_DESC"
 echo "  Port forwards: 50000→50000 (gRPC), 8443→8443 (REST)"
 echo ""
-echo "Press Ctrl-A X to exit QEMU"
+if [ "$DESKTOP_MODE" = "1" ]; then
+    echo "Close the QEMU window or send SIGINT to exit."
+else
+    echo "Press Ctrl-A X to exit QEMU"
+fi
 echo ""
-
-# Detect host terminal size and pass to guest via kernel cmdline
-HOST_COLS=$(stty size 2>/dev/null | awk '{print $2}')
-HOST_ROWS=$(stty size 2>/dev/null | awk '{print $1}')
-HOST_COLS=${HOST_COLS:-80}
-HOST_ROWS=${HOST_ROWS:-24}
 
 qemu-system-x86_64 \
     $ACCEL \
@@ -77,8 +109,8 @@ qemu-system-x86_64 \
     -drive file="$IMAGE",format=raw,if=virtio \
     -kernel "$KERNEL" \
     -initrd "$INITRD" \
-    -append "console=ttyS0 root=/dev/vda2 ro quiet embra.cols=$HOST_COLS embra.rows=$HOST_ROWS" \
-    -nographic \
-    -serial mon:stdio \
+    -append "$KERNEL_CMDLINE" \
+    "${DISPLAY_ARGS[@]}" \
+    "${SERIAL_ARGS[@]}" \
     -nic user,hostfwd=tcp::50000-:50000,hostfwd=tcp::8443-:8443 \
     -no-reboot
