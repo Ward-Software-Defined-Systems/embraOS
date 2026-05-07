@@ -35,8 +35,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::error;
 
 use crate::provider::{
-    ApiMessage, LlmProvider, ProviderError, ProviderKind, StreamEvent, SystemPromptBundle,
-    ToolManifest, ValidationResult,
+    ApiMessage, LlmProvider, LlmRequestOptions, ProviderError, ProviderKind, StreamEvent,
+    SystemPromptBundle, ToolManifest, ValidationResult,
 };
 use crate::tools::registry::ToolDescriptor;
 
@@ -288,6 +288,7 @@ impl LlmProvider for OpenAICompatProvider {
         messages: &[ApiMessage],
         system: &SystemPromptBundle,
         tools: &ToolManifest,
+        options: LlmRequestOptions,
     ) -> Result<BoxStream<'static, StreamEvent>, ProviderError> {
         let url = format!(
             "{}/v1/chat/completions",
@@ -348,7 +349,13 @@ impl LlmProvider for OpenAICompatProvider {
         let model_id = self.model_id.clone();
         let tx_clone = tx.clone();
         tokio::spawn(async move {
-            if let Err(e) = streaming::process_sse_stream(response, tx_clone.clone(), model_id).await
+            if let Err(e) = streaming::process_sse_stream(
+                response,
+                tx_clone.clone(),
+                model_id,
+                options.include_reasoning,
+            )
+            .await
             {
                 error!(target: "provider::openai_compat", "SSE stream error: {e}");
                 let _ = tx_clone.send(StreamEvent::Error(e.to_string())).await;
@@ -783,7 +790,7 @@ mod tests {
             }
         };
         let stream = provider
-            .stream_turn(&[ApiMessage::user_text("hi")], &system_bundle(), &empty_manifest())
+            .stream_turn(&[ApiMessage::user_text("hi")], &system_bundle(), &empty_manifest(), LlmRequestOptions::default())
             .await
             .unwrap();
         let events = collect_events(stream).await;
@@ -825,7 +832,7 @@ mod tests {
             }
         };
         let stream = provider
-            .stream_turn(&[ApiMessage::user_text("status")], &system_bundle(), &empty_manifest())
+            .stream_turn(&[ApiMessage::user_text("status")], &system_bundle(), &empty_manifest(), LlmRequestOptions::default())
             .await
             .unwrap();
         let events = collect_events(stream).await;
@@ -876,7 +883,7 @@ mod tests {
             }
         };
         let stream = provider
-            .stream_turn(&[ApiMessage::user_text("multi")], &system_bundle(), &empty_manifest())
+            .stream_turn(&[ApiMessage::user_text("multi")], &system_bundle(), &empty_manifest(), LlmRequestOptions::default())
             .await
             .unwrap();
         let events = collect_events(stream).await;
@@ -922,7 +929,7 @@ mod tests {
             }
         };
         let stream = provider
-            .stream_turn(&[ApiMessage::user_text("x")], &system_bundle(), &empty_manifest())
+            .stream_turn(&[ApiMessage::user_text("x")], &system_bundle(), &empty_manifest(), LlmRequestOptions::default())
             .await
             .unwrap();
         let events = collect_events(stream).await;
@@ -972,7 +979,7 @@ mod tests {
             }
         };
         let stream = provider
-            .stream_turn(&[ApiMessage::user_text("think")], &system_bundle(), &empty_manifest())
+            .stream_turn(&[ApiMessage::user_text("think")], &system_bundle(), &empty_manifest(), LlmRequestOptions::default())
             .await
             .unwrap();
         let events = collect_events(stream).await;
@@ -1025,7 +1032,7 @@ mod tests {
             }
         };
         let stream = provider
-            .stream_turn(&[ApiMessage::user_text("think")], &system_bundle(), &empty_manifest())
+            .stream_turn(&[ApiMessage::user_text("think")], &system_bundle(), &empty_manifest(), LlmRequestOptions::default())
             .await
             .unwrap();
         let events = collect_events(stream).await;
@@ -1082,7 +1089,7 @@ mod tests {
             }
         };
         let stream = provider
-            .stream_turn(&[ApiMessage::user_text("hi")], &system_bundle(), &empty_manifest())
+            .stream_turn(&[ApiMessage::user_text("hi")], &system_bundle(), &empty_manifest(), LlmRequestOptions::default())
             .await
             .unwrap();
         let events = collect_events(stream).await;
@@ -1114,7 +1121,7 @@ mod tests {
         let provider =
             OpenAICompatProvider::ollama(server.uri(), Some("bad".into()), "m".to_string());
         let err = provider
-            .stream_turn(&[ApiMessage::user_text("hi")], &system_bundle(), &empty_manifest())
+            .stream_turn(&[ApiMessage::user_text("hi")], &system_bundle(), &empty_manifest(), LlmRequestOptions::default())
             .await
             .err()
             .expect("expected error");
@@ -1135,7 +1142,7 @@ mod tests {
             .await;
         let provider = OpenAICompatProvider::ollama(server.uri(), None, "m".to_string());
         let err = provider
-            .stream_turn(&[ApiMessage::user_text("hi")], &system_bundle(), &empty_manifest())
+            .stream_turn(&[ApiMessage::user_text("hi")], &system_bundle(), &empty_manifest(), LlmRequestOptions::default())
             .await
             .err()
             .expect("expected error");
@@ -1290,6 +1297,7 @@ mod tests {
                 &[ApiMessage::user_text("hi")],
                 &system_bundle(),
                 &manifest,
+                LlmRequestOptions::default(),
             )
             .await
             .unwrap();
@@ -1329,6 +1337,7 @@ mod tests {
                 &[ApiMessage::user_text("hi")],
                 &system_bundle(),
                 &empty_manifest(),
+                LlmRequestOptions::default(),
             )
             .await
             .unwrap();
@@ -1374,6 +1383,7 @@ mod tests {
                 &[ApiMessage::user_text("hi")],
                 &system_bundle(),
                 &empty_manifest(),
+                LlmRequestOptions::default(),
             )
             .await
             .unwrap();
@@ -1411,6 +1421,7 @@ mod tests {
                 &[ApiMessage::user_text("hi")],
                 &system_bundle(),
                 &empty_manifest(),
+                LlmRequestOptions::default(),
             )
             .await
             .unwrap();

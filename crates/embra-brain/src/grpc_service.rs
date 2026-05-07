@@ -10,7 +10,9 @@ use crate::proactive::Notification;
 use crate::provider::anthropic::AnthropicProvider;
 use crate::provider::gemini::GeminiProvider;
 use crate::provider::ir::{ApiMessage, AssistantTurn, Block, EarlyStopReason, TurnOutcome};
-use crate::provider::{LlmProvider, ProviderKind, StreamEvent, SystemPromptBundle, ToolManifest};
+use crate::provider::{
+    LlmProvider, LlmRequestOptions, ProviderKind, StreamEvent, SystemPromptBundle, ToolManifest,
+};
 use crate::sessions::SessionManager;
 use crate::tools;
 
@@ -230,6 +232,7 @@ impl BrainService for BrainGrpcService {
                     anthropic_api_key: None,
                     gemini_api_key: None,
                     max_tool_iterations: None,
+                    show_reasoning: None,
                     openai_compat: crate::config::OpenAiCompatConfig::default(),
                 });
                 match run_learning_loop(&tx, &mut incoming, &db, &loaded_config, &api_key).await {
@@ -564,6 +567,7 @@ async fn handle_request(
                 anthropic_api_key: None,
                 gemini_api_key: None,
                 max_tool_iterations: None,
+                show_reasoning: None,
                 openai_compat: crate::config::OpenAiCompatConfig::default(),
             });
             let config_name = loaded_config.name.clone();
@@ -766,8 +770,16 @@ async fn handle_request(
                 embra_tools_core::new_turn_trace_handle();
             let turn_index: usize = history.len() / 2;
 
+            let request_options = LlmRequestOptions {
+                include_reasoning: loaded_config.show_reasoning(),
+            };
             let first_stream = provider
-                .stream_turn(&api_messages, &system_bundle, &tool_manifest)
+                .stream_turn(
+                    &api_messages,
+                    &system_bundle,
+                    &tool_manifest,
+                    request_options,
+                )
                 .await
                 .map_err(|e| anyhow::anyhow!("Brain call failed: {}", e))?;
             let Some(mut current_turn) =
@@ -843,7 +855,12 @@ async fn handle_request(
                             "stop_reason=pause_turn; resuming conversation"
                         );
                         let stream = provider
-                            .stream_turn(&api_messages, &system_bundle, &tool_manifest)
+                            .stream_turn(
+                                &api_messages,
+                                &system_bundle,
+                                &tool_manifest,
+                                request_options,
+                            )
                             .await
                             .map_err(|e| anyhow::anyhow!("Brain pause-resume failed: {}", e))?;
                         let Some(resp) = collect_response(stream, &tx, &config_name).await? else {
@@ -901,7 +918,12 @@ async fn handle_request(
                                     .push(ApiMessage::user_tool_results(synthetic));
                             }
                             match provider
-                                .stream_turn(&api_messages, &system_bundle, &tool_manifest)
+                                .stream_turn(
+                                    &api_messages,
+                                    &system_bundle,
+                                    &tool_manifest,
+                                    request_options,
+                                )
                                 .await
                             {
                                 Ok(stream) => {
@@ -1117,7 +1139,12 @@ async fn handle_request(
 
                         api_messages.push(ApiMessage::user_tool_results(result_blocks));
                         let stream = provider
-                            .stream_turn(&api_messages, &system_bundle, &tool_manifest)
+                            .stream_turn(
+                                &api_messages,
+                                &system_bundle,
+                                &tool_manifest,
+                                request_options,
+                            )
                             .await
                             .map_err(|e| {
                                 anyhow::anyhow!(
@@ -1443,7 +1470,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -1454,6 +1481,9 @@ async fn handle_slash_command(
         }
         "/iter-cap" => {
             handle_iter_cap_command(args, tx, db).await;
+        }
+        "/show-reasoning" => {
+            handle_show_reasoning_command(args, tx, db).await;
         }
         "/status" => {
             let status = tools::system_status(db).await;
@@ -2153,6 +2183,110 @@ async fn handle_iter_cap_command(
             .await;
         }
     }
+}
+
+/// `/show-reasoning [on|off]` — show, set, or reset whether reasoning
+/// streams to the expression panel. Persisted via
+/// `SystemConfig.show_reasoning`; the loop driver reads it fresh each
+/// turn through `LlmRequestOptions.include_reasoning`, so changes
+/// take effect on the next user message. Default-on with opt-out:
+/// unset (`None`) and `Some(true)` both mean *show*; `Some(false)`
+/// suppresses panel reasoning and strips the request-body opt-ins so
+/// providers don't spend tokens on summaries.
+async fn handle_show_reasoning_command(
+    args: &str,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    db: &Arc<WardsonDbClient>,
+) {
+    let send_msg = |content: String, kind: SystemMessageType| {
+        let tx = tx.clone();
+        async move {
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage {
+                            content,
+                            msg_type: kind as i32,
+                        },
+                    )),
+                }))
+                .await;
+        }
+    };
+
+    let mut cfg = match config::load_config(&**db).await {
+        Ok(c) => c,
+        Err(e) => {
+            send_msg(
+                format!("/show-reasoning: failed to load config: {e}"),
+                SystemMessageType::Error,
+            )
+            .await;
+            return;
+        }
+    };
+
+    let trimmed = args.trim();
+
+    if trimmed.is_empty() {
+        let on = cfg.show_reasoning();
+        let suffix = match cfg.show_reasoning {
+            Some(true) => "set on",
+            Some(false) => "set off",
+            None => "default on",
+        };
+        send_msg(
+            format!(
+                "Live reasoning to expression panel: {} ({}). \
+                 Use `/show-reasoning on` or `/show-reasoning off` to change. \
+                 When off, providers omit reasoning from request bodies (no token cost).",
+                if on { "on" } else { "off" },
+                suffix,
+            ),
+            SystemMessageType::Info,
+        )
+        .await;
+        return;
+    }
+
+    let new_value = match trimmed.to_ascii_lowercase().as_str() {
+        "on" | "true" | "1" | "yes" => Some(true),
+        "off" | "false" | "0" | "no" => Some(false),
+        "reset" | "default" => None,
+        _ => {
+            send_msg(
+                format!(
+                    "/show-reasoning: '{trimmed}' is not a valid value. Use `on`, `off`, or `reset`."
+                ),
+                SystemMessageType::Error,
+            )
+            .await;
+            return;
+        }
+    };
+
+    cfg.show_reasoning = new_value;
+    if let Err(e) = config::save_config(&**db, &cfg).await {
+        send_msg(
+            format!("/show-reasoning: failed to save: {e}"),
+            SystemMessageType::Error,
+        )
+        .await;
+        return;
+    }
+
+    let label = match new_value {
+        Some(true) => "on (explicit)",
+        Some(false) => "off",
+        None => "default (on)",
+    };
+    send_msg(
+        format!(
+            "Live reasoning panel set to {label}. Takes effect on the next user message."
+        ),
+        SystemMessageType::Info,
+    )
+    .await;
 }
 
 /// Parse a positive integer in the inclusive range 1..=1000. Pure
@@ -3338,7 +3472,14 @@ async fn run_learning_loop(
             .map(legacy_message_to_api)
             .collect();
         let mut brain_rx = provider
-            .stream_turn(&messages, &system_bundle, &empty_manifest)
+            .stream_turn(
+                &messages,
+                &system_bundle,
+                &empty_manifest,
+                LlmRequestOptions {
+                    include_reasoning: config.show_reasoning(),
+                },
+            )
             .await
             .map_err(|e| anyhow::anyhow!("Brain call failed in learning: {}", e))?;
 
@@ -3431,7 +3572,14 @@ async fn run_learning_loop(
                                 .map(legacy_message_to_api)
                                 .collect();
                             let mut brain_rx = provider
-                                .stream_turn(&messages, &system_bundle, &empty_manifest)
+                                .stream_turn(
+                                    &messages,
+                                    &system_bundle,
+                                    &empty_manifest,
+                                    LlmRequestOptions {
+                                        include_reasoning: config.show_reasoning(),
+                                    },
+                                )
                                 .await
                                 .map_err(|e| anyhow::anyhow!("Brain call failed: {}", e))?;
 
@@ -3551,6 +3699,23 @@ async fn stream_brain_to_grpc(
                 }
             }
             StreamEvent::BlockComplete | StreamEvent::ToolArgsDelta { .. } => {}
+            StreamEvent::ReasoningDelta(text) => {
+                // Forward to the expression panel via the dedicated
+                // ReasoningDelta proto frame. CRITICAL: must NOT append
+                // to `full_response` (would persist to session history)
+                // and must NOT toggle `is_thinking: false` (the typing
+                // indicator stays gated on real text deltas, not
+                // reasoning).
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(
+                            conversation_response::ResponseType::ReasoningDelta(
+                                ReasoningDelta { text },
+                            ),
+                        ),
+                    }))
+                    .await;
+            }
         }
     }
 
@@ -3928,6 +4093,23 @@ async fn collect_response(
             }
             StreamEvent::BlockComplete => {}
             StreamEvent::ToolArgsDelta { .. } => {}
+            StreamEvent::ReasoningDelta(text) => {
+                // Forward to the expression panel via the dedicated
+                // ReasoningDelta proto frame. CRITICAL: must NOT append
+                // to `accum_text` (would persist to session history via
+                // turn_text fallback) and must NOT toggle `is_thinking:
+                // false` (the typing indicator stays gated on real text
+                // deltas, not reasoning).
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(
+                            conversation_response::ResponseType::ReasoningDelta(
+                                ReasoningDelta { text },
+                            ),
+                        ),
+                    }))
+                    .await;
+            }
             StreamEvent::Complete(turn) => {
                 // Synthesize a gRPC Done from the assembled turn so the
                 // TUI gets a terminal "full text" frame for its
@@ -4051,6 +4233,7 @@ mod native_loop_tests {
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
+            show_reasoning: None,
             openai_compat: config::OpenAiCompatConfig::default(),
         }
     }
@@ -4683,5 +4866,202 @@ mod setup_reconfigure_tests {
         let (events, _) = run_step(&mut state, BEARER_SKIP).await;
         let prompt = last_setup_prompt(&events).expect("expected Selector");
         assert_eq!(prompt.default_value, "new-a");
+    }
+}
+
+#[cfg(test)]
+mod reasoning_delta_privacy_tests {
+    use super::*;
+    use crate::provider::{AssistantTurn, Block, StreamEvent, TurnOutcome};
+    use embra_common::proto::brain;
+    use futures::stream;
+    use tokio::sync::mpsc;
+
+    /// Drive `collect_response` with a synthetic stream that interleaves
+    /// `TextDelta` and `ReasoningDelta` events. The load-bearing
+    /// privacy assertion: reasoning text MUST NOT appear in the
+    /// `StreamDone.full_response` payload (which is what `turn_text`
+    /// would later persist to session history).
+    #[tokio::test]
+    async fn reasoning_delta_does_not_leak_into_full_response() {
+        let secret = "INTERNAL CHAIN OF THOUGHT — DO NOT PERSIST";
+        let visible = "Hello operator.";
+        let events: Vec<StreamEvent> = vec![
+            StreamEvent::ReasoningDelta(secret.to_string()),
+            StreamEvent::TextDelta(visible.to_string()),
+            StreamEvent::ReasoningDelta(" more secret reasoning".to_string()),
+            StreamEvent::Complete(AssistantTurn {
+                content: vec![Block::Text(visible.to_string())],
+                outcome: TurnOutcome::EndTurn,
+                usage: None,
+            }),
+        ];
+        let brain_rx = Box::pin(stream::iter(events));
+        let (tx, mut rx) = mpsc::channel(64);
+
+        let turn = collect_response(brain_rx, &tx, "Embra")
+            .await
+            .expect("collect_response ok")
+            .expect("got Complete turn");
+
+        drop(tx);
+        let mut frames = Vec::new();
+        while let Some(frame) = rx.recv().await {
+            frames.push(frame.expect("ok frame"));
+        }
+
+        // The terminal Done frame's full_response must contain the
+        // visible text and NOTHING from reasoning.
+        let done_payload: Vec<&str> = frames
+            .iter()
+            .filter_map(|f| match &f.response_type {
+                Some(conversation_response::ResponseType::Done(d)) => {
+                    Some(d.full_response.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(done_payload.len(), 1, "expected one Done frame");
+        assert_eq!(done_payload[0], visible);
+        assert!(
+            !done_payload[0].contains("INTERNAL"),
+            "reasoning text leaked into Done.full_response: {:?}",
+            done_payload[0]
+        );
+
+        // Reasoning frames went out as the dedicated proto variant.
+        let reasoning_texts: Vec<&str> = frames
+            .iter()
+            .filter_map(|f| match &f.response_type {
+                Some(conversation_response::ResponseType::ReasoningDelta(r)) => {
+                    Some(r.text.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reasoning_texts,
+            vec![secret, " more secret reasoning"],
+            "reasoning shards should arrive as dedicated proto frames in order"
+        );
+
+        // Token frames carry only the visible text.
+        let tokens: Vec<&str> = frames
+            .iter()
+            .filter_map(|f| match &f.response_type {
+                Some(conversation_response::ResponseType::Token(t)) => Some(t.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tokens, vec![visible]);
+
+        // The returned AssistantTurn used by the loop driver carries
+        // only the visible Block::Text — reasoning was not assembled
+        // into Block::Text, only sent as deltas.
+        let turn_text_value = turn_text(&turn);
+        assert_eq!(turn_text_value, visible);
+        assert!(
+            !turn_text_value.contains("INTERNAL"),
+            "turn_text leaked reasoning"
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_delta_does_not_toggle_first_token_thinking() {
+        // The "Embra is thinking..." indicator is gated to the first
+        // *real* TextDelta. A ReasoningDelta arriving first must NOT
+        // toggle is_thinking=false — that toggle is what dismisses the
+        // operator-facing typing animation.
+        let events: Vec<StreamEvent> = vec![
+            StreamEvent::ReasoningDelta("thinking out loud".to_string()),
+            StreamEvent::TextDelta("real text".to_string()),
+            StreamEvent::Complete(AssistantTurn {
+                content: vec![Block::Text("real text".to_string())],
+                outcome: TurnOutcome::EndTurn,
+                usage: None,
+            }),
+        ];
+        let brain_rx = Box::pin(stream::iter(events));
+        let (tx, mut rx) = mpsc::channel(64);
+
+        let _ = collect_response(brain_rx, &tx, "Embra").await.unwrap();
+        drop(tx);
+
+        let mut frames = Vec::new();
+        while let Some(frame) = rx.recv().await {
+            frames.push(frame.expect("ok frame"));
+        }
+
+        // Find the index of the first Thinking{is_thinking:false}
+        // frame and the first ReasoningDelta frame. The ReasoningDelta
+        // must come first; the thinking-off toggle must come AFTER the
+        // first TextDelta.
+        let mut first_thinking_off: Option<usize> = None;
+        let mut first_reasoning: Option<usize> = None;
+        let mut first_token: Option<usize> = None;
+        for (i, frame) in frames.iter().enumerate() {
+            match &frame.response_type {
+                Some(conversation_response::ResponseType::Thinking(t)) if !t.is_thinking => {
+                    first_thinking_off.get_or_insert(i);
+                }
+                Some(conversation_response::ResponseType::ReasoningDelta(_)) => {
+                    first_reasoning.get_or_insert(i);
+                }
+                Some(conversation_response::ResponseType::Token(_)) => {
+                    first_token.get_or_insert(i);
+                }
+                _ => {}
+            }
+        }
+
+        let r = first_reasoning.expect("expected ReasoningDelta frame");
+        let t = first_token.expect("expected Token frame");
+        let off = first_thinking_off.expect("expected thinking-off frame");
+        assert!(
+            r < off,
+            "ReasoningDelta arrived AFTER thinking-off (frames: {frames:#?})"
+        );
+        assert!(
+            off <= t,
+            "thinking-off should fire on first Token, not ReasoningDelta"
+        );
+    }
+
+    #[test]
+    fn show_reasoning_helper_defaults_to_true() {
+        let mut cfg = config::SystemConfig {
+            name: "Embra".to_string(),
+            api_key: String::new(),
+            timezone: "UTC".to_string(),
+            deployment_mode: "test".to_string(),
+            created_at: String::new(),
+            version: String::new(),
+            github_token: None,
+            kg_temporal_window_secs: 1800,
+            kg_max_traversal_depth: 3,
+            kg_traversal_depth_ceiling: 5,
+            kg_edge_candidate_limit: 50,
+            api_provider: "anthropic".to_string(),
+            gemini_model: None,
+            anthropic_api_key: None,
+            gemini_api_key: None,
+            max_tool_iterations: None,
+            show_reasoning: None,
+            openai_compat: config::OpenAiCompatConfig::default(),
+        };
+        assert!(cfg.show_reasoning(), "None should default to on");
+        cfg.show_reasoning = Some(true);
+        assert!(cfg.show_reasoning());
+        cfg.show_reasoning = Some(false);
+        assert!(!cfg.show_reasoning());
+    }
+
+    // Suppress unused-import warning when this module is built but not
+    // exercised in feature combinations.
+    #[allow(dead_code)]
+    fn _unused() {
+        let _ = brain::ReasoningDelta {
+            text: String::new(),
+        };
     }
 }

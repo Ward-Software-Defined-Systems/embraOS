@@ -30,6 +30,11 @@ pub enum ConsoleEvent {
     ThinkingState { is_thinking: bool, name: String },
     ModeTransition { from_mode: i32, to_mode: i32, message: String },
     SetupPrompt { field_type: String, prompt: String, options: Vec<String>, default_value: String },
+    /// Live reasoning/CoT shard from the brain. Routed exclusively to
+    /// the expression panel surface; never appended to the response
+    /// buffer or persisted. Cleared on user submit, ResponseDone,
+    /// SystemMessage::Error, and ModeTransition.
+    ReasoningDelta(String),
 }
 
 impl BrainClient {
@@ -124,6 +129,9 @@ impl BrainClient {
                                             options: s.options,
                                             default_value: s.default_value,
                                         }
+                                    }
+                                    brain::conversation_response::ResponseType::ReasoningDelta(r) => {
+                                        ConsoleEvent::ReasoningDelta(r.text)
                                     }
                                 };
                                 if out_tx.send(event).await.is_err() {

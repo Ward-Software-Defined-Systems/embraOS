@@ -85,6 +85,19 @@ pub struct SystemPromptBundle {
 pub enum StreamEvent {
     /// User-visible text delta (drives the TUI's typing feel).
     TextDelta(String),
+    /// Reasoning / thinking delta. Routed to the live expression-panel
+    /// surface for operator visibility; gated by `LlmRequestOptions::
+    /// include_reasoning` per turn.
+    ///
+    /// Privacy contract — this variant MUST NOT be appended to text
+    /// accumulators (`full_response` / `accum_text`), MUST NOT be
+    /// persisted to session history, and MUST NOT be replayed to the
+    /// model as Text blocks on subsequent turns. Provider signatures
+    /// (Anthropic `signature_delta`, Gemini `thoughtSignature`) ride
+    /// `Block::ProviderOpaque` for IR round-trip and are NOT carried
+    /// here. See `grpc_service.rs::stream_brain_to_grpc` for the
+    /// load-bearing privacy guard.
+    ReasoningDelta(String),
     /// One block in the assistant turn finalized. Carries no payload
     /// here — the assembled blocks come back together in `Complete`.
     BlockComplete,
@@ -127,6 +140,20 @@ pub enum ProviderError {
     Unsupported(String),
 }
 
+/// Per-turn request-shaping knobs the brain reads from `SystemConfig`
+/// and threads through `stream_turn`. Additive struct — new fields are
+/// `Default`-derived so older provider impls compile through additions.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct LlmRequestOptions {
+    /// When `true`, the provider's request body opts in to reasoning /
+    /// thought streaming where applicable (Anthropic `display: summary`,
+    /// Gemini `includeThoughts: true`). When `false`, providers omit
+    /// those fields and suppress emission of `StreamEvent::ReasoningDelta`
+    /// even if the model returns reasoning unsolicited (belt-and-
+    /// suspenders).
+    pub include_reasoning: bool,
+}
+
 /// Outbound LLM surface. One impl per provider.
 ///
 /// `stream_turn` is the hot path — it consumes the full turn-history,
@@ -156,6 +183,7 @@ pub trait LlmProvider: Send + Sync {
         messages: &[ApiMessage],
         system: &SystemPromptBundle,
         tools: &ToolManifest,
+        options: LlmRequestOptions,
     ) -> Result<BoxStream<'static, StreamEvent>, ProviderError>;
 
     /// Translate the registry's typed-args descriptors into the

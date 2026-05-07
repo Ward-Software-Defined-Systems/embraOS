@@ -60,14 +60,20 @@ use crate::provider::StreamEvent;
 /// Drive an SSE stream from `/v1/chat/completions`, emitting neutral
 /// [`StreamEvent`]s into `tx`. Terminates on `[DONE]`, on the chunk
 /// carrying `finish_reason`, or when the byte stream ends.
+/// `include_reasoning` gates `StreamEvent::ReasoningDelta` emission for
+/// `delta.reasoning` / `delta.reasoning_content` shards. The reasoning
+/// buffer is always assembled regardless (so the terminal
+/// `Block::ProviderOpaque` round-trip stays intact); only the live
+/// delta emission is gated.
 pub async fn process_sse_stream(
     response: reqwest::Response,
     tx: mpsc::Sender<StreamEvent>,
     model_id: String,
+    include_reasoning: bool,
 ) -> Result<()> {
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
-    let mut state = ParserState::new(model_id);
+    let mut state = ParserState::new(model_id, include_reasoning);
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
@@ -135,6 +141,11 @@ pub(super) struct ParserState {
     pub(super) tool_calls: BTreeMap<u32, PartialToolCall>,
     pub(super) finish_reason: Option<String>,
     pub(super) completed: bool,
+    /// Mirror of `LlmRequestOptions.include_reasoning` — gates
+    /// `StreamEvent::ReasoningDelta` emission. Reasoning buffer
+    /// assembly continues unconditionally so the terminal
+    /// `Block::ProviderOpaque` round-trip is unaffected.
+    pub(super) include_reasoning: bool,
 }
 
 #[derive(Default, Debug)]
@@ -145,7 +156,7 @@ pub(super) struct PartialToolCall {
 }
 
 impl ParserState {
-    pub(super) fn new(model_id: String) -> Self {
+    pub(super) fn new(model_id: String, include_reasoning: bool) -> Self {
         Self {
             model_id,
             text_buffer: String::new(),
@@ -153,6 +164,7 @@ impl ParserState {
             tool_calls: BTreeMap::new(),
             finish_reason: None,
             completed: false,
+            include_reasoning,
         }
     }
 
@@ -169,12 +181,22 @@ impl ParserState {
                     let _ = tx.send(StreamEvent::TextDelta(content)).await;
                 }
             }
-            // Reasoning content — accumulate ONLY (never emit as TextDelta).
+            // Reasoning content — accumulate for round-trip and (when
+            // operator opted in) emit as ReasoningDelta for the live
+            // expression panel. NEVER emitted as TextDelta — the
+            // ReasoningDelta privacy contract keeps it off
+            // `full_response` / session history.
             // C1 ordering: reasoning primary, reasoning_content fallback.
             if let Some(r) = choice.delta.reasoning {
                 self.reasoning_buffer.push_str(&r);
+                if self.include_reasoning {
+                    let _ = tx.send(StreamEvent::ReasoningDelta(r)).await;
+                }
             } else if let Some(r) = choice.delta.reasoning_content {
                 self.reasoning_buffer.push_str(&r);
+                if self.include_reasoning {
+                    let _ = tx.send(StreamEvent::ReasoningDelta(r)).await;
+                }
             }
             // Tool-call deltas — accumulate per index.
             if let Some(deltas) = choice.delta.tool_calls {
@@ -327,10 +349,21 @@ mod tests {
 
     /// In-memory test harness that drives the parser without an HTTP
     /// transport. Returns all StreamEvents and the final state.
+    /// `include_reasoning: false` matches the existing tests'
+    /// expectation that reasoning never streams; reasoning-on tests
+    /// call `drive_fake_with_reasoning` instead.
     async fn drive_fake(sse_text: &str, model_id: &str) -> Vec<StreamEvent> {
+        drive_fake_with_options(sse_text, model_id, false).await
+    }
+
+    async fn drive_fake_with_options(
+        sse_text: &str,
+        model_id: &str,
+        include_reasoning: bool,
+    ) -> Vec<StreamEvent> {
         let (tx, mut rx) = mpsc::channel(256);
         let mut buffer = sse_text.to_string();
-        let mut state = ParserState::new(model_id.to_string());
+        let mut state = ParserState::new(model_id.to_string(), include_reasoning);
         consume_sse_lines(&mut buffer, &mut state, &tx).await;
         if !state.completed {
             state.emit_complete(&tx).await;
@@ -671,6 +704,120 @@ mod tests {
             panic!("expected ProviderOpaque");
         };
         assert_eq!(opaque["content"], "primary");
+    }
+
+    #[tokio::test]
+    async fn reasoning_emits_delta_when_include_reasoning_enabled() {
+        // include_reasoning=true: each delta.reasoning shard fires a
+        // StreamEvent::ReasoningDelta in order. The reasoning buffer
+        // STILL assembles into the terminal Block::ProviderOpaque (so
+        // the round-trip stays intact); the deltas are an ADDITIONAL
+        // channel, not a replacement.
+        let mut sse = String::new();
+        sse.push_str(&data_frame(json!({
+            "id": "x", "object": "chat.completion.chunk", "created": 1, "model": "m",
+            "choices": [{
+                "index": 0,
+                "delta": {"reasoning": "first shard"},
+                "finish_reason": null
+            }]
+        })));
+        sse.push_str(&data_frame(json!({
+            "id": "x", "object": "chat.completion.chunk", "created": 1, "model": "m",
+            "choices": [{
+                "index": 0,
+                "delta": {"reasoning": " then more"},
+                "finish_reason": null
+            }]
+        })));
+        sse.push_str(&data_frame(json!({
+            "id": "x", "object": "chat.completion.chunk", "created": 1, "model": "m",
+            "choices": [{"index": 0, "delta": {"content": "ok"}, "finish_reason": "stop"}]
+        })));
+        sse.push_str("data: [DONE]\n\n");
+
+        let events = drive_fake_with_options(&sse, "gpt-oss:20b", true).await;
+        let reasoning: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ReasoningDelta(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning, vec!["first shard", " then more"]);
+
+        // Still no TextDelta from reasoning content.
+        assert_eq!(text_deltas(&events), vec!["ok"]);
+
+        // ProviderOpaque carries assembled buffer for IR round-trip.
+        let turn = complete_event(&events);
+        let Block::ProviderOpaque(opaque) = &turn.content[0] else {
+            panic!("expected ProviderOpaque first");
+        };
+        assert_eq!(opaque["content"], "first shard then more");
+    }
+
+    #[tokio::test]
+    async fn reasoning_alias_emits_delta_when_enabled() {
+        // delta.reasoning_content (LM Studio newer default) also fires
+        // ReasoningDelta when include_reasoning=true.
+        let mut sse = String::new();
+        sse.push_str(&data_frame(json!({
+            "id": "x", "object": "chat.completion.chunk", "created": 1, "model": "m",
+            "choices": [{
+                "index": 0,
+                "delta": {"reasoning_content": "lm studio cot"},
+                "finish_reason": null
+            }]
+        })));
+        sse.push_str(&data_frame(json!({
+            "id": "x", "object": "chat.completion.chunk", "created": 1, "model": "m",
+            "choices": [{"index": 0, "delta": {"content": "done"}, "finish_reason": "stop"}]
+        })));
+        sse.push_str("data: [DONE]\n\n");
+
+        let events = drive_fake_with_options(&sse, "qwen3.6:35b", true).await;
+        let reasoning: Vec<_> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ReasoningDelta(s) => Some(s.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning, vec!["lm studio cot"]);
+    }
+
+    #[tokio::test]
+    async fn reasoning_suppressed_when_include_reasoning_disabled() {
+        // Default path (include_reasoning=false): reasoning shards
+        // STILL assemble into the buffer (so the IR round-trip works)
+        // but the parser MUST NOT emit a single ReasoningDelta. This is
+        // the load-bearing privacy guard — operator opt-out at the
+        // brain level still works even if the model sends reasoning.
+        let mut sse = String::new();
+        sse.push_str(&data_frame(json!({
+            "id": "x", "object": "chat.completion.chunk", "created": 1, "model": "m",
+            "choices": [{
+                "index": 0,
+                "delta": {"reasoning": "leaked"},
+                "finish_reason": "stop"
+            }]
+        })));
+        sse.push_str("data: [DONE]\n\n");
+
+        let events = drive_fake(&sse, "gpt-oss:20b").await;
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, StreamEvent::ReasoningDelta(_))),
+            "ReasoningDelta must not fire when include_reasoning=false"
+        );
+        // Still assembled for round-trip.
+        let turn = complete_event(&events);
+        let Block::ProviderOpaque(opaque) = &turn.content[0] else {
+            panic!("expected ProviderOpaque");
+        };
+        assert_eq!(opaque["content"], "leaked");
     }
 
     #[tokio::test]

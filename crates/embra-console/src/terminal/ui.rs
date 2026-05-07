@@ -52,12 +52,67 @@ pub fn draw(f: &mut Frame, app: &AppState) {
 }
 
 fn draw_expression_panel(f: &mut Frame, area: Rect, app: &AppState) {
-    let rendered = sanitize_for_render(&app.expression_content);
+    // Source switch: live reasoning during an active turn, expression
+    // singleton when idle. The render style differentiates the two —
+    // italic dark-gray for ephemeral reasoning vs solid gray for
+    // operator-set expression — without consuming any of the 6 visible
+    // content rows for a header.
+    let inner_width = area.width.saturating_sub(2) as usize; // minus borders
+    let inner_rows = area.height.saturating_sub(2) as usize; // minus borders
+    let (rendered, style) = if !app.live_reasoning.is_empty() {
+        (
+            window_to_visible_rows(
+                &sanitize_for_render(&app.live_reasoning),
+                inner_width,
+                inner_rows,
+            ),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )
+    } else {
+        (
+            sanitize_for_render(&app.expression_content),
+            Style::default().fg(Color::Gray),
+        )
+    };
     let para = Paragraph::new(rendered)
         .block(Block::default().borders(Borders::ALL))
         .wrap(Wrap { trim: false })
-        .style(Style::default().fg(Color::Gray));
+        .style(style);
     f.render_widget(para, area);
+}
+
+/// Soft-wrap `text` by `cols` and return only the last `rows` visual
+/// lines, joined by newlines. Pre-windowing matches `draw_conversation`'s
+/// pattern of explicit wrapping management and avoids
+/// `Paragraph::scroll`'s drift on edge cases (CJK width, trailing `\n`).
+/// `cols == 0` or `rows == 0` returns the empty string.
+fn window_to_visible_rows(text: &str, cols: usize, rows: usize) -> String {
+    if cols == 0 || rows == 0 {
+        return String::new();
+    }
+    let mut wrapped: Vec<String> = Vec::new();
+    for source_line in text.split('\n') {
+        if source_line.is_empty() {
+            wrapped.push(String::new());
+            continue;
+        }
+        let mut current = String::new();
+        let mut current_width = 0usize;
+        for ch in source_line.chars() {
+            let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+            if current_width + w > cols && !current.is_empty() {
+                wrapped.push(std::mem::take(&mut current));
+                current_width = 0;
+            }
+            current.push(ch);
+            current_width += w;
+        }
+        wrapped.push(current);
+    }
+    let start = wrapped.len().saturating_sub(rows);
+    wrapped[start..].join("\n")
 }
 
 /// Render-side ANSI and control-char strip. Second defence layer behind

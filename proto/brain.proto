@@ -62,7 +62,8 @@ message ConversationResponse {
     ToolExecution tool = 4;          // Tool being executed
     ThinkingState thinking = 5;      // Thinking indicator state
     ModeTransition mode_change = 6;  // Learning → Operational transition
-    SetupPrompt setup = 7;          // Config wizard prompt (first run)
+    SetupPrompt setup = 7;           // Config wizard prompt (first run)
+    ReasoningDelta reasoning_delta = 8;  // Live reasoning/CoT shard for the expression panel
   }
 }
 
@@ -72,6 +73,15 @@ message StreamToken {
 
 message StreamDone {
   string full_response = 1;  // Complete assembled response
+}
+
+// Live reasoning / chain-of-thought shard streamed for operator visibility
+// in the expression panel. Routed exclusively to the panel surface — never
+// appended to the response text accumulator, never persisted to session
+// history, never replayed to the model. Provider opt-in is gated by
+// SystemConfig.show_reasoning (default true; toggle via /show-reasoning).
+message ReasoningDelta {
+  string text = 1;
 }
 
 message SystemMessage {

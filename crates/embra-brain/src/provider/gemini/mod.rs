@@ -27,8 +27,8 @@ use tracing::{error, warn};
 
 use crate::db::WardsonDbClient;
 use crate::provider::{
-    ApiMessage, LlmProvider, ProviderError, ProviderKind, StreamEvent, SystemPromptBundle,
-    ToolManifest, ValidationResult,
+    ApiMessage, LlmProvider, LlmRequestOptions, ProviderError, ProviderKind, StreamEvent,
+    SystemPromptBundle, ToolManifest, ValidationResult,
 };
 use crate::tools::registry::ToolDescriptor;
 
@@ -162,6 +162,7 @@ impl LlmProvider for GeminiProvider {
         messages: &[ApiMessage],
         system: &SystemPromptBundle,
         tools: &ToolManifest,
+        options: LlmRequestOptions,
     ) -> Result<BoxStream<'static, StreamEvent>, ProviderError> {
         // Translate neutral IR → Gemini wire shape.
         let contents = conv::ir_messages_to_wire(messages);
@@ -206,6 +207,7 @@ impl LlmProvider for GeminiProvider {
             tools,
             tools_empty,
             cache_handle.as_ref(),
+            options,
         );
         let body_with_cache_json = serde_json::to_value(&body_with_cache)
             .map_err(|e| ProviderError::Decode(format!("request serialization: {e}")))?;
@@ -224,7 +226,7 @@ impl LlmProvider for GeminiProvider {
                     cache.invalidate_local().await;
                 }
                 let body_no_cache =
-                    build_request_body(&contents, system, tools, tools_empty, None);
+                    build_request_body(&contents, system, tools, tools_empty, None, options);
                 let body_no_cache_json = serde_json::to_value(&body_no_cache).map_err(|e| {
                     ProviderError::Decode(format!("retry serialization: {e}"))
                 })?;
@@ -234,8 +236,11 @@ impl LlmProvider for GeminiProvider {
         };
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(128);
+        let include_reasoning = options.include_reasoning;
         tokio::spawn(async move {
-            if let Err(e) = streaming::process_sse_stream(response, tx.clone()).await {
+            if let Err(e) =
+                streaming::process_sse_stream(response, tx.clone(), include_reasoning).await
+            {
                 error!("Gemini SSE stream error: {}", e);
                 let _ = tx.send(StreamEvent::Error(e.to_string())).await;
             }
@@ -274,6 +279,7 @@ fn build_request_body<'a>(
     tools: &'a ToolManifest,
     tools_empty: bool,
     cache_handle: Option<&cache::CacheHandle>,
+    options: LlmRequestOptions,
 ) -> GeminiGenerateRequest<'a> {
     let cache_active = cache_handle.is_some();
     GeminiGenerateRequest {
@@ -305,6 +311,7 @@ fn build_request_body<'a>(
             max_output_tokens: MAX_OUTPUT_TOKENS,
             thinking_config: GeminiThinkingConfig {
                 thinking_level: THINKING_LEVEL.to_string(),
+                include_thoughts: options.include_reasoning,
             },
         }),
         cached_content: cache_handle.map(|h| h.cache_name.clone()),

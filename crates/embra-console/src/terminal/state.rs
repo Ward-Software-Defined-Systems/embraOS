@@ -167,6 +167,17 @@ pub struct AppState {
     // EXPR-01 expression panel — cached state polled from brain every 3s
     pub expression_content: String,
     pub expression_version: u64,
+    /// Live reasoning/CoT shards from the most recent turn. When
+    /// non-empty the expression panel renders this windowed tail
+    /// (italic dark-gray) instead of `expression_content`. Persists
+    /// past `ResponseDone` so the operator can keep reading the last
+    /// turn's reasoning between turns; cleared at the next user
+    /// submit, on `SystemMessage::Error`, or on `ModeTransition`.
+    /// Hard-capped at 64 KiB at receive time so a runaway reasoning
+    /// stream can't grow console memory unbounded. Per the privacy
+    /// contract this is NEVER persisted, NEVER replayed to the model,
+    /// and the brain handler keeps it off `full_response`.
+    pub live_reasoning: String,
     // Viewport dimensions (detected once at boot) — drive the panel size gate
     pub viewport_cols: u16,
     pub viewport_rows: u16,
@@ -196,6 +207,7 @@ impl AppState {
             multiline_mode: false,
             expression_content: String::new(),
             expression_version: 0,
+            live_reasoning: String::new(),
             viewport_cols: 80,
             viewport_rows: 24,
         }

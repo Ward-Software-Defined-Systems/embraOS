@@ -212,6 +212,9 @@ pub async fn process_sse_stream(
                         "thinking_delta" => {
                             if let Some(t) = delta.get("thinking").and_then(|v| v.as_str()) {
                                 acc.thinking.push_str(t);
+                                let _ = tx
+                                    .send(AnthropicStreamEvent::ThinkingDelta(t.to_string()))
+                                    .await;
                             }
                         }
                         "signature_delta" => {
@@ -433,6 +436,9 @@ mod tests {
                         "thinking_delta" => {
                             if let Some(t) = delta.get("thinking").and_then(|v| v.as_str()) {
                                 acc.thinking.push_str(t);
+                                let _ = tx
+                                    .send(AnthropicStreamEvent::ThinkingDelta(t.to_string()))
+                                    .await;
                             }
                         }
                         "signature_delta" => {
@@ -518,6 +524,45 @@ mod tests {
             MessageBlock::Text { text } => assert_eq!(text, "Hello world"),
             other => panic!("expected Text, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn thinking_delta_emits_thinking_delta_wire_event() {
+        // Verify the parser emits an `AnthropicStreamEvent::ThinkingDelta`
+        // for every `thinking_delta` SSE event in order — these become
+        // `StreamEvent::ReasoningDelta` for the live expression panel.
+        // Signature-deltas must NOT emit a wire event (they ride only on
+        // `BlockAccumulator::signature` for IR round-trip).
+        let events = [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"First thought."}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":" More."}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-abc"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
+            r#"{"type":"message_stop"}"#,
+        ];
+        let out = run_stream(&events).await;
+        let deltas: Vec<&str> = out
+            .iter()
+            .filter_map(|e| match e {
+                AnthropicStreamEvent::ThinkingDelta(s) => Some(s.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            deltas,
+            vec!["First thought.", " More."],
+            "expected one ThinkingDelta per thinking_delta event"
+        );
+        // No ThinkingDelta events leak from signature_delta.
+        assert!(
+            !out.iter().any(|e| matches!(
+                e,
+                AnthropicStreamEvent::ThinkingDelta(s) if s.contains("sig")
+            )),
+            "signatures must not be emitted as ThinkingDelta wire events"
+        );
     }
 
     #[tokio::test]

@@ -239,6 +239,7 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
+            show_reasoning: None,
             openai_compat: crate::config::OpenAiCompatConfig::default(),
         });
         // Direct registry dispatch — no ... synthesis, no model round-trip.

@@ -25,8 +25,8 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::error;
 
 use crate::provider::{
-    ApiMessage, AssistantTurn, LlmProvider, ProviderError, ProviderKind, StreamEvent,
-    SystemPromptBundle, ToolManifest, ValidationResult,
+    ApiMessage, AssistantTurn, LlmProvider, LlmRequestOptions, ProviderError, ProviderKind,
+    StreamEvent, SystemPromptBundle, ToolManifest, ValidationResult,
 };
 use crate::tools::registry::ToolDescriptor;
 
@@ -96,6 +96,7 @@ impl LlmProvider for AnthropicProvider {
         messages: &[ApiMessage],
         system: &SystemPromptBundle,
         tools: &ToolManifest,
+        options: LlmRequestOptions,
     ) -> Result<BoxStream<'static, StreamEvent>, ProviderError> {
         // Translate neutral IR → Anthropic wire shape.
         let wire_messages = conv::ir_messages_to_wire(messages);
@@ -111,10 +112,26 @@ impl LlmProvider for AnthropicProvider {
         // exactly — same model id, max_tokens, thinking config,
         // output_config, system-as-content-block-with-cache,
         // tool_choice: auto, prompt-caching beta header.
+        //
+        // `display: "summarized"` opts the API into emitting human-
+        // readable `thinking_delta` SSE events (translated to
+        // `StreamEvent::ReasoningDelta` for the live panel).
+        // `"omitted"` suppresses those deltas entirely. The API
+        // rejects any other value with 400 invalid_request_error
+        // ("Input should be 'summarized', 'omitted'") — do NOT change
+        // these strings without re-checking against the live API.
+        // Signature round-trip (signed `thinking` block carrying
+        // `signature_delta`) is unaffected by either setting and
+        // still rides via `Block::ProviderOpaque`.
+        let thinking_display = if options.include_reasoning {
+            "summarized"
+        } else {
+            "omitted"
+        };
         let mut body = json!({
             "model": MODEL,
             "max_tokens": MAX_TOKENS,
-            "thinking": {"type": "adaptive", "display": "omitted"},
+            "thinking": {"type": "adaptive", "display": thinking_display},
             "output_config": {"effort": "max"},
             "system": [{
                 "type": "text",
@@ -177,27 +194,44 @@ impl LlmProvider for AnthropicProvider {
             }
         });
 
-        // Translate wire events → neutral StreamEvents.
-        let stream = ReceiverStream::new(rx).filter_map(|ev| async move {
-            match ev {
-                wire::AnthropicStreamEvent::Token(s) => Some(StreamEvent::TextDelta(s)),
-                wire::AnthropicStreamEvent::Done(_) => {
-                    // Anthropic emits a Done after Complete carrying
-                    // the full accumulated text. The neutral stream
-                    // surfaces all text via Complete(turn) — drop the
-                    // Done duplicate to keep the contract clean.
-                    None
-                }
-                wire::AnthropicStreamEvent::Error(s) => Some(StreamEvent::Error(s)),
-                wire::AnthropicStreamEvent::BlockComplete { .. } => Some(StreamEvent::BlockComplete),
-                wire::AnthropicStreamEvent::Complete { response } => {
-                    let outcome = conv::stop_reason_to_outcome(response.stop_reason);
-                    let content = conv::wire_blocks_to_ir(response.content);
-                    Some(StreamEvent::Complete(AssistantTurn {
-                        content,
-                        outcome,
-                        usage: None,
-                    }))
+        // Translate wire events → neutral StreamEvents. Capture
+        // `include_reasoning` so the closure can suppress thinking-delta
+        // emission belt-and-suspenders even if the API returns it
+        // (paranoid against operator opt-out being respected only at
+        // the request body).
+        let include_reasoning = options.include_reasoning;
+        let stream = ReceiverStream::new(rx).filter_map(move |ev| {
+            let include_reasoning = include_reasoning;
+            async move {
+                match ev {
+                    wire::AnthropicStreamEvent::Token(s) => Some(StreamEvent::TextDelta(s)),
+                    wire::AnthropicStreamEvent::ThinkingDelta(s) => {
+                        if include_reasoning {
+                            Some(StreamEvent::ReasoningDelta(s))
+                        } else {
+                            None
+                        }
+                    }
+                    wire::AnthropicStreamEvent::Done(_) => {
+                        // Anthropic emits a Done after Complete carrying
+                        // the full accumulated text. The neutral stream
+                        // surfaces all text via Complete(turn) — drop the
+                        // Done duplicate to keep the contract clean.
+                        None
+                    }
+                    wire::AnthropicStreamEvent::Error(s) => Some(StreamEvent::Error(s)),
+                    wire::AnthropicStreamEvent::BlockComplete { .. } => {
+                        Some(StreamEvent::BlockComplete)
+                    }
+                    wire::AnthropicStreamEvent::Complete { response } => {
+                        let outcome = conv::stop_reason_to_outcome(response.stop_reason);
+                        let content = conv::wire_blocks_to_ir(response.content);
+                        Some(StreamEvent::Complete(AssistantTurn {
+                            content,
+                            outcome,
+                            usage: None,
+                        }))
+                    }
                 }
             }
         });

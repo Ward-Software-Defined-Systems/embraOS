@@ -116,6 +116,13 @@ pub struct GeminiThinkingConfig {
     /// `"minimal"`, `"low"`, `"medium"`, or `"high"` (default for
     /// Gemini 3.1 Pro, also the only value embraOS uses).
     pub thinking_level: String,
+    /// When `true`, the API returns `thought: true` text parts (chain-
+    /// of-thought summaries) interleaved with the visible response.
+    /// When `false` or omitted, no thought parts arrive at all — the
+    /// streaming code that filters `thought:true` is unreachable.
+    /// Operator-controlled via `SystemConfig.show_reasoning`; threaded
+    /// through `LlmRequestOptions.include_reasoning`.
+    pub include_thoughts: bool,
 }
 
 // ── Response shapes (streaming chunks) ──

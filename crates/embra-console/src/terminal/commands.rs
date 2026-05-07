@@ -38,6 +38,11 @@ Tool loop:
   /iter-cap <N>                  Set the cap (1..=1000, default 100)
   /iter-cap reset                Restore the default cap
 
+Reasoning panel:
+  /show-reasoning                Show whether reasoning streams to the panel
+  /show-reasoning <on|off>       Toggle live reasoning in the expression panel (default on)
+  /show-reasoning reset          Restore default (on)
+
 Setup:
   /github-token <token>          Set GitHub token
   /ssh-keygen                    Generate SSH key pair

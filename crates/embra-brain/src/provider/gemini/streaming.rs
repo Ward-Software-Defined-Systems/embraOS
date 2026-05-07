@@ -50,14 +50,18 @@ use super::wire::{GeminiPart, GeminiStreamChunk};
 /// Drive the SSE stream from `:streamGenerateContent?alt=sse`,
 /// emitting neutral [`StreamEvent`]s into `tx`. Terminates on
 /// `[DONE]`, on the chunk carrying `finishReason`, or when the byte
-/// stream ends.
+/// stream ends. `include_reasoning` gates `StreamEvent::ReasoningDelta`
+/// emission for `thought:true` text parts (belt-and-suspenders against
+/// the API returning thoughts when the request body had
+/// `includeThoughts: false`).
 pub async fn process_sse_stream(
     response: reqwest::Response,
     tx: mpsc::Sender<StreamEvent>,
+    include_reasoning: bool,
 ) -> Result<()> {
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
-    let mut state = ParserState::default();
+    let mut state = ParserState::with_options(include_reasoning);
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
@@ -109,6 +113,19 @@ struct ParserState {
     /// Tracks whether we've already emitted Complete so a trailing
     /// `[DONE]` line after a terminal chunk doesn't double-fire.
     completed: bool,
+    /// Mirror of `LlmRequestOptions.include_reasoning` — gates
+    /// `StreamEvent::ReasoningDelta` emission. Default `false` keeps
+    /// `Default::default()` callers (test harnesses) reasoning-off.
+    include_reasoning: bool,
+}
+
+impl ParserState {
+    fn with_options(include_reasoning: bool) -> Self {
+        Self {
+            include_reasoning,
+            ..Self::default()
+        }
+    }
 }
 
 impl ParserState {
@@ -175,9 +192,16 @@ impl ParserState {
                 });
             }
             // Only user-visible text fires TextDelta; chain-of-
-            // thought summaries are accumulated for round-trip but
-            // not surfaced.
-            if !is_thought {
+            // thought summaries route to ReasoningDelta when the
+            // operator has opted in (gated by include_reasoning,
+            // mirroring `LlmRequestOptions`). The ReasoningDelta
+            // privacy contract (provider/mod.rs) keeps this off the
+            // text accumulators / persistence path.
+            if is_thought {
+                if self.include_reasoning {
+                    let _ = tx.send(StreamEvent::ReasoningDelta(text)).await;
+                }
+            } else {
                 let _ = tx.send(StreamEvent::TextDelta(text)).await;
             }
             return;
@@ -385,7 +409,15 @@ mod tests {
     }
 
     async fn drive_fake(body: String, tx: mpsc::Sender<StreamEvent>) {
-        let mut state = ParserState::default();
+        drive_fake_with_options(body, tx, false).await;
+    }
+
+    async fn drive_fake_with_options(
+        body: String,
+        tx: mpsc::Sender<StreamEvent>,
+        include_reasoning: bool,
+    ) {
+        let mut state = ParserState::with_options(include_reasoning);
         for line in body.lines() {
             if line.is_empty() || line.starts_with(':') {
                 continue;
@@ -444,6 +476,78 @@ mod tests {
             other => panic!("expected Text, got {other:?}"),
         }
         assert!(turn.usage.is_some());
+    }
+
+    #[tokio::test]
+    async fn thought_text_emits_reasoning_delta_when_enabled() {
+        // With include_reasoning=true, thought:true text parts emit
+        // StreamEvent::ReasoningDelta but NEVER StreamEvent::TextDelta.
+        let events = [
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"Considering the question.","thought":true}]},"index":0}]}"#,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"Visible answer.","thought":false}]},"finishReason":"STOP","index":0}]}"#,
+        ];
+        let mut body = String::new();
+        for e in events {
+            body.push_str("data: ");
+            body.push_str(e);
+            body.push_str("\n\n");
+        }
+        let (tx, mut rx) = mpsc::channel(64);
+        tokio::spawn(async move {
+            drive_fake_with_options(body, tx, true).await;
+        });
+        let mut out = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            out.push(ev);
+        }
+
+        let reasoning: Vec<_> = out
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::ReasoningDelta(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(reasoning, vec!["Considering the question."]);
+
+        let text_deltas: Vec<_> = out
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::TextDelta(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            text_deltas,
+            vec!["Visible answer."],
+            "thought:true text must NOT leak into TextDelta"
+        );
+    }
+
+    #[tokio::test]
+    async fn thought_text_suppressed_when_reasoning_disabled() {
+        // With include_reasoning=false (the default), thought parts are
+        // accumulated for IR round-trip but NEVER emitted as
+        // ReasoningDelta or TextDelta.
+        let events = [
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"Internal monologue.","thought":true}]},"index":0}]}"#,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"Answer."}]},"finishReason":"STOP","index":0}]}"#,
+        ];
+        let out = run_stream(&events).await;
+        assert!(
+            !out
+                .iter()
+                .any(|e| matches!(e, StreamEvent::ReasoningDelta(_))),
+            "ReasoningDelta must not be emitted when include_reasoning=false"
+        );
+        let text_deltas: Vec<_> = out
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::TextDelta(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text_deltas, vec!["Answer."]);
     }
 
     #[tokio::test]

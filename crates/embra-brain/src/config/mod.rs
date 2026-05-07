@@ -61,6 +61,15 @@ pub struct SystemConfig {
     /// so a hand-edited bogus value can't break the loop driver.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tool_iterations: Option<usize>,
+    /// Whether to stream live reasoning / chain-of-thought to the
+    /// expression panel. `None` (the additive default) and `Some(true)`
+    /// both mean *show*; `Some(false)` suppresses panel reasoning and
+    /// strips the request-body opt-ins (Anthropic `display: omitted`,
+    /// Gemini `includeThoughts: false`) so providers don't spend
+    /// tokens on summaries the operator won't see. Toggleable at
+    /// runtime via `/show-reasoning`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_reasoning: Option<bool>,
     /// OpenAI-compat preset configuration (Sprint 5 schema v11).
     /// Holds endpoint URL and selected model id per preset; bearer
     /// tokens are NOT here (STATE-only per Locked Decision #8).
@@ -69,6 +78,15 @@ pub struct SystemConfig {
     /// is active (`api_provider`).
     #[serde(default)]
     pub openai_compat: OpenAiCompatConfig,
+}
+
+impl SystemConfig {
+    /// Effective `show_reasoning` decision: default-on when unset,
+    /// otherwise honor the operator's explicit setting. Mirrors the
+    /// `max_tool_iterations` precedent.
+    pub fn show_reasoning(&self) -> bool {
+        self.show_reasoning.unwrap_or(true)
+    }
 }
 
 /// Per-preset OpenAI-compat config. Endpoint and model name only;
@@ -230,6 +248,7 @@ pub async fn run_config_wizard() -> Result<SystemConfig> {
         anthropic_api_key: None,
         gemini_api_key: None,
         max_tool_iterations: None,
+        show_reasoning: None,
         openai_compat: crate::config::OpenAiCompatConfig::default(),
     };
 
@@ -701,6 +720,7 @@ pub async fn run_config_wizard_grpc(
         anthropic_api_key,
         gemini_api_key,
         max_tool_iterations: None,
+        show_reasoning: None,
         openai_compat,
     };
     save_config(db, &config).await?;
@@ -860,6 +880,7 @@ mod key_lookup_tests {
             anthropic_api_key: anth.map(str::to_string),
             gemini_api_key: gem.map(str::to_string),
             max_tool_iterations: None,
+            show_reasoning: None,
             openai_compat: crate::config::OpenAiCompatConfig::default(),
         }
     }
@@ -945,6 +966,7 @@ mod max_tool_iterations_serde_tests {
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
+            show_reasoning: None,
             openai_compat: crate::config::OpenAiCompatConfig::default(),
         }
     }
