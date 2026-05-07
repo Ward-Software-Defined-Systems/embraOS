@@ -91,7 +91,15 @@ if [ "$BUILDROOT_ONLY" = false ]; then
 
     echo "=== Step 1: Build Rust binaries (musl static) ==="
     rustup target add x86_64-unknown-linux-musl
-    cargo build --release --target x86_64-unknown-linux-musl
+    # embra-comp is excluded from the rootfs cross-compile until Stage 3c
+    # lands its Buildroot package recipe with proper pkg-config sysroot
+    # plumbing. smithay pulls in pixman / xkbcommon / wayland-server via
+    # FFI, and the musl.cc cross-toolchain at /opt/x86_64-linux-musl-cross
+    # doesn't ship those libs — they live in Buildroot's target sysroot,
+    # which Stage 3c will wire in. embra-comp still builds host-natively
+    # via `cargo build -p embra-comp` for winit-mode dev iteration.
+    cargo build --release --target x86_64-unknown-linux-musl \
+        --workspace --exclude embra-comp
 
     echo "=== Step 2: Build WardSONDB (from separate repo) ==="
     WARDSONDB_DIR="${WARDSONDB_DIR:-../WardSONDB}"
