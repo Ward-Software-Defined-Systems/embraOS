@@ -1,0 +1,26 @@
+[package]
+name = "embra-comp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Single-fullscreen-client Wayland kiosk compositor for embraOS"
+
+[dependencies]
+# Stage 3a: smithay listed without default features so the scaffold compiles
+# without host pkg-config packages (libudev, libinput, libwayland-client, etc.).
+# Stage 3b enables `backend_winit` + `wayland_frontend` for the host-side dev
+# loop; Stage 3c enables `backend_drm` + `backend_libinput` + `backend_udev` +
+# `backend_session_libseat` for the in-OS production boot path. The wsds-devops
+# host needs libudev-dev / libwayland-dev / libxkbcommon-dev installed before
+# those features will compile.
+smithay = { version = "0.7", default-features = false, features = [
+    "wayland_frontend",
+    "backend_winit",
+    "renderer_gl",
+    "renderer_pixman",
+    "desktop",
+] }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { version = "4", features = ["derive"] }
