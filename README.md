@@ -12,7 +12,7 @@
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — dense multigraph with auto-derived edges" width="100%">
 </p>
 
-**Current Status:** Phase 1 — Stable (embra-desktop branch) | Phase 0 — Stable
+**Current Status:** Phase 1 — Stable (embra-desktop dev branch)
 
 ---
 
