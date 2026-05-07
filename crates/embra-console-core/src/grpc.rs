@@ -15,7 +15,12 @@ pub struct BrainClient {
 }
 
 /// Events that a UI consumes (replaces Phase 0's StreamEvent + proactive notifications)
-#[derive(Debug)]
+///
+/// `Clone` is added so iced front-ends can carry these in their `Message`
+/// type (iced requires `Message: Clone`). All fields are owned types
+/// (`String`, `Vec<String>`); the clone cost is bounded by the event's
+/// payload size.
+#[derive(Debug, Clone)]
 pub enum ConsoleEvent {
     Token(String),
     ResponseDone(String),
