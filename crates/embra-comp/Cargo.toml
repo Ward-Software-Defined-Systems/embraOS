@@ -16,6 +16,10 @@ description = "Single-fullscreen-client Wayland kiosk compositor for embraOS"
 smithay = { version = "0.7", default-features = false, features = [
     "wayland_frontend",
     "backend_winit",
+    "backend_drm",
+    "backend_libinput",
+    "backend_udev",
+    "backend_session_libseat",
     "renderer_gl",
     "renderer_pixman",
     "desktop",

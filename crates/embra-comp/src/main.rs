@@ -16,9 +16,11 @@
 
 #![allow(irrefutable_let_patterns)]
 
+mod halt;
 mod handlers;
 mod input;
 mod state;
+mod tty_udev;
 mod winit;
 
 use anyhow::{Context, Result};
@@ -55,19 +57,15 @@ fn main() -> Result<()> {
     let args = Args::parse();
 
     if let Some(reason) = args.halt_reason.as_deref() {
-        tracing::warn!(reason, "halt mode — no clients will be accepted");
-        anyhow::bail!("halt-mode rendering not implemented yet (Stage 3c)");
+        halt::run(reason);
     }
 
     if args.winit {
         return run_winit(args.ready_sentinel);
     }
 
-    tracing::info!(
-        ready_sentinel = %args.ready_sentinel,
-        "tty-udev backend not implemented yet (Stage 3c) — exiting"
-    );
-    anyhow::bail!("tty-udev backend not implemented yet (Stage 3c)");
+    tracing::info!(ready_sentinel = %args.ready_sentinel, "starting tty-udev backend");
+    tty_udev::run(args.ready_sentinel)
 }
 
 fn run_winit(ready_sentinel: String) -> Result<()> {

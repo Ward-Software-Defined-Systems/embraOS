@@ -1,0 +1,13 @@
+config BR2_PACKAGE_EMBRA_COMP
+	bool "embra-comp"
+	help
+	  embraOS Wayland kiosk compositor (single-fullscreen-client).
+	  Built on smithay; hosts exactly one embra-desktop iced GUI
+	  client per boot. Used in production tty-udev mode (DRM scanout
+	  + libinput + seatd) when embraOS boots into a graphical
+	  session. Requires the binary to be cross-compiled with
+	  pkg-config pointing at Buildroot's staging tree so libudev /
+	  libinput / libseat / libgbm / libdrm link against the rootfs
+	  libs (not the host's musl-cross toolchain). See
+	  scripts/build-image.sh for the staging-aware cargo invocation
+	  (added in Stage 3c-final).

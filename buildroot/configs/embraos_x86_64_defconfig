@@ -54,6 +54,8 @@ BR2_PACKAGE_EMBRA_TRUSTD=y
 BR2_PACKAGE_EMBRA_BRAIN=y
 BR2_PACKAGE_EMBRA_CONSOLE=y
 BR2_PACKAGE_WARDSONDB=y
+# BR2_PACKAGE_EMBRA_COMP=y  # opt-in once Stage 3c-final cross-compiles the binary
+# BR2_PACKAGE_EMBRA_DESKTOP=y  # opt-in once Stage 4 cross-compile lands
 
 # === embra-desktop graphics stack (Stage 2 — experimental) ===
 # Single-fullscreen-client Wayland kiosk: smithay compositor + iced
