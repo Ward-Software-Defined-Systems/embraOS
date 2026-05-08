@@ -1,0 +1,11 @@
+config BR2_PACKAGE_EMBRA_DESKTOP
+	bool "embra-desktop"
+	help
+	  embraOS iced GUI client. Connects to embra-apid over gRPC and
+	  renders the operator UI as a Wayland client of embra-comp's
+	  fullscreen kiosk surface. Replaces embra-console in graphical
+	  boots. The binary is cross-compiled against Buildroot's
+	  staging tree (iced 0.14 pulls libwayland-client / xkbcommon /
+	  softbuffer via FFI; the standalone musl.cc toolchain doesn't
+	  ship those libs). Installed via the rootfs overlay in
+	  scripts/build-image.sh Step 4.5.

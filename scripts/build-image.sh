@@ -182,6 +182,73 @@ fi
     make BR2_EXTERNAL="$(pwd)/../buildroot" "$DEFCONFIG_NAME" && \
     make -j$(nproc_compat))
 
+# Step 4.5: cross-compile FFI crates (embra-comp, embra-desktop) against
+# Buildroot's staging sysroot. These crates pull pixman / xkbcommon /
+# libwayland / libseat / libdrm / mesa via FFI — the standalone
+# /opt/x86_64-linux-musl-cross toolchain doesn't ship those libs, but
+# Buildroot's host toolchain does (it points pkg-config at the staging
+# tree it just populated in Step 4).
+#
+# Skipped under EMBRA_NO_DESKTOP=1 (TUI-only build) since neither crate
+# is needed in the rootfs in that mode.
+if [ "${EMBRA_NO_DESKTOP:-0}" = "0" ] && [ "$BUILDROOT_ONLY" = false ]; then
+    echo "=== Step 4.5: Cross-compile FFI crates (embra-comp, embra-desktop) ==="
+    BR_HOST="$BUILDROOT_DIR/output/host"
+    BR_STAGING="$BUILDROOT_DIR/output/staging"
+
+    if [ ! -d "$BR_HOST" ] || [ ! -d "$BR_STAGING" ]; then
+        echo "ERROR: Buildroot host/staging tree missing — Step 4 didn't complete cleanly?" >&2
+        exit 1
+    fi
+
+    # Buildroot wraps pkg-config + the gcc front-end so they auto-use
+    # the staging sysroot. Override the musl.cc toolchain wiring set up
+    # in Step 1 with Buildroot's equivalent.
+    BR_GCC="$BR_HOST/bin/x86_64-buildroot-linux-musl-gcc"
+    BR_GXX="$BR_HOST/bin/x86_64-buildroot-linux-musl-g++"
+    BR_AR="$BR_HOST/bin/x86_64-buildroot-linux-musl-ar"
+    BR_PKGCONF="$BR_HOST/bin/pkg-config"
+
+    if [ ! -x "$BR_GCC" ]; then
+        echo "ERROR: Buildroot toolchain not found at $BR_GCC" >&2
+        exit 1
+    fi
+
+    export PATH="$BR_HOST/bin:$PATH"
+    export CC_x86_64_unknown_linux_musl="$BR_GCC"
+    export CXX_x86_64_unknown_linux_musl="$BR_GXX"
+    export AR_x86_64_unknown_linux_musl="$BR_AR"
+    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER="$BR_GCC"
+    export PKG_CONFIG_x86_64_unknown_linux_musl="$BR_PKGCONF"
+    export PKG_CONFIG_PATH_x86_64_unknown_linux_musl=""
+    export PKG_CONFIG_LIBDIR_x86_64_unknown_linux_musl="$BR_STAGING/usr/lib/pkgconfig:$BR_STAGING/usr/share/pkgconfig"
+    export PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_linux_musl="$BR_STAGING"
+    # iced/wgpu's bindgen-using transitives need clang to know the sysroot
+    export BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_musl="--sysroot=$BR_STAGING"
+
+    cargo build --release --target x86_64-unknown-linux-musl \
+        -p embra-comp -p embra-desktop
+
+    # Step 4.6: stage binaries into the rootfs overlay so the next
+    # Buildroot rootfs assembly (Step 4.7) folds them into the SquashFS.
+    OVERLAY="$(pwd)/buildroot/board/embraos/rootfs_overlay"
+    mkdir -p "$OVERLAY/sbin" "$OVERLAY/usr/bin"
+    cp -v "target/x86_64-unknown-linux-musl/release/embra-comp" \
+        "$OVERLAY/sbin/embra-comp"
+    cp -v "target/x86_64-unknown-linux-musl/release/embra-desktop" \
+        "$OVERLAY/usr/bin/embra-desktop"
+    chmod 0755 "$OVERLAY/sbin/embra-comp" "$OVERLAY/usr/bin/embra-desktop"
+
+    # Step 4.7: re-run Buildroot to regenerate rootfs.squashfs + image
+    # with the overlay binaries included. Buildroot's incremental
+    # rebuild only re-runs rootfs assembly + image creation, not the
+    # full package compile pass.
+    echo "=== Step 4.7: Regenerate rootfs.squashfs with FFI binaries ==="
+    (cd "$BUILDROOT_DIR" && \
+        rm -f output/images/rootfs.squashfs output/images/embraos.img && \
+        make -j$(nproc_compat))
+fi
+
 echo "=== Step 5: Copy outputs ==="
 mkdir -p output/images
 cp "$BUILDROOT_DIR/output/images/embraos.img" output/images/

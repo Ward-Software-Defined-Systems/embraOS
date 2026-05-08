@@ -52,3 +52,9 @@ ARCHITECTURE_Phase0_Sprint1.md
 /src/
 /Dockerfile
 /Cargo.toml.phase0
+
+# embra-desktop FFI binaries staged into the Buildroot rootfs overlay
+# during build-image.sh Step 4.5 (cross-compiled against Buildroot's
+# staging tree, not the standalone musl.cc toolchain).
+buildroot/board/embraos/rootfs_overlay/sbin/embra-comp
+buildroot/board/embraos/rootfs_overlay/usr/bin/embra-desktop
