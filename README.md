@@ -14,6 +14,10 @@
 
 **Current Status:** Phase 1 — Stable. Active dev branch: [`embra-desktop`](docs/EMBRA-DESKTOP.md) (experimental in-OS graphical session — cage compositor + iced GUI client; **Desktop Ubuntu recommended** for working on this branch since iteration relies on a host display server).
 
+> **⚠️ Heads-up — `embra-desktop` is experimental.** This branch is a live workstream exploring an in-OS graphical session and **may or may not boot end-to-end at any given commit**, depending on which mid-sprint state you check out. Stages land incrementally, regressions are sometimes the cost of progress, and pieces of the build pipeline / supervisor wiring / compositor integration may be in motion.
+>
+> If you want a known-good setup, **stay on [`main`](https://github.com/Ward-Software-Defined-Systems/embraOS/tree/main)** — Phase 1 is stable there at `v0.5.0-phase1`, with the serial-TTY ratatui TUI as the operator interface. Switch to `embra-desktop` only if you're comfortable iterating against a moving target. See [`docs/EMBRA-DESKTOP.md`](docs/EMBRA-DESKTOP.md) for current stage status before building.
+
 ---
 
 ## What Is This?
