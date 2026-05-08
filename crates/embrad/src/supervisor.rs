@@ -29,6 +29,25 @@ fn read_terminal_size_from_cmdline() -> (u16, u16) {
     (cols, rows)
 }
 
+/// Desktop mode detection. True when the kernel cmdline carries
+/// `embra.desktop=1` (set by `EMBRA_DESKTOP=1 ./scripts/run-qemu.sh`).
+/// In that mode the supervisor spawns `embra-comp` + `embra-desktop`
+/// instead of the serial-TTY `embra-console`.
+fn is_desktop_mode() -> bool {
+    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
+    let from_cmdline = cmdline
+        .split_whitespace()
+        .any(|p| p == "embra.desktop=1");
+    let binary_present = std::path::Path::new("/sbin/embra-comp").exists()
+        || std::path::Path::new("/usr/bin/embra-comp").exists();
+    let mode = from_cmdline && binary_present;
+    info!(
+        "Desktop mode: {} (cmdline={}, binary_present={})",
+        mode, from_cmdline, binary_present
+    );
+    mode
+}
+
 /// Service definition
 #[derive(Clone)]
 pub struct ServiceDef {
@@ -265,23 +284,71 @@ impl Supervisor {
             restart_policy: RestartPolicy::default(),
         });
 
-        // 5. embra-console — depends on embra-brain
-        // Read terminal size from kernel cmdline (set by run-qemu.sh from host terminal)
-        let (term_cols, term_rows) = read_terminal_size_from_cmdline();
-        self.add_service(ServiceDef {
-            name: "embra-console".to_string(),
-            binary: "/usr/bin/embra-console".to_string(),
-            args: vec![
-                "--apid-addr".to_string(), "http://127.0.0.1:50000".to_string(),
-                "--device".to_string(), "/dev/ttyS0".to_string(),
-                "--columns".to_string(), term_cols.to_string(),
-                "--rows".to_string(), term_rows.to_string(),
-            ],
-            env: vec![],
-            health_check: HealthCheck::ProcessAlive,
-            depends_on: vec!["embra-brain".to_string()],
-            restart_policy: RestartPolicy::default(),
-        });
+        // 5. Operator interface — desktop (embra-comp + embra-desktop) or
+        // serial TUI (embra-console), based on kernel cmdline + binary
+        // presence. Both paths depend on embra-brain healthy.
+        if is_desktop_mode() {
+            // 5a. embra-comp — Wayland kiosk compositor. Owns /dev/tty1,
+            // /dev/dri/card0, /dev/input/*. Health check: readiness
+            // sentinel file written after globals are advertised.
+            self.add_service(ServiceDef {
+                name: "embra-comp".to_string(),
+                binary: "/sbin/embra-comp".to_string(),
+                args: vec![
+                    "--ready-sentinel".to_string(),
+                    "/run/embra-comp.ready".to_string(),
+                ],
+                env: vec![
+                    ("XDG_RUNTIME_DIR".to_string(), "/run/user/0".to_string()),
+                ],
+                health_check: HealthCheck::FileExists {
+                    path: "/run/embra-comp.ready".to_string(),
+                    timeout: Duration::from_secs(20),
+                },
+                depends_on: vec!["embra-brain".to_string()],
+                restart_policy: RestartPolicy::default(),
+            });
+
+            // 5b. embra-desktop — iced GUI client. Connects to apid via
+            // gRPC, renders against embra-comp's wayland-0 socket.
+            self.add_service(ServiceDef {
+                name: "embra-desktop".to_string(),
+                binary: "/usr/bin/embra-desktop".to_string(),
+                args: vec![
+                    "--apid-addr".to_string(),
+                    "http://127.0.0.1:50000".to_string(),
+                ],
+                env: vec![
+                    ("XDG_RUNTIME_DIR".to_string(), "/run/user/0".to_string()),
+                    ("WAYLAND_DISPLAY".to_string(), "wayland-0".to_string()),
+                ],
+                health_check: HealthCheck::ProcessAlive,
+                depends_on: vec!["embra-comp".to_string()],
+                restart_policy: RestartPolicy::default(),
+            });
+        } else {
+            // 5. embra-console — depends on embra-brain
+            // Read terminal size from kernel cmdline (set by run-qemu.sh from host terminal)
+            let (term_cols, term_rows) = read_terminal_size_from_cmdline();
+            self.add_service(ServiceDef {
+                name: "embra-console".to_string(),
+                binary: "/usr/bin/embra-console".to_string(),
+                args: vec![
+                    "--apid-addr".to_string(),
+                    "http://127.0.0.1:50000".to_string(),
+                    "--device".to_string(),
+                    "/dev/ttyS0".to_string(),
+                    "--columns".to_string(),
+                    term_cols.to_string(),
+                    "--rows".to_string(),
+                    term_rows.to_string(),
+                ],
+                env: vec![],
+                health_check: HealthCheck::ProcessAlive,
+                depends_on: vec!["embra-brain".to_string()],
+                restart_policy: RestartPolicy::default(),
+            });
+        }
     }
 
     fn add_service(&mut self, def: ServiceDef) {
@@ -306,10 +373,15 @@ impl Supervisor {
 
             self.start_service(i).await?;
 
-            // After spawning embra-console, redirect embrad's output to log file
-            // so the TUI gets clean control of the terminal
-            if name == "embra-console" && std::process::id() == 1 {
-                info!("Redirecting embrad output to log file for TUI");
+            // After spawning the operator-interface service, redirect
+            // embrad's stdio to a log file so the interface (TUI on
+            // serial OR compositor on /dev/tty1) gets clean control of
+            // its surface. embra-comp takes /dev/tty1 to KD_GRAPHICS;
+            // embra-console owns the serial line.
+            if (name == "embra-console" || name == "embra-comp")
+                && std::process::id() == 1
+            {
+                info!("Redirecting embrad output to log file for {}", name);
                 if let Ok(log) = std::fs::File::create("/embra/ephemeral/embrad.log") {
                     use std::os::unix::io::AsRawFd;
                     let fd = log.as_raw_fd();
@@ -338,13 +410,14 @@ impl Supervisor {
         for (key, val) in &svc.def.env {
             cmd.env(key, val);
         }
-        // embra-console gets stdin/stdout for the TUI (serial console)
-        // stderr goes to log file to prevent embrad log bleed-through
-        if svc.def.name == "embra-console" {
+        // The operator-interface service inherits stdin/stdout —
+        // embra-console on serial, embra-comp on /dev/tty1.
+        // stderr goes to log file to prevent embrad log bleed-through.
+        if svc.def.name == "embra-console" || svc.def.name == "embra-comp" {
             cmd.stdin(Stdio::inherit());
             cmd.stdout(Stdio::inherit());
-            let log_path = "/embra/ephemeral/embra-console.log";
-            let log_file = std::fs::File::create(log_path)
+            let log_path = format!("/embra/ephemeral/{}.log", svc.def.name);
+            let log_file = std::fs::File::create(&log_path)
                 .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
             cmd.stderr(Stdio::from(log_file));
         } else {
@@ -556,7 +629,16 @@ impl Supervisor {
 
             // Soul exists but verification failed — this is a HALT condition
             error!("HALTING: Soul integrity violation. This system cannot be trusted.");
-            halt_system(&format!("Soul verification failed: {}", reason))
+            let halt_msg = format!("Soul verification failed: {}", reason);
+            // Desktop mode: spawn embra-comp in halt mode so the operator
+            // sees a visible failure on /dev/tty1 instead of a black
+            // graphical-boot screen. Best-effort — if it can't spawn we
+            // still halt; the failure is captured in /embra/state/halt_reason
+            // for post-mortem.
+            if is_desktop_mode() {
+                spawn_halt_screen(&halt_msg);
+            }
+            halt_system(&halt_msg)
         }
     }
 
@@ -640,6 +722,38 @@ impl Supervisor {
 
     pub fn service_status(&self, index: usize) -> &ServiceStatus {
         &self.services[index].status
+    }
+}
+
+/// Spawn embra-comp in halt mode so /dev/tty1 shows a visible halt
+/// screen. Best-effort — failures are logged but don't prevent
+/// halt_system from running. The spawned compositor parks forever
+/// rendering the halt reason.
+fn spawn_halt_screen(reason: &str) {
+    let binary = if std::path::Path::new("/sbin/embra-comp").exists() {
+        "/sbin/embra-comp"
+    } else if std::path::Path::new("/usr/bin/embra-comp").exists() {
+        "/usr/bin/embra-comp"
+    } else {
+        warn!("embra-comp binary not found — cannot render halt screen");
+        return;
+    };
+    match std::process::Command::new(binary)
+        .arg("--halt-reason")
+        .arg(reason)
+        .env("XDG_RUNTIME_DIR", "/run/user/0")
+        .spawn()
+    {
+        Ok(child) => {
+            info!("Spawned halt-mode embra-comp pid={} for visible halt screen", child.id());
+            // Give the compositor a moment to take /dev/tty1 before
+            // halt_system() reboots — without this the operator might
+            // see only a brief flash before the kernel halts.
+            std::thread::sleep(Duration::from_secs(2));
+        }
+        Err(e) => {
+            warn!("Failed to spawn halt-mode embra-comp: {}", e);
+        }
     }
 }
 

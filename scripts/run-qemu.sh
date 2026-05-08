@@ -73,7 +73,10 @@ if [ "$DESKTOP_MODE" = "1" ]; then
         -device virtio-tablet-pci
     )
     SERIAL_ARGS=(-serial "file:/tmp/embra-serial.log")
-    KERNEL_CMDLINE="root=/dev/vda2 ro quiet"
+    # `embra.desktop=1` flips embrad's supervisor to register
+    # embra-comp + embra-desktop in place of the serial-TTY
+    # embra-console.
+    KERNEL_CMDLINE="root=/dev/vda2 ro quiet embra.desktop=1"
     DISPLAY_DESC="GTK 1280x720 (virtio-gpu, llvmpipe)"
     SERIAL_DESC="/tmp/embra-serial.log"
 else
