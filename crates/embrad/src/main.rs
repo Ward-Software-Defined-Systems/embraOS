@@ -48,6 +48,15 @@ async fn main() -> Result<()> {
         e
     })?;
 
+    // Step 2.5: Start udevd if present in the rootfs. Required for
+    // cage / wlroots / libinput input device hot-plug detection in the
+    // graphical boot path. No-op (best-effort) if udevd isn't installed.
+    if pid == 1 {
+        if let Err(e) = mount::start_udevd() {
+            warn!("start_udevd failed: {} (continuing — graphical boot may misbehave)", e);
+        }
+    }
+
     // Step 3: Start services in dependency order
     info!("Starting services");
     let mut supervisor = supervisor::Supervisor::new();

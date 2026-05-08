@@ -112,7 +112,20 @@ if [ "$DESKTOP_MODE" = "1" ]; then
     # embra-console. cage is a wlroots-based kiosk compositor that
     # owns /dev/tty1 + DRM + libinput; embra-desktop runs as its
     # only fullscreen Wayland client.
-    KERNEL_CMDLINE="root=/dev/vda2 ro quiet embra.desktop=1"
+    #
+    # Two `console=` entries: kernel printk goes to BOTH the VGA text
+    # framebuffer (visible on VNC) AND the serial line (captured to
+    # /tmp/embra-serial.log on host).
+    #
+    # Order matters: the LAST `console=` becomes /dev/console for
+    # userspace output. `console=tty0 console=ttyS0` puts ttyS0 last so
+    # embrad's tracing logs land in the host serial log file (where the
+    # operator can `tail -f`), while kernel boot messages remain visible
+    # on VNC for boot-up confirmation.
+    #
+    # `quiet` is intentionally OMITTED so failures during
+    # kernel/initramfs/embrad boot are visible.
+    KERNEL_CMDLINE="root=/dev/vda2 ro console=tty0 console=ttyS0 embra.desktop=1"
     SERIAL_DESC="/tmp/embra-serial.log"
 else
     DISPLAY_ARGS=(-nographic)
@@ -152,6 +165,7 @@ qemu-system-x86_64 \
     $ACCEL \
     -m "$MEMORY" \
     -smp "$CPUS" \
+    -audio none \
     -drive file="$IMAGE",format=raw,if=virtio \
     -kernel "$KERNEL" \
     -initrd "$INITRD" \

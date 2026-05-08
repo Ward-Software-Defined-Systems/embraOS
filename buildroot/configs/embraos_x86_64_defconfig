@@ -67,7 +67,17 @@ BR2_PACKAGE_WARDSONDB=y
 # pipeline would otherwise need to be hand-written. embra-comp's --winit
 # backend (in `crates/embra-comp/`) is retained for nested host-side dev
 # but isn't shipped in the rootfs.
+#
+# Cage needs udev (input device hot-plug detection) + libgbm (KMS scanout
+# buffer allocation) on top of the Mesa3D + Wayland stack we already
+# install. The default rootfs device-creation strategy is devtmpfs-only;
+# we switch to eudev so wlroots' libinput backend gets device-add events.
+# embrad spawns `/sbin/udevd` early in boot before any graphical service
+# (this is a small addition in `crates/embrad/src/mount.rs`).
 BR2_PACKAGE_CAGE=y
+BR2_PACKAGE_MESA3D_GBM=y
+BR2_ROOTFS_DEVICE_CREATION_DYNAMIC_EUDEV=y
+BR2_PACKAGE_EUDEV=y
 
 # === embra-desktop graphics stack (experimental) ===
 # Single-fullscreen-client kiosk: cage compositor + iced tiny_skia

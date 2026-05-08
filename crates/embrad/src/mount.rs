@@ -42,6 +42,68 @@ pub fn mount_pseudofs() -> Result<()> {
     Ok(())
 }
 
+/// Start eudev's udevd daemon if present in the rootfs.
+///
+/// cage / wlroots / libinput rely on udev for input-device hot-plug
+/// detection. Since embraOS has `BR2_INIT_NONE=y` (embrad is PID 1),
+/// no init system runs udevd for us — embrad has to do it explicitly.
+///
+/// Best-effort: if udevd isn't installed (e.g. minimal/TUI build) this
+/// function logs and returns Ok(()) without failing boot. cage simply
+/// won't be wired in those builds anyway.
+#[cfg(target_os = "linux")]
+pub fn start_udevd() -> Result<()> {
+    use std::process::Command;
+
+    let candidates = [
+        "/sbin/udevd",
+        "/usr/sbin/udevd",
+        "/lib/udev/udevd",
+        "/lib/systemd/systemd-udevd",
+    ];
+    let udevd = candidates.iter().find(|p| Path::new(p).exists());
+    let Some(udevd) = udevd else {
+        info!("udevd not found in rootfs — skipping (TUI-only build path)");
+        return Ok(());
+    };
+
+    info!("Starting udevd: {}", udevd);
+    match Command::new(udevd).arg("--daemon").spawn() {
+        Ok(mut child) => {
+            // The daemon double-forks itself; we don't keep the handle.
+            let _ = child.try_wait();
+            info!("udevd spawned");
+        }
+        Err(e) => {
+            tracing::warn!("Failed to spawn {}: {} — input hot-plug will not work", udevd, e);
+            return Ok(());
+        }
+    }
+
+    // Trigger + settle so /dev is populated by the time graphical services
+    // need /dev/input/event*, /dev/dri/card0, etc.
+    let udevadm = ["/sbin/udevadm", "/usr/sbin/udevadm", "/bin/udevadm"]
+        .iter()
+        .find(|p| Path::new(p).exists())
+        .copied();
+    if let Some(udevadm) = udevadm {
+        let _ = Command::new(udevadm)
+            .args(["trigger", "--action=add"])
+            .status();
+        let _ = Command::new(udevadm)
+            .args(["settle", "--timeout=5"])
+            .status();
+        info!("udev devices settled");
+    }
+
+    Ok(())
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn start_udevd() -> Result<()> {
+    Ok(())
+}
+
 #[cfg(target_os = "linux")]
 fn bring_up_loopback() {
     use std::process::Command;
