@@ -51,11 +51,11 @@ elif [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     ACCEL_NAME="KVM (Linux)"
 fi
 
-# embra-desktop (Stage 2): graphical session selection.
+# embra-desktop graphical session selection.
 # When EMBRA_DESKTOP=1, swap the serial-only TUI launch for a GTK-windowed
 # 1280x720 graphical session backed by virtio-gpu (Mesa llvmpipe path) and
 # virtio keyboard + tablet input. The serial line is redirected to a file
-# so embrad's stdio still has somewhere to land after embra-comp takes
+# so embrad's stdio still has somewhere to land after cage takes
 # /dev/tty1. Use Ctrl-Alt-G to release the QEMU pointer grab.
 DESKTOP_MODE="${EMBRA_DESKTOP:-0}"
 
@@ -73,9 +73,11 @@ if [ "$DESKTOP_MODE" = "1" ]; then
         -device virtio-tablet-pci
     )
     SERIAL_ARGS=(-serial "file:/tmp/embra-serial.log")
-    # `embra.desktop=1` flips embrad's supervisor to register
-    # embra-comp + embra-desktop in place of the serial-TTY
-    # embra-console.
+    # `embra.desktop=1` flips embrad's supervisor to spawn
+    # `cage -- /usr/bin/embra-desktop` in place of the serial-TTY
+    # embra-console. cage is a wlroots-based kiosk compositor that
+    # owns /dev/tty1 + DRM + libinput; embra-desktop runs as its
+    # only fullscreen Wayland client.
     KERNEL_CMDLINE="root=/dev/vda2 ro quiet embra.desktop=1"
     DISPLAY_DESC="GTK 1280x720 (virtio-gpu, llvmpipe)"
     SERIAL_DESC="/tmp/embra-serial.log"

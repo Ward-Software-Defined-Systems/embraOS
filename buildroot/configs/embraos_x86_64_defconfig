@@ -54,12 +54,24 @@ BR2_PACKAGE_EMBRA_TRUSTD=y
 BR2_PACKAGE_EMBRA_BRAIN=y
 BR2_PACKAGE_EMBRA_CONSOLE=y
 BR2_PACKAGE_WARDSONDB=y
-# BR2_PACKAGE_EMBRA_COMP=y  # opt-in once Stage 3c-final cross-compiles the binary
-# BR2_PACKAGE_EMBRA_DESKTOP=y  # opt-in once Stage 4 cross-compile lands
+# embra-desktop installs via the rootfs overlay in build-image.sh Step 4.5
+# (cross-compiled against Buildroot staging because iced 0.14 pulls
+# softbuffer / wayland-client / xkbcommon via FFI). Buildroot package
+# recipes exist (see buildroot/package/embra-desktop/) but the install
+# path is the overlay, not the Buildroot package infra.
 
-# === embra-desktop graphics stack (Stage 2 — experimental) ===
-# Single-fullscreen-client Wayland kiosk: smithay compositor + iced
-# tiny_skia client. Software rendering only — no virgl, no GPU passthrough.
+# Cage — single-fullscreen-client Wayland kiosk compositor (wlroots-based,
+# C). Replaces our smithay-built embra-comp in the boot path. embrad
+# spawns `cage -- /usr/bin/embra-desktop` so cage handles DRM/KMS scanout,
+# libinput, and seat management — all the parts smithay's tty-udev
+# pipeline would otherwise need to be hand-written. embra-comp's --winit
+# backend (in `crates/embra-comp/`) is retained for nested host-side dev
+# but isn't shipped in the rootfs.
+BR2_PACKAGE_CAGE=y
+
+# === embra-desktop graphics stack (experimental) ===
+# Single-fullscreen-client kiosk: cage compositor + iced tiny_skia
+# client. Software rendering only — no virgl, no GPU passthrough.
 # Mesa3D + llvmpipe ship in the rootfs for any transitive GL touch even
 # though iced's tiny_skia path bypasses Mesa entirely.
 

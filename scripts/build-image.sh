@@ -182,17 +182,23 @@ fi
     make BR2_EXTERNAL="$(pwd)/../buildroot" "$DEFCONFIG_NAME" && \
     make -j$(nproc_compat))
 
-# Step 4.5: cross-compile FFI crates (embra-comp, embra-desktop) against
-# Buildroot's staging sysroot. These crates pull pixman / xkbcommon /
-# libwayland / libseat / libdrm / mesa via FFI — the standalone
-# /opt/x86_64-linux-musl-cross toolchain doesn't ship those libs, but
-# Buildroot's host toolchain does (it points pkg-config at the staging
-# tree it just populated in Step 4).
+# Step 4.5: cross-compile embra-desktop against Buildroot's staging
+# sysroot. iced 0.14 pulls libwayland-client / xkbcommon / softbuffer
+# via FFI — the standalone /opt/x86_64-linux-musl-cross toolchain
+# doesn't ship those libs, but Buildroot's host musl toolchain does
+# (it points pkg-config at the staging tree it just populated in
+# Step 4).
 #
-# Skipped under EMBRA_NO_DESKTOP=1 (TUI-only build) since neither crate
-# is needed in the rootfs in that mode.
+# embra-comp is NOT cross-compiled here — cage replaced it in the boot
+# path (it's a wlroots-based kiosk compositor in Buildroot, see
+# BR2_PACKAGE_CAGE in the defconfig). embra-comp's --winit backend
+# stays in the workspace as a host-side dev tool but isn't shipped in
+# the rootfs.
+#
+# Skipped under EMBRA_NO_DESKTOP=1 (TUI-only build) — embra-desktop
+# isn't needed in the rootfs.
 if [ "${EMBRA_NO_DESKTOP:-0}" = "0" ] && [ "$BUILDROOT_ONLY" = false ]; then
-    echo "=== Step 4.5: Cross-compile FFI crates (embra-comp, embra-desktop) ==="
+    echo "=== Step 4.5: Cross-compile embra-desktop against Buildroot staging ==="
     BR_HOST="$BUILDROOT_DIR/output/host"
     BR_STAGING="$BUILDROOT_DIR/output/staging"
 
@@ -223,27 +229,24 @@ if [ "${EMBRA_NO_DESKTOP:-0}" = "0" ] && [ "$BUILDROOT_ONLY" = false ]; then
     export PKG_CONFIG_PATH_x86_64_unknown_linux_musl=""
     export PKG_CONFIG_LIBDIR_x86_64_unknown_linux_musl="$BR_STAGING/usr/lib/pkgconfig:$BR_STAGING/usr/share/pkgconfig"
     export PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_linux_musl="$BR_STAGING"
-    # iced/wgpu's bindgen-using transitives need clang to know the sysroot
+    # iced's bindgen-using transitives need clang to know the sysroot
     export BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_musl="--sysroot=$BR_STAGING"
 
-    cargo build --release --target x86_64-unknown-linux-musl \
-        -p embra-comp -p embra-desktop
+    cargo build --release --target x86_64-unknown-linux-musl -p embra-desktop
 
-    # Step 4.6: stage binaries into the rootfs overlay so the next
-    # Buildroot rootfs assembly (Step 4.7) folds them into the SquashFS.
+    # Step 4.6: stage the binary into the rootfs overlay so the next
+    # Buildroot rootfs assembly (Step 4.7) folds it into the SquashFS.
     OVERLAY="$(pwd)/buildroot/board/embraos/rootfs_overlay"
-    mkdir -p "$OVERLAY/sbin" "$OVERLAY/usr/bin"
-    cp -v "target/x86_64-unknown-linux-musl/release/embra-comp" \
-        "$OVERLAY/sbin/embra-comp"
+    mkdir -p "$OVERLAY/usr/bin"
     cp -v "target/x86_64-unknown-linux-musl/release/embra-desktop" \
         "$OVERLAY/usr/bin/embra-desktop"
-    chmod 0755 "$OVERLAY/sbin/embra-comp" "$OVERLAY/usr/bin/embra-desktop"
+    chmod 0755 "$OVERLAY/usr/bin/embra-desktop"
 
     # Step 4.7: re-run Buildroot to regenerate rootfs.squashfs + image
-    # with the overlay binaries included. Buildroot's incremental
-    # rebuild only re-runs rootfs assembly + image creation, not the
-    # full package compile pass.
-    echo "=== Step 4.7: Regenerate rootfs.squashfs with FFI binaries ==="
+    # with the overlay binary included. Buildroot's incremental rebuild
+    # only re-runs rootfs assembly + image creation, not the full
+    # package compile pass.
+    echo "=== Step 4.7: Regenerate rootfs.squashfs with embra-desktop ==="
     (cd "$BUILDROOT_DIR" && \
         rm -f output/images/rootfs.squashfs output/images/embraos.img && \
         make -j$(nproc_compat))
