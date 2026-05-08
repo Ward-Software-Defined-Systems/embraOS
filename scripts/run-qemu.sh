@@ -66,8 +66,42 @@ HOST_COLS=${HOST_COLS:-80}
 HOST_ROWS=${HOST_ROWS:-24}
 
 if [ "$DESKTOP_MODE" = "1" ]; then
-    DISPLAY_ARGS=(
-        -display gtk,gl=off
+    # Display backend — `EMBRA_DISPLAY` overrides; default tries the
+    # most-likely-to-work options in sequence based on what's available.
+    # gtk needs an X11/Wayland session reachable from the QEMU process;
+    # sdl is more universal; vnc works headless (connect with any VNC
+    # client at localhost:5900).
+    EMBRA_DISPLAY="${EMBRA_DISPLAY:-auto}"
+    if [ "$EMBRA_DISPLAY" = "auto" ]; then
+        if [ -n "${WAYLAND_DISPLAY:-}" ] || [ -n "${DISPLAY:-}" ]; then
+            EMBRA_DISPLAY="sdl"
+        else
+            EMBRA_DISPLAY="vnc"
+        fi
+    fi
+    case "$EMBRA_DISPLAY" in
+        gtk)
+            DISPLAY_ARGS=(-display gtk,gl=off)
+            DISPLAY_DESC="GTK 1280x720 (virtio-gpu, llvmpipe)"
+            ;;
+        sdl)
+            DISPLAY_ARGS=(-display sdl,gl=off)
+            DISPLAY_DESC="SDL 1280x720 (virtio-gpu, llvmpipe)"
+            ;;
+        vnc)
+            DISPLAY_ARGS=(-vnc :0)
+            DISPLAY_DESC="VNC at localhost:5900 (connect with any VNC viewer)"
+            ;;
+        spice)
+            DISPLAY_ARGS=(-display spice-app,gl=off)
+            DISPLAY_DESC="SPICE (spice-client launches)"
+            ;;
+        *)
+            echo "ERROR: unknown EMBRA_DISPLAY=$EMBRA_DISPLAY (use gtk|sdl|vnc|spice|auto)" >&2
+            exit 2
+            ;;
+    esac
+    DISPLAY_ARGS+=(
         -device virtio-gpu-pci,xres=1280,yres=720
         -device virtio-keyboard-pci
         -device virtio-tablet-pci
@@ -79,7 +113,6 @@ if [ "$DESKTOP_MODE" = "1" ]; then
     # owns /dev/tty1 + DRM + libinput; embra-desktop runs as its
     # only fullscreen Wayland client.
     KERNEL_CMDLINE="root=/dev/vda2 ro quiet embra.desktop=1"
-    DISPLAY_DESC="GTK 1280x720 (virtio-gpu, llvmpipe)"
     SERIAL_DESC="/tmp/embra-serial.log"
 else
     DISPLAY_ARGS=(-nographic)
@@ -101,7 +134,15 @@ echo "  Serial console: $SERIAL_DESC"
 echo "  Port forwards: 50000→50000 (gRPC), 8443→8443 (REST)"
 echo ""
 if [ "$DESKTOP_MODE" = "1" ]; then
-    echo "Close the QEMU window or send SIGINT to exit."
+    case "$EMBRA_DISPLAY" in
+        vnc)
+            echo "Connect with: vncviewer localhost:5900   (or any VNC client)"
+            echo "Then send SIGINT to exit QEMU."
+            ;;
+        *)
+            echo "Close the QEMU window or send SIGINT to exit."
+            ;;
+    esac
 else
     echo "Press Ctrl-A X to exit QEMU"
 fi
