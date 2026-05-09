@@ -65,6 +65,18 @@ elif [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     fi
 fi
 
+# EMBRA_CPU lets the operator override the auto-picked CPU model. Useful
+# when diagnosing nested-virt issues — e.g., `EMBRA_CPU=host` to retest
+# CPU passthrough after fixing other latent bugs, or `EMBRA_CPU=Nehalem`
+# to drop AVX/AES claims that Parallels' nested KVM may not actually be
+# able to honor. Strips any auto-added `-cpu …` from $ACCEL first so we
+# don't end up with two `-cpu` flags.
+if [ -n "${EMBRA_CPU:-}" ]; then
+    ACCEL="$(echo "$ACCEL" | sed -E 's/-cpu [^ ]+ ?//; s/  +/ /g; s/ +$//')"
+    ACCEL="$ACCEL -cpu $EMBRA_CPU"
+    ACCEL_NAME="$ACCEL_NAME [EMBRA_CPU=$EMBRA_CPU]"
+fi
+
 # Parallels guests fall back to TCG when nested virtualization is off in the
 # host VM settings — boot then takes 5-10 minutes (Mesa3D + LLVM JIT + cage)
 # and looks like a kernel hang. Warn loudly so the operator knows what to fix.
@@ -92,6 +104,12 @@ fi
 # so embrad's stdio still has somewhere to land after cage takes
 # /dev/tty1. Use Ctrl-Alt-G to release the QEMU pointer grab.
 DESKTOP_MODE="${EMBRA_DESKTOP:-0}"
+
+# Serial-log destination. Default lands in $HOME so the file survives a
+# host-VM reboot (Ubuntu's /tmp is tmpfs by default — using it loses the
+# log if the dev VM crashes mid-boot, which is exactly the scenario we
+# need the log for). Operator can override via EMBRA_SERIAL_LOG=<path>.
+SERIAL_LOG="${EMBRA_SERIAL_LOG:-$HOME/embraos-serial.log}"
 
 # Detect host terminal size and pass to guest via kernel cmdline
 HOST_COLS=$(stty size 2>/dev/null | awk '{print $2}')
@@ -151,7 +169,7 @@ if [ "$DESKTOP_MODE" = "1" ]; then
         -device virtio-keyboard-pci
         -device virtio-tablet-pci
     )
-    SERIAL_ARGS=(-serial "file:/tmp/embra-serial.log")
+    SERIAL_ARGS=(-serial "file:$SERIAL_LOG")
     # `embra.desktop=1` flips embrad's supervisor to spawn
     # `cage -- /usr/bin/embra-desktop` in place of the serial-TTY
     # embra-console. cage is a wlroots-based kiosk compositor that
@@ -160,7 +178,7 @@ if [ "$DESKTOP_MODE" = "1" ]; then
     #
     # Two `console=` entries: kernel printk goes to BOTH the VGA text
     # framebuffer (visible on VNC) AND the serial line (captured to
-    # /tmp/embra-serial.log on host).
+    # $SERIAL_LOG on host — default $HOME/embraos-serial.log).
     #
     # Order matters: the LAST `console=` becomes /dev/console for
     # userspace output. `console=tty0 console=ttyS0` puts ttyS0 last so
@@ -178,7 +196,7 @@ if [ "$DESKTOP_MODE" = "1" ]; then
     # `vt.global_cursor_default=0` hides the kernel's blinking text cursor
     # so it doesn't flicker through cage's surface during the handoff.
     KERNEL_CMDLINE="root=/dev/vda2 ro console=tty0 console=ttyS0 vt.handoff=1 vt.global_cursor_default=0 embra.desktop=1"
-    SERIAL_DESC="/tmp/embra-serial.log"
+    SERIAL_DESC="$SERIAL_LOG"
 else
     DISPLAY_ARGS=(-nographic)
     SERIAL_ARGS=(-serial mon:stdio)
@@ -206,7 +224,7 @@ if [ "$DESKTOP_MODE" = "1" ]; then
             ;;
         *)
             echo "Close the QEMU window or send SIGINT to exit."
-            echo "Live boot progress: tail -F /tmp/embra-serial.log    (in another terminal)"
+            echo "Live boot progress: tail -F $SERIAL_LOG    (in another terminal)"
             ;;
     esac
 else
@@ -228,6 +246,35 @@ if [ -r /proc/meminfo ]; then
     fi
 fi
 
+# QEMU's own stderr (CPU-feature warnings, KVM init errors, accelerator
+# notices) gets a persistent sidecar log so it survives a host-VM crash.
+# Process substitution + `tee >&2` keeps the messages flowing to the
+# operator's terminal as well. Path mirrors $SERIAL_LOG with -qemu suffix
+# so both ride the same EMBRA_SERIAL_LOG override convention.
+QEMU_STDERR_LOG="${SERIAL_LOG%.log}-qemu.log"
+
+# Pre-create both log files and fsync the directory entries to disk
+# *before* QEMU starts. Without this, a host-VM hard-crash (e.g.
+# Parallels nested-KVM lockup) wipes the page cache, and the file may
+# never have made it to the underlying virtual disk at all — what we
+# want is for the file to exist post-crash even if its contents are
+# truncated to whatever was synced.
+: > "$SERIAL_LOG"
+: > "$QEMU_STDERR_LOG"
+sync "$SERIAL_LOG" "$QEMU_STDERR_LOG" 2>/dev/null || sync
+
+# Background syncer: forces dirty file pages to the underlying disk every
+# 1s while QEMU runs. Cuts the lost-tail-on-crash window from "the entire
+# run so far" to "at most ~1s of writes". `sync --data FILE` fdatasyncs
+# just those files (lighter than a global sync). Killed by trap on exit.
+( while :; do
+    sync --data "$SERIAL_LOG" "$QEMU_STDERR_LOG" 2>/dev/null \
+        || sync 2>/dev/null
+    sleep 1
+done ) &
+SYNCER_PID=$!
+trap 'kill "$SYNCER_PID" 2>/dev/null; sync 2>/dev/null' EXIT INT TERM
+
 qemu-system-x86_64 \
     $ACCEL \
     -m "$MEMORY" \
@@ -240,4 +287,5 @@ qemu-system-x86_64 \
     "${DISPLAY_ARGS[@]}" \
     "${SERIAL_ARGS[@]}" \
     -nic user,hostfwd=tcp::50000-:50000,hostfwd=tcp::8443-:8443 \
-    -no-reboot
+    -no-reboot \
+    2> >(tee -a "$QEMU_STDERR_LOG" >&2)
