@@ -46,6 +46,7 @@ buildroot-src/
 embraos-tools-instructions.md
 embraOS_Phase0_Sprint1.md
 ARCHITECTURE_Phase0_Sprint1.md
+/embra-desktop-troubleshooting/
 
 # Phase 0 reference (retired from branch, kept locally)
 # Leading slash anchors to repo root so crates/*/src/ are not matched.

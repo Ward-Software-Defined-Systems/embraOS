@@ -55,15 +55,73 @@ The graphics defconfig adds ~85-95 MB to `rootfs.squashfs` (LLVM + Mesa3D domina
 
 `scripts/build-image.sh` cross-compiles `embra-desktop` against Buildroot's staging tree because iced 0.14 pulls libwayland-client / xkbcommon / softbuffer via FFI — the standalone `/opt/x86_64-linux-musl-cross` toolchain doesn't ship those libs.
 
+**Two non-obvious Kconfig hinges** (both bit us with silent-drop failures during bring-up — Buildroot doesn't fail the build, it just writes a `# <pkg> needs ...` comment in the resolved `.config` and moves on):
+
+- **`BR2_TOOLCHAIN_BUILDROOT_CXX=y`** is mandatory. Mesa3D, LLVM, wlroots, and cage all depend on it transitively (Mesa3D's `depends on BR2_INSTALL_LIBSTDCPP`). Without it the toolchain doesn't ship a `g++` and all four packages drop — `/usr/bin/cage` is never built and `embrad` falls back to TUI even with `embra.desktop=1` set.
+- **`BR2_PACKAGE_MESA3D_LLVM=y`** must be explicit. It is *not* auto-selected by `BR2_PACKAGE_LLVM=y` + `BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LLVMPIPE=y`. Without it, LLVMPIPE drops → no Gallium driver → `BR2_PACKAGE_MESA3D_GBM` drops → `BR2_PACKAGE_HAS_LIBGBM` is never provided → cage and wlroots silently drop.
+
+Sanity check after build: `grep -E '^BR2_PACKAGE_(CAGE|WLROOTS|MESA3D|MESA3D_LLVM|MESA3D_GBM|HAS_LIBGBM)=y' buildroot-src/.config` should return six matches. If any are missing, grep for `# <pkg> needs` to find the unsatisfied dep.
+
 Steps:
 
-1. **Step 1**: cargo build all non-FFI crates with the standalone musl.cc toolchain (existing).
+1. **Step 1**: cargo build all non-FFI crates with the standalone musl.cc toolchain. Produces static-pie binaries (`embrad`, `embra-apid`, `embra-trustd`, `embra-brain`, `embra-console`).
 2. **Step 4**: Buildroot's main pass — kernel + userspace libs + Buildroot packages.
 3. **Step 4.5**: cargo build `embra-desktop` against Buildroot's staging (toolchain + pkg-config switched to Buildroot's host musl).
+   **Critical:** `CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=-crt-static"`. iced 0.14 → winit 0.30 → wayland-client 0.31 calls `dlopen("libwayland-client.so.0")` at runtime, and a fully-static musl binary can't reliably load `.so` files. Symptom of getting this wrong: `embra-desktop` panics with `WaylandError(Connection(NoWaylandLib))`. The rootfs ships `/lib/ld-musl-x86_64.so.1` plus the needed libs in `/usr/lib`, so dynamic-link is fine; only `embra-desktop` opts out of crt-static.
 4. **Step 4.6**: stage the binary into `buildroot/board/embraos/rootfs_overlay/usr/bin/embra-desktop`.
 5. **Step 4.7**: re-run Buildroot to fold the overlay binary into `rootfs.squashfs`.
 
 `embra-comp` is excluded from cross-compile (its smithay deps need the same staging plumbing, but it's no longer in the boot path).
+
+## Boot Wiring (embrad runtime setup)
+
+cage and embra-desktop need a handful of things at runtime that aren't in the SquashFS overlay or QEMU's defaults. `embrad` (PID 1) sets them up before spawning cage.
+
+| What | Where | Why |
+|---|---|---|
+| `/dev/shm` tmpfs mount | `crates/embrad/src/mount.rs` (after `/dev/pts`) | wlroots `shm_open()` for keymap + dmabuf format table. Without it, cage hands clients a stub keymap → segfault inside `libxkbcommon` on first keypress (`cage[N]: segfault at 80 ... in libxkbcommon.so.0.9.2`). |
+| `/run/user/0` mode 0700 | `crates/embrad/src/mount.rs` (after the `/run` tmpfs) | XDG basedir spec. cage's libwayland binds its socket at `$XDG_RUNTIME_DIR/wayland-0`; bind silently fails if the dir doesn't exist. cage's manpage doesn't document the requirement. The `post_build.sh` placeholder is masked by the tmpfs mount. |
+| udevd daemon | `crates/embrad/src/mount.rs::start_udevd` | cage / wlroots / libinput need device-add events for `/dev/input/*` and `/dev/dri/*`. Provided by eudev (`BR2_PACKAGE_EUDEV=y`). |
+| `XDG_RUNTIME_DIR=/run/user/0` env | `crates/embrad/src/supervisor.rs` cage spawn | XDG basedir env that libwayland reads. |
+| cage stderr → `/dev/console` | `crates/embrad/src/supervisor.rs` cage spawn | Visibility. cage's stdout goes to `/dev/tty1` (graphics surface, invisible to operator); routing stderr to `/dev/console` (= ttyS0 = host's `/tmp/embra-serial.log`) makes cage's wlroots/EGL/libseat error output debuggable. |
+
+Kernel cmdline (set by `scripts/run-qemu.sh` in graphics mode):
+
+| Flag | Why |
+|---|---|
+| `console=tty0 console=ttyS0` | tty0 = visible kernel framebuffer console; ttyS0 *last* so `/dev/console` maps to it for `embrad`'s tracing logs. |
+| `vt.handoff=1` | Kernel framebuffer console releases the CRTC when cage takes DRM master, instead of fighting back with damage-update workqueue items (which produced repeating `[CRTC:N:crtc-0] vblank wait timed out` WARNINGs). |
+| `vt.global_cursor_default=0` | Hides kernel text cursor so it doesn't flicker through cage's surface during the handoff. |
+| `embra.desktop=1` | `embrad` supervisor switch — spawns `cage -- /usr/bin/embra-desktop` instead of `embra-console`. |
+
+QEMU display devices (graphics mode):
+
+| Flag | Why |
+|---|---|
+| `-vga none` | Strips QEMU's default Cirrus/std VGA card. Without it, the guest sees TWO display devices (default VGA + virtio-gpu). SDL/GTK opens two windows, `/dev/dri/card0` ends up bound to VGA, cage opens the wrong DRM device, and the kernel framebuffer keeps writing to the unclaimed virtio-gpu surface. |
+| `-device virtio-gpu-pci,xres=1280,yres=720` | Software-rendered display device matching iced's window size. |
+| `-device virtio-keyboard-pci -device virtio-tablet-pci` | Input devices via virtio. |
+
+QEMU acceleration (graphics or TUI mode):
+
+| Flag | Why |
+|---|---|
+| `-cpu host` *only when bare metal* | Gated on `systemd-detect-virt == none` in `scripts/run-qemu.sh:46-65`. Inside a hypervisor (Parallels, VMware, Hyper-V, KVM-on-KVM) the L0 advertises CPU features through CPUID that it can't actually emulate when the L1 guest tries to use them — passing `-cpu host` causes hard lockups of the L1 VM. On Parallels we hit this exactly: kernel decompressed, jumped, used a passthrough feature on first instruction, the entire Ubuntu VM froze. |
+
+## Common Build & Boot Pitfalls
+
+Compiled list of traps we hit while bringing this up. If you hit one of these symptoms, jump to the cause.
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Boot reaches `Service embra-console is healthy`, QEMU window shows kernel text only | cage missing from rootfs (Buildroot silently dropped it) | Verify `BR2_TOOLCHAIN_BUILDROOT_CXX=y` and `BR2_PACKAGE_MESA3D_LLVM=y` in resolved `buildroot-src/.config`. Grep for `# .* needs` comments to find unmet deps. Toolchain change requires `rm -rf buildroot-src/output && ./scripts/build-image.sh`. |
+| Boot reaches `Service cage is healthy`, screen frozen on last kernel printk | `/run/user/0` not created at runtime → libwayland socket bind silently failed | `embrad`'s `mount_pseudofs` creates `/run/user/0` mode 0700 after the `/run` tmpfs mount. |
+| Two QEMU windows open | Default VGA card + virtio-gpu both present | `-vga none` in `scripts/run-qemu.sh` graphics-mode `DISPLAY_ARGS`. |
+| Repeating `[CRTC:N:crtc-0] vblank wait timed out` WARNINGs | Kernel framebuffer console fighting cage for the CRTC | `vt.handoff=1` on kernel cmdline. |
+| `embra-desktop` panics with `WaylandError(Connection(NoWaylandLib))` | Static-pie musl binary can't dlopen `libwayland-client.so.0` | Drop `+crt-static` for `embra-desktop` in Step 4.5 (`CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=-crt-static"`). |
+| `cage[N]: segfault at 80 ... in libxkbcommon.so.0.9.2` on keyboard input | wlroots `shm_open()` for keymap fails — `/dev/shm` not mounted | `embrad`'s `mount_pseudofs` mounts `/dev/shm` tmpfs after `/dev/pts`. |
+| Parallels host VM freezes when running QEMU+KVM with nested virt on | `-cpu host` advertising features Parallels nested KVM can't honor | `scripts/run-qemu.sh` gates `-cpu host` to `systemd-detect-virt == none`. With the gate in, nested virt should be safe. |
+| Boot is glacial (5–10 minutes) under Parallels | TCG software emulation (no `/dev/kvm`) | Enable nested virtualization in Parallels VM settings. |
 
 ## Stage Summary
 
@@ -77,6 +135,7 @@ Steps:
 | 4a-4d | ✅ | iced client (scaffold, gRPC subscription, keyboard shortcuts, auto-scroll) |
 | 5 | ✅ | embrad supervisor wiring + desktop-mode detection |
 | 6 | ✅ | Documentation + cage pivot |
+| 7 | ✅ | Wiring catch-up (toolchain CXX, MESA3D_LLVM, `/run/user/0`, `/dev/shm`, embra-desktop dynamic-link, `-vga none`, `vt.handoff=1`, cage stderr → /dev/console, `-cpu host` gated to bare metal). Boot now reaches the iced UI on first run; keyboard input works. See "Boot Wiring" + "Common Build & Boot Pitfalls" sections. |
 
 ## Host Dev Dependencies
 

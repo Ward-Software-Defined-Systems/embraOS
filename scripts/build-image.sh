@@ -231,6 +231,17 @@ if [ "${EMBRA_NO_DESKTOP:-0}" = "0" ] && [ "$BUILDROOT_ONLY" = false ]; then
     export PKG_CONFIG_SYSROOT_DIR_x86_64_unknown_linux_musl="$BR_STAGING"
     # iced's bindgen-using transitives need clang to know the sysroot
     export BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_musl="--sysroot=$BR_STAGING"
+    # Dynamic-link this one binary against musl. Default for the
+    # x86_64-unknown-linux-musl target is `+crt-static`, which would
+    # produce a static-pie executable — fine for headless services, but
+    # winit/wayland-client `dlopen("libwayland-client.so.0")` at runtime,
+    # and a fully-static musl binary can't reliably load `.so` files
+    # (panic: `WaylandError(Connection(NoWaylandLib))`). The rootfs ships
+    # /lib/ld-musl-x86_64.so.1 plus libwayland-client + libxkbcommon in
+    # /usr/lib, so dynamic linking just works. Only embra-desktop opts
+    # out of crt-static — embrad/embra-apid/etc. stay static-pie via the
+    # Step 1 standalone musl.cc build, which doesn't see this RUSTFLAGS.
+    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=-crt-static"
 
     cargo build --release --target x86_64-unknown-linux-musl -p embra-desktop
 

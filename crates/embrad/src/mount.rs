@@ -26,11 +26,37 @@ pub fn mount_pseudofs() -> Result<()> {
     std::fs::create_dir_all("/dev/pts")?;
     mount_if_needed("devpts", "/dev/pts", "devpts", MsFlags::MS_NOSUID | MsFlags::MS_NOEXEC)?;
 
+    // /dev/shm (tmpfs) — POSIX shared memory. wlroots calls shm_open() to
+    // share the keymap + dmabuf format table with Wayland clients; with no
+    // /dev/shm the call fails, wlroots gives clients a stub keymap, and
+    // cage then segfaults inside libxkbcommon on the first keypress when
+    // its xkb state hits a NULL field. Symptom we hit: GUI loads, typing
+    // crashes (`cage[N]: segfault at 80 ... in libxkbcommon.so.0.9.2`).
+    std::fs::create_dir_all("/dev/shm")?;
+    mount_if_needed("tmpfs", "/dev/shm", "tmpfs", MsFlags::MS_NOSUID | MsFlags::MS_NODEV)?;
+
     // /tmp (tmpfs)
     mount_if_needed("tmpfs", "/tmp", "tmpfs", MsFlags::MS_NOSUID | MsFlags::MS_NODEV)?;
 
     // /run (tmpfs — runtime state)
     mount_if_needed("tmpfs", "/run", "tmpfs", MsFlags::MS_NOSUID | MsFlags::MS_NODEV)?;
+
+    // /run/user/0 — XDG runtime dir for Wayland clients (cage, embra-desktop).
+    // post_build.sh creates this on the SquashFS as a placeholder, but the
+    // tmpfs mount above masks it. cage spawns with XDG_RUNTIME_DIR=/run/user/0
+    // and libwayland binds its socket at $XDG_RUNTIME_DIR/wayland-0; the bind
+    // silently fails if the directory doesn't exist — cage stays running but
+    // never actually serves Wayland, the screen never gets a surface, and our
+    // ProcessAlive health-check happily reports green. XDG basedir spec
+    // mandates 0700; uid 0 is correct since cage runs as embrad's child.
+    std::fs::create_dir_all("/run/user/0")?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(
+            "/run/user/0",
+            std::fs::Permissions::from_mode(0o700),
+        )?;
+    }
 
     // Bring up loopback interface (required for 127.0.0.1 connectivity)
     bring_up_loopback();

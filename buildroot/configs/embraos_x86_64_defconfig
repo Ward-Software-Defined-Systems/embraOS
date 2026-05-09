@@ -4,6 +4,16 @@
 BR2_x86_64=y
 BR2_TOOLCHAIN_BUILDROOT_MUSL=y
 
+# C++ in the internal toolchain. Mesa3D, LLVM (llvmpipe), wlroots, and
+# cage all require it — without it, Buildroot's Kconfig silently drops
+# the four packages with comments like "mesa3d needs a toolchain w/ ...
+# C++ ..." and "cage needs udev, EGL, OpenGL ES and GBM support" in the
+# resolved .config. Result: rootfs ships without /usr/bin/cage and
+# embrad falls back to the TUI even when EMBRA_DESKTOP=1 is on the
+# kernel cmdline. Bumping a toolchain option requires a clean rebuild
+# of buildroot-src/output/ (cannot incrementally rebuild the toolchain).
+BR2_TOOLCHAIN_BUILDROOT_CXX=y
+
 # Kernel — use Buildroot's default config
 BR2_LINUX_KERNEL=y
 BR2_LINUX_KERNEL_USE_DEFCONFIG=y
@@ -88,8 +98,18 @@ BR2_PACKAGE_EUDEV=y
 # LLVM (required by Mesa3D's llvmpipe Gallium driver)
 BR2_PACKAGE_LLVM=y
 
-# Mesa3D with llvmpipe software rasterizer
+# Mesa3D with llvmpipe software rasterizer.
+#
+# BR2_PACKAGE_MESA3D_LLVM gates the entire Gallium-driver-with-LLVM path.
+# Without it, BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LLVMPIPE silently drops
+# (its `depends on BR2_PACKAGE_MESA3D_LLVM` fails), which in turn means
+# no Gallium driver is selected, OPENGL_EGL drops (it `depends on
+# MESA3D_GALLIUM_DRIVER`), GBM drops (depends on OPENGL_EGL), and
+# HAS_LIBGBM is never provided — at which point cage and wlroots silently
+# drop too. Result: rootfs ships without /usr/bin/cage and embrad falls
+# back to TUI. Enabling MESA3D_LLVM is the single hinge.
 BR2_PACKAGE_MESA3D=y
+BR2_PACKAGE_MESA3D_LLVM=y
 BR2_PACKAGE_MESA3D_GALLIUM_DRIVER_LLVMPIPE=y
 BR2_PACKAGE_MESA3D_OPENGL_EGL=y
 BR2_PACKAGE_MESA3D_OPENGL_ES=y

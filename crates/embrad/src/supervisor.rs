@@ -395,14 +395,31 @@ impl Supervisor {
         }
         // The operator-interface service inherits stdin/stdout —
         // embra-console on serial, cage on /dev/tty1.
-        // stderr goes to log file to prevent embrad log bleed-through.
-        if svc.def.name == "embra-console" || svc.def.name == "cage" {
+        // Stderr handling is split:
+        //  - embra-console: stderr → /embra/ephemeral/embra-console.log on
+        //    guest tmpfs. The TUI owns ttyS0 via stdout, so writing stderr
+        //    to /dev/console (== ttyS0) would corrupt its rendering.
+        //  - cage: stderr → /dev/console (which the kernel cmdline maps to
+        //    ttyS0 → /tmp/embra-serial.log on the host). cage's stderr is
+        //    our only debug signal until cage actually paints, so we want
+        //    it visible to the operator. cage's stdout still inherits
+        //    /dev/tty1 for its own use; this only affects stderr.
+        if svc.def.name == "embra-console" {
             cmd.stdin(Stdio::inherit());
             cmd.stdout(Stdio::inherit());
             let log_path = format!("/embra/ephemeral/{}.log", svc.def.name);
             let log_file = std::fs::File::create(&log_path)
                 .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
             cmd.stderr(Stdio::from(log_file));
+        } else if svc.def.name == "cage" {
+            cmd.stdin(Stdio::inherit());
+            cmd.stdout(Stdio::inherit());
+            let console = std::fs::OpenOptions::new()
+                .write(true)
+                .open("/dev/console")
+                .or_else(|_| std::fs::File::create("/embra/ephemeral/cage.log"))
+                .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
+            cmd.stderr(Stdio::from(console));
         } else {
             let log_path = format!("/embra/ephemeral/{}.log", svc.def.name);
             let log_file = std::fs::File::create(&log_path)

@@ -40,15 +40,49 @@ fi
 MEMORY="2G"
 CPUS="2"
 
-# Auto-detect best acceleration
+# Auto-detect best acceleration. `-cpu host` is added on bare-metal hosts
+# only: passes through host CPU features instead of QEMU's qemu64 default
+# (x86-64-v1, missing SSSE3/SSE4 that some recent userspace assumes).
+#
+# Inside a hypervisor (Parallels, VMware, Hyper-V, KVM-on-KVM) we deliberately
+# skip `-cpu host` and let QEMU use qemu64 — the L0 hypervisor advertises CPU
+# features through CPUID that it can't actually emulate when the L1 guest
+# tries to use them, which causes hard lockups of the L1 VM (we hit this on
+# Parallels: kernel decompressed, jumped, used a passthrough feature on
+# first instruction, the entire Ubuntu VM froze).
 ACCEL=""
 ACCEL_NAME="none (TCG software emulation)"
 if [ "$(uname)" = "Darwin" ]; then
-    ACCEL="-accel hvf"
+    ACCEL="-accel hvf -cpu host"
     ACCEL_NAME="HVF (macOS)"
 elif [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
     ACCEL="-accel kvm"
     ACCEL_NAME="KVM (Linux)"
+    if command -v systemd-detect-virt >/dev/null 2>&1 \
+        && [ "$(systemd-detect-virt 2>/dev/null)" = "none" ]; then
+        ACCEL="$ACCEL -cpu host"
+        ACCEL_NAME="KVM (Linux, -cpu host)"
+    fi
+fi
+
+# Parallels guests fall back to TCG when nested virtualization is off in the
+# host VM settings — boot then takes 5-10 minutes (Mesa3D + LLVM JIT + cage)
+# and looks like a kernel hang. Warn loudly so the operator knows what to fix.
+if [ -z "$ACCEL" ] && command -v systemd-detect-virt >/dev/null 2>&1 \
+    && [ "$(systemd-detect-virt 2>/dev/null)" = "parallels" ]; then
+    cat >&2 <<'WARN'
+
+WARNING: Running in Parallels Desktop without /dev/kvm — falling back to
+         TCG software emulation. Boot will be 5-10x slower and usually
+         looks like a kernel hang at the bootloader.
+
+         Enable hardware acceleration:
+           1. Shut down this Ubuntu VM (not suspend).
+           2. Parallels Desktop -> Configure -> Hardware -> CPU & Memory
+              -> "Enable nested virtualization" (Pro/Business edition).
+           3. Boot the VM and re-run.
+
+WARN
 fi
 
 # embra-desktop graphical session selection.
@@ -101,7 +135,18 @@ if [ "$DESKTOP_MODE" = "1" ]; then
             exit 2
             ;;
     esac
+    # `-vga none` strips QEMU's default Cirrus/std VGA card. Without it,
+    # the guest sees TWO display devices (VGA + virtio-gpu) → SDL/GTK
+    # opens two windows, /dev/dri/card0 ends up bound to VGA, cage opens
+    # the wrong DRM device, and the kernel framebuffer console keeps
+    # writing to the virtio-gpu surface that cage never claims. Symptom
+    # was a "QEMU" window with kernel printk + a "QEMU - Press Ctrl-Alt-G"
+    # window with stale init-time text, plus repeating vblank-wait timeout
+    # WARNINGs from drm_fb_helper_damage_work. With -vga none the only
+    # display device is virtio-gpu → /dev/dri/card0 → cage takes DRM
+    # master cleanly.
     DISPLAY_ARGS+=(
+        -vga none
         -device virtio-gpu-pci,xres=1280,yres=720
         -device virtio-keyboard-pci
         -device virtio-tablet-pci
@@ -125,7 +170,14 @@ if [ "$DESKTOP_MODE" = "1" ]; then
     #
     # `quiet` is intentionally OMITTED so failures during
     # kernel/initramfs/embrad boot are visible.
-    KERNEL_CMDLINE="root=/dev/vda2 ro console=tty0 console=ttyS0 embra.desktop=1"
+    #
+    # `vt.handoff=1` tells the kernel framebuffer console to release the
+    # CRTC/scanout when a userspace DRM master (cage) takes over, instead
+    # of fighting back with damage-update workqueue items (which produced
+    # the `[CRTC:37:crtc-0] vblank wait timed out` WARNINGs we saw).
+    # `vt.global_cursor_default=0` hides the kernel's blinking text cursor
+    # so it doesn't flicker through cage's surface during the handoff.
+    KERNEL_CMDLINE="root=/dev/vda2 ro console=tty0 console=ttyS0 vt.handoff=1 vt.global_cursor_default=0 embra.desktop=1"
     SERIAL_DESC="/tmp/embra-serial.log"
 else
     DISPLAY_ARGS=(-nographic)
@@ -154,12 +206,27 @@ if [ "$DESKTOP_MODE" = "1" ]; then
             ;;
         *)
             echo "Close the QEMU window or send SIGINT to exit."
+            echo "Live boot progress: tail -F /tmp/embra-serial.log    (in another terminal)"
             ;;
     esac
 else
     echo "Press Ctrl-A X to exit QEMU"
 fi
 echo ""
+
+# Pre-flight: tight host memory swap-thrashes the guest before init runs;
+# warn when MemAvailable is below the requested -m plus 1 GiB QEMU overhead.
+# (Bit us once on a 3 GiB Parallels VM — kernel never made it past early init.)
+if [ -r /proc/meminfo ]; then
+    MEM_AVAIL_KB=$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)
+    MEM_REQ_GIB=${MEMORY%G}
+    MEM_NEED_KB=$(( (MEM_REQ_GIB + 1) * 1024 * 1024 ))
+    if [ -n "$MEM_AVAIL_KB" ] && [ "$MEM_AVAIL_KB" -lt "$MEM_NEED_KB" ]; then
+        echo "WARNING: only $((MEM_AVAIL_KB / 1024)) MiB available on host." >&2
+        echo "         QEMU requests ${MEMORY} + ~1 GiB overhead; boot may stall in swap." >&2
+        echo "" >&2
+    fi
+fi
 
 qemu-system-x86_64 \
     $ACCEL \
