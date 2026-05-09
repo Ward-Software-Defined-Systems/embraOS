@@ -72,7 +72,15 @@ The graphics defconfig adds ~85-95 MB to `rootfs.squashfs` (LLVM + Mesa3D domina
 EMBRA_DESKTOP=1 ./scripts/run-qemu.sh      # graphical session (1280x720 SDL/GTK window)
 ```
 
-`EMBRA_DISPLAY=gtk|sdl|vnc|spice` overrides the auto-picked backend; default auto-picks SDL when a display server is reachable, VNC on `localhost:5900` otherwise.
+| Env var | Default | Effect |
+|---|---|---|
+| `EMBRA_DESKTOP` | `0` | `1` flips embrad to spawn cage + iced GUI instead of the serial TUI. |
+| `EMBRA_DISPLAY` | `auto` | `gtk\|sdl\|vnc\|spice` — overrides QEMU's display backend. Default picks SDL when a display server is reachable, VNC on `localhost:5900` otherwise. |
+| `EMBRA_SERIAL_LOG` | `$HOME/embraos-serial.log` | Guest serial output path (graphics mode only — TUI mode goes to stdio). Lives on persistent storage so the file survives a host-VM crash; the script also pre-creates the file, fsyncs metadata, and runs a 1s `sync --data` loop while QEMU is up. |
+| `EMBRA_CPU` | (auto) | Override the auto-picked QEMU `-cpu` model. Auto = `host` on bare-metal Linux/Darwin, `qemu64` (QEMU default) inside any hypervisor. Mostly used for diagnosing nested-virt issues — e.g. `EMBRA_CPU=Nehalem` drops AVX/AES claims some nested KVM implementations can't honor. |
+| `EMBRA_NO_DESKTOP` | (build-time) | `1` selects the minimal defconfig (TUI only, no Mesa3D/cage in the rootfs). |
+
+QEMU's own stderr (CPU-feature warnings, KVM init notices) is captured to `${EMBRA_SERIAL_LOG%.log}-qemu.log` (default `$HOME/embraos-serial-qemu.log`) — useful when QEMU dies before any guest serial output is produced.
 
 ## Build Pipeline
 
@@ -127,9 +135,12 @@ QEMU display devices (graphics mode):
 
 QEMU acceleration (graphics or TUI mode):
 
-| Flag | Why |
+| Flag / behavior | Why |
 |---|---|
-| `-cpu host` *only when bare metal* | Gated on `systemd-detect-virt == none` in `scripts/run-qemu.sh:46-65`. Inside a hypervisor (Parallels, VMware, Hyper-V, KVM-on-KVM) the L0 advertises CPU features through CPUID that it can't actually emulate when the L1 guest tries to use them — passing `-cpu host` causes hard lockups of the L1 VM. On Parallels we hit this exactly: kernel decompressed, jumped, used a passthrough feature on first instruction, the entire Ubuntu VM froze. |
+| `-accel kvm` if `/dev/kvm` is r/w; `-accel hvf` on Darwin; otherwise TCG | Auto-detected. KVM/HVF give native speed; TCG is software emulation, ~5-10× slower but always works. |
+| `-cpu host` *only when bare metal* | Gated on `systemd-detect-virt == none` in `scripts/run-qemu.sh:46-65`. Inside a hypervisor (Parallels, VMware, Hyper-V, KVM-on-KVM) the L0 advertises CPU features through CPUID that it can't actually emulate when the L1 guest tries to use them — passing `-cpu host` causes hard lockups of the L1 VM. We hit this on Parallels: kernel decompressed, jumped, used a passthrough feature on first instruction, the entire Ubuntu VM froze. |
+| **Parallels-Intel: nested virt is unstable, period** | After fixing every other lockup cause, KVM-on-Parallels-Intel still hard-locks the host VM ~1s into boot — in BOTH TUI and graphics modes, with the default `qemu64` model AND with `-cpu host`. The `-cpu host` gate is necessary but not sufficient. Not fixable from the QEMU side; the L0's CPUID lies. **Disable nested virtualization in the Parallels VM settings and accept TCG.** ~30s boot to UI is the working steady state on this host class. |
+| `EMBRA_CPU=<model>` override | Bypass the auto-picked CPU model for diagnostic A/B testing on hosts where nested KVM might work — e.g. `EMBRA_CPU=Nehalem` for a constrained nested-friendly model, or `EMBRA_CPU=host` to force passthrough regardless of the gate. Has not rescued KVM-on-Parallels-Intel. |
 
 ## Common Build & Boot Pitfalls
 
@@ -143,8 +154,9 @@ Compiled list of traps we hit while bringing this up. If you hit one of these sy
 | Repeating `[CRTC:N:crtc-0] vblank wait timed out` WARNINGs | Kernel framebuffer console fighting cage for the CRTC | `vt.handoff=1` on kernel cmdline. |
 | `embra-desktop` panics with `WaylandError(Connection(NoWaylandLib))` | Static-pie musl binary can't dlopen `libwayland-client.so.0` | Drop `+crt-static` for `embra-desktop` in Step 4.5 (`CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS="-C target-feature=-crt-static"`). |
 | `cage[N]: segfault at 80 ... in libxkbcommon.so.0.9.2` on keyboard input | wlroots `shm_open()` for keymap fails — `/dev/shm` not mounted | `embrad`'s `mount_pseudofs` mounts `/dev/shm` tmpfs after `/dev/pts`. |
-| Parallels host VM freezes when running QEMU+KVM with nested virt on | `-cpu host` advertising features Parallels nested KVM can't honor | `scripts/run-qemu.sh` gates `-cpu host` to `systemd-detect-virt == none`. With the gate in, nested virt should be safe. |
-| Boot is glacial (5–10 minutes) under Parallels | TCG software emulation (no `/dev/kvm`) | Enable nested virtualization in Parallels VM settings. |
+| Parallels-Intel host VM freezes when running QEMU+KVM | KVM-on-Parallels-Intel is broadly unstable. The `-cpu host` gate (`systemd-detect-virt == none` in `scripts/run-qemu.sh`) is necessary but not sufficient — qemu64 default also locks up in both TUI and graphics modes (~1s into boot, fast enough that even our 1s `sync` loop loses the logs). | **Disable nested virtualization in the Parallels VM settings.** TCG is the working default on this host class. `-cpu host` gate stays in regardless. |
+| Boot is slow (~30s) under Parallels-Intel | TCG software emulation. KVM is not a viable path on this host class (see entry above). | Live with it, or move dev to bare-metal Linux / a different hypervisor where the `-cpu host` gate auto-engages. |
+| Logs missing after a host-VM crash | `/tmp` is tmpfs on Ubuntu 26.04 — wiped on reboot. Page cache lost on hard reset. | Log path defaults to `$HOME/embraos-serial.log` (persistent). Script pre-creates files + runs background `sync --data` loop. Sub-second crashes can still lose recent writes — for those, route serial off-VM (shared folder / network), not yet implemented. |
 
 ## Stage Summary
 

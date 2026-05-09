@@ -77,22 +77,26 @@ if [ -n "${EMBRA_CPU:-}" ]; then
     ACCEL_NAME="$ACCEL_NAME [EMBRA_CPU=$EMBRA_CPU]"
 fi
 
-# Parallels guests fall back to TCG when nested virtualization is off in the
-# host VM settings — boot then takes 5-10 minutes (Mesa3D + LLVM JIT + cage)
-# and looks like a kernel hang. Warn loudly so the operator knows what to fix.
+# Parallels guests fall back to TCG when nested virtualization is off in
+# the host VM settings. TCG boot is ~30s instead of the ~5s KVM/HVF give
+# you, but on Parallels-Intel TCG is the documented working default —
+# enabling nested virt has been observed to hard-lock the host VM ~1s
+# into boot, in both TUI and graphics modes, even with -cpu host gated
+# off. Mention the option but don't push it.
 if [ -z "$ACCEL" ] && command -v systemd-detect-virt >/dev/null 2>&1 \
     && [ "$(systemd-detect-virt 2>/dev/null)" = "parallels" ]; then
     cat >&2 <<'WARN'
 
-WARNING: Running in Parallels Desktop without /dev/kvm — falling back to
-         TCG software emulation. Boot will be 5-10x slower and usually
-         looks like a kernel hang at the bootloader.
+NOTE: Running in Parallels Desktop without /dev/kvm — falling back to
+      TCG software emulation. Boot will take ~30s instead of ~5s, but
+      this is the documented working default for Parallels-Intel.
 
-         Enable hardware acceleration:
-           1. Shut down this Ubuntu VM (not suspend).
-           2. Parallels Desktop -> Configure -> Hardware -> CPU & Memory
-              -> "Enable nested virtualization" (Pro/Business edition).
-           3. Boot the VM and re-run.
+      Enabling nested virtualization in the Parallels VM settings would
+      enable KVM acceleration BUT has been observed to hard-lock the
+      host VM on Parallels-Intel (the L0 hypervisor's CPUID lies about
+      features it can't actually emulate). If you try it and the dev
+      VM crashes mid-boot, hard-reset and disable nested virt — TCG is
+      stable. See docs/EMBRA-DESKTOP.md "QEMU acceleration" section.
 
 WARN
 fi
