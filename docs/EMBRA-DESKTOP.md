@@ -37,19 +37,42 @@ Detection: when the kernel cmdline carries `embra.desktop=1` AND `/usr/bin/cage`
 
 ## Build & Run
 
+### Host setup (one-time)
+
+The image build needs the Rust toolchain, the standalone musl.cc cross-toolchain at `/opt/x86_64-linux-musl-cross`, and Buildroot's standard prerequisites — see the main README for the canonical host-prereq list.
+
+If you also want to iterate on `embra-comp` or `embra-desktop` host-side via `cargo run` (nested-Wayland mode — exercises the GUI without booting QEMU), install the matching link-time graphics deps:
+
+```bash
+sudo apt install -y \
+    libseat-dev libudev-dev libinput-dev \
+    libgbm-dev libdrm-dev \
+    libegl1-mesa-dev libgles2-mesa-dev \
+    libpixman-1-dev libxkbcommon-dev libwayland-dev
+```
+
+These apt packages are only needed for host-side cargo iteration; the Buildroot rootfs provides matching runtime libs separately.
+
+### Build the image
+
 ```bash
 # Default — graphics defconfig (Mesa3D + Wayland + cage + embra-desktop)
 ./scripts/build-image.sh --storage-engine fjall
 
 # Fallback — pre-experiment minimal defconfig (TUI on serial, no graphics)
 EMBRA_NO_DESKTOP=1 ./scripts/build-image.sh --storage-engine fjall
-
-# QEMU run modes
-./scripts/run-qemu.sh                      # serial TUI (-nographic)
-EMBRA_DESKTOP=1 ./scripts/run-qemu.sh      # graphical session (1280x720 GTK window)
 ```
 
 The graphics defconfig adds ~85-95 MB to `rootfs.squashfs` (LLVM + Mesa3D dominate; cage + wlroots are small). Cap is 200 MB; current build well under.
+
+### Run
+
+```bash
+./scripts/run-qemu.sh                      # serial TUI (-nographic)
+EMBRA_DESKTOP=1 ./scripts/run-qemu.sh      # graphical session (1280x720 SDL/GTK window)
+```
+
+`EMBRA_DISPLAY=gtk|sdl|vnc|spice` overrides the auto-picked backend; default auto-picks SDL when a display server is reachable, VNC on `localhost:5900` otherwise.
 
 ## Build Pipeline
 
@@ -136,20 +159,6 @@ Compiled list of traps we hit while bringing this up. If you hit one of these sy
 | 5 | ✅ | embrad supervisor wiring + desktop-mode detection |
 | 6 | ✅ | Documentation + cage pivot |
 | 7 | ✅ | Wiring catch-up (toolchain CXX, MESA3D_LLVM, `/run/user/0`, `/dev/shm`, embra-desktop dynamic-link, `-vga none`, `vt.handoff=1`, cage stderr → /dev/console, `-cpu host` gated to bare metal). Boot now reaches the iced UI on first run; keyboard input works. See "Boot Wiring" + "Common Build & Boot Pitfalls" sections. |
-
-## Host Dev Dependencies
-
-For `cargo build/test/run` of `embra-comp` and `embra-desktop` on `wsds-devops`:
-
-```bash
-sudo apt install -y \
-    libseat-dev libudev-dev libinput-dev \
-    libgbm-dev libdrm-dev \
-    libegl1-mesa-dev libgles2-mesa-dev \
-    libpixman-1-dev libxkbcommon-dev libwayland-dev
-```
-
-These are link-time deps; the Buildroot rootfs provides runtime libs.
 
 ## Key Locked Decisions (from Stage 0)
 
