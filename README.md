@@ -80,6 +80,7 @@ rustup target add x86_64-unknown-linux-musl
 # Clone and configure
 git clone https://github.com/Ward-Software-Defined-Systems/embraOS.git
 cd embraOS
+git checkout embra-desktop   # this branch — main is the Phase 1 stable serial-TUI build
 
 # Configure musl linker (per-machine, only needed once)
 cat >> ~/.cargo/config.toml << 'EOF'
