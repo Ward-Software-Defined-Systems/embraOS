@@ -34,9 +34,9 @@ Think of it as an AI that lives somewhere and is always there when you need it.
 
 ### Phase 1 — Build from Source (QEMU Bootable Image)
 
-Phase 1 builds a QEMU-bootable x86_64 disk image with an immutable SquashFS rootfs, service supervision, and soul verification at boot.
+Phase 1 on this branch builds a QEMU-bootable x86_64 disk image with the graphics rootfs by default (Mesa3D + Wayland + `cage` compositor + `iced` GUI client), immutable SquashFS, service supervision, and soul verification at boot. The serial-TTY ratatui TUI is retained as a fallback boot mode.
 
-#### Ubuntu 24.04 / 26.04 (Recommended — Full Build Pipeline)
+#### Ubuntu 24.04 / 26.04 Desktop (Recommended for embra-desktop)
 
 ```bash
 # Install dependencies
@@ -44,10 +44,17 @@ Phase 1 builds a QEMU-bootable x86_64 disk image with an immutable SquashFS root
 # rocksdb → zstd-sys dep chain) to parse C headers at build time.
 # libcrypt-dev provides crypt.h for Buildroot's host-mkpasswd build —
 # Ubuntu 26.04 split crypt.h out of glibc into the standalone libxcrypt.
+# libseat-dev, libwayland-dev, and the other graphics dev-deps are only
+# needed if you also want to iterate on embra-comp or embra-desktop
+# host-side via `cargo run` (nested-Wayland mode — exercises the GUI
+# without booting QEMU). The image build itself uses Buildroot's staging
+# tree, which ships its own copies of these libs.
 sudo apt-get update && sudo apt-get install -y \
   build-essential gcc g++ unzip bc cpio rsync wget python3 file \
   protobuf-compiler musl-tools clang libclang-dev \
-  qemu-system-x86 libcrypt-dev libelf-dev libssl-dev genext2fs
+  qemu-system-x86 libcrypt-dev libelf-dev libssl-dev genext2fs \
+  libdrm-dev libegl1-mesa-dev libgbm-dev libgles2-mesa-dev libinput-dev \
+  libpixman-1-dev libseat-dev libudev-dev libwayland-dev libxkbcommon-dev
 
 # Install musl cross-toolchain (gcc+g++ with a matching musl libstdc++).
 # Ubuntu's musl-tools only wraps the host gcc and drags in a glibc-linked
@@ -87,26 +94,27 @@ cd embraOS
 ```
 
 ```bash
-# Build and run — pick a storage engine: rocksdb (battle-tested) or fjall (pure Rust)
-./scripts/build-image.sh --storage-engine rocksdb   # Full pipeline: Rust → initramfs → Buildroot → disk image
-./scripts/run-qemu.sh                                # Boot in QEMU with serial console
+# Build — pick a storage engine: rocksdb (battle-tested C++) or fjall (pure Rust)
+./scripts/build-image.sh --storage-engine rocksdb   # Default graphics rootfs (Mesa3D + cage + iced GUI)
+# or
+./scripts/build-image.sh --storage-engine fjall     # Same pipeline, pure-Rust storage backend
+
+# Run — pick a boot mode
+EMBRA_DESKTOP=1 ./scripts/run-qemu.sh                # Graphical session (1280x720 cage + iced GUI)
+./scripts/run-qemu.sh                                # Serial TUI fallback
 ```
 
 > **Storage engine:** The `--storage-engine` flag is required and is baked into the embrad binary at build time. WardSONDB locks the choice into the DATA partition on first boot via a `.engine` marker file — switching engines later requires wiping DATA.
 
 > **Buildroot version:** Defaults to `2026.02.1` (LTS, designed for Ubuntu 26.04 era). Override with `BUILDROOT_VERSION=2024.02 ./scripts/build-image.sh ...` if you need to fall back on an older host.
 
-> **embra-desktop experiment** *(branch only, not in `main`)* — the `embra-desktop` branch ships an experimental in-OS graphical session: `cage` (wlroots kiosk compositor) hosting an `iced`-based GUI client in place of the serial-TTY ratatui TUI. Desktop Ubuntu is recommended for working on this branch — iteration relies on a host display server (GTK or SDL); headless servers work via VNC but are painful. Build modes:
-> ```bash
-> ./scripts/build-image.sh --storage-engine fjall    # default — graphics rootfs (Mesa + cage + iced GUI)
-> EMBRA_NO_DESKTOP=1 ./scripts/build-image.sh ...    # fallback — TUI-only rootfs, no graphics packages
-> EMBRA_DESKTOP=1 ./scripts/run-qemu.sh              # boot into the graphical session
-> EMBRA_DISPLAY=gtk|sdl|vnc EMBRA_DESKTOP=1 ./scripts/run-qemu.sh   # force a specific QEMU display backend
-> ./scripts/run-qemu.sh                              # serial TUI (works in either rootfs)
-> ```
-> See [`docs/EMBRA-DESKTOP.md`](docs/EMBRA-DESKTOP.md) for the full architecture, host dev-deps (`libseat-dev`, `libudev-dev`, `libinput-dev`, `libgbm-dev`, `libdrm-dev`, `libegl1-mesa-dev`, `libgles2-mesa-dev`, `libpixman-1-dev`, `libxkbcommon-dev`, `libwayland-dev`), Phase-2-roadmap relationship, and stage status.
+> **embra-desktop boot variants:**
+> - `EMBRA_NO_DESKTOP=1 ./scripts/build-image.sh ...` — fallback build with the pre-experiment minimal defconfig (no graphics packages in the rootfs; serial TUI only).
+> - `EMBRA_DISPLAY=gtk|sdl|vnc EMBRA_DESKTOP=1 ./scripts/run-qemu.sh` — force a specific QEMU display backend (auto-detected from `$DISPLAY` / `$WAYLAND_DISPLAY` otherwise; `vnc` is the headless option).
+>
+> See [`docs/EMBRA-DESKTOP.md`](docs/EMBRA-DESKTOP.md) for the full architecture (cage + iced + `embra-console-core`), build pipeline (Step 4.5 cross-compile against Buildroot staging), stage status, locked design decisions, and the privacy/security invariants this branch preserves.
 
-On first boot, the Config Wizard runs — name your intelligence, choose your LLM provider (Anthropic Claude, Google Gemini, Ollama, or LM Studio), enter the corresponding credentials (API key for Anthropic/Gemini; endpoint URL + optional bearer + selected model for the OpenAI-compat presets), set your timezone. Each field is validated before commit — an invalid API key, unreachable endpoint, or garbage timezone re-prompts instead of persisting. The Ollama / LM Studio sub-flow probes `GET /v1/models` against your endpoint and presents a model selector populated from the live server response. After setup, you're in a full TUI conversation with styled text, thinking indicators, and tool execution.
+On first boot, the Config Wizard runs — name your intelligence, choose your LLM provider (Anthropic Claude, Google Gemini, Ollama, or LM Studio), enter the corresponding credentials (API key for Anthropic/Gemini; endpoint URL + optional bearer + selected model for the OpenAI-compat presets), set your timezone. Each field is validated before commit — an invalid API key, unreachable endpoint, or garbage timezone re-prompts instead of persisting. The Ollama / LM Studio sub-flow probes `GET /v1/models` against your endpoint and presents a model selector populated from the live server response. After setup, you're in a full conversation with styled text, thinking indicators, and tool execution — rendered in the iced GUI when booted via `EMBRA_DESKTOP=1`, or in the serial ratatui TUI otherwise.
 
 #### Post-Boot Setup
 
@@ -128,7 +136,7 @@ All tokens persist across reboots (stored on the STATE partition). Git `safe.dir
 
 > **SSH Setup:** `/ssh-keygen` generates an ed25519 key and displays the public key. Copy it to your target hosts' `~/.ssh/authorized_keys` manually, or use `/ssh-copy-id user@host` (RFC 1918 addresses only, best-effort with BatchMode).
 
-> **Terminal Size:** The TUI automatically inherits your SSH terminal size via the QEMU kernel command line. For best results, maximize your terminal before running `run-qemu.sh`. The size is detected once at boot — resizing the terminal after launch won't update the TUI layout.
+> **Terminal Size (serial TUI mode only):** The TUI automatically inherits your SSH terminal size via the QEMU kernel command line. For best results, maximize your terminal before running `run-qemu.sh`. The size is detected once at boot — resizing the terminal after launch won't update the TUI layout.
 
 > **Image Search Order:** `run-qemu.sh` looks for the disk image in this order:
 > 1. Explicit path passed as argument: `./scripts/run-qemu.sh /path/to/embraos.img`

@@ -37,6 +37,8 @@ Detection: when the kernel cmdline carries `embra.desktop=1` AND `/usr/bin/cage`
 
 ## Build & Run
 
+See [README.md `## Quick Start`](../README.md#quick-start) for the entry-level operator path; this section covers embra-desktop-specific detail.
+
 ### Host setup (one-time)
 
 The image build needs the Rust toolchain, the standalone musl.cc cross-toolchain at `/opt/x86_64-linux-musl-cross`, and Buildroot's standard prerequisites — see the main README for the canonical host-prereq list.
