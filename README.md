@@ -50,7 +50,7 @@ Phase 1 on this branch builds a QEMU-bootable x86_64 disk image with the graphic
 # without booting QEMU). The image build itself uses Buildroot's staging
 # tree, which ships its own copies of these libs.
 sudo apt-get update && sudo apt-get install -y \
-  build-essential gcc g++ unzip bc cpio rsync wget python3 file \
+  build-essential gcc g++ unzip bc cpio rsync wget curl git gh python3 file \
   protobuf-compiler musl-tools clang libclang-dev \
   qemu-system-x86 libcrypt-dev libelf-dev libssl-dev genext2fs \
   libdrm-dev libegl1-mesa-dev libgbm-dev libgles2-mesa-dev libinput-dev \
@@ -77,9 +77,11 @@ rustup target add x86_64-unknown-linux-musl
 ```
 
 ```bash
-# Clone and configure
+# Clone and configure — use ~/projects so source + build artifacts persist
+# across reboots (the /tmp toolchain step above is fine because /opt persists).
+mkdir -p ~/projects && cd ~/projects
 git clone https://github.com/Ward-Software-Defined-Systems/embraOS.git
-cd embraOS
+cd ~/projects/embraOS
 git checkout embra-desktop   # this branch — main is the Phase 1 stable serial-TUI build
 
 # Configure musl linker (per-machine, only needed once)
@@ -89,9 +91,9 @@ linker = "x86_64-linux-musl-gcc"
 EOF
 
 # Clone WardSONDB (separate repo, required dependency — build-image.sh builds and copies it)
-cd ..
+cd ~/projects
 git clone https://github.com/Ward-Software-Defined-Systems/wardsondb.git WardSONDB
-cd embraOS
+cd ~/projects/embraOS
 ```
 
 ```bash
