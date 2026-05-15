@@ -38,11 +38,16 @@ use crate::menu::{Action, MenuPanel, MenuState, ModalState, NavDir};
 /// ID per `view()` call, breaking the link between update and the live
 /// widget.
 static CONVERSATION_SCROLL_ID: Lazy<Id> = Lazy::new(Id::unique);
+static EXPRESSION_SCROLL_ID: Lazy<Id> = Lazy::new(Id::unique);
 static MODAL_INPUT_ID: Lazy<Id> = Lazy::new(Id::unique);
 static EDITOR_ID: Lazy<Id> = Lazy::new(Id::unique);
 
 pub fn conversation_scroll_id() -> &'static Id {
     &CONVERSATION_SCROLL_ID
+}
+
+pub fn expression_scroll_id() -> &'static Id {
+    &EXPRESSION_SCROLL_ID
 }
 
 pub fn modal_input_id() -> &'static Id {
@@ -231,9 +236,15 @@ impl EmbraDesktop {
                         | ConsoleEvent::ToolExecution { .. }
                         | ConsoleEvent::SetupPrompt { .. }
                 );
+                // Reasoning streams into the expression panel; keep it
+                // pinned to the newest text as it arrives (auto-tail).
+                let reasoning_event = matches!(event, ConsoleEvent::ReasoningDelta(_));
                 handle_console_event(event, &mut self.state);
                 if scrollable_event {
                     return operation::snap_to_end(conversation_scroll_id().clone());
+                }
+                if reasoning_event {
+                    return operation::snap_to_end(expression_scroll_id().clone());
                 }
             }
             Message::ExpressionTick => {

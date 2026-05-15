@@ -17,7 +17,7 @@ use iced::{Background, Border, Color, Element, Font, Length, Padding, Shadow, Th
 
 use crate::editor::{EditorState, EditorSyntax};
 use crate::menu::{Action, MenuItem, MenuPanel, MenuState, ModalState};
-use crate::{conversation_scroll_id, editor_id, modal_input_id, Message};
+use crate::{conversation_scroll_id, editor_id, expression_scroll_id, modal_input_id, Message};
 
 const HEADER_BG: Color = Color::from_rgb(0.18, 0.18, 0.22);
 const STATUS_BG: Color = Color::from_rgb(0.18, 0.18, 0.22);
@@ -144,20 +144,25 @@ fn draw_expression_panel(state: &AppState) -> Element<'_, Message> {
         });
     }
 
-    container(t)
-        .padding(Padding::from([6, 10]))
-        .width(Length::Fill)
-        .height(Length::Fixed(120.0))
-        .style(|_: &Theme| container::Style {
-            background: Some(Background::Color(PANEL_BG)),
-            border: Border {
-                color: Color::from_rgb(0.2, 0.2, 0.25),
-                width: 1.0,
-                radius: 0.0.into(),
-            },
-            ..container::Style::default()
-        })
-        .into()
+    container(
+        scrollable(t)
+            .id(expression_scroll_id().clone())
+            .width(Length::Fill)
+            .height(Length::Fill),
+    )
+    .padding(Padding::from([6, 10]))
+    .width(Length::Fill)
+    .height(Length::Fixed(120.0))
+    .style(|_: &Theme| container::Style {
+        background: Some(Background::Color(PANEL_BG)),
+        border: Border {
+            color: Color::from_rgb(0.2, 0.2, 0.25),
+            width: 1.0,
+            radius: 0.0.into(),
+        },
+        ..container::Style::default()
+    })
+    .into()
 }
 
 fn draw_conversation(state: &AppState) -> Container<'_, Message> {
