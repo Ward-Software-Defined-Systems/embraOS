@@ -792,7 +792,7 @@ pub enum KnowledgePromoteKind {
 #[embra_tool(
     name = "knowledge_promote",
     is_side_effectful = true,
-    description = "Promote an episodic memory entry to a semantic or procedural knowledge node. For kind=semantic, data is one of: fact, preference, decision, observation, pattern. For kind=procedural, data is a JSON object describing the procedure (preconditions, steps, outcomes)."
+    description = "Promote an episodic memory entry to a semantic or procedural knowledge node. For kind=semantic, data is one of: fact, preference, decision, observation, pattern. For kind=procedural, data is a JSON object describing the procedure (preconditions, steps, outcomes). Promote only durable, reusable knowledge worth keeping across sessions — not every memory."
 )]
 pub struct KnowledgePromoteArgs {
     pub entry_id: String,
@@ -816,7 +816,7 @@ impl KnowledgePromoteArgs {
 #[embra_tool(
     name = "knowledge_link",
     is_side_effectful = true,
-    description = "Create a directed, weighted, typed edge between two knowledge nodes. edge_type: enables | contradicts | refines | depends_on | related_to. weight is 0.0-1.0 indicating confidence."
+    description = "Create a directed, weighted, typed edge between two knowledge nodes. edge_type: enables | contradicts | refines | depends_on | related_to. weight is 0.0-1.0 indicating confidence. Use enables when the source is a prerequisite for the target; contradicts when they conflict; refines when the source is more specific than the target; depends_on when the source requires the target to hold; related_to for same-scope, non-hierarchical association."
 )]
 pub struct KnowledgeLinkArgs {
     pub source_collection: String,
@@ -906,7 +906,7 @@ impl KnowledgeUnlinkEdgeArgs {
 #[embra_tool(
     name = "knowledge_unlink_node",
     is_side_effectful = true,
-    description = "Delete a semantic or procedural node and cascade-remove all edges referencing it. Prefer this over manually deleting edges when the node itself should go."
+    description = "Delete a semantic or procedural node and cascade-remove all edges referencing it. Prefer this over manually deleting edges when the node itself should go. For episodic memory entries, use forget instead."
 )]
 pub struct KnowledgeUnlinkNodeArgs {
     pub collection: String,
@@ -924,7 +924,7 @@ impl KnowledgeUnlinkNodeArgs {
 #[embra_tool(
     name = "knowledge_update",
     is_side_effectful = true,
-    description = "Update fields on a semantic or procedural node in place while preserving all referencing edges. Immutable fields (provenance, timestamps, access counters) are rejected. patch_json is a JSON object of the fields to patch."
+    description = "Update fields on a semantic or procedural node in place while preserving all referencing edges. Immutable fields (provenance, timestamps, access counters) are rejected. patch_json is a JSON object of the fields to patch. Prefer this over unlink + re-promote when node identity and provenance should stay intact. If you substantially change tags, auto-derived tag_overlap edges may be stale — clean specific ones with knowledge_unlink_edge."
 )]
 pub struct KnowledgeUpdateArgs {
     pub collection: String,
@@ -978,7 +978,7 @@ impl KnowledgeTraverseArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "knowledge_query",
-    description = "Find relevant knowledge via graph-aware retrieval (multi-signal ranking with depth-2 expansion). max_results defaults to 20, capped at 100. categories is a CSV of semantic categories to filter by (fact, preference, decision, observation, pattern)."
+    description = "Find relevant knowledge via graph-aware retrieval (multi-signal ranking with depth-2 expansion). max_results defaults to 20, capped at 100. categories is a CSV of semantic categories to filter by (fact, preference, decision, observation, pattern). Call this before answering questions where prior context would help."
 )]
 pub struct KnowledgeQueryArgs {
     pub query: String,

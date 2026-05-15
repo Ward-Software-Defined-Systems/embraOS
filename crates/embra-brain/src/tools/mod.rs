@@ -1357,7 +1357,7 @@ impl SearchMemoryArgs {
 #[embra_tool(
     name = "remember",
     is_side_effectful = true,
-    description = "Save a note or fact to persistent memory. Hashtag tokens (e.g. #architecture, #soul) are extracted into the tags array; the remaining words become the content. Keep content to a single line."
+    description = "Save a note or fact to persistent memory. Hashtag tokens (e.g. #architecture, #soul) are extracted into the tags array; the remaining words become the content. Keep content to a single line. For durable, reusable knowledge worth keeping across sessions, follow up with knowledge_promote."
 )]
 pub struct RememberArgs {
     /// Content to save. Letter-start `#tag` tokens are extracted into tags.
