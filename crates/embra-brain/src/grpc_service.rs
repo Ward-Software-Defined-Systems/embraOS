@@ -615,15 +615,33 @@ async fn handle_request(
             // Build system prompt
             let system_prompt = if learning::is_soul_sealed(&**db).await.unwrap_or(false) {
                 // Operational mode — build full system prompt
-                let soul = learning::load_soul(&**db).await.ok().flatten()
-                    .map(|s| serde_json::to_string_pretty(&s).unwrap_or_default())
-                    .unwrap_or_default();
-                let user_profile = db.read("memory.user", "user").await.ok()
-                    .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
-                    .unwrap_or_default();
-                let identity = db.read("memory.identity", "identity").await.ok()
-                    .map(|v| serde_json::to_string_pretty(&v).unwrap_or_default())
-                    .unwrap_or_default();
+                // Pass the soul as a Value — operational_mode renders it
+                // into the embraOS constitution via brain::render_constitution.
+                // The stored doc is read-only here; never re-serialized into
+                // storage, so the SHA-256 seal and trustd verification are
+                // untouched.
+                let soul = learning::load_soul(&**db)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(serde_json::Value::Null);
+                // Pass the profile as a Value — operational_mode renders
+                // it via brain::render_user_profile. Read-only; the profile
+                // is not sealed, so no hash/trustd interaction.
+                let user_profile = db
+                    .read("memory.user", "user")
+                    .await
+                    .ok()
+                    .unwrap_or(serde_json::Value::Null);
+                // Pass identity as a Value — operational_mode renders it
+                // into the embraOS character portrait via
+                // brain::render_identity. Read-only; identity is not
+                // sealed, so there is no hash/trustd interaction.
+                let identity = db
+                    .read("memory.identity", "identity")
+                    .await
+                    .ok()
+                    .unwrap_or(serde_json::Value::Null);
                 let session_context = format!("Session: {}, Timezone: {}", session_name, config_tz);
                 crate::brain::operational_mode(
                     &config_name, &soul, &identity, &user_profile, &session_context,
