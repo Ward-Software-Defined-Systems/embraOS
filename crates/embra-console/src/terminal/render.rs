@@ -30,9 +30,34 @@ impl StyledSegment {
 
 pub type StyledLine = Vec<StyledSegment>;
 
-pub fn parse_styled_line(line: &str, base_style: Style) -> StyledLine {
-    let base_core = ratatui_to_core(base_style);
-    core_render::parse_styled_line(line, base_core)
+fn map_core_lines(lines: Vec<core_render::StyledLine>) -> Vec<StyledLine> {
+    lines
+        .into_iter()
+        .map(|line| {
+            line.into_iter()
+                .map(|seg| StyledSegment {
+                    text: seg.text,
+                    style: core_to_ratatui(seg.style),
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Whole-message styling (header, ```json fences, trailing blank),
+/// delegated to the shared core so the TUI and GUI render identically.
+pub fn render_message_lines(role: &str, content: &str, timestamp: &str) -> Vec<StyledLine> {
+    map_core_lines(core_render::render_message_lines(role, content, timestamp))
+}
+
+/// In-progress streamed response (shared with the GUI).
+pub fn render_streaming_lines(thinking_name: &str, streaming: &str) -> Vec<StyledLine> {
+    map_core_lines(core_render::render_streaming_lines(thinking_name, streaming))
+}
+
+/// "Thinking…" indicator line with time-cycled dots (shared with the GUI).
+pub fn render_thinking_line(thinking_name: &str) -> StyledLine {
+    core_render::render_thinking_line(thinking_name)
         .into_iter()
         .map(|seg| StyledSegment {
             text: seg.text,
@@ -41,35 +66,9 @@ pub fn parse_styled_line(line: &str, base_style: Style) -> StyledLine {
         .collect()
 }
 
-pub fn parse_json_line(line: &str) -> StyledLine {
-    core_render::parse_json_line(line)
-        .into_iter()
-        .map(|seg| StyledSegment {
-            text: seg.text,
-            style: core_to_ratatui(seg.style),
-        })
-        .collect()
-}
-
-fn ratatui_to_core(s: Style) -> TextStyle {
-    let fg = s.fg.map(map_color_to_core).unwrap_or(CoreColor::Reset);
-    let mut m = CoreModifier::empty();
-    if s.add_modifier.contains(Modifier::BOLD) {
-        m = m.union(CoreModifier::BOLD);
-    }
-    if s.add_modifier.contains(Modifier::ITALIC) {
-        m = m.union(CoreModifier::ITALIC);
-    }
-    if s.add_modifier.contains(Modifier::UNDERLINED) {
-        m = m.union(CoreModifier::UNDERLINE);
-    }
-    if s.add_modifier.contains(Modifier::DIM) {
-        m = m.union(CoreModifier::DIM);
-    }
-    if s.add_modifier.contains(Modifier::SLOW_BLINK) {
-        m = m.union(CoreModifier::SLOW_BLINK);
-    }
-    TextStyle { fg, modifier: m }
+/// ANSI / control-char strip (shared with the GUI).
+pub fn sanitize_for_render(s: &str) -> String {
+    core_render::sanitize_for_render(s)
 }
 
 fn core_to_ratatui(ts: TextStyle) -> Style {
@@ -93,29 +92,6 @@ fn core_to_ratatui(ts: TextStyle) -> Style {
         s = s.add_modifier(Modifier::SLOW_BLINK);
     }
     s
-}
-
-fn map_color_to_core(c: Color) -> CoreColor {
-    match c {
-        Color::Reset => CoreColor::Reset,
-        Color::Black => CoreColor::Black,
-        Color::Red => CoreColor::Red,
-        Color::Green => CoreColor::Green,
-        Color::Yellow => CoreColor::Yellow,
-        Color::Blue => CoreColor::Blue,
-        Color::Magenta => CoreColor::Magenta,
-        Color::Cyan => CoreColor::Cyan,
-        Color::Gray => CoreColor::Gray,
-        Color::DarkGray => CoreColor::DarkGray,
-        Color::LightRed => CoreColor::LightRed,
-        Color::LightGreen => CoreColor::LightGreen,
-        Color::LightYellow => CoreColor::LightYellow,
-        Color::LightBlue => CoreColor::LightBlue,
-        Color::LightMagenta => CoreColor::LightMagenta,
-        Color::LightCyan => CoreColor::LightCyan,
-        Color::White => CoreColor::White,
-        _ => CoreColor::Reset,
-    }
 }
 
 fn map_color_from_core(c: CoreColor) -> Color {

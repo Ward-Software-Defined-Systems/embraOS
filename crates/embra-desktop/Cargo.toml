@@ -12,10 +12,12 @@ embra-common = { workspace = true }
 # alongside the default wgpu path. Stage 0 locked tiny-skia for the
 # experiment (smaller binary, no Vulkan loader needed); iced selects
 # renderer at runtime so wgpu is acceptable as a fallback. `tokio`
-# feature lets subscriptions drive the async gRPC stream. Defaults left
-# on so winit's X11/Wayland platform features (and softbuffer's
-# matching platform backends) flow through.
-iced = { version = "0.14", features = ["tiny-skia", "tokio"] }
+# feature lets subscriptions drive the async gRPC stream. `highlighter`
+# pulls iced_highlighter (syntect) for JSON/markdown coloring in the
+# structured-input editor overlay. Defaults left on so winit's
+# X11/Wayland platform features (and softbuffer's matching platform
+# backends) flow through.
+iced = { version = "0.14", features = ["tiny-skia", "tokio", "highlighter"] }
 tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }

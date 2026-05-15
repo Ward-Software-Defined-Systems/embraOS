@@ -11,6 +11,8 @@
 //!   mode, keyboard shortcuts beyond Enter (Ctrl+C, scroll, Alt+Enter).
 //! - 4d: Theme polish.
 
+mod editor;
+mod menu;
 mod subscription;
 mod theme;
 mod view;
@@ -28,14 +30,27 @@ use iced::{Element, Size, Subscription, Task, Theme};
 use once_cell::sync::Lazy;
 use tokio::sync::mpsc;
 
+use crate::editor::{EditorState, EditorSyntax};
+use crate::menu::{Action, MenuPanel, MenuState, ModalState, NavDir};
+
 /// Stable ID for the conversation scrollable so `operation::snap_to_end`
 /// can target it from `update`. `Id::unique()` would generate a fresh
 /// ID per `view()` call, breaking the link between update and the live
 /// widget.
 static CONVERSATION_SCROLL_ID: Lazy<Id> = Lazy::new(Id::unique);
+static MODAL_INPUT_ID: Lazy<Id> = Lazy::new(Id::unique);
+static EDITOR_ID: Lazy<Id> = Lazy::new(Id::unique);
 
 pub fn conversation_scroll_id() -> &'static Id {
     &CONVERSATION_SCROLL_ID
+}
+
+pub fn modal_input_id() -> &'static Id {
+    &MODAL_INPUT_ID
+}
+
+pub fn editor_id() -> &'static Id {
+    &EDITOR_ID
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -74,6 +89,40 @@ pub enum Message {
     /// 200 ms tick for thinking-dot animation (no-op until Stage 4d
     /// renders the dots).
     AnimationTick,
+    /// Menu-bar dropdown open. Carries which panel.
+    MenuOpen(MenuPanel),
+    /// Close any open menu (and the modal, if one is open — see update).
+    MenuClose,
+    /// Mouse hover moved to item `index`. `sub=true` means submenu column.
+    MenuHover {
+        sub: bool,
+        index: usize,
+    },
+    /// Activate the currently-highlighted menu item (click or Enter).
+    MenuActivate,
+    /// Arrow-key navigation inside an open menu.
+    MenuNavigate(NavDir),
+    /// Modal text changed.
+    ModalInputChanged(String),
+    /// Modal OK / Enter on modal input.
+    ModalSubmit,
+    /// Modal Cancel / Escape / backdrop click.
+    ModalCancel,
+    /// Unified slash-command dispatch from a menu (tracing/telemetry hook).
+    ExecuteSlash {
+        command: String,
+        args: String,
+    },
+    /// Open the structured-input editor overlay.
+    EditorOpen,
+    /// An edit/cursor action from the `text_editor` widget.
+    EditorAction(iced::widget::text_editor::Action),
+    /// Switch the editor's syntax highlighting.
+    EditorSyntaxSet(EditorSyntax),
+    /// Send the editor buffer as a user message (Send button / Ctrl+Enter).
+    EditorSubmit,
+    /// Discard the editor buffer and close (Cancel / Esc).
+    EditorCancel,
 }
 
 pub struct EmbraDesktop {
@@ -83,6 +132,9 @@ pub struct EmbraDesktop {
     /// subscription emits `GrpcConnected`. `update()` skips brain-bound
     /// sends while it's `None` (input is buffered locally regardless).
     grpc_in: Option<mpsc::Sender<ConversationRequest>>,
+    menu: MenuState,
+    modal: Option<ModalState>,
+    editor: Option<EditorState>,
 }
 
 impl EmbraDesktop {
@@ -99,6 +151,9 @@ impl EmbraDesktop {
                 state,
                 apid_addr: args.apid_addr,
                 grpc_in: None,
+                menu: MenuState::default(),
+                modal: None,
+                editor: None,
             },
             Task::none(),
         )
@@ -115,27 +170,49 @@ impl EmbraDesktop {
                 self.state.cursor_pos = self.state.input_buffer.chars().count();
             }
             Message::Submit => {
-                self.handle_submit();
-                return Self::scroll_to_end_task();
+                // Menu/modal/editor layers intercept Enter. The main
+                // text_input's on_submit still fires when focus leaks
+                // through; ignore.
+                if self.modal.is_some() || self.menu.open.is_some() || self.editor.is_some() {
+                    return Task::none();
+                }
+                let task = self.handle_submit();
+                return Task::batch([task, Self::scroll_to_end_task()]);
             }
             Message::ArrowUp => {
-                if let Some(sel) = self.state.selector.as_mut() {
+                if self.modal.is_some() || self.editor.is_some() {
+                    return Task::none();
+                }
+                if self.menu.open.is_some() {
+                    self.menu.navigate(NavDir::Up);
+                } else if let Some(sel) = self.state.selector.as_mut() {
                     sel.up();
                 } else {
                     self.state.scroll_offset = self.state.scroll_offset.saturating_add(1);
                 }
             }
             Message::ArrowDown => {
-                if let Some(sel) = self.state.selector.as_mut() {
+                if self.modal.is_some() || self.editor.is_some() {
+                    return Task::none();
+                }
+                if self.menu.open.is_some() {
+                    self.menu.navigate(NavDir::Down);
+                } else if let Some(sel) = self.state.selector.as_mut() {
                     sel.down();
                 } else {
                     self.state.scroll_offset = self.state.scroll_offset.saturating_sub(1);
                 }
             }
             Message::PageUp => {
+                if self.modal.is_some() || self.menu.open.is_some() || self.editor.is_some() {
+                    return Task::none();
+                }
                 self.state.scroll_offset = self.state.scroll_offset.saturating_add(10);
             }
             Message::PageDown => {
+                if self.modal.is_some() || self.menu.open.is_some() || self.editor.is_some() {
+                    return Task::none();
+                }
                 self.state.scroll_offset = self.state.scroll_offset.saturating_sub(10);
             }
             Message::Quit => {
@@ -169,18 +246,144 @@ impl EmbraDesktop {
             Message::AnimationTick => {
                 // No visual animation yet (Stage 4c).
             }
+            Message::MenuOpen(panel) => {
+                if self.modal.is_some() || self.editor.is_some() {
+                    return Task::none();
+                }
+                self.menu = MenuState::open_panel(panel);
+            }
+            Message::MenuClose => {
+                // Esc precedence: editor > modal > menu.
+                if self.editor.is_some() {
+                    self.editor = None;
+                } else if self.modal.is_some() {
+                    self.modal = None;
+                } else {
+                    self.menu = MenuState::default();
+                }
+            }
+            Message::MenuHover { sub, index } => {
+                if self.menu.open.is_some() {
+                    if sub {
+                        self.menu.submenu_selected = index;
+                    } else {
+                        self.menu.selected = index;
+                        self.menu.submenu_open = false;
+                        self.menu.submenu_selected = 0;
+                    }
+                }
+            }
+            Message::MenuNavigate(dir) => {
+                if self.menu.open.is_some() {
+                    self.menu.navigate(dir);
+                }
+            }
+            Message::MenuActivate => {
+                if self.menu.open.is_none() {
+                    return Task::none();
+                }
+                let Some(action) = self.menu.active_action() else {
+                    return Task::none();
+                };
+                match action {
+                    Action::Direct { command, args } => {
+                        self.menu = MenuState::default();
+                        let task = self.dispatch_slash(command, args);
+                        return Task::batch([task, Self::scroll_to_end_task()]);
+                    }
+                    Action::Prompt { title, command } => {
+                        self.menu = MenuState::default();
+                        self.modal = Some(ModalState {
+                            title: title.to_string(),
+                            pending_command: command.to_string(),
+                            input: String::new(),
+                        });
+                        return operation::focus(MODAL_INPUT_ID.clone());
+                    }
+                    Action::OpenSubmenu(_) => {
+                        if !self.menu.submenu_open {
+                            // Reuse navigate(Right) to land on first action.
+                            self.menu.navigate(NavDir::Right);
+                        }
+                    }
+                    Action::Quit => {
+                        tracing::info!("menu quit, exiting");
+                        return iced::exit();
+                    }
+                }
+            }
+            Message::ModalInputChanged(text) => {
+                if let Some(m) = self.modal.as_mut() {
+                    m.input = text;
+                }
+            }
+            Message::ModalSubmit => {
+                let Some(modal) = self.modal.take() else {
+                    return Task::none();
+                };
+                if modal.input.trim().is_empty() {
+                    // Keep modal closed; user can re-open if desired.
+                    return Task::none();
+                }
+                let task = self.dispatch_slash(&modal.pending_command, modal.input.trim());
+                return Task::batch([task, Self::scroll_to_end_task()]);
+            }
+            Message::ModalCancel => {
+                self.modal = None;
+            }
+            Message::ExecuteSlash { command, args } => {
+                let task = self.dispatch_slash(&command, &args);
+                return Task::batch([task, Self::scroll_to_end_task()]);
+            }
+            Message::EditorOpen => {
+                if self.editor.is_none() {
+                    self.menu = MenuState::default();
+                    self.modal = None;
+                    self.editor = Some(EditorState::new());
+                    return operation::focus(EDITOR_ID.clone());
+                }
+            }
+            Message::EditorAction(action) => {
+                if let Some(e) = self.editor.as_mut() {
+                    e.content.perform(action);
+                }
+            }
+            Message::EditorSyntaxSet(syntax) => {
+                if let Some(e) = self.editor.as_mut() {
+                    e.syntax = syntax;
+                }
+            }
+            Message::EditorSubmit => {
+                if let Some(e) = self.editor.take() {
+                    let text = e.content.text();
+                    let body = text.trim_end_matches('\n');
+                    if !body.trim().is_empty() {
+                        self.state.messages.push(DisplayMessage::new_with_tz(
+                            "user",
+                            body,
+                            &self.state.config_tz,
+                        ));
+                        self.state.live_reasoning.clear();
+                        self.send_user_message(body.to_string());
+                        return Self::scroll_to_end_task();
+                    }
+                }
+            }
+            Message::EditorCancel => {
+                self.editor = None;
+            }
         }
         Task::none()
     }
 
-    fn handle_submit(&mut self) {
+    fn handle_submit(&mut self) -> Task<Message> {
         // Selector takes priority — if a selector is active, Enter sends
         // the highlighted choice to the brain.
         if let Some(selector) = self.state.selector.take() {
             let choice = selector.current().to_string();
             self.state.live_reasoning.clear();
             self.send_user_message(choice);
-            return;
+            return Task::none();
         }
 
         let input = self.state.input_buffer.trim().to_string();
@@ -192,7 +395,7 @@ impl EmbraDesktop {
         let input = if input.is_empty() {
             match self.state.setup_default.take() {
                 Some(d) if !d.is_empty() => d,
-                _ => return,
+                _ => return Task::none(),
             }
         } else {
             self.state.setup_default = None;
@@ -200,34 +403,9 @@ impl EmbraDesktop {
         };
 
         if let Some(stripped) = input.strip_prefix('/') {
-            // Slash command: split at first space, then either local-handle
-            // or forward to brain.
-            let parts: Vec<&str> = stripped.splitn(2, ' ').collect();
-            let cmd_word = parts[0];
-            let args = if parts.len() > 1 { parts[1] } else { "" };
+            let (cmd_word, args) = stripped.split_once(' ').unwrap_or((stripped, ""));
             let cmd = format!("/{}", cmd_word);
-
-            if commands::is_local_command(&cmd) {
-                if let Some(out) =
-                    commands::handle_local_command(&cmd, args, &self.state.config_name)
-                {
-                    self.state
-                        .messages
-                        .push(DisplayMessage::system_with_tz(&out, &self.state.config_tz));
-                }
-                return;
-            }
-
-            self.state.live_reasoning.clear();
-            self.send(ConversationRequest {
-                request_type: Some(conversation_request::RequestType::SlashCommand(
-                    SlashCommand {
-                        command: cmd,
-                        args: args.to_string(),
-                    },
-                )),
-            });
-            return;
+            return self.dispatch_slash(&cmd, args);
         }
 
         // Regular message — echo into history then forward to brain.
@@ -236,6 +414,47 @@ impl EmbraDesktop {
             .push(DisplayMessage::new_with_tz("user", &input, &self.state.config_tz));
         self.state.live_reasoning.clear();
         self.send_user_message(input);
+        Task::none()
+    }
+
+    /// Single entry point for slash-command dispatch. Reached from typed
+    /// `/cmd` input via `handle_submit`, from menu activation, and from
+    /// modal submission. Local commands render inline; everything else
+    /// goes down the gRPC channel.
+    fn dispatch_slash(&mut self, cmd: &str, args: &str) -> Task<Message> {
+        // GUI-only: `/ml` opens the structured-input editor instead of
+        // the TUI's multiline-mode toggle. embra-console-core and the
+        // serial TUI are untouched (they still treat /ml as the flag).
+        if cmd == "/ml" {
+            if self.editor.is_none() {
+                self.menu = MenuState::default();
+                self.modal = None;
+                self.editor = Some(EditorState::new());
+                return operation::focus(EDITOR_ID.clone());
+            }
+            return Task::none();
+        }
+        tracing::debug!(cmd, args, "dispatch_slash");
+        if commands::is_local_command(cmd) {
+            if let Some(out) =
+                commands::handle_local_command(cmd, args, &self.state.config_name)
+            {
+                self.state
+                    .messages
+                    .push(DisplayMessage::system_with_tz(&out, &self.state.config_tz));
+            }
+            return Task::none();
+        }
+        self.state.live_reasoning.clear();
+        self.send(ConversationRequest {
+            request_type: Some(conversation_request::RequestType::SlashCommand(
+                SlashCommand {
+                    command: cmd.to_string(),
+                    args: args.to_string(),
+                },
+            )),
+        });
+        Task::none()
     }
 
     fn scroll_to_end_task() -> Task<Message> {
@@ -270,7 +489,12 @@ impl EmbraDesktop {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        view::draw(&self.state)
+        view::draw(
+            &self.state,
+            &self.menu,
+            self.modal.as_ref(),
+            self.editor.as_ref(),
+        )
     }
 
     fn subscription(&self) -> Subscription<Message> {

@@ -65,7 +65,7 @@ These apt packages are only needed for host-side cargo iteration; the Buildroot 
 EMBRA_NO_DESKTOP=1 ./scripts/build-image.sh --storage-engine fjall
 ```
 
-The graphics defconfig adds ~85-95 MB to `rootfs.squashfs` (LLVM + Mesa3D dominate; cage + wlroots are small). Cap is 200 MB; current build well under.
+The graphics defconfig adds ~85-95 MB to `rootfs.squashfs` (LLVM + Mesa3D dominate; cage + wlroots are small). There is no image-size cap — the former 200 MB target was dropped; rootfs size does not gate dependency or feature choices.
 
 ### Run
 
@@ -185,7 +185,7 @@ Compiled list of traps we hit while bringing this up. If you hit one of these sy
 | libc | Stay on musl | Uniform with `main`; canary verified Mesa+musl works |
 | TUI fallback | Retained behind `EMBRA_NO_DESKTOP=1` | Quick recovery / no-graphics builds |
 | Audio | Out of scope | If Embra ever speaks, separate effort |
-| Image-size cap | 200 MB rootfs.squashfs | Current build well under |
+| Image-size cap | None — lifted | Former 200 MB rootfs.squashfs target dropped; image size no longer gates feature/dependency decisions |
 
 ## Soul-Halt UX
 

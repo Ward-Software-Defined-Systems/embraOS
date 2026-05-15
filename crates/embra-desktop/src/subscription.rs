@@ -23,6 +23,7 @@ use iced::Subscription;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
+use crate::menu::{MenuPanel, NavDir};
 use crate::Message;
 
 /// Global keyboard shortcuts. Fires regardless of focus, so behaviors
@@ -37,8 +38,19 @@ pub fn keyboard() -> Subscription<Message> {
         match key.as_ref() {
             Key::Named(Named::ArrowUp) => Some(Message::ArrowUp),
             Key::Named(Named::ArrowDown) => Some(Message::ArrowDown),
+            Key::Named(Named::ArrowLeft) => Some(Message::MenuNavigate(NavDir::Left)),
+            Key::Named(Named::ArrowRight) => Some(Message::MenuNavigate(NavDir::Right)),
             Key::Named(Named::PageUp) => Some(Message::PageUp),
             Key::Named(Named::PageDown) => Some(Message::PageDown),
+            Key::Named(Named::Enter) if modifiers.control() => Some(Message::EditorSubmit),
+            Key::Named(Named::Enter) => Some(Message::MenuActivate),
+            Key::Named(Named::Escape) => Some(Message::MenuClose),
+            Key::Character("f") if modifiers.alt() => Some(Message::MenuOpen(MenuPanel::File)),
+            Key::Character("v") if modifiers.alt() => Some(Message::MenuOpen(MenuPanel::View)),
+            Key::Character("p") if modifiers.alt() => Some(Message::MenuOpen(MenuPanel::Provider)),
+            Key::Character("s") if modifiers.alt() => Some(Message::MenuOpen(MenuPanel::Settings)),
+            Key::Character("t") if modifiers.alt() => Some(Message::MenuOpen(MenuPanel::Setup)),
+            Key::Character("h") if modifiers.alt() => Some(Message::MenuOpen(MenuPanel::Help)),
             Key::Character("c") if modifiers.control() => Some(Message::Quit),
             Key::Character("d") if modifiers.control() => Some(Message::Quit),
             _ => None,

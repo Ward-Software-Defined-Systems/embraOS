@@ -121,7 +121,7 @@ On first boot, the Config Wizard runs — name your intelligence, choose your LL
 
 #### Post-Boot Setup
 
-After the Config Wizard completes, configure GitHub and SSH access from the TUI using slash commands. There is no shell — all setup is done through the conversational interface.
+After the Config Wizard completes, configure GitHub and SSH access from the console (GUI or serial TUI) using slash commands. There is no shell — all setup is done through the conversational interface.
 
 ```
 /github-token ghp_your_token_here          # Enable GitHub API tools (issues, PRs, clone)
@@ -276,7 +276,7 @@ All sessions share the same intelligence — same memory, same identity, same so
 | Command | Description |
 |---|---|
 | `/help` | Show all commands and keyboard shortcuts |
-| `/ml` | Toggle multi-line input mode — type on multiple lines, `.` on its own line to send |
+| `/ml` | **Serial TUI:** toggle multi-line input mode — type on multiple lines, `.` on its own line to send. **GUI:** open the structured-input editor (multi-line, JSON/Markdown syntax highlighting) |
 | `/status` | System status — version, uptime, WardSONDB health, memory, soul status |
 | `/sessions` | List all sessions with state and last active time |
 | `/new <name>` | Create a new named session and switch to it |
@@ -313,6 +313,23 @@ All sessions share the same intelligence — same memory, same identity, same so
 | `Up/Down` | Scroll history |
 | `Ctrl+C` | Graceful detach |
 | `Ctrl+D` | Graceful detach |
+
+**embraOS GUI (`embra-desktop`)** — in-conversation. The kiosk has no window chrome; the menu bar is drawn by the GUI itself:
+
+| Key | Action |
+|---|---|
+| `Alt+F` / `Alt+V` / `Alt+P` | Open the File / View / Provider menu |
+| `Alt+S` / `Alt+T` / `Alt+H` | Open the Settings / Setup / Help menu |
+| `Up/Down` | Move selection within an open menu |
+| `Left/Right` | Move between menus / open a submenu |
+| `Enter` | Activate the highlighted menu item |
+| `Esc` | Close the menu (or cancel an open modal / the editor) |
+| `Up/Down` | Scroll history (when no menu is open) |
+| `Ctrl+C` / `Ctrl+D` | Graceful detach |
+
+Arg-taking menu items (New Session…, GitHub Token…, etc.) open a modal — type the value, `Enter` to submit, `Esc` or click outside to cancel.
+
+The structured-input editor (the `⊞ Structured` button next to the input box, or `/ml`) is a multi-line editor with JSON / Markdown / Plain syntax-highlight toggles: `Ctrl+Enter` sends the buffer as one message, `Esc` or click outside discards.
 
 **QEMU** — host-level (`run-qemu.sh` uses `-serial mon:stdio`, so `Ctrl+A` is the escape prefix):
 

@@ -256,3 +256,157 @@ pub fn parse_json_line(line: &str) -> StyledLine {
         segments
     }
 }
+
+/// Render one conversation message into neutral styled lines.
+///
+/// Owns the role→color/prefix mapping, the system/tool vs. assistant
+/// split, the bold header line, the ```json fence state machine
+/// (`parse_json_line` inside, `parse_styled_line` outside), and the
+/// trailing blank separator. Both the TUI (`embra-console`) and the GUI
+/// (`embra-desktop`) call this so the conversation styling stays
+/// identical across front-ends.
+pub fn render_message_lines(role: &str, content: &str, timestamp: &str) -> Vec<StyledLine> {
+    let mut lines: Vec<StyledLine> = Vec::new();
+
+    let (color, prefix): (Color, &str) = match role {
+        "user" | "You" => (Color::LightBlue, "You"),
+        "system" => (Color::White, ""),
+        "tool" => (Color::Cyan, ""),
+        _ => (Color::Green, role),
+    };
+    let base_style = TextStyle::new().fg(color);
+
+    if role == "system" || role == "tool" {
+        for line in content.lines() {
+            lines.push(parse_styled_line(&format!("  {}", line), base_style));
+        }
+    } else {
+        let header = format!("[{}] {}: ", timestamp, prefix);
+        lines.push(vec![StyledSegment::new(
+            header,
+            base_style.add_modifier(Modifier::BOLD),
+        )]);
+
+        let mut in_json_block = false;
+        for line in content.lines() {
+            let prefixed = format!("  {}", line);
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("```json") || trimmed.starts_with("```JSON") {
+                in_json_block = true;
+                lines.push(vec![StyledSegment::new(
+                    prefixed,
+                    TextStyle::new().fg(Color::Gray),
+                )]);
+                continue;
+            }
+            if trimmed.starts_with("```") && in_json_block {
+                in_json_block = false;
+                lines.push(vec![StyledSegment::new(
+                    prefixed,
+                    TextStyle::new().fg(Color::Gray),
+                )]);
+                continue;
+            }
+            if in_json_block {
+                let mut json_segments =
+                    vec![StyledSegment::new("  ".to_string(), base_style)];
+                json_segments.extend(parse_json_line(line));
+                lines.push(json_segments);
+            } else {
+                lines.push(parse_styled_line(&prefixed, base_style));
+            }
+        }
+    }
+
+    // Trailing blank line — message separator (matches the TUI).
+    lines.push(vec![StyledSegment::new(String::new(), TextStyle::default())]);
+
+    lines
+}
+
+/// Strip ANSI escape sequences and control characters. Defence-in-depth
+/// behind the brain-side `express` sanitize so a stray escape can't
+/// corrupt a front-end. Shared by the TUI and GUI expression panels.
+pub fn sanitize_for_render(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            match chars.peek() {
+                Some(&'[') => {
+                    chars.next();
+                    while let Some(&c) = chars.peek() {
+                        chars.next();
+                        let cv = c as u32;
+                        if (0x40..=0x7e).contains(&cv) {
+                            break;
+                        }
+                    }
+                }
+                Some(&']') => {
+                    chars.next();
+                    while let Some(&c) = chars.peek() {
+                        chars.next();
+                        if c == '\x07' {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '\n' => out.push(ch),
+            c if (c as u32) < 0x20 => continue,
+            '\u{7f}' => continue,
+            c if (c as u32) >= 0x80 && (c as u32) < 0xA0 => continue,
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The "thinking" indicator line with time-cycled dots. Both front-ends
+/// render this while a turn is in flight and no text has streamed yet.
+pub fn render_thinking_line(thinking_name: &str) -> StyledLine {
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let dots = match (elapsed / 500) % 3 {
+        0 => ".",
+        1 => "..",
+        _ => "...",
+    };
+    vec![StyledSegment::new(
+        format!("  {} is thinking{}", thinking_name, dots),
+        TextStyle::new()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    )]
+}
+
+/// In-progress streamed response: bold-green name header, each line
+/// markdown-styled, then a blinking block cursor. Mirrors the TUI so the
+/// GUI streams identically.
+pub fn render_streaming_lines(thinking_name: &str, streaming: &str) -> Vec<StyledLine> {
+    let mut lines: Vec<StyledLine> = Vec::new();
+    lines.push(vec![StyledSegment::new(
+        format!("{}: ", thinking_name),
+        TextStyle::new()
+            .fg(Color::Green)
+            .add_modifier(Modifier::BOLD),
+    )]);
+    let base = TextStyle::new().fg(Color::Green);
+    for line in streaming.lines() {
+        lines.push(parse_styled_line(&format!("  {}", line), base));
+    }
+    lines.push(vec![StyledSegment::new(
+        "  ▊".to_string(),
+        TextStyle::new()
+            .fg(Color::Green)
+            .add_modifier(Modifier::SLOW_BLINK),
+    )]);
+    lines
+}

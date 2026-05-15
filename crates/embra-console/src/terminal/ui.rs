@@ -62,7 +62,7 @@ fn draw_expression_panel(f: &mut Frame, area: Rect, app: &AppState) {
     let (rendered, style) = if !app.live_reasoning.is_empty() {
         (
             window_to_visible_rows(
-                &sanitize_for_render(&app.live_reasoning),
+                &render::sanitize_for_render(&app.live_reasoning),
                 inner_width,
                 inner_rows,
             ),
@@ -72,7 +72,7 @@ fn draw_expression_panel(f: &mut Frame, area: Rect, app: &AppState) {
         )
     } else {
         (
-            sanitize_for_render(&app.expression_content),
+            render::sanitize_for_render(&app.expression_content),
             Style::default().fg(Color::Gray),
         )
     };
@@ -113,50 +113,6 @@ fn window_to_visible_rows(text: &str, cols: usize, rows: usize) -> String {
     }
     let start = wrapped.len().saturating_sub(rows);
     wrapped[start..].join("\n")
-}
-
-/// Render-side ANSI and control-char strip. Second defence layer behind
-/// the brain-side sanitize in the `express` tool — the tool should already
-/// keep these out of WardSONDB, but we never want a stray escape sequence
-/// to corrupt the rest of the TUI.
-fn sanitize_for_render(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(ch) = chars.next() {
-        if ch == '\x1b' {
-            match chars.peek() {
-                Some(&'[') => {
-                    chars.next();
-                    while let Some(&c) = chars.peek() {
-                        chars.next();
-                        let cv = c as u32;
-                        if (0x40..=0x7e).contains(&cv) {
-                            break;
-                        }
-                    }
-                }
-                Some(&']') => {
-                    chars.next();
-                    while let Some(&c) = chars.peek() {
-                        chars.next();
-                        if c == '\x07' {
-                            break;
-                        }
-                    }
-                }
-                _ => {}
-            }
-            continue;
-        }
-        match ch {
-            '\n' => out.push(ch),
-            c if (c as u32) < 0x20 => continue,
-            '\u{7f}' => continue,
-            c if (c as u32) >= 0x80 && (c as u32) < 0xA0 => continue,
-            c => out.push(c),
-        }
-    }
-    out
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &AppState) {
@@ -223,52 +179,11 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
     let mut styled_lines: Vec<StyledLine> = Vec::new();
 
     for msg in &app.messages {
-        let (color, prefix) = match msg.role.as_str() {
-            "user" | "You" => (Color::LightBlue, "You"),
-            "system" => (Color::White, ""),
-            "tool" => (Color::Cyan, ""),
-            _ => (Color::Green, msg.role.as_str()),
-        };
-
-        let base_style = Style::default().fg(color);
-
-        if msg.role == "system" || msg.role == "tool" {
-            let style = Style::default().fg(color);
-            for line in msg.content.lines() {
-                styled_lines.push(render::parse_styled_line(&format!("  {}", line), style));
-            }
-        } else {
-            // Header line
-            let header = format!("[{}] {}: ", msg.timestamp, prefix);
-            styled_lines.push(vec![StyledSegment::new(
-                header,
-                base_style.add_modifier(Modifier::BOLD),
-            )]);
-
-            // Content lines with rich rendering
-            let mut in_json_block = false;
-            for line in msg.content.lines() {
-                let prefixed = format!("  {}", line);
-                if line.trim_start().starts_with("```json") || line.trim_start().starts_with("```JSON") {
-                    in_json_block = true;
-                    styled_lines.push(vec![StyledSegment::new(prefixed, Style::default().fg(Color::Gray))]);
-                    continue;
-                }
-                if line.trim_start().starts_with("```") && in_json_block {
-                    in_json_block = false;
-                    styled_lines.push(vec![StyledSegment::new(prefixed, Style::default().fg(Color::Gray))]);
-                    continue;
-                }
-                if in_json_block {
-                    let mut json_segments = vec![StyledSegment::new("  ".to_string(), base_style)];
-                    json_segments.extend(render::parse_json_line(line));
-                    styled_lines.push(json_segments);
-                } else {
-                    styled_lines.push(render::parse_styled_line(&prefixed, base_style));
-                }
-            }
-        }
-        styled_lines.push(vec![StyledSegment::new(String::new(), Style::default())]);
+        styled_lines.extend(render::render_message_lines(
+            &msg.role,
+            &msg.content,
+            &msg.timestamp,
+        ));
     }
 
     // Show selector if active
@@ -292,41 +207,12 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
 
     // Show thinking indicator
     if app.thinking && app.streaming_text.is_none() {
-        let elapsed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        let dots = match (elapsed / 500) % 3 {
-            0 => ".",
-            1 => "..",
-            _ => "...",
-        };
-        styled_lines.push(vec![StyledSegment::new(
-            format!("  {} is thinking{}", app.thinking_name, dots),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
-        )]);
+        styled_lines.push(render::render_thinking_line(&app.thinking_name));
     }
 
     // Show streaming text if present
     if let Some(streaming) = &app.streaming_text {
-        styled_lines.push(vec![StyledSegment::new(
-            format!("{}: ", app.thinking_name),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        )]);
-        let style = Style::default().fg(Color::Green);
-        for line in streaming.lines() {
-            styled_lines.push(render::parse_styled_line(&format!("  {}", line), style));
-        }
-        styled_lines.push(vec![StyledSegment::new(
-            "  ▊".to_string(),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::SLOW_BLINK),
-        )]);
+        styled_lines.extend(render::render_streaming_lines(&app.thinking_name, streaming));
     }
 
     // Manually wrap lines and render from the bottom up
