@@ -294,10 +294,16 @@ impl Supervisor {
                     "--console-bin".to_string(), "/usr/bin/embra-console".to_string(),
                 ],
                 env: vec![],
-                // TLS-only port: the supervisor's Http check is plaintext
-                // and Grpc is a bare TCP connect, so ProcessAlive is the
-                // correct check (same as the serial console uses).
-                health_check: HealthCheck::ProcessAlive,
+                // embra-web only binds :3345 *after* it has fetched its
+                // serving cert from embra-trustd, so a TCP-connect on 3345
+                // is a real readiness signal (port open ⇒ cert acquired +
+                // HTTPS listener up). HealthCheck::Grpc is just a TCP
+                // connect (no gRPC spoken), which is what we want here.
+                // Generous timeout covers trustd warm-up + cert gen.
+                health_check: HealthCheck::Grpc {
+                    port: 3345,
+                    timeout: std::time::Duration::from_secs(45),
+                },
                 depends_on: vec!["embra-brain".to_string()],
                 restart_policy: RestartPolicy::default(),
             });
@@ -348,6 +354,22 @@ impl Supervisor {
             // a log file: serial console needs ttyS0 clean for the TUI;
             // web mode wants ttyS0 quiet (operator is on the browser).
             if (name == "embra-console" || name == "embra-web") && std::process::id() == 1 {
+                if name == "embra-web" {
+                    // embra-web is healthy now (TCP :3345 open ⇒ cert
+                    // acquired + HTTPS serving). Print a clear readiness
+                    // line to the serial console *before* the redirect —
+                    // web mode goes quiet after this and the operator
+                    // works from the browser.
+                    use std::io::Write as _;
+                    let mut o = std::io::stdout();
+                    let _ = writeln!(o);
+                    let _ = writeln!(o,
+                        "\x1b[1;32m  \u{2713} embraOS boot complete \u{2014} web console is ready\x1b[0m");
+                    let _ = writeln!(o,
+                        "    \x1b[1;36mhttps://localhost:3345/embraOS\x1b[0m  \x1b[2m(QEMU hostfwd; accept the embraOS-CA cert)\x1b[0m");
+                    let _ = writeln!(o);
+                    let _ = o.flush();
+                }
                 info!("Redirecting embrad output to log file");
                 if let Ok(log) = std::fs::File::create("/embra/ephemeral/embrad.log") {
                     use std::os::unix::io::AsRawFd;
