@@ -34,7 +34,9 @@ pub fn on_role(cb: impl FnMut(String, String) + 'static) {
     closure.forget();
 }
 
-/// Inject a slash command (adds the trailing newline the TUI expects).
+/// Inject a slash command followed by Enter. NB: a raw-mode PTY expects
+/// carriage return (`\r`, 0x0D) for Enter — `\n` (0x0A) is Ctrl+J, which
+/// crossterm decodes as `Char('j')` and the TUI inserts literally.
 pub fn run_command(cmd: &str) {
-    inject(&format!("{cmd}\n"));
+    inject(&format!("{cmd}\r"));
 }
