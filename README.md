@@ -12,7 +12,7 @@
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — dense multigraph with auto-derived edges" width="100%">
 </p>
 
-**Current Status:** Phase 1 — Stable (embra-desktop dev branch)
+**Current Status:** Phase 1 — Stable (embra-desktop branch is experimental)
 
 ---
 
@@ -27,6 +27,13 @@ Think of it as an AI that lives somewhere and is always there when you need it.
 ---
 
 ## Quick Start
+
+> ⚠️ **New default UI — experimental.** The browser-based **embra-web** console is now
+> the default UI, served over HTTPS at **https://localhost:3345/embraOS** (accept the
+> embraOS-CA cert on first visit). It wraps the same Phase 1 conversational TUI in
+> xterm.js over a PTY→WebSocket bridge and is **experimental**. Set **`EMBRA_TUI=1`**
+> before `run-qemu.sh` to boot the stable Phase 1 serial TUI instead — no image
+> rebuild needed.
 
 ### Phase 1 — Build from Source (QEMU Bootable Image)
 
@@ -63,6 +70,11 @@ x86_64-linux-musl-g++ --version
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source ~/.cargo/env
 rustup target add x86_64-unknown-linux-musl
+
+# embra-web frontend (Leptos/WASM) — build-image.sh Step 0.5 builds it
+# with Trunk and aborts if trunk is missing.
+rustup target add wasm32-unknown-unknown
+cargo install trunk --locked
 ```
 
 ```bash
@@ -85,7 +97,12 @@ cd embraOS
 ```bash
 # Build and run — pick a storage engine: rocksdb (battle-tested) or fjall (pure Rust)
 ./scripts/build-image.sh --storage-engine rocksdb   # Full pipeline: Rust → initramfs → Buildroot → disk image
-./scripts/run-qemu.sh                                # Boot in QEMU with serial console
+
+# Default UI is the embra-web console (experimental) — https://localhost:3345/embraOS
+./scripts/run-qemu.sh                                # Boot in QEMU — web console (default)
+
+# Or fall back to the stable Phase 1 serial TUI on this terminal (no rebuild needed)
+EMBRA_TUI=1 ./scripts/run-qemu.sh                    # Boot in QEMU — serial TUI
 ```
 
 > **Storage engine:** The `--storage-engine` flag is required and is baked into the embrad binary at build time. WardSONDB locks the choice into the DATA partition on first boot via a `.engine` marker file — switching engines later requires wiping DATA.
@@ -131,7 +148,7 @@ All tokens persist across reboots (stored on the STATE partition). Git `safe.dir
 > sudo losetup -d "$LOOPDEV"
 > ```
 
-> **Port Forwarding:** QEMU forwards ports 50000 (gRPC) and 8443 (REST) to the host. Test with:
+> **Port Forwarding:** QEMU forwards 50000 (gRPC) and 8443 (REST); in the default web-console mode it also forwards 3345 (HTTPS web console — https://localhost:3345/embraOS). Test with:
 > ```bash
 > curl http://localhost:8443/health
 > ```
@@ -163,9 +180,9 @@ A minimal setup: name the intelligence, choose your LLM provider (Anthropic Clau
 The intelligence is born. It asks you who you are. It explores its own identity with you. Together, you define its soul — the non-negotiable values and constraints that will guide everything it does. Once you approve the soul, it's sealed. The intelligence can never modify it.
 
 ### 3. Persistent Terminal
-You're dropped into a conversational session. It's not a shell — you can't run system commands. You talk to the intelligence, and it acts through its governed tool system.
+You're dropped into a conversational session. It's not a shell — you can't run system commands. You talk to the intelligence, and it acts through its governed tool system. By default this session is delivered through the **embra-web** browser console (the same conversational TUI, rendered in xterm.js); `EMBRA_TUI=1` delivers it on the serial terminal instead.
 
-Sessions persist across disconnections. Close your terminal, come back later, and the intelligence picks up where you left off and tells you what happened while you were away.
+Sessions persist across disconnections. Close the tab or terminal, come back later, and the intelligence picks up where you left off and tells you what happened while you were away.
 
 ---
 
