@@ -9,11 +9,11 @@
 **embraOS** is a continuity-preserving AI operating system. It's not a chatbot. It's not an agent framework. It's an intelligence that remembers, evolves, and maintains itself across time — with a soul it can never modify and a memory it writes itself.
 
 <p align="center">
-  <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — dense multigraph with auto-derived edges" width="100%">
+  <img src="assets/embra-web.png" alt="embraOS web console (embra-web) — the conversational TUI in the browser over a PTY→WebSocket bridge" width="100%">
 </p>
 
 <p align="center">
-  <img src="assets/embra-web.png" alt="embraOS web console (embra-web) — the conversational TUI in the browser over a PTY→WebSocket bridge" width="100%">
+  <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — dense multigraph with auto-derived edges" width="100%">
 </p>
 
 **Current Status:** Phase 1 — Stable (embra-desktop branch is experimental)
