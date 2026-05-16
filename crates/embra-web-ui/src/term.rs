@@ -17,6 +17,11 @@ extern "C" {
     #[wasm_bindgen(js_name = embraTermTakeover)]
     pub fn takeover();
 
+    /// Focus the terminal so keystrokes go to the console (used after
+    /// launching a guided/interactive setup that continues there).
+    #[wasm_bindgen(js_name = embraTermFocus)]
+    pub fn focus();
+
     #[wasm_bindgen(js_name = embraTermSetRoleCb)]
     fn embra_term_set_role_cb(cb: &Closure<dyn FnMut(String, String)>);
 }

@@ -1,9 +1,11 @@
 //! The enterprise web shell: top bar (status pills + role + takeover),
-//! left command nav, guided-setup launchers, the live xterm.js console,
-//! and a ⌘K command palette.
+//! left command nav, a per-command parameter modal, a guided
+//! provider-setup launcher, the live xterm.js console, and a ⌘K palette.
 //!
 //! Every chrome action injects into the PTY — the embedded TUI stays
-//! authoritative (parity-safe).
+//! authoritative (parity-safe). Commands that need a value open a modal
+//! first; the brain-driven multi-step setup is launched with its entry
+//! parameter and then continues in the console (operator answers there).
 
 use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
@@ -19,7 +21,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
     ]),
     ("Identity", &[("/soul", "soul"), ("/identity", "identity")]),
     ("Provider", &[
-        ("/provider", "list"), ("/iter-cap", "tool cap"),
+        ("/provider", "switch"), ("/iter-cap", "tool cap"),
         ("/show-reasoning", "reasoning"),
     ]),
     ("Setup", &[
@@ -30,13 +32,104 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
     ("Help", &[("/help", "help"), ("/ml", "multiline")]),
 ];
 
-/// Guided-setup launchers (label, command).
-const WIZARDS: &[(&str, &str)] = &[
-    ("Provider setup", "/provider --setup"),
-    ("Git setup", "/git-setup"),
-    ("GitHub token", "/github-token"),
-    ("SSH keygen", "/ssh-keygen"),
+/// A field in a command's parameter modal.
+struct Field {
+    label: &'static str,
+    ph: &'static str,
+    req: bool,
+    secret: bool,
+    /// Non-empty → render a `<select>` of these; empty → text input.
+    choices: &'static [&'static str],
+}
+
+/// A command that needs input before it can be submitted.
+struct Spec {
+    cmd: &'static str,
+    title: &'static str,
+    note: &'static str,
+    /// Separator between multiple field values on the command line.
+    join: &'static str,
+    /// Guided: after injecting, focus the console + show the banner so
+    /// the operator answers the brain's follow-up prompts there.
+    guided: bool,
+    fields: &'static [Field],
+}
+
+const fn t(label: &'static str, ph: &'static str, req: bool) -> Field {
+    Field { label, ph, req, secret: false, choices: &[] }
+}
+const fn sel(label: &'static str, choices: &'static [&'static str], req: bool) -> Field {
+    Field { label, ph: "", req, secret: false, choices }
+}
+
+// Choices beginning with '(' are sentinels → treated as "no argument"
+// (e.g. show current status) rather than a literal value.
+const SPECS: &[Spec] = &[
+    Spec { cmd: "/new", title: "New session", note: "Creates and switches to it.",
+        join: " ", guided: false,
+        fields: &[t("Session name", "my-session", true)] },
+    Spec { cmd: "/switch", title: "Switch session", note: "Attach to an existing session.",
+        join: " ", guided: false,
+        fields: &[t("Session name", "existing-session", true)] },
+    Spec { cmd: "/iter-cap", title: "Tool iteration cap",
+        note: "Blank = show current. 'reset' = restore default.",
+        join: " ", guided: false,
+        fields: &[t("Max iterations (1–1000) / reset", "blank = show current", false)] },
+    Spec { cmd: "/show-reasoning", title: "Reasoning panel",
+        note: "Toggle the live-reasoning panel.", join: " ", guided: false,
+        fields: &[sel("State", &["(show current)", "on", "off", "reset"], false)] },
+    Spec { cmd: "/github-token", title: "GitHub token",
+        note: "Blank = show status. Stored to STATE.", join: " ", guided: false,
+        fields: &[Field { label: "Token", ph: "ghp_… (blank = status)",
+            req: false, secret: true, choices: &[] }] },
+    Spec { cmd: "/ssh-copy-id", title: "Copy SSH key to host",
+        note: "Runs ssh-copy-id to the given target.", join: " ", guided: false,
+        fields: &[t("user@host", "root@10.0.0.5", true)] },
+    Spec { cmd: "/git-setup", title: "Git identity",
+        note: "Both blank = show current config.", join: " | ", guided: false,
+        fields: &[t("Name", "Ada Lovelace", false), t("Email", "ada@example.com", false)] },
+    Spec { cmd: "/provider", title: "Provider",
+        note: "Switch the active provider, or show status.", join: " ", guided: false,
+        fields: &[sel("Action",
+            &["(show status)", "anthropic", "gemini", "ollama", "lm_studio"], false)] },
+    Spec { cmd: "/provider --setup", title: "Provider setup (guided)",
+        note: "Pick a provider, then answer the prompts in the console below.",
+        join: " ", guided: true,
+        fields: &[sel("Provider",
+            &["anthropic", "gemini", "ollama", "lm_studio"], true)] },
 ];
+
+fn spec_idx(cmd: &str) -> Option<usize> {
+    SPECS.iter().position(|s| s.cmd == cmd)
+}
+
+fn defaults(spec: &Spec) -> Vec<String> {
+    spec.fields.iter()
+        .map(|f| f.choices.first().copied().unwrap_or("").to_string())
+        .collect()
+}
+
+/// Build the command line from a spec + field values. `None` = a required
+/// field is empty (caller should reject).
+fn build(spec: &Spec, vals: &[String]) -> Option<String> {
+    for (f, v) in spec.fields.iter().zip(vals) {
+        if f.req && v.trim().is_empty() {
+            return None;
+        }
+    }
+    let parts: Vec<String> = spec.fields.iter().zip(vals)
+        .map(|(_, v)| {
+            let v = v.trim();
+            if v.starts_with('(') { String::new() } else { v.to_string() }
+        })
+        .filter(|v| !v.is_empty())
+        .collect();
+    Some(if parts.is_empty() {
+        spec.cmd.to_string()
+    } else {
+        format!("{} {}", spec.cmd, parts.join(spec.join))
+    })
+}
 
 fn flat() -> Vec<(&'static str, &'static str)> {
     GROUPS.iter().flat_map(|(_, cs)| cs.iter().copied()).collect()
@@ -45,12 +138,26 @@ fn flat() -> Vec<(&'static str, &'static str)> {
 #[component]
 pub fn App() -> impl IntoView {
     let status = use_status();
-    // (role, owner)
     let role = RwSignal::new(("observer".to_string(), "none".to_string()));
     let palette_open = RwSignal::new(false);
     let filter = RwSignal::new(String::new());
+    // Parameter modal: Some(spec index) when open.
+    let modal = RwSignal::new(None::<usize>);
+    let vals = RwSignal::new(Vec::<String>::new());
+    // Guidance banner after launching a guided (brain-driven) flow.
+    let guide = RwSignal::new(false);
 
-    // One-shot: boot the terminal, wire role updates, add ⌘K / Esc.
+    let open_modal = move |i: usize| {
+        vals.set(defaults(&SPECS[i]));
+        modal.set(Some(i));
+    };
+    // Click handler shared by nav + palette: modal if the command needs
+    // input, otherwise inject straight away.
+    let dispatch = move |c: &'static str| match spec_idx(c) {
+        Some(i) => open_modal(i),
+        None => term::run_command(c),
+    };
+
     Effect::new(move |_| {
         term::init("embra-term");
         term::on_role(move |r, o| role.set((r, o)));
@@ -64,6 +171,7 @@ pub fn App() -> impl IntoView {
                         palette_open.update(|b| *b = !*b);
                     } else if k == "Escape" {
                         palette_open.set(false);
+                        modal.set(None);
                     }
                 },
             );
@@ -135,8 +243,7 @@ pub fn App() -> impl IntoView {
                         {cmds.iter().map(|(c, d)| {
                             let c = *c;
                             view! {
-                                <button class="cmd"
-                                    on:click=move |_| term::run_command(c)>
+                                <button class="cmd" on:click=move |_| dispatch(c)>
                                     {c}" "<code>{*d}</code>
                                 </button>
                             }
@@ -148,22 +255,111 @@ pub fn App() -> impl IntoView {
             <div class="main">
                 <div class="wizard">
                     <span class="lbl">"Guided setup:"</span>
-                    {WIZARDS.iter().map(|(label, cmd)| {
-                        let cmd = *cmd;
-                        view! {
-                            <button class="btn ghost"
-                                on:click=move |_| term::run_command(cmd)>
-                                {*label}
-                            </button>
-                        }
-                    }).collect_view()}
+                    <button class="btn" on:click=move |_| {
+                        if let Some(i) = spec_idx("/provider --setup") { open_modal(i); }
+                    }>"Provider setup"</button>
+                    <span class="lbl" style="margin-left:auto">
+                        "Other setups (/git-setup, /github-token, /ssh-keygen) are in the nav."
+                    </span>
                 </div>
+                {move || guide.get().then(|| view! {
+                    <div class="banner">
+                        <span>
+                            "⮕ Setup started — answer the prompts in the console below \
+                             (arrow keys + Enter for selectors)."
+                        </span>
+                        <button class="btn ghost" on:click=move |_| guide.set(false)>
+                            "Dismiss"
+                        </button>
+                    </div>
+                })}
                 <div class="term-wrap"><div id="embra-term"></div></div>
                 <div class="term-hint">
                     "Live embraOS console. Buttons inject commands; the console is authoritative."
                 </div>
             </div>
 
+            // ── Parameter modal ───────────────────────────────────────
+            {move || modal.get().map(|i| {
+                let spec = &SPECS[i];
+                view! {
+                    <div class="palette-bg" on:click=move |_| modal.set(None)>
+                        <div class="modal"
+                            on:click=move |e: leptos::ev::MouseEvent| e.stop_propagation()>
+                            <div class="m-head">
+                                <b>{spec.title}</b>
+                                <code>{spec.cmd}</code>
+                            </div>
+                            <div class="m-note">{spec.note}</div>
+                            <div class="m-body">
+                                {spec.fields.iter().enumerate().map(|(fi, f)| {
+                                    let label = if f.req {
+                                        format!("{} *", f.label)
+                                    } else { f.label.to_string() };
+                                    let input = if f.choices.is_empty() {
+                                        let itype = if f.secret { "password" } else { "text" };
+                                        view! {
+                                            <input
+                                                type=itype
+                                                placeholder=f.ph
+                                                prop:value=move || vals.with(|v|
+                                                    v.get(fi).cloned().unwrap_or_default())
+                                                on:input=move |e| {
+                                                    let nv = event_target_value(&e);
+                                                    vals.update(|v| if fi < v.len() { v[fi] = nv });
+                                                } />
+                                        }.into_any()
+                                    } else {
+                                        view! {
+                                            <select
+                                                prop:value=move || vals.with(|v|
+                                                    v.get(fi).cloned().unwrap_or_default())
+                                                on:change=move |e| {
+                                                    let nv = event_target_value(&e);
+                                                    vals.update(|v| if fi < v.len() { v[fi] = nv });
+                                                }>
+                                                {f.choices.iter().map(|c| view! {
+                                                    <option value=*c>{*c}</option>
+                                                }).collect_view()}
+                                            </select>
+                                        }.into_any()
+                                    };
+                                    view! {
+                                        <label class="field">
+                                            <span>{label}</span>{input}
+                                        </label>
+                                    }
+                                }).collect_view()}
+                            </div>
+                            <div class="m-actions">
+                                <button class="btn ghost"
+                                    on:click=move |_| modal.set(None)>"Cancel"</button>
+                                <button class="btn" on:click=move |_| {
+                                    let line = build(&SPECS[i], &vals.get());
+                                    match line {
+                                        Some(l) => {
+                                            term::run_command(&l);
+                                            if SPECS[i].guided {
+                                                term::focus();
+                                                guide.set(true);
+                                            }
+                                            modal.set(None);
+                                        }
+                                        None => {
+                                            if let Some(w) = web_sys::window() {
+                                                let _ = w.alert_with_message(
+                                                    "Please fill the required field(s).");
+                                            }
+                                        }
+                                    }
+                                }>"Run"</button>
+                            </div>
+                        </div>
+                    </div>
+                }
+            })}
+
+            // ── Command palette ───────────────────────────────────────
             {move || palette_open.get().then(|| {
                 let f = filter.get().to_lowercase();
                 view! {
@@ -181,8 +377,8 @@ pub fn App() -> impl IntoView {
                                     })
                                     .map(|(c, d)| view! {
                                         <div class="row" on:click=move |_| {
-                                            term::run_command(c);
                                             palette_open.set(false);
+                                            dispatch(c);
                                         }>
                                             <span>{c}</span><span class="d">{d}</span>
                                         </div>

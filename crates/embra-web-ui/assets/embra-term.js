@@ -84,6 +84,9 @@
   window.embraTermTakeover = function () {
     if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: "takeover" }));
   };
+  window.embraTermFocus = function () {
+    if (term) try { term.focus(); } catch (e) {}
+  };
   window.embraTermSetRoleCb = function (cb) {
     roleCb = cb;
     cb(lastRole, lastOwner); // prime
