@@ -1,20 +1,25 @@
 :root {
-  --bg: #070b12;
-  --bg-2: #0c121d;
-  --panel: #111a28;
-  --panel-2: #16212f;
-  --line: #1f2c3d;
-  --txt: #cdd9e5;
-  --txt-dim: #7e8da0;
-  --accent: #4ad6e6;
-  --accent-2: #6ee7b7;
-  --warn: #f0b429;
-  --bad: #ef5a6f;
-  --good: #43d17a;
+  /* Warm embraOS brand palette (from embraos-banner.png / Embra flame). */
+  --bg: #0c0907;          /* warm near-black */
+  --bg-2: #140d09;        /* lifted warm */
+  --panel: #1b120c;
+  --panel-2: #221710;
+  --line: #33231a;        /* warm border */
+  --txt: #ece2d8;         /* warm off-white */
+  --txt-dim: #9c8b7c;     /* warm gray */
+  --accent: #ff7a1a;      /* flame orange (primary) */
+  --accent-2: #f5a623;    /* amber / gold */
+  --accent-red: #d2442a;  /* deep ember red */
+  --warn: #f5a623;
+  --bad: #e5533a;         /* warm red — still clearly "down" */
+  --good: #43d17a;        /* conventional green — "up" (kept for legibility) */
 }
 * { box-sizing: border-box; }
-html, body { margin: 0; height: 100%; background: var(--bg); color: var(--txt);
+html, body { margin: 0; height: 100%; color: var(--txt);
   font-family: 'Inter', system-ui, -apple-system, sans-serif; font-size: 14px; }
+/* Subtle ember glow from top-center fading to warm-black (echoes banner). */
+body { background:
+  radial-gradient(1100px 560px at 50% -8%, #241208 0%, var(--bg) 58%) fixed; }
 #app, .shell { height: 100vh; }
 
 .shell {
@@ -27,12 +32,18 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--txt);
 /* ── Top bar ───────────────────────────────────────────── */
 .topbar {
   grid-area: top; display: flex; align-items: center; gap: 18px;
-  padding: 0 18px; background: linear-gradient(180deg, var(--bg-2), var(--bg));
+  padding: 0 18px; background: linear-gradient(180deg, var(--bg-2), transparent);
   border-bottom: 1px solid var(--line);
 }
-.brand { font-weight: 700; letter-spacing: .5px; color: var(--txt); }
-.brand b { color: var(--accent); }
-.brand .ver { color: var(--txt-dim); font-weight: 500; font-size: 12px; margin-left: 8px; }
+.brand { display: flex; align-items: center; gap: 10px; letter-spacing: .5px; }
+.brand .logo { height: 26px; width: 26px; object-fit: contain; display: block;
+  filter: drop-shadow(0 0 6px rgba(255, 122, 26, .35)); }
+.brand .wordmark {
+  font-weight: 800; font-size: 19px; line-height: 1;
+  background: linear-gradient(95deg, var(--accent-2) 0%, var(--accent) 46%, var(--accent-red) 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+.brand .ver { color: var(--txt-dim); font-weight: 500; font-size: 12px; margin-left: 6px; }
 .pills { display: flex; gap: 8px; flex: 1; flex-wrap: wrap; }
 .pill {
   display: inline-flex; align-items: center; gap: 6px; font-size: 12px;
@@ -42,15 +53,15 @@ html, body { margin: 0; height: 100%; background: var(--bg); color: var(--txt);
 .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--txt-dim); }
 .pill.up .dot { background: var(--good); box-shadow: 0 0 7px var(--good); }
 .pill.down .dot { background: var(--bad); box-shadow: 0 0 7px var(--bad); }
-.pill.down { color: var(--bad); border-color: #3a2230; }
+.pill.down { color: var(--bad); border-color: #3a201a; }
 
 .role { display: flex; align-items: center; gap: 10px; }
 .role .badge { font-size: 12px; padding: 4px 10px; border-radius: 6px;
   border: 1px solid var(--line); }
-.role .badge.writer { color: var(--accent-2); border-color: #1d3a33; }
-.role .badge.observer { color: var(--warn); border-color: #3a3320; }
+.role .badge.writer { color: var(--accent-2); border-color: #3a2a14; }
+.role .badge.observer { color: var(--accent-red); border-color: #3a221a; }
 button.btn {
-  font: inherit; font-size: 12px; cursor: pointer; color: var(--bg);
+  font: inherit; font-size: 12px; cursor: pointer; color: #1a0e06;
   background: var(--accent); border: 0; padding: 6px 12px; border-radius: 6px;
   font-weight: 600;
 }
@@ -75,13 +86,15 @@ button.btn.ghost:hover { border-color: var(--accent); color: var(--accent); }
 
 /* ── Main / terminal ───────────────────────────────────── */
 .main { grid-area: main; display: flex; flex-direction: column;
-  background: var(--bg); padding: 14px; gap: 12px; min-width: 0; }
+  padding: 14px; gap: 12px; min-width: 0; }
 .term-wrap {
-  flex: 1; min-height: 0; background: #070b12; border: 1px solid var(--line);
+  flex: 1; min-height: 0; background: #0c0907; border: 1px solid var(--line);
   border-radius: 10px; padding: 10px;
-  box-shadow: inset 0 0 60px rgba(74, 214, 230, .05), 0 0 0 1px rgba(74,214,230,.04);
+  box-shadow: inset 0 0 70px rgba(255, 122, 26, .05), 0 0 0 1px rgba(255, 122, 26, .05);
 }
-body.is-observer .term-wrap { box-shadow: inset 0 0 60px rgba(240,180,41,.06); }
+body.is-observer .term-wrap {
+  box-shadow: inset 0 0 70px rgba(245, 166, 35, .08), 0 0 0 1px rgba(245, 166, 35, .12);
+}
 #embra-term { width: 100%; height: 100%; }
 .term-hint { font-size: 12px; color: var(--txt-dim); }
 .wizard { display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
@@ -90,18 +103,18 @@ body.is-observer .term-wrap { box-shadow: inset 0 0 60px rgba(240,180,41,.06); }
 .wizard .lbl { font-size: 12px; color: var(--txt-dim); margin-right: 4px; }
 
 /* ── Command palette ───────────────────────────────────── */
-.palette-bg { position: fixed; inset: 0; background: rgba(3,6,11,.66);
+.palette-bg { position: fixed; inset: 0; background: rgba(8, 5, 3, .68);
   display: flex; align-items: flex-start; justify-content: center;
   padding-top: 12vh; z-index: 50; }
 .palette { width: 540px; max-width: 92vw; background: var(--panel-2);
   border: 1px solid var(--line); border-radius: 10px; overflow: hidden;
-  box-shadow: 0 24px 60px rgba(0,0,0,.5); }
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .55); }
 .palette input { width: 100%; font: inherit; font-size: 15px; padding: 14px 16px;
   background: var(--bg-2); color: var(--txt); border: 0;
   border-bottom: 1px solid var(--line); outline: none; }
 .palette .list { max-height: 46vh; overflow-y: auto; }
 .palette .row { padding: 10px 16px; cursor: pointer; display: flex;
   justify-content: space-between; }
-.palette .row:hover { background: var(--accent); color: var(--bg); }
+.palette .row:hover { background: var(--accent); color: #1a0e06; }
 .palette .row .d { color: var(--txt-dim); font-size: 12px; }
-.palette .row:hover .d { color: var(--bg); }
+.palette .row:hover .d { color: #1a0e06; }

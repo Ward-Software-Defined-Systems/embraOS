@@ -79,7 +79,8 @@ pub fn App() -> impl IntoView {
         <div class="shell">
             <div class="topbar">
                 <div class="brand">
-                    "embra"<b>"OS"</b>
+                    <img class="logo" src="/assets/embra-logo.png" alt="embraOS" />
+                    <span class="wordmark">"embraOS"</span>
                     <span class="ver">
                         {move || status.get().version
                             .map(|v| format!("v{v}"))

@@ -55,8 +55,12 @@
     term = new Terminal({
       fontFamily: "'JetBrains Mono','Fira Code',ui-monospace,monospace",
       fontSize: 14, cursorBlink: true, scrollback: 4000,
-      theme: { background: "#070b12", foreground: "#cdd9e5",
-               cursor: "#4ad6e6", selectionBackground: "#22405a" },
+      // Warm brand bg + amber (flame) cursor to blend with the shell.
+      // The 16 ANSI colors are intentionally left at xterm defaults so
+      // the real ratatui TUI's own colors render true (parity-safe).
+      theme: { background: "#0c0907", foreground: "#ece2d8",
+               cursor: "#ff7a1a", cursorAccent: "#0c0907",
+               selectionBackground: "#3a2a18" },
     });
     fit = new FitAddon.FitAddon();
     term.loadAddon(fit);

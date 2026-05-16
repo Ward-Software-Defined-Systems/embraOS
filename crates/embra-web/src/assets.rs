@@ -25,6 +25,8 @@ fn content_type(path: &str) -> &'static str {
         Some("css") => "text/css; charset=utf-8",
         Some("json") => "application/json",
         Some("svg") => "image/svg+xml",
+        Some("png") => "image/png",
+        Some("ico") => "image/x-icon",
         _ => "application/octet-stream",
     }
 }
