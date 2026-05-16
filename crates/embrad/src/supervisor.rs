@@ -29,6 +29,18 @@ fn read_terminal_size_from_cmdline() -> (u16, u16) {
     (cols, rows)
 }
 
+/// Web mode: `embra.web=1` on the kernel cmdline (set by run-qemu.sh).
+/// In web mode the operator UI is the browser, so the serial
+/// `embra-console` is NOT spawned (the brain is single-conversation —
+/// `embra-web` runs the sole PTY-hosted console). Same parsing style as
+/// `read_terminal_size_from_cmdline`.
+fn web_mode_enabled() -> bool {
+    std::fs::read_to_string("/proc/cmdline")
+        .unwrap_or_default()
+        .split_whitespace()
+        .any(|p| p == "embra.web=1")
+}
+
 /// Service definition
 #[derive(Clone)]
 pub struct ServiceDef {
@@ -265,23 +277,49 @@ impl Supervisor {
             restart_policy: RestartPolicy::default(),
         });
 
-        // 5. embra-console — depends on embra-brain
-        // Read terminal size from kernel cmdline (set by run-qemu.sh from host terminal)
-        let (term_cols, term_rows) = read_terminal_size_from_cmdline();
-        self.add_service(ServiceDef {
-            name: "embra-console".to_string(),
-            binary: "/usr/bin/embra-console".to_string(),
-            args: vec![
-                "--apid-addr".to_string(), "http://127.0.0.1:50000".to_string(),
-                "--device".to_string(), "/dev/ttyS0".to_string(),
-                "--columns".to_string(), term_cols.to_string(),
-                "--rows".to_string(), term_rows.to_string(),
-            ],
-            env: vec![],
-            health_check: HealthCheck::ProcessAlive,
-            depends_on: vec!["embra-brain".to_string()],
-            restart_policy: RestartPolicy::default(),
-        });
+        // 5. Operator UI — depends on embra-brain.
+        // The brain is single-conversation (one shared SessionManager /
+        // in_turn gate), so exactly one console→brain client may run.
+        // Web mode: embra-web (it spawns the sole PTY-hosted embra-console
+        // internally). Otherwise: the serial embra-console TUI.
+        if web_mode_enabled() {
+            info!("Web mode (embra.web=1): registering embra-web; serial console skipped");
+            self.add_service(ServiceDef {
+                name: "embra-web".to_string(),
+                binary: "/usr/bin/embra-web".to_string(),
+                args: vec![
+                    "--port".to_string(), "3345".to_string(),
+                    "--apid-addr".to_string(), "http://127.0.0.1:50000".to_string(),
+                    "--trust-addr".to_string(), "http://127.0.0.1:50001".to_string(),
+                    "--console-bin".to_string(), "/usr/bin/embra-console".to_string(),
+                ],
+                env: vec![],
+                // TLS-only port: the supervisor's Http check is plaintext
+                // and Grpc is a bare TCP connect, so ProcessAlive is the
+                // correct check (same as the serial console uses).
+                health_check: HealthCheck::ProcessAlive,
+                depends_on: vec!["embra-brain".to_string()],
+                restart_policy: RestartPolicy::default(),
+            });
+        } else {
+            // Read terminal size from kernel cmdline (set by run-qemu.sh
+            // from the host terminal).
+            let (term_cols, term_rows) = read_terminal_size_from_cmdline();
+            self.add_service(ServiceDef {
+                name: "embra-console".to_string(),
+                binary: "/usr/bin/embra-console".to_string(),
+                args: vec![
+                    "--apid-addr".to_string(), "http://127.0.0.1:50000".to_string(),
+                    "--device".to_string(), "/dev/ttyS0".to_string(),
+                    "--columns".to_string(), term_cols.to_string(),
+                    "--rows".to_string(), term_rows.to_string(),
+                ],
+                env: vec![],
+                health_check: HealthCheck::ProcessAlive,
+                depends_on: vec!["embra-brain".to_string()],
+                restart_policy: RestartPolicy::default(),
+            });
+        }
     }
 
     fn add_service(&mut self, def: ServiceDef) {
@@ -306,10 +344,11 @@ impl Supervisor {
 
             self.start_service(i).await?;
 
-            // After spawning embra-console, redirect embrad's output to log file
-            // so the TUI gets clean control of the terminal
-            if name == "embra-console" && std::process::id() == 1 {
-                info!("Redirecting embrad output to log file for TUI");
+            // After spawning the operator UI, redirect embrad's output to
+            // a log file: serial console needs ttyS0 clean for the TUI;
+            // web mode wants ttyS0 quiet (operator is on the browser).
+            if (name == "embra-console" || name == "embra-web") && std::process::id() == 1 {
+                info!("Redirecting embrad output to log file");
                 if let Ok(log) = std::fs::File::create("/embra/ephemeral/embrad.log") {
                     use std::os::unix::io::AsRawFd;
                     let fd = log.as_raw_fd();

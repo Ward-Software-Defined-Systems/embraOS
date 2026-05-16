@@ -89,6 +89,21 @@ if [ "$BUILDROOT_ONLY" = false ]; then
     export AR_x86_64_unknown_linux_musl=x86_64-linux-musl-ar
     export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
 
+    # Build the Leptos/WASM frontend BEFORE the cargo cross-build so
+    # embra-web can embed crates/embra-web-ui/dist via rust-embed. This
+    # is host/CI-only (no Node in the image; assets ride inside the
+    # static musl binary).
+    echo "=== Step 0.5: Build embra-web frontend (Trunk → WASM) ==="
+    if ! command -v trunk &>/dev/null; then
+        echo "ERROR: trunk not found (needed for the embra-web frontend)" >&2
+        echo "  Install it with:" >&2
+        echo "    rustup target add wasm32-unknown-unknown" >&2
+        echo "    cargo install trunk --locked" >&2
+        exit 1
+    fi
+    rustup target add wasm32-unknown-unknown
+    (cd crates/embra-web-ui && trunk build --release)
+
     echo "=== Step 1: Build Rust binaries (musl static) ==="
     rustup target add x86_64-unknown-linux-musl
     cargo build --release --target x86_64-unknown-linux-musl
@@ -152,7 +167,7 @@ fi
 # Clean stale Buildroot package caches so fresh binaries are picked up
 # Includes embraOS packages AND upstream packages whose config may have changed
 (cd "$BUILDROOT_DIR" && \
-    for pkg in embrad embra-apid embra-trustd embra-brain embra-console wardsondb \
+    for pkg in embrad embra-apid embra-trustd embra-brain embra-console embra-web wardsondb \
                git openssl libcurl openssh; do
         make "${pkg}-dirclean" 2>/dev/null || true
     done && \

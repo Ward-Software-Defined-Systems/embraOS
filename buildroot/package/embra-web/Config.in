@@ -1,0 +1,5 @@
+config BR2_PACKAGE_EMBRA_WEB
+	bool "embra-web"
+	help
+	  embraOS self-hosted web console (HTTPS :3345) — enterprise
+	  shell wrapping the real TUI in xterm.js over a PTY bridge.

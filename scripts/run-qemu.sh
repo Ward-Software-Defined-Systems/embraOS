@@ -58,8 +58,26 @@ echo "  Initrd: $INITRD"
 echo "  Memory: $MEMORY"
 echo "  CPUs: $CPUS"
 echo "  Acceleration: $ACCEL_NAME"
+
+# UI mode — web console by default (this is the embra-web branch).
+# EMBRA_TUI=1 boots the serial TUI instead: with embra.web=1 absent from
+# the kernel cmdline, embrad registers embra-console (Phase-1 TUI on this
+# terminal) and does NOT start embra-web. No image rebuild needed.
+if [ "${EMBRA_TUI:-}" = "1" ]; then
+    WEB_CMDLINE=""
+else
+    WEB_CMDLINE="embra.web=1"
+fi
+
 echo "  Serial console: this terminal"
-echo "  Port forwards: 50000→50000 (gRPC), 8443→8443 (REST)"
+if [ -n "$WEB_CMDLINE" ]; then
+    echo "  UI mode: web console (default) — set EMBRA_TUI=1 for the serial TUI"
+    echo "  Port forwards: 50000→50000 (gRPC), 8443→8443 (REST), 3345→3345 (HTTPS web)"
+    echo "  Web console: https://localhost:3345/embraOS  (accept the embraOS-CA cert)"
+else
+    echo "  UI mode: serial TUI (EMBRA_TUI=1) — embra-web not started"
+    echo "  Port forwards: 50000→50000 (gRPC), 8443→8443 (REST)"
+fi
 echo ""
 echo "Press Ctrl-A X to exit QEMU"
 echo ""
@@ -77,8 +95,8 @@ qemu-system-x86_64 \
     -drive file="$IMAGE",format=raw,if=virtio \
     -kernel "$KERNEL" \
     -initrd "$INITRD" \
-    -append "console=ttyS0 root=/dev/vda2 ro quiet embra.cols=$HOST_COLS embra.rows=$HOST_ROWS" \
+    -append "console=ttyS0 root=/dev/vda2 ro quiet embra.cols=$HOST_COLS embra.rows=$HOST_ROWS $WEB_CMDLINE" \
     -nographic \
     -serial mon:stdio \
-    -nic user,hostfwd=tcp::50000-:50000,hostfwd=tcp::8443-:8443 \
+    -nic user,hostfwd=tcp::50000-:50000,hostfwd=tcp::8443-:8443,hostfwd=tcp::3345-:3345 \
     -no-reboot

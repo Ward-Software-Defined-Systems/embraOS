@@ -42,17 +42,32 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
     // Skip EnterAlternateScreen — doesn't work over QEMU serial (-nographic)
     enable_raw_mode()?;
 
-    // For serial console, always use fixed viewport since TIOCGWINSZ is unreliable
+    // Serial console: TIOCGWINSZ is unreliable over QEMU -nographic, so the
+    // viewport is pinned to the cmdline-provided size (Viewport::Fixed).
+    // Web/PTY console (EMBRA_WEB_PTY=1 — spawned by embra-web with no
+    // columns/rows override): the PTY has a real, dynamic winsize driven by
+    // xterm.js, so use the size-tracking backend that reflows on resize.
+    let web_pty = std::env::var("EMBRA_WEB_PTY").is_ok();
     let use_cols = if cols > 0 { cols } else { 80 };
     let use_rows = if rows > 0 { rows } else { 24 };
 
     let backend = CrosstermBackend::new(stdout());
-    let mut terminal_tui = Terminal::with_options(
-        backend,
-        ratatui::TerminalOptions {
-            viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, use_cols, use_rows)),
-        },
-    )?;
+    let mut terminal_tui = if web_pty {
+        // ratatui's full-screen Terminal re-reads the backend size on every
+        // draw() (autoresize), so it reflows automatically once the PTY
+        // winsize changes and crossterm delivers Event::Resize (handled
+        // in the event loop below).
+        Terminal::new(backend)?
+    } else {
+        Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(
+                    0, 0, use_cols, use_rows,
+                )),
+            },
+        )?
+    };
     // Delay to let embrad finish its dup2 redirect, then clear any log bleed-through
     tokio::time::sleep(Duration::from_millis(500)).await;
     terminal_tui.clear()?;
@@ -111,8 +126,18 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
 
             // Terminal events
             Some(ev) = term_rx.recv() => {
-                if let Event::Key(key) = ev {
-                    handle_key_event(key, &mut app, &in_tx).await?;
+                match ev {
+                    Event::Key(key) => handle_key_event(key, &mut app, &in_tx).await?,
+                    // PTY/web mode: xterm.js → embra-web → TIOCSWINSZ →
+                    // crossterm Event::Resize. The size-tracking backend
+                    // reflows on the next draw(); we only refresh the
+                    // viewport dims the renderer's manual wrapping reads.
+                    // (Serial/Fixed mode never emits Resize — no-op there.)
+                    Event::Resize(c, r) => {
+                        app.viewport_cols = c;
+                        app.viewport_rows = r;
+                    }
+                    _ => {}
                 }
             }
 

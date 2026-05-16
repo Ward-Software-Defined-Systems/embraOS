@@ -1,0 +1,25 @@
+[package]
+name = "embra-web"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "embraOS self-hosted web console (HTTPS :3345) — enterprise shell wrapping the real TUI in xterm.js over a PTY→WebSocket bridge"
+
+[dependencies]
+embra-common = { workspace = true }
+tokio = { workspace = true }
+tonic = { workspace = true }
+prost = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+axum = { version = "0.8", features = ["ws"] }
+tokio-rustls = "0.26"
+futures-util = "0.3"
+bytes = "1"
+portable-pty = "0.8"
+rust-embed = { version = "8", features = ["compression"] }

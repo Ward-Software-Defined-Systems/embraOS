@@ -1,0 +1,6 @@
+[build]
+target = "index.html"
+dist = "dist"
+# Deterministic asset names so the embra-web rust-embed include is stable.
+filehash = false
+# trunk auto-selects a wasm-bindgen CLI matching the crate's dependency.

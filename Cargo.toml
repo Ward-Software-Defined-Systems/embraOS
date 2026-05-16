@@ -7,9 +7,16 @@ members = [
     "crates/embra-trustd",
     "crates/embra-brain",
     "crates/embra-console",
+    "crates/embra-web",
     "crates/embra-common",
     "crates/embra-tool-macro",
     "crates/embra-tools-core",
+]
+
+# embra-web-ui is a wasm32 Leptos/Trunk crate with its own toolchain and
+# dependency set — deliberately NOT a member of the musl OS workspace.
+exclude = [
+    "crates/embra-web-ui",
 ]
 
 [workspace.package]
