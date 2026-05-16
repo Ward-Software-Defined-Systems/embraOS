@@ -12,6 +12,10 @@
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — dense multigraph with auto-derived edges" width="100%">
 </p>
 
+<p align="center">
+  <img src="assets/embra-web.png" alt="embraOS web console (embra-web) — the conversational TUI in the browser over a PTY→WebSocket bridge" width="100%">
+</p>
+
 **Current Status:** Phase 1 — Stable (embra-desktop branch is experimental)
 
 ---
