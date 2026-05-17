@@ -39,6 +39,12 @@
         lastRole = msg.role; lastOwner = msg.owner;
         writable = msg.role === "writer";
         document.body.classList.toggle("is-observer", !writable);
+        // First chance to push our geometry: sendResize() is gated on
+        // `writable`, which is still false on ws.onopen / initial
+        // ResizeObserver. Without this the PTY stays at portable-pty's
+        // 80x24 default until a manual browser resize. Fires on initial
+        // connect, reconnect, and takeover (resync per writer change).
+        if (writable) { try { fit.fit(); } catch (e) {} sendResize(); }
         if (roleCb) roleCb(lastRole, lastOwner);
       }
     };
@@ -54,7 +60,11 @@
     if (term) return; // once
     term = new Terminal({
       fontFamily: "'JetBrains Mono','Fira Code',ui-monospace,monospace",
-      fontSize: 14, cursorBlink: true, scrollback: 4000,
+      // scrollback: 0 — the TUI is full-screen ratatui drawn on the
+      // normal buffer (no alt-screen, for QEMU serial parity), so it
+      // repaints the whole screen every ~200ms. Any scrollback would
+      // just be stale snapshots the user could wheel away into.
+      fontSize: 14, cursorBlink: true, scrollback: 0,
       // Warm brand bg + amber (flame) cursor to blend with the shell.
       // The 16 ANSI colors are intentionally left at xterm defaults so
       // the real ratatui TUI's own colors render true (parity-safe).
