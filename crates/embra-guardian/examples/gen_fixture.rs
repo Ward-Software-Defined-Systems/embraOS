@@ -33,9 +33,18 @@ fn run(input: &str) -> String {
 "##;
 
 fn main() -> anyhow::Result<()> {
-    let out = std::env::args().nth(1).expect("usage: gen_fixture <outdir>");
-    let m = embra_guardian::validate(SAMPLE, &[])
-        .map_err(|e| anyhow::anyhow!("sample failed validation: {e}"))?;
+    let out = std::env::args()
+        .nth(1)
+        .expect("usage: gen_fixture <outdir> [module.rs]");
+    // Optional argv[2]: a module source file (else the built-in SAMPLE).
+    // Lets the doc examples be compiled to wasm32 for verification.
+    let src: String = match std::env::args().nth(2) {
+        Some(path) => std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("read {path}: {e}"))?,
+        None => SAMPLE.to_string(),
+    };
+    let m = embra_guardian::validate(&src, &[])
+        .map_err(|e| anyhow::anyhow!("module failed validation: {e}"))?;
     let p = embra_guardian::scaffold(Path::new(&out), &m)?;
     println!("{}", p.project.display());
     println!("{}", p.artifact_name);

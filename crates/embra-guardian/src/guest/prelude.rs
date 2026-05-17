@@ -7,10 +7,12 @@
 // embra-guardian — `include_str!`'d as text.
 #![no_std]
 #![allow(dead_code)]
+#![allow(unused_imports)]
 #[macro_use]
 extern crate alloc;
 
-use alloc::string::String;
+use alloc::borrow::ToOwned;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 mod json;
