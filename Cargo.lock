@@ -739,6 +739,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "embra-common",
+ "embra-guardian",
  "embra-tool-macro",
  "embra-tools-core",
  "futures",

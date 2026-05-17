@@ -4,7 +4,7 @@ use tracing::{error, info, warn};
 
 use crate::db::{WardsonDbClient, WardsonDbError};
 
-const CURRENT_SCHEMA_VERSION: u32 = 11;
+const CURRENT_SCHEMA_VERSION: u32 = 12;
 
 /// Run all pending migrations. Each migration is idempotent.
 pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
@@ -116,6 +116,12 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
         set_schema_version(db, 11).await?;
     }
 
+    if current_version < 12 {
+        // v12 (embra-guardian-v1): dynamic-tool manifest collection.
+        run_v12_guardian(db).await?;
+        set_schema_version(db, 12).await?;
+    }
+
     info!("Migrations complete. Schema version: {}", CURRENT_SCHEMA_VERSION);
     Ok(())
 }
@@ -209,6 +215,19 @@ async fn run_v2_consolidation(db: &WardsonDbClient) -> Result<()> {
     }
 
     info!("Migration v2: consolidation log collection ensured");
+    Ok(())
+}
+
+/// Migration v12 (embra-guardian-v1): create the `guardian.tools`
+/// collection that persists dynamic-tool manifests (one doc per tool,
+/// `_id == name`). Idempotent — brand-new feature, no data walk.
+async fn run_v12_guardian(db: &WardsonDbClient) -> Result<()> {
+    info!("Running migration v12: guardian.tools collection");
+    if !db.collection_exists("guardian.tools").await.unwrap_or(false) {
+        info!("Creating collection: guardian.tools");
+        let _ = db.create_collection("guardian.tools").await;
+    }
+    info!("Migration v12: guardian.tools collection ensured");
     Ok(())
 }
 

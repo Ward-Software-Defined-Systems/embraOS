@@ -23,6 +23,7 @@ mod knowledge;
 mod grpc_service;
 mod provider;
 mod setup;
+mod guardian;
 
 use grpc_service::BrainGrpcService;
 
@@ -131,6 +132,14 @@ async fn main() -> anyhow::Result<()> {
             tools::registry::tool_count()
         ),
         Err(e) => error!("Failed to write tools.registry snapshot: {e}"),
+    }
+
+    // embra-guardian-v1: init the dynamic-tool runtime overlay and load
+    // previously-built artifacts (DATA persists). Ready tools whose
+    // toolchain matches are recompiled into the sandbox; missing/stale
+    // ones are logged for re-define. Never blocks boot on a build.
+    if let Err(e) = guardian::reconcile_on_boot(&db).await {
+        error!("guardian reconcile failed (dynamic tools unavailable this boot): {e}");
     }
 
     // Set HOME to writable workspace so git/ssh config persists on DATA partition
