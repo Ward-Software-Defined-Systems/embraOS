@@ -6,6 +6,7 @@ members = [
     "crates/embra-apid",
     "crates/embra-trustd",
     "crates/embra-brain",
+    "crates/embra-guardian",
     "crates/embra-console",
     "crates/embra-web",
     "crates/embra-common",

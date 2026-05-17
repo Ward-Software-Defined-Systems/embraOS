@@ -1,0 +1,38 @@
+[package]
+name = "embra-guardian"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "embra-guardian-v1 — validate, build, and sandbox-run intelligence-authored dynamic WASM tools"
+
+[dependencies]
+embra-tools-core = { path = "../embra-tools-core" }
+anyhow.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
+tokio.workspace = true
+# Host-side capability transport (the workspace already links this exact
+# reqwest+rustls stack static-musl for the WardSONDB client; we add the
+# `blocking` client since wasmtime host imports are synchronous).
+reqwest = { workspace = true, features = ["blocking"] }
+url = "2"
+# Static validation of the pasted guest module (parse-only; NOT a
+# proc-macro). span-locations gives file line/col for reject messages.
+syn = { version = "2", features = ["full", "visit", "extra-traits"] }
+proc-macro2 = { version = "1", features = ["span-locations"] }
+# Minimal feature set: cranelift (compile) + runtime (execute) + std.
+# Native Unix trap handling is built into `runtime`/`std` (no extra
+# feature). NO wasi / component-model / gc / cache / parallel-compilation
+# — keeps the static-musl link small and the sandbox import-free.
+# syn (validator) is added in the core-modules step.
+wasmtime = { version = "44.0.1", default-features = false, features = ["cranelift", "runtime", "std"] }
+
+[dev-dependencies]
+# `wat` compiles the small ABI fixture used by host/abi round-trip tests
+# and the R1 spike example so `cargo test`/examples stay self-contained
+# (no in-OS toolchain needed).
+wat = "1"
