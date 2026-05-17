@@ -23,6 +23,10 @@ set -euo pipefail
 # Buildroot release pin. Override at runtime: BUILDROOT_VERSION=2024.02 ./scripts/build-image.sh ...
 BUILDROOT_VERSION="${BUILDROOT_VERSION:-2026.02.1}"
 
+# embra-guardian-v1 in-OS Rust toolchain pin (musl host + wasm32 std).
+# Staged into vendor/rust-toolchain by Step 3.5 and installed at /opt/rust.
+RUST_TOOLCHAIN_VERSION="${RUST_TOOLCHAIN_VERSION:-1.94.1}"
+
 # macOS-compatible nproc
 nproc_compat() {
     if command -v nproc &>/dev/null; then
@@ -123,6 +127,53 @@ if [ "$BUILDROOT_ONLY" = false ]; then
     ./scripts/create_initramfs.sh
 fi
 
+# Runs unconditionally (also under --buildroot-only): Buildroot's local
+# SITE rsync needs vendor/rust-toolchain present before Step 4.
+echo "=== Step 3.5: Stage in-OS Rust toolchain (embra-guardian-v1) ==="
+RUST_STAGE="$PWD/vendor/rust-toolchain"
+if [ -x "$RUST_STAGE/bin/cargo" ] && \
+   [ "$(cat "$RUST_STAGE/RUST_VERSION" 2>/dev/null || true)" = "$RUST_TOOLCHAIN_VERSION" ]; then
+    echo "in-OS Rust toolchain already staged ($RUST_TOOLCHAIN_VERSION) — skipping"
+else
+    if ! command -v xz &>/dev/null; then
+        echo "ERROR: xz is required to unpack the in-OS Rust toolchain" >&2
+        exit 1
+    fi
+    RUST_DIST_BASE="${RUST_DIST_BASE:-https://static.rust-lang.org/dist}"
+    RUST_HOST="rust-${RUST_TOOLCHAIN_VERSION}-x86_64-unknown-linux-musl"
+    RUST_WASM="rust-std-${RUST_TOOLCHAIN_VERSION}-wasm32-unknown-unknown"
+    RUST_TMP="$(mktemp -d)"
+    trap 'rm -rf "$RUST_TMP"' EXIT
+    for tb in "$RUST_HOST" "$RUST_WASM"; do
+        echo "  downloading ${tb}.tar.xz"
+        curl -fSL --retry 3 -o "$RUST_TMP/${tb}.tar.xz" \
+            "$RUST_DIST_BASE/${tb}.tar.xz" \
+            || { echo "ERROR: download of ${tb}.tar.xz failed" >&2; exit 1; }
+        curl -fSL --retry 3 -o "$RUST_TMP/${tb}.tar.xz.sha256" \
+            "$RUST_DIST_BASE/${tb}.tar.xz.sha256" \
+            || { echo "ERROR: download of ${tb}.tar.xz.sha256 failed" >&2; exit 1; }
+        ( cd "$RUST_TMP" \
+            && printf '%s  %s\n' "$(awk '{print $1}' "${tb}.tar.xz.sha256")" "${tb}.tar.xz" \
+               | sha256sum -c - ) \
+            || { echo "ERROR: sha256 verification failed for ${tb}.tar.xz" >&2; exit 1; }
+        tar -xf "$RUST_TMP/${tb}.tar.xz" -C "$RUST_TMP" \
+            || { echo "ERROR: extract of ${tb}.tar.xz failed" >&2; exit 1; }
+    done
+    rm -rf "$RUST_STAGE"
+    mkdir -p "$RUST_STAGE"
+    "$RUST_TMP/$RUST_HOST/install.sh" --prefix="$RUST_STAGE" \
+        --disable-ldconfig --without=rust-docs >/dev/null \
+        || { echo "ERROR: Rust host install failed" >&2; exit 1; }
+    "$RUST_TMP/$RUST_WASM/install.sh" --prefix="$RUST_STAGE" \
+        --disable-ldconfig >/dev/null \
+        || { echo "ERROR: wasm32 std install failed" >&2; exit 1; }
+    rm -rf "$RUST_STAGE/share/doc" "$RUST_STAGE/share/man" \
+           "$RUST_STAGE/lib/rustlib/src" 2>/dev/null || true
+    echo "$RUST_TOOLCHAIN_VERSION" > "$RUST_STAGE/RUST_VERSION"
+    rm -rf "$RUST_TMP"; trap - EXIT
+    echo "  staged Rust $RUST_TOOLCHAIN_VERSION ($(du -sh "$RUST_STAGE" 2>/dev/null | cut -f1)) → $RUST_STAGE"
+fi
+
 echo "=== Step 4: Buildroot ==="
 # Buildroot requires a Linux host (compiles Linux kernel, uses Linux-specific tools)
 if [ "$(uname)" = "Darwin" ]; then
@@ -168,7 +219,7 @@ fi
 # Includes embraOS packages AND upstream packages whose config may have changed
 (cd "$BUILDROOT_DIR" && \
     for pkg in embrad embra-apid embra-trustd embra-brain embra-console embra-web wardsondb \
-               git openssl libcurl openssh; do
+               embra-rust-toolchain git openssl libcurl openssh; do
         make "${pkg}-dirclean" 2>/dev/null || true
     done && \
     rm -f output/images/rootfs.squashfs output/images/embraos.img)

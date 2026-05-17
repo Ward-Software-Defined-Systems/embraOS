@@ -1,0 +1,11 @@
+config BR2_PACKAGE_EMBRA_RUST_TOOLCHAIN
+	bool "embra-rust-toolchain"
+	help
+	  Prebaked Rust toolchain installed read-only at /opt/rust:
+	  musl-host rustc + cargo + the wasm32-unknown-unknown std +
+	  bundled rust-lld. Enables embra-guardian-v1 to compile
+	  intelligence-authored dynamic tools to a wasmtime sandbox
+	  at runtime (CARGO_HOME / target dir live on writable DATA).
+
+	  Staged host-side by scripts/build-image.sh (Step 3.5) into
+	  vendor/rust-toolchain. Adds substantial size to the rootfs.
