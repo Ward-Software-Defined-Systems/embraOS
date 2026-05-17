@@ -272,7 +272,7 @@ All sessions share the same intelligence — same memory, same identity, same so
 | Command | Description |
 |---|---|
 | `/help` | Show all commands and keyboard shortcuts |
-| `/ml` | Toggle multi-line input mode — type on multiple lines, `.` on its own line to send |
+| `/ml` | Open a multi-line message editor. **Web console (default):** a textarea modal — Ctrl/⌘+Enter or **Send** to submit, Esc/Cancel to discard; sent verbatim as one message. **Serial TUI (`EMBRA_TUI=1`):** toggles dot-terminator mode — type lines, `.` on its own line to send |
 | `/status` | System status — version, uptime, WardSONDB health, memory, soul status |
 | `/sessions` | List all sessions with state and last active time |
 | `/new <name>` | Create a new named session and switch to it |
@@ -309,6 +309,8 @@ All sessions share the same intelligence — same memory, same identity, same so
 | `Up/Down` | Scroll history |
 | `Ctrl+C` | Graceful detach |
 | `Ctrl+D` | Graceful detach |
+
+*In the web console's `/ml` editor modal: Enter = newline, Ctrl/⌘+Enter or Send = submit, Esc/Cancel = discard.*
 
 **QEMU** — host-level (`run-qemu.sh` uses `-serial mon:stdio`, so `Ctrl+A` is the escape prefix):
 
