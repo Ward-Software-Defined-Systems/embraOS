@@ -17,6 +17,8 @@ pub fn handle_local_command(cmd: &str, _args: &str, name: &str) -> Option<String
 Commands:
   /help                          Show this help message
   /ml                            Toggle multi-line mode (. on own line to send)
+  /guardian-define               Define a dynamic tool (paste a Rust module)
+  /guardian list|status <n>|show <n>|delete <n>   Manage dynamic tools
   /status                        System status
   /sessions                      List all sessions
   /new <name>                    Create a new session

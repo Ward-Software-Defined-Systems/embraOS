@@ -164,6 +164,12 @@ pub struct AppState {
     pub provider_model: String,
     pub pasted_lines: Option<Vec<String>>,
     pub multiline_mode: bool,
+    /// embra-guardian-v1: when set (via `/guardian-define`), the next
+    /// submitted multi-line/pasted buffer is delivered to the brain as
+    /// `SlashCommand{"/guardian","define\n<module>"}` instead of a
+    /// UserMessage. Reuses the multiline/paste accumulation; the serial
+    /// path stays byte-identical when this is false.
+    pub guardian_capture: bool,
     // EXPR-01 expression panel — cached state polled from brain every 3s
     pub expression_content: String,
     pub expression_version: u64,
@@ -205,6 +211,7 @@ impl AppState {
             provider_model: "opus-4.7".to_string(),
             pasted_lines: None,
             multiline_mode: false,
+            guardian_capture: false,
             expression_content: String::new(),
             expression_version: 0,
             live_reasoning: String::new(),

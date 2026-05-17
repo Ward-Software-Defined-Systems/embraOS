@@ -393,15 +393,29 @@ async fn handle_key_event(
                     )),
                 }).await;
             } else if let Some(pasted) = app.pasted_lines.take() {
-                // Send pasted content
                 let content = pasted.join("\n");
-                app.messages.push(DisplayMessage::new_with_tz("user", &content, &app.config_tz));
-                app.live_reasoning.clear();
-                let _ = in_tx.send(ConversationRequest {
-                    request_type: Some(conversation_request::RequestType::UserMessage(
-                        UserMessage { content }
-                    )),
-                }).await;
+                if app.guardian_capture {
+                    // Guardian capture: deliver the pasted module to the
+                    // brain's /guardian define path, not a model turn.
+                    app.guardian_capture = false;
+                    app.multiline_mode = false;
+                    app.messages.push(DisplayMessage::system_with_tz("Submitting Guardian tool module…", &app.config_tz));
+                    app.live_reasoning.clear();
+                    let _ = in_tx.send(ConversationRequest {
+                        request_type: Some(conversation_request::RequestType::SlashCommand(
+                            SlashCommand { command: "/guardian".to_string(), args: format!("define\n{content}") }
+                        )),
+                    }).await;
+                } else {
+                    // Send pasted content
+                    app.messages.push(DisplayMessage::new_with_tz("user", &content, &app.config_tz));
+                    app.live_reasoning.clear();
+                    let _ = in_tx.send(ConversationRequest {
+                        request_type: Some(conversation_request::RequestType::UserMessage(
+                            UserMessage { content }
+                        )),
+                    }).await;
+                }
             } else if app.multiline_mode {
                 // Multi-line mode: check if the last line is "." (send terminator)
                 let last_line_is_dot = app.input_buffer
@@ -418,21 +432,36 @@ async fn handle_key_event(
                         app.input_buffer.clear();
                         app.cursor_pos = 0;
                         app.multiline_mode = false;
+                        app.guardian_capture = false;
                         return Ok(());
                     }
                     let input = app.input_buffer.trim().to_string();
                     app.input_buffer.clear();
                     app.cursor_pos = 0;
                     app.multiline_mode = false;
+                    let guardian = app.guardian_capture;
+                    app.guardian_capture = false;
 
                     if !input.is_empty() {
-                        app.messages.push(DisplayMessage::new_with_tz("user", &input, &app.config_tz));
-                        app.live_reasoning.clear();
-                        let _ = in_tx.send(ConversationRequest {
-                            request_type: Some(conversation_request::RequestType::UserMessage(
-                                UserMessage { content: input }
-                            )),
-                        }).await;
+                        if guardian {
+                            // Guardian capture: deliver the typed module to
+                            // the brain's /guardian define path.
+                            app.messages.push(DisplayMessage::system_with_tz("Submitting Guardian tool module…", &app.config_tz));
+                            app.live_reasoning.clear();
+                            let _ = in_tx.send(ConversationRequest {
+                                request_type: Some(conversation_request::RequestType::SlashCommand(
+                                    SlashCommand { command: "/guardian".to_string(), args: format!("define\n{input}") }
+                                )),
+                            }).await;
+                        } else {
+                            app.messages.push(DisplayMessage::new_with_tz("user", &input, &app.config_tz));
+                            app.live_reasoning.clear();
+                            let _ = in_tx.send(ConversationRequest {
+                                request_type: Some(conversation_request::RequestType::UserMessage(
+                                    UserMessage { content: input }
+                                )),
+                            }).await;
+                        }
                     }
                 } else {
                     // Insert newline
@@ -474,6 +503,16 @@ async fn handle_key_event(
                             "Multi-line mode OFF."
                         };
                         app.messages.push(DisplayMessage::system_with_tz(status, &app.config_tz));
+                    } else if cmd == "/guardian-define" {
+                        // Enter Guardian capture (reuses multi-line accumulation +
+                        // bracketed paste). The next submitted buffer is sent as
+                        // SlashCommand{"/guardian","define\n<module>"}.
+                        app.guardian_capture = true;
+                        app.multiline_mode = true;
+                        app.messages.push(DisplayMessage::system_with_tz(
+                            "Guardian: paste your Rust tool module (marker + GUARDIAN_* + fn run), then send with a lone '.' on its own line (serial) or paste-and-Enter (web). It will be validated and built in the background.",
+                            &app.config_tz,
+                        ));
                     } else if commands::is_local_command(cmd) {
                         if let Some(output) = commands::handle_local_command(cmd, args, &app.config_name) {
                             app.messages.push(DisplayMessage::system_with_tz(&output, &app.config_tz));
@@ -737,5 +776,27 @@ mod paste_tests {
         let staged = stage("");
         assert_eq!(staged, vec![String::new()]);
         assert_eq!(staged.join("\n"), "");
+    }
+
+    #[test]
+    fn guardian_capture_wraps_module_as_define_slash() {
+        // Documents the console side: with guardian_capture set, the
+        // staged module is delivered to the brain as
+        // SlashCommand{"/guardian","define\n<verbatim module>"} — not a
+        // UserMessage. The split→join is verbatim (same property the
+        // pasted_lines path guarantees), so the module reaches the
+        // validator byte-for-byte.
+        let module = "// guardian-tool: web_search\nconst GUARDIAN_NAME: &str = \"web_search\";\nfn run(i: &str) -> String { String::new() }";
+        let staged = stage(module);
+        let args = format!("define\n{}", staged.join("\n"));
+        assert_eq!(args, format!("define\n{module}"));
+        assert!(args.starts_with("define\n// guardian-tool: web_search"));
+    }
+
+    #[test]
+    fn guardian_capture_defaults_off() {
+        // The serial path stays byte-identical: the flag is false unless
+        // /guardian-define explicitly sets it.
+        assert!(!AppState::new().guardian_capture);
     }
 }
