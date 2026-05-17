@@ -1,0 +1,216 @@
+# Guardian Tool Examples (embra-guardian-v1)
+
+Paste-ready dynamic-tool modules for testing and as a starting point for
+the intelligence. Every fenced `rust` module below is checked against the
+real validator by `crates/embra-guardian/tests/doc_examples_validate.rs`,
+so what's here is exactly what the gate accepts.
+
+> Status: **experimental** (branch `embra-guardian-v1`). The in-OS
+> toolchain (`/opt/rust`) must be present — build the image with
+> `BR2_PACKAGE_EMBRA_RUST_TOOLCHAIN=y` (default in the embraOS defconfig).
+
+## How it works
+
+1. In the console (serial **or** web) type `/guardian-define`.
+2. Paste a module (the fenced blocks below).
+3. Submit: a lone `.` on its own line (serial) or paste-and-Enter (web).
+4. It is validated synchronously, then compiled to a `wasm32` sandbox in
+   the background. Poll with `/guardian status <name>`.
+5. Once `ready`, the intelligence calls it: `guardian_call` with
+   `action="invoke"`, `tool="<name>"`, `input={…}`; it discovers tools
+   with `guardian_list`.
+6. Manage: `/guardian list`, `/guardian show <name>`,
+   `/guardian delete <name>`.
+
+## The contract
+
+You paste **only** these items — the scaffold owns everything else
+(`#![no_std]`, the allocator, the panic handler, the ABI exports, and the
+`json` / `host` modules):
+
+- A first marker line: `// guardian-tool: <name>`
+  (`name` is `^[a-z][a-z0-9_]{2,40}$`, ≥3 chars, and must not collide
+  with a built-in tool name nor `guardian_call`/`guardian_list` — the
+  validator rejects with a precise message if it does).
+- `const GUARDIAN_NAME: &str = "<name>";` (must equal the marker)
+- `const GUARDIAN_DESC: &str = "…";`
+- `const GUARDIAN_SCHEMA: &str = r#"{ "type":"object", "properties":{…} }"#;`
+- *(optional)* `const GUARDIAN_CAPS: &[&str] = &["http_get"];`
+- Exactly one `fn run(input: &str) -> String` (not `pub`, not `unsafe`).
+- Any number of **private** helper `fn`s.
+
+Forbidden in the paste (validator-enforced): `unsafe`, `extern`/FFI,
+`std::*` / `core::arch` / `proc_macro`, `use` of anything outside
+`core`/`alloc`/`json`/`host`, `include!`/`env!`/`asm!`-style macros,
+`mod`, `pub` free items, `#[no_mangle]`/`#[link]`/runtime attrs, and any
+third-party crate dependency (v1 guests are dependency-free). `vec![]`
+and `format!` are available.
+
+`run` must never panic — a panic becomes a sandbox trap reported as a
+tool error. Parse defensively (`unwrap_or`, return an `{"error":…}`
+object).
+
+### Provided `json` API (vendored, zero-dep)
+
+```text
+json::parse(&str) -> Result<Json, String>
+Json::get(key: &str) -> &Json     // object field; &Null if missing
+Json::idx(i: usize)  -> &Json     // array element; &Null if out of range
+Json::as_str()   -> Option<&str>
+Json::as_f64()   -> Option<f64>
+Json::as_bool()  -> Option<bool>
+Json::as_array() -> Option<&[Json]>
+Json::is_null()  -> bool
+json::stringify(&Json) -> String
+builders: json::s(&str)  json::n(f64)  json::b(bool)  json::null()
+          json::arr(Vec<Json>)  json::obj(Vec<(&str, Json)>)
+```
+
+### Provided `host` API (only when `GUARDIAN_CAPS` includes `"http_get"`)
+
+```text
+host::http_get(url: &str) -> String   // returns a JSON envelope string:
+//   {"ok":true,"status":<u16>,"url":"…","content_type":"…","body":"…"}
+//   {"ok":false,"error":"…"}
+// The Guardian enforces: https-only, RFC1918/loopback/CGNAT/IPv6 +
+// DNS-resolved-IP SSRF block, optional domain allowlist, 10s timeout,
+// 256 KiB body cap, text/* | application/json content-types. Audited.
+```
+
+## Minimal template
+
+```rust
+// guardian-tool: my_tool
+const GUARDIAN_NAME: &str = "my_tool";
+const GUARDIAN_DESC: &str = "One-line description of what this tool does.";
+const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"input":{"type":"string"}}}"#;
+fn run(input: &str) -> String {
+    let v = match json::parse(input) {
+        Ok(v) => v,
+        Err(e) => return json::stringify(&json::obj(vec![("error", json::s(&e))])),
+    };
+    let _ = v.get("input").as_str().unwrap_or("");
+    json::stringify(&json::obj(vec![("ok", json::b(true))]))
+}
+```
+
+## Example 1 — `echo` (pure compute)
+
+`{"message":"hi"}` → `{"echo":"hi"}`
+
+```rust
+// guardian-tool: echo
+const GUARDIAN_NAME: &str = "echo";
+const GUARDIAN_DESC: &str = "Echo the input message back under an \"echo\" key.";
+const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}"#;
+fn run(input: &str) -> String {
+    let v = match json::parse(input) {
+        Ok(v) => v,
+        Err(e) => return json::stringify(&json::obj(vec![("error", json::s(&e))])),
+    };
+    let msg = v.get("message").as_str().unwrap_or("");
+    json::stringify(&json::obj(vec![("echo", json::s(msg))]))
+}
+```
+
+## Example 2 — `sum` (numbers)
+
+`{"a":2,"b":40}` → `{"sum":42}`
+
+```rust
+// guardian-tool: sum
+const GUARDIAN_NAME: &str = "sum";
+const GUARDIAN_DESC: &str = "Add two numbers a + b.";
+const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"a":{"type":"number"},"b":{"type":"number"}},"required":["a","b"]}"#;
+fn run(input: &str) -> String {
+    let v = match json::parse(input) {
+        Ok(v) => v,
+        Err(e) => return json::stringify(&json::obj(vec![("error", json::s(&e))])),
+    };
+    let a = v.get("a").as_f64().unwrap_or(0.0);
+    let b = v.get("b").as_f64().unwrap_or(0.0);
+    json::stringify(&json::obj(vec![("sum", json::n(a + b))]))
+}
+```
+
+## Example 3 — `word_count` (string processing + a private helper)
+
+`{"text":"one two three"}` → `{"words":3,"chars":13,"lines":1}`
+
+```rust
+// guardian-tool: word_count
+const GUARDIAN_NAME: &str = "word_count";
+const GUARDIAN_DESC: &str = "Count words, characters, and lines in `text`.";
+const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}"#;
+fn run(input: &str) -> String {
+    let v = match json::parse(input) {
+        Ok(v) => v,
+        Err(e) => return json::stringify(&json::obj(vec![("error", json::s(&e))])),
+    };
+    let text = v.get("text").as_str().unwrap_or("");
+    json::stringify(&json::obj(vec![
+        ("words", json::n(count_words(text) as f64)),
+        ("chars", json::n(text.chars().count() as f64)),
+        ("lines", json::n(text.lines().count().max(1) as f64)),
+    ]))
+}
+fn count_words(s: &str) -> usize {
+    s.split_whitespace().filter(|w| !w.is_empty()).count()
+}
+```
+
+## Example 4 — `http_fetch` (capability: Guardian-mediated network)
+
+Declares the `http_get` capability. `{"url":"https://example.com","max":200}`
+→ `{"status":200,"bytes":1256,"snippet":"…"}`
+
+```rust
+// guardian-tool: http_fetch
+const GUARDIAN_NAME: &str = "http_fetch";
+const GUARDIAN_DESC: &str = "Fetch an https URL via the Guardian egress guard; returns status and a body snippet.";
+const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"url":{"type":"string"},"max":{"type":"integer"}},"required":["url"]}"#;
+const GUARDIAN_CAPS: &[&str] = &["http_get"];
+fn run(input: &str) -> String {
+    let v = match json::parse(input) {
+        Ok(v) => v,
+        Err(e) => return json::stringify(&json::obj(vec![("error", json::s(&e))])),
+    };
+    let url = v.get("url").as_str().unwrap_or("");
+    if url.is_empty() {
+        return json::stringify(&json::obj(vec![("error", json::s("missing 'url'"))]));
+    }
+    let max = v.get("max").as_f64().unwrap_or(280.0) as usize;
+    // The Guardian validates + fetches; we get back a JSON envelope string.
+    let raw = host::http_get(url);
+    let env = match json::parse(&raw) {
+        Ok(v) => v,
+        Err(_) => return raw,
+    };
+    if env.get("ok").as_bool().unwrap_or(false) {
+        let body = env.get("body").as_str().unwrap_or("");
+        let snippet: String = body.chars().take(max).collect();
+        json::stringify(&json::obj(vec![
+            ("status", json::n(env.get("status").as_f64().unwrap_or(0.0))),
+            ("bytes", json::n(body.len() as f64)),
+            ("snippet", json::s(&snippet)),
+        ]))
+    } else {
+        json::stringify(&json::obj(vec![
+            ("error", json::s(env.get("error").as_str().unwrap_or("fetch failed"))),
+        ]))
+    }
+}
+```
+
+## Quick test sequence
+
+```text
+/guardian-define
+<paste Example 2 (sum)>
+.                                  ← serial terminator (web: just Enter)
+/guardian status sum               ← repeat until: ready
+# then, to the intelligence:
+guardian_call action=invoke tool=sum input={"a":2,"b":40}   → {"sum":42}
+/guardian list
+/guardian delete sum
+```
