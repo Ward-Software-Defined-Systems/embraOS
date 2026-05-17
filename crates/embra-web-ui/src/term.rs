@@ -59,3 +59,16 @@ pub fn send_multiline(body: &str) {
     let safe = body.replace("\x1b[201~", "\u{1b} [201~");
     inject(&format!("\x1b[200~{safe}\x1b[201~\r"));
 }
+
+/// Define a Guardian tool from the web editor. Equivalent to a human
+/// typing `/guardian-define`, Enter (the console enters guardian capture:
+/// `guardian_capture` + multi-line), then pasting the module and pressing
+/// Enter — so the bracketed-paste buffer routes to the brain's
+/// `/guardian define` path (a `SlashCommand`, not a user turn). The
+/// `/guardian-define\r` line is processed before the paste because the
+/// PTY is one ordered byte stream.
+pub fn send_guardian_define(body: &str) {
+    run_command("/guardian-define");
+    let safe = body.replace("\x1b[201~", "\u{1b} [201~");
+    inject(&format!("\x1b[200~{safe}\x1b[201~\r"));
+}

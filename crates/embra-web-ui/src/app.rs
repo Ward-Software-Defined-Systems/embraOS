@@ -29,6 +29,11 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/ssh-keygen", "ssh key"), ("/ssh-copy-id", "ssh copy"),
         ("/feedback-loop", "feedback"),
     ]),
+    ("Guardian", &[
+        ("/guardian-define", "define"), ("/guardian list", "list"),
+        ("/guardian status", "status"), ("/guardian show", "show"),
+        ("/guardian delete", "delete"),
+    ]),
     ("Help", &[("/help", "help"), ("/ml", "multiline")]),
 ];
 
@@ -97,6 +102,15 @@ const SPECS: &[Spec] = &[
         join: " ", guided: true,
         fields: &[sel("Provider",
             &["anthropic", "gemini", "ollama", "lm_studio"], true)] },
+    Spec { cmd: "/guardian status", title: "Guardian tool status",
+        note: "Build status + log tail for a dynamic tool.", join: " ", guided: false,
+        fields: &[t("Tool name", "web_search", true)] },
+    Spec { cmd: "/guardian show", title: "Show Guardian tool source",
+        note: "Print the stored module source.", join: " ", guided: false,
+        fields: &[t("Tool name", "web_search", true)] },
+    Spec { cmd: "/guardian delete", title: "Delete Guardian tool",
+        note: "Removes manifest, overlay, project, and artifact.", join: " ", guided: false,
+        fields: &[t("Tool name", "web_search", true)] },
 ];
 
 fn spec_idx(cmd: &str) -> Option<usize> {
@@ -150,6 +164,9 @@ pub fn App() -> impl IntoView {
     // with the parameter modal.
     let editor_open = RwSignal::new(false);
     let editor_text = RwSignal::new(String::new());
+    // True when the editor was opened by /guardian-define: submit routes
+    // to the brain's `/guardian define` path instead of a user message.
+    let editor_guardian = RwSignal::new(false);
 
     let open_modal = move |i: usize| {
         vals.set(defaults(&SPECS[i]));
@@ -159,7 +176,8 @@ pub fn App() -> impl IntoView {
     // editor; a command that needs a value opens its modal; everything
     // else injects straight away.
     let dispatch = move |c: &'static str| {
-        if c == "/ml" {
+        if c == "/ml" || c == "/guardian-define" {
+            editor_guardian.set(c == "/guardian-define");
             editor_text.set(String::new());
             modal.set(None); // mutual exclusivity
             editor_open.set(true);
@@ -177,10 +195,15 @@ pub fn App() -> impl IntoView {
         let body = editor_text.get();
         let trimmed = body.trim_end_matches('\n');
         if !trimmed.is_empty() {
-            term::send_multiline(trimmed);
+            if editor_guardian.get() {
+                term::send_guardian_define(trimmed);
+            } else {
+                term::send_multiline(trimmed);
+            }
         }
         editor_text.set(String::new());
         editor_open.set(false);
+        editor_guardian.set(false);
     };
 
     Effect::new(move |_| {
@@ -311,11 +334,15 @@ pub fn App() -> impl IntoView {
                     <div class="modal editor"
                         on:click=move |e: leptos::ev::MouseEvent| e.stop_propagation()>
                         <div class="m-head">
-                            <b>"Multi-line message"</b>
-                            <code>"/ml"</code>
+                            <b>{move || if editor_guardian.get() { "Define Guardian tool" } else { "Multi-line message" }}</b>
+                            <code>{move || if editor_guardian.get() { "/guardian-define" } else { "/ml" }}</code>
                         </div>
                         <div class="m-note">
-                            "Sent as one message. A leading / or a lone . line is literal."
+                            {move || if editor_guardian.get() {
+                                "Paste a Guardian tool module (// guardian-tool: marker + GUARDIAN_* + fn run). Validated, then built in the background."
+                            } else {
+                                "Sent as one message. A leading / or a lone . line is literal."
+                            }}
                         </div>
                         <div class="m-body">
                             <textarea
