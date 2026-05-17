@@ -45,3 +45,17 @@ pub fn on_role(cb: impl FnMut(String, String) + 'static) {
 pub fn run_command(cmd: &str) {
     inject(&format!("{cmd}\r"));
 }
+
+/// Send a multi-line body as ONE verbatim user message: a bracketed
+/// paste (`\x1b[200~ … \x1b[201~`) followed by Enter. embra-console (in
+/// the web-pty build) enables crossterm bracketed paste, so the wrapped
+/// body coalesces into a single `Event::Paste` staged into `pasted_lines`;
+/// the trailing `\r` is a separate Enter that fires the verbatim send
+/// path (no `.trim()`, no slash parsing — a leading `/`, a lone `.` line,
+/// and surrounding whitespace all survive). The end marker must not occur
+/// inside the body or it would close the paste early; a raw ESC can't be
+/// typed into a `<textarea>`, but we neutralize it defensively anyway.
+pub fn send_multiline(body: &str) {
+    let safe = body.replace("\x1b[201~", "\u{1b} [201~");
+    inject(&format!("\x1b[200~{safe}\x1b[201~\r"));
+}

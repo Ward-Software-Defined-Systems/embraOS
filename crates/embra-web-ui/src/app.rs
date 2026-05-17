@@ -146,16 +146,41 @@ pub fn App() -> impl IntoView {
     let vals = RwSignal::new(Vec::<String>::new());
     // Guidance banner after launching a guided (brain-driven) flow.
     let guide = RwSignal::new(false);
+    // Multi-line editor (/ml): a textarea overlay, mutually exclusive
+    // with the parameter modal.
+    let editor_open = RwSignal::new(false);
+    let editor_text = RwSignal::new(String::new());
 
     let open_modal = move |i: usize| {
         vals.set(defaults(&SPECS[i]));
         modal.set(Some(i));
     };
-    // Click handler shared by nav + palette: modal if the command needs
-    // input, otherwise inject straight away.
-    let dispatch = move |c: &'static str| match spec_idx(c) {
-        Some(i) => open_modal(i),
-        None => term::run_command(c),
+    // Click handler shared by nav + palette: /ml opens the multi-line
+    // editor; a command that needs a value opens its modal; everything
+    // else injects straight away.
+    let dispatch = move |c: &'static str| {
+        if c == "/ml" {
+            editor_text.set(String::new());
+            modal.set(None); // mutual exclusivity
+            editor_open.set(true);
+            return;
+        }
+        match spec_idx(c) {
+            Some(i) => open_modal(i),
+            None => term::run_command(c),
+        }
+    };
+    // Editor submit: send the body verbatim as one message (trailing
+    // newlines stripped, matching the embra-desktop structured editor),
+    // then reset + close. Empty / all-newline → close, send nothing.
+    let submit_editor = move || {
+        let body = editor_text.get();
+        let trimmed = body.trim_end_matches('\n');
+        if !trimmed.is_empty() {
+            term::send_multiline(trimmed);
+        }
+        editor_text.set(String::new());
+        editor_open.set(false);
     };
 
     Effect::new(move |_| {
@@ -172,6 +197,7 @@ pub fn App() -> impl IntoView {
                     } else if k == "Escape" {
                         palette_open.set(false);
                         modal.set(None);
+                        editor_open.set(false);
                     }
                 },
             );
@@ -278,6 +304,49 @@ pub fn App() -> impl IntoView {
                     "Live embraOS console. Buttons inject commands; the console is authoritative."
                 </div>
             </div>
+
+            // ── Multi-line editor (/ml) ───────────────────────────────
+            {move || editor_open.get().then(|| view! {
+                <div class="palette-bg" on:click=move |_| editor_open.set(false)>
+                    <div class="modal editor"
+                        on:click=move |e: leptos::ev::MouseEvent| e.stop_propagation()>
+                        <div class="m-head">
+                            <b>"Multi-line message"</b>
+                            <code>"/ml"</code>
+                        </div>
+                        <div class="m-note">
+                            "Sent as one message. A leading / or a lone . line is literal."
+                        </div>
+                        <div class="m-body">
+                            <textarea
+                                class="ml-input"
+                                autofocus
+                                placeholder="Type or paste a multi-line message…"
+                                prop:value=move || editor_text.get()
+                                on:input=move |e| editor_text.set(event_target_value(&e))
+                                on:keydown=move |e: leptos::ev::KeyboardEvent| {
+                                    let k = e.key();
+                                    if k == "Enter" && (e.ctrl_key() || e.meta_key()) {
+                                        e.prevent_default();
+                                        submit_editor();
+                                    } else if k == "Escape" {
+                                        e.prevent_default();
+                                        editor_open.set(false);
+                                    }
+                                } />
+                        </div>
+                        <div class="m-actions">
+                            <span class="m-hint">
+                                "Ctrl+Enter (⌘+Enter) to send · Esc to cancel"
+                            </span>
+                            <button class="btn ghost"
+                                on:click=move |_| editor_open.set(false)>"Cancel"</button>
+                            <button class="btn"
+                                on:click=move |_| submit_editor()>"Send"</button>
+                        </div>
+                    </div>
+                </div>
+            })}
 
             // ── Parameter modal ───────────────────────────────────────
             {move || modal.get().map(|i| {

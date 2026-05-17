@@ -16,7 +16,10 @@ use embra_common::proto::apid::*;
 
 use anyhow::Result;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent,
+        KeyModifiers,
+    },
     terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -48,6 +51,14 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
     // columns/rows override): the PTY has a real, dynamic winsize driven by
     // xterm.js, so use the size-tracking backend that reflows on resize.
     let web_pty = std::env::var("EMBRA_WEB_PTY").is_ok();
+    if web_pty {
+        // Web/PTY only: lets crossterm coalesce the embra-web /ml editor's
+        // `\x1b[200~ … \x1b[201~` blob into a single Event::Paste. The
+        // serial Viewport::Fixed path deliberately never enables this, so
+        // it stays bit-identical. Best-effort: if it fails, the wrapper
+        // bytes arrive as ordinary keys — no worse than before.
+        let _ = stdout().execute(EnableBracketedPaste);
+    }
     let use_cols = if cols > 0 { cols } else { 80 };
     let use_rows = if rows > 0 { rows } else { 24 };
 
@@ -137,6 +148,18 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
                         app.viewport_cols = c;
                         app.viewport_rows = r;
                     }
+                    // Web/PTY: a bracketed-paste blob (the embra-web /ml
+                    // editor injects `\x1b[200~ … \x1b[201~`). Stage it
+                    // for the existing verbatim send path — the next Enter
+                    // takes pasted_lines and sends `pasted.join("\n")` as
+                    // one UserMessage (no trim, no slash parse). crossterm
+                    // strips CRs from paste content; split on '\n' only.
+                    // Only ever produced when bracketed paste was enabled
+                    // (web_pty-gated above), so the serial path is unaffected.
+                    Event::Paste(s) => {
+                        app.pasted_lines =
+                            Some(s.split('\n').map(str::to_string).collect());
+                    }
                     _ => {}
                 }
             }
@@ -159,6 +182,9 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
     }
 
     // Cleanup
+    if web_pty {
+        let _ = stdout().execute(DisableBracketedPaste);
+    }
     disable_raw_mode()?;
     Ok(())
 }
@@ -668,5 +694,48 @@ mod reasoning_tests {
         let mut buf = "kept".to_string();
         append_live_reasoning(&mut buf, "");
         assert_eq!(buf, "kept");
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+
+    // Mirrors the Event::Paste dispatch arm and the pasted_lines consume
+    // path (the next Enter sends `pasted.join("\n")` as one UserMessage,
+    // no trim, no slash parse). A bracketed-paste blob is split on '\n'
+    // into pasted_lines; this `stage` fn is byte-identical to the arm.
+    fn stage(s: &str) -> Vec<String> {
+        s.split('\n').map(str::to_string).collect()
+    }
+
+    #[test]
+    fn paste_stages_pasted_lines() {
+        let mut app = AppState::new();
+        app.pasted_lines = Some(stage("a\nb\n."));
+        // The lone "." line is preserved verbatim — the property the
+        // /ml dot-terminator path could not guarantee.
+        assert_eq!(
+            app.pasted_lines,
+            Some(vec!["a".to_string(), "b".to_string(), ".".to_string()])
+        );
+    }
+
+    #[test]
+    fn pasted_lines_join_roundtrips_verbatim() {
+        // Leading '/', a lone '.' line, and surrounding whitespace all
+        // survive the split→join round-trip — the core correctness claim.
+        let staged = stage("/status\nline 2\n.\n  trailing  ");
+        assert_eq!(staged.join("\n"), "/status\nline 2\n.\n  trailing  ");
+    }
+
+    #[test]
+    fn empty_paste_stages_single_empty_line() {
+        // "".split('\n') yields [""]; join is "". The web-ui empty-guard
+        // (trim_end_matches('\n') + is_empty) is what prevents an empty
+        // UserMessage being sent — this documents the console side.
+        let staged = stage("");
+        assert_eq!(staged, vec![String::new()]);
+        assert_eq!(staged.join("\n"), "");
     }
 }
