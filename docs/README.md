@@ -8,7 +8,7 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 
 ## Getting Started
 
-- [INSTALL.md](INSTALL.md) — Build from source, the QEMU image, first boot, the Config Wizard, post-boot GitHub/SSH, backup & restore.
+- **Build & install** — see the **Quick Start** in [../README.md](../README.md): full prerequisites, the musl cross-toolchain, the build pipeline, the Config Wizard, post-boot GitHub/SSH, backup & restore.
 - [OPERATION.md](OPERATION.md) — What running it feels like, the session model, keyboard shortcuts, current limitations.
 
 ## Reference
