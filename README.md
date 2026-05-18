@@ -107,9 +107,11 @@ cargo install trunk --locked
 ```
 
 ```bash
-# Clone and configure
+# Clone and configure — use ~/projects so source + build artifacts persist
+# across reboots (the /tmp toolchain step above is fine because /opt persists).
+mkdir -p ~/projects && cd ~/projects
 git clone https://github.com/Ward-Software-Defined-Systems/embraOS.git
-cd embraOS
+cd ~/projects/embraOS
 
 # Configure musl linker (per-machine, only needed once)
 cat >> ~/.cargo/config.toml << 'EOF'
@@ -118,9 +120,9 @@ linker = "x86_64-linux-musl-gcc"
 EOF
 
 # Clone WardSONDB (separate repo, required dependency — build-image.sh builds and copies it)
-cd ..
+cd ~/projects
 git clone https://github.com/Ward-Software-Defined-Systems/wardsondb.git WardSONDB
-cd embraOS
+cd ~/projects/embraOS
 ```
 
 ```bash
