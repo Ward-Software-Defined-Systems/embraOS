@@ -1,6 +1,6 @@
 # Tool Reference
 
-Phase 1 includes 90 internal tools the intelligence invokes during conversation. All 90 work identically across all four LLM providers (Anthropic, Gemini, Ollama, LM Studio) via per-provider tool-schema translators that share a common JSON Schema cleanup pipeline (`provider/schema_util.rs::inline_refs`). They are organized below by category.
+Phase 1 includes 92 internal tools the intelligence invokes during conversation. All 92 work identically across all four LLM providers (Anthropic, Gemini, Ollama, LM Studio) via per-provider tool-schema translators that share a common JSON Schema cleanup pipeline (`provider/schema_util.rs::inline_refs`). They are organized below by category.
 
 > **⚠️ Testing Notice:** The default tools and slash commands are actively being tested. If you encounter bugs or unexpected behavior, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
@@ -136,3 +136,14 @@ Phase 1 includes 90 internal tools the intelligence invokes during conversation.
 | **ssh_session_end** | Close SSH session and tear down ControlMaster connection (EXPERIMENTAL) |
 
 > **⚠️ SSH Security:** SSH tools are restricted to RFC 1918 private addresses (10.x, 172.16-31.x, 192.168.x) and loopback (127.x, localhost). Public IP targets are denied. Connections use `StrictHostKeyChecking=accept-new` (auto-accepts first-time hosts, rejects changed keys). Password authentication is disabled — key-based auth required (see Quick Start). These tools are marked EXPERIMENTAL — use at your own risk.
+
+**Guardian — Dynamic Tools** *(embra-guardian-v1 — EXPERIMENTAL)*
+
+The intelligence can author its own tools at runtime: an operator-pasted Rust module (`/guardian-define`) is `syn`-validated, cross-compiled to `wasm32` by the in-OS toolchain, and run in a `wasmtime` sandbox with zero ambient authority. Dynamic tools are **never** injected into the provider tool schema — they are reachable only through these two static meta-tools, so the tool snapshot stays prompt-cache-stable.
+
+| Tool | Description |
+|---|---|
+| **guardian_list** | List the dynamically-defined Guardian tools available to call — name, description, declared capabilities, build status, and input schema. Call this before `guardian_call` to discover what dynamic tools exist |
+| **guardian_call** | Invoke a Guardian-defined dynamic tool by name with a JSON input object (`action="invoke"`), or poll a tool's build state (`action="status"`). A tool only runs once its status is `ready`. Side-effectful |
+
+> **⚠️ Guardian Security:** Dynamic tools execute in an epoch- and memory-capped `wasmtime` sandbox, one fresh instance per call, with no ambient authority. Any capability beyond pure compute (e.g. `http_get`, Brave `web_search`) is a Guardian-mediated host import added host-side **at the guard level**, never by widening guest authority. Tool source is statically validated (`syn` contract + denylist) before it ever compiles. Marked EXPERIMENTAL — use at your own risk.

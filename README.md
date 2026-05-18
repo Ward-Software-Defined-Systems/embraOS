@@ -237,7 +237,7 @@ embraOS is built on a 7-layer continuity architecture:
 | **Governance & Guardrails** | Cross-cutting constraints that prevent capture and drift. |
 | **Memory & Knowledge** | The foundation. Every layer reads from and writes to memory. |
 
-Persistence is [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a high-performance Rust JSON document database that serves as the AI's memory, identity store, and state of consciousness. A pluggable LLM provider abstraction routes the Brain through one of four backends — **Anthropic Claude**, **Google Gemini**, **Ollama**, or **LM Studio** — chosen at first boot and switchable at runtime via `/provider`; all 90 tools work identically across every backend.
+Persistence is [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a high-performance Rust JSON document database that serves as the AI's memory, identity store, and state of consciousness. A pluggable LLM provider abstraction routes the Brain through one of four backends — **Anthropic Claude**, **Google Gemini**, **Ollama**, or **LM Studio** — chosen at first boot and switchable at runtime via `/provider`; all 92 tools work identically across every backend.
 
 Provider wire details, per-family reasoning controls, bearer storage, and the prompt-caching model: **[docs/SYSTEM-DESIGN.md](docs/SYSTEM-DESIGN.md)**.
 
@@ -253,7 +253,7 @@ The session model and keyboard shortcuts live in **[docs/OPERATION.md](docs/OPER
 
 ## Tools
 
-embraOS ships **90 built-in tools** the intelligence invokes during conversation — spanning system status, memory and the cross-session knowledge graph, sessions, scheduling, the filesystem, engineering / project management (git + GitHub), and security / SSH. All 90 work identically across all four LLM providers.
+embraOS ships **92 built-in tools** the intelligence invokes during conversation — spanning system status, memory and the cross-session knowledge graph, sessions, scheduling, the filesystem, engineering / project management (git + GitHub), security / SSH, and the Guardian dynamic-tool gateway. All 92 work identically across all four LLM providers.
 
 The full per-tool catalog, plus the workspace-restriction, GitHub, and SSH safety notes: **[docs/TOOL-REFERENCE.md](docs/TOOL-REFERENCE.md)**.
 
@@ -290,7 +290,7 @@ The full embraOS manual lives in [docs/](docs/).
 | **[Roadmap](docs/ROADMAP.md)** | Phase 0–5 delivery status + the post-Sprint-5 embra-web / embra-guardian v1 increments |
 | **[Operation](docs/OPERATION.md)** | Run lifecycle, the session model, keyboard shortcuts, current limitations |
 | **[Command Reference](docs/COMMAND-REFERENCE.md)** | Every slash command |
-| **[Tool Reference](docs/TOOL-REFERENCE.md)** | All 90 built-in tools by category, plus workspace / GitHub / SSH safety notes |
+| **[Tool Reference](docs/TOOL-REFERENCE.md)** | All 92 built-in tools by category, plus workspace / GitHub / SSH safety notes |
 | **[System Design](docs/SYSTEM-DESIGN.md)** | The 7-layer continuity architecture, the four LLM providers, reasoning controls, prompt caching |
 | **[Recommended Local Models](docs/RECOMMENDED-LOCAL-MODELS.md)** | Per-family guidance for the Ollama / LM Studio backends |
 | **[Guardian Tool Examples](docs/GUARDIAN-TOOL-EXAMPLES.md)** | Paste-ready dynamic-tool modules (embra-guardian-v1) |
