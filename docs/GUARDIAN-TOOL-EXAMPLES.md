@@ -43,7 +43,7 @@ You paste **only** these items — the scaffold owns everything else
 
 Forbidden in the paste (validator-enforced): `unsafe`, `extern`/FFI,
 `std::*` / `core::arch` / `proc_macro`, `use` of anything outside
-`core`/`alloc`/`json`/`host`, `include!`/`env!`/`asm!`-style macros,
+`core`/`alloc`/`json`/`host`/`html_text`, `include!`/`env!`/`asm!`-style macros,
 `mod`, `pub` free items, `#[no_mangle]`/`#[link]`/runtime attrs, and any
 third-party crate dependency (v1 guests are dependency-free). `vec![]`
 and `format!` are available.
@@ -84,17 +84,44 @@ host::http_get(url: &str) -> String   // returns a JSON envelope string:
 `host::web_search` — when `GUARDIAN_CAPS` includes `"web_search"`:
 
 ```text
-host::web_search(query: &str) -> String   // returns a JSON envelope:
+host::web_search(query: &str) -> String
+host::web_search_ex(request_json: &str) -> String   // structured form
+// Envelope:
 //   {"ok":true,"query":"…","count":<n>,"results":[
-//      {"title":"…","url":"https://…","description":"…"}, …]}
+//      {"title":"…","url":"https://…","description":"…",
+//       "age":"<provider date, when present>",
+//       "snippets":["<extra excerpts, when requested>", …]}, …]}
 //   {"ok":false,"error":"…"}
+//
+// `web_search(q)` = a bare query. `web_search_ex(json)` takes a JSON
+// object — all fields clamped / whitelisted host-side:
+//   {"q":"…",                       // required
+//    "count": 1..=20,               // default 10
+//    "offset": 0..=9,               // page (default 0)
+//    "freshness": "day"|"week"|"month"|"year"
+//                 |"YYYY-MM-DDtoYYYY-MM-DD",
+//    "exclude": ["host", …],        // become -site: operators in q
+//    "extra_snippets": true|false}  // more excerpt text, no fetch
+//
 // Backed by Brave Search; the host holds the API key (never reaches the
 // guest) and the endpoint is fixed (api.search.brave.com) so there is no
-// guest-controlled URL / SSRF surface. Results are filtered to https,
-// length-capped, normalized. The text is still attacker-controlled — the
-// tool MUST injection-scrub it (see GUARDIAN-ADVANCED-EXAMPLE.md). The
-// key is set by the operator: `/guardian key brave <token>`; if unset
-// the envelope is {"ok":false,"error":"search capability not configured…"}.
+// guest-controlled URL / SSRF surface. Results filtered to https,
+// length-capped, normalized. `age` is best-effort (provider-defined
+// format, omitted when absent). Text is attacker-controlled — the tool
+// MUST injection-scrub it (see GUARDIAN-ADVANCED-EXAMPLE.md). The key is
+// set by the operator: `/guardian key brave <token>`; if unset the
+// envelope is {"ok":false,"error":"search capability not configured…"}.
+```
+
+### Provided `html_text` API (always available, zero-dep)
+
+```text
+html_text::to_text(html: &str) -> String
+// Heuristic HTML→text reducer for #![no_std] guests: drops
+// <script>/<style> bodies, strips tags, decodes a minimal entity set,
+// collapses whitespace. NOT a parser and NOT a sanitizer — pair it with
+// http_get to make a fetched page model-readable, then injection-scrub
+// the result (it is attacker-controlled). See GUARDIAN-ADVANCED-EXAMPLE.md.
 ```
 
 ## Minimal template

@@ -21,6 +21,10 @@ pub const GUARDIAN_ROOT: &str = "/embra/workspace/.guardian";
 
 const PRELUDE_SRC: &str = include_str!("guest/prelude.rs");
 const JSON_SRC: &str = include_str!("guest/json.rs");
+// Always shipped (like `json`); the prelude declares `mod html_text;`.
+// Only useful to a tool that also declares `http_get`, but shipping it
+// unconditionally keeps scaffold composition simple.
+const HTML_TEXT_SRC: &str = include_str!("guest/html_text.rs");
 
 // Scaffold-owned `mod host`. Composed from the declared caps so a tool
 // that declares several capabilities gets ONE module (shared
@@ -60,13 +64,25 @@ const HOST_FN_WEB_SEARCH: &str = r#"
         #[link_name = "web_search"]
         fn guardian_web_search(q_ptr: u32, q_len: u32) -> u64;
     }
-    /// Guardian-mediated web search. JSON envelope:
-    /// {"ok":true,"query":..,"count":N,"results":[{title,url,description}]}
-    /// or {"ok":false,"error":..}. The host holds the API key; the query
-    /// is the only guest-controlled input. Results are attacker content —
-    /// the tool must still injection-scrub them.
+    /// Guardian-mediated web search (Brave-backed). JSON envelope:
+    /// {"ok":true,"query":..,"count":N,"results":[{title,url,description,
+    ///  age?,snippets?}]} or {"ok":false,"error":..}. The host holds the
+    /// API key and pins the endpoint; the request is the only
+    /// guest-controlled input. Results are attacker content — the tool
+    /// must still injection-scrub them.
     pub fn web_search(query: &str) -> String {
         read_packed(unsafe { guardian_web_search(query.as_ptr() as u32, query.len() as u32) })
+    }
+    /// Structured form. `request_json` is a JSON object:
+    /// {"q":..,"count":1..=20,"offset":0..=9,"freshness":
+    ///  "day"|"week"|"month"|"year"|"YYYY-MM-DDtoYYYY-MM-DD",
+    ///  "exclude":["host",..],"extra_snippets":bool}. Unknown or
+    /// out-of-range fields are clamped / dropped host-side; a non-object
+    /// is treated as a bare query.
+    pub fn web_search_ex(request_json: &str) -> String {
+        read_packed(unsafe {
+            guardian_web_search(request_json.as_ptr() as u32, request_json.len() as u32)
+        })
     }
 "#;
 
@@ -190,6 +206,7 @@ pub fn scaffold(base: &Path, m: &ValidatedModule) -> Result<ScaffoldPaths, Guard
     write(&manifest, &CARGO_TOML_TMPL.replace("{NAME}", &m.name))?;
     write(&cargo_dir.join("config.toml"), CARGO_CONFIG)?;
     write(&src.join("json.rs"), JSON_SRC)?;
+    write(&src.join("html_text.rs"), HTML_TEXT_SRC)?;
     let lib_rs = src.join("lib.rs");
     write(&lib_rs, &assemble_lib_rs(m))?;
 
@@ -228,6 +245,7 @@ mod tests {
         let s = assemble_lib_rs(&module(vec![]));
         assert!(s.contains("#![no_std]"));
         assert!(s.contains("mod json;"));
+        assert!(s.contains("mod html_text;"));
         assert!(s.contains("pub extern \"C\" fn guardian_run"));
         assert!(s.contains("// guardian-tool: web_search"));
         assert!(s.contains("fn run(input: &str)"));
@@ -249,6 +267,7 @@ mod tests {
         assert!(s.contains("mod host {"));
         assert!(s.contains("link_name = \"web_search\""));
         assert!(s.contains("pub fn web_search(query: &str)"));
+        assert!(s.contains("pub fn web_search_ex(request_json: &str)"));
         assert!(!s.contains("link_name = \"http_get\""));
     }
 
@@ -286,6 +305,7 @@ mod tests {
         assert!(p.lib_rs.exists());
         assert!(p.project.join(".cargo/config.toml").exists());
         assert!(p.project.join("src/json.rs").exists());
+        assert!(p.project.join("src/html_text.rs").exists());
         let toml = std::fs::read_to_string(&p.manifest).unwrap();
         assert!(toml.contains("name = \"web_search\""));
         assert!(toml.contains("crate-type = [\"cdylib\"]"));

@@ -1,7 +1,8 @@
 // Scaffold-owned guest prelude. Prepended verbatim to every generated
 // tool's `src/lib.rs`; the intelligence never writes or sees this. It
-// owns `#![no_std]`, the allocator, the panic handler, the `json` module
-// declaration, and the three ABI exports. The pasted module contributes
+// owns `#![no_std]`, the allocator, the panic handler, the `json` +
+// `html_text` module declarations, and the three ABI exports. The pasted
+// module contributes
 // only `GUARDIAN_*` metadata + `fn run(&str) -> String` (+ pure helpers),
 // which the validator has already scanned. NOT compiled inside
 // embra-guardian — `include_str!`'d as text.
@@ -16,6 +17,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 mod json;
+mod html_text;
 
 // Bump allocator over a fixed per-instance arena. The host instantiates a
 // fresh module per call, so linear memory (and this arena) is zeroed and

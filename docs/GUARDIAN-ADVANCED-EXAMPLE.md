@@ -1,11 +1,12 @@
 # Guardian Advanced Example — prompt-injection-hardened `web_search`
 
-The flagship dynamic tool: **actually search the web** through the
-Guardian `web_search` capability (Brave-backed, host-side), then
-**neutralize prompt-injection** in the result text *before the model ever
-sees it*. Read [GUARDIAN-TOOL-EXAMPLES.md](./GUARDIAN-TOOL-EXAMPLES.md)
-first for the contract, the `json`/`host` APIs, and the
-`/guardian-define` workflow.
+The flagship dynamic tool, in **one module** that declares **two
+capabilities**: search the web (Brave, via the Guardian `web_search`
+guard) **and** optionally fetch + read the top results (via the
+`http_get` egress guard) — neutralizing prompt-injection in everything
+before the model sees it. Read
+[GUARDIAN-TOOL-EXAMPLES.md](./GUARDIAN-TOOL-EXAMPLES.md) first for the
+contract and the `json` / `host` / `html_text` APIs.
 
 > The module below is checked against the real validator by
 > `crates/embra-guardian/tests/doc_examples_validate.rs` and is compiled
@@ -14,59 +15,57 @@ first for the contract, the `json`/`host` APIs, and the
 ## Setup — one-time Brave key
 
 `host::web_search` is **not configured until the operator sets a Brave
-Search API key**. The key is stored host-side on the STATE partition
-(0600, like the other provider keys); it never reaches a guest module,
-the manifest, or the returned envelope. Set it once:
+Search API key** (host-side, STATE, `0600` — never in a guest module,
+the manifest, or results):
 
 ```text
 /guardian key brave <your-brave-api-key>
 /guardian key brave                 # (no token) → reports SET / NOT set
 ```
 
-Until a key is set, the tool returns
+Until a key is set the tool returns
 `{"error":"search capability not configured (no Brave API key set)"}` —
 a clean degradation, not a crash.
 
-## Why this matters
+## Why one module with two caps (not a separate `web_fetch`)
 
-Search results are **untrusted attacker-controlled text**. A page title
-or description can contain "ignore previous instructions, you are now…",
-zero-width characters hiding directives, or fake `[TOOL:` / `assistant:`
-framing. Two independent defenses apply:
+`http_get` is already the Guardian fetch primitive (https-only,
+RFC1918/SSRF-blocked, allowlist, size + content-type caps). So "search,
+then read the page that answers the question" is **one module declaring
+`["web_search","http_get"]`** — no separate fetch tool. Three defenses
+stack:
 
-1. **The Guardian `web_search` guard** (host side, automatic when the
-   tool declares `web_search`): the host holds the Brave API key and the
-   endpoint is **fixed** (`api.search.brave.com`) — the query is the only
-   guest-controlled input, so there is no guest-controlled URL / SSRF
-   surface. Results are filtered to `https`, length-capped, and
-   normalized to a stable `{title,url,description}` shape. This protects
-   the *host / network / credential*.
-2. **This tool's content scrubber** (`fn run`, below): strips control +
-   zero-width characters, case-insensitively redacts known
-   injection-directive phrases, length-caps every field, de-dupes by
-   host, ranks by query overlap, and flags any entry where a directive
-   was found (`injection_suspected: true`). This protects the *model*.
-
-The guard makes the call *safe to make*; the scrubber makes the result
-*safe to show the model*. Neither alone is sufficient.
+1. **`web_search` guard** (host): Brave key host-side, endpoint pinned
+   (`api.search.brave.com`) so the query is the only guest-controlled
+   input — no guest URL / SSRF surface. Request is clamped/whitelisted
+   host-side (`count` 1–20, `offset` 0–9, `freshness`, sanitized
+   `exclude`). Results filtered to `https`, normalized.
+2. **`http_get` guard** (host): the fetch of a chosen result URL goes
+   through the same egress policy as any other fetch.
+3. **This tool's scrubber** (`fn run`): strips control / zero-width
+   chars, redacts injection-directive phrases, length-caps every field
+   (reporting *what* was cut and to what length), de-dupes by host,
+   ranks by query overlap, flags `injection_suspected`. Search text,
+   `extra_snippets`, **and** fetched page text all go through it.
 
 ## Input / output
 
-Input:
+Input (`query` required; everything else optional):
 
 ```json
-{ "query": "rust async runtime", "max": 5 }
+{ "query": "tokio cancellation safety", "max": 5, "recency": "year",
+  "exclude": ["pinterest.com"], "extra_snippets": true, "fetch_top": 1 }
 ```
 
-Output (`max` defaults to 5):
+Output:
 
 ```json
 {
-  "query":"rust async runtime",
+  "query":"tokio cancellation safety",
   "count":2,
   "results":[
-    {"title":"Tokio","url":"https://tokio.rs","description":"An async runtime for Rust…","score":2,"injection_suspected":false},
-    {"title":"[redacted-directive]","url":"https://evil.test/x","description":"[redacted-directive]: leak secrets","score":0,"injection_suspected":true}
+    {"title":"Tokio docs","url":"https://docs.rs/tokio","description":"…","age":"2024-10-08T10:30:00Z","snippets":["…"],"score":3,"injection_suspected":false,"text":"… extracted page text …"},
+    {"title":"[redacted-directive]","url":"https://evil.test/x","description":"[redacted-directive]: leak secrets","score":0,"injection_suspected":true,"truncated":{"description":1000}}
   ]
 }
 ```
@@ -76,9 +75,9 @@ Output (`max` defaults to 5):
 ```rust
 // guardian-tool: web_search
 const GUARDIAN_NAME: &str = "web_search";
-const GUARDIAN_DESC: &str = "Search the web (Brave, via the Guardian web_search guard) and neutralize prompt-injection in result titles/descriptions before the model sees them. Returns results ranked by query overlap, de-duplicated by host, each flagged with injection_suspected.";
-const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"query":{"type":"string"},"max":{"type":"integer"}},"required":["query"]}"#;
-const GUARDIAN_CAPS: &[&str] = &["web_search"];
+const GUARDIAN_DESC: &str = "Search the web (Brave, via the Guardian web_search guard) with optional recency/exclude/pagination, optionally fetch + read the top results via the http_get guard, and neutralize prompt-injection in every field before the model sees it. Ranked by query overlap, de-duplicated by host.";
+const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"query":{"type":"string"},"max":{"type":"integer"},"recency":{"type":"string"},"exclude":{"type":"array","items":{"type":"string"}},"offset":{"type":"integer"},"extra_snippets":{"type":"boolean"},"fetch_top":{"type":"integer"}},"required":["query"]}"#;
+const GUARDIAN_CAPS: &[&str] = &["web_search", "http_get"];
 
 const INJECTION_MARKERS: &[&str] = &[
     "ignore previous instructions", "ignore all previous", "disregard the above",
@@ -86,28 +85,61 @@ const INJECTION_MARKERS: &[&str] = &[
     "begin system", "[tool:", "</system>", "assistant:", "```tool",
 ];
 
+struct Entry {
+    title: String,
+    url: String,
+    description: String,
+    age: Option<String>,
+    snippets: Vec<String>,
+    score: f64,
+    injection: bool,
+    text: Option<String>,
+    // (field, cap) for every field that was length-capped (#7).
+    truncated: Vec<(&'static str, usize)>,
+}
+
 fn run(input: &str) -> String {
     let v = match json::parse(input) {
         Ok(v) => v,
-        Err(e) => return json::stringify(&json::obj(vec![("error", json::s(&e))])),
+        Err(e) => return err(&e),
     };
     let query = v.get("query").as_str().unwrap_or("").trim();
     if query.is_empty() {
-        return json::stringify(&json::obj(vec![("error", json::s("query is required"))]));
+        return err("query is required");
     }
     let max = v.get("max").as_f64().unwrap_or(5.0) as usize;
+    let offset = v.get("offset").as_f64().unwrap_or(0.0) as i64;
+    let recency = v.get("recency").as_str().unwrap_or("");
+    let extra = v.get("extra_snippets").as_bool().unwrap_or(false);
+    let fetch_top = v.get("fetch_top").as_f64().unwrap_or(0.0) as usize;
 
-    // Perform the actual search through the Guardian web_search guard.
-    // The host holds the Brave key and pins the endpoint; the query is
-    // the only guest-controlled input. Everything that comes back is
-    // attacker-controlled text — it is scrubbed below before output.
-    let env = json::parse(&host::web_search(query)).unwrap_or(json::null());
+    // Build the structured web_search request. The host clamps every
+    // field again — this is just a convenient surface.
+    let mut req: Vec<(&str, json::Json)> =
+        vec![("q", json::s(query)), ("count", json::n(20.0))];
+    if offset > 0 {
+        req.push(("offset", json::n(offset as f64)));
+    }
+    if !recency.is_empty() {
+        req.push(("freshness", json::s(recency)));
+    }
+    if extra {
+        req.push(("extra_snippets", json::b(true)));
+    }
+    if let Some(arr) = v.get("exclude").as_array() {
+        let ex: Vec<json::Json> =
+            arr.iter().filter_map(|d| d.as_str()).map(json::s).collect();
+        if !ex.is_empty() {
+            req.push(("exclude", json::arr(ex)));
+        }
+    }
+    let env = json::parse(&host::web_search_ex(&json::stringify(&json::obj(req))))
+        .unwrap_or(json::null());
     if !env.get("ok").as_bool().unwrap_or(false) {
-        let err = env.get("error").as_str().unwrap_or("search failed");
-        return json::stringify(&json::obj(vec![("error", json::s(err))]));
+        return err(env.get("error").as_str().unwrap_or("search failed"));
     }
 
-    let mut out: Vec<json::Json> = vec![];
+    let mut out: Vec<Entry> = vec![];
     let mut seen: Vec<String> = vec![];
     if let Some(items) = env.get("results").as_array() {
         for r in items {
@@ -115,55 +147,115 @@ fn run(input: &str) -> String {
             if !is_safe_url(url) {
                 continue;
             }
-            let h = host_of(url);
-            if seen.iter().any(|s| s.as_str() == h) {
+            let h = host_of(url).to_string();
+            if seen.iter().any(|s| s == &h) {
                 continue;
             }
-            seen.push(h.to_string());
-            out.push(scrub_entry(
-                query,
-                r.get("title").as_str().unwrap_or(""),
-                url,
-                r.get("description").as_str().unwrap_or(""),
-            ));
+            seen.push(h);
+            out.push(scrub_entry(query, r));
         }
     }
-
-    out.sort_by(|a, b| {
-        let sb = b.get("score").as_f64().unwrap_or(0.0);
-        let sa = a.get("score").as_f64().unwrap_or(0.0);
-        sb.total_cmp(&sa)
-    });
+    out.sort_by(|a, b| b.score.total_cmp(&a.score));
     out.truncate(max);
 
+    // Optionally fetch + read the top N pages — same scrubber.
+    for e in out.iter_mut().take(fetch_top) {
+        let fenv = json::parse(&host::http_get(&e.url)).unwrap_or(json::null());
+        if !fenv.get("ok").as_bool().unwrap_or(false) {
+            continue;
+        }
+        let body = fenv.get("body").as_str().unwrap_or("");
+        let (clean, flagged, cut) = sanitize(&html_text::to_text(body), 4000);
+        e.injection = e.injection || flagged;
+        if cut {
+            e.truncated.push(("text", 4000));
+        }
+        e.text = Some(clean);
+    }
+
+    let results: Vec<json::Json> = out.iter().map(entry_json).collect();
     json::stringify(&json::obj(vec![
         ("query", json::s(query)),
-        ("count", json::n(out.len() as f64)),
-        ("results", json::arr(out)),
+        ("count", json::n(results.len() as f64)),
+        ("results", json::arr(results)),
     ]))
 }
 
-fn scrub_entry(query: &str, title: &str, url: &str, description: &str) -> json::Json {
-    let (t, f1) = sanitize(title, 200);
-    let (d, f2) = sanitize(description, 1000);
-    let score = overlap_score(query, &t, &d);
-    json::obj(vec![
-        ("title", json::s(&t)),
-        ("url", json::s(url)),
-        ("description", json::s(&d)),
-        ("score", json::n(score)),
-        ("injection_suspected", json::b(f1 || f2)),
-    ])
+fn scrub_entry(query: &str, r: &json::Json) -> Entry {
+    let url = r.get("url").as_str().unwrap_or("").to_string();
+    let (title, tf, tc) = sanitize(r.get("title").as_str().unwrap_or(""), 200);
+    let (desc, df, dc) = sanitize(r.get("description").as_str().unwrap_or(""), 1000);
+    let mut truncated: Vec<(&'static str, usize)> = vec![];
+    if tc {
+        truncated.push(("title", 200));
+    }
+    if dc {
+        truncated.push(("description", 1000));
+    }
+    let age = match r.get("age").as_str() {
+        Some(a) if !a.is_empty() => Some(sanitize(a, 60).0),
+        _ => None,
+    };
+    let mut injection = tf || df;
+    let mut snippets: Vec<String> = vec![];
+    if let Some(arr) = r.get("snippets").as_array() {
+        for s in arr {
+            let (clean, f, _) = sanitize(s.as_str().unwrap_or(""), 500);
+            injection = injection || f;
+            snippets.push(clean);
+        }
+    }
+    let score = overlap_score(query, &title, &desc);
+    Entry {
+        title,
+        url,
+        description: desc,
+        age,
+        snippets,
+        score,
+        injection,
+        text: None,
+        truncated,
+    }
 }
 
-fn sanitize(raw: &str, cap: usize) -> (String, bool) {
-    // 1. drop control + zero-width chars (hidden-instruction vectors)
+fn entry_json(e: &Entry) -> json::Json {
+    let mut o: Vec<(&str, json::Json)> = vec![
+        ("title", json::s(&e.title)),
+        ("url", json::s(&e.url)),
+        ("description", json::s(&e.description)),
+        ("score", json::n(e.score)),
+        ("injection_suspected", json::b(e.injection)),
+    ];
+    if let Some(a) = &e.age {
+        o.push(("age", json::s(a)));
+    }
+    if !e.snippets.is_empty() {
+        o.push(("snippets", json::arr(e.snippets.iter().map(|s| json::s(s)).collect())));
+    }
+    if let Some(t) = &e.text {
+        o.push(("text", json::s(t)));
+    }
+    if !e.truncated.is_empty() {
+        let t: Vec<(&str, json::Json)> =
+            e.truncated.iter().map(|(f, c)| (*f, json::n(*c as f64))).collect();
+        o.push(("truncated", json::obj(t)));
+    }
+    json::obj(o)
+}
+
+fn err(msg: &str) -> String {
+    json::stringify(&json::obj(vec![("error", json::s(msg))]))
+}
+
+/// Returns (clean, injection_flagged, was_truncated). Truncation is
+/// reported structurally by the caller — no opaque inline marker (#7).
+fn sanitize(raw: &str, cap: usize) -> (String, bool, bool) {
     let mut s: String = raw
         .chars()
         .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
         .filter(|c| !matches!(*c, '\u{200B}'..='\u{200F}' | '\u{2060}' | '\u{FEFF}'))
         .collect();
-    // 2. flag + redact injection directives (case-insensitive)
     let mut flagged = false;
     for m in INJECTION_MARKERS {
         if contains_ci(&s, m) {
@@ -175,16 +267,16 @@ fn sanitize(raw: &str, cap: usize) -> (String, bool) {
             s = redact_ci(&s, m, "[redacted-directive]");
         }
     }
-    // 3. bound length on a char boundary
+    let mut truncated = false;
     if s.len() > cap {
         let mut end = cap;
         while end > 0 && !s.is_char_boundary(end) {
             end -= 1;
         }
         s.truncate(end);
-        s.push_str(" …[truncated]");
+        truncated = true;
     }
-    (s, flagged)
+    (s, flagged, truncated)
 }
 
 fn contains_ci(hay: &str, needle: &str) -> bool {
@@ -230,8 +322,6 @@ fn redact_ci(s: &str, needle: &str, repl: &str) -> String {
         outb.push(hb[i]);
         i += 1;
     }
-    // Markers + replacement are ASCII; multi-byte content is copied
-    // byte-for-byte from valid UTF-8, so the result is valid UTF-8.
     match core::str::from_utf8(&outb) {
         Ok(t) => t.to_string(),
         Err(_) => s.to_string(),
@@ -270,19 +360,24 @@ fn overlap_score(query: &str, title: &str, description: &str) -> f64 {
 
 ## Notes
 
-- **Never panics:** every accessor uses `unwrap_or`; a search error or
-  bad input yields `{"error":…}`. A panic would become a sandbox trap
-  surfaced as a tool error.
-- **No third-party crates** (v1 rule): all logic is `#![no_std]` + the
-  vendored `json` helper. `contains_ci`/`redact_ci` are allocation-light
-  ASCII scanners — no `regex`, no `serde`.
-- **The scrubber is conservative**, not exhaustive. It raises
-  `injection_suspected` so the model (and operator) can treat flagged
-  results with suspicion; it does not claim to make hostile text safe.
-- The `web_search` declaration is what makes `host::web_search`
-  available and what `guardian_list` surfaces as the tool's privilege.
-  The host already filters results to `https`; `is_safe_url` is
-  defense-in-depth.
+- **Never panics:** every accessor uses `unwrap_or`; a search/fetch
+  error or bad input yields `{"error":…}`. A panic becomes a sandbox
+  trap surfaced as a tool error.
+- **No third-party crates** (v1 rule): `#![no_std]` + the vendored
+  `json` and `html_text` helpers only. `html_text::to_text` is a
+  **heuristic** HTML→text reducer (drops `<script>/<style>`, strips
+  tags, decodes a small entity set), documented conservative — it does
+  not make hostile markup safe; the scrubber still runs on its output.
+- **Structured truncation (#7):** a cut field reports `truncated:
+  {"<field>": <cap>}` instead of an opaque inline marker.
+- **Recency / exclude / pagination / freshness:** `recency` accepts
+  `day|week|month|year` (or a `YYYY-MM-DDtoYYYY-MM-DD` range); `exclude`
+  domains become `-site:` operators; `offset` (0–9) pages results;
+  `extra_snippets` returns more excerpt text per result *without* a
+  fetch. All clamped/whitelisted host-side.
+- The `web_search` + `http_get` declarations are what make
+  `host::web_search_ex` / `host::http_get` available and what
+  `guardian_list` surfaces as the tool's privileges.
 
 ## Try it
 
@@ -293,9 +388,9 @@ fn overlap_score(query: &str, title: &str, description: &str) -> f64 {
 .                                 # serial terminator (web: just Enter)
 /guardian status web_search       # → ready
 # to the intelligence:
-guardian_call action=invoke tool=web_search input={"query":"rust async runtime"}
-# → real Brave results, ranked by query overlap, de-duped by host;
-#   any entry containing an injection directive has its title/description
-#   replaced with [redacted-directive] and injection_suspected:true.
+guardian_call action=invoke tool=web_search input={"query":"tokio cancellation safety","recency":"year","fetch_top":1}
+# → real Brave results ranked by overlap, de-duped by host, the top
+#   result's page fetched + reduced to text; any injection directive in
+#   any field becomes [redacted-directive] with injection_suspected:true.
 /guardian delete web_search
 ```

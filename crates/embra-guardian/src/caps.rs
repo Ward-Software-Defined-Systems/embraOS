@@ -195,6 +195,29 @@ pub fn guarded_http_get(caps: &Capabilities, url: &str) -> String {
 
 // ── web_search capability ──
 
+/// A parsed, validated `web_search` request. The guest sends either a
+/// bare query string (→ `{ q: <that> }`) or a JSON object with these
+/// fields; everything is clamped / whitelisted host-side by
+/// [`parse_request`] before it reaches a provider, so a hostile guest
+/// cannot smuggle a provider parameter we did not vet.
+#[derive(Clone, Debug)]
+pub struct SearchRequest {
+    pub q: String,
+    /// Brave `freshness`: `pd|pw|pm|py` or a `YYYY-MM-DDtoYYYY-MM-DD`
+    /// range. `None` ⇒ no recency filter.
+    pub freshness: Option<String>,
+    /// Brave `offset`: 0-based page index, clamped `0..=9`.
+    pub offset: u32,
+    /// Brave `count`: results per page, clamped `1..=20`.
+    pub count: usize,
+    /// Domains to exclude — appended to `q` as `-site:<d>` (Brave has no
+    /// exclude parameter). Sanitized, at most 10.
+    pub exclude: Vec<String>,
+    /// Request Brave `extra_snippets` (extra excerpt text per result —
+    /// cheaper than a fetch; partly answers "search is half-blind").
+    pub extra_snippets: bool,
+}
+
 /// One normalized search hit. The Guardian flattens the provider's schema
 /// to this stable shape so guests are provider-agnostic. The text is
 /// still attacker-controlled — guests must injection-scrub it.
@@ -203,42 +226,145 @@ pub struct SearchResult {
     pub title: String,
     pub url: String,
     pub description: String,
+    /// Best-effort published/modified date (Brave `age` ‖ `page_age`).
+    /// Provider-defined format, not guaranteed; `None` when absent.
+    pub age: Option<String>,
+    /// Brave `extra_snippets` (additional excerpts), when requested.
+    pub snippets: Vec<String>,
 }
 
 /// Pluggable search backend. The impl performs the request + parsing;
 /// **policy/normalization is enforced by [`guarded_web_search`]**, never
 /// here. A future browser-driven backend is just another impl.
 pub trait SearchProvider: Send + Sync {
-    fn search(&self, query: &str, count: usize, timeout: Duration)
+    fn search(&self, req: &SearchRequest, timeout: Duration)
         -> Result<Vec<SearchResult>, String>;
+}
+
+/// Parse the guest-supplied bytes into a vetted [`SearchRequest`]. A JSON
+/// **object** is treated as a structured request; anything else (bare
+/// string, number, parse error) is treated as a plain query. Every field
+/// is clamped / whitelisted here — never trust the guest's numbers.
+fn parse_request(input: &str) -> SearchRequest {
+    let mut req = SearchRequest {
+        q: String::new(),
+        freshness: None,
+        offset: 0,
+        count: 10,
+        exclude: Vec::new(),
+        extra_snippets: false,
+    };
+    match serde_json::from_str::<serde_json::Value>(input) {
+        Ok(serde_json::Value::Object(m)) => {
+            req.q = m.get("q").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+            req.count = m
+                .get("count")
+                .and_then(|v| v.as_u64())
+                .map(|n| n.clamp(1, 20) as usize)
+                .unwrap_or(10);
+            req.offset = m
+                .get("offset")
+                .and_then(|v| v.as_u64())
+                .map(|n| n.min(9) as u32)
+                .unwrap_or(0);
+            req.extra_snippets =
+                m.get("extra_snippets").and_then(|v| v.as_bool()).unwrap_or(false);
+            req.freshness =
+                m.get("freshness").and_then(|v| v.as_str()).and_then(normalize_freshness);
+            if let Some(arr) = m.get("exclude").and_then(|v| v.as_array()) {
+                req.exclude = arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .filter_map(sanitize_domain)
+                    .take(10)
+                    .collect();
+            }
+        }
+        _ => req.q = input.trim().to_string(),
+    }
+    req
+}
+
+/// Map a freshness token to Brave's wire value. Accepts the friendly
+/// `day|week|month|year`, the raw `pd|pw|pm|py`, or a validated
+/// `YYYY-MM-DDtoYYYY-MM-DD` range. Anything else ⇒ `None` (filter
+/// silently dropped, never passed through unvetted).
+fn normalize_freshness(s: &str) -> Option<String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "day" | "pd" => Some("pd".into()),
+        "week" | "pw" => Some("pw".into()),
+        "month" | "pm" => Some("pm".into()),
+        "year" | "py" => Some("py".into()),
+        other => is_date_range(other).then(|| other.to_string()),
+    }
+}
+
+fn is_date_range(s: &str) -> bool {
+    matches!(s.split_once("to"), Some((a, b)) if is_ymd(a) && is_ymd(b))
+}
+
+fn is_ymd(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() == 10
+        && b.iter().enumerate().all(|(i, c)| {
+            if i == 4 || i == 7 { *c == b'-' } else { c.is_ascii_digit() }
+        })
+}
+
+/// Reduce a guest-supplied exclude entry to a bare hostname. Strips a
+/// scheme / path, lowercases, and accepts only `[a-z0-9.-]` with a dot —
+/// so it cannot inject extra `q` operators when concatenated as `-site:`.
+fn sanitize_domain(s: &str) -> Option<String> {
+    let d = s
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://");
+    let d = d.split('/').next().unwrap_or("").to_ascii_lowercase();
+    (!d.is_empty()
+        && d.len() <= 253
+        && d.contains('.')
+        && d.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-'))
+    .then_some(d)
 }
 
 /// The guarded host method for `guardian::web_search`. Returns the JSON
 /// envelope handed back to the guest (always well-formed; never panics).
-pub fn guarded_web_search(caps: &Capabilities, query: &str) -> String {
+pub fn guarded_web_search(caps: &Capabilities, input: &str) -> String {
     let Some(provider) = caps.search.as_ref() else {
         return err_json("search capability not configured (no Brave API key set)");
     };
-    let q = query.trim();
-    if q.is_empty() {
+    let req = parse_request(input);
+    if req.q.is_empty() {
         return err_json("empty search query");
     }
-    match provider.search(q, 10, Duration::from_secs(10)) {
+    match provider.search(&req, Duration::from_secs(10)) {
         Ok(results) => {
             let items: Vec<serde_json::Value> = results
                 .into_iter()
                 .filter(|r| r.url.starts_with("https://"))
-                .take(10)
+                .take(req.count.min(20))
                 .map(|r| {
-                    serde_json::json!({
-                        "title": truncate(&r.title, 300),
-                        "url": r.url,
-                        "description": truncate(&r.description, 1000),
-                    })
+                    let mut o = serde_json::Map::new();
+                    o.insert("title".into(), truncate(&r.title, 300).into());
+                    o.insert("url".into(), r.url.into());
+                    o.insert("description".into(), truncate(&r.description, 1000).into());
+                    if let Some(age) = r.age.filter(|a| !a.is_empty()) {
+                        o.insert("age".into(), age.into());
+                    }
+                    if !r.snippets.is_empty() {
+                        let snips: Vec<serde_json::Value> = r
+                            .snippets
+                            .iter()
+                            .take(5)
+                            .map(|s| truncate(s, 500).into())
+                            .collect();
+                        o.insert("snippets".into(), snips.into());
+                    }
+                    serde_json::Value::Object(o)
                 })
                 .collect();
             serde_json::json!({
-                "ok": true, "query": q, "count": items.len(), "results": items,
+                "ok": true, "query": req.q, "count": items.len(), "results": items,
             })
             .to_string()
         }
@@ -277,13 +403,31 @@ impl BraveSearch {
 }
 
 impl SearchProvider for BraveSearch {
-    fn search(&self, query: &str, count: usize, timeout: Duration)
+    fn search(&self, req: &SearchRequest, timeout: Duration)
         -> Result<Vec<SearchResult>, String> {
-        let count = count.clamp(1, 20).to_string();
+        // Brave has no exclude param — fold sanitized excludes into `q`
+        // as `-site:` operators (sanitize_domain already removed anything
+        // that could inject a second operator).
+        let mut q = req.q.clone();
+        for d in &req.exclude {
+            q.push_str(" -site:");
+            q.push_str(d);
+        }
+        let mut params: Vec<(&str, String)> = vec![
+            ("q", q),
+            ("count", req.count.clamp(1, 20).to_string()),
+            ("offset", req.offset.min(9).to_string()),
+        ];
+        if let Some(f) = &req.freshness {
+            params.push(("freshness", f.clone()));
+        }
+        if req.extra_snippets {
+            params.push(("extra_snippets", "1".to_string()));
+        }
         let resp = self
             .client
             .get("https://api.search.brave.com/res/v1/web/search")
-            .query(&[("q", query), ("count", count.as_str())])
+            .query(&params)
             .header("Accept", "application/json")
             .header("X-Subscription-Token", &self.api_key)
             .timeout(timeout)
@@ -299,16 +443,39 @@ impl SearchProvider for BraveSearch {
             .and_then(|w| w.get("results"))
             .and_then(|r| r.as_array())
             .ok_or_else(|| "unexpected brave response shape".to_string())?;
+        // Brave's date field is undocumented (community-confirmed gap):
+        // `age` and `page_age` both appear, format not guaranteed. Try
+        // both, surface as an opaque string, never fail on its absence.
         Ok(arr
             .iter()
-            .map(|r| SearchResult {
-                title: r.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                url: r.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string(),
-                description: r
-                    .get("description")
+            .map(|r| {
+                let age = r
+                    .get("age")
                     .and_then(|x| x.as_str())
-                    .unwrap_or("")
-                    .to_string(),
+                    .or_else(|| r.get("page_age").and_then(|x| x.as_str()))
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                let snippets = r
+                    .get("extra_snippets")
+                    .and_then(|x| x.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|s| s.as_str())
+                            .map(|s| s.to_string())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                SearchResult {
+                    title: r.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    url: r.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                    description: r
+                        .get("description")
+                        .and_then(|x| x.as_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    age,
+                    snippets,
+                }
             })
             .collect())
     }
@@ -481,8 +648,18 @@ mod search_tests {
 
     struct MockSearch(Result<Vec<SearchResult>, String>);
     impl SearchProvider for MockSearch {
-        fn search(&self, _q: &str, _c: usize, _t: Duration) -> Result<Vec<SearchResult>, String> {
+        fn search(&self, _r: &SearchRequest, _t: Duration) -> Result<Vec<SearchResult>, String> {
             self.0.clone()
+        }
+    }
+
+    fn sr(title: &str, url: &str, desc: &str) -> SearchResult {
+        SearchResult {
+            title: title.into(),
+            url: url.into(),
+            description: desc.into(),
+            age: None,
+            snippets: vec![],
         }
     }
 
@@ -498,20 +675,20 @@ mod search_tests {
     }
 
     #[test]
-    fn empty_query_rejected() {
+    fn empty_query_rejected_bare_and_json() {
         let caps = Capabilities::with_search(Arc::new(MockSearch(Ok(vec![]))));
-        let v = parse(&guarded_web_search(&caps, "   "));
-        assert_eq!(v["ok"], false);
-        assert!(v["error"].as_str().unwrap().contains("empty"));
+        for input in ["   ", r#"{"q":"  "}"#, r#"{"count":5}"#] {
+            let v = parse(&guarded_web_search(&caps, input));
+            assert_eq!(v["ok"], false, "input {input:?}");
+            assert!(v["error"].as_str().unwrap().contains("empty"));
+        }
     }
 
     #[test]
     fn normalizes_and_filters_non_https() {
         let caps = Capabilities::with_search(Arc::new(MockSearch(Ok(vec![
-            SearchResult { title: "Tokio".into(), url: "https://tokio.rs".into(),
-                description: "async runtime".into() },
-            SearchResult { title: "Insecure".into(), url: "http://nope.test".into(),
-                description: "dropped".into() },
+            sr("Tokio", "https://tokio.rs", "async runtime"),
+            sr("Insecure", "http://nope.test", "dropped"),
         ]))));
         let v = parse(&guarded_web_search(&caps, "rust async"));
         assert_eq!(v["ok"], true);
@@ -522,10 +699,79 @@ mod search_tests {
     }
 
     #[test]
+    fn age_and_snippets_only_when_present() {
+        let with = SearchResult {
+            age: Some("2024-10-08T10:30:00Z".into()),
+            snippets: vec!["extra one".into(), "extra two".into()],
+            ..sr("Doc", "https://docs.rs/x", "d")
+        };
+        let caps = Capabilities::with_search(Arc::new(MockSearch(Ok(vec![
+            with,
+            sr("Bare", "https://bare.rs", "b"),
+        ]))));
+        let v = parse(&guarded_web_search(&caps, "q"));
+        assert_eq!(v["results"][0]["age"], "2024-10-08T10:30:00Z");
+        assert_eq!(v["results"][0]["snippets"][1], "extra two");
+        assert!(v["results"][1].get("age").is_none(), "no age key when absent");
+        assert!(v["results"][1].get("snippets").is_none(), "no snippets key when empty");
+    }
+
+    #[test]
     fn provider_error_surfaces() {
-        let caps = Capabilities::with_search(Arc::new(MockSearch(Err("brave search HTTP 401".into()))));
+        let caps =
+            Capabilities::with_search(Arc::new(MockSearch(Err("brave search HTTP 401".into()))));
         let v = parse(&guarded_web_search(&caps, "x"));
         assert_eq!(v["ok"], false);
         assert!(v["error"].as_str().unwrap().contains("401"));
+    }
+
+    #[test]
+    fn bare_string_is_the_query() {
+        let r = parse_request("  rust async  ");
+        assert_eq!(r.q, "rust async");
+        assert_eq!(r.count, 10);
+        assert_eq!(r.offset, 0);
+        assert!(r.freshness.is_none() && r.exclude.is_empty() && !r.extra_snippets);
+    }
+
+    #[test]
+    fn json_request_is_parsed_and_clamped() {
+        let r = parse_request(
+            r#"{"q":"x","count":999,"offset":50,"freshness":"week",
+                "exclude":["https://Pinterest.com/board","ok.dev","b@d"],
+                "extra_snippets":true}"#,
+        );
+        assert_eq!(r.q, "x");
+        assert_eq!(r.count, 20, "count clamped to 20");
+        assert_eq!(r.offset, 9, "offset clamped to 9");
+        assert_eq!(r.freshness.as_deref(), Some("pw"));
+        assert!(r.extra_snippets);
+        assert_eq!(r.exclude, vec!["pinterest.com".to_string(), "ok.dev".to_string()],
+            "scheme/path stripped, lowercased, junk dropped");
+    }
+
+    #[test]
+    fn count_zero_floor_and_freshness_variants() {
+        assert_eq!(parse_request(r#"{"q":"x","count":0}"#).count, 1);
+        assert_eq!(parse_request(r#"{"q":"x","freshness":"day"}"#).freshness.as_deref(), Some("pd"));
+        assert_eq!(parse_request(r#"{"q":"x","freshness":"py"}"#).freshness.as_deref(), Some("py"));
+        assert!(parse_request(r#"{"q":"x","freshness":"bogus"}"#).freshness.is_none());
+        assert_eq!(
+            parse_request(r#"{"q":"x","freshness":"2024-01-01to2024-12-31"}"#).freshness.as_deref(),
+            Some("2024-01-01to2024-12-31"),
+            "validated date range passes through"
+        );
+        assert!(
+            parse_request(r#"{"q":"x","freshness":"2024-1-1to2024-12-31"}"#).freshness.is_none(),
+            "malformed date range dropped"
+        );
+    }
+
+    #[test]
+    fn json_string_or_array_is_treated_as_bare_query() {
+        // Only an object is a structured request; a JSON string/array is
+        // the literal query text.
+        assert_eq!(parse_request(r#""hello world""#).q, r#""hello world""#);
+        assert_eq!(parse_request("[1,2]").q, "[1,2]");
     }
 }

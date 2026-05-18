@@ -25,7 +25,9 @@ pub mod scaffold;
 pub mod store;
 pub mod validator;
 
-pub use caps::{Capabilities, EgressPolicy, HttpTransport, SearchProvider, SearchResult};
+pub use caps::{
+    Capabilities, EgressPolicy, HttpTransport, SearchProvider, SearchRequest, SearchResult,
+};
 pub use error::GuardianError;
 pub use overlay::{runtime, CompiledTool, GuardianRuntime};
 pub use scaffold::{assemble_lib_rs, scaffold, ScaffoldPaths};

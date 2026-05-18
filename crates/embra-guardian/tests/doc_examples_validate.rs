@@ -35,11 +35,15 @@ fn every_doc_module_passes_the_validator() {
                         panic!("doc example failed validation: {e}\n--- module ---\n{code}\n---")
                     });
                     // Capability-declaring examples must keep declaring
-                    // exactly the cap their `host::` calls require, or the
-                    // doc has drifted from the validator's KNOWN_CAPS rule.
+                    // exactly the caps their `host::` calls require, or
+                    // the doc has drifted from the validator's KNOWN_CAPS
+                    // rule. `m.caps` is sorted+deduped by the validator,
+                    // so the flagship's `["web_search","http_get"]`
+                    // surfaces as the alphabetical `["http_get",
+                    // "web_search"]`.
                     let expect_caps: &[&str] = match m.name.as_str() {
                         "http_fetch" => &["http_get"],
-                        "web_search" => &["web_search"],
+                        "web_search" => &["http_get", "web_search"],
                         _ => &[],
                     };
                     assert_eq!(

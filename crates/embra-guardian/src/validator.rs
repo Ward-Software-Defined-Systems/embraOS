@@ -302,7 +302,8 @@ const DENIED_MACROS: &[&str] = &[
     "include", "include_str", "include_bytes", "env", "option_env",
     "asm", "global_asm", "concat_idents",
 ];
-const USE_ROOTS_OK: &[&str] = &["core", "alloc", "crate", "self", "super", "json", "host"];
+const USE_ROOTS_OK: &[&str] =
+    &["core", "alloc", "crate", "self", "super", "json", "host", "html_text"];
 
 impl<'ast> Visit<'ast> for Deny {
     fn visit_item_extern_crate(&mut self, i: &'ast syn::ItemExternCrate) {
@@ -314,7 +315,7 @@ impl<'ast> Visit<'ast> for Deny {
     fn visit_item_mod(&mut self, i: &'ast syn::ItemMod) {
         self.flag(err_at(
             "module",
-            "`mod` is not allowed; the scaffold provides `json`/`host`",
+            "`mod` is not allowed; the scaffold provides `json`/`host`/`html_text`",
             i.span(),
         ));
     }
@@ -352,7 +353,7 @@ impl<'ast> Visit<'ast> for Deny {
             self.flag(err_at(
                 "use",
                 format!("`use {r}::…` is not allowed (v1 permits no extra crates; \
-                         only core/alloc + scaffold `json`/`host`)"),
+                         only core/alloc + scaffold `json`/`host`/`html_text`)"),
                 u.span(),
             ));
         }
@@ -464,6 +465,28 @@ fn run(input: &str) -> String { String::new() }
     fn unknown_capability() {
         let src = GOOD.replace(r#"&["http_get"]"#, r#"&["spawn_proc"]"#);
         assert_eq!(reject(&src).rule, "capability");
+    }
+
+    #[test]
+    fn html_text_helper_use_and_call_allowed() {
+        // `html_text` is a scaffold-shipped module like `json`: both a
+        // `use html_text::…;` and a bare `html_text::to_text(..)` call
+        // must pass the denylist.
+        let src = r##"
+// guardian-tool: reader
+const GUARDIAN_NAME: &str = "reader";
+const GUARDIAN_DESC: &str = "Fetch + read.";
+const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"u":{"type":"string"}}}"#;
+const GUARDIAN_CAPS: &[&str] = &["http_get"];
+use html_text::to_text;
+fn run(input: &str) -> String {
+    let page = host::http_get(input);
+    let _ = to_text(&page);
+    html_text::to_text(&page)
+}
+"##;
+        let m = validate(src, &[]).expect("html_text use + call must be allowed");
+        assert_eq!(m.name, "reader");
     }
 
     #[test]
