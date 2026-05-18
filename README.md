@@ -28,8 +28,8 @@
 > through two static meta-tools (`guardian_call` / `guardian_list`), so the provider
 > tool schema — and the prompt cache — stay byte-stable. This is the first step
 > toward an intelligence that grows its own capabilities. Pulled forward from
-> Phase 2; feature-complete and operator-tested on the dedicated **`embra-guardian-v1`**
-> branch — **experimental, not yet merged**. See
+> Phase 2; feature-complete, operator-tested, and now **merged to `main`** — still
+> **experimental**. See
 > [`docs/GUARDIAN-TOOL-EXAMPLES.md`](docs/GUARDIAN-TOOL-EXAMPLES.md) and
 > [`docs/GUARDIAN-ADVANCED-EXAMPLE.md`](docs/GUARDIAN-ADVANCED-EXAMPLE.md).
 
@@ -76,8 +76,10 @@ Phase 1 builds a QEMU-bootable x86_64 disk image with an immutable SquashFS root
 # rocksdb → zstd-sys dep chain) to parse C headers at build time.
 # libcrypt-dev provides crypt.h for Buildroot's host-mkpasswd build —
 # Ubuntu 26.04 split crypt.h out of glibc into the standalone libxcrypt.
+# xz-utils unpacks the pinned in-OS Rust toolchain that build-image.sh
+# Step 3.5 bakes into the image (the Guardian self-extension substrate).
 sudo apt-get update && sudo apt-get install -y \
-  build-essential gcc g++ unzip bc cpio rsync wget python3 file \
+  build-essential gcc g++ unzip xz-utils bc cpio rsync wget python3 file \
   protobuf-compiler musl-tools clang libclang-dev \
   qemu-system-x86 libcrypt-dev libelf-dev libssl-dev genext2fs
 
@@ -139,6 +141,8 @@ EMBRA_TUI=1 ./scripts/run-qemu.sh                    # Boot in QEMU — serial T
 > **Storage engine:** The `--storage-engine` flag is required and is baked into the embrad binary at build time. WardSONDB locks the choice into the DATA partition on first boot via a `.engine` marker file — switching engines later requires wiping DATA.
 
 > **Buildroot version:** Defaults to `2026.02.1` (LTS, designed for Ubuntu 26.04 era). Override with `BUILDROOT_VERSION=2024.02 ./scripts/build-image.sh ...` if you need to fall back on an older host.
+
+> **In-OS Rust toolchain:** Guardian self-extension needs a Rust toolchain *inside* the image, so `build-image.sh` Step 3.5 downloads a pinned toolchain (musl host + `wasm32` std, SHA-256-verified) from `static.rust-lang.org`, caches it under `vendor/rust-toolchain`, and bakes it into the rootfs at `/opt/rust`. The first build needs network for this and adds ~100 MB to the image; override the pin with `RUST_TOOLCHAIN_VERSION=... ./scripts/build-image.sh ...`.
 
 On first boot, the Config Wizard runs — name your intelligence, choose your LLM provider (Anthropic Claude, Google Gemini, Ollama, or LM Studio), enter the corresponding credentials (API key for Anthropic/Gemini; endpoint URL + optional bearer + selected model for the OpenAI-compat presets), set your timezone. Each field is validated before commit — an invalid API key, unreachable endpoint, or garbage timezone re-prompts instead of persisting. The Ollama / LM Studio sub-flow probes `GET /v1/models` against your endpoint and presents a model selector populated from the live server response. After setup, you're in a full TUI conversation with styled text, thinking indicators, and tool execution.
 
