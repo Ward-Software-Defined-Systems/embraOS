@@ -44,8 +44,12 @@ pub const IMPORT_MODULE: &str = "guardian";
 /// (returns [`pack`]ed ptr/len of a JSON result the host wrote into guest
 /// memory via the guest's own `galloc`).
 pub const CAP_HTTP_GET: &str = "http_get";
+/// Capability: guarded web search. `fn(q_ptr: u32, q_len: u32) -> u64`
+/// (packed ptr/len of a normalized JSON results envelope the host wrote
+/// into guest memory). The host holds the provider credential.
+pub const CAP_WEB_SEARCH: &str = "web_search";
 /// The complete v1 capability allowlist (`validator` rejects anything else).
-pub const KNOWN_CAPS: &[&str] = &[CAP_HTTP_GET];
+pub const KNOWN_CAPS: &[&str] = &[CAP_HTTP_GET, CAP_WEB_SEARCH];
 
 /// Pack a `(ptr, len)` pair into the single `u64` `guardian_run` returns.
 #[inline]

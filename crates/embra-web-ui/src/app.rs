@@ -32,7 +32,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
     ("Guardian", &[
         ("/guardian-define", "define"), ("/guardian list", "list"),
         ("/guardian status", "status"), ("/guardian show", "show"),
-        ("/guardian delete", "delete"),
+        ("/guardian delete", "delete"), ("/guardian key brave", "brave key"),
     ]),
     ("Help", &[("/help", "help"), ("/ml", "multiline")]),
 ];
@@ -111,6 +111,11 @@ const SPECS: &[Spec] = &[
     Spec { cmd: "/guardian delete", title: "Delete Guardian tool",
         note: "Removes manifest, overlay, project, and artifact.", join: " ", guided: false,
         fields: &[t("Tool name", "web_search", true)] },
+    Spec { cmd: "/guardian key brave", title: "Brave Search API key",
+        note: "Enables web_search-capable tools. Blank = show status. Stored to STATE (0600).",
+        join: " ", guided: false,
+        fields: &[Field { label: "API key", ph: "brave key (blank = status)",
+            req: false, secret: true, choices: &[] }] },
 ];
 
 fn spec_idx(cmd: &str) -> Option<usize> {

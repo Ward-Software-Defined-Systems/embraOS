@@ -20,7 +20,7 @@ use wasmtime::{
 };
 
 use crate::abi;
-use crate::caps::{guarded_http_get, Capabilities};
+use crate::caps::{guarded_http_get, guarded_web_search, Capabilities};
 use crate::error::GuardianError;
 
 /// Hard ceiling on guest output, mirroring the registry's
@@ -69,6 +69,15 @@ impl WasmHost {
                 abi::CAP_HTTP_GET,
                 |mut caller: Caller<'_, StoreData>, url_ptr: u32, url_len: u32| -> u64 {
                     host_http_get(&mut caller, url_ptr, url_len)
+                },
+            )
+            .map_err(|e| GuardianError::Instantiate(e.to_string()))?;
+        linker
+            .func_wrap(
+                abi::IMPORT_MODULE,
+                abi::CAP_WEB_SEARCH,
+                |mut caller: Caller<'_, StoreData>, q_ptr: u32, q_len: u32| -> u64 {
+                    host_web_search(&mut caller, q_ptr, q_len)
                 },
             )
             .map_err(|e| GuardianError::Instantiate(e.to_string()))?;
@@ -210,6 +219,45 @@ fn host_http_get(caller: &mut Caller<'_, StoreData>, url_ptr: u32, url_len: u32)
 
     let caps = caller.data().caps.clone();
     let result = guarded_http_get(&caps, &url);
+    let bytes = result.into_bytes();
+    let Ok(out_len) = u32::try_from(bytes.len()) else {
+        return 0;
+    };
+
+    let Ok(out_ptr) = galloc.call(&mut *caller, out_len) else {
+        return 0;
+    };
+    if memory.write(&mut *caller, out_ptr as usize, &bytes).is_err() {
+        return 0;
+    }
+    abi::pack(out_ptr, out_len)
+}
+
+/// `guardian::web_search` host import. Same marshalling as
+/// [`host_http_get`]; the policy/credential live in `guarded_web_search`
+/// + the per-call `Capabilities.search` provider (host-side only).
+fn host_web_search(caller: &mut Caller<'_, StoreData>, q_ptr: u32, q_len: u32) -> u64 {
+    let Some(Extern::Memory(memory)) = caller.get_export(abi::EXPORT_MEMORY) else {
+        return 0;
+    };
+    let Some(Extern::Func(galloc_fn)) = caller.get_export(abi::EXPORT_ALLOC) else {
+        return 0;
+    };
+    let Ok(galloc) = galloc_fn.typed::<u32, u32>(&*caller) else {
+        return 0;
+    };
+
+    let query = {
+        let data = memory.data(&*caller);
+        let (start, end) = (q_ptr as usize, q_ptr as usize + q_len as usize);
+        match data.get(start..end) {
+            Some(b) => String::from_utf8_lossy(b).into_owned(),
+            None => return 0,
+        }
+    };
+
+    let caps = caller.data().caps.clone();
+    let result = guarded_web_search(&caps, &query);
     let bytes = result.into_bytes();
     let Ok(out_len) = u32::try_from(bytes.len()) else {
         return 0;

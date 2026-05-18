@@ -36,6 +36,8 @@ You paste **only** these items — the scaffold owns everything else
 - `const GUARDIAN_DESC: &str = "…";`
 - `const GUARDIAN_SCHEMA: &str = r#"{ "type":"object", "properties":{…} }"#;`
 - *(optional)* `const GUARDIAN_CAPS: &[&str] = &["http_get"];`
+  (v1 capabilities: `"http_get"`, `"web_search"` — declare only what the
+  tool uses; the validator rejects an undeclared `host::` reference)
 - Exactly one `fn run(input: &str) -> String` (not `pub`, not `unsafe`).
 - Any number of **private** helper `fn`s.
 
@@ -66,7 +68,9 @@ builders: json::s(&str)  json::n(f64)  json::b(bool)  json::null()
           json::arr(Vec<Json>)  json::obj(Vec<(&str, Json)>)
 ```
 
-### Provided `host` API (only when `GUARDIAN_CAPS` includes `"http_get"`)
+### Provided `host` API (each fn appears only when its cap is declared)
+
+`host::http_get` — when `GUARDIAN_CAPS` includes `"http_get"`:
 
 ```text
 host::http_get(url: &str) -> String   // returns a JSON envelope string:
@@ -75,6 +79,22 @@ host::http_get(url: &str) -> String   // returns a JSON envelope string:
 // The Guardian enforces: https-only, RFC1918/loopback/CGNAT/IPv6 +
 // DNS-resolved-IP SSRF block, optional domain allowlist, 10s timeout,
 // 256 KiB body cap, text/* | application/json content-types. Audited.
+```
+
+`host::web_search` — when `GUARDIAN_CAPS` includes `"web_search"`:
+
+```text
+host::web_search(query: &str) -> String   // returns a JSON envelope:
+//   {"ok":true,"query":"…","count":<n>,"results":[
+//      {"title":"…","url":"https://…","description":"…"}, …]}
+//   {"ok":false,"error":"…"}
+// Backed by Brave Search; the host holds the API key (never reaches the
+// guest) and the endpoint is fixed (api.search.brave.com) so there is no
+// guest-controlled URL / SSRF surface. Results are filtered to https,
+// length-capped, normalized. The text is still attacker-controlled — the
+// tool MUST injection-scrub it (see GUARDIAN-ADVANCED-EXAMPLE.md). The
+// key is set by the operator: `/guardian key brave <token>`; if unset
+// the envelope is {"ok":false,"error":"search capability not configured…"}.
 ```
 
 ## Minimal template

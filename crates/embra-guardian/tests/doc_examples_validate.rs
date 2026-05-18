@@ -34,14 +34,20 @@ fn every_doc_module_passes_the_validator() {
                     let m = embra_guardian::validate(code, &[]).unwrap_or_else(|e| {
                         panic!("doc example failed validation: {e}\n--- module ---\n{code}\n---")
                     });
-                    if m.name == "http_fetch" || m.name == "web_search" {
-                        assert_eq!(
-                            m.caps,
-                            vec!["http_get".to_string()],
-                            "{} must declare the http_get capability",
-                            m.name
-                        );
-                    }
+                    // Capability-declaring examples must keep declaring
+                    // exactly the cap their `host::` calls require, or the
+                    // doc has drifted from the validator's KNOWN_CAPS rule.
+                    let expect_caps: &[&str] = match m.name.as_str() {
+                        "http_fetch" => &["http_get"],
+                        "web_search" => &["web_search"],
+                        _ => &[],
+                    };
+                    assert_eq!(
+                        m.caps,
+                        expect_caps.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                        "{} must declare exactly {expect_caps:?}",
+                        m.name
+                    );
                 }
                 buf.clear();
             } else {

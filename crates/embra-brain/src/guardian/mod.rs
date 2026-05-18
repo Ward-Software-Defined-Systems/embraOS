@@ -21,6 +21,12 @@ const GUARDIAN_BASE: &str = "/embra/workspace/.guardian";
 /// Prebaked toolchain location (Buildroot package, task #5).
 const TOOLCHAIN_BIN: &str = "/opt/rust/bin";
 const COLLECTION: &str = "guardian.tools";
+/// Brave Search API key, stored host-side on the STATE partition like the
+/// other provider credentials (flat 0600 file, same convention as
+/// `/embra/state/api_key_anthropic`). NEVER reaches a guest module, the
+/// manifest, or the returned envelope — it only ever lives here + in the
+/// host-side `BraveSearch` provider.
+const BRAVE_KEY_PATH: &str = "/embra/state/api_key_brave";
 
 fn base() -> &'static Path {
     Path::new(GUARDIAN_BASE)
@@ -57,6 +63,16 @@ fn artifact_path(name: &str) -> PathBuf {
     base()
         .join("target/wasm32-unknown-unknown/release")
         .join(format!("{name}.wasm"))
+}
+
+/// Read the Brave Search API key from STATE. `None` ⇒ not set; the
+/// `web_search` capability then degrades to a structured "not configured"
+/// envelope rather than failing the call.
+fn read_brave_key() -> Option<String> {
+    std::fs::read_to_string(BRAVE_KEY_PATH)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 // ── persistence (one doc per tool, _id == name) ──
@@ -162,14 +178,56 @@ pub async fn handle_guardian_slash(args: &str, db: &Arc<WardsonDbClient>) -> Str
             None => format!("guardian: no such tool '{}'", rest.trim()),
         },
         "delete" => delete(db, rest.trim()).await,
+        "key" => key_cmd(rest),
         "" => "Usage: /guardian-define (paste a module) | /guardian list | \
                 /guardian status <name> | /guardian show <name> | \
-                /guardian delete <name>"
+                /guardian delete <name> | /guardian key brave <token>"
             .to_string(),
         other => format!(
-            "guardian: unknown subcommand '{other}'. Use list|status|show|delete, \
+            "guardian: unknown subcommand '{other}'. Use list|status|show|delete|key, \
              or /guardian-define to paste a module."
         ),
+    }
+}
+
+/// `/guardian key <provider> [<token>]`. Sets (or, with no token, reports
+/// the presence of) a search-provider credential. The token is written to
+/// STATE 0600 like the other provider keys and is **never echoed back** —
+/// status replies only ever say SET / NOT set. v1 provider: `brave`.
+fn key_cmd(rest: &str) -> String {
+    let (provider, token) = match rest.split_once(char::is_whitespace) {
+        Some((p, t)) => (p.trim(), t.trim()),
+        None => (rest.trim(), ""),
+    };
+    match provider {
+        "brave" => {
+            if token.is_empty() {
+                return if read_brave_key().is_some() {
+                    "guardian: Brave Search API key is SET — web_search-capable \
+                     tools can search. Re-run `/guardian key brave <token>` to \
+                     replace it."
+                        .to_string()
+                } else {
+                    "guardian: Brave Search API key is NOT set. Set it with \
+                     `/guardian key brave <token>` to enable web_search-capable \
+                     tools (until then they return a 'not configured' result)."
+                        .to_string()
+                };
+            }
+            match crate::config::write_credential_state(BRAVE_KEY_PATH, token) {
+                Ok(()) => "guardian: Brave Search API key saved (STATE, 0600). \
+                           web_search-capable tools can now search."
+                    .to_string(),
+                Err(e) => format!("guardian: could not save Brave key — {e}"),
+            }
+        }
+        "" => "Usage: /guardian key brave <token>  (sets the Brave Search API \
+               key; omit the token to check status). Brave is the only v1 \
+               search provider."
+            .to_string(),
+        other => {
+            format!("guardian: unknown key provider '{other}'. v1 supports: brave.")
+        }
     }
 }
 
@@ -362,25 +420,45 @@ pub async fn guardian_call(
                     )));
                 }
             };
-            let caps = if compiled
+            // Build the per-call grant from the tool's declared caps. The
+            // validator already KNOWN_CAPS-checked these; we only wire the
+            // host-side primitive for each one declared. A declared cap
+            // whose backend is unconfigured (no Brave key) degrades to a
+            // structured "not configured" envelope inside the guard — it
+            // does NOT fail the call.
+            let mut caps = embra_guardian::Capabilities::none();
+            if compiled
                 .caps
                 .iter()
                 .any(|c| c == embra_guardian::abi::CAP_HTTP_GET)
             {
                 match embra_guardian::caps::ReqwestTransport::new() {
-                    Ok(tr) => embra_guardian::Capabilities::with_http(
-                        Arc::new(tr),
-                        embra_guardian::EgressPolicy::default(),
-                    ),
+                    Ok(tr) => {
+                        caps.http = Some(Arc::new(tr));
+                        caps.http_policy = embra_guardian::EgressPolicy::default();
+                    }
                     Err(e) => {
                         return Err(DispatchError::Handler(format!(
                             "guardian: http capability init failed: {e}"
                         )));
                     }
                 }
-            } else {
-                embra_guardian::Capabilities::none()
-            };
+            }
+            if compiled
+                .caps
+                .iter()
+                .any(|c| c == embra_guardian::abi::CAP_WEB_SEARCH)
+                && let Some(key) = read_brave_key()
+            {
+                match embra_guardian::caps::BraveSearch::new(&key) {
+                    Ok(bs) => caps.search = Some(Arc::new(bs)),
+                    Err(e) => {
+                        return Err(DispatchError::Handler(format!(
+                            "guardian: web_search capability init failed: {e}"
+                        )));
+                    }
+                }
+            }
             let input_str = serde_json::to_string(&input).unwrap_or_else(|_| "{}".into());
             let module = compiled.module.clone();
             let res = tokio::task::spawn_blocking(move || {

@@ -51,6 +51,10 @@ impl Default for EgressPolicy {
 pub struct Capabilities {
     pub http: Option<Arc<dyn HttpTransport>>,
     pub http_policy: EgressPolicy,
+    /// `web_search` provider (Brave-backed in v1). `None` ⇒ the host
+    /// method returns a structured "not configured" envelope. The
+    /// provider holds the API key host-side; it never reaches the guest.
+    pub search: Option<Arc<dyn SearchProvider>>,
 }
 
 impl Capabilities {
@@ -60,7 +64,11 @@ impl Capabilities {
     }
     /// Grant `http_get` backed by `transport` under `policy`.
     pub fn with_http(transport: Arc<dyn HttpTransport>, policy: EgressPolicy) -> Self {
-        Self { http: Some(transport), http_policy: policy }
+        Self { http: Some(transport), http_policy: policy, search: None }
+    }
+    /// Grant `web_search` backed by `provider`.
+    pub fn with_search(provider: Arc<dyn SearchProvider>) -> Self {
+        Self { search: Some(provider), ..Self::default() }
     }
 }
 
@@ -182,6 +190,127 @@ pub fn guarded_http_get(caps: &Capabilities, url: &str) -> String {
             .to_string()
         }
         Err(e) => err_json(&e),
+    }
+}
+
+// ── web_search capability ──
+
+/// One normalized search hit. The Guardian flattens the provider's schema
+/// to this stable shape so guests are provider-agnostic. The text is
+/// still attacker-controlled — guests must injection-scrub it.
+#[derive(Clone, Debug)]
+pub struct SearchResult {
+    pub title: String,
+    pub url: String,
+    pub description: String,
+}
+
+/// Pluggable search backend. The impl performs the request + parsing;
+/// **policy/normalization is enforced by [`guarded_web_search`]**, never
+/// here. A future browser-driven backend is just another impl.
+pub trait SearchProvider: Send + Sync {
+    fn search(&self, query: &str, count: usize, timeout: Duration)
+        -> Result<Vec<SearchResult>, String>;
+}
+
+/// The guarded host method for `guardian::web_search`. Returns the JSON
+/// envelope handed back to the guest (always well-formed; never panics).
+pub fn guarded_web_search(caps: &Capabilities, query: &str) -> String {
+    let Some(provider) = caps.search.as_ref() else {
+        return err_json("search capability not configured (no Brave API key set)");
+    };
+    let q = query.trim();
+    if q.is_empty() {
+        return err_json("empty search query");
+    }
+    match provider.search(q, 10, Duration::from_secs(10)) {
+        Ok(results) => {
+            let items: Vec<serde_json::Value> = results
+                .into_iter()
+                .filter(|r| r.url.starts_with("https://"))
+                .take(10)
+                .map(|r| {
+                    serde_json::json!({
+                        "title": truncate(&r.title, 300),
+                        "url": r.url,
+                        "description": truncate(&r.description, 1000),
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "ok": true, "query": q, "count": items.len(), "results": items,
+            })
+            .to_string()
+        }
+        Err(e) => err_json(&e),
+    }
+}
+
+fn truncate(s: &str, cap: usize) -> String {
+    if s.len() <= cap {
+        return s.to_string();
+    }
+    let mut end = cap;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &s[..end])
+}
+
+/// Brave Search backend. Holds the API key host-side only; fixed
+/// endpoint (`api.search.brave.com`) so there is no guest-controlled
+/// URL / SSRF surface. reqwest blocking + rustls, no redirects.
+pub struct BraveSearch {
+    client: reqwest::blocking::Client,
+    api_key: String,
+}
+
+impl BraveSearch {
+    pub fn new(api_key: &str) -> Result<Self, String> {
+        let client = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .user_agent("embra-guardian/0.5")
+            .build()
+            .map_err(|e| e.to_string())?;
+        Ok(Self { client, api_key: api_key.trim().to_string() })
+    }
+}
+
+impl SearchProvider for BraveSearch {
+    fn search(&self, query: &str, count: usize, timeout: Duration)
+        -> Result<Vec<SearchResult>, String> {
+        let count = count.clamp(1, 20).to_string();
+        let resp = self
+            .client
+            .get("https://api.search.brave.com/res/v1/web/search")
+            .query(&[("q", query), ("count", count.as_str())])
+            .header("Accept", "application/json")
+            .header("X-Subscription-Token", &self.api_key)
+            .timeout(timeout)
+            .send()
+            .map_err(|e| e.to_string())?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!("brave search HTTP {}", status.as_u16()));
+        }
+        let v: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
+        let arr = v
+            .get("web")
+            .and_then(|w| w.get("results"))
+            .and_then(|r| r.as_array())
+            .ok_or_else(|| "unexpected brave response shape".to_string())?;
+        Ok(arr
+            .iter()
+            .map(|r| SearchResult {
+                title: r.get("title").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                url: r.get("url").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+                description: r
+                    .get("description")
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            })
+            .collect())
     }
 }
 
@@ -343,5 +472,60 @@ mod tests {
         assert!(is_blocked_ip(&mapped));
         let pub_v6: IpAddr = "2606:4700:4700::1111".parse().unwrap();
         assert!(!is_blocked_ip(&pub_v6));
+    }
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    struct MockSearch(Result<Vec<SearchResult>, String>);
+    impl SearchProvider for MockSearch {
+        fn search(&self, _q: &str, _c: usize, _t: Duration) -> Result<Vec<SearchResult>, String> {
+            self.0.clone()
+        }
+    }
+
+    fn parse(s: &str) -> serde_json::Value {
+        serde_json::from_str(s).expect("guard must emit valid JSON")
+    }
+
+    #[test]
+    fn not_configured_when_no_provider() {
+        let v = parse(&guarded_web_search(&Capabilities::none(), "rust async"));
+        assert_eq!(v["ok"], false);
+        assert!(v["error"].as_str().unwrap().contains("not configured"));
+    }
+
+    #[test]
+    fn empty_query_rejected() {
+        let caps = Capabilities::with_search(Arc::new(MockSearch(Ok(vec![]))));
+        let v = parse(&guarded_web_search(&caps, "   "));
+        assert_eq!(v["ok"], false);
+        assert!(v["error"].as_str().unwrap().contains("empty"));
+    }
+
+    #[test]
+    fn normalizes_and_filters_non_https() {
+        let caps = Capabilities::with_search(Arc::new(MockSearch(Ok(vec![
+            SearchResult { title: "Tokio".into(), url: "https://tokio.rs".into(),
+                description: "async runtime".into() },
+            SearchResult { title: "Insecure".into(), url: "http://nope.test".into(),
+                description: "dropped".into() },
+        ]))));
+        let v = parse(&guarded_web_search(&caps, "rust async"));
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["query"], "rust async");
+        assert_eq!(v["count"], 1, "non-https result is dropped");
+        assert_eq!(v["results"][0]["url"], "https://tokio.rs");
+        assert_eq!(v["results"][0]["title"], "Tokio");
+    }
+
+    #[test]
+    fn provider_error_surfaces() {
+        let caps = Capabilities::with_search(Arc::new(MockSearch(Err("brave search HTTP 401".into()))));
+        let v = parse(&guarded_web_search(&caps, "x"));
+        assert_eq!(v["ok"], false);
+        assert!(v["error"].as_str().unwrap().contains("401"));
     }
 }
