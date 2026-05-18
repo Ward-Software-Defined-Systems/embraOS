@@ -18,6 +18,21 @@
 
 **Current Status:** Phase 1 — Stable (embra-desktop branch is experimental)
 
+> 🧬 **New — a self-extending OS: `embra-guardian-v1`.** The intelligence can now
+> **author its own tools**. It writes a Rust module, and embraOS validates it
+> statically, compiles it to WebAssembly with an in-OS toolchain, and runs it in a
+> `wasmtime` sandbox — all on the live, immutable system, with the new tool persisted
+> across reboots until deleted. The guest has **zero ambient authority**; anything
+> beyond pure compute (e.g. `http_get`, Brave-backed `web_search`) is a
+> policy-guarded host capability the module must explicitly declare. Reachable only
+> through two static meta-tools (`guardian_call` / `guardian_list`), so the provider
+> tool schema — and the prompt cache — stay byte-stable. This is the first step
+> toward an intelligence that grows its own capabilities. Pulled forward from
+> Phase 2; feature-complete and operator-tested on the dedicated **`embra-guardian-v1`**
+> branch — **experimental, not yet merged**. See
+> [`docs/GUARDIAN-TOOL-EXAMPLES.md`](docs/GUARDIAN-TOOL-EXAMPLES.md) and
+> [`docs/GUARDIAN-ADVANCED-EXAMPLE.md`](docs/GUARDIAN-ADVANCED-EXAMPLE.md).
+
 ---
 
 ## What Is This?
@@ -488,8 +503,9 @@ Phase 1 includes 90 internal tools the intelligence invokes during conversation.
 | **Phase 1 — Sprint 3** | WardSONDB pluggable storage engine (`--storage-engine <fjall\|rocksdb>`), EXPR-01 expression panel, NATIVE-TOOLS-01 Anthropic native tool-use migration, tool-coverage expansion, four post-merge fix passes closing 15 Embra_Debug issues (90 tools, 142 tests) | ✅ **Complete** |
 | **Phase 1 — Sprint 4** | GEMINI-PROVIDER-01 — pluggable LLM provider abstraction, Anthropic + Google Gemini 3.1 Pro backends, neutral IR loop driver, Gemini explicit context cache lifecycle, per-provider API keys (schema v10), `/provider [status\|<kind>\|--setup]` slash command, wizard provider step + post-merge cross-provider guard hotfix + Embra_Debug #80 graceful tool-iteration cap with `/iter-cap` runtime knob (90 tools, 234 tests) | ✅ **Complete** |
 | **Phase 1 — Sprint 5** | OPENAI-COMPAT-PROVIDER-01 — Ollama + LM Studio via single `OpenAICompatProvider` with preset discriminator, schema v11 + STATE bearer plumbing, 4-way wizard with Endpoint → Bearer → Probe-and-Select sub-flow, `/provider --setup <ollama\|lm_studio>` runtime reconfigure, model-aware `reasoning_effort` gating, plus REASONING-STREAM-01 follow-up — live provider reasoning streamed to the expression panel, default-on with `/show-reasoning <on\|off>` opt-out (90 tools, 421 workspace tests) | ✅ **Complete** |
+| **`embra-guardian-v1` branch** | Self-extending OS (pulled forward from Phase 2) — intelligence-authored dynamic tools: `syn` static validation + denylist, in-OS prebaked Rust toolchain → `wasm32`, `wasmtime` sandbox (epoch + memory cap, instance-per-call), capability-broker host imports (`http_get`, Brave `web_search`; zero ambient guest authority), `guardian_call`/`guardian_list` meta-tool gateway (prompt-cache-stable), WardSONDB persistence + boot reconcile, new `embra-guardian` crate. R1 gate + full workspace tests + QEMU operator-test green; ~+90–130 MB rootfs signed off | 🔬 Feature-complete on branch — experimental, unmerged |
 | **Pit Stop** | Code review branch — security audit, AI slop cleanup, refactoring | Planned |
-| **Phase 2** | Terminal & Sessions — Full TUI rewrite, API Web Searches via `embra-guardian` v1 (including additional prompt injection protection for the returned results) | Planned |
+| **Phase 2** | Terminal & Sessions — Full TUI rewrite; API Web Searches (the `embra-guardian` v1 dynamic-tool substrate + brokered web search with prompt-injection protection was pulled forward to the `embra-guardian-v1` branch above) | Planned |
 | **Phase 3** | Module System — `embra-guardian` v2, `embractl` management CLI (the `talosctl` equivalent), `embra-brain` Local/Hybrid option via external Ollama but default/recommended remains Anthropic API, LLM-driven Continuity Engine feedback loop (local/API/Hybrid options), MCP server modules via `embra-guardian` governance proxy, containerd runtime, governed capability expansion | Planned |
 | **Phase 4** | Image Factory — GPT Partition Alignment, additional bootable ISO builds, bare metal and Kubernetes deployment | Planned |
 | **Phase 5** | Sovereign Intelligence Options, OS Updates, and Security — A/B partition scheme with automatic rollback, LUKS encryption, mTLS enforcement, custom kernel, custom embraOS-QNM AI model option, local LLM inference/offline operation, zero external dependencies | Planned |
