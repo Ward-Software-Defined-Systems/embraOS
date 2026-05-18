@@ -1,7 +1,12 @@
+/* Template — post_image.sh resolves @KERNEL_IMAGE@ to the kernel
+ * filename Buildroot produced (x86_64 -> bzImage, aarch64 -> Image)
+ * and renders this to $(BUILD_DIR)/genimage.cfg. Keeps one committed
+ * config building both arches with no per-arch sed. */
+
 image boot.vfat {
     vfat {
         files = {
-            "bzImage"
+            "@KERNEL_IMAGE@"
         }
     }
     size = 64M
