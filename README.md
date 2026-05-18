@@ -287,7 +287,7 @@ The full embraOS manual lives in [docs/](docs/).
 
 | Chapter | What it covers |
 |---|---|
-| **[Roadmap](docs/ROADMAP.md)** | Phase 0–5 delivery status + the embra-guardian-v1 branch |
+| **[Roadmap](docs/ROADMAP.md)** | Phase 0–5 delivery status + the post-Sprint-5 embra-web / embra-guardian v1 increments |
 | **[Operation](docs/OPERATION.md)** | Run lifecycle, the session model, keyboard shortcuts, current limitations |
 | **[Command Reference](docs/COMMAND-REFERENCE.md)** | Every slash command |
 | **[Tool Reference](docs/TOOL-REFERENCE.md)** | All 90 built-in tools by category, plus workspace / GitHub / SSH safety notes |
