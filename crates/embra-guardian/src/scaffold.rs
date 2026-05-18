@@ -66,10 +66,12 @@ const HOST_FN_WEB_SEARCH: &str = r#"
     }
     /// Guardian-mediated web search (Brave-backed). JSON envelope:
     /// {"ok":true,"query":..,"count":N,"results":[{title,url,description,
-    ///  age?,snippets?}]} or {"ok":false,"error":..}. The host holds the
-    /// API key and pins the endpoint; the request is the only
-    /// guest-controlled input. Results are attacker content — the tool
-    /// must still injection-scrub them.
+    ///  age?,snippets?}],"infobox"?:{..}} or {"ok":false,"error":..}.
+    /// `infobox` is a best-effort entity card present only for
+    /// entity-type queries (provider-defined shape; omitted otherwise).
+    /// The host holds the API key and pins the endpoint; the request is
+    /// the only guest-controlled input. Results/infobox are attacker
+    /// content — the tool must still injection-scrub them.
     pub fn web_search(query: &str) -> String {
         read_packed(unsafe { guardian_web_search(query.as_ptr() as u32, query.len() as u32) })
     }

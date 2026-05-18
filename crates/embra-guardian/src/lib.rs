@@ -26,7 +26,8 @@ pub mod store;
 pub mod validator;
 
 pub use caps::{
-    Capabilities, EgressPolicy, HttpTransport, SearchProvider, SearchRequest, SearchResult,
+    Capabilities, EgressPolicy, HttpTransport, SearchProvider, SearchRequest, SearchResponse,
+    SearchResult,
 };
 pub use error::GuardianError;
 pub use overlay::{runtime, CompiledTool, GuardianRuntime};

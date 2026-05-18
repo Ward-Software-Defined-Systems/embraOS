@@ -39,8 +39,11 @@ pub fn to_text(html: &str) -> String {
             push_space(&mut out);
             continue;
         }
-        // Note: nested `if` (not a let-chain) — generated guest crates
-        // are edition 2021, where `if … && let …` is not available.
+        // Nested `if` (NOT a let-chain) — generated guest crates are
+        // edition 2021, where `if … && let …` is unavailable. clippy's
+        // collapsible_if suggestion would break the guest build, so it is
+        // suppressed here deliberately. Do not collapse.
+        #[allow(clippy::collapsible_if)]
         if b[i] == b'&' {
             if let Some(used) = decode_entity(&html[i..], &mut out) {
                 i += used;

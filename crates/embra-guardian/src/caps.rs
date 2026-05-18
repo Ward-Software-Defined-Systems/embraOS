@@ -233,12 +233,31 @@ pub struct SearchResult {
     pub snippets: Vec<String>,
 }
 
+/// A provider's full reply: the normalized result list plus optional
+/// top-level enrichments Brave returns in the *same* web-search response.
+/// `infobox` is best-effort (entity-type queries only; provider-defined
+/// shape) — surfaced when present, omitted otherwise, exactly like
+/// [`SearchResult::age`]. (Brave's `summarizer` web-response key is only
+/// an opaque pointer to a *deprecated* separate endpoint, so it is
+/// deliberately not surfaced — see the Answers API as the future path.)
+#[derive(Clone, Debug, Default)]
+pub struct SearchResponse {
+    pub results: Vec<SearchResult>,
+    pub infobox: Option<serde_json::Value>,
+}
+
+impl From<Vec<SearchResult>> for SearchResponse {
+    fn from(results: Vec<SearchResult>) -> Self {
+        Self { results, infobox: None }
+    }
+}
+
 /// Pluggable search backend. The impl performs the request + parsing;
 /// **policy/normalization is enforced by [`guarded_web_search`]**, never
 /// here. A future browser-driven backend is just another impl.
 pub trait SearchProvider: Send + Sync {
     fn search(&self, req: &SearchRequest, timeout: Duration)
-        -> Result<Vec<SearchResult>, String>;
+        -> Result<SearchResponse, String>;
 }
 
 /// Parse the guest-supplied bytes into a vetted [`SearchRequest`]. A JSON
@@ -338,8 +357,9 @@ pub fn guarded_web_search(caps: &Capabilities, input: &str) -> String {
         return err_json("empty search query");
     }
     match provider.search(&req, Duration::from_secs(10)) {
-        Ok(results) => {
-            let items: Vec<serde_json::Value> = results
+        Ok(resp) => {
+            let items: Vec<serde_json::Value> = resp
+                .results
                 .into_iter()
                 .filter(|r| r.url.starts_with("https://"))
                 .take(req.count.min(20))
@@ -363,10 +383,19 @@ pub fn guarded_web_search(caps: &Capabilities, input: &str) -> String {
                     serde_json::Value::Object(o)
                 })
                 .collect();
-            serde_json::json!({
+            let mut env = serde_json::json!({
                 "ok": true, "query": req.q, "count": items.len(), "results": items,
-            })
-            .to_string()
+            });
+            // Top-level enrichment: surface Brave's `infobox` only when it
+            // is present, non-null, and small enough to not bloat the
+            // envelope (defense-in-depth before the brain 2 MiB cap).
+            if let Some(ib) = resp.infobox
+                && !ib.is_null()
+                && ib.to_string().len() <= 8 * 1024
+            {
+                env["infobox"] = ib;
+            }
+            env.to_string()
         }
         Err(e) => err_json(&e),
     }
@@ -404,7 +433,7 @@ impl BraveSearch {
 
 impl SearchProvider for BraveSearch {
     fn search(&self, req: &SearchRequest, timeout: Duration)
-        -> Result<Vec<SearchResult>, String> {
+        -> Result<SearchResponse, String> {
         // Brave has no exclude param — fold sanitized excludes into `q`
         // as `-site:` operators (sanitize_domain already removed anything
         // that could inject a second operator).
@@ -446,7 +475,7 @@ impl SearchProvider for BraveSearch {
         // Brave's date field is undocumented (community-confirmed gap):
         // `age` and `page_age` both appear, format not guaranteed. Try
         // both, surface as an opaque string, never fail on its absence.
-        Ok(arr
+        let results: Vec<SearchResult> = arr
             .iter()
             .map(|r| {
                 let age = r
@@ -477,8 +506,64 @@ impl SearchProvider for BraveSearch {
                     snippets,
                 }
             })
-            .collect())
+            .collect();
+        // Same defensive posture as `age`: Brave's `infobox` / GraphInfobox
+        // child fields are undocumented + JS-rendered in the dashboard, so
+        // treat it as opaque — whitelist known string fields, else a
+        // size-capped shallow subset, else `None`. Never an error.
+        let infobox = trim_infobox(&v);
+        Ok(SearchResponse { results, infobox })
     }
+}
+
+/// Reduce Brave's top-level `infobox` to a small, safe JSON object.
+/// `infobox` is a `ResultContainer` (`{type, results:[GraphInfobox], …}`);
+/// we take the first entry, keep a whitelist of known string fields, and
+/// otherwise fall back to a shallow, size-capped clone. Returns `None`
+/// when absent/empty so the envelope simply omits it.
+fn trim_infobox(v: &serde_json::Value) -> Option<serde_json::Value> {
+    let ib = v.get("infobox")?;
+    // The entity object: `infobox.results[0]`, else the infobox itself.
+    let entity = ib
+        .get("results")
+        .and_then(|r| r.as_array())
+        .and_then(|a| a.first())
+        .unwrap_or(ib);
+    let obj = entity.as_object()?;
+
+    let mut out = serde_json::Map::new();
+    for key in ["type", "subtype", "label", "title", "category"] {
+        if let Some(s) = obj.get(key).and_then(|x| x.as_str())
+            && !s.is_empty()
+        {
+            out.insert(key.into(), truncate(s, 200).into());
+        }
+    }
+    if let Some(d) = obj
+        .get("long_desc")
+        .or_else(|| obj.get("description"))
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        out.insert("description".into(), truncate(d, 2000).into());
+    }
+    if let Some(u) = obj.get("url").and_then(|x| x.as_str())
+        && u.starts_with("https://")
+    {
+        out.insert("url".into(), u.to_string().into());
+    }
+
+    // Fallback: nothing matched the whitelist — surface a shallow,
+    // size-capped clone so an unknown-but-useful shape is not lost, but a
+    // hostile/huge blob cannot bloat the envelope.
+    if out.is_empty() {
+        let shallow = serde_json::Value::Object(obj.clone());
+        if shallow.to_string().len() <= 4 * 1024 {
+            return Some(shallow);
+        }
+        return None;
+    }
+    Some(serde_json::Value::Object(out))
 }
 
 /// Default transport: `reqwest` blocking + rustls (the workspace already
@@ -646,9 +731,21 @@ mod tests {
 mod search_tests {
     use super::*;
 
+    // Results-only mock: existing call sites pass `Ok(vec![..])` / `Err`
+    // unchanged; the `From<Vec<SearchResult>>` impl lifts it to a
+    // `SearchResponse` (no infobox).
     struct MockSearch(Result<Vec<SearchResult>, String>);
     impl SearchProvider for MockSearch {
-        fn search(&self, _r: &SearchRequest, _t: Duration) -> Result<Vec<SearchResult>, String> {
+        fn search(&self, _r: &SearchRequest, _t: Duration) -> Result<SearchResponse, String> {
+            self.0.clone().map(SearchResponse::from)
+        }
+    }
+
+    // Full mock for the enrichment tests: returns a `SearchResponse`
+    // verbatim (so a test can inject an `infobox`).
+    struct MockResp(Result<SearchResponse, String>);
+    impl SearchProvider for MockResp {
+        fn search(&self, _r: &SearchRequest, _t: Duration) -> Result<SearchResponse, String> {
             self.0.clone()
         }
     }
@@ -723,6 +820,87 @@ mod search_tests {
         let v = parse(&guarded_web_search(&caps, "x"));
         assert_eq!(v["ok"], false);
         assert!(v["error"].as_str().unwrap().contains("401"));
+    }
+
+    // The provider (`BraveSearch`) is responsible for trimming via
+    // `trim_infobox`; the guard only presence/size-gates and passes the
+    // already-trimmed value through. So the mock injects the post-trim
+    // shape; `trim_infobox` itself is unit-tested separately below.
+    #[test]
+    fn infobox_surfaced_when_present() {
+        let resp = SearchResponse {
+            results: vec![sr("R", "https://r.rs", "d")],
+            infobox: Some(serde_json::json!({
+                "title": "Rust",
+                "description": "A systems programming language.",
+                "url": "https://www.rust-lang.org",
+            })),
+        };
+        let caps = Capabilities::with_search(Arc::new(MockResp(Ok(resp))));
+        let v = parse(&guarded_web_search(&caps, "rust"));
+        assert_eq!(v["ok"], true);
+        assert_eq!(v["infobox"]["title"], "Rust");
+        assert_eq!(v["infobox"]["description"], "A systems programming language.");
+        assert_eq!(v["infobox"]["url"], "https://www.rust-lang.org");
+        assert_eq!(v["results"][0]["title"], "R");
+    }
+
+    #[test]
+    fn infobox_omitted_when_absent_or_oversized() {
+        // absent
+        let caps = Capabilities::with_search(Arc::new(MockResp(Ok(SearchResponse::from(
+            vec![sr("R", "https://r.rs", "d")],
+        )))));
+        let v = parse(&guarded_web_search(&caps, "ordinary query"));
+        assert_eq!(v["ok"], true);
+        assert!(v.get("infobox").is_none(), "no infobox key when absent");
+        // oversized → guard drops it (defense-in-depth before the 2 MiB cap)
+        let big = SearchResponse {
+            results: vec![sr("R", "https://r.rs", "d")],
+            infobox: Some(serde_json::json!({ "blob": "x".repeat(9 * 1024) })),
+        };
+        let caps = Capabilities::with_search(Arc::new(MockResp(Ok(big))));
+        let v = parse(&guarded_web_search(&caps, "q"));
+        assert_eq!(v["ok"], true);
+        assert!(v.get("infobox").is_none(), "oversized infobox dropped");
+    }
+
+    #[test]
+    fn trim_infobox_whitelists_and_falls_back() {
+        // Brave shape: infobox → results[0]; whitelist kept, junk dropped,
+        // non-https url dropped, long_desc → description.
+        let raw = serde_json::json!({
+            "infobox": { "type": "infobox", "results": [{
+                "title": "Rust",
+                "long_desc": "A systems programming language.",
+                "url": "https://www.rust-lang.org",
+                "junk": "z".repeat(50),
+            }]}
+        });
+        let t = trim_infobox(&raw).expect("present");
+        assert_eq!(t["title"], "Rust");
+        assert_eq!(t["description"], "A systems programming language.");
+        assert_eq!(t["url"], "https://www.rust-lang.org");
+        assert!(t.get("junk").is_none());
+
+        // non-https url is dropped
+        let raw = serde_json::json!({
+            "infobox": { "results": [{ "title": "X", "url": "http://insecure" }] }
+        });
+        let t = trim_infobox(&raw).expect("present");
+        assert_eq!(t["title"], "X");
+        assert!(t.get("url").is_none(), "non-https url dropped");
+
+        // absent → None
+        assert!(trim_infobox(&serde_json::json!({ "web": {} })).is_none());
+
+        // unknown shape, small → shallow fallback; huge → None
+        let small = serde_json::json!({ "infobox": { "results": [{ "weird": 1 }] } });
+        assert!(trim_infobox(&small).is_some(), "small unknown shape kept shallow");
+        let huge = serde_json::json!({
+            "infobox": { "results": [{ "weird": "y".repeat(5 * 1024) }] }
+        });
+        assert!(trim_infobox(&huge).is_none(), "oversized unknown shape dropped");
     }
 
     #[test]

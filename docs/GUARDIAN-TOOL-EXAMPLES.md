@@ -91,7 +91,10 @@ host::web_search_ex(request_json: &str) -> String   // structured form
 //   {"ok":true,"query":"…","count":<n>,"results":[
 //      {"title":"…","url":"https://…","description":"…",
 //       "age":"<provider date, when present>",
-//       "snippets":["<extra excerpts, when requested>", …]}, …]}
+//       "snippets":["<extra excerpts, when requested>", …]}, …],
+//    "infobox":{…}}        // entity card, present ONLY for entity-type
+//                          // queries; best-effort / provider-defined;
+//                          // omitted when absent
 //   {"ok":false,"error":"…"}
 //
 // `web_search(q)` = a bare query. `web_search_ex(json)` takes a JSON
@@ -107,9 +110,12 @@ host::web_search_ex(request_json: &str) -> String   // structured form
 // Backed by Brave Search; the host holds the API key (never reaches the
 // guest) and the endpoint is fixed (api.search.brave.com) so there is no
 // guest-controlled URL / SSRF surface. Results filtered to https,
-// length-capped, normalized. `age` is best-effort (provider-defined
-// format, omitted when absent). Text is attacker-controlled — the tool
-// MUST injection-scrub it (see GUARDIAN-ADVANCED-EXAMPLE.md). The key is
+// length-capped, normalized. `age` and `infobox` are best-effort
+// (provider-defined, omitted when absent; `infobox` only for entity
+// queries). (Brave's `summarizer` web-response key is only an opaque
+// pointer to a deprecated separate endpoint, so it is intentionally not
+// surfaced.) Text/infobox are attacker-controlled — the tool MUST
+// injection-scrub them (see GUARDIAN-ADVANCED-EXAMPLE.md). The key is
 // set by the operator: `/guardian key brave <token>`; if unset the
 // envelope is {"ok":false,"error":"search capability not configured…"}.
 ```

@@ -375,6 +375,13 @@ fn overlap_score(query: &str, title: &str, description: &str) -> f64 {
   domains become `-site:` operators; `offset` (0–9) pages results;
   `extra_snippets` returns more excerpt text per result *without* a
   fetch. All clamped/whitelisted host-side.
+- **`infobox` (entity card):** the envelope may also carry a top-level
+  `infobox` object for entity-type queries (best-effort, provider-defined,
+  omitted otherwise) — also attacker-controlled. This flagship deliberately
+  ignores it for brevity; a tool that wants it should read
+  `env.get("infobox")` and injection-scrub its strings the same way. (Brave's
+  `summarizer` web-response key is only an opaque pointer to a deprecated
+  separate endpoint, so the capability does not surface it.)
 - The `web_search` + `http_get` declarations are what make
   `host::web_search_ex` / `host::http_get` available and what
   `guardian_list` surfaces as the tool's privileges.
