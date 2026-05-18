@@ -79,7 +79,7 @@ Phase 1 builds a QEMU-bootable x86_64 disk image with an immutable SquashFS root
 # xz-utils unpacks the pinned in-OS Rust toolchain that build-image.sh
 # Step 3.5 bakes into the image (the Guardian self-extension substrate).
 sudo apt-get update && sudo apt-get install -y \
-  build-essential gcc g++ unzip xz-utils bc cpio rsync wget python3 file \
+  build-essential gcc g++ unzip xz-utils bc cpio rsync wget curl python3 file \
   protobuf-compiler musl-tools clang libclang-dev \
   qemu-system-x86 libcrypt-dev libelf-dev libssl-dev genext2fs
 
