@@ -311,6 +311,9 @@ All sessions share the same intelligence — same memory, same identity, same so
 | `/show-reasoning <on\|off>` | Toggle live reasoning streaming. When on, the panel renders the model's reasoning in italic dark-gray during a turn (Anthropic `display: "summarized"`, Gemini `includeThoughts: true`, OpenAI-compat already-on); reverts to the operator-set `express` content when idle. When off, providers omit reasoning from request bodies entirely (no token cost) and the panel only shows operator-set expressions. Persists past `ResponseDone` until the next user message |
 | `/show-reasoning reset` | Restore the default (on) |
 | `/feedback-loop` | **(EXPERIMENTAL)** Trigger Phase 3 Continuity Engine self-evaluation protocol — the Brain walks through a multi-step gather/evaluate/reconcile/execute sequence using existing tools |
+| `/guardian-define` | **(`embra-guardian-v1` branch — experimental)** Open the multi-line editor to paste a Rust module defining a dynamic tool; validated synchronously, then compiled to WASM in the background (poll with `/guardian status <name>`) |
+| `/guardian list \| status <name> \| show <name> \| delete <name>` | **(`embra-guardian-v1` branch)** List dynamic tools (status + declared capabilities), show one's build status + log tail, print its stored source, or remove it (manifest, overlay, project, artifact) |
+| `/guardian key brave <token>` | **(`embra-guardian-v1` branch)** Set the Brave Search API key host-side (STATE, `0600`) to enable `web_search`-capable tools; omit `<token>` to check status — the key is never echoed, never in a guest module, the manifest, or results |
 | `/copy` | Copy conversation to clipboard via OSC 52 — `/copy 5` for last 5 messages (disabled — Sprint 5) |
 
 ### Keyboard Shortcuts
