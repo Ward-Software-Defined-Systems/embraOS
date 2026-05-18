@@ -16,9 +16,10 @@ so what's here is exactly what the gate accepts.
 3. Submit: a lone `.` on its own line (serial) or paste-and-Enter (web).
 4. It is validated synchronously, then compiled to a `wasm32` sandbox in
    the background. Poll with `/guardian status <name>`.
-5. Once `ready`, the intelligence calls it: `guardian_call` with
-   `action="invoke"`, `tool="<name>"`, `input={…}`; it discovers tools
-   with `guardian_list`.
+5. Once `ready`, just ask the intelligence to use the tool, in plain
+   language, by its name (e.g. "use the sum guardian tool to add 2 and
+   40"). It invokes the dynamic tool itself through internal meta-tools
+   — you never type tool-call syntax.
 6. Manage: `/guardian list`, `/guardian show <name>`,
    `/guardian delete <name>`.
 
@@ -256,8 +257,8 @@ fn run(input: &str) -> String {
 <paste Example 2 (sum)>
 .                                  ← serial terminator (web: just Enter)
 /guardian status sum               ← repeat until: ready
-# then, to the intelligence:
-guardian_call action=invoke tool=sum input={"a":2,"b":40}   → {"sum":42}
+# then just ask the intelligence in plain language, e.g.:
+#   "use the sum guardian tool to add 2 and 40"   → it answers 42
 /guardian list
 /guardian delete sum
 ```

@@ -387,8 +387,9 @@ fn overlap_score(query: &str, title: &str, description: &str) -> f64 {
 <paste the module above>
 .                                 # serial terminator (web: just Enter)
 /guardian status web_search       # → ready
-# to the intelligence:
-guardian_call action=invoke tool=web_search input={"query":"tokio cancellation safety","recency":"year","fetch_top":1}
+# then just ask the intelligence in plain language, e.g.:
+#   "use the web_search guardian tool to find recent material on tokio
+#    cancellation safety and fetch the top result"
 # → real Brave results ranked by overlap, de-duped by host, the top
 #   result's page fetched + reduced to text; any injection directive in
 #   any field becomes [redacted-directive] with injection_suspected:true.
