@@ -17,6 +17,12 @@
 > host, cap build parallelism — see the `JOBS` knob below. Re-run the [End-to-End
 > Validation](#end-to-end-validation) checklist after any canonical-build bump and
 > re-stamp this date.
+>
+> **Single source of truth (2026-05-19):** the aarch64 scripts are committed
+> in-tree (`scripts/`, `buildroot/configs/`) and the arch-parameterized Buildroot
+> tree (commit `f6a684a`) is end-to-end QEMU-verified on **both** x86_64 and
+> aarch64. The former standalone Apple-Silicon build bundle has been retired —
+> this guide now lives at `docs/AARCH64-BUILD.md`, its scripts in `scripts/`.
 
 ---
 
@@ -56,11 +62,11 @@ The `build-image-aarch64.sh` script auto-detects the `musl-cross` path and expor
 `CC/CXX/AR/RANLIB`, the cargo linker, and the bindgen sysroot — **no manual
 `~/.cargo/config.toml` setup is required** for the standard flow.
 
-### 2. Clone, place files & build the image
+### 2. Clone & build the image
 
-This guide is self-contained — clone embraOS and WardSONDB (a required sibling
-repo; the build script builds and copies its binary), then build. Everything
-runs from the embraOS repo root.
+Clone embraOS and WardSONDB (a required sibling repo; the build script builds
+and copies its binary), then build. The aarch64 scripts ship committed in-tree,
+so there is nothing to place. Everything runs from the embraOS repo root.
 
 ```bash
 # Clone into ~/projects (keeps source + build artifacts across reboots).
@@ -71,13 +77,10 @@ git clone https://github.com/Ward-Software-Defined-Systems/embraOS.git
 git clone https://github.com/Ward-Software-Defined-Systems/wardsondb.git WardSONDB
 cd ~/projects/embraOS
 
-# Copy the aarch64 helper files into the embraOS tree
-SRC=embraOS_aarch64_AppleSilicon_Experimental_Build
-cp "$SRC/embraos_aarch64_defconfig" buildroot/configs/
-cp "$SRC/build-image-aarch64.sh" "$SRC/run-qemu-aarch64.sh" \
-   "$SRC/create_initramfs.sh" "$SRC/embraos-backup-mac.sh" scripts/
-chmod +x scripts/build-image-aarch64.sh scripts/run-qemu-aarch64.sh \
-         scripts/create_initramfs.sh scripts/embraos-backup-mac.sh
+# The aarch64 scripts (scripts/build-image-aarch64.sh, run-qemu-aarch64.sh,
+# create_initramfs.sh, embraos-backup-mac.sh) and
+# buildroot/configs/embraos_aarch64_defconfig ship committed in-tree — a fresh
+# clone already has them; there is nothing to copy.
 
 # Steps 0.5–3 on macOS: Trunk/WASM frontend → Rust cross-compile → initramfs.
 # (Stops at the Step 4 guard with the next command — that's expected on macOS.)
@@ -310,7 +313,7 @@ image**, and runs it in a `wasmtime` sandbox. Step 3.5 stages that toolchain.
 
 ### What Changed from x86_64
 
-#### New files (add alongside existing)
+#### aarch64-specific files (committed in-tree)
 
 | File | Purpose |
 |---|---|
@@ -379,8 +382,8 @@ container as root.
 
 #### Setup
 
-The Quick Start already copies `embraos-backup-mac.sh` into `scripts/` alongside the
-original `embraos-backup.sh` (Ubuntu/Linux).
+`embraos-backup-mac.sh` ships committed in `scripts/` alongside the original
+`embraos-backup.sh` (Ubuntu/Linux) — nothing to set up.
 
 #### Usage
 

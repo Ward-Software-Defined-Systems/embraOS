@@ -42,7 +42,7 @@ All sessions share the same intelligence — same memory, same identity, same so
 ## Current Limitations
 
 - **API or remote-style local LLM** — Anthropic Claude / Google Gemini require internet + a paid API key. Ollama and LM Studio (Sprint 5) connect to a local-network OpenAI-compat server you operate (typically a Mac Studio or similar). Inference still happens on a separate host — true on-device inference inside embraOS itself comes in Phase 5.
-- **QEMU x86_64 (recommended)** — an experimental aarch64/Apple Silicon build is available under [`embraOS_aarch64_AppleSilicon_Experimental_Build/`](../embraOS_aarch64_AppleSilicon_Experimental_Build/EMBRAOS_AARCH64_BUILD_GUIDE.md) (re-synced with the canonical build at `f8cad9c` and re-verified end-to-end on Apple Silicon — MacBook M2, 2026-05-18 — including embra-guardian-v1's in-OS toolchain); bare metal and broader architecture support come in Phase 4
+- **QEMU x86_64 (recommended)** — an experimental aarch64/Apple Silicon build is available — see the [aarch64 / Apple Silicon build guide](AARCH64-BUILD.md) (re-synced with the canonical build at `f8cad9c` and end-to-end QEMU-verified on both x86_64 and aarch64 — aarch64 on a MacBook M2, 2026-05-18/19 — including embra-guardian-v1's in-OS toolchain); bare metal and broader architecture support come in Phase 4
 - **Tested on limited platforms** — built and verified on Ubuntu 24.04 + 26.04 under QEMU 8.2.2; bootable image also runs under QEMU on Intel and Apple Silicon Macs
 - **Built-in tools only** — no MCP server modules (yet)
 - **No on-device LLM inference** — Phase 5 will add `embraOS-QNM` for sovereign on-host inference. Sprint 5's OpenAI-compat support is the foundation for Phase 3's hybrid local/API routing.

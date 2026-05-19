@@ -157,7 +157,7 @@ if [ "$BUILDROOT_ONLY" = false ]; then
     # directly (e.g., tikv-jemalloc-sys). Without these, jemalloc's ./configure
     # picks up macOS's BSD ar, which produces empty archives that pass the build
     # step silently — you then hit undefined references to _rjem_malloc etc. at
-    # link time. See Troubleshooting in EMBRAOS_AARCH64_BUILD_GUIDE.md.
+    # link time. See Troubleshooting in docs/AARCH64-BUILD.md.
     export AR=aarch64-linux-musl-ar
     export RANLIB=aarch64-linux-musl-ranlib
     export RANLIB_aarch64_unknown_linux_musl=aarch64-linux-musl-ranlib
