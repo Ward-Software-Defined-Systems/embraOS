@@ -100,26 +100,28 @@ async fn prompt_endpoint(
     Ok(endpoint)
 }
 
-/// Bearer step: a yes/no Selector first ("Configure a bearer token?")
+/// Bearer step: a set/skip Selector first ("Bearer token for X? (current: none)")
 /// followed by a Text prompt for the actual token only when the
-/// operator picks Yes. Selector-then-Text is required because the
+/// operator picks Set. Selector-then-Text is required because the
 /// console enforces non-empty Text submissions — a single empty-string
 /// Text prompt for "leave empty for no auth" is unreachable on the
-/// console side. The Selector defaults to No so Enter without arrowing
-/// accepts no-auth in the typical case.
+/// console side. The Selector defaults to Skip so Enter without arrowing
+/// accepts no-auth in the typical case. Wording + options + default
+/// mirror `grpc_service.rs` `/provider --setup` fresh-setup branch so
+/// the operator sees the same prompt in both flows.
 async fn prompt_bearer(
     preset: OpenAiCompatPreset,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
     response_rx: &mut mpsc::Receiver<String>,
 ) -> Result<Option<String>> {
-    // Step 1: yes/no choice.
+    // Step 1: set/skip choice.
     let _ = tx
         .send(Ok(ConversationResponse {
             response_type: Some(conversation_response::ResponseType::Setup(SetupPrompt {
                 field_type: SetupFieldType::Selector as i32,
-                prompt: format!("Configure a bearer token for {}?", preset.label()),
-                options: vec!["No".to_string(), "Yes".to_string()],
-                default_value: "No".to_string(),
+                prompt: format!("Bearer token for {}? (current: none)", preset.label()),
+                options: vec!["Set".to_string(), "Skip".to_string()],
+                default_value: "Skip".to_string(),
             })),
         }))
         .await;
@@ -128,7 +130,7 @@ async fn prompt_bearer(
         .recv()
         .await
         .ok_or_else(|| anyhow!("setup channel closed during bearer choice step"))?;
-    let want_bearer = choice.trim().eq_ignore_ascii_case("yes");
+    let want_bearer = choice.trim().eq_ignore_ascii_case("set");
     if !want_bearer {
         return Ok(None);
     }
@@ -364,10 +366,10 @@ mod tests {
         let (resp_tx, mut resp_rx) = mpsc::channel(32);
         let (user_tx, user_rx) = mpsc::channel(32);
 
-        // Operator inputs — ordered: endpoint URL, bearer-yes/no (No),
-        // model selection. New 2-step bearer flow short-circuits on No.
+        // Operator inputs — ordered: endpoint URL, bearer-set/skip (Skip),
+        // model selection. 2-step bearer flow short-circuits on Skip.
         user_tx.send(server.uri()).await.unwrap();
-        user_tx.send("No".to_string()).await.unwrap();
+        user_tx.send("Skip".to_string()).await.unwrap();
         user_tx.send("qwen3.6:35b".to_string()).await.unwrap();
 
         let mut user_rx = user_rx;
@@ -413,12 +415,12 @@ mod tests {
         let (resp_tx, mut resp_rx) = mpsc::channel(32);
         let (user_tx, user_rx) = mpsc::channel(32);
 
-        // First attempt: endpoint, bearer-no, → probe returns 0 → re-prompt.
-        // Second attempt: endpoint, bearer-no, model.
+        // First attempt: endpoint, bearer-skip, → probe returns 0 → re-prompt.
+        // Second attempt: endpoint, bearer-skip, model.
         user_tx.send(server.uri()).await.unwrap();
-        user_tx.send("No".to_string()).await.unwrap();
+        user_tx.send("Skip".to_string()).await.unwrap();
         user_tx.send(server.uri()).await.unwrap();
-        user_tx.send("No".to_string()).await.unwrap();
+        user_tx.send("Skip".to_string()).await.unwrap();
         user_tx.send("m".to_string()).await.unwrap();
 
         let mut user_rx = user_rx;
@@ -447,14 +449,14 @@ mod tests {
         let (resp_tx, mut resp_rx) = mpsc::channel(32);
         let (user_tx, user_rx) = mpsc::channel(32);
 
-        // First attempt: endpoint, bearer-no, "not_in_list" — fails
+        // First attempt: endpoint, bearer-skip, "not_in_list" — fails
         // validation and re-prompts from endpoint.
-        // Second attempt: endpoint, bearer-no, valid pick.
+        // Second attempt: endpoint, bearer-skip, valid pick.
         user_tx.send(server.uri()).await.unwrap();
-        user_tx.send("No".to_string()).await.unwrap();
+        user_tx.send("Skip".to_string()).await.unwrap();
         user_tx.send("not_in_list".to_string()).await.unwrap();
         user_tx.send(server.uri()).await.unwrap();
-        user_tx.send("No".to_string()).await.unwrap();
+        user_tx.send("Skip".to_string()).await.unwrap();
         user_tx.send("m2".to_string()).await.unwrap();
 
         let mut user_rx = user_rx;
@@ -483,9 +485,9 @@ mod tests {
         let (resp_tx, mut resp_rx) = mpsc::channel(32);
         let (user_tx, user_rx) = mpsc::channel(32);
 
-        // New flow: endpoint, bearer-yes, token text, model selection.
+        // Flow: endpoint, bearer-set, token text, model selection.
         user_tx.send(server.uri()).await.unwrap();
-        user_tx.send("Yes".to_string()).await.unwrap();
+        user_tx.send("Set".to_string()).await.unwrap();
         user_tx.send("secret-token".to_string()).await.unwrap();
         user_tx.send("m".to_string()).await.unwrap();
 
@@ -499,9 +501,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subflow_bearer_choice_defaults_no() {
-        // Operator presses Enter on the yes/no Selector without arrowing —
-        // console emits the default option ("No") so bearer = None.
+    async fn subflow_bearer_choice_defaults_skip() {
+        // Operator presses Enter on the set/skip Selector without arrowing —
+        // console emits the default option ("Skip") so bearer = None.
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
@@ -518,7 +520,7 @@ mod tests {
         let (user_tx, user_rx) = mpsc::channel(32);
 
         user_tx.send(server.uri()).await.unwrap();
-        user_tx.send("No".to_string()).await.unwrap();
+        user_tx.send("Skip".to_string()).await.unwrap();
         user_tx.send("m".to_string()).await.unwrap();
 
         let mut user_rx = user_rx;
@@ -530,10 +532,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn subflow_bearer_choice_yes_case_insensitive() {
-        // "yes" / "YES" / "Yes" all accepted — eq_ignore_ascii_case on the
+    async fn subflow_bearer_choice_set_case_insensitive() {
+        // "set" / "SET" / "Set" all accepted — eq_ignore_ascii_case on the
         // selector value. Console renders the option label verbatim
-        // ("Yes"), but lowercase is also tolerated for resilience.
+        // ("Set"), but lowercase is also tolerated for resilience.
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         let server = MockServer::start().await;
@@ -546,7 +548,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        for variant in ["yes", "YES", "Yes"] {
+        for variant in ["set", "SET", "Set"] {
             let (resp_tx, mut resp_rx) = mpsc::channel(32);
             let (user_tx, user_rx) = mpsc::channel(32);
             user_tx.send(server.uri()).await.unwrap();

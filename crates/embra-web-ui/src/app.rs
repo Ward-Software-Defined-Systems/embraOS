@@ -151,7 +151,10 @@ fn build(spec: &Spec, vals: &[String]) -> Option<String> {
 }
 
 fn flat() -> Vec<(&'static str, &'static str)> {
-    GROUPS.iter().flat_map(|(_, cs)| cs.iter().copied()).collect()
+    let mut v: Vec<(&'static str, &'static str)> =
+        GROUPS.iter().flat_map(|(_, cs)| cs.iter().copied()).collect();
+    v.sort_by_key(|(c, _)| *c);
+    v
 }
 
 #[component]
@@ -291,18 +294,19 @@ pub fn App() -> impl IntoView {
             </div>
 
             <div class="nav">
-                {GROUPS.iter().map(|(title, cmds)| view! {
-                    <>
-                        <h4>{*title}</h4>
-                        {cmds.iter().map(|(c, d)| {
-                            let c = *c;
-                            view! {
+                {GROUPS.iter().map(|(title, cmds)| {
+                    let mut sorted: Vec<(&'static str, &'static str)> = cmds.to_vec();
+                    sorted.sort_by_key(|(c, _)| *c);
+                    view! {
+                        <>
+                            <h4>{*title}</h4>
+                            {sorted.into_iter().map(|(c, d)| view! {
                                 <button class="cmd" on:click=move |_| dispatch(c)>
-                                    {c}" "<code>{*d}</code>
+                                    {c}" "<code>{d}</code>
                                 </button>
-                            }
-                        }).collect_view()}
-                    </>
+                            }).collect_view()}
+                        </>
+                    }
                 }).collect_view()}
             </div>
 
@@ -334,7 +338,12 @@ pub fn App() -> impl IntoView {
             </div>
 
             // ── Multi-line editor (/ml) ───────────────────────────────
-            {move || editor_open.get().then(|| view! {
+            {move || editor_open.get().then(|| {
+                // Fresh NodeRef per render so .focus() fires on each open.
+                // `autofocus` alone is unreliable for dynamically-mounted nodes.
+                let textarea_ref = NodeRef::<leptos::html::Textarea>::new();
+                textarea_ref.on_load(|el| { let _ = el.focus(); });
+                view! {
                 <div class="palette-bg" on:click=move |_| editor_open.set(false)>
                     <div class="modal editor"
                         on:click=move |e: leptos::ev::MouseEvent| e.stop_propagation()>
@@ -351,8 +360,8 @@ pub fn App() -> impl IntoView {
                         </div>
                         <div class="m-body">
                             <textarea
+                                node_ref=textarea_ref
                                 class="ml-input"
-                                autofocus
                                 placeholder="Type or paste a multi-line message…"
                                 prop:value=move || editor_text.get()
                                 on:input=move |e| editor_text.set(event_target_value(&e))
@@ -378,11 +387,32 @@ pub fn App() -> impl IntoView {
                         </div>
                     </div>
                 </div>
+                }
             })}
 
             // ── Parameter modal ───────────────────────────────────────
             {move || modal.get().map(|i| {
                 let spec = &SPECS[i];
+                // Shared submit path: Run button + Enter on any input/select.
+                let submit_modal = move || {
+                    let line = build(&SPECS[i], &vals.get());
+                    match line {
+                        Some(l) => {
+                            term::run_command(&l);
+                            if SPECS[i].guided {
+                                term::focus();
+                                guide.set(true);
+                            }
+                            modal.set(None);
+                        }
+                        None => {
+                            if let Some(w) = web_sys::window() {
+                                let _ = w.alert_with_message(
+                                    "Please fill the required field(s).");
+                            }
+                        }
+                    }
+                };
                 view! {
                     <div class="palette-bg" on:click=move |_| modal.set(None)>
                         <div class="modal"
@@ -394,6 +424,15 @@ pub fn App() -> impl IntoView {
                             <div class="m-note">{spec.note}</div>
                             <div class="m-body">
                                 {spec.fields.iter().enumerate().map(|(fi, f)| {
+                                    // Fresh refs per render; only fi == 0 wires
+                                    // .focus() on mount so the first field grabs
+                                    // focus when the modal opens.
+                                    let input_ref = NodeRef::<leptos::html::Input>::new();
+                                    let select_ref = NodeRef::<leptos::html::Select>::new();
+                                    if fi == 0 {
+                                        input_ref.on_load(|el| { let _ = el.focus(); });
+                                        select_ref.on_load(|el| { let _ = el.focus(); });
+                                    }
                                     let label = if f.req {
                                         format!("{} *", f.label)
                                     } else { f.label.to_string() };
@@ -401,6 +440,7 @@ pub fn App() -> impl IntoView {
                                         let itype = if f.secret { "password" } else { "text" };
                                         view! {
                                             <input
+                                                node_ref=input_ref
                                                 type=itype
                                                 placeholder=f.ph
                                                 prop:value=move || vals.with(|v|
@@ -408,16 +448,29 @@ pub fn App() -> impl IntoView {
                                                 on:input=move |e| {
                                                     let nv = event_target_value(&e);
                                                     vals.update(|v| if fi < v.len() { v[fi] = nv });
+                                                }
+                                                on:keydown=move |e: leptos::ev::KeyboardEvent| {
+                                                    if e.key() == "Enter" && !e.shift_key() {
+                                                        e.prevent_default();
+                                                        submit_modal();
+                                                    }
                                                 } />
                                         }.into_any()
                                     } else {
                                         view! {
                                             <select
+                                                node_ref=select_ref
                                                 prop:value=move || vals.with(|v|
                                                     v.get(fi).cloned().unwrap_or_default())
                                                 on:change=move |e| {
                                                     let nv = event_target_value(&e);
                                                     vals.update(|v| if fi < v.len() { v[fi] = nv });
+                                                }
+                                                on:keydown=move |e: leptos::ev::KeyboardEvent| {
+                                                    if e.key() == "Enter" && !e.shift_key() {
+                                                        e.prevent_default();
+                                                        submit_modal();
+                                                    }
                                                 }>
                                                 {f.choices.iter().map(|c| view! {
                                                     <option value=*c>{*c}</option>
@@ -435,25 +488,8 @@ pub fn App() -> impl IntoView {
                             <div class="m-actions">
                                 <button class="btn ghost"
                                     on:click=move |_| modal.set(None)>"Cancel"</button>
-                                <button class="btn" on:click=move |_| {
-                                    let line = build(&SPECS[i], &vals.get());
-                                    match line {
-                                        Some(l) => {
-                                            term::run_command(&l);
-                                            if SPECS[i].guided {
-                                                term::focus();
-                                                guide.set(true);
-                                            }
-                                            modal.set(None);
-                                        }
-                                        None => {
-                                            if let Some(w) = web_sys::window() {
-                                                let _ = w.alert_with_message(
-                                                    "Please fill the required field(s).");
-                                            }
-                                        }
-                                    }
-                                }>"Run"</button>
+                                <button class="btn"
+                                    on:click=move |_| submit_modal()>"Run"</button>
                             </div>
                         </div>
                     </div>
@@ -462,28 +498,35 @@ pub fn App() -> impl IntoView {
 
             // ── Command palette ───────────────────────────────────────
             {move || palette_open.get().then(|| {
-                let f = filter.get().to_lowercase();
+                // Fresh NodeRef per open; on_load focuses the filter input
+                // so the operator can type immediately.
+                let palette_input_ref = NodeRef::<leptos::html::Input>::new();
+                palette_input_ref.on_load(|el| { let _ = el.focus(); });
                 view! {
                     <div class="palette-bg" on:click=move |_| palette_open.set(false)>
                         <div class="palette"
                             on:click=move |e: leptos::ev::MouseEvent| e.stop_propagation()>
                             <input
+                                node_ref=palette_input_ref
                                 placeholder="Type a command…  (Esc to close)"
                                 prop:value=move || filter.get()
                                 on:input=move |e| filter.set(event_target_value(&e)) />
                             <div class="list">
-                                {flat().into_iter()
-                                    .filter(move |(c, d)| {
-                                        f.is_empty() || c.contains(&f) || d.contains(&f)
-                                    })
-                                    .map(|(c, d)| view! {
-                                        <div class="row" on:click=move |_| {
-                                            palette_open.set(false);
-                                            dispatch(c);
-                                        }>
-                                            <span>{c}</span><span class="d">{d}</span>
-                                        </div>
-                                    }).collect_view()}
+                                {move || {
+                                    let f = filter.get().to_lowercase();
+                                    flat().into_iter()
+                                        .filter(move |(c, d)| {
+                                            f.is_empty() || c.contains(&f) || d.contains(&f)
+                                        })
+                                        .map(|(c, d)| view! {
+                                            <div class="row" on:click=move |_| {
+                                                palette_open.set(false);
+                                                dispatch(c);
+                                            }>
+                                                <span>{c}</span><span class="d">{d}</span>
+                                            </div>
+                                        }).collect_view()
+                                }}
                             </div>
                         </div>
                     </div>
