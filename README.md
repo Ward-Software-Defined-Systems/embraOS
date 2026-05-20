@@ -37,7 +37,7 @@
 
 ## What Is This?
 
-embraOS gives an AI a persistent identity, memory, and purpose. When you first run it, you don't configure it — you meet it. Through a guided conversation, the AI forms its own identity, defines its values, and learns who you are. That conversation becomes its first memory. Its soul — the values and constraints you agree on together — becomes immutable. It can never change them. You can.
+embraOS gives an AI a persistent identity, memory, and purpose. When you first run it, you don't configure it — you meet it. Through a guided conversation, the AI forms its own identity, defines its values, and learns who you are. That conversation becomes its first memory. Its soul — the values and constraints you agree on together — becomes immutable. It can never change them.
 
 After the first conversation, embraOS is your persistent AI environment. It remembers every interaction. It maintains itself. It tells you when something needs attention. When you disconnect and come back, it catches you up on what happened while you were away.
 
@@ -79,7 +79,7 @@ Phase 1 builds a QEMU-bootable x86_64 disk image with an immutable SquashFS root
 # xz-utils unpacks the pinned in-OS Rust toolchain that build-image.sh
 # Step 3.5 bakes into the image (the Guardian self-extension substrate).
 sudo apt-get update && sudo apt-get install -y \
-  build-essential gcc g++ unzip xz-utils bc cpio rsync wget curl python3 file \
+  build-essential gcc g++ unzip xz-utils bc cpio rsync wget curl python3 file git \
   protobuf-compiler musl-tools clang libclang-dev \
   qemu-system-x86 libcrypt-dev libelf-dev libssl-dev genext2fs
 
