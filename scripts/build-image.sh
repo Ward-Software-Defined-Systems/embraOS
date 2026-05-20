@@ -9,14 +9,16 @@
 # The choice is locked into the DATA partition on first boot via WardSONDB's
 # .engine marker file — switching engines later requires wiping DATA.
 #
-# NOTE: Steps 1-3 (Rust cross-compilation + initramfs) work on macOS.
-#       Step 4 (Buildroot) requires a Linux host. On macOS, use Docker:
+# NOTE: Steps 0.5-3.5 (frontend + Rust cross-compile + initramfs + in-OS Rust
+#       toolchain stage) work on macOS. Step 4 (Buildroot) requires a Linux
+#       host. On macOS (Intel or Apple Silicon — Apple Silicon uses the
+#       parallel build-image-aarch64.sh flow), use Docker:
 #
 #   ./scripts/build-image.sh --storage-engine rocksdb   # outer call bakes engine
 #   docker run --rm -v "$PWD":/work -w /work ubuntu:24.04 bash -c \
 #     "apt-get update && apt-get install -y build-essential gcc g++ \
-#      unzip bc cpio rsync wget python3 file && \
-#      ./scripts/build-image.sh --buildroot-only"
+#      unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \
+#      FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image.sh --buildroot-only"
 
 set -euo pipefail
 
@@ -185,8 +187,8 @@ if [ "$(uname)" = "Darwin" ]; then
     echo ""
     echo "  docker run --rm -v \"\$PWD\":/work -w /work ubuntu:24.04 bash -c \\"
     echo "    \"apt-get update && apt-get install -y build-essential gcc g++ \\"
-    echo "     unzip bc cpio rsync wget python3 file && \\"
-    echo "     ./scripts/build-image.sh --buildroot-only\""
+    echo "     unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \\"
+    echo "     FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image.sh --buildroot-only\""
     echo ""
     echo "Or run this script on a Linux machine."
     exit 1
