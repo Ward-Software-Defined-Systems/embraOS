@@ -5,13 +5,18 @@
 >
 > **Host:** macOS on Intel (any Mac with an `x86_64` CPU + macOS 10.10+).
 >
-> ✅ **Status — Intel Mac build + QEMU boot verified 2026-05-20 at commit
-> `bb61c15`** (William, Intel MacBook Pro 16"). Native build pipeline
-> (Steps 0.5–3.5), the Docker Buildroot pass, and HVF-accelerated boot under
-> `qemu-system-x86_64` all confirmed. The full
-> [End-to-End Validation](#end-to-end-validation) checklist (Config Wizard,
-> soul-formation, Guardian dynamic-tool round-trip, `EMBRA_TUI=1` serial mode,
-> reboot soul-verify) is NOT yet exercised — re-stamp this banner once it runs.
+> ✅ **Status — verified end-to-end on Intel Mac (2026-05-20).** Verified by
+> William on Intel MacBook Pro 16" against Buildroot `2026.02.1`, storage
+> engine `fjall`, at commit `bac1d08`: the full build pipeline (Step 0.5
+> Trunk/WASM frontend → Rust cross-compile → initramfs → Step 3.5 in-OS
+> Rust toolchain → Docker Buildroot pass), HVF-accelerated boot under
+> `qemu-system-x86_64`, Config Wizard + soul-formation, the serial TUI
+> (`EMBRA_TUI=1`), embra-guardian-v1 (a dynamic tool compiled in-guest via
+> `/opt/rust` and run in the wasmtime sandbox), and reboot + second-boot
+> soul SHA-256 verify. embra-web and embra-guardian-v1 remain experimental
+> features upstream (project-wide, not Intel-Mac-specific). Re-run the
+> [End-to-End Validation](#end-to-end-validation) checklist after any
+> canonical-build bump and re-stamp this date.
 >
 > **Why a separate guide:** `scripts/build-image.sh` is shaped around a Linux
 > host (auto-detects musl.cc's `/opt/x86_64-linux-musl-cross`, expects `xz` and
