@@ -5,11 +5,13 @@
 >
 > **Host:** macOS on Intel (any Mac with an `x86_64` CPU + macOS 10.10+).
 >
-> ⚠️ **Status — pending Intel Mac end-to-end validation.** Build path + Docker
-> helper synced with the canonical build at commit `f8cad9c` (canonical x86_64 +
-> aarch64 both end-to-end QEMU-verified there 2026-05-18/19). Re-run the
-> [End-to-End Validation](#end-to-end-validation) checklist on Intel Mac and
-> re-stamp this banner with the date + commit you tested at.
+> ✅ **Status — Intel Mac build + QEMU boot verified 2026-05-20 at commit
+> `bb61c15`** (William, Intel MacBook Pro 16"). Native build pipeline
+> (Steps 0.5–3.5), the Docker Buildroot pass, and HVF-accelerated boot under
+> `qemu-system-x86_64` all confirmed. The full
+> [End-to-End Validation](#end-to-end-validation) checklist (Config Wizard,
+> soul-formation, Guardian dynamic-tool round-trip, `EMBRA_TUI=1` serial mode,
+> reboot soul-verify) is NOT yet exercised — re-stamp this banner once it runs.
 >
 > **Why a separate guide:** `scripts/build-image.sh` is shaped around a Linux
 > host (auto-detects musl.cc's `/opt/x86_64-linux-musl-cross`, expects `xz` and
@@ -83,6 +85,11 @@ your shell once per session before invoking `build-image.sh`:
 MUSL_CROSS_BIN="$(ls -d /usr/local/Cellar/musl-cross/*/libexec/bin | head -n1)"
 MUSL_CROSS_ROOT="$(dirname "$MUSL_CROSS_BIN")"
 MUSL_SYSROOT="$MUSL_CROSS_ROOT/x86_64-linux-musl"
+
+# build-image.sh checks $MUSL_CROSS/bin/x86_64-linux-musl-gcc (default: Linux
+# musl.cc layout /opt/x86_64-linux-musl-cross); Homebrew lays it out under
+# libexec/, so point MUSL_CROSS at the libexec root so the sanity check resolves.
+export MUSL_CROSS="$MUSL_CROSS_ROOT"
 
 export PATH="$MUSL_CROSS_BIN:$PATH"
 export CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc
@@ -161,10 +168,14 @@ provider + credentials, timezone), then Learning Mode forms and seals the soul.
 > checkout.
 
 > **Build memory / parallel jobs (`JOBS`):** the Docker pass runs
-> `make -j$(nproc)`. Buildroot's GCC + musl toolchain bootstrap is RAM-hungry —
-> on a memory-limited host (e.g. OrbStack's 4 GB default VM, `nproc`=8 → `-j8`)
-> that OOMs (`ar: … Cannot allocate memory`, `libc.a Error 1`). Cap parallelism
-> with `JOBS` (passed into the container with `-e`):
+> `make -j$(nproc)`. Buildroot is RAM-hungry — on a memory-limited host
+> (e.g. OrbStack's 4 GB default VM, `nproc`=8 → `-j8`) it OOMs in several
+> flavors. The toolchain bootstrap dies with `libc.a Error 1` /
+> `ar: … Cannot allocate memory`; regular package compiles fail with bare
+> `Cannot allocate memory` while reading small headers (e.g. openssh's
+> `sshd-auth.c` on `<sys/wait.h>`); the kernel hits the same on its own
+> headers (`<uapi/linux/sem.h>`) or in `fixdep`. All have the same fix — cap
+> parallelism with `JOBS` (passed into the container with `-e`):
 > ```bash
 > docker run --rm -e JOBS=2 -v "$PWD":/work -w /work ubuntu:24.04 bash -c \
 >   "apt-get update && apt-get install -y build-essential gcc g++ \
