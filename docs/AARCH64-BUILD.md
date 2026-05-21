@@ -38,6 +38,14 @@ Rust toolchain) and Step 4 (Buildroot) run in a `linux/arm64` Docker container.
 > **`EMBRA_TUI=1`** before `run-qemu-aarch64.sh` to boot the stable Phase 1 serial TUI
 > on this terminal instead — no image rebuild needed.
 
+> **zsh paste gotcha:** macOS's default `zsh` doesn't treat `#` as a comment in
+> interactive shells — pasting a multi-line code block from this guide makes
+> any `#`-prefixed (or inline `… # comment`) line fail with `command not found`
+> or `no matches found`. Run once per session (or add to `~/.zshrc`):
+> ```bash
+> setopt interactive_comments
+> ```
+
 ### 1. Prerequisites (macOS, Apple Silicon)
 
 ```bash
@@ -597,9 +605,10 @@ ls -la target/aarch64-unknown-linux-musl/release/build/tikv-jemalloc-sys-*/out/b
 If it's still 96 bytes, the env vars didn't take effect — run them one at a time in the
 same shell.
 
-> **zsh gotcha:** `zsh` treats an unescaped `?` in comment lines as a glob and throws
-> `no matches found`. If you hit that pasting multi-line blocks, run `setopt no_nomatch`
-> once per session.
+> **zsh gotcha (paste).** If paste fails with `no matches found` or `command not
+> found`, you missed the `setopt interactive_comments` callout at the top of
+> [Quick Start](#quick-start) — that's the actual fix. (`setopt no_nomatch`
+> suppresses the symptom but doesn't make `#` work as a comment.)
 
 ### Buildroot arch parameterization (how it works)
 

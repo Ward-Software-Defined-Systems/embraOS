@@ -32,6 +32,14 @@ run on macOS; Step 4 (Buildroot) runs in a `linux/amd64` Docker container.
 > Set **`EMBRA_TUI=1`** before `run-qemu.sh` to boot the stable Phase 1 serial
 > TUI on this terminal instead — no image rebuild needed.
 
+> **zsh paste gotcha:** macOS's default `zsh` doesn't treat `#` as a comment in
+> interactive shells — pasting a multi-line code block from this guide makes
+> any `#`-prefixed (or inline `… # comment`) line fail with `command not found`
+> or `no matches found`. Run once per session (or add to `~/.zshrc`):
+> ```bash
+> setopt interactive_comments
+> ```
+
 ### 1. Prerequisites (Intel Mac, x86_64)
 
 ```bash
