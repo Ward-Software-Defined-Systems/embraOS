@@ -133,7 +133,7 @@ cd ~/projects/embraOS
 # Step 4 (Buildroot) in Docker (linux/amd64 by default on Intel Mac)
 docker run --rm -v "$PWD":/work -w /work ubuntu:24.04 bash -c \
   "apt-get update && apt-get install -y build-essential gcc g++ \
-   unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \
+   unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools libelf-dev && \
    FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image.sh --buildroot-only"
 ```
 
@@ -168,7 +168,7 @@ provider + credentials, timezone), then Learning Mode forms and seals the soul.
 > ```bash
 > docker run --rm -e JOBS=2 -v "$PWD":/work -w /work ubuntu:24.04 bash -c \
 >   "apt-get update && apt-get install -y build-essential gcc g++ \
->    unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \
+>    unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools libelf-dev && \
 >    FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image.sh --buildroot-only"
 > ```
 > `JOBS` defaults to all cores (unchanged from canonical) — only set it when

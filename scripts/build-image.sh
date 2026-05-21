@@ -17,8 +17,13 @@
 #   ./scripts/build-image.sh --storage-engine rocksdb   # outer call bakes engine
 #   docker run --rm -v "$PWD":/work -w /work ubuntu:24.04 bash -c \
 #     "apt-get update && apt-get install -y build-essential gcc g++ \
-#      unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \
+#      unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools libelf-dev && \
 #      FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image.sh --buildroot-only"
+#
+# libelf-dev is needed for the kernel's tools/objtool (ORC unwinder + stack
+# validation, mostly x86_64). A typical dev Ubuntu host has it system-wide,
+# which is why the canonical Linux build never tripped on it; a fresh
+# ubuntu:24.04 container doesn't, so it has to be in the apt-get list.
 
 set -euo pipefail
 
@@ -187,7 +192,7 @@ if [ "$(uname)" = "Darwin" ]; then
     echo ""
     echo "  docker run --rm -v \"\$PWD\":/work -w /work ubuntu:24.04 bash -c \\"
     echo "    \"apt-get update && apt-get install -y build-essential gcc g++ \\"
-    echo "     unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \\"
+    echo "     unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools libelf-dev && \\"
     echo "     FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image.sh --buildroot-only\""
     echo ""
     echo "Or run this script on a Linux machine."
