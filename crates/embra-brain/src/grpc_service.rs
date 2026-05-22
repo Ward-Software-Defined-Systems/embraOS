@@ -1624,26 +1624,47 @@ async fn handle_slash_command(
                     }
                     let _ = mgr.reattach(args).await;
                     mgr.active_session = Some(args.to_string());
-                    // Load and send session history
-                    if let Ok(history) = mgr.load_history(args).await {
-                        drop(mgr);
-                        for msg in &history {
-                            let role_display = if msg.role == "user" { "user" } else { "assistant" };
-                            let _ = tx.send(Ok(ConversationResponse {
-                                response_type: Some(conversation_response::ResponseType::System(
-                                    SystemMessage {
-                                        content: format!("[{}] {}", role_display, msg.content),
-                                        msg_type: SystemMessageType::Reconnection as i32,
-                                    }
-                                )),
-                            })).await;
+                    // Load and send session history; capture len for the
+                    // resume-briefing gate below.
+                    let history_len: usize = match mgr.load_history(args).await {
+                        Ok(history) => {
+                            drop(mgr);
+                            for msg in &history {
+                                let role_display = if msg.role == "user" { "user" } else { "assistant" };
+                                let _ = tx.send(Ok(ConversationResponse {
+                                    response_type: Some(conversation_response::ResponseType::System(
+                                        SystemMessage {
+                                            content: format!("[{}] {}", role_display, msg.content),
+                                            msg_type: SystemMessageType::Reconnection as i32,
+                                        }
+                                    )),
+                                })).await;
+                            }
+                            send_msg(tx, format!("Switched to session '{}' ({} messages)", args, history.len())).await;
+                            history.len()
                         }
-                        send_msg(tx, format!("Switched to session '{}' ({} messages)", args, history.len())).await;
-                    } else {
-                        drop(mgr);
-                        send_msg(tx, format!("Switched to session '{}'", args)).await;
-                    }
+                        Err(_) => {
+                            drop(mgr);
+                            send_msg(tx, format!("Switched to session '{}'", args)).await;
+                            0
+                        }
+                    };
                     send_session_update(tx, args).await;
+
+                    // Resume-briefing trigger — same gate as SessionAttach:
+                    // existing session with prior history, Operational mode
+                    // (soul sealed). Set the flag and signal a synthetic
+                    // UserMessage dispatch via this function's Some(prompt)
+                    // return convention; the outer SlashCommand handler at
+                    // ~grpc_service.rs:1292-1304 will `Box::pin(handle_request(...))`
+                    // it through, the UserMessage handler will read-and-clear
+                    // the flag and substitute the `<session_resumption>`
+                    // wrapper. Raw `[Session resumed]` is what persists.
+                    let is_sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
+                    if is_sealed && history_len > 0 {
+                        session_mgr.write().await.pending_resume_briefing = true;
+                        return Some("[Session resumed]".to_string());
+                    }
                 } else {
                     send_msg(tx, format!("Session '{}' does not exist", args)).await;
                 }
