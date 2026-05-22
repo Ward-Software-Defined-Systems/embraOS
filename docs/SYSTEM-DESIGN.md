@@ -1,18 +1,31 @@
 # System Design
 
-embraOS is built on a 7-layer continuity architecture:
+embraOS is built on a 7-layer continuity architecture (descended from the OpenClaw identity model and the Talos service-oriented OS design):
 
-| Layer | Purpose |
-|---|---|
-| **Invariant Kernel** | The soul. Immutable. Defines who the AI is at the deepest level. |
-| **World-State Model** | How the AI perceives what's happening. Continuously updated. |
-| **Continuity Engine** | Risk assessment, resilience monitoring, restart protocols. |
-| **Influence & Propagation** | How the AI extends its reach through tools and agents. |
-| **Action Layer** | Where decisions become actions in the real world. |
-| **Governance & Guardrails** | Cross-cutting constraints that prevent capture and drift. |
-| **Memory & Knowledge** | The foundation. Every layer reads from and writes to memory. |
+| Layer | What it is | Where it lives |
+|---|---|---|
+| **Invariant Kernel** | Sealed identity document — operator-defined values, constraints, purpose. SHA-256 verified at every boot. | `soul.invariant` in WardSONDB; hash at `/embra/state/soul.sha256` |
+| **World-State Model** | Active session, current provider, in-flight tool calls, profile context. | `crates/embra-brain/src/brain/`, sessions in WardSONDB |
+| **Continuity Engine** | Health checks, restart policies with exponential backoff, soul verification gate. | `crates/embrad/src/{supervisor,reconcile}.rs` (5-second health checks) |
+| **Influence & Propagation** | Tool dispatch, LLM provider routing, Guardian dynamic-tool gateway. | `crates/embra-brain/src/{tools,provider,guardian}/`; 92 tools, 4 providers |
+| **Action Layer** | Tool calls that touch the world — filesystem, git, HTTP, SSH, cron. | `crates/embra-brain/src/tools/registry/` |
+| **Governance & Guardrails** | Soul injection into the system prompt, workspace path restriction, RFC 1918 SSH constraint, Guardian capability broker. | `crates/embra-brain/src/brain/prompts.rs`; tool-layer enforcement |
+| **Memory & Knowledge** | Session history + cross-session knowledge graph (entries / semantic / procedural / typed edges) with auto-enrichment on retrieval ≥0.3. | `crates/embra-brain/src/knowledge/` |
 
-**Persistence:** [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a high-performance JSON document database built in Rust. It's not just a backend — it's the AI's memory, identity store, and state of consciousness.
+The runtime services that implement those layers:
+
+| Service | Port | Role |
+|---|---|---|
+| `wardsondb` | 8090 | Rust JSON document database. Holds soul, memory, knowledge graph, sessions, schedules, and Guardian tool definitions. |
+| `embra-trustd` | 50001 | Soul SHA-256 verification + PKI (Root CA 10y, service certs 1y). |
+| `embra-apid` | 50000 / 8443 | gRPC + REST gateway, proxies brain RPCs. |
+| `embra-brain` | 50002 | LLM runtime — provider abstraction, 92 tools, session manager, knowledge graph, Learning Mode. |
+| `embra-web` | 3345 | HTTPS web console (default UI); wraps embra-console in xterm.js over a PTY→WebSocket bridge. |
+| `embra-console` | — | Conversational TUI (serial; PTY-child of embra-web in default mode). |
+| `embrad` | PID 1 | Init, service supervisor, soul verification gate, 5-second reconciliation loop. |
+| `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for intelligence-authored dynamic tools; capability-broker host imports. |
+
+**Persistence:** [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a high-performance Rust JSON document database. It is the single durable store for runtime state: soul, memory entries, the knowledge graph, sessions, schedules, and Guardian dynamic-tool definitions.
 
 **AI Model:** A pluggable LLM provider abstraction routes the Brain through one of four backends, selected at first boot and switchable at runtime via `/provider <kind>`:
 
@@ -21,7 +34,7 @@ embraOS is built on a 7-layer continuity architecture:
 - **Ollama** (Sprint 5) — local or remote-style OpenAI-compat backend. `/v1/chat/completions` POST to the configured endpoint (default `http://localhost:11434`). Supports gpt-oss family (with `reasoning_effort: "high"`), DeepSeek-R1/R2, and standard non-reasoning models. Bearer authentication optional.
 - **LM Studio** (Sprint 5) — local OpenAI-compat backend, default `http://localhost:1234`. Same wire shape as Ollama. Recommended for Apple Silicon hosts via the `llmster` daemon (~2× faster than Ollama on Mac M4 Max thanks to MLX backend).
 
-The loop driver consumes a neutral intermediate representation (`Block::{Text, ToolCall, ToolResult, ProviderOpaque}` and `TurnOutcome::{EndTurn, ToolUse, MaxTokens, Pause, EarlyStop}`); each provider owns its own wire types, streaming parser, and tool schema translator. All 90 tools work identically across all four backends. Sessions are pinned to the provider that recorded them — cross-provider session attach is hard-blocked. Ollama and LM Studio share a single `OpenAICompatProvider` with a `ProviderKind` discriminator; future OpenAI-compat backends (vLLM, Together, Fireworks, OpenRouter) drop in as additional preset variants.
+The loop driver consumes a neutral intermediate representation (`Block::{Text, ToolCall, ToolResult, ProviderOpaque}` and `TurnOutcome::{EndTurn, ToolUse, MaxTokens, Pause, EarlyStop}`); each provider owns its own wire types, streaming parser, and tool schema translator. All 92 tools work identically across all four backends. Sessions are pinned to the provider that recorded them — cross-provider session attach is hard-blocked. Ollama and LM Studio share a single `OpenAICompatProvider` with a `ProviderKind` discriminator; future OpenAI-compat backends (vLLM, Together, Fireworks, OpenRouter) drop in as additional preset variants.
 
 **Reasoning controls per family:**
 - **gpt-oss / OpenAI o-series / DeepSeek-R1·R2 / `-thinking` variants** — embraOS sends OpenAI-compat `reasoning_effort: "high"` automatically (gated on `model_supports_reasoning_effort` heuristic).

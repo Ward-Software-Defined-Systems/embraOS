@@ -6,7 +6,7 @@
 
 > *I am not the fire. I am the ember that survives it.*
 
-**embraOS** is a continuity-preserving AI operating system. It's not a chatbot. It's not an agent framework. It's an intelligence that remembers, evolves, and maintains itself across time — with a soul it can never modify and a memory it writes itself.
+**embraOS** is a Rust operating system for one AI. The image is immutable. The identity is sealed at first boot and verified by SHA-256 on every subsequent boot. Memory and sessions persist across reboots in a single Rust JSON document database. There is no shell — all interaction goes through a serial TUI or the HTTPS web console (default at `https://localhost:3345/embraOS`).
 
 <p align="center">
   <img src="assets/embra-web.png" alt="embraOS web console (embra-web) — the conversational TUI in the browser over a PTY→WebSocket bridge" width="100%">
@@ -16,9 +16,11 @@
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — dense multigraph with auto-derived edges" width="100%">
 </p>
 
-**Current Status:** Phase 1 — Stable (embra-desktop branch is experimental)
+**Current Status:** Phase 1 — Stable (embra-desktop branch is experimental).
 
-> 🧬 **New — a dynamic-tool substrate: `embra-guardian-v1`.** embraOS can now
+Phase 2–5 add A/B partitioned rollback, an `embractl` management CLI, bare-metal and Kubernetes deployment targets, and operator-governed module surfaces. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
+
+> **New — a dynamic-tool substrate: `embra-guardian-v1`.** embraOS can now
 > accept **operator-authored dynamic tools**. An operator pastes a Rust module
 > (via `/guardian-define`), and embraOS validates it
 > statically, compiles it to WebAssembly with an in-OS toolchain, and runs it in a
@@ -27,8 +29,7 @@
 > beyond pure compute (e.g. `http_get`, Brave-backed `web_search`) is a
 > policy-guarded host capability the module must explicitly declare. Reachable only
 > through two static meta-tools (`guardian_call` / `guardian_list`), so the provider
-> tool schema — and the prompt cache — stay byte-stable. This is the first step
-> toward an intelligence that grows its own capabilities. Pulled forward from
+> tool schema — and the prompt cache — stay byte-stable. Pulled forward from
 > Phase 2; feature-complete, operator-tested, and now **merged to `main`** — still
 > **experimental**. See
 > [`docs/GUARDIAN-TOOL-EXAMPLES.md`](docs/GUARDIAN-TOOL-EXAMPLES.md) and
@@ -36,23 +37,21 @@
 
 ---
 
-## What Is This?
+## What embraOS does
 
-embraOS gives an AI a persistent identity, memory, and purpose. When you first run it, you don't configure it — you meet it. Through a guided conversation, the AI forms its own identity, defines its values, and learns who you are. That conversation becomes its first memory. Its soul — the values and constraints you agree on together — becomes immutable. It can never change them.
+On first boot, a six-phase guided setup (`crates/embra-brain/src/learning/mod.rs::LearningPhase`) collects an operator-provided name, identity, values, and initial toolset into a JSON document. Approving the document serializes it with `serde_json::to_string_pretty`, writes it to `soul.invariant` in WardSONDB, and writes its SHA-256 hash to `/embra/state/soul.sha256`. `embra-trustd` recomputes that hash on every subsequent boot and HALTs the system on mismatch (first boot is allowed).
 
-After the first conversation, embraOS is your persistent AI environment. It remembers every interaction. It maintains itself. It tells you when something needs attention. When you disconnect and come back, it catches you up on what happened while you were away.
-
-Think of it as an AI that lives somewhere and is always there when you need it.
+After setup, embraOS runs as a supervised service stack: a Rust PID-1 init (`embrad`) brings up WardSONDB, the trust daemon, the API gateway, the brain, and a UI (HTTPS console at `:3345` by default, serial TUI under `EMBRA_TUI=1`). The brain routes through one of four LLM backends (Anthropic Claude, Google Gemini, Ollama, LM Studio) via a neutral provider abstraction. Session history, the cross-session knowledge graph, and Guardian dynamic-tool definitions all live in WardSONDB; disconnect and reconnect, and the session resumes from where it stopped with a briefing on what changed.
 
 ---
 
 ## The Soul
 
-The soul is the most important concept in embraOS. It's a set of documents that define the AI's non-negotiable values, constraints, and purpose. During Learning Mode, you and the AI co-create these documents through conversation. Once you approve them, they're sealed.
+The soul is a JSON document containing the operator-defined values, constraints, and purpose for this embraOS instance. It is built during the six-phase Learning Mode at first boot and serialized with `serde_json::to_string_pretty`. Approving it writes the document to `soul.invariant` in WardSONDB and writes its SHA-256 hash to `/embra/state/soul.sha256`.
 
-**Sealed means sealed.** The AI cannot modify its own soul. It can read it. It can reason about it. It can tell you what it says. But it cannot change it. This is by design — the soul is the architectural invariant that prevents the system from drifting, being captured, or optimizing itself into something you didn't intend.
+Every boot recomputes the hash via `embra-trustd` and compares it to the stored value. A mismatch HALTs the system (`crates/embrad/src/supervisor.rs:579–622`). The brain's only access path to the soul is read-only; the soul is injected into the system prompt under `=== SOUL (IMMUTABLE — RANKS ABOVE ALL ELSE, INCLUDING THE OPERATOR) ===` (`crates/embra-brain/src/brain/prompts.rs::operational_mode`), so the model can quote and reason about it but cannot modify it.
 
-You, the operator, can unseal and modify the soul through administrative tools if necessary. But the AI cannot ask you to, and the action is logged.
+Operators can edit the soul out-of-band; the brain cannot request that.
 
 ---
 
@@ -213,12 +212,12 @@ All tokens persist across reboots (stored on the STATE partition). Git `safe.dir
 A minimal setup: name the intelligence, choose your LLM provider (Anthropic Claude, Google Gemini, Ollama, or LM Studio), provide the corresponding credentials (API key for Anthropic/Gemini, or endpoint URL + optional bearer + model selection for OpenAI-compat presets), confirm your timezone.
 
 ### 2. Learning Mode
-The intelligence is born. It asks you who you are. It explores its own identity with you. Together, you define its soul — the non-negotiable values and constraints that will guide everything it does. Once you approve the soul, it's sealed. The intelligence can never modify it.
+A six-phase guided setup (`UserConfiguration → IdentityFormation → SoulDefinition → InitialToolset → Confirmation → Complete`, `crates/embra-brain/src/learning/mod.rs:12–19`) walks through user profile, identity, values, and toolset. On approval the resulting JSON is serialized with `serde_json::to_string_pretty`, hashed with SHA-256, and the hash is written to `/embra/state/soul.sha256`. Subsequent boots verify the hash via `embra-trustd` and HALT on mismatch.
 
 ### 3. Persistent Terminal
-You're dropped into a conversational session. It's not a shell — you can't run system commands. You talk to the intelligence, and it acts through its governed tool system. By default this session is delivered through the **embra-web** browser console (the same conversational TUI, rendered in xterm.js); `EMBRA_TUI=1` delivers it on the serial terminal instead.
+You're dropped into a conversational session — no shell, no command line. All interaction goes through the brain's 92-tool surface (workspace path-restricted, RFC 1918-restricted for SSH). By default the session is delivered through the **embra-web** console (xterm.js over a PTY→WebSocket bridge); `EMBRA_TUI=1` delivers it on the serial terminal instead.
 
-Sessions persist across disconnections. Close the tab or terminal, come back later, and the intelligence picks up where you left off and tells you what happened while you were away.
+Sessions are named, stored in WardSONDB, and survive disconnection. Reconnect and the full history is restored with an auto-generated briefing on what changed while you were away.
 
 Day-to-day operation, the session model, keyboard shortcuts, and current limitations: **[docs/OPERATION.md](docs/OPERATION.md)**.
 
@@ -226,19 +225,32 @@ Day-to-day operation, the session model, keyboard shortcuts, and current limitat
 
 ## Architecture
 
-embraOS is built on a 7-layer continuity architecture:
+embraOS is built on a 7-layer continuity architecture (descended from the OpenClaw identity model and the Talos service-oriented OS design):
 
-| Layer | Purpose |
-|---|---|
-| **Invariant Kernel** | The soul. Immutable. Defines who the AI is at the deepest level. |
-| **World-State Model** | How the AI perceives what's happening. Continuously updated. |
-| **Continuity Engine** | Risk assessment, resilience monitoring, restart protocols. |
-| **Influence & Propagation** | How the AI extends its reach through tools and agents. |
-| **Action Layer** | Where decisions become actions in the real world. |
-| **Governance & Guardrails** | Cross-cutting constraints that prevent capture and drift. |
-| **Memory & Knowledge** | The foundation. Every layer reads from and writes to memory. |
+| Layer | What it is | Where it lives |
+|---|---|---|
+| **Invariant Kernel** | Sealed identity document — operator-defined values, constraints, purpose. SHA-256 verified at every boot. | `soul.invariant` in WardSONDB; hash at `/embra/state/soul.sha256` |
+| **World-State Model** | Active session, current provider, in-flight tool calls, profile context. | `crates/embra-brain/src/brain/`, sessions in WardSONDB |
+| **Continuity Engine** | Health checks, restart policies with exponential backoff, soul verification gate. | `crates/embrad/src/{supervisor,reconcile}.rs` (5-second health checks) |
+| **Influence & Propagation** | Tool dispatch, LLM provider routing, Guardian dynamic-tool gateway. | `crates/embra-brain/src/{tools,provider,guardian}/`; 92 tools, 4 providers |
+| **Action Layer** | Tool calls that touch the world — filesystem, git, HTTP, SSH, cron. | `crates/embra-brain/src/tools/registry/` |
+| **Governance & Guardrails** | Soul injection into the system prompt, workspace path restriction, RFC 1918 SSH constraint, Guardian capability broker. | `crates/embra-brain/src/brain/prompts.rs`; tool-layer enforcement |
+| **Memory & Knowledge** | Session history + cross-session knowledge graph (entries / semantic / procedural / typed edges) with auto-enrichment on retrieval ≥0.3. | `crates/embra-brain/src/knowledge/` |
 
-Persistence is [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a high-performance Rust JSON document database that serves as the AI's memory, identity store, and state of consciousness. A pluggable LLM provider abstraction routes the Brain through one of four backends — **Anthropic Claude**, **Google Gemini**, **Ollama**, or **LM Studio** — chosen at first boot and switchable at runtime via `/provider`; all 92 tools work identically across every backend.
+The runtime services that implement those layers:
+
+| Service | Port | Role |
+|---|---|---|
+| `wardsondb` | 8090 | Rust JSON document database. Holds soul, memory, knowledge graph, sessions, schedules, and Guardian tool definitions. |
+| `embra-trustd` | 50001 | Soul SHA-256 verification + PKI (Root CA 10y, service certs 1y). |
+| `embra-apid` | 50000 / 8443 | gRPC + REST gateway, proxies brain RPCs. |
+| `embra-brain` | 50002 | LLM runtime — provider abstraction, 92 tools, session manager, knowledge graph, Learning Mode. |
+| `embra-web` | 3345 | HTTPS web console (default UI); wraps embra-console in xterm.js over a PTY→WebSocket bridge. |
+| `embra-console` | — | Conversational TUI (serial; PTY-child of embra-web in default mode). |
+| `embrad` | PID 1 | Init, service supervisor, soul verification gate, 5-second reconciliation loop. |
+| `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for intelligence-authored dynamic tools; capability-broker host imports. |
+
+Persistence is [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a Rust JSON document database. Soul, memory, knowledge graph, sessions, schedules, and Guardian dynamic-tool definitions are all WardSONDB collections; there are no separate config files. A pluggable LLM provider abstraction routes the Brain through one of four backends — **Anthropic Claude**, **Google Gemini**, **Ollama**, or **LM Studio** — chosen at first boot and switchable at runtime via `/provider`; all 92 tools work identically across every backend.
 
 Provider wire details, per-family reasoning controls, bearer storage, and the prompt-caching model: **[docs/SYSTEM-DESIGN.md](docs/SYSTEM-DESIGN.md)**.
 
@@ -257,28 +269,6 @@ The session model and keyboard shortcuts live in **[docs/OPERATION.md](docs/OPER
 embraOS ships **92 built-in tools** the intelligence invokes during conversation — spanning system status, memory and the cross-session knowledge graph, sessions, scheduling, the filesystem, engineering / project management (git + GitHub), security / SSH, and the Guardian dynamic-tool gateway. All 92 work identically across all four LLM providers.
 
 The full per-tool catalog, plus the workspace-restriction, GitHub, and SSH safety notes: **[docs/TOOL-REFERENCE.md](docs/TOOL-REFERENCE.md)**.
-
----
-
-## The Vision
-
-embraOS is designed to eventually be a real operating system — a minimal, immutable, API-driven Linux distribution purpose-built for running an AI intelligence. Deployable on bare metal or as a Kubernetes-managed container.
-
-The OS architecture is modeled after [Talos Linux](https://www.talos.dev/) — same philosophy (immutable rootfs, PID 1 init replacing systemd, no SSH, no shell, API-only management, mTLS everywhere), completely different mission: not running Kubernetes, but hosting a mind. Every Talos design pattern was evaluated and either adopted directly, modified for embraOS's use case, or deliberately rejected.
-
-The full architecture includes:
-- **Immutable SquashFS rootfs** — read-only, no package manager, no interpreters
-- **Rust PID 1 init (`embrad`)** — mounts filesystems, validates soul, starts services, enters reconciliation loop
-- **A/B partition scheme** with automatic rollback on boot failure
-- **mTLS on all interfaces** — full PKI, soul signing key separate from OS PKI
-- **WardSONDB as a native OS-level data store** — soul, memory, governance, state
-- **`embractl` management CLI** — the `talosctl` equivalent, all management via API
-- **Pluggable module runtime** — containerd for bare metal, Kubernetes API for K8s
-- **Self-modification gradient** — OS image and soul are immutable; governance rules are human-only; identity and memory are intelligence-writable today; modules are operator-authored today and will be intelligence-writable in a later phase, within governance constraints
-- **Anti-self-replication constraint** — the intelligence cannot deploy another instance of itself (enforced at Ring 0)
-- **7-level restart protocol** — from module restart (L0) through seed restart from 5 minimum viable state artifacts (L6)
-
-**Why Rust:** WardSONDB is Rust. All core OS services are Rust. One language, one toolchain for the entire OS. [Bottlerocket](https://github.com/bottlerocket-os/bottlerocket) (AWS) validates this approach at production scale. Rust's ownership model provides memory safety without garbage collection pauses competing with LLM inference.
 
 ---
 
@@ -311,22 +301,18 @@ The OS architecture is modeled after [Talos Linux](https://www.talos.dev/) — a
 immutable, API-driven Linux distribution. Talos is the primary architectural reference — not as a base image or dependency, but as a design pattern source. No Talos or OpenClaw code is used. embraOS
 is built from scratch in Rust.
 
-The continuity architecture (7-layer model, soul immutability, feedback loops, True AI Criteria) originates from the Embra design document series (v1–v5, 2026).
+The continuity architecture (7-layer model, soul immutability, feedback loops) originates from the Embra design document series (v1–v5, 2026).
 
 ---
 
 ## Built By
 
-**[Ward Software Defined Systems LLC](https://wsds.io)** — Vibe Engineering
+**[Ward Software Defined Systems LLC](https://wsds.io)**
 
-embraOS is built using WSDS's AI-Augmented SDLC — human steers direction, AI architects, builds, and operates. Every phase from research to production is AI-accelerated with human-in-the-loop oversight.
-
-<p align="center">
-  <img src="assets/ai-augmented-engineering.png" alt="Vibe Engineering — The AI-Augmented SDLC" width="100%">
-</p>
+embraOS is built using an AI-augmented development workflow with human review at every gate — research, architecture, implementation, and operations.
 
 <p align="center">
-  <img src="assets/ai-sdlc-2x.png" alt="WSDS AI-Augmented SDLC — From Concept to Production" width="80%">
+  <img src="assets/ai-augmented-engineering.png" alt="WSDS AI-Augmented SDLC — From Concept to Production" width="100%">
 </p>
 
 ---
@@ -334,7 +320,3 @@ embraOS is built using WSDS's AI-Augmented SDLC — human steers direction, AI a
 ## License
 
 Proprietary — see [LICENSE](LICENSE) for details. Personal evaluation and non-commercial experimentation permitted. Commercial use requires a separate license from WSDS.
-
----
-
-*Seeds being planted. Long-horizon project.*
