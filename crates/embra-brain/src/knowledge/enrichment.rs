@@ -104,6 +104,60 @@ pub async fn build_turn_context(
     ctx
 }
 
+/// Brain-facing wrapper for a resume-briefing turn. Used in place of
+/// `build_turn_context` when `SessionManager::pending_resume_briefing`
+/// is set. The wrapper is per-turn only — the synthetic UserMessage's
+/// raw content (`[Session resumed]`) is what persists to history, so
+/// this instruction never leaks into subsequent turns. The system
+/// prompt is untouched, so prompt caching stays warm.
+pub fn build_resumption_context() -> String {
+    String::from(
+        "<session_resumption>\n\
+         You have just been reconnected to this session. The user did \
+         not type anything — this turn was triggered automatically by \
+         the resumption.\n\
+         Briefly recap (2–4 sentences) where the conversation left off: \
+         what we were working on, anything pending, and offer the next \
+         step. Be concise — the user can already see the full prior \
+         transcript.\n\
+         </session_resumption>"
+    )
+}
+
+#[cfg(test)]
+mod resumption_context_tests {
+    //! Verifies the brain-facing wrapper used in place of
+    //! `build_turn_context` when `SessionManager::pending_resume_briefing`
+    //! is set. The wrapper is per-turn only — raw `msg.content`
+    //! (`[Session resumed]`) is what persists to history.
+    use super::*;
+
+    #[test]
+    fn build_resumption_context_contains_wrapper_and_recap_directive() {
+        let s = build_resumption_context();
+        // Load-bearing markers — the brain uses them to distinguish a
+        // resumption-triggered turn from a real user message.
+        assert!(
+            s.starts_with("<session_resumption>"),
+            "must start with the open tag"
+        );
+        assert!(
+            s.trim_end().ends_with("</session_resumption>"),
+            "must end with the close tag"
+        );
+        // Non-empty recap directive — the model must know what to produce.
+        assert!(
+            s.contains("recap"),
+            "must instruct the model to recap"
+        );
+        // No user impersonation — the model must know the user did not type.
+        assert!(
+            s.contains("did not type"),
+            "must clarify the user did not type"
+        );
+    }
+}
+
 fn is_chatty_filler(s: &str) -> bool {
     let lower = s.to_lowercase();
     let stripped = lower.trim_end_matches(|c: char| {

@@ -68,6 +68,14 @@ fn default_legacy_format_version() -> u32 {
 pub struct SessionManager {
     db: WardsonDbClient,
     pub active_session: Option<String>,
+    /// Set by the SessionAttach handler when a resume briefing should fire
+    /// on the next user turn (existing session, prior history, Operational
+    /// mode). The UserMessage handler reads-and-clears this flag and
+    /// substitutes the `<session_resumption>` wrapper for the brain-facing
+    /// call; the synthetic UserMessage's raw `content` (`[Session resumed]`)
+    /// is what gets persisted to history. Pure runtime state — not
+    /// serialized, no schema bump.
+    pub pending_resume_briefing: bool,
 }
 
 impl SessionManager {
@@ -75,6 +83,7 @@ impl SessionManager {
         Self {
             db,
             active_session: None,
+            pending_resume_briefing: false,
         }
     }
 
@@ -339,5 +348,42 @@ mod format_version_tests {
         });
         let h: SessionHistory = serde_json::from_value(raw).unwrap();
         assert_eq!(h.format_version, 1);
+    }
+}
+
+#[cfg(test)]
+mod pending_resume_briefing_tests {
+    //! Verifies the in-memory `pending_resume_briefing` flag added for
+    //! the SessionAttach → UserMessage resume-briefing handshake. The
+    //! full briefing loop (SessionAttach → synthetic dispatch → model
+    //! call → stream → persist) depends on a live WardSONDB and LLM
+    //! provider, so it is QEMU-verified rather than unit-tested.
+    use super::*;
+
+    #[test]
+    fn pending_resume_briefing_defaults_false() {
+        // Dummy client — never connected; these tests don't touch the DB.
+        let db = WardsonDbClient::from_url("http://127.0.0.1:1");
+        let mgr = SessionManager::new(db);
+        assert!(
+            !mgr.pending_resume_briefing,
+            "default must be false so the first turn after construction isn't accidentally treated as a resumption"
+        );
+    }
+
+    #[test]
+    fn pending_resume_briefing_replaces_cleanly() {
+        let db = WardsonDbClient::from_url("http://127.0.0.1:1");
+        let mut mgr = SessionManager::new(db);
+        mgr.pending_resume_briefing = true;
+        // Mirrors the read-and-clear pattern in grpc_service.rs's
+        // UserMessage handler — std::mem::replace returns the prior
+        // value and stores `false`, so the flag is one-shot.
+        let was = std::mem::replace(&mut mgr.pending_resume_briefing, false);
+        assert!(was, "replace must return the prior `true`");
+        assert!(
+            !mgr.pending_resume_briefing,
+            "after replace, the flag must be cleared so subsequent turns are not briefings"
+        );
     }
 }

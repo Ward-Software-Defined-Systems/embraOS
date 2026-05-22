@@ -240,6 +240,20 @@ pub fn App() -> impl IntoView {
         }
     });
 
+    // Return focus to the xterm pane on the any-modal-open → all-closed
+    // transition, so the user can start typing immediately after closing
+    // a modal (submit, Cancel, Escape, or backdrop click). prev=None on
+    // initial mount → no steal on first paint.
+    Effect::new(move |prev: Option<bool>| {
+        let any_open = palette_open.get()
+            || modal.get().is_some()
+            || editor_open.get();
+        if prev == Some(true) && !any_open {
+            term::focus();
+        }
+        any_open
+    });
+
     view! {
         <div class="shell">
             <div class="topbar">

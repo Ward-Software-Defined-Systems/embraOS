@@ -723,18 +723,34 @@ async fn handle_request(
                 mgr.load_history(&session_name).await.unwrap_or_default()
             };
 
+            // Resume-briefing branch: SessionAttach sets this flag for
+            // the next user turn (existing session with prior history,
+            // Operational mode). Read-and-clear, then substitute the
+            // `<session_resumption>` wrapper for the brain-facing call.
+            // Raw `msg.content` (`[Session resumed]`) is what the
+            // persistence step at the end of this handler writes to
+            // history, mirroring the auto-enrichment pattern below.
+            let pending_briefing = std::mem::replace(
+                &mut session_mgr.write().await.pending_resume_briefing,
+                false,
+            );
+
             // Auto-KG-enrichment: wrap the user message in a <retrieved_context>
             // block when the knowledge graph has relevant prior knowledge. The
             // system prompt is left untouched so Anthropic prompt caching stays
             // warm. History persistence below saves `msg.content` (raw), so the
             // wrapper never leaks into subsequent turns.
-            let enriched = crate::knowledge::enrichment::build_turn_context(
-                db.as_ref(),
-                &msg.content,
-                &session_name,
-                &loaded_config,
-            )
-            .await;
+            let enriched = if pending_briefing {
+                crate::knowledge::enrichment::build_resumption_context()
+            } else {
+                crate::knowledge::enrichment::build_turn_context(
+                    db.as_ref(),
+                    &msg.content,
+                    &session_name,
+                    &loaded_config,
+                )
+                .await
+            };
 
             // Build neutral-IR message history. Legacy persistence shape
             // (role+String) maps to text-only `Block::Text`; thinking
@@ -1356,29 +1372,35 @@ async fn handle_request(
             // Mark active only after the cross-provider check passes.
             session_mgr.write().await.active_session = Some(session_name.clone());
 
-            // Load and send session history so console displays prior conversation
-            {
+            // Load and send session history so console displays prior
+            // conversation. Capture `history.len()` here so the
+            // "restored" message below and the resume-briefing gate
+            // further down don't need a second load_history round-trip.
+            let history_len: usize = {
                 let mgr = session_mgr.read().await;
-                if let Ok(history) = mgr.load_history(&session_name).await {
-                    for msg in &history {
-                        let role_display = if msg.role == "user" { "user" } else { "assistant" };
-                        let _ = tx.send(Ok(ConversationResponse {
-                            response_type: Some(conversation_response::ResponseType::System(
-                                SystemMessage {
-                                    content: format!("[{}] {}", role_display, msg.content),
-                                    msg_type: SystemMessageType::Reconnection as i32,
-                                }
-                            )),
-                        })).await;
+                match mgr.load_history(&session_name).await {
+                    Ok(history) => {
+                        for msg in &history {
+                            let role_display = if msg.role == "user" { "user" } else { "assistant" };
+                            let _ = tx.send(Ok(ConversationResponse {
+                                response_type: Some(conversation_response::ResponseType::System(
+                                    SystemMessage {
+                                        content: format!("[{}] {}", role_display, msg.content),
+                                        msg_type: SystemMessageType::Reconnection as i32,
+                                    }
+                                )),
+                            })).await;
+                        }
+                        history.len()
                     }
+                    Err(_) => 0,
                 }
-            }
+            };
 
             let _ = tx.send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::System(
                     SystemMessage {
-                        content: format!("Session '{}' attached ({} messages restored)", session_name,
-                            session_mgr.read().await.load_history(&session_name).await.map(|h| h.len()).unwrap_or(0)),
+                        content: format!("Session '{}' attached ({} messages restored)", session_name, history_len),
                         msg_type: SystemMessageType::Reconnection as i32,
                     }
                 )),
@@ -1411,6 +1433,29 @@ async fn handle_request(
                     }
                 )),
             })).await;
+
+            // Resume-briefing trigger: existing session, prior history,
+            // Operational mode only. Mirrors the slash-command synthetic-turn
+            // precedent above (`handle_slash_command` → `Box::pin(handle_request(...))`).
+            // The UserMessage handler reads the flag we set here, swaps in
+            // the `<session_resumption>` wrapper for the brain-facing call,
+            // and persists `[Session resumed]` (raw) to history. No wrapper
+            // leak into subsequent turns.
+            if !new_session && is_sealed && history_len > 0 {
+                session_mgr.write().await.pending_resume_briefing = true;
+                let synthetic = ConversationRequest {
+                    request_type: Some(conversation_request::RequestType::UserMessage(
+                        UserMessage {
+                            content: "[Session resumed]".to_string(),
+                            timestamp: None,
+                        }
+                    )),
+                };
+                Box::pin(handle_request(
+                    synthetic, tx, db, session_mgr, config_tz, api_key, in_turn,
+                    pending_provider, pending_key_setup, pending_openai_compat_setup,
+                )).await?;
+            }
 
             Ok(())
         }
