@@ -20,6 +20,15 @@
 
 Phase 2–5 add A/B partitioned rollback, an `embractl` management CLI, bare-metal and Kubernetes deployment targets, and operator-governed module surfaces. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
+> **Local inference — model selection matters.** For full functionality (all 92
+> tools dispatch reliably), the model your provider serves needs to handle a large
+> tool schema without truncating or hallucinating tool calls. When running locally
+> via **Ollama** or **LM Studio** this is the dominant constraint — plenty of
+> otherwise-capable models cannot. Models currently vetted to provide full
+> functionality: **`DeepSeek-v4-Pro:cloud`**, **`Qwen3.6-35b-a3b-mlx`**,
+> **`Qwen3.6-35b-a3b-ud-mlx`**, and **`Qwen3.5-9b`**. Experiment freely with others —
+> these four are the ones confirmed to handle the full toolset.
+
 > **New — a dynamic-tool substrate: `embra-guardian-v1`.** embraOS can now
 > accept **operator-authored dynamic tools**. An operator pastes a Rust module
 > (via `/guardian-define`), and embraOS validates it
@@ -34,6 +43,16 @@ Phase 2–5 add A/B partitioned rollback, an `embractl` management CLI, bare-met
 > **experimental**. See
 > [`docs/GUARDIAN-TOOL-EXAMPLES.md`](docs/GUARDIAN-TOOL-EXAMPLES.md) and
 > [`docs/GUARDIAN-ADVANCED-EXAMPLE.md`](docs/GUARDIAN-ADVANCED-EXAMPLE.md).
+
+> **Memory & knowledge graph today — operator-driven, by conversation.** Creating
+> episodic memories and promoting them to the cross-session knowledge graph is
+> currently a **manual** process; automation is on the near-term roadmap. The flow
+> is just a conversation: ask the intelligence to remember something specific, or
+> ask whether anything from the current session is worth promoting to the knowledge
+> graph — it has the `remember` and `knowledge_*` tools and will write the entries
+> itself. Separately, **`/feedback-loop`** (**experimental**) runs a full
+> self-realignment against the intelligence's identity and soul — a different
+> concern, not a memory-promotion sweep.
 
 ---
 
