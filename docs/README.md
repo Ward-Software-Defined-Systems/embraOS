@@ -5,10 +5,11 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 ## Project
 
 - [ROADMAP.md](ROADMAP.md) — Phase 0–5 delivery status + the embra-guardian-v1 branch.
+- [CHANGE-LOG.md](CHANGE-LOG.md) — Chronological merge log for `main`, anchored on tagged releases.
 
 ## Getting Started
 
-- **Build & install** — see the **Quick Start** in [../README.md](../README.md): full prerequisites, the musl cross-toolchain, the build pipeline, the Config Wizard, post-boot GitHub/SSH, backup & restore.
+- [QUICK-START.md](QUICK-START.md) — Build the QEMU image from source (Ubuntu 24.04 / 26.04), the musl cross-toolchain, the build pipeline, the Config Wizard, and operational notes (terminal size, image search order, clean first boot, port forwarding, backup & restore).
 - [OPERATION.md](OPERATION.md) — What running it feels like, the session model, keyboard shortcuts, current limitations.
 
 ## Reference
@@ -20,6 +21,7 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 ## Internals
 
 - [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md) — The 7-layer continuity architecture, the four LLM providers, reasoning controls, prompt caching.
+- [OPEN-PROBLEMS.md](OPEN-PROBLEMS.md) — Unresolved Phase 1–3 design questions tracked at the architecture level.
 
 ## Self-Extension (Guardian)
 

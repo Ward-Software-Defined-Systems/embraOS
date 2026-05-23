@@ -135,7 +135,7 @@ Phase 1 includes 92 internal tools the intelligence invokes during conversation.
 | **ssh_session_exec** | Run a command in the open SSH session — each command gets a clean process lifecycle via ControlMaster socket. 30s timeout, 10KB truncation (EXPERIMENTAL) |
 | **ssh_session_end** | Close SSH session and tear down ControlMaster connection (EXPERIMENTAL) |
 
-> **⚠️ SSH Security:** SSH tools are restricted to RFC 1918 private addresses (10.x, 172.16-31.x, 192.168.x) and loopback (127.x, localhost). Public IP targets are denied. Connections use `StrictHostKeyChecking=accept-new` (auto-accepts first-time hosts, rejects changed keys). Password authentication is disabled — key-based auth required (see Quick Start). These tools are marked EXPERIMENTAL — use at your own risk.
+> **⚠️ SSH Security:** SSH tools are restricted to RFC 1918 private addresses (10.x, 172.16-31.x, 192.168.x) and loopback (127.x, localhost). Public IP targets are denied. Connections use `StrictHostKeyChecking=accept-new` (auto-accepts first-time hosts, rejects changed keys). Password authentication is disabled — key-based auth required (see [QUICK-START.md](QUICK-START.md)). These tools are marked EXPERIMENTAL — use at your own risk.
 
 **Guardian — Dynamic Tools** *(embra-guardian-v1 — EXPERIMENTAL)*
 
