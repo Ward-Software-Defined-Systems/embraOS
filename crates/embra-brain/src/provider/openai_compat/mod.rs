@@ -206,30 +206,31 @@ impl OpenAICompatProvider {
     }
 }
 
-/// Heuristic on `model_id` to decide whether `reasoning_effort` is
-/// meaningful for this model. Per Locked Decision #4, the parameter
-/// is sent only to reasoning-effort-aware models and omitted entirely
-/// for everything else. False negatives (a reasoning model we miss)
-/// degrade to no-effort-control output; false positives (sending to
-/// a non-reasoning model) produce server-side log warnings without
-/// affecting the response.
+/// Returns the `reasoning_effort` value to send for `model_id`, or
+/// `None` to omit the field. Per Locked Decision #4, send only to
+/// reasoning-effort-aware models; omit for everything else. False
+/// negatives degrade to no-effort-control output; false positives
+/// produce server-side log warnings without affecting the response.
 ///
-/// Pattern criteria — case-insensitive substring or prefix match:
-/// - **gpt-oss family** (`gpt-oss:`, `*/gpt-oss-*`): OpenAI's
-///   launch-partner reasoning model on Ollama.
-/// - **OpenAI o-series** (`o1-mini`, `o1-preview`, `o3-mini`,
-///   `o3-pro`, `o4-mini`): small reasoning models hosted via LM
-///   Studio per its 0.3.23+ alignment-with-o3-mini changelog note.
-/// - **`-thinking`**: Qwen3-thinking variants, Claude-thinking-style
-///   models, etc.
-/// - **`deepseek-r1`** / **`deepseek-r2`**: DeepSeek's reasoning family.
-///
-/// Standard non-reasoning models (Qwen3.6 base, Llama 3.x, Mistral)
-/// fall through to `false`.
-pub(crate) fn model_supports_reasoning_effort(model_id: &str) -> bool {
+/// Routing (case-insensitive substring match):
+/// - `deepseek-v4-pro` → `"max"` — V4-Pro's "Max thinking" mode per
+///   `api-docs.deepseek.com/guides/thinking_mode` (`reasoning_effort:
+///   "high/max"`). Ollama's OpenAI-compat docs list only
+///   `high/medium/low/none`, but the underlying engine accepts `"max"`
+///   per openclaw#71584. Matches `deepseek-v4-pro` and
+///   `deepseek-v4-pro:cloud`. Checked first so the substring won't
+///   fall through to a later branch.
+/// - `gpt-oss*`, OpenAI o-series (`o1-mini`/`o1-preview`/`o3-mini`/
+///   `o3-pro`/`o4-mini`), `-thinking`/`_thinking` variants, and
+///   `deepseek-r1`/`deepseek-r2` → `"high"`.
+/// - Everything else → `None`.
+pub(crate) fn reasoning_effort_for_model(model_id: &str) -> Option<&'static str> {
     let lower = model_id.to_lowercase();
+    if lower.contains("deepseek-v4-pro") {
+        return Some("max");
+    }
     if lower.starts_with("gpt-oss") || lower.contains("/gpt-oss") {
-        return true;
+        return Some("high");
     }
     if lower.contains("o1-mini")
         || lower.contains("o1-preview")
@@ -237,15 +238,15 @@ pub(crate) fn model_supports_reasoning_effort(model_id: &str) -> bool {
         || lower.contains("o3-pro")
         || lower.contains("o4-mini")
     {
-        return true;
+        return Some("high");
     }
     if lower.contains("-thinking") || lower.contains("_thinking") {
-        return true;
+        return Some("high");
     }
     if lower.contains("deepseek-r1") || lower.contains("deepseek-r2") {
-        return true;
+        return Some("high");
     }
-    false
+    None
 }
 
 /// Decide whether a failed attempt warrants one retry. Connection
@@ -326,18 +327,15 @@ impl LlmProvider for OpenAICompatProvider {
             } else {
                 None
             },
-            // Locked Decision #4: send "high" only when the active
-            // model is reasoning-effort-aware. Sending to a non-
-            // reasoning model produces a `No valid custom reasoning
-            // fields found` warning on the server side (LM Studio)
-            // and is silently dropped (Ollama). Omit entirely when
-            // unsupported — matches the spec's "parameter omitted
-            // entirely when it doesn't" wording verbatim.
-            reasoning_effort: if model_supports_reasoning_effort(&self.model_id) {
-                Some("high".to_string())
-            } else {
-                None
-            },
+            // Locked Decision #4: send `reasoning_effort` only when
+            // the active model is reasoning-effort-aware. Sending to
+            // a non-reasoning model produces a `No valid custom
+            // reasoning fields found` warning on LM Studio and is
+            // silently dropped by Ollama. Omit entirely when
+            // unsupported. V4-Pro routes to "max"; other recognized
+            // reasoning models route to "high" — see
+            // `reasoning_effort_for_model` doc.
+            reasoning_effort: reasoning_effort_for_model(&self.model_id).map(String::from),
             max_tokens: None,
         };
 
@@ -1210,56 +1208,99 @@ mod tests {
     }
 
     #[test]
-    fn model_supports_reasoning_effort_recognizes_gpt_oss() {
-        assert!(model_supports_reasoning_effort("gpt-oss:20b"));
-        assert!(model_supports_reasoning_effort("gpt-oss:120b"));
-        assert!(model_supports_reasoning_effort("openai/gpt-oss-120b"));
+    fn reasoning_effort_for_model_routes_gpt_oss_to_high() {
+        assert_eq!(reasoning_effort_for_model("gpt-oss:20b"), Some("high"));
+        assert_eq!(reasoning_effort_for_model("gpt-oss:120b"), Some("high"));
+        assert_eq!(
+            reasoning_effort_for_model("openai/gpt-oss-120b"),
+            Some("high")
+        );
     }
 
     #[test]
-    fn model_supports_reasoning_effort_recognizes_o_series() {
-        assert!(model_supports_reasoning_effort("o1-mini"));
-        assert!(model_supports_reasoning_effort("o1-preview"));
-        assert!(model_supports_reasoning_effort("o3-mini"));
-        assert!(model_supports_reasoning_effort("o3-pro-2026"));
-        assert!(model_supports_reasoning_effort("o4-mini-preview"));
+    fn reasoning_effort_for_model_routes_o_series_to_high() {
+        assert_eq!(reasoning_effort_for_model("o1-mini"), Some("high"));
+        assert_eq!(reasoning_effort_for_model("o1-preview"), Some("high"));
+        assert_eq!(reasoning_effort_for_model("o3-mini"), Some("high"));
+        assert_eq!(reasoning_effort_for_model("o3-pro-2026"), Some("high"));
+        assert_eq!(
+            reasoning_effort_for_model("o4-mini-preview"),
+            Some("high")
+        );
     }
 
     #[test]
-    fn model_supports_reasoning_effort_recognizes_thinking_variants() {
-        assert!(model_supports_reasoning_effort(
-            "qwen3.6-32b-thinking-mlx-4bit"
-        ));
-        assert!(model_supports_reasoning_effort("Claude-3.5-thinking"));
-        assert!(model_supports_reasoning_effort(
-            "unsloth/Qwen3-thinking-32b"
-        ));
+    fn reasoning_effort_for_model_routes_thinking_variants_to_high() {
+        assert_eq!(
+            reasoning_effort_for_model("qwen3.6-32b-thinking-mlx-4bit"),
+            Some("high")
+        );
+        assert_eq!(
+            reasoning_effort_for_model("Claude-3.5-thinking"),
+            Some("high")
+        );
+        assert_eq!(
+            reasoning_effort_for_model("unsloth/Qwen3-thinking-32b"),
+            Some("high")
+        );
     }
 
     #[test]
-    fn model_supports_reasoning_effort_recognizes_deepseek_r() {
-        assert!(model_supports_reasoning_effort("deepseek-r1:32b"));
-        assert!(model_supports_reasoning_effort("DeepSeek-r2-7B"));
+    fn reasoning_effort_for_model_routes_deepseek_r_to_high() {
+        assert_eq!(
+            reasoning_effort_for_model("deepseek-r1:32b"),
+            Some("high")
+        );
+        assert_eq!(reasoning_effort_for_model("DeepSeek-r2-7B"), Some("high"));
     }
 
     #[test]
-    fn model_supports_reasoning_effort_rejects_standard_models() {
+    fn reasoning_effort_for_model_returns_none_for_standard_models() {
         // Non-reasoning models — sending reasoning_effort to these
         // produces "No valid custom reasoning fields found" warnings
         // in LM Studio's server logs.
-        assert!(!model_supports_reasoning_effort(
-            "unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit"
-        ));
-        assert!(!model_supports_reasoning_effort("qwen3.6:35b"));
-        assert!(!model_supports_reasoning_effort("llama3.2:8b"));
-        assert!(!model_supports_reasoning_effort("mistral:7b"));
-        assert!(!model_supports_reasoning_effort(
-            "mlx-community/Llama-3.3-70B-Instruct"
-        ));
+        assert_eq!(
+            reasoning_effort_for_model("unsloth/Qwen3.6-35B-A3B-UD-MLX-4bit"),
+            None
+        );
+        assert_eq!(reasoning_effort_for_model("qwen3.6:35b"), None);
+        assert_eq!(reasoning_effort_for_model("llama3.2:8b"), None);
+        assert_eq!(reasoning_effort_for_model("mistral:7b"), None);
+        assert_eq!(
+            reasoning_effort_for_model("mlx-community/Llama-3.3-70B-Instruct"),
+            None
+        );
         // Bare `o1` / `o3` / `o4` substrings shouldn't false-positive
         // (only the canonical OpenAI o-series-mini/pro/preview names).
-        assert!(!model_supports_reasoning_effort("hello1"));
-        assert!(!model_supports_reasoning_effort("o3"));
+        assert_eq!(reasoning_effort_for_model("hello1"), None);
+        assert_eq!(reasoning_effort_for_model("o3"), None);
+    }
+
+    #[test]
+    fn reasoning_effort_for_model_routes_deepseek_v4_pro_to_max() {
+        // Per `api-docs.deepseek.com/guides/thinking_mode`, V4-Pro
+        // selects Max thinking via `reasoning_effort: "max"`. Matches
+        // both bare `deepseek-v4-pro` and the `:cloud` variant.
+        assert_eq!(
+            reasoning_effort_for_model("deepseek-v4-pro"),
+            Some("max")
+        );
+        assert_eq!(
+            reasoning_effort_for_model("deepseek-v4-pro:cloud"),
+            Some("max")
+        );
+        assert_eq!(
+            reasoning_effort_for_model("DeepSeek-v4-Pro:cloud"),
+            Some("max")
+        );
+        // Narrow scope (per user decision): V4-Flash and other V4
+        // siblings stay `None` until separately vetted on the test
+        // fleet.
+        assert_eq!(reasoning_effort_for_model("deepseek-v4-flash"), None);
+        assert_eq!(
+            reasoning_effort_for_model("deepseek-v4-flash:cloud"),
+            None
+        );
     }
 
     #[tokio::test]

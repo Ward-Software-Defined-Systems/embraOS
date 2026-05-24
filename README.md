@@ -27,7 +27,10 @@ Phase 2–5 add A/B partitioned rollback, an `embractl` management CLI, bare-met
 > otherwise-capable models cannot. Models currently vetted to provide full
 > functionality: **`DeepSeek-v4-Pro:cloud`**, **`Qwen3.6-35b-a3b-mlx`**,
 > **`Qwen3.6-35b-a3b-ud-mlx`**, and **`Qwen3.5-9b`**. Experiment freely with others —
-> these four are the ones confirmed to handle the full toolset.
+> these four are the ones confirmed to handle the full toolset. When
+> **`DeepSeek-v4-Pro:cloud`** is the active Ollama model, embraOS auto-sends
+> `reasoning_effort: "max"` (per [DeepSeek's docs](https://api-docs.deepseek.com/guides/thinking_mode))
+> to engage the model's Max-thinking mode — no per-turn operator action.
 
 > **New — a dynamic-tool substrate: `embra-guardian-v1`.** embraOS can now
 > accept **operator-authored dynamic tools**. An operator pastes a Rust module
