@@ -2,7 +2,7 @@
 
 Chronological merge log for `main`, anchored on tagged releases. Each entry's headline summary is pulled from the corresponding sprint section in [../ARCHITECTURE.md](../ARCHITECTURE.md) (local doc, gitignored) — that file remains canonical for design narrative; this file is the navigable release index.
 
-**Last updated:** 2026-05-21.
+**Last updated:** 2026-05-24.
 
 ---
 
@@ -23,6 +23,8 @@ Chronological merge log for `main`, anchored on tagged releases. Each entry's he
 **`b4e94d1`→`7a75a25` — embra-web modal focus return + embra-brain session-resume briefing (2026-05-21).** Modal focus-return Effect at App root watches palette/modal/editor state and calls `term::focus()` on any-open→all-closed. Session-resume briefing dispatch on `SessionAttach` AND the `/switch` slash command (the latter added in `7a75a25` after an operator reported `/switch` skipped the briefing).
 
 **`981818c` — README header callouts (2026-05-21).** Two operator-facing callouts: local-inference model vetting (DeepSeek-v4-Pro:cloud + three Qwen variants confirmed full-toolset-capable) and "memory & knowledge graph today — operator-driven, by conversation" (manual today, automation near-term; `/feedback-loop` is soul/identity realignment, not memory promotion).
+
+**Feedback-loop spec tightened to v2.1 operational backbone (2026-05-24).** `crates/embra-brain/src/brain/feedback_loop_spec_v2.md` rewritten 435 → 274 lines: cut header metadata, Overview, When-to-Run, inline rationale paragraphs, Token Usage Tracking, the Operational Practices list, First Iteration Results, Future Iterations, the duplicate Evaluation Dimensions section, and the closing quote. The 5-step backbone (Gather/Evaluate/Reconcile/Execute/Record) with sub-steps, tool invocations, severity framework, evaluation-dimensions table, decision framework, action definitions, governance boundary, auto-execute tool table, and knowledge-promotion blocks is preserved. `include_str!` path unchanged (`grpc_service.rs:3378`); brain rebuild required for runtime effect because `include_str!` is compile-time. No proto/schema/tool-count/test-count change. Motivation: the spec is pasted verbatim into the synthetic user message every `/feedback-loop` invocation, so every line of narrative cost tokens at runtime.
 
 The `embra-web` and `embra-guardian-v1` feature branches were retired (deleted local + origin) 2026-05-18 once merged — both are fully in `main`. `embra-desktop` is now the only remaining separate workstream branch (`3588236`, forked from `69200e9`; 27 commits; NOT merged; built on `embra-desktop.ops.wsds`).
 
