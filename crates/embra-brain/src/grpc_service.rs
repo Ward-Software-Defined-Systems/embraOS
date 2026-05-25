@@ -768,7 +768,7 @@ async fn handle_request(
             // Send thinking indicator.
             let _ = tx.send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::Thinking(
-                    ThinkingState { is_thinking: true, name: config_name.clone() }
+                    ThinkingState { is_thinking: true, name: config_name.clone(), current_tool: String::new() }
                 )),
             })).await;
 
@@ -1074,12 +1074,34 @@ async fn handle_request(
                                 trace: &trace_handle,
                                 turn_index,
                             };
+                            // Operator-facing tool-execution indicator — rides
+                            // on the existing Thinking signal via `current_tool`.
+                            // Cleared after dispatch regardless of outcome so
+                            // the indicator never lingers on a finished tool.
+                            let _ = tx.send(Ok(ConversationResponse {
+                                response_type: Some(conversation_response::ResponseType::Thinking(
+                                    ThinkingState {
+                                        is_thinking: true,
+                                        name: loaded_config.name.clone(),
+                                        current_tool: name.to_string(),
+                                    }
+                                )),
+                            })).await;
                             let outcome = tools::registry::dispatch(
                                 name,
                                 args.clone(),
                                 ctx,
                             )
                             .await;
+                            let _ = tx.send(Ok(ConversationResponse {
+                                response_type: Some(conversation_response::ResponseType::Thinking(
+                                    ThinkingState {
+                                        is_thinking: true,
+                                        name: loaded_config.name.clone(),
+                                        current_tool: String::new(),
+                                    }
+                                )),
+                            })).await;
                             let elapsed_ms = started.elapsed().as_millis() as u64;
                             let (content, is_error) = match outcome {
                                 Ok(s) => (s, false),
@@ -1101,6 +1123,16 @@ async fn handle_request(
                                     true,
                                 ),
                                 Err(embra_tools_core::DispatchError::Handler(msg)) => (msg, true),
+                                Err(embra_tools_core::DispatchError::Timeout { tool, limit_secs }) => (
+                                    format!(
+                                        "Tool '{}' exceeded the {}s global execution timeout. \
+                                         The command may still be running on the remote/host but \
+                                         its result will not be visible to you. Consider breaking \
+                                         the work into smaller chunks or backgrounding it.",
+                                        tool, limit_secs
+                                    ),
+                                    true,
+                                ),
                             };
                             info!(
                                 target: "dispatch",
@@ -3553,7 +3585,7 @@ async fn run_learning_loop(
         // Send thinking indicator
         let _ = tx.send(Ok(ConversationResponse {
             response_type: Some(conversation_response::ResponseType::Thinking(
-                ThinkingState { is_thinking: true, name: config.name.clone() }
+                ThinkingState { is_thinking: true, name: config.name.clone(), current_tool: String::new() }
             )),
         })).await;
 
@@ -3654,7 +3686,7 @@ async fn run_learning_loop(
 
                             let _ = tx.send(Ok(ConversationResponse {
                                 response_type: Some(conversation_response::ResponseType::Thinking(
-                                    ThinkingState { is_thinking: true, name: config.name.clone() }
+                                    ThinkingState { is_thinking: true, name: config.name.clone(), current_tool: String::new() }
                                 )),
                             })).await;
 
@@ -3750,7 +3782,7 @@ async fn stream_brain_to_grpc(
                 if first_token {
                     let _ = tx.send(Ok(ConversationResponse {
                         response_type: Some(conversation_response::ResponseType::Thinking(
-                            ThinkingState { is_thinking: false, name: String::new() }
+                            ThinkingState { is_thinking: false, name: String::new(), current_tool: String::new() }
                         )),
                     })).await;
                     first_token = false;
@@ -4151,6 +4183,7 @@ async fn collect_response(
                                 ThinkingState {
                                     is_thinking: false,
                                     name: String::new(),
+                                    current_tool: String::new(),
                                 },
                             )),
                         }))

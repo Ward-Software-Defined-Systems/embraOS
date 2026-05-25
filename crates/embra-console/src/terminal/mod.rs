@@ -233,10 +233,25 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
             ));
             app.scroll_offset = 0;
         }
-        ConsoleEvent::ThinkingState { is_thinking, name } => {
+        ConsoleEvent::ThinkingState { is_thinking, name, current_tool } => {
             app.thinking = is_thinking;
             if !name.is_empty() {
                 app.thinking_name = name;
+            }
+            match current_tool {
+                Some(tool) => {
+                    // Only restart the elapsed clock if the tool name
+                    // actually changed — duplicate signals during a single
+                    // dispatch shouldn't reset the displayed "(Ns)".
+                    if app.current_tool.as_deref() != Some(&tool) {
+                        app.current_tool_started = Some(std::time::Instant::now());
+                    }
+                    app.current_tool = Some(tool);
+                }
+                None => {
+                    app.current_tool = None;
+                    app.current_tool_started = None;
+                }
             }
         }
         ConsoleEvent::ModeTransition { from_mode: _, to_mode, message } => {

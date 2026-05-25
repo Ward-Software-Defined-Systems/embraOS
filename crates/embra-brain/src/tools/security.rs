@@ -470,24 +470,21 @@ pub async fn ssh_remote_admin(param: &str) -> String {
         format!("{}@{}:{}", user, host, port)
     };
 
-    let result = tokio::time::timeout(
-        Duration::from_secs(30),
-        tokio::process::Command::new("ssh")
-            .arg("-p").arg(port.to_string())
-            .arg("-i").arg(SSH_KEY_PATH)
-            .arg("-o").arg(format!("UserKnownHostsFile={}", SSH_KNOWN_HOSTS))
-            .arg("-o").arg("StrictHostKeyChecking=accept-new")
-            .arg("-o").arg("ConnectTimeout=10")
-            .arg("-o").arg("BatchMode=yes")
-            .arg("-o").arg("PasswordAuthentication=no")
-            .arg(format!("{}@{}", user, host))
-            .arg(command)
-            .output(),
-    )
-    .await;
+    let result = tokio::process::Command::new("ssh")
+        .arg("-p").arg(port.to_string())
+        .arg("-i").arg(SSH_KEY_PATH)
+        .arg("-o").arg(format!("UserKnownHostsFile={}", SSH_KNOWN_HOSTS))
+        .arg("-o").arg("StrictHostKeyChecking=accept-new")
+        .arg("-o").arg("ConnectTimeout=10")
+        .arg("-o").arg("BatchMode=yes")
+        .arg("-o").arg("PasswordAuthentication=no")
+        .arg(format!("{}@{}", user, host))
+        .arg(command)
+        .output()
+        .await;
 
     match result {
-        Ok(Ok(output)) => {
+        Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let code = output.status.code().unwrap_or(-1);
@@ -502,19 +499,12 @@ pub async fn ssh_remote_admin(param: &str) -> String {
                 host_display, command, code, stdout.trim(), stderr.trim()
             )
         }
-        Ok(Err(e)) => format!(
+        Err(e) => format!(
             "[EXPERIMENTAL] SSH Remote Admin — use at your own risk\n\
              Host: {}\n\
              Command: {}\n\
              Error: {}",
             host_display, command, e
-        ),
-        Err(_) => format!(
-            "[EXPERIMENTAL] SSH Remote Admin — use at your own risk\n\
-             Host: {}\n\
-             Command: {}\n\
-             Error: command timed out after 30 seconds",
-            host_display, command
         ),
     }
 }
@@ -667,19 +657,16 @@ pub async fn ssh_session_exec(param: &str) -> String {
     }
 
     // Run command as a discrete SSH process through the ControlMaster socket
-    let result = tokio::time::timeout(
-        Duration::from_secs(30),
-        tokio::process::Command::new("ssh")
-            .arg("-o").arg(format!("ControlPath={}", session.control_path))
-            .arg("-o").arg("ConnectTimeout=10")
-            .arg(&session.user_host)
-            .arg(param)
-            .output(),
-    )
-    .await;
+    let result = tokio::process::Command::new("ssh")
+        .arg("-o").arg(format!("ControlPath={}", session.control_path))
+        .arg("-o").arg("ConnectTimeout=10")
+        .arg(&session.user_host)
+        .arg(param)
+        .output()
+        .await;
 
     match result {
-        Ok(Ok(output)) => {
+        Ok(output) => {
             let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
             let code = output.status.code().unwrap_or(-1);
@@ -701,17 +688,11 @@ pub async fn ssh_session_exec(param: &str) -> String {
                 session.user_host, param, combined.trim()
             )
         }
-        Ok(Err(e)) => format!(
+        Err(e) => format!(
             "[EXPERIMENTAL] SSH session exec on {}\n\
              Command: {}\n\
              Error: {}",
             session.user_host, param, e
-        ),
-        Err(_) => format!(
-            "[EXPERIMENTAL] SSH session exec on {}\n\
-             Command: {}\n\
-             Error: timed out after 30 seconds",
-            session.user_host, param
         ),
     }
 }
@@ -852,7 +833,7 @@ impl PortScanArgs {
 #[embra_tool(
     name = "ssh_remote_admin",
     is_side_effectful = true,
-    description = "Execute a single command on a remote host via SSH (EXPERIMENTAL). Restricted to RFC 1918 private ranges and loopback. target format: host OR user@host OR user@host:port. 30s timeout."
+    description = "Execute a single command on a remote host via SSH (EXPERIMENTAL). Restricted to RFC 1918 private ranges and loopback. target format: host OR user@host OR user@host:port."
 )]
 pub struct SshRemoteAdminArgs {
     /// SSH target: host OR user@host OR user@host:port.
@@ -889,7 +870,7 @@ impl SshSessionStartArgs {
 #[embra_tool(
     name = "ssh_session_exec",
     is_side_effectful = true,
-    description = "Run a command in the open SSH session. 30s timeout. Each command runs in a fresh process; state between commands is not preserved by the shell."
+    description = "Run a command in the open SSH session. Each command runs in a fresh process; state between commands is not preserved by the shell."
 )]
 pub struct SshSessionExecArgs {
     /// Command to run on the remote host.

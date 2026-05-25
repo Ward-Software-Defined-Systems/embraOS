@@ -130,9 +130,9 @@ Phase 1 includes 92 internal tools the intelligence invokes during conversation.
 |---|---|
 | **security_check** | Container security overview — running processes, load average, listening ports |
 | **port_scan** | TCP connect scan with banner grabbing — supports specific ports (`80,443`), ranges (`8000-8100`), and presets (`web`, `db`, `all`). Semaphore-limited concurrency. Restricted to RFC 1918 private and loopback addresses only |
-| **ssh_remote_admin** | Execute a single command on a remote host via SSH — host forms: `host`, `user@host`, `host:port`, `user@host:port`. 30s timeout (EXPERIMENTAL) |
+| **ssh_remote_admin** | Execute a single command on a remote host via SSH — host forms: `host`, `user@host`, `host:port`, `user@host:port` (EXPERIMENTAL) |
 | **ssh_session_start** | Open a persistent SSH session via ControlMaster — connection validated with probe command. Same host forms as `ssh_remote_admin` (`host:port` / `user@host:port` supported). One session at a time (EXPERIMENTAL) |
-| **ssh_session_exec** | Run a command in the open SSH session — each command gets a clean process lifecycle via ControlMaster socket. 30s timeout (EXPERIMENTAL) |
+| **ssh_session_exec** | Run a command in the open SSH session — each command gets a clean process lifecycle via ControlMaster socket (EXPERIMENTAL) |
 | **ssh_session_end** | Close SSH session and tear down ControlMaster connection (EXPERIMENTAL) |
 
 > **⚠️ SSH Security:** SSH tools are restricted to RFC 1918 private addresses (10.x, 172.16-31.x, 192.168.x) and loopback (127.x, localhost). Public IP targets are denied. Connections use `StrictHostKeyChecking=accept-new` (auto-accepts first-time hosts, rejects changed keys). Password authentication is disabled — key-based auth required (see [QUICK-START.md](QUICK-START.md)). These tools are marked EXPERIMENTAL — use at your own risk.

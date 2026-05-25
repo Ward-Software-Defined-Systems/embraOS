@@ -80,6 +80,13 @@ pub fn all_descriptors() -> impl Iterator<Item = &'static ToolDescriptor> {
 }
 
 const MAX_TOOL_RESULT_SIZE: usize = 2_097_152;
+/// Global wall-clock ceiling for any single tool dispatch. The mirror of
+/// [`MAX_TOOL_RESULT_SIZE`] for execution time: it bounds runaway tools
+/// uniformly instead of relying on each handler to wrap itself. Tools that
+/// need a tighter ceiling (`port_scan` per-port probes, `ssh_session_start`
+/// handshake, `gh_clone`, etc.) keep their own inner `tokio::time::timeout`
+/// wrappers; this is the backstop, not the operational limit.
+const MAX_TOOL_DURATION: std::time::Duration = std::time::Duration::from_secs(600);
 
 fn apply_max_size(s: String) -> String {
     if s.len() <= MAX_TOOL_RESULT_SIZE {
@@ -92,11 +99,31 @@ fn apply_max_size(s: String) -> String {
     format!("{}...\n[truncated: {} bytes total]", &s[..end], s.len())
 }
 
+/// Wraps a handler future in a wall-time ceiling. Lifted out of
+/// [`dispatch`] so the timeout behavior is unit-testable without standing
+/// up a full `DispatchContext` against the live `REGISTRY`.
+pub(crate) async fn enforce_timeout<F>(
+    fut: F,
+    tool: &str,
+    timeout: std::time::Duration,
+) -> Result<String, DispatchError>
+where
+    F: std::future::Future<Output = Result<String, DispatchError>>,
+{
+    match tokio::time::timeout(timeout, fut).await {
+        Ok(result) => result,
+        Err(_) => Err(DispatchError::Timeout {
+            tool: tool.into(),
+            limit_secs: timeout.as_secs(),
+        }),
+    }
+}
+
 /// Native-tool-use dispatcher.
 ///
 /// Looks up `name` in [`REGISTRY`], runs the handler with the typed
-/// context, and applies the 2 MiB result cap that matched the legacy
-/// dispatcher's behavior. Stage 3 wires this into the gRPC dispatch loop.
+/// context under the [`MAX_TOOL_DURATION`] ceiling, and applies the
+/// 2 MiB result cap. Stage 3 wires this into the gRPC dispatch loop.
 pub async fn dispatch(
     name: &str,
     input: JsonValue,
@@ -105,8 +132,45 @@ pub async fn dispatch(
     let Some(desc) = REGISTRY.get(name) else {
         return Err(DispatchError::Unknown(name.into()));
     };
-    let raw = (desc.handler)(input, ctx).await?;
+    let raw = enforce_timeout((desc.handler)(input, ctx), name, MAX_TOOL_DURATION).await?;
     Ok(apply_max_size(raw))
+}
+
+#[cfg(test)]
+mod timeout_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn enforce_timeout_passes_through_fast_ok() {
+        let fast = async { Ok::<_, DispatchError>("done".to_string()) };
+        let res = enforce_timeout(fast, "fake", std::time::Duration::from_secs(1)).await;
+        assert_eq!(res.unwrap(), "done");
+    }
+
+    #[tokio::test]
+    async fn enforce_timeout_passes_through_handler_error() {
+        let err = async { Err::<String, _>(DispatchError::Handler("boom".to_string())) };
+        let res = enforce_timeout(err, "fake", std::time::Duration::from_secs(1)).await;
+        assert!(matches!(res, Err(DispatchError::Handler(m)) if m == "boom"));
+    }
+
+    #[tokio::test]
+    async fn enforce_timeout_returns_timeout_when_exceeded() {
+        // Real-time short durations — workspace tokio doesn't have the
+        // `test-util` feature enabled, so `start_paused` isn't available.
+        // 50ms timeout vs 500ms sleep is well above the scheduler tick so
+        // the timeout fires reliably without being flaky.
+        let slow = async {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            Ok::<_, DispatchError>("never".to_string())
+        };
+        let res = enforce_timeout(slow, "fake_tool", std::time::Duration::from_millis(50)).await;
+        assert!(matches!(
+            res,
+            Err(DispatchError::Timeout { tool, .. })
+                if tool == "fake_tool"
+        ));
+    }
 }
 
 /// Write the current tool registry snapshot to WardSONDB's `tools.registry`

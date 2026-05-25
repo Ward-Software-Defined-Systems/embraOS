@@ -150,6 +150,15 @@ pub struct AppState {
     pub streaming_text: Option<String>,
     pub thinking: bool,
     pub thinking_name: String,
+    /// Name of the tool currently mid-`tools::registry::dispatch`, surfaced
+    /// by the brain on the existing Thinking signal so the operator-facing
+    /// indicator can show "<name> is running <tool> (Ns)..." while a tool
+    /// is in flight. `None` outside dispatch.
+    pub current_tool: Option<String>,
+    /// Wall-clock instant when `current_tool` last changed, used to render
+    /// elapsed seconds next to the tool name. Reset only on a *changed*
+    /// tool — duplicate signals for the same tool don't restart the clock.
+    pub current_tool_started: Option<std::time::Instant>,
     pub status_message: String,
     pub should_quit: bool,
     pub selector: Option<Selector>,
@@ -201,6 +210,8 @@ impl AppState {
             streaming_text: None,
             thinking: false,
             thinking_name: "Embra".to_string(),
+            current_tool: None,
+            current_tool_started: None,
             status_message: String::new(),
             should_quit: false,
             selector: None,

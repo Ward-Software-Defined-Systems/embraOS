@@ -117,6 +117,11 @@ message ToolExecution {
 message ThinkingState {
   bool is_thinking = 1;
   string name = 2;  // AI name for "X is thinking..."
+  // When non-empty, the operator-facing indicator should render
+  // "<name> is running <current_tool>..." instead of the generic
+  // "thinking" label. Set by embra-brain immediately before
+  // `tools::registry::dispatch` and cleared immediately after.
+  string current_tool = 3;
 }
 
 message ModeTransition {

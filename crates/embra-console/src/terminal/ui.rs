@@ -290,7 +290,7 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
         styled_lines.push(vec![StyledSegment::new(String::new(), Style::default())]);
     }
 
-    // Show thinking indicator
+    // Show thinking / tool-execution indicator
     if app.thinking && app.streaming_text.is_none() {
         let elapsed = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -301,8 +301,15 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
             1 => "..",
             _ => "...",
         };
+        let label = match (&app.current_tool, app.current_tool_started) {
+            (Some(tool), Some(started)) => {
+                let secs = started.elapsed().as_secs();
+                format!("  {} is running {} ({}s){}", app.thinking_name, tool, secs, dots)
+            }
+            _ => format!("  {} is thinking{}", app.thinking_name, dots),
+        };
         styled_lines.push(vec![StyledSegment::new(
-            format!("  {} is thinking{}", app.thinking_name, dots),
+            label,
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),

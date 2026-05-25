@@ -28,6 +28,8 @@ pub enum DispatchError {
     },
     #[error("{0}")]
     Handler(String),
+    #[error("tool '{tool}' exceeded {limit_secs}s global execution timeout")]
+    Timeout { tool: String, limit_secs: u64 },
 }
 
 /// One tool invocation recorded in the current turn's trace.

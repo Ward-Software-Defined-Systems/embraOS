@@ -27,7 +27,7 @@ pub enum ConsoleEvent {
         result: String,
         is_error: bool,
     },
-    ThinkingState { is_thinking: bool, name: String },
+    ThinkingState { is_thinking: bool, name: String, current_tool: Option<String> },
     ModeTransition { from_mode: i32, to_mode: i32, message: String },
     SetupPrompt { field_type: String, prompt: String, options: Vec<String>, default_value: String },
     /// Live reasoning/CoT shard from the brain. Routed exclusively to
@@ -108,6 +108,11 @@ impl BrainClient {
                                         ConsoleEvent::ThinkingState {
                                             is_thinking: t.is_thinking,
                                             name: t.name,
+                                            current_tool: if t.current_tool.is_empty() {
+                                                None
+                                            } else {
+                                                Some(t.current_tool)
+                                            },
                                         }
                                     }
                                     brain::conversation_response::ResponseType::ModeChange(m) => {
