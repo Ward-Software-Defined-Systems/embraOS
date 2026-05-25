@@ -58,13 +58,21 @@
 
   window.embraTermInit = function (elId) {
     if (term) return; // once
+    // fontSize is pulled from the shell's --term-fs CSS variable so
+    // app.css is the single source of truth for the font-size
+    // hierarchy. Falls back to 15 (xterm.js's own default) if the
+    // variable can't be parsed.
+    const termFs = parseInt(
+      getComputedStyle(document.documentElement).getPropertyValue("--term-fs"),
+      10
+    ) || 15;
     term = new Terminal({
       fontFamily: "'JetBrains Mono','Fira Code',ui-monospace,monospace",
       // scrollback: 0 — the TUI is full-screen ratatui drawn on the
       // normal buffer (no alt-screen, for QEMU serial parity), so it
       // repaints the whole screen every ~200ms. Any scrollback would
       // just be stale snapshots the user could wheel away into.
-      fontSize: 14, cursorBlink: true, scrollback: 0,
+      fontSize: termFs, cursorBlink: true, scrollback: 0,
       // Warm brand bg + amber (flame) cursor to blend with the shell.
       // The 16 ANSI colors are intentionally left at xterm defaults so
       // the real ratatui TUI's own colors render true (parity-safe).
