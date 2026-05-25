@@ -8,18 +8,6 @@ use tokio::sync::Semaphore;
 const SSH_KEY_PATH: &str = "/embra/workspace/.ssh/id_ed25519";
 const SSH_KNOWN_HOSTS: &str = "/embra/workspace/.ssh/known_hosts";
 
-/// Truncate a string to at most `max_bytes`, snapping to a char boundary.
-fn truncate_str(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
 /// Run a basic security/system check by reading container info.
 pub async fn security_check() -> String {
     let mut output = String::from("=== Security Check ===\n");
@@ -504,18 +492,6 @@ pub async fn ssh_remote_admin(param: &str) -> String {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let code = output.status.code().unwrap_or(-1);
 
-            // Truncate to 10KB (char-boundary safe)
-            let stdout_trunc = if stdout.len() > 10240 {
-                format!("{}\n[OUTPUT TRUNCATED AT 10KB]", truncate_str(&stdout, 10240))
-            } else {
-                stdout.to_string()
-            };
-            let stderr_trunc = if stderr.len() > 10240 {
-                format!("{}\n[OUTPUT TRUNCATED AT 10KB]", truncate_str(&stderr, 10240))
-            } else {
-                stderr.to_string()
-            };
-
             format!(
                 "[EXPERIMENTAL] SSH Remote Admin — use at your own risk\n\
                  Host: {}\n\
@@ -523,7 +499,7 @@ pub async fn ssh_remote_admin(param: &str) -> String {
                  Exit code: {}\n\n\
                  --- stdout ---\n{}\n\
                  --- stderr ---\n{}",
-                host_display, command, code, stdout_trunc.trim(), stderr_trunc.trim()
+                host_display, command, code, stdout.trim(), stderr.trim()
             )
         }
         Ok(Err(e)) => format!(
@@ -708,20 +684,10 @@ pub async fn ssh_session_exec(param: &str) -> String {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let code = output.status.code().unwrap_or(-1);
 
-            // Combine stdout + stderr
-            let mut combined = if stdout.len() > 10240 {
-                format!("{}\n[OUTPUT TRUNCATED AT 10KB]", truncate_str(&stdout, 10240))
-            } else {
-                stdout.to_string()
-            };
+            let mut combined = stdout.to_string();
 
             if !stderr.trim().is_empty() {
-                let stderr_trunc = if stderr.len() > 10240 {
-                    format!("{}\n[OUTPUT TRUNCATED AT 10KB]", truncate_str(&stderr, 10240))
-                } else {
-                    stderr.to_string()
-                };
-                combined.push_str(&format!("\n[stderr]:\n{}", stderr_trunc.trim()));
+                combined.push_str(&format!("\n[stderr]:\n{}", stderr.trim()));
             }
 
             if code != 0 {
@@ -923,7 +889,7 @@ impl SshSessionStartArgs {
 #[embra_tool(
     name = "ssh_session_exec",
     is_side_effectful = true,
-    description = "Run a command in the open SSH session. 30s timeout, 10KB output truncation. Each command runs in a fresh process; state between commands is not preserved by the shell."
+    description = "Run a command in the open SSH session. 30s timeout. Each command runs in a fresh process; state between commands is not preserved by the shell."
 )]
 pub struct SshSessionExecArgs {
     /// Command to run on the remote host.
