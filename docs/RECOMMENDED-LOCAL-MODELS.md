@@ -1,6 +1,6 @@
 # Recommended Models for OpenAI-Compatible Providers
 
-**Status:** Active testing in progress. Models below are locked for Sprint 5 smoke-testing; operator-overridable at wizard time.
+**Status:** Phase 1 stable since `v0.5.0-phase1` (2026-05-07). Models below are operator-vetted as full-toolset-capable on William's test fleet (see also the README header callout for the same list, surfaced for fresh GitHub readers); operator-overridable at wizard time.
 
 The wizard's selector reads `GET /v1/models` from the configured server, so any pulled (Ollama) or loaded (LM Studio) model is selectable regardless of what's listed here.
 
@@ -8,8 +8,9 @@ Hardware mapping for the test fleet:
 
 - **Ollama** runs on the **M1 Mac Mini, 16 GB unified memory**
 - **LM Studio** runs on the **Mac Studio M4 Max, 128 GB unified memory**
+- **Ollama Cloud** (the `:cloud` tag suffix) — hosted by Ollama; no local hardware allocation
 
-Both servers run the **Qwen3.x family** for behavioral parity: same chat template, same thinking-mode semantics, same tool-call format, same `ProviderOpaque` thinking-block handling.
+Both local servers run the **Qwen3.x family** for behavioral parity: same chat template, same thinking-mode semantics, same tool-call format, same `ProviderOpaque` thinking-block handling. Ollama Cloud is a separate DeepSeek-family tier for heavy reasoning workloads (see below).
 
 ---
 
@@ -37,6 +38,18 @@ Both servers run the **Qwen3.x family** for behavioral parity: same chat templat
 - Native context is 256K; configured to 128K for 100% GPU on 16 GB (operator-verified). Sliding-window attention keeps KV cache small enough that 128K fits.
 - Same Qwen3.x family as the Studio for behavioral parity. Mini test results are predictive of Studio behavior.
 - **Not a deployment target.** This tier is for wire-format CI and behavioral smoke tests, not production embra-brain operation.
+
+### Ollama Cloud (no local hardware required)
+
+| Pick | Model | Tag | Native ctx | Role |
+|------|-------|-----|------------|------|
+| 1 | DeepSeek-V4-Pro | `deepseek-v4-pro:cloud` | 1M | Full-toolset reasoning workloads |
+
+**Notes:**
+- The `:cloud` suffix routes through Ollama's hosted infrastructure; no local VRAM or CPU cost.
+- 1.6T-parameter MoE (49B activated per token); three thinking modes — "No thinking" / "Thinking" / "Max thinking" — toggled by `reasoning_effort` per [DeepSeek's docs](https://api-docs.deepseek.com/guides/thinking_mode).
+- **embra-brain auto-engages Max thinking for this model** (and any model whose name contains `deepseek-v4-pro`, case-insensitive): the OpenAI-compat provider sends `reasoning_effort: "max"` automatically — no per-turn operator action. The route table is `reasoning_effort_for_model` in `crates/embra-brain/src/provider/openai_compat/mod.rs`. Empirical Max-thinking response-signature confirmation in QEMU is still pending — Learning-Mode boot reach is verified, but the deeper-trace signature characteristic of Max thinking has not yet been compared against a Thinking-mode baseline.
+- Cloud models bypass the local Ollama env-var configuration below — context window and KV-cache layout are server-managed.
 
 ---
 
@@ -69,6 +82,8 @@ launchctl setenv OLLAMA_KV_CACHE_TYPE q8_0
 All three vars are required together. Without `OLLAMA_FLASH_ATTENTION=1`, KV cache quantization silently falls back to f16 (per `ollama/ollama#13337`).
 
 embra-brain sends sampler params and Ollama's `think: true` flag in each request — operators don't configure these.
+
+**`:cloud` models** (e.g. `deepseek-v4-pro:cloud`) bypass these env vars entirely — context window and KV-cache layout are managed by Ollama's hosted infrastructure. `num_ctx` is not a documented field on Ollama's OpenAI-compat endpoint anyway, regardless of local/cloud mode (per [`ollama#7063`](https://github.com/ollama/ollama/issues/7063), still open since 2024-10-01).
 
 ### Bearer auth
 
@@ -105,4 +120,4 @@ Both lists are operator-overridable at wizard time. Switching models post-wizard
 
 ---
 
-*Last updated: 2026-05-06.*
+*Last updated: 2026-05-25.*
