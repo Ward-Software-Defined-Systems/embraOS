@@ -13,6 +13,28 @@ pub struct Svc {
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
+pub struct SystemMetrics {
+    /// `None` on the first poll (no baseline) or non-Linux dev build.
+    #[serde(default)]
+    pub cpu_pct: Option<f64>,
+    #[serde(default)]
+    pub mem_total_bytes: Option<u64>,
+    #[serde(default)]
+    pub mem_used_bytes: Option<u64>,
+    #[serde(default)]
+    pub mem_pct: Option<f64>,
+    #[serde(default)]
+    pub load1: Option<f64>,
+    #[serde(default)]
+    pub load5: Option<f64>,
+    #[serde(default)]
+    pub load15: Option<f64>,
+    /// Logical core count, for grading load average relative to capacity.
+    #[serde(default)]
+    pub cpu_count: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct StatusData {
     #[serde(default)]
     pub services: Vec<Svc>,
@@ -20,6 +42,8 @@ pub struct StatusData {
     pub version: Option<String>,
     #[serde(default)]
     pub ts: u64,
+    #[serde(default)]
+    pub system: Option<SystemMetrics>,
 }
 
 /// Create the status signal and start the 5 s poll loop.

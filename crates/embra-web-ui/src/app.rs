@@ -157,6 +157,64 @@ fn flat() -> Vec<(&'static str, &'static str)> {
     v
 }
 
+/// Severity-color class for a 0..100 utilization percent.
+fn severity_pct(pct: f64) -> &'static str {
+    if pct >= 90.0 {
+        "danger"
+    } else if pct >= 70.0 {
+        "warn"
+    } else {
+        "good"
+    }
+}
+
+/// Severity for load average — graded relative to logical core count.
+fn severity_load(load1: f64, cpu_count: Option<u32>) -> &'static str {
+    match cpu_count {
+        Some(n) if n > 0 => {
+            let n = n as f64;
+            if load1 >= 2.0 * n {
+                "danger"
+            } else if load1 >= n {
+                "warn"
+            } else {
+                "good"
+            }
+        }
+        _ => "good",
+    }
+}
+
+/// Bar+number meter pill — used for CPU and memory utilization.
+fn meter_pill(label: &'static str, pct: f64, tooltip: String) -> impl IntoView {
+    let sev = severity_pct(pct);
+    view! {
+        <span class=format!("pill meter {sev}") title=tooltip>
+            <span class="meter-name">{label}</span>
+            <span class="meter-bar">
+                <span class="meter-fill" style=format!("width: {:.0}%", pct.clamp(0.0, 100.0))></span>
+            </span>
+            <span class="meter-num">{format!("{pct:.0}%")}</span>
+        </span>
+    }
+}
+
+/// Dot pill for load average — no bar (load has no natural ceiling),
+/// just the 1-minute value with severity color relative to core count.
+fn load_pill(load1: f64, load5: f64, load15: f64, cpu_count: Option<u32>) -> impl IntoView {
+    let sev = severity_load(load1, cpu_count);
+    let tooltip = match cpu_count {
+        Some(n) => format!("1m {load1:.2}  5m {load5:.2}  15m {load15:.2}  ({n} cores)"),
+        None => format!("1m {load1:.2}  5m {load5:.2}  15m {load15:.2}"),
+    };
+    view! {
+        <span class=format!("pill load {sev}") title=tooltip>
+            <span class="dot"></span>
+            <span class="meter-num">{format!("LOAD {load1:.2}")}</span>
+        </span>
+    }
+}
+
 #[component]
 pub fn App() -> impl IntoView {
     let status = use_status();
@@ -275,6 +333,29 @@ pub fn App() -> impl IntoView {
                             </span>
                         }
                     }).collect_view()}
+                    {move || {
+                        let sys = status.get().system?;
+                        let cpu = sys.cpu_pct.map(|pct| meter_pill(
+                            "CPU", pct,
+                            "CPU across all cores (5 s average)".to_string(),
+                        ));
+                        let mem = sys.mem_pct.map(|pct| {
+                            let used = sys.mem_used_bytes.unwrap_or(0);
+                            let total = sys.mem_total_bytes.unwrap_or(0);
+                            meter_pill("MEM", pct, format!(
+                                "{:.1} GB / {:.1} GB used",
+                                used as f64 / 1_073_741_824.0,
+                                total as f64 / 1_073_741_824.0,
+                            ))
+                        });
+                        let load = sys.load1.map(|l1| load_pill(
+                            l1,
+                            sys.load5.unwrap_or(0.0),
+                            sys.load15.unwrap_or(0.0),
+                            sys.cpu_count,
+                        ));
+                        Some(view! { <>{cpu}{mem}{load}</> })
+                    }}
                 </div>
                 <div class="role">
                     {move || {

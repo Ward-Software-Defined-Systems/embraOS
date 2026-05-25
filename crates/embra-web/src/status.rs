@@ -9,9 +9,13 @@
 use std::time::Duration;
 
 use axum::Json;
+use axum::extract::State;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+use crate::metrics;
+use crate::state::AppState;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -55,7 +59,7 @@ fn parse_version(resp: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
-pub async fn api_status() -> Json<Value> {
+pub async fn api_status(State(state): State<AppState>) -> Json<Value> {
     // Probe concurrently; each is bounded by PROBE_TIMEOUT.
     let (wardson, trustd, apid_grpc, apid_http, brain) = tokio::join!(
         http_get("127.0.0.1:8090", "/_health"),
@@ -86,5 +90,50 @@ pub async fn api_status() -> Json<Value> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    Json(json!({ "services": services, "version": version, "ts": ts }))
+    let system = collect_system_metrics(&state);
+
+    Json(json!({
+        "services": services,
+        "version": version,
+        "ts": ts,
+        "system": system,
+    }))
+}
+
+/// Snapshot CPU / memory / load. Returns `Value::Null` when nothing
+/// useful is available (non-Linux dev build, /proc read failure, etc.)
+/// so the frontend can hide the meters cleanly.
+fn collect_system_metrics(state: &AppState) -> Value {
+    let curr_cpu = metrics::read_cpu_snapshot();
+    let mem = metrics::read_mem_info();
+    let load = metrics::read_loadavg();
+
+    // CPU% needs two samples. Swap curr into shared state; if a prev
+    // existed, compute the delta-based percent. First poll → `null`.
+    let cpu_pct = match curr_cpu {
+        Some(curr) => {
+            let prev = state.cpu_snap.lock().ok().and_then(|mut g| g.replace(curr));
+            prev.and_then(|p| metrics::compute_cpu_pct(&p, &curr))
+        }
+        None => None,
+    };
+
+    if cpu_pct.is_none() && mem.is_none() && load.is_none() {
+        return Value::Null;
+    }
+
+    // `available_parallelism` works cross-platform without /proc — it lets
+    // the frontend color-code the LOAD pill relative to the core count.
+    let cpu_count = std::thread::available_parallelism().map(|n| n.get()).ok();
+
+    json!({
+        "cpu_pct": cpu_pct,
+        "cpu_count": cpu_count,
+        "mem_total_bytes": mem.map(|m| m.total_bytes),
+        "mem_used_bytes": mem.map(|m| m.used_bytes()),
+        "mem_pct": mem.and_then(|m| m.used_pct()),
+        "load1": load.map(|l| l.load1),
+        "load5": load.map(|l| l.load5),
+        "load15": load.map(|l| l.load15),
+    })
 }

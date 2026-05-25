@@ -64,6 +64,28 @@ body { background:
 .pill.down .dot { background: var(--bad); box-shadow: 0 0 7px var(--bad); }
 .pill.down { color: var(--bad); border-color: #3a201a; }
 
+/* System-resource meters (CPU / MEM): label, mini fill bar, percent. */
+.pill.meter { gap: 8px; }
+.pill .meter-name { color: var(--txt); font-weight: 600; letter-spacing: .3px; }
+.pill .meter-bar {
+  width: 32px; height: 8px; background: var(--panel-2);
+  border-radius: 4px; overflow: hidden; border: 1px solid var(--line);
+}
+.pill .meter-fill {
+  display: block; height: 100%; background: var(--good);
+  transition: width .4s ease;
+}
+.pill.meter.warn   .meter-fill { background: var(--warn); }
+.pill.meter.danger .meter-fill { background: var(--bad); }
+.pill.meter.danger { color: var(--bad); border-color: #3a201a; }
+.pill .meter-num { font-variant-numeric: tabular-nums; }
+
+/* Load-average pill — dot + value, severity colored relative to cores. */
+.pill.load .dot { background: var(--good); box-shadow: 0 0 7px var(--good); }
+.pill.load.warn   .dot { background: var(--warn); box-shadow: 0 0 7px var(--warn); }
+.pill.load.danger .dot { background: var(--bad);  box-shadow: 0 0 7px var(--bad);  }
+.pill.load.danger { color: var(--bad); border-color: #3a201a; }
+
 .role { display: flex; align-items: center; gap: 10px; }
 .role .badge { font-size: var(--text-xs); padding: 4px 10px; border-radius: 6px;
   border: 1px solid var(--line); }

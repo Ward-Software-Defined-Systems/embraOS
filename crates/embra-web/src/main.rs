@@ -12,12 +12,15 @@
 mod arbiter;
 mod assets;
 mod config;
+mod metrics;
 mod pty_bridge;
 mod server;
 mod state;
 mod status;
 mod tls;
 mod ws;
+
+use std::sync::{Arc, Mutex};
 
 use arbiter::Arbiter;
 use config::WebConfig;
@@ -52,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         bridge,
         arbiter: Arbiter::new(),
+        cpu_snap: Arc::new(Mutex::new(None)),
     };
 
     server::serve(&cfg, state, server_config).await
