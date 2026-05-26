@@ -120,17 +120,16 @@ fn collect_system_metrics(state: &AppState) -> Value {
         None => None,
     };
 
-    // DISK pill is a worst-of-both rollup so a filling STATE escalates
-    // the meter even when DATA is calm. Bytes for each are sent through
-    // so the frontend can build a per-partition tooltip.
-    let disk_pct = match (data.and_then(|d| d.used_pct()), state_fs.and_then(|s| s.used_pct())) {
-        (Some(a), Some(b)) => Some(a.max(b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
-    };
+    // Per-partition percents so DATA and STATE render as their own pills.
+    let data_pct = data.and_then(|d| d.used_pct());
+    let state_pct = state_fs.and_then(|s| s.used_pct());
 
-    if cpu_pct.is_none() && mem.is_none() && load.is_none() && disk_pct.is_none() {
+    if cpu_pct.is_none()
+        && mem.is_none()
+        && load.is_none()
+        && data_pct.is_none()
+        && state_pct.is_none()
+    {
         return Value::Null;
     }
 
@@ -147,9 +146,10 @@ fn collect_system_metrics(state: &AppState) -> Value {
         "load1": load.map(|l| l.load1),
         "load5": load.map(|l| l.load5),
         "load15": load.map(|l| l.load15),
-        "disk_pct": disk_pct,
+        "data_pct": data_pct,
         "data_total_bytes": data.map(|d| d.total_bytes),
         "data_used_bytes": data.map(|d| d.used_bytes()),
+        "state_pct": state_pct,
         "state_total_bytes": state_fs.map(|s| s.total_bytes),
         "state_used_bytes": state_fs.map(|s| s.used_bytes()),
     })

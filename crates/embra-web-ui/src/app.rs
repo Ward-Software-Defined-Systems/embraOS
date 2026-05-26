@@ -10,7 +10,7 @@
 use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 
-use crate::status::{SystemMetrics, use_status};
+use crate::status::use_status;
 use crate::term;
 
 /// Sidebar command groups (label, command, hint).
@@ -213,32 +213,16 @@ fn fmt_compact_bytes(b: u64) -> String {
     }
 }
 
-/// Tooltip for the DISK pill — breaks down per-partition usage so the
-/// operator can tell whether DATA or STATE is driving the severity.
-fn disk_tooltip(sys: &SystemMetrics) -> String {
-    let part = |label: &str, used: Option<u64>, total: Option<u64>| -> Option<String> {
-        let total = total?;
-        let used = used.unwrap_or(0);
-        let pct = if total == 0 {
-            0.0
-        } else {
-            (used as f64 / total as f64) * 100.0
-        };
-        Some(format!(
-            "{label} {} / {} ({:.0}%)",
-            fmt_compact_bytes(used),
-            fmt_compact_bytes(total),
-            pct
-        ))
-    };
-    [
-        part("DATA", sys.data_used_bytes, sys.data_total_bytes),
-        part("STATE", sys.state_used_bytes, sys.state_total_bytes),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>()
-    .join("  ·  ")
+/// Tooltip for a filesystem pill — matches the MEM pill's
+/// "X / Y used on /path" shape.
+fn fs_tooltip(used: Option<u64>, total: Option<u64>, mount: &str) -> String {
+    let used = used.unwrap_or(0);
+    let total = total.unwrap_or(0);
+    format!(
+        "{} / {} used on {mount}",
+        fmt_compact_bytes(used),
+        fmt_compact_bytes(total)
+    )
 }
 
 /// Dot pill for load average — no bar (load has no natural ceiling),
@@ -390,8 +374,13 @@ pub fn App() -> impl IntoView {
                                 total as f64 / 1_073_741_824.0,
                             ))
                         });
-                        let disk = sys.disk_pct.map(|pct| meter_pill(
-                            "DISK", pct, disk_tooltip(&sys),
+                        let data = sys.data_pct.map(|pct| meter_pill(
+                            "DATA", pct,
+                            fs_tooltip(sys.data_used_bytes, sys.data_total_bytes, "/embra/data"),
+                        ));
+                        let state_fs = sys.state_pct.map(|pct| meter_pill(
+                            "STATE", pct,
+                            fs_tooltip(sys.state_used_bytes, sys.state_total_bytes, "/embra/state"),
                         ));
                         let load = sys.load1.map(|l1| load_pill(
                             l1,
@@ -399,7 +388,7 @@ pub fn App() -> impl IntoView {
                             sys.load15.unwrap_or(0.0),
                             sys.cpu_count,
                         ));
-                        Some(view! { <>{cpu}{mem}{disk}{load}</> })
+                        Some(view! { <>{cpu}{mem}{data}{state_fs}{load}</> })
                     }}
                 </div>
                 <div class="role">
