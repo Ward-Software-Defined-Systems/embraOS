@@ -885,6 +885,7 @@ dependencies = [
  "bytes",
  "embra-common",
  "futures-util",
+ "libc",
  "portable-pty",
  "prost",
  "rust-embed",

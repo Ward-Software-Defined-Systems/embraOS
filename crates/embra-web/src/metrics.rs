@@ -33,6 +33,27 @@ pub struct LoadAvg {
     pub load15: f64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DiskInfo {
+    pub total_bytes: u64,
+    /// Blocks available to an unprivileged process (`f_bavail` × `f_frsize`).
+    /// We use `f_bavail` rather than `f_bfree` because `df` does the same:
+    /// reserved blocks aren't "free" from the operator's perspective.
+    pub available_bytes: u64,
+}
+
+impl DiskInfo {
+    pub fn used_bytes(&self) -> u64 {
+        self.total_bytes.saturating_sub(self.available_bytes)
+    }
+    pub fn used_pct(&self) -> Option<f64> {
+        if self.total_bytes == 0 {
+            return None;
+        }
+        Some((self.used_bytes() as f64 / self.total_bytes as f64) * 100.0)
+    }
+}
+
 /// CPU% averaged across the interval between two snapshots (0..=100).
 /// `None` when the counter didn't advance, or appeared to go backwards.
 pub fn compute_cpu_pct(prev: &CpuSnapshot, curr: &CpuSnapshot) -> Option<f64> {
@@ -110,6 +131,23 @@ pub fn read_loadavg() -> Option<LoadAvg> {
     parse_loadavg(&std::fs::read_to_string("/proc/loadavg").ok()?)
 }
 
+/// One `statvfs(2)` syscall against a mount point. `None` on syscall
+/// failure (path doesn't exist, isn't mounted, EACCES, ...).
+#[cfg(target_os = "linux")]
+pub fn read_disk_info(path: &str) -> Option<DiskInfo> {
+    let c_path = std::ffi::CString::new(path).ok()?;
+    let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), &mut buf) };
+    if rc != 0 {
+        return None;
+    }
+    let block_size = buf.f_frsize as u64;
+    Some(DiskInfo {
+        total_bytes: (buf.f_blocks as u64) * block_size,
+        available_bytes: (buf.f_bavail as u64) * block_size,
+    })
+}
+
 #[cfg(not(target_os = "linux"))]
 pub fn read_cpu_snapshot() -> Option<CpuSnapshot> {
     None
@@ -120,6 +158,10 @@ pub fn read_mem_info() -> Option<MemInfo> {
 }
 #[cfg(not(target_os = "linux"))]
 pub fn read_loadavg() -> Option<LoadAvg> {
+    None
+}
+#[cfg(not(target_os = "linux"))]
+pub fn read_disk_info(_path: &str) -> Option<DiskInfo> {
     None
 }
 
@@ -243,5 +285,35 @@ mod tests {
             idle: 800,
         };
         assert!(compute_cpu_pct(&prev, &curr).is_none());
+    }
+
+    #[test]
+    fn disk_used_pct_basic() {
+        let d = DiskInfo {
+            total_bytes: 64 * 1024 * 1024 * 1024,    // 64 GB
+            available_bytes: 48 * 1024 * 1024 * 1024, // 48 GB free
+        };
+        assert_eq!(d.used_bytes(), 16 * 1024 * 1024 * 1024);
+        let pct = d.used_pct().unwrap();
+        assert!((pct - 25.0).abs() < 1e-9, "got {pct}");
+    }
+
+    #[test]
+    fn disk_used_pct_zero_total_is_none() {
+        let d = DiskInfo {
+            total_bytes: 0,
+            available_bytes: 0,
+        };
+        assert!(d.used_pct().is_none());
+    }
+
+    #[test]
+    fn disk_used_pct_full() {
+        let d = DiskInfo {
+            total_bytes: 1000,
+            available_bytes: 0,
+        };
+        let pct = d.used_pct().unwrap();
+        assert!((pct - 100.0).abs() < 1e-9);
     }
 }

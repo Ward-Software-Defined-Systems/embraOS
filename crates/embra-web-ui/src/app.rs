@@ -10,7 +10,7 @@
 use leptos::prelude::*;
 use wasm_bindgen::prelude::*;
 
-use crate::status::use_status;
+use crate::status::{SystemMetrics, use_status};
 use crate::term;
 
 /// Sidebar command groups (label, command, hint).
@@ -199,6 +199,48 @@ fn meter_pill(label: &'static str, pct: f64, tooltip: String) -> impl IntoView {
     }
 }
 
+/// Compact human-readable byte formatter — picks GB or MB so STATE
+/// (typically tens of MB) doesn't render as "0.0 GB".
+fn fmt_compact_bytes(b: u64) -> String {
+    let gb = b as f64 / 1_073_741_824.0;
+    let mb = b as f64 / 1_048_576.0;
+    if gb >= 1.0 {
+        format!("{gb:.1} GB")
+    } else if mb >= 1.0 {
+        format!("{mb:.0} MB")
+    } else {
+        format!("{b} B")
+    }
+}
+
+/// Tooltip for the DISK pill — breaks down per-partition usage so the
+/// operator can tell whether DATA or STATE is driving the severity.
+fn disk_tooltip(sys: &SystemMetrics) -> String {
+    let part = |label: &str, used: Option<u64>, total: Option<u64>| -> Option<String> {
+        let total = total?;
+        let used = used.unwrap_or(0);
+        let pct = if total == 0 {
+            0.0
+        } else {
+            (used as f64 / total as f64) * 100.0
+        };
+        Some(format!(
+            "{label} {} / {} ({:.0}%)",
+            fmt_compact_bytes(used),
+            fmt_compact_bytes(total),
+            pct
+        ))
+    };
+    [
+        part("DATA", sys.data_used_bytes, sys.data_total_bytes),
+        part("STATE", sys.state_used_bytes, sys.state_total_bytes),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>()
+    .join("  ·  ")
+}
+
 /// Dot pill for load average — no bar (load has no natural ceiling),
 /// just the 1-minute value with severity color relative to core count.
 fn load_pill(load1: f64, load5: f64, load15: f64, cpu_count: Option<u32>) -> impl IntoView {
@@ -348,13 +390,16 @@ pub fn App() -> impl IntoView {
                                 total as f64 / 1_073_741_824.0,
                             ))
                         });
+                        let disk = sys.disk_pct.map(|pct| meter_pill(
+                            "DISK", pct, disk_tooltip(&sys),
+                        ));
                         let load = sys.load1.map(|l1| load_pill(
                             l1,
                             sys.load5.unwrap_or(0.0),
                             sys.load15.unwrap_or(0.0),
                             sys.cpu_count,
                         ));
-                        Some(view! { <>{cpu}{mem}{load}</> })
+                        Some(view! { <>{cpu}{mem}{disk}{load}</> })
                     }}
                 </div>
                 <div class="role">

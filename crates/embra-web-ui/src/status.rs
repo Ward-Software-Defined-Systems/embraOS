@@ -32,6 +32,19 @@ pub struct SystemMetrics {
     /// Logical core count, for grading load average relative to capacity.
     #[serde(default)]
     pub cpu_count: Option<u32>,
+    /// Worst-of-both partition usage percent (DATA vs STATE) — drives the
+    /// DISK pill's bar fill and severity color. Bytes are sent through
+    /// separately for the tooltip breakdown.
+    #[serde(default)]
+    pub disk_pct: Option<f64>,
+    #[serde(default)]
+    pub data_total_bytes: Option<u64>,
+    #[serde(default)]
+    pub data_used_bytes: Option<u64>,
+    #[serde(default)]
+    pub state_total_bytes: Option<u64>,
+    #[serde(default)]
+    pub state_used_bytes: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
