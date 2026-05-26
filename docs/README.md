@@ -21,6 +21,7 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 ## Internals
 
 - [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md) — The 7-layer continuity architecture, the four LLM providers, reasoning controls, prompt caching.
+- [KNOWLEDGE-GRAPH.md](KNOWLEDGE-GRAPH.md) — Cross-session memory graph: auto-derived edges, density rationale, promotion path, auto-enrichment, retrieval ranking, the 9 `knowledge_*` tools.
 - [OPEN-PROBLEMS.md](OPEN-PROBLEMS.md) — Unresolved Phase 1–3 design questions tracked at the architecture level.
 
 ## Self-Extension (Guardian)

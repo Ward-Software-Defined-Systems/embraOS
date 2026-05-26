@@ -31,6 +31,8 @@ Phase 1 includes 92 internal tools the intelligence invokes during conversation.
 
 **Knowledge Graph** *(Sprint 2 — EXPERIMENTAL)*
 
+For the data model, edge taxonomy, density rationale, promotion path, auto-enrichment behavior, and retrieval ranking, see [KNOWLEDGE-GRAPH.md](KNOWLEDGE-GRAPH.md).
+
 | Tool | Description |
 |---|---|
 | **knowledge_promote** | Promote an episodic entry to semantic (with category) or procedural (with JSON procedure). Creates a `derived_from` edge and auto-derives additional edges |
