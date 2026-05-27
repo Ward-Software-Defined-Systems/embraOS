@@ -4,13 +4,15 @@ The embraOS knowledge graph (KG) is the cross-session memory layer. It lives in 
 
 This doc covers the write-side (auto-derived edges, promotion), the read-side (auto-enrichment, retrieval ranking, traversal), the nine `knowledge_*` tools, and the design rationale behind a deliberately dense edge layer.
 
-The shorter operator-facing inventory of KG tools lives in [TOOL-REFERENCE.md](TOOL-REFERENCE.md). The architectural placement (the 7-layer model's *Memory & Knowledge* row) is in [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md).
+The shorter inventory of KG tools (as part of the broader 92-tool catalog) lives in [TOOL-REFERENCE.md](TOOL-REFERENCE.md). The architectural placement (the 7-layer model's *Memory & Knowledge* row) is in [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md).
+
+> **How operators interact with the KG.** Every `knowledge_*` reference below is a *tool the intelligence calls during conversation*, not a command the operator types. The intelligence owns KG management — it decides when to `remember`, when to `knowledge_promote`, when to `knowledge_query` for context before answering, when to `knowledge_unlink_edge` after a tag rename. Operators participate by talking to the intelligence in natural language ("remember that the cert refresh works after manual generation", "promote that as a semantic observation", "what do we know about embra-web cert failures?", "looks like there are orphan edges — sweep them"). Tool names appear throughout this doc as references to the intelligence's capabilities, not as operator command syntax.
 
 ---
 
 ## TL;DR (for operators)
 
-If you ran `knowledge_graph_stats` and saw something like *"Graph density: 7.3 edges/node"* with thousands of edges on a young instance, you may have wondered whether the graph needs pruning. It doesn't. Four things to know:
+If the intelligence has reported `knowledge_graph_stats` output showing something like *"Graph density: 7.3 edges/node"* with thousands of edges on a young instance, you may have wondered whether the graph needs pruning. It doesn't. Four things to know:
 
 1. **The graph is dense by design.** A single `remember` into an active session writes 50–500+ edge documents through three independent auto-derivation paths. This is the intended behavior.
 2. **Auto-derived edges are cheap stateless formulas.** Recomputing one is free, so the engine doesn't buffer or pre-prune; it writes everything that passes the candidate filter.
@@ -23,7 +25,7 @@ If you want to see the per-write math, the **Worked example** below traces one `
 
 ## Worked example: one `remember` insert
 
-An operator runs `remember the embra-web cert refresh failure #embra-web #cert` mid-session. The conversation memory tool writes one document to `memory.entries`. Immediately after the write returns, `derive_edges` (`crates/embra-brain/src/knowledge/edges.rs:33`) fires. Here is what that single insert produces.
+An operator says to the intelligence — in natural conversation — something like *"remember the embra-web cert refresh failure, tag it embra-web and cert"*. The intelligence calls `remember` with the content and tags it parsed from the request, which writes one document to `memory.entries`. Immediately after the write returns, `derive_edges` (`crates/embra-brain/src/knowledge/edges.rs:33`) fires. Here is what that single insert produces.
 
 The engine takes the new document's `(session, tags, created_at)` and queries all three memory collections (`memory.entries`, `memory.semantic`, `memory.procedural`) for three independent candidate pools (`edges.rs:70-108`):
 
@@ -131,7 +133,7 @@ Inserted by `insert_derived_from_edge` (`promotion.rs:189-209`). Directional (no
 
 This is the type whose categorization is commonly misread. `is_brain_created()` excludes it — the brain cannot create it via `knowledge_link`. It is purely a provenance edge written by the promotion path.
 
-### Brain/operator-created via `knowledge_link` (5 types)
+### Brain-created via `knowledge_link` (5 types)
 
 | Type | Symmetric | Intent |
 |---|---|---|
@@ -171,7 +173,7 @@ Auto-enrichment is even more aggressive: `MAX_INJECTED = 5` (`crates/embra-brain
 
 ### Depth-2 expansion needs the density
 
-`knowledge_query`'s graph-expansion step (`crates/embra-brain/src/knowledge/retrieval.rs:103-122`) takes the top 10 unique seeds collected from direct + session retrieval and BFS-walks each to depth 2. The point of expansion is to surface adjacent knowledge the operator didn't tag directly — *"the user asked about cert refresh; the graph also says cert refresh contradicts the old systemd unit cleanup"*.
+`knowledge_query`'s graph-expansion step (`crates/embra-brain/src/knowledge/retrieval.rs:103-122`) takes the top 10 unique seeds collected from direct + session retrieval and BFS-walks each to depth 2. The point of expansion is to surface adjacent knowledge the operator didn't explicitly ask about — *"the user asked about cert refresh; the graph also says cert refresh contradicts the old systemd unit cleanup"*.
 
 A sparse graph would expand to nothing useful. The auto-derived layer's job is to be the substrate that depth-2 expansion can actually find adjacent nodes through.
 
@@ -179,7 +181,7 @@ A sparse graph would expand to nothing useful. The auto-derived layer's job is t
 
 It scans `memory.edges` up to a limit (default 10k, clamp `[1, 100000]`), collects `(collection, id)` endpoints into per-collection HashSets, batch-resolves each via `{"_id": {"$in": [...]}}`, and set-diffs to find missing endpoints (`tools.rs:660-739`). Edges with a dangling source or target are reported (and optionally deleted in chunks of 100).
 
-It runs when an operator notices that `knowledge_graph_stats` reports `Orphan edges: N of M scanned` with `N > 0` (`tools.rs:639-651` — orphan detection is also called passively by `graph_stats` so the drift surfaces without an explicit sweep). It is not a density-management tool. There is no analogous "edges with low weight" or "edges older than X" sweep.
+It runs when the intelligence reports `knowledge_graph_stats` output with `Orphan edges: N of M scanned` and `N > 0`, and the operator asks for a sweep (the intelligence then calls `knowledge_sweep_orphans`). Orphan detection is also called passively by `graph_stats` (`tools.rs:639-651`) so the drift surfaces in the report without an explicit sweep. It is not a density-management tool. There is no analogous "edges with low weight" or "edges older than X" sweep.
 
 ### What does scale poorly
 
@@ -194,7 +196,7 @@ Both are query-time costs, not write-time costs. Neither is on a hot path. The a
 
 ## Promotion path (episodic → semantic/procedural)
 
-Promotion is the one operator-triggered path that side-effects the edge layer. Implemented in `crates/embra-brain/src/knowledge/promotion.rs`. Two entry points:
+Promotion is one conversation-driven path that side-effects the edge layer — the operator asks the intelligence to consolidate a memory ("promote that as a semantic observation" / "save that as a procedure"), and the intelligence calls `knowledge_promote`. Implemented in `crates/embra-brain/src/knowledge/promotion.rs`. Two entry points:
 
 - `promote_to_semantic` (`:22-77`) — requires a category (`fact` / `preference` / `decision` / `observation` / `pattern`); writes a `SemanticNode` with `confidence: 0.9`.
 - `promote_to_procedural` (`:80-153`) — requires a JSON object with `title`, `description`, `preconditions`, `steps`, `outcomes.{success, failure}` (schema validated at `:91-106`).
@@ -209,7 +211,7 @@ The promotion flow, in order:
 4. Insert the directed `derived_from` edge (semantic/procedural → source entry, weight `1.0`) via `insert_derived_from_edge` (`:189-209`).
 5. Trigger `derive_edges` on the new node (`:63-71, 140-148`) — auto-derives `same_session`, `temporal`, `tag_overlap` edges for it from the current pool.
 
-Promotion is one-way. There is no demote tool. To reverse a promotion, run `knowledge_unlink_node <coll>:<id>` on the semantic/procedural node — it cascades the `derived_from` edge plus every other edge referencing the node, then clears the source entry's `promoted_to` pointer (`tools.rs:253-272`).
+Promotion is one-way. There is no demote tool. To reverse a promotion, the operator asks the intelligence to unlink the semantic/procedural node; the intelligence calls `knowledge_unlink_node`, which cascades the `derived_from` edge plus every other edge referencing the node, then clears the source entry's `promoted_to` pointer (`tools.rs:253-272`).
 
 `retrieve_relevant_knowledge` uses `redirect_if_promoted` (`retrieval.rs:186-198`) to short-circuit the indirection: when Step 3 (content-substring on `memory.entries`) finds a doc with a non-null `promoted_to`, it loads the target node instead and adds *that* to the result set, keyed by the target's `(collection, id)`. Step 4 (graph expansion) does the same redirect with a duplicate-check (`retrieval.rs:112-115`). Effect: a promoted entry and its target never both surface in the same retrieval result.
 
@@ -348,11 +350,11 @@ The tool-side renderer (`tools.rs:432-478`) groups discovered nodes by depth and
 
 ## Tool reference
 
-Nine `knowledge_*` tools registered via `#[embra_tool(...)]` macros at `crates/embra-brain/src/knowledge/tools.rs:792-1047`. The full registration is verified by `knowledge_tools_register` (`tools.rs:1128-1146`). For args and operator-facing one-liners, see [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — this section covers KG-specific contract details.
+Nine `knowledge_*` tools registered via `#[embra_tool(...)]` macros at `crates/embra-brain/src/knowledge/tools.rs:792-1047`. The full registration is verified by `knowledge_tools_register` (`tools.rs:1128-1146`). The intelligence chooses which to invoke as conversation requires; the args below are what the intelligence fills in, not what an operator types. For the broader tool catalog the intelligence draws from (all 92 tools), see [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — this section covers KG-specific contract details.
 
 ### Read tools
 
-**`knowledge_query`** — multi-signal ranking + depth-2 expansion. `query` is required; `max_results` defaults to 20 (clamp `[1, 100]`); `categories` is an optional CSV of semantic categories (filter applied after ranking, semantic-only). Output renders the source breakdown (`direct: N, session: N, graph: N`) so the operator can read whether the model is seeing direct matches or just expansion noise.
+**`knowledge_query`** — multi-signal ranking + depth-2 expansion. `query` is required; `max_results` defaults to 20 (clamp `[1, 100]`); `categories` is an optional CSV of semantic categories (filter applied after ranking, semantic-only). Output renders the source breakdown (`direct: N, session: N, graph: N`); when the intelligence relays this back in conversation, the operator can read whether the retrieval is hitting direct matches or only expansion noise.
 
 **`knowledge_traverse`** — BFS from a single start node. Default depth comes from `config.kg_max_traversal_depth` (3), ceiling is `config.kg_traversal_depth_ceiling` (5). `edge_types` is an optional CSV filter; `min_weight` is an optional `f64` floor. Side-effect: increments `access_count` + `last_accessed` on every visited node (which then feeds the `access_frequency` ranking signal).
 
@@ -366,9 +368,9 @@ Nine `knowledge_*` tools registered via `#[embra_tool(...)]` macros at `crates/e
 
 **`knowledge_unlink_edge`** — by `edge_id` or by `(source, edge_type, target)` triple. `edge_id` takes precedence. Triple form respects `is_symmetric()` (`tools.rs:159-173`): symmetric types (`same_session`, `temporal`, `tag_overlap`, `related_to`) delete bidirectionally via `$or`; directional types (`enables`, `contradicts`, `refines`, `depends_on`, `derived_from`) delete only the forward direction. The directional-only behavior is a regression-guarded fix (Embra_Debug #63, test at `types.rs:200-214`).
 
-**`knowledge_unlink_node`** — cascade-deletes a `memory.semantic` or `memory.procedural` node. Workflow (`tools.rs:221-294`): read node → clear `promoted_to` on every source entry the node `derived_from`-points back to → delete all edges referencing the node (source OR target) via `$or` query → delete the node. Reports cleared-entry count and cascaded-edge count. `memory.entries` is rejected — operators use `forget` for episodic cleanup (which has its own cascade per the post-Sprint-2 fix; see CHANGE-LOG or ARCHITECTURE.md commit log #33).
+**`knowledge_unlink_node`** — cascade-deletes a `memory.semantic` or `memory.procedural` node. Workflow (`tools.rs:221-294`): read node → clear `promoted_to` on every source entry the node `derived_from`-points back to → delete all edges referencing the node (source OR target) via `$or` query → delete the node. Reports cleared-entry count and cascaded-edge count. `memory.entries` is rejected — for episodic cleanup the intelligence uses `forget` instead, which has its own cascade per the post-Sprint-2 fix (see CHANGE-LOG or ARCHITECTURE.md commit log #33).
 
-**`knowledge_update`** — in-place JSON-patch on a `memory.semantic` or `memory.procedural` node. Immutable fields rejected (`tools.rs:345-353`): `_id`, `source_entry_id`, `source_session`, `created_at`, `access_count`, `last_accessed`, `updated_at`. `updated_at` is auto-refreshed (`tools.rs:369-372`). Referencing edges are preserved automatically — `memory.edges` keys by id, not by content. **Auto-derived edges are NOT re-derived** — if a tag change makes `tag_overlap` edges stale, operators follow up with `knowledge_unlink_edge` (the tool description, `tools.rs:927`, says this explicitly).
+**`knowledge_update`** — in-place JSON-patch on a `memory.semantic` or `memory.procedural` node. Immutable fields rejected (`tools.rs:345-353`): `_id`, `source_entry_id`, `source_session`, `created_at`, `access_count`, `last_accessed`, `updated_at`. `updated_at` is auto-refreshed (`tools.rs:369-372`). Referencing edges are preserved automatically — `memory.edges` keys by id, not by content. **Auto-derived edges are NOT re-derived** — if a tag change makes `tag_overlap` edges stale, the intelligence follows up with `knowledge_unlink_edge` to remove them (the tool's own description at `tools.rs:927` carries this prompt-level guidance for the brain).
 
 ### Maintenance
 
@@ -389,9 +391,9 @@ No. Density is the design (see **Why the density isn't bloat** above). Auto-deri
 Correct — they're not re-derived (`tools.rs:307-308, 927`). Two options:
 
 - **Accept the stale weight.** It just affects ranking. The depth-2 expansion path still finds the node; the score may be slightly off relative to a freshly-derived edge.
-- **Clean up specifically.** Run `knowledge_unlink_edge` on the stale triples. The brain has system-prompt guidance pointing at this exact case (per ARCHITECTURE.md Sprint-2 follow-up).
+- **Clean up specifically.** Ask the intelligence to remove the stale edges; it calls `knowledge_unlink_edge` on each affected triple. The brain has system-prompt guidance pointing at this exact case (per ARCHITECTURE.md Sprint-2 follow-up), so it will often volunteer the cleanup on its own after a substantive tag change.
 
-The reason `knowledge_update` doesn't re-derive is that doing so would require either (a) recomputing every existing edge involving the node, which is `O(N)` in the node's degree and could itself be hundreds of edges, or (b) implicitly deleting then re-deriving, which would silently churn edge IDs and break any external references. Both are worse than leaving the operator in charge.
+The reason `knowledge_update` doesn't re-derive is that doing so would require either (a) recomputing every existing edge involving the node, which is `O(N)` in the node's degree and could itself be hundreds of edges, or (b) implicitly deleting then re-deriving, which would silently churn edge IDs and break any external references. Both are worse than leaving the cleanup explicit and conversation-driven.
 
 ### "Why are there two records per relationship?"
 
@@ -399,17 +401,17 @@ Bidirectional storage simplifies the query path. A graph walk starting from eith
 
 Directional edges (`enables`, `contradicts`, `refines`, `depends_on`, `derived_from`) are stored as a single record.
 
-### "When do I run `knowledge_sweep_orphans`?"
+### "When does a `knowledge_sweep_orphans` call make sense?"
 
-Only when `knowledge_graph_stats` reports `Orphan edges: N of M scanned` with `N > 0`. The sweep is for cleaning up dangling refs left by historical deletes — typically `forget` calls predating the cascade fix (CHANGE-LOG #33), or any direct deletes that bypassed `knowledge_unlink_node`. It is not for density management.
+Only when the intelligence's `knowledge_graph_stats` report shows `Orphan edges: N of M scanned` with `N > 0`. At that point the operator can ask for a sweep and the intelligence calls `knowledge_sweep_orphans`. The sweep is for cleaning up dangling refs left by historical deletes — typically `forget` calls predating the cascade fix (CHANGE-LOG #33), or any direct deletes that bypassed `knowledge_unlink_node`. It is not for density management.
 
-`dry_run=true` previews the count without deleting. Useful when you want to see the size of the cleanup before committing to it.
+`dry_run=true` previews the count without deleting — useful when the operator wants to see the cleanup size before authorizing the actual delete (a "preview first, then sweep" round-trip is a common conversational shape).
 
 ### "Is there a TTL or eviction?"
 
-No. The graph grows monotonically until an operator explicitly unlinks. Sessions add new edges; nothing reaps them.
+No. The graph grows monotonically until the operator explicitly asks for an unlink (and the intelligence calls `knowledge_unlink_node` / `knowledge_unlink_edge` / `forget`). Sessions add new edges; nothing reaps them.
 
-This is intentional: continuity is the value the KG provides. An eviction policy would either lose information silently (failure mode: model forgets old context) or require operator judgment about what to drop (better handled explicitly via `knowledge_unlink_node` / `forget`).
+This is intentional: continuity is the value the KG provides. An eviction policy would either lose information silently (failure mode: model forgets old context) or force the system to decide what to drop without operator input. Better to leave removal explicit and conversation-driven via `knowledge_unlink_node` / `forget`.
 
 If a graph ever does grow large enough that `knowledge_graph_stats` becomes slow, the bottleneck is the report-side scan limits (10k nodes per collection, 100k edges), not the ranking or auto-enrichment paths — both of which truncate at fixed small sizes regardless of graph size.
 
@@ -446,28 +448,24 @@ Schema lineage: v5 introduced the 3 KG collections + 7 indexes + the 4 config fi
 
 Sanity-checking against a running QEMU instance.
 
+Everything below is a conversation with the intelligence — the operator types in the web console (or the serial TUI), and the intelligence chooses the tools. No CLI invocations.
+
 1. **Boot** an image and let the soul verify.
 
    ```bash
    ./scripts/run-qemu.sh
    ```
 
-2. **Establish a baseline** via `knowledge_graph_stats` in the web console. On a fresh DATA partition you should see zero of everything.
+2. **Establish a baseline.** Ask the intelligence to show the knowledge graph stats — anything like *"what does the knowledge graph look like right now?"* will route to `knowledge_graph_stats`. On a fresh DATA partition the reported numbers should be zero or near zero.
 
-3. **Trigger auto-derivation.** Ask the brain to `remember` two distinct notes in the same session with overlapping tags:
+3. **Trigger auto-derivation.** Ask the intelligence to remember two distinct things in the same session with overlapping tags — e.g. *"remember that the embra-web cert refresh works after manual generation, tag it embra-web and cert"* and *"now remember the trustd CA expiry pipeline issues, same tags"*. The intelligence calls `remember` for each, which fires `derive_edges` (`edges.rs:33`) on every insert. Then ask for the graph stats again. The intelligence's report should show:
 
-   ```
-   remember the embra-web cert refresh works after manual generation #embra-web #cert
-   remember the trustd CA expiry pipeline issues #embra-web #cert
-   ```
-
-   Then `knowledge_graph_stats` again. You should see:
    - `memory.entries: 2 total, 0 promoted, 2 unpromoted`
    - `memory.edges: ~6` (the same_session + temporal + tag_overlap edges from `derive_edges`, bidirectional).
    - `Graph density: 3.0 edges/node` (rough; depends on bidirectional counts).
    - `Orphan edges: 0 of 6 scanned`.
 
-4. **Trigger auto-enrichment.** Send a substantial user message that mentions `cert refresh`. Watch the tracing output (or `journalctl` if you've wired it through) for the info-level `auto-enrichment` log line:
+4. **Trigger auto-enrichment.** Send a substantial user message (≥15 chars, not on the chatty-filler list) that mentions `cert refresh`. Auto-enrichment fires before the model call — it doesn't go through a `knowledge_*` tool, so the trigger is just the operator typing. Watch the tracing output (or `journalctl` if you've wired it through) for the info-level `auto-enrichment` log line:
 
    ```
    INFO auto-enrichment session=<name> tag_count=3 result_count=1 top_score=0.45
@@ -475,16 +473,9 @@ Sanity-checking against a running QEMU instance.
 
    `result_count > 0` confirms enrichment fired with a qualifying result.
 
-5. **Promote and inspect provenance.** Promote one of the entries to semantic, then traverse from the new node:
+5. **Promote and inspect provenance.** Ask the intelligence to promote one of the entries — *"promote that first one as a semantic observation"* — then ask it to trace what's connected to the new node — *"now show me what's linked to that new semantic node, depth 2"*. The intelligence calls `knowledge_promote` then `knowledge_traverse`. The traversal output should include the `derived_from` edge back to the source entry plus the auto-derived edges to the second entry / any in-session adjacents.
 
-   ```
-   knowledge_promote <entry_id> | semantic | observation
-   knowledge_traverse memory.semantic:<new_id> 2
-   ```
-
-   The traversal should return the `derived_from` edge back to the source entry plus the auto-derived edges to the second entry / any in-session adjacents.
-
-6. **Verify cascade cleanup.** `knowledge_unlink_node memory.semantic:<new_id>` should report the cascaded edge count plus the cleared-entry count (the source entry's `promoted_to` field is reset). A follow-up `knowledge_graph_stats` should show one fewer semantic node and no orphan edges.
+6. **Verify cascade cleanup.** Ask the intelligence to unlink the semantic node — *"unlink that semantic node and show me what cascades"*. It calls `knowledge_unlink_node`, which reports the cascaded edge count plus the cleared-entry count (the source entry's `promoted_to` field is reset). A follow-up stats ask should show one fewer semantic node and no orphan edges.
 
 7. **Verify the doc's claims against HEAD** (regression-time only): grep each file:line reference in this doc against `crates/embra-brain/src/knowledge/`. Anything that doesn't resolve means the code has moved and the doc is stale.
 
@@ -494,7 +485,7 @@ If any step diverges from what the code claims here, the code is right and the d
 
 ## Related
 
-- [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — operator-facing KG tool catalog (the **Knowledge Graph** table).
+- [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — catalog of all 92 tools the intelligence draws from (the **Knowledge Graph** table covers these nine).
 - [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md) — the 7-layer architecture (KG is the **Memory & Knowledge** row).
 - [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md) — slash commands; the KG layer is reached via brain tools, not slash commands.
 - `ARCHITECTURE.md` (local) — historical Sprint 2 narrative with commit SHAs and the fix-wave for `knowledge_unlink_node` cascade, the `derived_from` cleanup, and orphan-sweep introduction.
