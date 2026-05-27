@@ -55,7 +55,9 @@ Phase 2–5 add A/B partitioned rollback, an `embractl` management CLI, bare-met
 > graph — it has the `remember` and `knowledge_*` tools and will write the entries
 > itself. Separately, **`/feedback-loop`** (**experimental**) runs a full
 > self-realignment against the intelligence's identity and soul — a different
-> concern, not a memory-promotion sweep.
+> concern, not a memory-promotion sweep. See
+> [`docs/KNOWLEDGE-GRAPH.md`](docs/KNOWLEDGE-GRAPH.md) for the data model, edge
+> taxonomy, auto-derived edge density rationale, and the nine `knowledge_*` tools.
 
 ---
 
