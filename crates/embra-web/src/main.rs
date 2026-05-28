@@ -11,6 +11,7 @@
 
 mod arbiter;
 mod assets;
+mod chat_bridge;
 mod config;
 mod metrics;
 mod pty_bridge;
@@ -19,6 +20,7 @@ mod state;
 mod status;
 mod tls;
 mod ws;
+mod ws_chat;
 
 use std::sync::{Arc, Mutex};
 
@@ -56,6 +58,7 @@ async fn main() -> anyhow::Result<()> {
         bridge,
         arbiter: Arbiter::new(),
         cpu_snap: Arc::new(Mutex::new(None)),
+        apid_addr: cfg.apid_addr.clone(),
     };
 
     server::serve(&cfg, state, server_config).await

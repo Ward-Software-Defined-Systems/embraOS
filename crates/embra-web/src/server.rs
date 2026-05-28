@@ -20,6 +20,7 @@ use crate::config::WebConfig;
 use crate::state::AppState;
 use crate::status::api_status;
 use crate::ws::ws_terminal;
+use crate::ws_chat::ws_chat;
 
 /// A TLS-terminating listener. `axum::serve::Listener::accept` has no
 /// Result, so transient TCP/handshake errors are logged and skipped.
@@ -63,6 +64,7 @@ pub async fn serve(
 ) -> anyhow::Result<()> {
     let app = Router::new()
         .route("/ws/terminal", get(ws_terminal))
+        .route("/ws/chat", get(ws_chat))
         .route("/api/status", get(api_status))
         .fallback(static_handler)
         .with_state(state);

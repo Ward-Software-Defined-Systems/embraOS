@@ -19,6 +19,7 @@ rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 axum = { version = "0.8", features = ["ws"] }
 tokio-rustls = "0.26"
+tokio-stream = "0.1"
 futures-util = "0.3"
 bytes = "1"
 portable-pty = "0.8"
