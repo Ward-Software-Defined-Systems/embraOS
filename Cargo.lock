@@ -895,6 +895,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-rustls",
+ "tokio-stream",
  "tonic",
  "tracing",
  "tracing-subscriber",
