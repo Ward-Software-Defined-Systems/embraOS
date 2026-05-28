@@ -35,7 +35,19 @@ fn serve(path: &str) -> Option<Response> {
     let file = Assets::get(path)?;
     Some(
         (
-            [(header::CONTENT_TYPE, content_type(path))],
+            [
+                (header::CONTENT_TYPE, content_type(path)),
+                // Bust browser caches between OS image rebuilds. The
+                // index.html → SRI → wasm chain reloads correctly when
+                // the HTML itself is fresh, but mobile Safari and
+                // others will happily serve a cached HTML (and thus a
+                // stale SRI → stale wasm) across iterations. `no-store`
+                // is heavier than `no-cache` w/ revalidation, but the
+                // embra-web bundle is small (<500 KB) and served over
+                // LAN, so the bandwidth cost is negligible compared to
+                // the time spent debugging stale-cache mysteries.
+                (header::CACHE_CONTROL, "no-store"),
+            ],
             Body::from(file.data),
         )
             .into_response(),

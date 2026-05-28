@@ -796,14 +796,33 @@ fn handle_server_msg(
     current_setup: RwSignal<Option<SetupData>>,
     has_connected_once: RwSignal<bool>,
 ) {
+    // DIAGNOSTIC — temporary, remove after empty-bubble + briefing-spam
+    // bugs are confirmed fixed. Logs every server frame to devtools so
+    // we can see what's actually arriving on the WS vs what we render.
+    web_sys::console::log_1(
+        &format!("[chat-srv] {srv:?}").into(),
+    );
+
     // Reconnection-briefing filter: on subsequent WS opens (e.g. after
     // iOS Safari suspends the tab on app-switch), the brain replays the
     // session history as `kind:"reconnection"` SystemMessages. The
     // browser still has the timeline from before the disconnect, so the
     // replay is pure noise. Keep it on the very first open per page
     // load (operator wants the briefing then) and drop it after.
-    if let ServerMsg::System { kind, content } = &srv {
-        if kind == "reconnection" && has_connected_once.get_untracked() {
+    //
+    // CRITICAL: the flag flips only on a NON-reconnection message. The
+    // very first briefing on initial connect IS a series of reconnection
+    // messages (multiple of them) — if we flipped on the first message
+    // of any kind, the second briefing message onward would already be
+    // filtered AS the user is supposed to be reading them. We wait for
+    // a "real" event (Token / Done / Mode / Tool / Setup / non-recon
+    // System) to signal that the briefing has wound down.
+    let is_reconnection_msg = matches!(
+        &srv,
+        ServerMsg::System { kind, .. } if kind == "reconnection"
+    );
+    if is_reconnection_msg && has_connected_once.get_untracked() {
+        if let ServerMsg::System { content, .. } = &srv {
             // Still extract session=foo so the topbar stays accurate
             // even when we suppress the bubble.
             for tok in content.split_whitespace() {
@@ -816,10 +835,10 @@ fn handle_server_msg(
                     );
                 }
             }
-            return;
         }
+        return;
     }
-    if !has_connected_once.get_untracked() {
+    if !is_reconnection_msg && !has_connected_once.get_untracked() {
         has_connected_once.set(true);
     }
     match srv {
