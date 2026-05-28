@@ -28,7 +28,10 @@ use gloo_timers::future::TimeoutFuture;
 use leptos::ev::{KeyboardEvent, MouseEvent};
 use leptos::prelude::*;
 use serde::{Deserialize, Serialize};
+use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
+
+use crate::status::{StatusData, use_status};
 
 // ── Wire protocol — mirrors embra-web/src/chat_bridge.rs ─────────────
 
@@ -145,6 +148,120 @@ fn truncate(s: &str, max: usize) -> String {
     out
 }
 
+/// DOM-find + focus the chat input textarea. Used after closing a
+/// sheet that inserted text — keeps the soft keyboard in place and the
+/// cursor positioned for follow-up typing.
+fn focus_chat_textarea() {
+    if let Some(el) = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.query_selector(".ci-textarea").ok().flatten())
+        .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+    {
+        let _ = el.focus();
+    }
+}
+
+/// Curated slash-command catalogue for the picker sheet.
+///
+/// Mirrors the desktop sidebar's `GROUPS` minus `/ml` and
+/// `/guardian-define` — both require richer client UI (multi-line
+/// editor) that mobile doesn't have in v2. Multi-step interactive
+/// wizards (e.g. `/provider --setup`) are also intentionally excluded:
+/// they prompt the operator for one answer at a time and need an
+/// inline form to be sensible on a phone (Phase 3 polish).
+const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
+    ("Session", &[
+        ("/status", "system overview"),
+        ("/sessions", "list sessions"),
+        ("/new", "new session (needs name)"),
+        ("/switch", "switch session (needs name)"),
+        ("/close", "close current session"),
+        ("/mode", "show operating mode"),
+    ]),
+    ("Identity", &[
+        ("/soul", "show soul document"),
+        ("/identity", "show identity document"),
+    ]),
+    ("Provider", &[
+        ("/provider", "show or switch provider"),
+        ("/iter-cap", "show / set tool iteration cap"),
+        ("/show-reasoning", "toggle reasoning panel"),
+    ]),
+    ("Setup", &[
+        ("/git-setup", "show git identity"),
+        ("/github-token", "set / show GitHub token"),
+        ("/ssh-keygen", "generate SSH key"),
+        ("/ssh-copy-id", "copy SSH key to host (needs target)"),
+        ("/feedback-loop", "toggle feedback loop"),
+    ]),
+    ("Guardian", &[
+        ("/guardian list", "list dynamic tools"),
+        ("/guardian status", "tool build status (needs name)"),
+        ("/guardian show", "show tool source (needs name)"),
+        ("/guardian delete", "remove tool (needs name)"),
+        ("/guardian key brave", "set / show Brave Search API key"),
+    ]),
+    ("Help", &[
+        ("/help", "show command help"),
+    ]),
+];
+
+// `state`, `last_active`, `has_summary` arrive in the JSON but the v2
+// sheet only renders `name` + `turn_count`. Phase 3 polish will add an
+// "active session" highlight (state) and a relative last-active label.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default, Deserialize)]
+struct Session {
+    name: String,
+    #[serde(default)]
+    state: String,
+    #[serde(default)]
+    turn_count: u32,
+    #[serde(default)]
+    last_active: String,
+    #[serde(default)]
+    has_summary: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SessionsResp {
+    #[serde(default)]
+    sessions: Vec<Session>,
+    #[serde(default)]
+    error: String,
+}
+
+/// Fetch `/api/sessions`. Returns the parsed session list or a
+/// human-readable error string for the sheet to render.
+async fn fetch_sessions() -> Result<Vec<Session>, String> {
+    let resp = gloo_net::http::Request::get("/api/sessions")
+        .send()
+        .await
+        .map_err(|e| format!("network: {e}"))?;
+    let parsed: SessionsResp = resp
+        .json()
+        .await
+        .map_err(|e| format!("decode: {e}"))?;
+    if !parsed.error.is_empty() {
+        return Err(parsed.error);
+    }
+    Ok(parsed.sessions)
+}
+
+/// Aggregate health from a [`StatusData`] snapshot. Returns one of
+/// "up" / "warn" / "down" — drives the topbar health-chip color.
+fn services_health(s: &StatusData) -> &'static str {
+    if s.services.is_empty() {
+        return "warn"; // pre-first-poll
+    }
+    let down = s.services.iter().filter(|svc| svc.state != "up").count();
+    match down {
+        0 => "up",
+        n if n < s.services.len() => "warn",
+        _ => "down",
+    }
+}
+
 // ── ChatApp root ─────────────────────────────────────────────────────
 
 #[component]
@@ -158,6 +275,12 @@ pub fn ChatApp() -> impl IntoView {
     let thinking_tool = RwSignal::new(String::new());
     let session_name = RwSignal::new(String::new());
     let input = RwSignal::new(String::new());
+    // Phase 2 bottom sheets — only one open at a time.
+    let sessions_open = RwSignal::new(false);
+    let slashes_open = RwSignal::new(false);
+    let services_open = RwSignal::new(false);
+    // Service-health snapshot (5 s poll loop shared with the desktop UI).
+    let status = use_status();
 
     // Outbound sender — replaced on each WS reconnect cycle. A signal
     // (rather than Rc<RefCell<...>>) so the `send_msg` closure stays
@@ -210,11 +333,211 @@ pub fn ChatApp() -> impl IntoView {
         input.set(String::new());
     };
 
+    // Shared dispatcher for slashes triggered from sheets (sessions /
+    // services / future flows). Mirrors `send_msg`'s local-echo +
+    // outbound-send pattern but takes the command + args directly.
+    let dispatch_slash = move |command: String, args: String| {
+        let display = if args.is_empty() {
+            command.clone()
+        } else {
+            format!("{command} {args}")
+        };
+        messages.update(|m| m.push(Bubble::User(display)));
+        if let Some(tx) = outbound.get_untracked() {
+            let _ = tx.unbounded_send(ClientMsg::Slash { command, args });
+        }
+    };
+
     view! {
         <div class="chat-app">
-            <ChatTopBar connected thinking thinking_tool session_name />
+            <ChatTopBar
+                connected
+                thinking
+                thinking_tool
+                session_name
+                status
+                sessions_open
+                services_open
+            />
             <ChatScroll messages streaming />
-            <ChatInput input connected on_send=send_msg />
+            <ChatInput input connected slashes_open on_send=send_msg />
+
+            // ── Sessions sheet ─────────────────────────────────────
+            {move || sessions_open.get().then(|| {
+                // Per-render local state (fresh each open → re-fetches).
+                let sessions = RwSignal::new(Vec::<Session>::new());
+                let loading = RwSignal::new(true);
+                let error = RwSignal::new(String::new());
+                let new_name = RwSignal::new(String::new());
+
+                spawn_local(async move {
+                    match fetch_sessions().await {
+                        Ok(s) => sessions.set(s),
+                        Err(e) => error.set(e),
+                    }
+                    loading.set(false);
+                });
+
+                let create = move || {
+                    let name = new_name.get();
+                    let trimmed = name.trim();
+                    if trimmed.is_empty() {
+                        return;
+                    }
+                    dispatch_slash("/new".to_string(), trimmed.to_string());
+                    new_name.set(String::new());
+                    sessions_open.set(false);
+                };
+
+                view! {
+                    <div class="sheet-bg" on:click=move |_| sessions_open.set(false)>
+                        <div class="sheet" on:click=move |e: MouseEvent| e.stop_propagation()>
+                            <div class="sheet-head">
+                                <span class="sheet-title">"Sessions"</span>
+                                <button class="sheet-close"
+                                    on:click=move |_| sessions_open.set(false)>"×"</button>
+                            </div>
+                            <div class="sheet-body">
+                                <div class="sheet-newrow">
+                                    <input class="sheet-input" type="text"
+                                        placeholder="new session name…"
+                                        prop:value=move || new_name.get()
+                                        on:input=move |e| new_name.set(event_target_value(&e))
+                                        on:keydown=move |e: KeyboardEvent| {
+                                            if e.key() == "Enter" {
+                                                e.prevent_default();
+                                                create();
+                                            }
+                                        } />
+                                    <button class="sheet-action"
+                                        on:click=move |_| create()>"+ Create"</button>
+                                </div>
+                                <div class="sheet-section">"Existing"</div>
+                                {move || {
+                                    if loading.get() {
+                                        view! { <div class="sheet-empty">"Loading…"</div> }.into_any()
+                                    } else if !error.get().is_empty() {
+                                        view! { <div class="sheet-empty err">{error.get()}</div> }.into_any()
+                                    } else if sessions.get().is_empty() {
+                                        view! { <div class="sheet-empty">"No sessions yet."</div> }.into_any()
+                                    } else {
+                                        view! {
+                                            <>
+                                                {sessions.get().into_iter().map(|s| {
+                                                    let name = s.name.clone();
+                                                    let display_name = s.name.clone();
+                                                    let meta = format!(
+                                                        "{} turn{}",
+                                                        s.turn_count,
+                                                        if s.turn_count == 1 { "" } else { "s" },
+                                                    );
+                                                    view! {
+                                                        <div class="sheet-row session"
+                                                            on:click=move |_| {
+                                                                dispatch_slash(
+                                                                    "/switch".to_string(),
+                                                                    name.clone(),
+                                                                );
+                                                                sessions_open.set(false);
+                                                            }>
+                                                            <span class="row-name">{display_name}</span>
+                                                            <span class="row-meta">{meta}</span>
+                                                        </div>
+                                                    }
+                                                }).collect_view()}
+                                            </>
+                                        }.into_any()
+                                    }
+                                }}
+                            </div>
+                        </div>
+                    </div>
+                }
+            })}
+
+            // ── Slash picker sheet ─────────────────────────────────
+            {move || slashes_open.get().then(|| view! {
+                <div class="sheet-bg" on:click=move |_| slashes_open.set(false)>
+                    <div class="sheet" on:click=move |e: MouseEvent| e.stop_propagation()>
+                        <div class="sheet-head">
+                            <span class="sheet-title">"Slash commands"</span>
+                            <button class="sheet-close"
+                                on:click=move |_| slashes_open.set(false)>"×"</button>
+                        </div>
+                        <div class="sheet-body">
+                            {SLASH_GROUPS.iter().map(|(title, cmds)| view! {
+                                <>
+                                    <div class="sheet-section">{*title}</div>
+                                    {cmds.iter().map(|(cmd, hint)| {
+                                        let cmd = *cmd;
+                                        let hint = *hint;
+                                        view! {
+                                            <div class="sheet-row slash"
+                                                on:click=move |_| {
+                                                    input.set(format!("{cmd} "));
+                                                    slashes_open.set(false);
+                                                    focus_chat_textarea();
+                                                }>
+                                                <span class="row-cmd">{cmd}</span>
+                                                <span class="row-hint">{hint}</span>
+                                            </div>
+                                        }
+                                    }).collect_view()}
+                                </>
+                            }).collect_view()}
+                        </div>
+                    </div>
+                </div>
+            })}
+
+            // ── Services sheet ─────────────────────────────────────
+            {move || services_open.get().then(|| view! {
+                <div class="sheet-bg" on:click=move |_| services_open.set(false)>
+                    <div class="sheet" on:click=move |e: MouseEvent| e.stop_propagation()>
+                        <div class="sheet-head">
+                            <span class="sheet-title">"Services"</span>
+                            <button class="sheet-close"
+                                on:click=move |_| services_open.set(false)>"×"</button>
+                        </div>
+                        <div class="sheet-body">
+                            <div class="sheet-row svc connection">
+                                <span class="row-cmd">"WebSocket /ws/chat"</span>
+                                {move || if connected.get() {
+                                    view! { <span class="row-state up">"connected"</span> }.into_any()
+                                } else {
+                                    view! { <span class="row-state down">"disconnected"</span> }.into_any()
+                                }}
+                            </div>
+                            <div class="sheet-section">"Backend services"</div>
+                            {move || {
+                                let svcs = status.get().services;
+                                if svcs.is_empty() {
+                                    view! { <div class="sheet-empty">"Loading…"</div> }.into_any()
+                                } else {
+                                    view! {
+                                        <>
+                                            {svcs.into_iter().map(|s| {
+                                                let state_class = if s.state == "up" {
+                                                    "row-state up"
+                                                } else {
+                                                    "row-state down"
+                                                };
+                                                view! {
+                                                    <div class="sheet-row svc"
+                                                        title=s.detail.clone()>
+                                                        <span class="row-cmd">{s.name}</span>
+                                                        <span class=state_class>{s.state}</span>
+                                                    </div>
+                                                }
+                                            }).collect_view()}
+                                        </>
+                                    }.into_any()
+                                }
+                            }}
+                        </div>
+                    </div>
+                </div>
+            })}
         </div>
     }
 }
@@ -442,6 +765,9 @@ fn ChatTopBar(
     thinking: RwSignal<bool>,
     thinking_tool: RwSignal<String>,
     session_name: RwSignal<String>,
+    status: RwSignal<StatusData>,
+    sessions_open: RwSignal<bool>,
+    services_open: RwSignal<bool>,
 ) -> impl IntoView {
     let switch_to_desktop = move |_: MouseEvent| {
         if let Some(win) = web_sys::window() {
@@ -452,34 +778,53 @@ fn ChatTopBar(
         }
     };
 
+    // Health summary: WS disconnect overrides services (red); otherwise
+    // the services aggregate (up / warn / down) drives the dot color.
+    let health_class = move || {
+        if !connected.get() {
+            "ct-health down"
+        } else {
+            match services_health(&status.get()) {
+                "up" => "ct-health up",
+                "warn" => "ct-health warn",
+                _ => "ct-health down",
+            }
+        }
+    };
+
     view! {
         <div class="chat-topbar">
             <div class="ct-brand">
                 <img class="ct-logo" src="/assets/embra-logo.png" alt="embraOS" />
                 <span class="ct-name">"embraOS"</span>
             </div>
-            <div class="ct-status">
-                {move || {
-                    if !connected.get() {
-                        view! { <span class="ct-dot down"></span><span class="ct-state">"reconnecting…"</span> }.into_any()
-                    } else if thinking.get() {
-                        let label = {
-                            let t = thinking_tool.get();
-                            if t.is_empty() { "thinking…".to_string() } else { format!("{t}…") }
-                        };
-                        view! { <span class="ct-dot warn"></span><span class="ct-state">{label}</span> }.into_any()
-                    } else {
-                        view! { <span class="ct-dot up"></span><span class="ct-state">"connected"</span> }.into_any()
-                    }
-                }}
-                {move || {
-                    let s = session_name.get();
-                    if s.is_empty() { view! { <span></span> }.into_any() }
-                    else { view! { <span class="ct-session">{s}</span> }.into_any() }
+            <button class=health_class
+                title="Tap for service detail"
+                on:click=move |_| services_open.set(true)>
+                <span class="ct-dot"></span>
+            </button>
+            <div class="ct-thinking">
+                {move || if thinking.get() {
+                    let t = thinking_tool.get();
+                    let label = if t.is_empty() { "thinking…".to_string() }
+                                else { format!("{t}…") };
+                    view! { <span class="ct-state">{label}</span> }.into_any()
+                } else if !connected.get() {
+                    view! { <span class="ct-state down">"reconnecting…"</span> }.into_any()
+                } else {
+                    view! { <span></span> }.into_any()
                 }}
             </div>
+            <button class="ct-session-btn"
+                title="Tap for sessions"
+                on:click=move |_| sessions_open.set(true)>
+                {move || {
+                    let s = session_name.get();
+                    if s.is_empty() { "session ⋯".to_string() } else { s }
+                }}
+            </button>
             <button class="ct-toggle" title="Switch to desktop view"
-                on:click=switch_to_desktop>"↗ desktop"</button>
+                on:click=switch_to_desktop>"↗"</button>
         </div>
     }
 }
@@ -566,6 +911,7 @@ fn BubbleView(idx: usize, bubble: Bubble) -> impl IntoView {
 fn ChatInput<F>(
     input: RwSignal<String>,
     connected: RwSignal<bool>,
+    slashes_open: RwSignal<bool>,
     on_send: F,
 ) -> impl IntoView
 where
@@ -590,6 +936,9 @@ where
 
     view! {
         <div class="chat-input-bar">
+            <button class="ci-slash"
+                title="Slash commands"
+                on:click=move |_| slashes_open.set(true)>"/"</button>
             <textarea
                 node_ref=textarea_ref
                 class="ci-textarea"
