@@ -499,8 +499,18 @@ pub fn ChatApp() -> impl IntoView {
                                                         s.turn_count,
                                                         if s.turn_count == 1 { "" } else { "s" },
                                                     );
+                                                    // Highlight the row that matches the current
+                                                    // session_name (set when the brain emits a
+                                                    // SystemMessage containing "session=X"). Empty
+                                                    // session_name → no highlight on any row.
+                                                    let current = session_name.get_untracked();
+                                                    let row_class = if !current.is_empty() && current == s.name {
+                                                        "sheet-row session active"
+                                                    } else {
+                                                        "sheet-row session"
+                                                    };
                                                     view! {
-                                                        <div class="sheet-row session"
+                                                        <div class=row_class
                                                             on:click=move |_| {
                                                                 dispatch_slash(
                                                                     "/switch".to_string(),
@@ -1177,6 +1187,24 @@ where
         }
     };
 
+    // iOS keyboard auto-scroll: when the textarea gains focus, the soft
+    // keyboard animates in (~250 ms) and shrinks the visual viewport.
+    // Without nudging the chat scroll, the most recent messages can end
+    // up above where the user is looking. Wait one animation cycle, then
+    // pin the chat-scroll back to the bottom.
+    let on_focus = move |_| {
+        spawn_local(async {
+            TimeoutFuture::new(300).await;
+            if let Some(el) = web_sys::window()
+                .and_then(|w| w.document())
+                .and_then(|d| d.query_selector(".chat-scroll").ok().flatten())
+                .and_then(|e| e.dyn_into::<web_sys::HtmlElement>().ok())
+            {
+                el.set_scroll_top(el.scroll_height());
+            }
+        });
+    };
+
     view! {
         <div class="chat-input-bar">
             <button class="ci-slash"
@@ -1189,6 +1217,7 @@ where
                 prop:value=move || input.get()
                 on:input=move |e| input.set(event_target_value(&e))
                 on:keydown=keydown
+                on:focus=on_focus
                 rows="1" />
             <button class="ci-send"
                 disabled=move || !connected.get() || input.with(|s| s.trim().is_empty())

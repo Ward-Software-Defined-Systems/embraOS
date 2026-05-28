@@ -421,6 +421,18 @@ pub fn App() -> impl IntoView {
                         on:click=move |_| palette_open.update(|b| *b = !*b)>
                         "⌘ Commands"
                     </button>
+                    <button class="btn ghost mobile-toggle"
+                        title="Switch to mobile chat view"
+                        on:click=move |_| {
+                            if let Some(win) = web_sys::window() {
+                                if let Ok(Some(ls)) = win.local_storage() {
+                                    let _ = ls.set_item("embra-mode", "chat");
+                                }
+                                let _ = win.location().reload();
+                            }
+                        }>
+                        "↗ mobile"
+                    </button>
                 </div>
             </div>
 
