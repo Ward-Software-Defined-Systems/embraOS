@@ -29,7 +29,11 @@ html, body { margin: 0; height: 100%; color: var(--txt);
 /* Subtle ember glow from top-center fading to warm-black (echoes banner). */
 body { background:
   radial-gradient(1100px 560px at 50% -8%, #241208 0%, var(--bg) 58%) fixed; }
-#app, .shell { height: 100vh; }
+/* `100dvh` is the dynamic viewport height — accounts for iOS Safari's
+   collapsing address bar. Plain `100vh` reserves space for chrome that
+   actually hides on scroll, over-extending the page. `100vh` first as
+   a fallback for any browser that doesn't know `dvh`. */
+#app, .shell { height: 100vh; height: 100dvh; }
 
 .shell {
   display: grid;
@@ -170,6 +174,10 @@ body.is-observer .term-wrap {
 .modal .m-actions { display: flex; justify-content: flex-end; gap: 8px;
   padding: 12px 16px; border-top: 1px solid var(--line); background: var(--bg-2);
   align-items: center; }
+/* Confirmation sheet (takeover, future yes/no prompts): smaller and
+   tighter than the parameter modal. */
+.modal.confirm { width: 380px; max-width: 92vw; }
+
 /* Multi-line editor (/ml): wider panel + monospace textarea, reusing the
    same surface tokens as `.modal input`. */
 .modal.editor { width: min(820px, 92vw); }

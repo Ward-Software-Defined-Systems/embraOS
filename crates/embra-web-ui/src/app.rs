@@ -259,6 +259,10 @@ pub fn App() -> impl IntoView {
     // True when the editor was opened by /guardian-define: submit routes
     // to the brain's `/guardian define` path instead of a user message.
     let editor_guardian = RwSignal::new(false);
+    // Takeover confirmation. Replaces the native `window.confirm()` with
+    // an in-app sheet (centred modal on desktop; mobile work picks up
+    // the bottom-sheet variant in the chat UI branch).
+    let takeover_open = RwSignal::new(false);
 
     let open_modal = move |i: usize| {
         vals.set(defaults(&SPECS[i]));
@@ -313,6 +317,7 @@ pub fn App() -> impl IntoView {
                         palette_open.set(false);
                         modal.set(None);
                         editor_open.set(false);
+                        takeover_open.set(false);
                     }
                 },
             );
@@ -331,7 +336,8 @@ pub fn App() -> impl IntoView {
     Effect::new(move |prev: Option<bool>| {
         let any_open = palette_open.get()
             || modal.get().is_some()
-            || editor_open.get();
+            || editor_open.get()
+            || takeover_open.get();
         if prev == Some(true) && !any_open {
             term::focus();
         }
@@ -403,14 +409,10 @@ pub fn App() -> impl IntoView {
                                     <span class="badge observer">
                                         {format!("○ Read-only · operator {o}")}
                                     </span>
-                                    <button class="btn" on:click=move |_| {
-                                        let ok = web_sys::window()
-                                            .and_then(|w| w.confirm_with_message(
-                                                "Take control of the console? The current operator becomes read-only."
-                                            ).ok())
-                                            .unwrap_or(false);
-                                        if ok { term::takeover(); }
-                                    }>"Take control"</button>
+                                    <button class="btn"
+                                        on:click=move |_| takeover_open.set(true)>
+                                        "Take control"
+                                    </button>
                                 </>
                             }.into_any()
                         }
@@ -623,6 +625,31 @@ pub fn App() -> impl IntoView {
                         </div>
                     </div>
                 }
+            })}
+
+            // ── Takeover confirmation sheet ───────────────────────────
+            {move || takeover_open.get().then(|| view! {
+                <div class="palette-bg"
+                    on:click=move |_| takeover_open.set(false)>
+                    <div class="modal confirm"
+                        on:click=move |e: leptos::ev::MouseEvent| e.stop_propagation()>
+                        <div class="m-head">
+                            <b>"Take control of the console?"</b>
+                        </div>
+                        <div class="m-note">
+                            "The current operator becomes read-only."
+                        </div>
+                        <div class="m-actions">
+                            <button class="btn ghost"
+                                on:click=move |_| takeover_open.set(false)>"Cancel"</button>
+                            <button class="btn"
+                                on:click=move |_| {
+                                    term::takeover();
+                                    takeover_open.set(false);
+                                }>"Take control"</button>
+                        </div>
+                    </div>
+                </div>
             })}
 
             // ── Command palette ───────────────────────────────────────

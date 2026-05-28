@@ -3,6 +3,13 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- iOS "Add to Home Screen" gets a chromeless launcher with the
+         brand status bar. `default` (not `black-translucent`) keeps the
+         status bar in the safe zone so the topbar isn't hidden behind
+         it — avoids needing safe-area inset handling. -->
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="embraOS" />
     <title>embraOS</title>
     <link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32.png" />
     <link rel="apple-touch-icon" sizes="180x180" href="/assets/apple-touch-icon.png" />
