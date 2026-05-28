@@ -17,6 +17,7 @@ use tokio_rustls::server::TlsStream;
 
 use crate::assets::static_handler;
 use crate::config::WebConfig;
+use crate::sessions::api_sessions_list;
 use crate::state::AppState;
 use crate::status::api_status;
 use crate::ws::ws_terminal;
@@ -66,6 +67,7 @@ pub async fn serve(
         .route("/ws/terminal", get(ws_terminal))
         .route("/ws/chat", get(ws_chat))
         .route("/api/status", get(api_status))
+        .route("/api/sessions", get(api_sessions_list))
         .fallback(static_handler)
         .with_state(state);
 
