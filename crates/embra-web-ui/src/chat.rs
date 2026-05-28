@@ -796,13 +796,6 @@ fn handle_server_msg(
     current_setup: RwSignal<Option<SetupData>>,
     has_connected_once: RwSignal<bool>,
 ) {
-    // DIAGNOSTIC — temporary, remove after empty-bubble + briefing-spam
-    // bugs are confirmed fixed. Logs every server frame to devtools so
-    // we can see what's actually arriving on the WS vs what we render.
-    web_sys::console::log_1(
-        &format!("[chat-srv] {srv:?}").into(),
-    );
-
     // Reconnection-briefing filter: on subsequent WS opens (e.g. after
     // iOS Safari suspends the tab on app-switch), the brain replays the
     // session history as `kind:"reconnection"` SystemMessages. The
