@@ -458,6 +458,40 @@ body.is-observer .term-wrap {
 }
 .ct-thinking .ct-state.down { color: var(--bad); }
 
+/* Live-reasoning indicator — appears only while a reasoning shard
+   exists (Phase 3b). 36 px tap target with a subtle pulse to draw the
+   eye when new shards arrive. Tap → opens the reasoning sheet. */
+.ct-reasoning {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  background: transparent;
+  border: 0;
+  font-size: 16px;
+  cursor: pointer;
+  flex-shrink: 0;
+  animation: ct-reason-pulse 1.8s ease-in-out infinite;
+}
+@keyframes ct-reason-pulse {
+  0%, 100% { opacity: 0.6; }
+  50%      { opacity: 1.0; }
+}
+
+.reasoning-sheet .sheet-body { padding: 0; }
+.reasoning-text {
+  margin: 0;
+  padding: 12px 16px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--txt-dim);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
 .ct-session-btn {
   font: inherit;
   font-size: 12px;

@@ -299,6 +299,12 @@ pub fn ChatApp() -> impl IntoView {
     let sessions_open = RwSignal::new(false);
     let slashes_open = RwSignal::new(false);
     let services_open = RwSignal::new(false);
+    // Phase 3b — live reasoning shard accumulator + sheet toggle.
+    // Cleared on Done / Error / Mode / user submit (matches the TUI
+    // expression-panel contract; never persisted client-side per
+    // REASONING-STREAM-01).
+    let reasoning = RwSignal::new(String::new());
+    let reasoning_open = RwSignal::new(false);
     // Service-health snapshot (5 s poll loop shared with the desktop UI).
     let status = use_status();
 
@@ -317,6 +323,7 @@ pub fn ChatApp() -> impl IntoView {
             thinking,
             thinking_tool,
             session_name,
+            reasoning,
         ));
     });
 
@@ -351,6 +358,9 @@ pub fn ChatApp() -> impl IntoView {
             let _ = tx.unbounded_send(msg);
         }
         input.set(String::new());
+        // New turn → any in-flight reasoning shard from the previous
+        // turn is stale. Mirror what the brain will do server-side.
+        reasoning.set(String::new());
     };
 
     // Shared dispatcher for slashes triggered from sheets (sessions /
@@ -366,6 +376,7 @@ pub fn ChatApp() -> impl IntoView {
         if let Some(tx) = outbound.get_untracked() {
             let _ = tx.unbounded_send(ClientMsg::Slash { command, args });
         }
+        reasoning.set(String::new());
     };
 
     view! {
@@ -378,6 +389,8 @@ pub fn ChatApp() -> impl IntoView {
                 status
                 sessions_open
                 services_open
+                reasoning
+                reasoning_open
             />
             <ChatScroll messages streaming />
             <ChatInput input connected slashes_open on_send=send_msg />
@@ -558,6 +571,26 @@ pub fn ChatApp() -> impl IntoView {
                     </div>
                 </div>
             })}
+
+            // ── Reasoning sheet ────────────────────────────────────
+            {move || reasoning_open.get().then(|| view! {
+                <div class="sheet-bg" on:click=move |_| reasoning_open.set(false)>
+                    <div class="sheet reasoning-sheet"
+                        on:click=move |e: MouseEvent| e.stop_propagation()>
+                        <div class="sheet-head">
+                            <span class="sheet-title">"Live reasoning"</span>
+                            <button class="sheet-close"
+                                on:click=move |_| reasoning_open.set(false)>"×"</button>
+                        </div>
+                        <div class="sheet-body">
+                            <pre class="reasoning-text">{move || {
+                                let r = reasoning.get();
+                                if r.is_empty() { "(reasoning ended)".to_string() } else { r }
+                            }}</pre>
+                        </div>
+                    </div>
+                </div>
+            })}
         </div>
     }
 }
@@ -572,6 +605,7 @@ async fn run_ws_forever(
     thinking: RwSignal<bool>,
     thinking_tool: RwSignal<String>,
     session_name: RwSignal<String>,
+    reasoning: RwSignal<String>,
 ) {
     let mut backoff_ms: u32 = 1000;
     loop {
@@ -586,12 +620,14 @@ async fn run_ws_forever(
             thinking,
             thinking_tool,
             session_name,
+            reasoning,
         )
         .await;
 
         outbound.set(None);
         connected.set(false);
         thinking.set(false);
+        reasoning.set(String::new());
 
         match exit {
             ExitReason::Ok => {
@@ -622,6 +658,7 @@ async fn run_ws_once(
     thinking: RwSignal<bool>,
     thinking_tool: RwSignal<String>,
     session_name: RwSignal<String>,
+    reasoning: RwSignal<String>,
 ) -> ExitReason {
     let ws = match WebSocket::open(&ws_url()) {
         Ok(ws) => ws,
@@ -672,6 +709,7 @@ async fn run_ws_once(
                     thinking,
                     thinking_tool,
                     session_name,
+                    reasoning,
                 );
             }
             Ok(WsMessage::Bytes(_)) => {
@@ -690,6 +728,7 @@ fn handle_server_msg(
     thinking: RwSignal<bool>,
     thinking_tool: RwSignal<String>,
     session_name: RwSignal<String>,
+    reasoning: RwSignal<String>,
 ) {
     match srv {
         ServerMsg::Token { text } => {
@@ -710,6 +749,9 @@ fn handle_server_msg(
             streaming.set(String::new());
             thinking.set(false);
             thinking_tool.set(String::new());
+            // Per REASONING-STREAM-01: reasoning is per-turn, cleared on
+            // response completion (same as TUI expression-panel).
+            reasoning.set(String::new());
         }
         ServerMsg::System { content, kind } => {
             // Reconnection briefings can be long — keep them but render
@@ -721,6 +763,11 @@ fn handle_server_msg(
                 if let Some(rest) = tok.strip_prefix("session=") {
                     session_name.set(rest.trim_end_matches(|c: char| !c.is_alphanumeric() && c != '-' && c != '_').to_string());
                 }
+            }
+            // Errors terminate the turn just like Done; clear reasoning
+            // so a stale shard doesn't outlive its turn.
+            if kind == "error" {
+                reasoning.set(String::new());
             }
             messages.update(|m| m.push(Bubble::System { content, kind }));
         }
@@ -755,6 +802,8 @@ fn handle_server_msg(
             } else {
                 format!("Mode: {from} → {to} — {message}")
             };
+            // Mode transitions end any in-flight reasoning shards.
+            reasoning.set(String::new());
             messages.update(|m| {
                 m.push(Bubble::System {
                     content,
@@ -765,8 +814,8 @@ fn handle_server_msg(
         ServerMsg::Setup { prompt, .. } => {
             messages.update(|m| m.push(Bubble::Setup { prompt }));
         }
-        ServerMsg::Reasoning { .. } => {
-            // Phase 3 adds the reasoning panel. MVP drops these.
+        ServerMsg::Reasoning { text } => {
+            reasoning.update(|s| s.push_str(&text));
         }
         ServerMsg::Error { message } => {
             messages.update(|m| {
@@ -790,6 +839,8 @@ fn ChatTopBar(
     status: RwSignal<StatusData>,
     sessions_open: RwSignal<bool>,
     services_open: RwSignal<bool>,
+    reasoning: RwSignal<String>,
+    reasoning_open: RwSignal<bool>,
 ) -> impl IntoView {
     let switch_to_desktop = move |_: MouseEvent| {
         if let Some(win) = web_sys::window() {
@@ -825,6 +876,17 @@ fn ChatTopBar(
                 on:click=move |_| services_open.set(true)>
                 <span class="ct-dot"></span>
             </button>
+            {move || {
+                if reasoning.with(|r| r.is_empty()) {
+                    view! { <span></span> }.into_any()
+                } else {
+                    view! {
+                        <button class="ct-reasoning"
+                            title="Tap to read live reasoning"
+                            on:click=move |_| reasoning_open.set(true)>"💭"</button>
+                    }.into_any()
+                }
+            }}
             <div class="ct-thinking">
                 {move || if thinking.get() {
                     let t = thinking_tool.get();
