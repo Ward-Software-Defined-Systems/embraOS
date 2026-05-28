@@ -323,6 +323,14 @@ pub fn ChatApp() -> impl IntoView {
     let reasoning_open = RwSignal::new(false);
     // Phase 3c — interactive wizard prompt overlay state.
     let current_setup = RwSignal::new(None::<SetupData>);
+    // Flips to true after the first server message arrives — used to
+    // suppress redundant "Reconnection" SystemMessages on subsequent WS
+    // reconnects (the browser still has the timeline in memory; we only
+    // need the briefing on the very first open per page load). iOS
+    // Safari aggressively closes WebSockets on app-switch, so without
+    // this filter the briefing replays every time the user flips back
+    // to the tab.
+    let has_connected_once = RwSignal::new(false);
     // Service-health snapshot (5 s poll loop shared with the desktop UI).
     let status = use_status();
 
@@ -343,6 +351,7 @@ pub fn ChatApp() -> impl IntoView {
             session_name,
             reasoning,
             current_setup,
+            has_connected_once,
         ));
     });
 
@@ -652,6 +661,7 @@ async fn run_ws_forever(
     session_name: RwSignal<String>,
     reasoning: RwSignal<String>,
     current_setup: RwSignal<Option<SetupData>>,
+    has_connected_once: RwSignal<bool>,
 ) {
     let mut backoff_ms: u32 = 1000;
     loop {
@@ -668,6 +678,7 @@ async fn run_ws_forever(
             session_name,
             reasoning,
             current_setup,
+            has_connected_once,
         )
         .await;
 
@@ -709,6 +720,7 @@ async fn run_ws_once(
     session_name: RwSignal<String>,
     reasoning: RwSignal<String>,
     current_setup: RwSignal<Option<SetupData>>,
+    has_connected_once: RwSignal<bool>,
 ) -> ExitReason {
     let ws = match WebSocket::open(&ws_url()) {
         Ok(ws) => ws,
@@ -761,6 +773,7 @@ async fn run_ws_once(
                     session_name,
                     reasoning,
                     current_setup,
+                    has_connected_once,
                 );
             }
             Ok(WsMessage::Bytes(_)) => {
@@ -781,7 +794,34 @@ fn handle_server_msg(
     session_name: RwSignal<String>,
     reasoning: RwSignal<String>,
     current_setup: RwSignal<Option<SetupData>>,
+    has_connected_once: RwSignal<bool>,
 ) {
+    // Reconnection-briefing filter: on subsequent WS opens (e.g. after
+    // iOS Safari suspends the tab on app-switch), the brain replays the
+    // session history as `kind:"reconnection"` SystemMessages. The
+    // browser still has the timeline from before the disconnect, so the
+    // replay is pure noise. Keep it on the very first open per page
+    // load (operator wants the briefing then) and drop it after.
+    if let ServerMsg::System { kind, content } = &srv {
+        if kind == "reconnection" && has_connected_once.get_untracked() {
+            // Still extract session=foo so the topbar stays accurate
+            // even when we suppress the bubble.
+            for tok in content.split_whitespace() {
+                if let Some(rest) = tok.strip_prefix("session=") {
+                    session_name.set(
+                        rest.trim_end_matches(|c: char| {
+                            !c.is_alphanumeric() && c != '-' && c != '_'
+                        })
+                        .to_string(),
+                    );
+                }
+            }
+            return;
+        }
+    }
+    if !has_connected_once.get_untracked() {
+        has_connected_once.set(true);
+    }
     match srv {
         ServerMsg::Token { text } => {
             streaming.update(|s| s.push_str(&text));
@@ -1036,12 +1076,36 @@ fn BubbleView(idx: usize, bubble: Bubble) -> impl IntoView {
             } else {
                 "bubble tool ok"
             };
-            let summary = truncate(result.trim(), 100);
+            // Defensive fallbacks: some tools legitimately return "" (silent
+            // side-effect tools like file_write, set_env) or have `{}` input.
+            // Without these, the bubble renders as just "name → ▼" with a
+            // blank middle and reads as an empty block on a phone.
+            let display_name = if name.is_empty() {
+                "(tool)".to_string()
+            } else {
+                name.clone()
+            };
+            let trimmed_result = result.trim();
+            let summary = if trimmed_result.is_empty() {
+                "(no output)".to_string()
+            } else {
+                truncate(trimmed_result, 100)
+            };
+            let detail_input = if input_json.trim().is_empty() || input_json.trim() == "{}" {
+                "(no input)".to_string()
+            } else {
+                pretty_json_capped(&input_json, 4096)
+            };
+            let detail_result = if result.is_empty() {
+                "(no output)".to_string()
+            } else {
+                result.clone()
+            };
             view! {
                 <div class=cls>
                     <div class="tool-head"
                         on:click=move |_| expanded.update(|b| *b = !*b)>
-                        <span class="t-name">{name}</span>
+                        <span class="t-name">{display_name}</span>
                         <span class="t-sep">" → "</span>
                         <span class="t-result">{summary}</span>
                         <span class="t-toggle">
@@ -1051,9 +1115,9 @@ fn BubbleView(idx: usize, bubble: Bubble) -> impl IntoView {
                     {move || expanded.get().then(|| view! {
                         <div class="tool-detail">
                             <div class="t-section">"input"</div>
-                            <pre class="t-pre">{pretty_json_capped(&input_json, 4096)}</pre>
+                            <pre class="t-pre">{detail_input.clone()}</pre>
                             <div class="t-section">"result"</div>
-                            <pre class="t-pre">{result.clone()}</pre>
+                            <pre class="t-pre">{detail_result.clone()}</pre>
                         </div>
                     })}
                 </div>
