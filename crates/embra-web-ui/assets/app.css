@@ -312,16 +312,65 @@ body.is-observer .term-wrap {
 
 .bubble.tool {
   align-self: flex-start;
+  max-width: 95%;
   background: var(--bg-2);
   border: 1px solid var(--line);
+  border-radius: 8px;
   font-size: 13px;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  padding: 8px 12px;
+  padding: 0;
+  overflow: hidden;
 }
 .bubble.tool.error { border-color: #5a2a1c; }
-.bubble.tool .t-name { color: var(--accent-2); font-weight: 600; }
-.bubble.tool .t-sep { color: var(--txt-dim); }
-.bubble.tool .t-result { color: var(--txt); }
+
+.bubble.tool .tool-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  cursor: pointer;
+  min-height: 36px;
+  -webkit-tap-highlight-color: transparent;
+}
+.bubble.tool .tool-head:active { background: var(--panel); }
+.bubble.tool .t-name { color: var(--accent-2); font-weight: 600; flex-shrink: 0; }
+.bubble.tool .t-sep { color: var(--txt-dim); flex-shrink: 0; }
+.bubble.tool .t-result {
+  color: var(--txt);
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bubble.tool .t-toggle {
+  color: var(--txt-dim);
+  font-size: 10px;
+  margin-left: 4px;
+  flex-shrink: 0;
+}
+
+.bubble.tool .tool-detail {
+  border-top: 1px solid var(--line);
+  padding: 4px 0;
+}
+.bubble.tool .t-section {
+  padding: 6px 10px 2px;
+  font-size: 10px;
+  color: var(--txt-dim);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+.bubble.tool .t-pre {
+  margin: 0;
+  padding: 4px 10px 8px;
+  font-size: 12px;
+  color: var(--txt);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  max-height: 40dvh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
 
 .bubble.setup {
   align-self: stretch;

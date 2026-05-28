@@ -107,6 +107,9 @@ enum Bubble {
     Tool {
         name: String,
         is_error: bool,
+        /// Raw JSON-as-string from the wire (tool input). Rendered
+        /// pretty-printed when the card is expanded.
+        input_json: String,
         result: String,
     },
     /// Phase 1 stub — Phase 3 expands this to an inline form.
@@ -145,6 +148,23 @@ fn truncate(s: &str, max: usize) -> String {
     }
     let mut out: String = s.chars().take(max).collect();
     out.push('…');
+    out
+}
+
+/// Pretty-print a JSON string with a soft character cap. Falls back to
+/// the raw input on parse failure (defensive — tool input is always
+/// valid JSON in practice). Tools can ship very large inputs (file
+/// contents, etc.); the cap keeps the expanded card from blowing past
+/// what a phone can scroll through comfortably.
+fn pretty_json_capped(s: &str, max: usize) -> String {
+    let pretty = serde_json::from_str::<serde_json::Value>(s)
+        .and_then(|v| serde_json::to_string_pretty(&v))
+        .unwrap_or_else(|_| s.to_string());
+    if pretty.chars().count() <= max {
+        return pretty;
+    }
+    let mut out: String = pretty.chars().take(max).collect();
+    out.push_str("\n…(truncated)");
     out
 }
 
@@ -707,6 +727,7 @@ fn handle_server_msg(
         ServerMsg::Tool {
             name,
             is_error,
+            input_json,
             result,
             ..
         } => {
@@ -714,6 +735,7 @@ fn handle_server_msg(
                 m.push(Bubble::Tool {
                     name,
                     is_error,
+                    input_json,
                     result,
                 });
             });
@@ -878,19 +900,35 @@ fn BubbleView(idx: usize, bubble: Bubble) -> impl IntoView {
         Bubble::Tool {
             name,
             is_error,
+            input_json,
             result,
         } => {
+            let expanded = RwSignal::new(false);
             let cls = if is_error {
                 "bubble tool error"
             } else {
                 "bubble tool ok"
             };
-            let summary = truncate(result.trim(), 200);
+            let summary = truncate(result.trim(), 100);
             view! {
                 <div class=cls>
-                    <span class="t-name">{name}</span>
-                    <span class="t-sep">" → "</span>
-                    <span class="t-result">{summary}</span>
+                    <div class="tool-head"
+                        on:click=move |_| expanded.update(|b| *b = !*b)>
+                        <span class="t-name">{name}</span>
+                        <span class="t-sep">" → "</span>
+                        <span class="t-result">{summary}</span>
+                        <span class="t-toggle">
+                            {move || if expanded.get() { "▲" } else { "▼" }}
+                        </span>
+                    </div>
+                    {move || expanded.get().then(|| view! {
+                        <div class="tool-detail">
+                            <div class="t-section">"input"</div>
+                            <pre class="t-pre">{pretty_json_capped(&input_json, 4096)}</pre>
+                            <div class="t-section">"result"</div>
+                            <pre class="t-pre">{result.clone()}</pre>
+                        </div>
+                    })}
                 </div>
             }
             .into_any()
