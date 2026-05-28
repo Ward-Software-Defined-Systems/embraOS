@@ -112,8 +112,24 @@ enum Bubble {
         input_json: String,
         result: String,
     },
-    /// Phase 1 stub — Phase 3 expands this to an inline form.
+    /// Inert history record of a wizard prompt — the interactive form
+    /// lives in `current_setup` / [`SetupOverlay`] above the input bar.
     Setup { prompt: String },
+}
+
+/// In-flight wizard step. Set when a `ServerMsg::Setup` arrives and
+/// cleared when the operator submits an answer or the brain emits a
+/// new Mode / Error. Only the latest setup is interactive — past
+/// prompts live in the timeline as `Bubble::Setup`.
+#[derive(Clone, Debug)]
+struct SetupData {
+    /// "text" / "selector" / "confirm" — mapped from `SetupFieldType`.
+    field_type: String,
+    prompt: String,
+    /// Populated for `field_type == "selector"`.
+    options: Vec<String>,
+    /// Pre-populates the text input (no-op for selector / confirm).
+    default_value: String,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -305,6 +321,8 @@ pub fn ChatApp() -> impl IntoView {
     // REASONING-STREAM-01).
     let reasoning = RwSignal::new(String::new());
     let reasoning_open = RwSignal::new(false);
+    // Phase 3c — interactive wizard prompt overlay state.
+    let current_setup = RwSignal::new(None::<SetupData>);
     // Service-health snapshot (5 s poll loop shared with the desktop UI).
     let status = use_status();
 
@@ -324,6 +342,7 @@ pub fn ChatApp() -> impl IntoView {
             thinking_tool,
             session_name,
             reasoning,
+            current_setup,
         ));
     });
 
@@ -379,6 +398,21 @@ pub fn ChatApp() -> impl IntoView {
         reasoning.set(String::new());
     };
 
+    // Wizard answers go on the wire as plain UserMessages — same as
+    // typing the answer into the input bar. Used by the SetupOverlay
+    // submit path. Echoes locally so the timeline shows what was
+    // answered next to the wizard prompt bubble.
+    let send_text = move |text: String| {
+        if text.is_empty() {
+            return;
+        }
+        messages.update(|m| m.push(Bubble::User(text.clone())));
+        if let Some(tx) = outbound.get_untracked() {
+            let _ = tx.unbounded_send(ClientMsg::Msg { text });
+        }
+        reasoning.set(String::new());
+    };
+
     view! {
         <div class="chat-app">
             <ChatTopBar
@@ -393,6 +427,7 @@ pub fn ChatApp() -> impl IntoView {
                 reasoning_open
             />
             <ChatScroll messages streaming />
+            <SetupOverlay current_setup on_submit=send_text />
             <ChatInput input connected slashes_open on_send=send_msg />
 
             // ── Sessions sheet ─────────────────────────────────────
@@ -606,6 +641,7 @@ async fn run_ws_forever(
     thinking_tool: RwSignal<String>,
     session_name: RwSignal<String>,
     reasoning: RwSignal<String>,
+    current_setup: RwSignal<Option<SetupData>>,
 ) {
     let mut backoff_ms: u32 = 1000;
     loop {
@@ -621,6 +657,7 @@ async fn run_ws_forever(
             thinking_tool,
             session_name,
             reasoning,
+            current_setup,
         )
         .await;
 
@@ -628,6 +665,8 @@ async fn run_ws_forever(
         connected.set(false);
         thinking.set(false);
         reasoning.set(String::new());
+        // A stale in-flight wizard step belongs to the dead connection.
+        current_setup.set(None);
 
         match exit {
             ExitReason::Ok => {
@@ -659,6 +698,7 @@ async fn run_ws_once(
     thinking_tool: RwSignal<String>,
     session_name: RwSignal<String>,
     reasoning: RwSignal<String>,
+    current_setup: RwSignal<Option<SetupData>>,
 ) -> ExitReason {
     let ws = match WebSocket::open(&ws_url()) {
         Ok(ws) => ws,
@@ -710,6 +750,7 @@ async fn run_ws_once(
                     thinking_tool,
                     session_name,
                     reasoning,
+                    current_setup,
                 );
             }
             Ok(WsMessage::Bytes(_)) => {
@@ -729,6 +770,7 @@ fn handle_server_msg(
     thinking_tool: RwSignal<String>,
     session_name: RwSignal<String>,
     reasoning: RwSignal<String>,
+    current_setup: RwSignal<Option<SetupData>>,
 ) {
     match srv {
         ServerMsg::Token { text } => {
@@ -802,8 +844,10 @@ fn handle_server_msg(
             } else {
                 format!("Mode: {from} → {to} — {message}")
             };
-            // Mode transitions end any in-flight reasoning shards.
+            // Mode transitions end any in-flight reasoning shards AND
+            // dismiss any pending setup prompt (the wizard completed).
             reasoning.set(String::new());
+            current_setup.set(None);
             messages.update(|m| {
                 m.push(Bubble::System {
                     content,
@@ -811,7 +855,18 @@ fn handle_server_msg(
                 });
             });
         }
-        ServerMsg::Setup { prompt, .. } => {
+        ServerMsg::Setup {
+            field_type,
+            prompt,
+            options,
+            default_value,
+        } => {
+            current_setup.set(Some(SetupData {
+                field_type,
+                prompt: prompt.clone(),
+                options,
+                default_value,
+            }));
             messages.update(|m| m.push(Bubble::Setup { prompt }));
         }
         ServerMsg::Reasoning { text } => {
@@ -996,12 +1051,100 @@ fn BubbleView(idx: usize, bubble: Bubble) -> impl IntoView {
             .into_any()
         }
         Bubble::Setup { prompt } => view! {
-            <div class="bubble setup">
-                <div class="s-hint">"Setup prompt (respond from desktop console for now):"</div>
-                <div class="s-prompt">{prompt}</div>
+            <div class="bubble setup-history">
+                <span class="s-hint">"⚙ asked: "</span>
+                <span class="s-text">{prompt}</span>
             </div>
         }
         .into_any(),
+    }
+}
+
+// ── Setup overlay (wizard step inline form) ─────────────────────────
+
+#[component]
+fn SetupOverlay<F>(
+    current_setup: RwSignal<Option<SetupData>>,
+    on_submit: F,
+) -> impl IntoView
+where
+    F: Fn(String) + 'static + Copy + Send + Sync,
+{
+    view! {
+        {move || current_setup.get().map(|setup| {
+            // Destructure into owned locals so each branch can move
+            // freely without re-cloning the parent struct.
+            let SetupData { field_type, prompt, options, default_value } = setup;
+
+            let body: leptos::tachys::view::any_view::AnyView = match field_type.as_str() {
+                "selector" => {
+                    view! {
+                        <div class="setup-options">
+                            {options.into_iter().map(|opt| {
+                                let opt_value = opt.clone();
+                                view! {
+                                    <button class="setup-opt"
+                                        on:click=move |_| {
+                                            on_submit(opt_value.clone());
+                                            current_setup.set(None);
+                                        }>{opt}</button>
+                                }
+                            }).collect_view()}
+                        </div>
+                    }.into_any()
+                }
+                "confirm" => {
+                    view! {
+                        <div class="setup-options">
+                            <button class="setup-opt yes"
+                                on:click=move |_| {
+                                    on_submit("yes".to_string());
+                                    current_setup.set(None);
+                                }>"Yes"</button>
+                            <button class="setup-opt no"
+                                on:click=move |_| {
+                                    on_submit("no".to_string());
+                                    current_setup.set(None);
+                                }>"No"</button>
+                        </div>
+                    }.into_any()
+                }
+                _ => {
+                    let answer = RwSignal::new(default_value);
+                    let submit = move || {
+                        let val = answer.get().trim().to_string();
+                        if val.is_empty() {
+                            return;
+                        }
+                        on_submit(val);
+                        current_setup.set(None);
+                    };
+                    view! {
+                        <div class="setup-text-row">
+                            <input class="setup-input"
+                                type="text"
+                                prop:value=move || answer.get()
+                                on:input=move |e| answer.set(event_target_value(&e))
+                                on:keydown=move |e: KeyboardEvent| {
+                                    if e.key() == "Enter" {
+                                        e.prevent_default();
+                                        submit();
+                                    }
+                                } />
+                            <button class="setup-submit"
+                                on:click=move |_| submit()>"Submit"</button>
+                        </div>
+                    }.into_any()
+                }
+            };
+
+            view! {
+                <div class="setup-overlay">
+                    <div class="setup-prompt">"⚙ " {prompt}</div>
+                    {body}
+                </div>
+            }
+        })}
     }
 }
 

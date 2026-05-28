@@ -207,7 +207,8 @@ body.is-observer .term-wrap {
 
 .chat-app {
   display: grid;
-  grid-template-rows: 56px 1fr auto;
+  /* topbar / scroll / wizard overlay (auto, 0 when no SetupData) / input */
+  grid-template-rows: 56px 1fr auto auto;
   height: 100dvh;
   background: var(--bg);
   color: var(--txt);
@@ -372,15 +373,100 @@ body.is-observer .term-wrap {
   -webkit-overflow-scrolling: touch;
 }
 
-.bubble.setup {
+/* Compact history record of a past wizard prompt — the interactive
+   form lives in the SetupOverlay above the input bar. Visually quieter
+   than the active overlay so the timeline doesn't get pulled away from
+   the conversation flow. */
+.bubble.setup-history {
   align-self: stretch;
-  background: linear-gradient(90deg, rgba(255, 122, 26, .14), rgba(255, 122, 26, .04));
-  border: 1px solid #4a2a12;
-  font-size: 14px;
-  padding: 10px 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--txt-dim);
+  padding: 6px 10px;
 }
-.bubble.setup .s-hint { color: var(--txt-dim); font-size: 12px; margin-bottom: 4px; }
-.bubble.setup .s-prompt { color: var(--txt); font-weight: 500; }
+.bubble.setup-history .s-hint { color: var(--accent-2); margin-right: 6px; font-weight: 600; }
+.bubble.setup-history .s-text { color: var(--txt); }
+
+/* Active wizard step — sticky between the chat scroll and the input
+   bar. Brand-warm accent so it reads as "the system needs your
+   attention here", not background chatter. */
+.setup-overlay {
+  background: linear-gradient(90deg, rgba(255, 122, 26, .14), rgba(255, 122, 26, .04));
+  border-top: 1px solid #4a2a12;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.setup-prompt {
+  font-size: 14px;
+  color: var(--txt);
+  font-weight: 500;
+  line-height: 1.4;
+}
+.setup-text-row {
+  display: flex;
+  gap: 8px;
+}
+.setup-input {
+  flex: 1;
+  font: inherit;
+  font-size: 16px;
+  padding: 10px 12px;
+  background: var(--bg-2);
+  color: var(--txt);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  outline: none;
+  min-height: 44px;
+}
+.setup-input:focus { border-color: var(--accent); }
+.setup-submit {
+  min-width: 80px;
+  min-height: 44px;
+  background: var(--accent);
+  color: #1a0e06;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  font-weight: 600;
+  font-size: 14px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+.setup-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.setup-opt {
+  min-height: 44px;
+  padding: 10px 16px;
+  background: var(--panel);
+  color: var(--txt);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  flex: 1 1 auto;
+  min-width: 80px;
+}
+.setup-opt:active {
+  background: var(--accent);
+  color: #1a0e06;
+  border-color: var(--accent);
+}
+.setup-opt.yes {
+  background: var(--good);
+  color: #0c2a14;
+  border-color: var(--good);
+}
+.setup-opt.no {
+  background: var(--panel);
+}
 
 /* Input bar — textarea grows up to a cap, Send button always 44 px. */
 .chat-input-bar {
