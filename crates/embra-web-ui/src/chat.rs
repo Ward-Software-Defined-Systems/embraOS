@@ -184,6 +184,117 @@ fn pretty_json_capped(s: &str, max: usize) -> String {
     out
 }
 
+/// Match `kw` at `i` in `chars` on word boundaries (so `null` inside
+/// `nullable` doesn't match).
+fn kw_at(chars: &[char], i: usize, kw: &str) -> bool {
+    let k: Vec<char> = kw.chars().collect();
+    if i + k.len() > chars.len() || chars[i..i + k.len()] != k[..] {
+        return false;
+    }
+    let before_ok = i == 0 || !chars[i - 1].is_alphanumeric();
+    let after = i + k.len();
+    let after_ok = after >= chars.len() || !chars[after].is_alphanumeric();
+    before_ok && after_ok
+}
+
+/// Tokenize a JSON-ish string into `(text, css-class)` segments, mirroring
+/// the TUI's scheme (`embra-console` `render.rs::parse_json_line`): keys →
+/// `jk` (cyan), string values → `js` (green), numbers + true/false/null →
+/// `jn`/`jb` (amber), everything else → `""` (default). Newlines are kept
+/// verbatim for the surrounding `<pre>`.
+fn highlight_json_segments(s: &str) -> Vec<(String, &'static str)> {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut segs: Vec<(String, &'static str)> = Vec::new();
+    let mut cur = String::new();
+    let mut i = 0;
+    while i < len {
+        let ch = chars[i];
+        if ch == '"' {
+            if !cur.is_empty() {
+                segs.push((std::mem::take(&mut cur), ""));
+            }
+            let mut lit = String::from('"');
+            i += 1;
+            while i < len && chars[i] != '"' {
+                if chars[i] == '\\' && i + 1 < len {
+                    lit.push(chars[i]);
+                    i += 1;
+                }
+                lit.push(chars[i]);
+                i += 1;
+            }
+            if i < len {
+                lit.push('"');
+                i += 1;
+            }
+            // A string is a key when the next non-space char is ':'.
+            let mut j = i;
+            while j < len && chars[j] == ' ' {
+                j += 1;
+            }
+            let cls = if j < len && chars[j] == ':' { "jk" } else { "js" };
+            segs.push((lit, cls));
+        } else if (ch.is_ascii_digit() || ch == '-')
+            && (cur.trim().is_empty()
+                || cur.ends_with(": ")
+                || cur.ends_with(',')
+                || cur.ends_with('['))
+        {
+            if !cur.is_empty() {
+                segs.push((std::mem::take(&mut cur), ""));
+            }
+            let mut num = String::from(ch);
+            i += 1;
+            while i < len
+                && (chars[i].is_ascii_digit() || matches!(chars[i], '.' | 'e' | 'E' | '+' | '-'))
+            {
+                num.push(chars[i]);
+                i += 1;
+            }
+            segs.push((num, "jn"));
+        } else if kw_at(&chars, i, "true") || kw_at(&chars, i, "false") || kw_at(&chars, i, "null")
+        {
+            if !cur.is_empty() {
+                segs.push((std::mem::take(&mut cur), ""));
+            }
+            let kw = if kw_at(&chars, i, "false") {
+                "false"
+            } else if kw_at(&chars, i, "true") {
+                "true"
+            } else {
+                "null"
+            };
+            segs.push((kw.to_string(), "jb"));
+            i += kw.len();
+        } else {
+            cur.push(ch);
+            i += 1;
+        }
+    }
+    if !cur.is_empty() {
+        segs.push((cur, ""));
+    }
+    segs
+}
+
+/// Render tool input/result into the card `<pre>` with JSON syntax colors.
+/// Only JSON-shaped content under a size cap is tokenized; large or plain
+/// text renders unstyled (one node) to keep the DOM light.
+fn json_pre(content: &str) -> AnyView {
+    let trimmed = content.trim_start();
+    let looks_json = trimmed.starts_with('{') || trimmed.starts_with('[');
+    if looks_json && content.len() <= 8192 {
+        highlight_json_segments(content)
+            .into_iter()
+            .map(|(text, cls)| view! { <span class=cls>{text}</span> }.into_any())
+            .collect_view()
+            .into_any()
+    } else {
+        view! { <span>{content.to_string()}</span> }.into_any()
+    }
+}
+
 /// DOM-find + focus the chat input textarea. Used after closing a
 /// sheet that inserted text — keeps the soft keyboard in place and the
 /// cursor positioned for follow-up typing.
@@ -220,6 +331,7 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
     ]),
     ("Provider", &[
         ("/provider", "show or switch provider"),
+        ("/model", "show / switch Anthropic model"),
         ("/iter-cap", "show / set tool iteration cap"),
         ("/show-reasoning", "toggle reasoning panel"),
     ]),
@@ -323,14 +435,6 @@ pub fn ChatApp() -> impl IntoView {
     let reasoning_open = RwSignal::new(false);
     // Phase 3c — interactive wizard prompt overlay state.
     let current_setup = RwSignal::new(None::<SetupData>);
-    // Flips to true after the first server message arrives — used to
-    // suppress redundant "Reconnection" SystemMessages on subsequent WS
-    // reconnects (the browser still has the timeline in memory; we only
-    // need the briefing on the very first open per page load). iOS
-    // Safari aggressively closes WebSockets on app-switch, so without
-    // this filter the briefing replays every time the user flips back
-    // to the tab.
-    let has_connected_once = RwSignal::new(false);
     // Service-health snapshot (5 s poll loop shared with the desktop UI).
     let status = use_status();
 
@@ -351,7 +455,6 @@ pub fn ChatApp() -> impl IntoView {
             session_name,
             reasoning,
             current_setup,
-            has_connected_once,
         ));
     });
 
@@ -661,7 +764,6 @@ async fn run_ws_forever(
     session_name: RwSignal<String>,
     reasoning: RwSignal<String>,
     current_setup: RwSignal<Option<SetupData>>,
-    has_connected_once: RwSignal<bool>,
 ) {
     let mut backoff_ms: u32 = 1000;
     loop {
@@ -678,7 +780,6 @@ async fn run_ws_forever(
             session_name,
             reasoning,
             current_setup,
-            has_connected_once,
         )
         .await;
 
@@ -720,13 +821,25 @@ async fn run_ws_once(
     session_name: RwSignal<String>,
     reasoning: RwSignal<String>,
     current_setup: RwSignal<Option<SetupData>>,
-    has_connected_once: RwSignal<bool>,
 ) -> ExitReason {
     let ws = match WebSocket::open(&ws_url()) {
         Ok(ws) => ws,
         Err(e) => return ExitReason::Err(format!("open: {e:?}")),
     };
     connected.set(true);
+
+    // Reconnection-briefing gate, snapshotted PER CONNECTION before any
+    // frame is processed. On attach the brain replays the whole session
+    // history as a series of `kind:"reconnection"` System frames. We want
+    // them on a cold open (empty timeline — the operator needs the
+    // briefing) but NOT on a reconnect where we still hold the timeline
+    // in memory (pure noise). Keying on "did the timeline already have
+    // content when this socket opened" is robust to iOS Safari dropping
+    // the WS mid-briefing (which defeated the old "flip a flag on the
+    // first non-reconnection frame" heuristic — the flag never flipped,
+    // so every reconnect re-dumped the full history) AND to a context
+    // reset (timeline empty ⇒ we correctly re-show the briefing).
+    let had_content_at_connect = messages.with_untracked(|m| !m.is_empty());
 
     let (mut sink, mut stream) = ws.split();
 
@@ -773,7 +886,7 @@ async fn run_ws_once(
                     session_name,
                     reasoning,
                     current_setup,
-                    has_connected_once,
+                    had_content_at_connect,
                 );
             }
             Ok(WsMessage::Bytes(_)) => {
@@ -794,27 +907,27 @@ fn handle_server_msg(
     session_name: RwSignal<String>,
     reasoning: RwSignal<String>,
     current_setup: RwSignal<Option<SetupData>>,
-    has_connected_once: RwSignal<bool>,
+    had_content_at_connect: bool,
 ) {
-    // Reconnection-briefing filter: on subsequent WS opens (e.g. after
-    // iOS Safari suspends the tab on app-switch), the brain replays the
-    // session history as `kind:"reconnection"` SystemMessages. The
-    // browser still has the timeline from before the disconnect, so the
-    // replay is pure noise. Keep it on the very first open per page
-    // load (operator wants the briefing then) and drop it after.
+    // Reconnection-briefing filter. On attach the brain replays the whole
+    // session history as a series of `kind:"reconnection"` System frames.
+    // We want them on a cold open (empty timeline — the operator needs the
+    // briefing) but NOT on a reconnect where we still hold the timeline in
+    // memory (pure noise — e.g. iOS Safari closing the WS on app-switch).
     //
-    // CRITICAL: the flag flips only on a NON-reconnection message. The
-    // very first briefing on initial connect IS a series of reconnection
-    // messages (multiple of them) — if we flipped on the first message
-    // of any kind, the second briefing message onward would already be
-    // filtered AS the user is supposed to be reading them. We wait for
-    // a "real" event (Token / Done / Mode / Tool / Setup / non-recon
-    // System) to signal that the briefing has wound down.
+    // `had_content_at_connect` is snapshotted once per socket in
+    // `run_ws_once`, BEFORE any frame is processed, so the whole briefing
+    // series is judged against the timeline's state at connect — not its
+    // state mid-replay. This is robust to the WS dropping mid-briefing
+    // (the old "flip a flag on the first non-reconnection frame" heuristic
+    // never flipped in that case and re-dumped the full history on every
+    // reconnect) and degrades correctly on a context reset (timeline empty
+    // ⇒ briefing re-shown).
     let is_reconnection_msg = matches!(
         &srv,
         ServerMsg::System { kind, .. } if kind == "reconnection"
     );
-    if is_reconnection_msg && has_connected_once.get_untracked() {
+    if is_reconnection_msg && had_content_at_connect {
         if let ServerMsg::System { content, .. } = &srv {
             // Still extract session=foo so the topbar stays accurate
             // even when we suppress the bubble.
@@ -831,9 +944,6 @@ fn handle_server_msg(
         }
         return;
     }
-    if !is_reconnection_msg && !has_connected_once.get_untracked() {
-        has_connected_once.set(true);
-    }
     match srv {
         ServerMsg::Token { text } => {
             streaming.update(|s| s.push_str(&text));
@@ -847,7 +957,12 @@ fn handle_server_msg(
             } else {
                 streaming.get_untracked()
             };
-            if !final_text.is_empty() {
+            // Trim-guard, not just is_empty: a turn that ends with only a
+            // tool call (no prose) can yield a whitespace-only response,
+            // which would otherwise render as a visible empty assistant
+            // bubble. Push the untrimmed text to preserve intentional
+            // formatting; gate only on whether anything is visible.
+            if !final_text.trim().is_empty() {
                 messages.update(|m| m.push(Bubble::Assistant(final_text)));
             }
             streaming.set(String::new());
@@ -873,7 +988,12 @@ fn handle_server_msg(
             if kind == "error" {
                 reasoning.set(String::new());
             }
-            messages.update(|m| m.push(Bubble::System { content, kind }));
+            // Defensive: skip a System frame with no visible text so it
+            // can't render as a stray empty bubble. Session extraction and
+            // the reasoning clear above still ran.
+            if !content.trim().is_empty() {
+                messages.update(|m| m.push(Bubble::System { content, kind }));
+            }
         }
         ServerMsg::Tool {
             name,
@@ -1049,11 +1169,26 @@ fn ChatScroll(
         }
     });
 
+    // Keyed list: each bubble's view (and a tool card's inner `expanded`
+    // signal) is created ONCE and preserved across new messages. The previous
+    // `collect_view()` re-ran on every push, re-creating every BubbleView —
+    // which disposed the tool cards' freshly-made signals and left them
+    // rendering blank ("worked once, then blank"). Bubbles are append-only, so
+    // the index is a stable key. `bubbles` is bound outside `view!` so the
+    // macro doesn't trip over the inline `move ||` closure.
+    let bubbles = move || {
+        messages
+            .get()
+            .into_iter()
+            .enumerate()
+            .collect::<Vec<(usize, Bubble)>>()
+    };
+
     view! {
         <div node_ref=scroll_ref class="chat-scroll">
-            {move || messages.get().into_iter().enumerate().map(|(i, b)| {
-                view! { <BubbleView idx=i bubble=b /> }
-            }).collect_view()}
+            <For each=bubbles key={|t: &(usize, Bubble)| t.0} let:item>
+                <BubbleView idx={item.0} bubble={item.1} />
+            </For>
             {move || {
                 let s = streaming.get();
                 if s.is_empty() {
@@ -1082,56 +1217,35 @@ fn BubbleView(idx: usize, bubble: Bubble) -> impl IntoView {
             input_json,
             result,
         } => {
-            let expanded = RwSignal::new(false);
-            let cls = if is_error {
-                "bubble tool error"
-            } else {
-                "bubble tool ok"
-            };
-            // Defensive fallbacks: some tools legitimately return "" (silent
-            // side-effect tools like file_write, set_env) or have `{}` input.
-            // Without these, the bubble renders as just "name → ▼" with a
-            // blank middle and reads as an empty block on a phone.
             let display_name = if name.is_empty() {
                 "(tool)".to_string()
             } else {
-                name.clone()
-            };
-            let trimmed_result = result.trim();
-            let summary = if trimmed_result.is_empty() {
-                "(no output)".to_string()
-            } else {
-                truncate(trimmed_result, 100)
+                name
             };
             let detail_input = if input_json.trim().is_empty() || input_json.trim() == "{}" {
                 "(no input)".to_string()
             } else {
                 pretty_json_capped(&input_json, 4096)
             };
-            let detail_result = if result.is_empty() {
+            let detail_result = if result.trim().is_empty() {
                 "(no output)".to_string()
             } else {
-                result.clone()
+                truncate(result.trim(), 8192)
             };
+            // Full styled card. The earlier blanks were a CSS flex-collapse of
+            // `.bubble.tool` (fixed via `flex-shrink: 0` on `.bubble`), NOT the
+            // nesting / `<pre>` / json highlighting — those are all restored
+            // here. `class:error` is the documented reactive-toggle form (a
+            // bare `class=variable` is unsupported in Leptos 0.7).
             view! {
-                <div class=cls>
-                    <div class="tool-head"
-                        on:click=move |_| expanded.update(|b| *b = !*b)>
-                        <span class="t-name">{display_name}</span>
-                        <span class="t-sep">" → "</span>
-                        <span class="t-result">{summary}</span>
-                        <span class="t-toggle">
-                            {move || if expanded.get() { "▲" } else { "▼" }}
-                        </span>
+                <div class="bubble tool" class:error=is_error>
+                    <div class="tool-head"><span class="t-name">{display_name}</span></div>
+                    <div class="tool-detail">
+                        <div class="t-section">"input"</div>
+                        <pre class="t-pre">{json_pre(&detail_input)}</pre>
+                        <div class="t-section">"result"</div>
+                        <pre class="t-pre">{json_pre(&detail_result)}</pre>
                     </div>
-                    {move || expanded.get().then(|| view! {
-                        <div class="tool-detail">
-                            <div class="t-section">"input"</div>
-                            <pre class="t-pre">{detail_input.clone()}</pre>
-                            <div class="t-section">"result"</div>
-                            <pre class="t-pre">{detail_result.clone()}</pre>
-                        </div>
-                    })}
                 </div>
             }
             .into_any()

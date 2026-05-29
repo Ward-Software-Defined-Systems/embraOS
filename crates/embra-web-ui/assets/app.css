@@ -267,6 +267,11 @@ body.is-observer .term-wrap {
 
 /* Bubble shared shape. */
 .bubble {
+  /* Bubbles must never shrink on the flex main-axis — the scroll area
+     handles overflow. Critical for `.bubble.tool`: its `overflow: hidden`
+     flips `min-height: auto` → `0`, so without this it collapsed to the
+     2px border height and clipped its own (DOM-present) content. */
+  flex-shrink: 0;
   max-width: 88%;
   padding: 10px 14px;
   border-radius: 14px;
@@ -372,6 +377,12 @@ body.is-observer .term-wrap {
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
 }
+/* JSON syntax colors — mirror the serial TUI (keys cyan, strings green,
+   numbers + true/false/null amber). Default text keeps --txt. */
+.bubble.tool .t-pre .jk { color: #6cb6c9; }
+.bubble.tool .t-pre .js { color: #8db86a; }
+.bubble.tool .t-pre .jn { color: var(--accent-2); }
+.bubble.tool .t-pre .jb { color: var(--accent-2); }
 
 /* Compact history record of a past wizard prompt — the interactive
    form lives in the SetupOverlay above the input bar. Visually quieter

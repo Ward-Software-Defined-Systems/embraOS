@@ -24,7 +24,7 @@ use futures::stream::BoxStream;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{mpsc, Mutex, RwLock};
+use tokio::sync::{mpsc, watch, Mutex, RwLock};
 use tokio_stream::{Stream, StreamExt, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, error, info, warn};
@@ -63,6 +63,19 @@ pub struct BrainGrpcService {
     /// token? → Model selection). Cleared on completion or any slash
     /// command cancel hatch.
     pending_openai_compat_setup: Arc<Mutex<Option<OpenAiCompatSetupState>>>,
+    /// Cross-stream onboarding-stage signal (Setup → Learning →
+    /// Operational, carried as `OperatingMode as i32`). Each `converse`
+    /// call spawns its own task; while the soul is unsealed every attached
+    /// stream independently runs its OWN first-run wizard / learning loop,
+    /// blocked on `incoming.next()` with no global re-check. The driver
+    /// stream advances this watch when it finishes the wizard (→ Learning)
+    /// and when it seals the soul (→ Operational); the other streams' loops
+    /// `select!` on it and exit cleanly instead of staying frozen waiting
+    /// for input that never comes (the desktop-stuck-on-Learning bug). Mode
+    /// is brain-global (soul-sealed status), so no per-session keying is
+    /// needed. `send_replace` is used so a send with zero current
+    /// subscribers is a no-op rather than an error.
+    onboarding_stage: Arc<watch::Sender<i32>>,
 }
 
 /// Sprint 5 follow-up: post-wizard reconfigure for OpenAI-compat
@@ -118,6 +131,11 @@ impl BrainGrpcService {
             SessionManager::new((*db).clone())
         ));
 
+        // Seeded at Setup; the value only matters to streams blocked in an
+        // onboarding loop, which observe CHANGES. A brain that boots
+        // already-sealed never enters those loops, so the seed is moot there.
+        let (stage_tx, _) = watch::channel(OperatingMode::Setup as i32);
+
         Self {
             db,
             session_manager,
@@ -129,6 +147,7 @@ impl BrainGrpcService {
             pending_provider: Arc::new(Mutex::new(None)),
             pending_key_setup: Arc::new(Mutex::new(None)),
             pending_openai_compat_setup: Arc::new(Mutex::new(None)),
+            onboarding_stage: Arc::new(stage_tx),
         }
     }
 }
@@ -154,6 +173,7 @@ impl BrainService for BrainGrpcService {
         let pending_provider = self.pending_provider.clone();
         let pending_key_setup = self.pending_key_setup.clone();
         let pending_openai_compat_setup = self.pending_openai_compat_setup.clone();
+        let onboarding_stage = self.onboarding_stage.clone();
 
         tokio::spawn(async move {
             let mut config_tz = config_tz;
@@ -172,6 +192,13 @@ impl BrainService for BrainGrpcService {
                 let mut wizard_handle = tokio::spawn(async move {
                     config::run_config_wizard_grpc(&wizard_gRPC_tx, &mut wizard_rx, &wizard_db).await
                 });
+
+                // Watch for ANOTHER stream finishing the wizard (multiple
+                // clients can hit first-run concurrently, each spawning its
+                // own wizard). If one persists config first, this stream's
+                // wizard would otherwise block forever on input that never
+                // comes — the stage signal lets us abort and move on.
+                let mut stage_rx = onboarding_stage.subscribe();
 
                 // Feed user responses to wizard until it completes
                 loop {
@@ -197,6 +224,12 @@ impl BrainService for BrainGrpcService {
                                     info!("Config wizard completed: name={}", new_config.name);
                                     api_key = new_config.api_key;
                                     config_tz = new_config.timezone;
+                                    // We're the driver — config is persisted.
+                                    // Wake any other stream blocked in its own
+                                    // wizard loop so it can adopt the config and
+                                    // advance to the learning stage.
+                                    let _ = onboarding_stage
+                                        .send_replace(OperatingMode::Learning as i32);
                                 }
                                 Ok(Err(e)) => {
                                     error!("Config wizard failed: {}", e);
@@ -206,6 +239,19 @@ impl BrainService for BrainGrpcService {
                                 }
                             }
                             break;
+                        }
+                        _ = stage_rx.changed() => {
+                            // Another stream finished the first-run wizard
+                            // (config now persisted). Our wizard task is still
+                            // blocked on input that will never arrive — abort
+                            // it, adopt the saved config, and fall through to
+                            // the learning stage.
+                            if let Ok(cfg) = config::load_config(&db).await {
+                                api_key = cfg.api_key;
+                                config_tz = cfg.timezone;
+                                wizard_handle.abort();
+                                break;
+                            }
                         }
                     }
                 }
@@ -229,13 +275,14 @@ impl BrainService for BrainGrpcService {
                     kg_edge_candidate_limit: 50,
                     api_provider: "anthropic".to_string(),
                     gemini_model: None,
+                    anthropic_model: None,
                     anthropic_api_key: None,
                     gemini_api_key: None,
                     max_tool_iterations: None,
                     show_reasoning: None,
                     openai_compat: crate::config::OpenAiCompatConfig::default(),
                 });
-                match run_learning_loop(&tx, &mut incoming, &db, &loaded_config, &api_key).await {
+                match run_learning_loop(&tx, &mut incoming, &db, &loaded_config, &api_key, &onboarding_stage).await {
                     Ok(()) => {
                         info!("Learning Mode complete — transitioning to Operational");
                         // Reload config in case it was updated
@@ -564,6 +611,7 @@ async fn handle_request(
                 kg_edge_candidate_limit: 50,
                 api_provider: "anthropic".to_string(),
                 gemini_model: None,
+                anthropic_model: None,
                 anthropic_api_key: None,
                 gemini_api_key: None,
                 max_tool_iterations: None,
@@ -680,7 +728,10 @@ async fn handle_request(
                             .with_cache(db.clone()),
                     )
                 }
-                ProviderKind::Anthropic => Arc::new(AnthropicProvider::new(active_key)),
+                ProviderKind::Anthropic => {
+                    let (model_id, display) = resolve_anthropic_model(&loaded_config);
+                    Arc::new(AnthropicProvider::with_model(active_key, model_id, display))
+                }
                 ProviderKind::Ollama | ProviderKind::LmStudio => {
                     match build_openai_compat_provider(provider_kind, &loaded_config) {
                         Ok(p) => p,
@@ -1565,7 +1616,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-4.7|opus-4.8>         Switch the Anthropic Opus version (next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -1579,6 +1630,9 @@ async fn handle_slash_command(
         }
         "/show-reasoning" => {
             handle_show_reasoning_command(args, tx, db).await;
+        }
+        "/model" => {
+            handle_model_command(args, tx, db, session_mgr).await;
         }
         "/guardian" => {
             // Operator affordance (define/list/status/show/delete/key).
@@ -2692,6 +2746,7 @@ fn build_openai_compat_provider(
 fn display_model_for(provider: &str, config: &config::SystemConfig) -> String {
     match provider {
         "gemini" => "gemini-3.1-pro".to_string(),
+        "anthropic" => resolve_anthropic_model(config).1,
         "ollama" => {
             if config.openai_compat.ollama_model.is_empty() {
                 "ollama".to_string()
@@ -3340,6 +3395,188 @@ fn resolve_gemini_model_id_inner(env: Option<&str>, cfg_field: Option<&str>) -> 
     "gemini-3.1-pro-preview".to_string()
 }
 
+/// Resolve the active Anthropic model, returning `(api_model_id, display)`.
+/// Precedence mirrors [`resolve_gemini_model_id`]:
+/// 1. `EMBRA_ANTHROPIC_MODEL` env var (boot/dev override).
+/// 2. `config.anthropic_model` (persistent, set via `/model`).
+/// 3. The provider's [`DEFAULT_MODEL`](crate::provider::anthropic::DEFAULT_MODEL)
+///    (`claude-opus-4-7`).
+/// The request shape is identical across Opus versions, so this only swaps
+/// the `model` id + display name. Inner fn is pure for env-race-free tests.
+fn resolve_anthropic_model(cfg: &config::SystemConfig) -> (String, String) {
+    let env_override = std::env::var("EMBRA_ANTHROPIC_MODEL").ok();
+    resolve_anthropic_model_inner(env_override.as_deref(), cfg.anthropic_model.as_deref())
+}
+
+fn resolve_anthropic_model_inner(
+    env: Option<&str>,
+    cfg_field: Option<&str>,
+) -> (String, String) {
+    let raw = [env, cfg_field]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|s| !s.is_empty());
+    match raw {
+        Some(s) => normalize_anthropic_model(s),
+        None => (
+            crate::provider::anthropic::DEFAULT_MODEL.to_string(),
+            crate::provider::anthropic::DEFAULT_DISPLAY_NAME.to_string(),
+        ),
+    }
+}
+
+/// Map a known Opus alias to `(api_id, display)`. The `/model` command only
+/// accepts these (so a typo can't persist a bogus id that 400s every turn);
+/// the resolver additionally allows env/config passthrough for a model this
+/// build predates — see [`normalize_anthropic_model`].
+fn parse_anthropic_model_choice(s: &str) -> Option<(&'static str, &'static str)> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "opus-4.8" | "4.8" | "opus4.8" | "claude-opus-4-8" => {
+            Some(("claude-opus-4-8", "opus-4.8"))
+        }
+        "opus-4.7" | "4.7" | "opus4.7" | "claude-opus-4-7" => {
+            Some(("claude-opus-4-7", "opus-4.7"))
+        }
+        _ => None,
+    }
+}
+
+/// Resolve a raw value to `(api_id, display)`. Known aliases canonicalize;
+/// anything else passes through unchanged (forward-compat — the operator
+/// owns the exact id via env/config when the build predates the model).
+fn normalize_anthropic_model(s: &str) -> (String, String) {
+    match parse_anthropic_model_choice(s) {
+        Some((id, disp)) => (id.to_string(), disp.to_string()),
+        None => (s.to_string(), s.to_string()),
+    }
+}
+
+/// `/model [<opus-4.7|opus-4.8>]` — show or switch the Anthropic Opus model.
+/// Persists `SystemConfig.anthropic_model`; the loop driver rebuilds the
+/// provider per-turn from config, so a switch takes effect on the next user
+/// message. Only meaningful for the Anthropic provider (Gemini / OpenAI-compat
+/// models are set via `/provider --setup`). On a successful switch it emits an
+/// Operational ModeChange so the status bar reflects the new Brain immediately.
+async fn handle_model_command(
+    args: &str,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    db: &Arc<WardsonDbClient>,
+    session_mgr: &Arc<RwLock<SessionManager>>,
+) {
+    let send = |content: String, kind: SystemMessageType| {
+        let tx = tx.clone();
+        async move {
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage {
+                            content,
+                            msg_type: kind as i32,
+                        },
+                    )),
+                }))
+                .await;
+        }
+    };
+
+    let mut cfg = match config::load_config(&**db).await {
+        Ok(c) => c,
+        Err(e) => {
+            send(
+                format!("/model: failed to load config: {e}"),
+                SystemMessageType::Error,
+            )
+            .await;
+            return;
+        }
+    };
+
+    let active = cfg.api_provider.clone();
+    let trimmed = args.trim();
+
+    // No args → show current model + options.
+    if trimmed.is_empty() {
+        let current = display_model_for(&active, &cfg);
+        let msg = if active == "anthropic" {
+            format!(
+                "Anthropic model: {current}. Options: opus-4.7, opus-4.8. \
+                 Use `/model opus-4.8` to switch (takes effect on your next message)."
+            )
+        } else {
+            format!(
+                "Active provider '{active}' model: {current}. `/model` switches the \
+                 Anthropic Opus version; for {active}, use `/provider --setup {active}`."
+            )
+        };
+        send(msg, SystemMessageType::Info).await;
+        return;
+    }
+
+    if active != "anthropic" {
+        send(
+            format!(
+                "`/model` currently switches only the Anthropic Opus version. Active \
+                 provider is '{active}' — use `/provider --setup {active}` to change its model."
+            ),
+            SystemMessageType::Error,
+        )
+        .await;
+        return;
+    }
+
+    let Some((_id, display)) = parse_anthropic_model_choice(trimmed) else {
+        send(
+            format!(
+                "'{trimmed}' is not a recognized Anthropic model. Options: opus-4.7, opus-4.8."
+            ),
+            SystemMessageType::Error,
+        )
+        .await;
+        return;
+    };
+
+    cfg.anthropic_model = Some(display.to_string());
+    if let Err(e) = config::save_config(&**db, &cfg).await {
+        send(
+            format!("/model: failed to save: {e}"),
+            SystemMessageType::Error,
+        )
+        .await;
+        return;
+    }
+
+    send(
+        format!("Anthropic model set to {display}. Takes effect on your next message."),
+        SystemMessageType::Info,
+    )
+    .await;
+
+    // Refresh the status bar. Reaching a slash command implies the soul is
+    // sealed (Operational) — the learning loop ignores slash commands — so an
+    // Operational→Operational ModeChange with the new Brain is correct.
+    let session = session_mgr
+        .read()
+        .await
+        .active_session
+        .clone()
+        .unwrap_or_else(|| "<none>".to_string());
+    let _ = tx
+        .send(Ok(ConversationResponse {
+            response_type: Some(conversation_response::ResponseType::ModeChange(
+                ModeTransition {
+                    from_mode: OperatingMode::Operational as i32,
+                    to_mode: OperatingMode::Operational as i32,
+                    message: format!(
+                        "Operational — Name: {} — Session: {} — TZ: {} — Brain: {}",
+                        cfg.name, session, cfg.timezone, display
+                    ),
+                },
+            )),
+        }))
+        .await;
+}
+
 /// Check that `session_name`'s recorded provider matches the
 /// currently-active provider. Returns `Ok(())` when compatible (or
 /// when the active provider can't be loaded — fail-open on config
@@ -3435,6 +3672,29 @@ Acknowledge you're initiating the protocol, then execute Step 1.1.",
     )
 }
 
+/// Build the Learning→Operational `ModeChange` announced when the soul is
+/// sealed. Emitted both by the stream that drives learning to completion AND
+/// by any other stream woken out of its own blocked learning loop by the
+/// onboarding-stage signal — hence one shared constructor. Clients parse the
+/// message for the status bar (`Name:`/`TZ:`/`Brain:`), so the shape is
+/// load-bearing; see the `soul_sealed_mode_change_tests` regression guards.
+fn soul_sealed_mode_change(config: &config::SystemConfig) -> ConversationResponse {
+    ConversationResponse {
+        response_type: Some(conversation_response::ResponseType::ModeChange(
+            ModeTransition {
+                from_mode: OperatingMode::Learning as i32,
+                to_mode: OperatingMode::Operational as i32,
+                message: format!(
+                    "Soul sealed — Name: {} — TZ: {} — Brain: {}",
+                    config.name,
+                    config.timezone,
+                    display_model_for(&config.api_provider, config)
+                ),
+            },
+        )),
+    }
+}
+
 /// Drive the 6-phase Learning Mode over gRPC.
 /// Creates LearningState, runs each phase with Brain calls, detects [PHASE_COMPLETE],
 /// persists extracted documents, and transitions to Operational when complete.
@@ -3444,6 +3704,7 @@ async fn run_learning_loop(
     db: &Arc<WardsonDbClient>,
     config: &config::SystemConfig,
     api_key: &str,
+    onboarding_stage: &Arc<watch::Sender<i32>>,
 ) -> anyhow::Result<()> {
     let mut state = learning::LearningState::new();
 
@@ -3470,7 +3731,10 @@ async fn run_learning_loop(
                 GeminiProvider::with_model(active_key, model_id).with_cache(db.clone()),
             )
         }
-        ProviderKind::Anthropic => Arc::new(AnthropicProvider::new(active_key)),
+        ProviderKind::Anthropic => {
+            let (model_id, display) = resolve_anthropic_model(config);
+            Arc::new(AnthropicProvider::with_model(active_key, model_id, display))
+        }
         ProviderKind::Ollama | ProviderKind::LmStudio => {
             match build_openai_compat_provider(provider_kind, config) {
                 Ok(p) => p,
@@ -3515,6 +3779,12 @@ async fn run_learning_loop(
             }
         )),
     })).await;
+
+    // Wake signal: fires when ANOTHER stream advances the global onboarding
+    // stage (i.e. seals the soul) while we sit blocked on `incoming.next()`
+    // below. Without it, a second client that entered its own learning loop
+    // stays frozen on Learning after the driver completes onboarding.
+    let mut stage_rx = onboarding_stage.subscribe();
 
     loop {
         if state.phase == learning::LearningPhase::Complete {
@@ -3642,20 +3912,10 @@ async fn run_learning_loop(
                 let _ = save_learning_history(db, &state.conversation_history).await;
 
                 // Transition to Operational
-                let _ = tx.send(Ok(ConversationResponse {
-                    response_type: Some(conversation_response::ResponseType::ModeChange(
-                        ModeTransition {
-                            from_mode: OperatingMode::Learning as i32,
-                            to_mode: OperatingMode::Operational as i32,
-                            message: format!(
-                                "Soul sealed — Name: {} — TZ: {} — Brain: {}",
-                                config.name,
-                                config.timezone,
-                                display_model_for(&config.api_provider, config)
-                            ),
-                        }
-                    )),
-                })).await;
+                let _ = tx.send(Ok(soul_sealed_mode_change(config))).await;
+                // We're the driver — soul is sealed. Wake any other stream
+                // blocked in its own learning loop so it advances too.
+                let _ = onboarding_stage.send_replace(OperatingMode::Operational as i32);
                 break;
             } else {
                 // Notify phase change
@@ -3671,7 +3931,26 @@ async fn run_learning_loop(
         } else {
             // No [PHASE_COMPLETE] — wait for user input and continue conversation
             loop {
-                match incoming.next().await {
+                let next = tokio::select! {
+                    msg = incoming.next() => msg,
+                    _ = stage_rx.changed() => {
+                        // Another stream sealed the soul while we sat blocked
+                        // here waiting for input that may never come. Re-check
+                        // the authoritative DB state; if sealed, announce
+                        // Operational on OUR own stream and hand off to the
+                        // operational loop (the converse handler runs its
+                        // post-learning setup on `Ok`). This is the fix for a
+                        // second client staying frozen on Learning after another
+                        // completes onboarding. The task owns an `Arc<Sender>`
+                        // clone for its lifetime, so `changed()` never errors.
+                        if learning::is_soul_sealed(&**db).await.unwrap_or(false) {
+                            let _ = tx.send(Ok(soul_sealed_mode_change(config))).await;
+                            return Ok(());
+                        }
+                        continue;
+                    }
+                };
+                match next {
                     Some(Ok(req)) => {
                         if let Some(conversation_request::RequestType::UserMessage(um)) = req.request_type {
                             state.conversation_history.push(Message::user(&um.content));
@@ -3725,20 +4004,12 @@ async fn run_learning_loop(
 
                                 if state.phase == learning::LearningPhase::Complete {
                                     let _ = save_learning_history(db, &state.conversation_history).await;
-                                    let _ = tx.send(Ok(ConversationResponse {
-                                        response_type: Some(conversation_response::ResponseType::ModeChange(
-                                            ModeTransition {
-                                                from_mode: OperatingMode::Learning as i32,
-                                                to_mode: OperatingMode::Operational as i32,
-                                                message: format!(
-                                                    "Soul sealed — Name: {} — TZ: {} — Brain: {}",
-                                                    config.name,
-                                                    config.timezone,
-                                                    display_model_for(&config.api_provider, config)
-                                                ),
-                                            }
-                                        )),
-                                    })).await;
+                                    let _ = tx.send(Ok(soul_sealed_mode_change(config))).await;
+                                    // Driver path — soul sealed. Wake any other
+                                    // stream blocked in its own learning loop so
+                                    // it advances to Operational too.
+                                    let _ = onboarding_stage
+                                        .send_replace(OperatingMode::Operational as i32);
                                     return Ok(());
                                 } else {
                                     let _ = tx.send(Ok(ConversationResponse {
@@ -4355,6 +4626,7 @@ mod native_loop_tests {
             kg_edge_candidate_limit: 50,
             api_provider: "anthropic".to_string(),
             gemini_model: None,
+            anthropic_model: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
@@ -5168,6 +5440,7 @@ mod reasoning_delta_privacy_tests {
             kg_edge_candidate_limit: 50,
             api_provider: "anthropic".to_string(),
             gemini_model: None,
+            anthropic_model: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
@@ -5188,5 +5461,144 @@ mod reasoning_delta_privacy_tests {
         let _ = brain::ReasoningDelta {
             text: String::new(),
         };
+    }
+}
+
+#[cfg(test)]
+mod soul_sealed_mode_change_tests {
+    //! Guards the Learning→Operational `ModeChange` shared by the
+    //! learning-completion path and the onboarding-stage wake arm added in
+    //! `embra-brain-broadcaster`. Clients parse this message for the status
+    //! bar, so the `Soul sealed — Name: … — TZ: … — Brain: …` shape and the
+    //! from/to modes are load-bearing.
+    use super::soul_sealed_mode_change;
+    use crate::config::{OpenAiCompatConfig, SystemConfig};
+    use embra_common::proto::brain::{
+        ConversationResponse, ModeTransition, OperatingMode, conversation_response::ResponseType,
+    };
+
+    fn cfg(name: &str, tz: &str, provider: &str) -> SystemConfig {
+        SystemConfig {
+            name: name.to_string(),
+            api_key: String::new(),
+            timezone: tz.to_string(),
+            deployment_mode: "phase1".into(),
+            created_at: String::new(),
+            version: "test".into(),
+            github_token: None,
+            kg_temporal_window_secs: 1800,
+            kg_max_traversal_depth: 3,
+            kg_traversal_depth_ceiling: 5,
+            kg_edge_candidate_limit: 50,
+            api_provider: provider.to_string(),
+            gemini_model: None,
+            anthropic_model: None,
+            anthropic_api_key: None,
+            gemini_api_key: None,
+            max_tool_iterations: None,
+            show_reasoning: None,
+            openai_compat: OpenAiCompatConfig::default(),
+        }
+    }
+
+    fn mode_change(resp: &ConversationResponse) -> &ModeTransition {
+        match resp.response_type.as_ref().expect("response_type is set") {
+            ResponseType::ModeChange(m) => m,
+            other => panic!("expected ModeChange, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn announces_learning_to_operational() {
+        let resp = soul_sealed_mode_change(&cfg("Aria", "America/New_York", "anthropic"));
+        let m = mode_change(&resp);
+        assert_eq!(m.from_mode, OperatingMode::Learning as i32);
+        assert_eq!(m.to_mode, OperatingMode::Operational as i32);
+    }
+
+    #[test]
+    fn message_carries_name_tz_and_brain_for_status_bar() {
+        let resp = soul_sealed_mode_change(&cfg("Aria", "America/New_York", "anthropic"));
+        let msg = &mode_change(&resp).message;
+        assert!(msg.contains("Soul sealed"), "got: {msg}");
+        assert!(msg.contains("Name: Aria"), "got: {msg}");
+        assert!(msg.contains("TZ: America/New_York"), "got: {msg}");
+        // anthropic default display model
+        assert!(msg.contains("Brain: opus-4.7"), "got: {msg}");
+    }
+
+    #[test]
+    fn brain_field_reflects_provider() {
+        let resp = soul_sealed_mode_change(&cfg("Embra", "Etc/UTC", "gemini"));
+        assert!(
+            mode_change(&resp).message.contains("Brain: gemini-3.1-pro"),
+            "got: {}",
+            mode_change(&resp).message
+        );
+    }
+}
+
+#[cfg(test)]
+mod anthropic_model_tests {
+    //! Opus model resolution + the `/model` choice parser (added in
+    //! `embra-brain-broadcaster`). The API id is load-bearing (sent in the
+    //! request body); the inner resolver is pure so the env var isn't
+    //! mutated across the suite (same discipline as the Gemini resolver).
+    use super::{
+        normalize_anthropic_model, parse_anthropic_model_choice, resolve_anthropic_model_inner,
+    };
+
+    #[test]
+    fn defaults_to_opus_4_7_when_unset() {
+        let (id, disp) = resolve_anthropic_model_inner(None, None);
+        assert_eq!(id, "claude-opus-4-7");
+        assert_eq!(disp, "opus-4.7");
+    }
+
+    #[test]
+    fn config_field_selects_4_8() {
+        let (id, disp) = resolve_anthropic_model_inner(None, Some("opus-4.8"));
+        assert_eq!(id, "claude-opus-4-8");
+        assert_eq!(disp, "opus-4.8");
+    }
+
+    #[test]
+    fn env_overrides_config() {
+        let (id, _) = resolve_anthropic_model_inner(Some("opus-4.8"), Some("opus-4.7"));
+        assert_eq!(id, "claude-opus-4-8");
+    }
+
+    #[test]
+    fn blank_values_fall_through_to_default() {
+        let (id, _) = resolve_anthropic_model_inner(Some("  "), Some(""));
+        assert_eq!(id, "claude-opus-4-7");
+    }
+
+    #[test]
+    fn aliases_canonicalize() {
+        for s in ["opus-4.8", "4.8", "claude-opus-4-8", "OPUS-4.8"] {
+            assert_eq!(
+                parse_anthropic_model_choice(s),
+                Some(("claude-opus-4-8", "opus-4.8")),
+                "input: {s}"
+            );
+        }
+        for s in ["opus-4.7", "4.7", "claude-opus-4-7"] {
+            assert_eq!(
+                parse_anthropic_model_choice(s),
+                Some(("claude-opus-4-7", "opus-4.7")),
+                "input: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_choice_rejected_but_resolver_passes_through() {
+        // `/model` rejects unknown choices…
+        assert_eq!(parse_anthropic_model_choice("opus-9"), None);
+        // …but env/config passthrough allows a future id this build predates.
+        let (id, disp) = normalize_anthropic_model("claude-opus-5-0");
+        assert_eq!(id, "claude-opus-5-0");
+        assert_eq!(disp, "claude-opus-5-0");
     }
 }

@@ -35,6 +35,8 @@ Provider:
                                          Switch provider for future turns
   /provider --setup <anthropic|gemini>   Add/replace an API key (multi-turn)
   /provider --setup <ollama|lm_studio>   Reconfigure endpoint, bearer, model (multi-turn)
+  /model                                 Show the active Anthropic model
+  /model <opus-4.7|opus-4.8>             Switch the Anthropic Opus version (next message)
 
 Tool loop:
   /iter-cap                      Show the per-turn tool iteration cap

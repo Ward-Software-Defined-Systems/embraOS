@@ -44,6 +44,16 @@ pub struct SystemConfig {
     /// env var which takes precedence over this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gemini_model: Option<String>,
+    /// Active Anthropic model alias (e.g. `"opus-4.7"`, `"opus-4.8"`).
+    /// `None` (additive default) means the provider's `DEFAULT_MODEL`
+    /// (`claude-opus-4-7`). The brain also honors the `EMBRA_ANTHROPIC_MODEL`
+    /// env var, which takes precedence. Settable at runtime via `/model`;
+    /// the request shape (adaptive thinking, `effort: max`) is identical
+    /// across Opus versions, so this only swaps the API `model` id.
+    /// Serde-additive `Option` — no schema bump (same precedent as
+    /// `gemini_model` / `max_tool_iterations` / `show_reasoning`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_model: Option<String>,
     /// Per-provider API keys (Sprint 4 schema v10, spec D2). The
     /// legacy `api_key` field above mirrors whichever of these is
     /// active so existing read paths keep working; new writes
@@ -174,26 +184,28 @@ fn default_kg_candidate_limit() -> u32 { 50 }
 fn default_api_provider() -> String { "anthropic".to_string() }
 
 const PROVIDER_ANTHROPIC_LABEL: &str = "Anthropic Claude Opus 4.7";
+const PROVIDER_ANTHROPIC_48_LABEL: &str = "Anthropic Claude Opus 4.8";
 const PROVIDER_GEMINI_LABEL: &str = "Google Gemini 3.1 Pro";
 const PROVIDER_OLLAMA_LABEL: &str = "Ollama (OpenAI-compat)";
 const PROVIDER_LM_STUDIO_LABEL: &str = "LM Studio (OpenAI-compat)";
-
-fn provider_label(kind: ProviderKind) -> &'static str {
-    match kind {
-        ProviderKind::Anthropic => PROVIDER_ANTHROPIC_LABEL,
-        ProviderKind::Gemini => PROVIDER_GEMINI_LABEL,
-        ProviderKind::Ollama => PROVIDER_OLLAMA_LABEL,
-        ProviderKind::LmStudio => PROVIDER_LM_STUDIO_LABEL,
-    }
-}
 
 fn provider_from_label(label: &str) -> ProviderKind {
     match label {
         PROVIDER_GEMINI_LABEL => ProviderKind::Gemini,
         PROVIDER_OLLAMA_LABEL => ProviderKind::Ollama,
         PROVIDER_LM_STUDIO_LABEL => ProviderKind::LmStudio,
+        // Both Anthropic labels (Opus 4.7 / 4.8) map here; the chosen
+        // Opus version is captured separately by `anthropic_model_from_label`.
         _ => ProviderKind::Anthropic,
     }
+}
+
+/// Which Opus version a provider-selection label implies, as the value
+/// persisted to `SystemConfig.anthropic_model`. `Some("opus-4.8")` for the
+/// 4.8 entry; `None` (the additive default) for 4.7 or any non-Anthropic
+/// label. Later switchable at runtime via `/model`.
+fn anthropic_model_from_label(label: &str) -> Option<String> {
+    (label == PROVIDER_ANTHROPIC_48_LABEL).then(|| "opus-4.8".to_string())
 }
 
 pub async fn run_config_wizard() -> Result<SystemConfig> {
@@ -245,6 +257,7 @@ pub async fn run_config_wizard() -> Result<SystemConfig> {
         kg_edge_candidate_limit: default_kg_candidate_limit(),
         api_provider: default_api_provider(),
         gemini_model: None,
+        anthropic_model: None,
         anthropic_api_key: None,
         gemini_api_key: None,
         max_tool_iterations: None,
@@ -464,6 +477,7 @@ pub async fn run_config_wizard_grpc(
                 prompt: "Which AI provider would you like to use?".to_string(),
                 options: vec![
                     PROVIDER_ANTHROPIC_LABEL.to_string(),
+                    PROVIDER_ANTHROPIC_48_LABEL.to_string(),
                     PROVIDER_GEMINI_LABEL.to_string(),
                     PROVIDER_OLLAMA_LABEL.to_string(),
                     PROVIDER_LM_STUDIO_LABEL.to_string(),
@@ -477,9 +491,16 @@ pub async fn run_config_wizard_grpc(
         _ => PROVIDER_ANTHROPIC_LABEL.to_string(),
     };
     let provider_kind = provider_from_label(&provider_choice);
+    // Capture the chosen Opus version (4.7 default / 4.8) for the Anthropic
+    // path; persisted below as `SystemConfig.anthropic_model`.
+    let anthropic_model = anthropic_model_from_label(&provider_choice);
     info!(
-        "Config wizard: provider = {}",
-        provider_kind.as_str()
+        "Config wizard: provider = {}{}",
+        provider_kind.as_str(),
+        anthropic_model
+            .as_deref()
+            .map(|m| format!(" ({m})"))
+            .unwrap_or_default()
     );
 
     // Sprint 5: OpenAI-compat presets dispatch into the new sub-flow
@@ -532,7 +553,7 @@ pub async fn run_config_wizard_grpc(
                 SystemMessage {
                     content: format!(
                         "{other_env_name} detected in environment but provider is {} — ignored.",
-                        provider_label(provider_kind)
+                        provider_choice
                     ),
                     msg_type: SystemMessageType::Info as i32,
                 }
@@ -594,7 +615,7 @@ pub async fn run_config_wizard_grpc(
                     SystemMessage {
                         content: format!(
                             "Validating API key with {}…",
-                            provider_label(provider_kind)
+                            provider_choice
                         ),
                         msg_type: SystemMessageType::Info as i32,
                     }
@@ -657,7 +678,7 @@ pub async fn run_config_wizard_grpc(
     let summary = format!(
         "Configuration summary:\n  Name: {}\n  Provider: {}\n  API Key: {}...\n  Timezone: {}\n\nConfirm?",
         name,
-        provider_label(provider_kind),
+        provider_choice,
         &api_key[..std::cmp::min(10, api_key.len())],
         timezone,
     );
@@ -717,6 +738,7 @@ pub async fn run_config_wizard_grpc(
         kg_edge_candidate_limit: default_kg_candidate_limit(),
         api_provider: provider_kind.as_str().to_string(),
         gemini_model: None,
+        anthropic_model,
         anthropic_api_key,
         gemini_api_key,
         max_tool_iterations: None,
@@ -840,7 +862,15 @@ pub async fn run_config_wizard_grpc(
                 config.openai_compat.lm_studio_model.clone()
             }
         }
-        _ => "opus-4.7".to_string(),
+        // Anthropic (and any unknown): reflect the chosen/persisted Opus
+        // version so the status bar shows opus-4.8 when selected, not the
+        // hardcoded 4.7. (Inline rather than calling grpc_service's
+        // resolver — that would be a circular dep, per the note above.)
+        _ => config
+            .anthropic_model
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "opus-4.7".to_string()),
     };
     let _ = tx.send(Ok(ConversationResponse {
         response_type: Some(conversation_response::ResponseType::ModeChange(
@@ -877,6 +907,7 @@ mod key_lookup_tests {
             kg_edge_candidate_limit: 50,
             api_provider: provider.into(),
             gemini_model: None,
+            anthropic_model: None,
             anthropic_api_key: anth.map(str::to_string),
             gemini_api_key: gem.map(str::to_string),
             max_tool_iterations: None,
@@ -963,6 +994,7 @@ mod max_tool_iterations_serde_tests {
             kg_edge_candidate_limit: 50,
             api_provider: "anthropic".into(),
             gemini_model: None,
+            anthropic_model: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
@@ -1018,5 +1050,41 @@ mod max_tool_iterations_serde_tests {
         let json = serde_json::to_value(&cfg).unwrap();
         let back: SystemConfig = serde_json::from_value(json).unwrap();
         assert_eq!(back.max_tool_iterations, Some(42));
+    }
+}
+
+#[cfg(test)]
+mod provider_label_tests {
+    //! Wizard provider-selection labels → (ProviderKind, anthropic_model).
+    //! Both Anthropic Opus entries resolve to the Anthropic provider; the
+    //! 4.8 entry additionally seeds `anthropic_model` (added with the Opus
+    //! 4.8 option). The selector itself is server-driven, so the console
+    //! and chat-mobile UIs render whichever labels appear here.
+    use super::{
+        anthropic_model_from_label, provider_from_label, PROVIDER_ANTHROPIC_48_LABEL,
+        PROVIDER_ANTHROPIC_LABEL, PROVIDER_GEMINI_LABEL,
+    };
+    use crate::provider::ProviderKind;
+
+    #[test]
+    fn both_opus_labels_map_to_anthropic() {
+        assert_eq!(
+            provider_from_label(PROVIDER_ANTHROPIC_LABEL),
+            ProviderKind::Anthropic
+        );
+        assert_eq!(
+            provider_from_label(PROVIDER_ANTHROPIC_48_LABEL),
+            ProviderKind::Anthropic
+        );
+    }
+
+    #[test]
+    fn only_the_4_8_label_seeds_anthropic_model() {
+        assert_eq!(
+            anthropic_model_from_label(PROVIDER_ANTHROPIC_48_LABEL),
+            Some("opus-4.8".to_string())
+        );
+        assert_eq!(anthropic_model_from_label(PROVIDER_ANTHROPIC_LABEL), None);
+        assert_eq!(anthropic_model_from_label(PROVIDER_GEMINI_LABEL), None);
     }
 }

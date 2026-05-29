@@ -1,4 +1,8 @@
-//! Anthropic provider: `claude-opus-4-7` via `/v1/messages`.
+//! Anthropic provider: `claude-opus-4-7` (default) or `claude-opus-4-8`
+//! via `/v1/messages`. The model id is per-instance (`with_model`); the
+//! request shape — adaptive thinking, `effort: max`, prompt-caching beta —
+//! is identical across models, so switching Opus versions changes only the
+//! `model` field.
 //!
 //! Implements `LlmProvider` over the `/v1/messages` streaming endpoint.
 //! Internal structure:
@@ -30,24 +34,49 @@ use crate::provider::{
 };
 use crate::tools::registry::ToolDescriptor;
 
-const MODEL: &str = "claude-opus-4-7";
+/// Default Anthropic model when none is configured. `with_model` overrides
+/// it (e.g. `claude-opus-4-8`); the resolver in `grpc_service.rs` picks the
+/// active id from env/config.
+pub const DEFAULT_MODEL: &str = "claude-opus-4-7";
 const MAX_TOKENS: u32 = 128_000;
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
 const BETA: &str = "prompt-caching-2024-07-31";
 const MODELS_URL: &str = "https://api.anthropic.com/v1/models";
 const VALIDATE_TIMEOUT: Duration = Duration::from_secs(10);
-const DISPLAY_NAME: &str = "opus-4.7";
+/// Display name paired with [`DEFAULT_MODEL`] for the status bar.
+pub const DEFAULT_DISPLAY_NAME: &str = "opus-4.7";
 
 pub struct AnthropicProvider {
     api_key: String,
+    /// API model id sent in the request body (e.g. `claude-opus-4-7`).
+    model: String,
+    /// Short display name (e.g. `opus-4.7`); backs the
+    /// `LlmProvider::display_name` accessor, exercised in tests like the
+    /// sibling Gemini / OpenAI-compat providers' equivalent field.
+    display_name: String,
     http: Client,
 }
 
 impl AnthropicProvider {
+    /// Construct with the default model ([`DEFAULT_MODEL`]). Used by
+    /// key-validation and tests where the model id is irrelevant.
     pub fn new(api_key: String) -> Self {
+        Self::with_model(
+            api_key,
+            DEFAULT_MODEL.to_string(),
+            DEFAULT_DISPLAY_NAME.to_string(),
+        )
+    }
+
+    /// Construct with an explicit API model id + display name. The request
+    /// shape is identical regardless of model — only the `model` field and
+    /// the reported `display_name` differ.
+    pub fn with_model(api_key: String, model: String, display_name: String) -> Self {
         Self {
             api_key,
+            model,
+            display_name,
             http: Client::new(),
         }
     }
@@ -56,7 +85,7 @@ impl AnthropicProvider {
 #[async_trait]
 impl LlmProvider for AnthropicProvider {
     fn display_name(&self) -> &str {
-        DISPLAY_NAME
+        &self.display_name
     }
 
     fn kind(&self) -> ProviderKind {
@@ -129,7 +158,7 @@ impl LlmProvider for AnthropicProvider {
             "omitted"
         };
         let mut body = json!({
-            "model": MODEL,
+            "model": self.model,
             "max_tokens": MAX_TOKENS,
             "thinking": {"type": "adaptive", "display": thinking_display},
             "output_config": {"effort": "max"},
@@ -305,6 +334,24 @@ fn build_cached_messages(messages: &[wire::AnthropicWireMessage]) -> Vec<serde_j
 mod tests {
     use super::*;
     use crate::provider::ir::Block;
+
+    #[test]
+    fn new_defaults_to_opus_4_7() {
+        let p = AnthropicProvider::new(String::new());
+        assert_eq!(p.model, "claude-opus-4-7");
+        assert_eq!(p.display_name(), "opus-4.7");
+    }
+
+    #[test]
+    fn with_model_sets_opus_4_8() {
+        let p = AnthropicProvider::with_model(
+            String::new(),
+            "claude-opus-4-8".to_string(),
+            "opus-4.8".to_string(),
+        );
+        assert_eq!(p.model, "claude-opus-4-8");
+        assert_eq!(p.display_name(), "opus-4.8");
+    }
 
     #[test]
     fn build_cached_api_messages_marks_penultimate_text_block() {

@@ -21,7 +21,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
     ]),
     ("Identity", &[("/soul", "soul"), ("/identity", "identity")]),
     ("Provider", &[
-        ("/provider", "switch"), ("/iter-cap", "tool cap"),
+        ("/provider", "switch"), ("/model", "model"), ("/iter-cap", "tool cap"),
         ("/show-reasoning", "reasoning"),
     ]),
     ("Setup", &[
@@ -97,6 +97,10 @@ const SPECS: &[Spec] = &[
         note: "Switch the active provider, or show status.", join: " ", guided: false,
         fields: &[sel("Action",
             &["(show status)", "anthropic", "gemini", "ollama", "lm_studio"], false)] },
+    Spec { cmd: "/model", title: "Anthropic model",
+        note: "Switch the Anthropic Opus version (next message), or show current.",
+        join: " ", guided: false,
+        fields: &[sel("Model", &["(show current)", "opus-4.7", "opus-4.8"], false)] },
     Spec { cmd: "/provider --setup", title: "Provider setup (guided)",
         note: "Pick a provider, then answer the prompts in the console below.",
         join: " ", guided: true,
