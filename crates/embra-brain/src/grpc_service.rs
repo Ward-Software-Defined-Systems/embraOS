@@ -3652,22 +3652,17 @@ fn build_feedback_loop_prompt() -> String {
     format!(
         "MANUAL FEEDBACK LOOP TRIGGER \u{2014} EXPERIMENTAL (Phase 3 Continuity Engine preview)\n\
 \n\
-Will has invoked /feedback-loop. You are to initiate the feedback loop\n\
-self-evaluation protocol using the spec below. Work through the protocol\n\
-using the tools you already have. Follow the spec's governance boundary:\n\
-S0/S1 actions auto-execute; S2/S3 actions are presented to Will for approval.\n\
+Will has invoked /feedback-loop. Work through the embedded spec sequentially,\n\
+starting at Step 1.1. Governance boundary: S0/S1 actions auto-execute; S2/S3\n\
+actions pause at Step 4.2 for Will's approval.\n\
 \n\
-Begin with Step 1.1 (Introspect: Load Evaluation Criteria). Work through\n\
-the protocol sequentially. Pause at the Step 4.2 governance boundary to\n\
-present S2/S3 findings for approval.\n\
-\n\
-=== FEEDBACK LOOP SPEC v2.0 (read-only, embedded in binary) ===\n\
+=== FEEDBACK LOOP SPEC v2.2 (read-only, embedded in binary) ===\n\
 \n\
 {}\n\
 \n\
 === END SPEC ===\n\
 \n\
-Acknowledge you're initiating the protocol, then execute Step 1.1.",
+Acknowledge, then execute Step 1.1.",
         FEEDBACK_LOOP_SPEC_V2
     )
 }
