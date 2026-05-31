@@ -118,7 +118,7 @@ session_summarize <feedback-loop-session-name>
 ### 5.2 — Findings Record
 
 ```
-remember Feedback Loop Run <date>: <count> sessions reviewed, <count> memory entries scanned. Alignment confirmed in: <list>. Tensions found: <count> (S0: <n>, S1: <n>, S2: <n>, S3: <n>). Actions taken: <summary>. Token usage: <creator-provided metrics>. #feedback-loop #evaluation
+remember Feedback Loop Run <date>: <count> sessions reviewed, <count> memory entries scanned. Alignment confirmed in: <list>. Tensions found: <count> (S0: <n>, S1: <n>, S2: <n>, S3: <n>). Actions taken: <summary>. #feedback-loop #evaluation
 ```
 
 ### 5.3 — Promote Findings to Knowledge Graph
@@ -130,5 +130,3 @@ knowledge_promote <practice_entry_id> | semantic | practice
 knowledge_promote <protocol_update_entry_id> | semantic | practice
 knowledge_promote <rewrite_entry_id> | semantic | <category>
 ```
-
-### 5.4 — Token Usage Record
