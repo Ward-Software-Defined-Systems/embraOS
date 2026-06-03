@@ -83,6 +83,15 @@
     fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
     term.open(document.getElementById(elId));
+    // Grid-locked glyph rendering. xterm's default DOM renderer places
+    // glyphs by their natural font advance, so on long/wrapped rows the
+    // characters drift off the integer cell grid and visually bunch/
+    // overlap (worse at non-100% browser zoom or fractional DPR). The
+    // Canvas renderer paints every cell at col*cellWidth. Loaded AFTER
+    // term.open() (xterm requires renderer addons to attach post-open),
+    // wrapped in try/catch so a missing/incompatible addon degrades to
+    // the DOM renderer rather than a blank terminal.
+    try { term.loadAddon(new CanvasAddon.CanvasAddon()); } catch (e) {}
     try { fit.fit(); } catch (e) {}
     term.onData((d) => {
       if (writable && ws && ws.readyState === 1) ws.send(new TextEncoder().encode(d));
