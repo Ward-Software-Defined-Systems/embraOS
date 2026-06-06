@@ -24,7 +24,7 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 - [KNOWLEDGE-GRAPH.md](KNOWLEDGE-GRAPH.md) — Cross-session memory graph: auto-derived edges, density rationale, promotion path, auto-enrichment, retrieval ranking, the 9 `knowledge_*` tools.
 - [OPEN-PROBLEMS.md](OPEN-PROBLEMS.md) — Unresolved Phase 1–3 design questions tracked at the architecture level.
 
-## Self-Extension (Guardian)
+## Guardian — Dynamic Tools & the Replicant Check
 
 - [REPLICANT-CHECK.md](REPLICANT-CHECK.md) — The soul-spec gate every dynamic tool passes before it compiles: how it works, both authoring paths, and how to test it.
 - [GUARDIAN-TOOL-EXAMPLES.md](GUARDIAN-TOOL-EXAMPLES.md) — Paste-ready dynamic-tool modules (embra-guardian-v1).

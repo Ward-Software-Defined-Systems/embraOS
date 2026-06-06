@@ -32,24 +32,19 @@ Phase 2–5 add A/B partitioned rollback, an `embractl` management CLI, bare-met
 > `reasoning_effort: "max"` (per [DeepSeek's docs](https://api-docs.deepseek.com/guides/thinking_mode))
 > to engage the model's Max-thinking mode — no per-turn operator action.
 
-> **New — the replicant check: soul-gated dynamic tools.** A dynamic tool can now be
-> authored by the **intelligence** (the `guardian_propose` tool) as well as by an
-> **operator** (`/guardian-define`) — and on both paths the draft must pass the
+> **New — soul-gated dynamic tools: the replicant check.** The intelligence can now
+> propose its own dynamic tools (via the `guardian_propose` tool), and operators can
+> still paste them (`/guardian-define`) — but on both paths the draft must pass the
 > **replicant check** before it compiles. The check is an independent soul-verdict
-> model call: it evaluates the proposed Rust module against the sealed soul and returns
-> *allow / refuse / escalate*. A draft that conflicts with the soul is **refused and
-> never compiles** — the soul outranks even an operator paste, and a refusal is not
-> waivable. A passing **intelligence** draft becomes a *proposal* the operator approves
-> (`/guardian approve`) before it builds; the authoring intelligence never rules on or
-> approves its own draft. The check **fails closed**. This is the first landing of
-> *soul-as-enforced-runtime* — moving the soul from text the model is asked to honor to
-> a gate the OS enforces. What compiles is cross-compiled to WebAssembly with an in-OS
-> toolchain and run in a `wasmtime` sandbox on the live, immutable system, persisted
-> across reboots. The guest has **zero ambient authority**; anything beyond pure compute
-> (e.g. `http_get`, Brave-backed `web_search`) is a policy-guarded host capability the
-> module must declare. Reachable only through three static meta-tools (`guardian_call` /
-> `guardian_list` / `guardian_propose`), so the provider tool schema — and the prompt
-> cache — stay byte-stable. Pulled forward from Phase 2; **experimental**. See
+> call: it judges the proposed Rust module against the sealed soul and returns *allow /
+> refuse / escalate*, and it fails closed. A **refuse** blocks the compile on either
+> path — the soul outranks even an operator paste, and is not waivable. A passing
+> **intelligence** proposal still needs an operator's `/guardian approve` before it
+> builds; the intelligence never approves its own draft. This is the first landing of
+> *soul-as-enforced-runtime* — the soul moving from text the model is asked to honor to
+> a gate the OS enforces. (What compiles still runs in the same zero-ambient-authority
+> `wasmtime` sandbox, reachable only via the static `guardian_*` meta-tools, so the
+> prompt cache stays byte-stable.) **Experimental.** See
 > [`docs/REPLICANT-CHECK.md`](docs/REPLICANT-CHECK.md),
 > [`docs/GUARDIAN-TOOL-EXAMPLES.md`](docs/GUARDIAN-TOOL-EXAMPLES.md), and
 > [`docs/GUARDIAN-ADVANCED-EXAMPLE.md`](docs/GUARDIAN-ADVANCED-EXAMPLE.md).
@@ -136,7 +131,7 @@ The runtime services that implement those layers:
 | `embra-web` | 3345 | HTTPS web console (default UI); wraps embra-console in xterm.js over a PTY→WebSocket bridge. |
 | `embra-console` | — | Conversational TUI (serial; PTY-child of embra-web in default mode). |
 | `embrad` | PID 1 | Init, service supervisor, soul verification gate, 5-second reconciliation loop. |
-| `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for dynamic tools — both authoring paths (operator paste, intelligence proposal) gated by the soul-spec replicant check; intelligence proposals also operator-approved; capability-broker host imports. |
+| `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for dynamic tools (both authoring paths replicant-checked; intelligence proposals also operator-approved); capability-broker host imports. |
 
 Persistence is [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a Rust JSON document database. Soul, memory, knowledge graph, sessions, schedules, and Guardian dynamic-tool definitions are all WardSONDB collections; there are no separate config files. A pluggable LLM provider abstraction routes the Brain through one of four backends — **Anthropic Claude**, **Google Gemini**, **Ollama**, or **LM Studio** — chosen at first boot and switchable at runtime via `/provider`; all 93 tools work identically across every backend.
 
