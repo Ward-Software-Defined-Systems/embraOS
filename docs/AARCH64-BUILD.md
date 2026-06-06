@@ -293,9 +293,10 @@ cd ../embraOS
 
 ### In-OS Rust toolchain (embra-guardian-v1)
 
-embra-guardian-v1 lets the intelligence author its own tools: it writes a Rust module,
-embraOS validates it, compiles it to WebAssembly **with a Rust toolchain inside the
-image**, and runs it in a `wasmtime` sandbox. Step 3.5 stages that toolchain.
+embra-guardian-v1 compiles dynamic tools — whether an operator pastes the Rust module
+or the intelligence proposes one, both soul-checked first (intelligence proposals are
+also operator-approved) — to WebAssembly **with a Rust toolchain inside the image**, then
+runs them in a `wasmtime` sandbox. Step 3.5 stages that toolchain.
 
 - **What it downloads:** host `rust-1.94.1-aarch64-unknown-linux-musl` (aarch64 because
   it runs *inside* the aarch64 guest; `aarch64-unknown-linux-musl` is a Tier-2

@@ -49,6 +49,23 @@ impl GuardianCallArgs {
     }
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "guardian_propose",
+    is_side_effectful = true,
+    description = "Propose a new Guardian dynamic tool by drafting its complete Rust module source. It does NOT run when you call this: it is statically validated, then evaluated against your soul (the \"replicant check\"). Only if it passes is it saved as a PROPOSAL for the human operator to approve; if it conflicts with your soul it is refused and never proposed. Use this only when a needed capability exists in neither the built-in tools nor the current guardian tools (call guardian_list first). After a successful proposal, tell the operator to review with /guardian show <name> and approve with /guardian approve <name> (or reject with /guardian reject <name>); it will NOT run until approved. Module contract (fix and re-propose if validation fails): (1) first line is the marker // guardian-tool: <name>; (2) const GUARDIAN_NAME: &str equals the marker, 3-40 chars, lowercase-first, [a-z0-9_] only, not colliding with an existing tool; (3) const GUARDIAN_DESC: &str, 1-600 chars; (4) const GUARDIAN_SCHEMA: &str, valid JSON, object root with \"type\":\"object\", <= 8192 bytes; (5) optional const GUARDIAN_CAPS: &[&str] = &[\"http_get\"]; only http_get and web_search are allowed, omit for pure compute; (6) exactly one fn run(input: &str) -> String (not pub, not unsafe), where input is the JSON arguments string. Guest constraints (no_std): NO std::{fs,net,process,os,env,thread}, NO unsafe, NO FFI/extern/mod, NO extra-crate use (only core, alloc, and scaffold helpers json/host/html_text), NO include!/env!/asm! macros, NO ABI attributes. Host-mediated capabilities: with http_get call host::http_get(url: &str) -> String (https-only, SSRF-blocked); with web_search call host::web_search(query: &str) -> String. Provide the full module as the source argument."
+)]
+pub struct GuardianProposeArgs {
+    /// The complete Guardian module source (marker + GUARDIAN_* consts + fn run).
+    pub source: String,
+}
+
+impl GuardianProposeArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        crate::guardian::propose(ctx.db, ctx.config, &self.source).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,11 +88,21 @@ mod tests {
     }
 
     #[test]
-    fn both_meta_tools_registered() {
+    fn propose_args_deserialize() {
+        let p: GuardianProposeArgs = serde_json::from_value(serde_json::json!({
+            "source": "// guardian-tool: t\nfn run(i:&str)->String{String::new()}"
+        }))
+        .unwrap();
+        assert!(p.source.starts_with("// guardian-tool:"));
+    }
+
+    #[test]
+    fn meta_tools_registered() {
         let names: Vec<&str> = crate::tools::registry::all_descriptors()
             .map(|d| d.name)
             .collect();
         assert!(names.contains(&"guardian_list"));
         assert!(names.contains(&"guardian_call"));
+        assert!(names.contains(&"guardian_propose"));
     }
 }

@@ -1,6 +1,6 @@
 # Tool Reference
 
-Phase 1 includes 92 internal tools the intelligence invokes during conversation. All 92 work identically across all four LLM providers (Anthropic, Gemini, Ollama, LM Studio) via per-provider tool-schema translators that share a common JSON Schema cleanup pipeline (`provider/schema_util.rs::inline_refs`). They are organized below by category.
+Phase 1 includes 93 internal tools the intelligence invokes during conversation. All 93 work identically across all four LLM providers (Anthropic, Gemini, Ollama, LM Studio) via per-provider tool-schema translators that share a common JSON Schema cleanup pipeline (`provider/schema_util.rs::inline_refs`). They are organized below by category.
 
 > **⚠️ Testing Notice:** The default tools and slash commands are actively being tested. If you encounter bugs or unexpected behavior, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
@@ -141,11 +141,19 @@ For the data model, edge taxonomy, density rationale, promotion path, auto-enric
 
 **Guardian — Dynamic Tools** *(embra-guardian-v1 — EXPERIMENTAL)*
 
-The intelligence can author its own tools at runtime: an operator-pasted Rust module (`/guardian-define`) is `syn`-validated, cross-compiled to `wasm32` by the in-OS toolchain, and run in a `wasmtime` sandbox with zero ambient authority. Dynamic tools are **never** injected into the provider tool schema — they are reachable only through these two static meta-tools, so the tool snapshot stays prompt-cache-stable.
+Guardian dynamic tools are authored along two paths, both `syn`-validated → soul-checked by the **replicant check** → `wasm32` cross-compiled → `wasmtime`-sandboxed (zero ambient authority):
+
+- **Operator-authored** — the operator pastes a Rust module (`/guardian-define`); it is validated and soul-checked, then compiles. A draft the replicant check *refuses* is not compiled: the soul outranks even an operator paste, and a *refuse* is not waivable.
+- **Intelligence-proposed** — the intelligence drafts a module via the `guardian_propose` tool. Same validation + replicant check, but a passing draft becomes a *proposal* the operator must approve with `/guardian approve <name>` (or reject with `/guardian reject <name>`) before it compiles. The authoring intelligence never rules on its own draft and never approves it; a refused draft is never proposed.
+
+The replicant check is an independent soul-verdict model call returning **allow / refuse / escalate**; it **fails closed** (if it cannot run, nothing compiles) and is skipped only before the soul is sealed (nothing to evaluate against).
+
+Dynamic tools are **never** injected into the provider tool schema — they are reachable only through the static meta-tools below, so the tool snapshot stays prompt-cache-stable.
 
 | Tool | Description |
 |---|---|
 | **guardian_list** | List the dynamically-defined Guardian tools available to call — name, description, declared capabilities, build status, and input schema. Call this before `guardian_call` to discover what dynamic tools exist |
 | **guardian_call** | Invoke a Guardian-defined dynamic tool by name with a JSON input object (`action="invoke"`), or poll a tool's build state (`action="status"`). A tool only runs once its status is `ready`. Side-effectful |
+| **guardian_propose** | Draft a new Guardian tool's complete Rust module source. Does not run or build — the draft is validated, soul-checked (the replicant check), and on a pass saved as a `proposed` tool awaiting `/guardian approve`. Refused if it conflicts with the soul. Side-effectful |
 
-> **⚠️ Guardian Security:** Dynamic tools execute in an epoch- and memory-capped `wasmtime` sandbox, one fresh instance per call, with no ambient authority. Any capability beyond pure compute (e.g. `http_get`, Brave `web_search`) is a Guardian-mediated host import added host-side **at the guard level**, never by widening guest authority. Tool source is statically validated (`syn` contract + denylist) before it ever compiles. Marked EXPERIMENTAL — use at your own risk.
+> **⚠️ Guardian Security:** Dynamic tools execute in an epoch- and memory-capped `wasmtime` sandbox, one fresh instance per call, with no ambient authority. Any capability beyond pure compute (e.g. `http_get`, Brave `web_search`) is a Guardian-mediated host import added host-side **at the guard level**, never by widening guest authority. Tool source is statically validated (`syn` contract + denylist) before it ever compiles. Both authoring paths must pass the soul-spec replicant check — a `refuse` blocks compilation even for an operator paste (the soul is not operator-waivable) — and an intelligence proposal additionally requires operator approval before it compiles. Marked EXPERIMENTAL — use at your own risk.

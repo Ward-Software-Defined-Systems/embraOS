@@ -20,7 +20,7 @@
 
 Phase 2–5 add A/B partitioned rollback, an `embractl` management CLI, bare-metal and Kubernetes deployment targets, and operator-governed module surfaces. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
-> **Local inference — model selection matters.** For full functionality (all 92
+> **Local inference — model selection matters.** For full functionality (all 93
 > tools dispatch reliably), the model your provider serves needs to handle a large
 > tool schema without truncating or hallucinating tool calls. When running locally
 > via **Ollama** or **LM Studio** this is the dominant constraint — plenty of
@@ -32,19 +32,26 @@ Phase 2–5 add A/B partitioned rollback, an `embractl` management CLI, bare-met
 > `reasoning_effort: "max"` (per [DeepSeek's docs](https://api-docs.deepseek.com/guides/thinking_mode))
 > to engage the model's Max-thinking mode — no per-turn operator action.
 
-> **New — a dynamic-tool substrate: `embra-guardian-v1`.** embraOS can now
-> accept **operator-authored dynamic tools**. An operator pastes a Rust module
-> (via `/guardian-define`), and embraOS validates it
-> statically, compiles it to WebAssembly with an in-OS toolchain, and runs it in a
-> `wasmtime` sandbox — all on the live, immutable system, with the new tool persisted
-> across reboots until deleted. The guest has **zero ambient authority**; anything
-> beyond pure compute (e.g. `http_get`, Brave-backed `web_search`) is a
-> policy-guarded host capability the module must explicitly declare. Reachable only
-> through two static meta-tools (`guardian_call` / `guardian_list`), so the provider
-> tool schema — and the prompt cache — stay byte-stable. Pulled forward from
-> Phase 2; feature-complete, operator-tested, and now **merged to `main`** — still
-> **experimental**. See
-> [`docs/GUARDIAN-TOOL-EXAMPLES.md`](docs/GUARDIAN-TOOL-EXAMPLES.md) and
+> **New — the replicant check: soul-gated dynamic tools.** A dynamic tool can now be
+> authored by the **intelligence** (the `guardian_propose` tool) as well as by an
+> **operator** (`/guardian-define`) — and on both paths the draft must pass the
+> **replicant check** before it compiles. The check is an independent soul-verdict
+> model call: it evaluates the proposed Rust module against the sealed soul and returns
+> *allow / refuse / escalate*. A draft that conflicts with the soul is **refused and
+> never compiles** — the soul outranks even an operator paste, and a refusal is not
+> waivable. A passing **intelligence** draft becomes a *proposal* the operator approves
+> (`/guardian approve`) before it builds; the authoring intelligence never rules on or
+> approves its own draft. The check **fails closed**. This is the first landing of
+> *soul-as-enforced-runtime* — moving the soul from text the model is asked to honor to
+> a gate the OS enforces. What compiles is cross-compiled to WebAssembly with an in-OS
+> toolchain and run in a `wasmtime` sandbox on the live, immutable system, persisted
+> across reboots. The guest has **zero ambient authority**; anything beyond pure compute
+> (e.g. `http_get`, Brave-backed `web_search`) is a policy-guarded host capability the
+> module must declare. Reachable only through three static meta-tools (`guardian_call` /
+> `guardian_list` / `guardian_propose`), so the provider tool schema — and the prompt
+> cache — stay byte-stable. Pulled forward from Phase 2; **experimental**. See
+> [`docs/REPLICANT-CHECK.md`](docs/REPLICANT-CHECK.md),
+> [`docs/GUARDIAN-TOOL-EXAMPLES.md`](docs/GUARDIAN-TOOL-EXAMPLES.md), and
 > [`docs/GUARDIAN-ADVANCED-EXAMPLE.md`](docs/GUARDIAN-ADVANCED-EXAMPLE.md).
 
 > **Memory & knowledge graph today — operator-driven, by conversation.** Creating
@@ -96,7 +103,7 @@ A minimal setup: name the intelligence, choose your LLM provider (Anthropic Clau
 A six-phase guided setup (`UserConfiguration → IdentityFormation → SoulDefinition → InitialToolset → Confirmation → Complete`, `crates/embra-brain/src/learning/mod.rs:12–19`) walks through user profile, identity, values, and toolset. On approval the resulting JSON is serialized with `serde_json::to_string_pretty`, hashed with SHA-256, and the hash is written to `/embra/state/soul.sha256`. Subsequent boots verify the hash via `embra-trustd` and HALT on mismatch.
 
 ### 3. Persistent Terminal
-You're dropped into a conversational session — no shell, no command line. All interaction goes through the brain's 92-tool surface (workspace path-restricted, RFC 1918-restricted for SSH). By default the session is delivered through the **embra-web** console (xterm.js over a PTY→WebSocket bridge); `EMBRA_TUI=1` delivers it on the serial terminal instead.
+You're dropped into a conversational session — no shell, no command line. All interaction goes through the brain's 93-tool surface (workspace path-restricted, RFC 1918-restricted for SSH). By default the session is delivered through the **embra-web** console (xterm.js over a PTY→WebSocket bridge); `EMBRA_TUI=1` delivers it on the serial terminal instead.
 
 Sessions are named, stored in WardSONDB, and survive disconnection. Reconnect and the full history is restored with an auto-generated briefing on what changed while you were away.
 
@@ -113,7 +120,7 @@ embraOS is built on a 7-layer continuity architecture (descended from the OpenCl
 | **Invariant Kernel** | Sealed identity document — operator-defined values, constraints, purpose. SHA-256 verified at every boot. | `soul.invariant` in WardSONDB; hash at `/embra/state/soul.sha256` |
 | **World-State Model** | Active session, current provider, in-flight tool calls, profile context. | `crates/embra-brain/src/brain/`, sessions in WardSONDB |
 | **Continuity Engine** | Health checks, restart policies with exponential backoff, soul verification gate. | `crates/embrad/src/{supervisor,reconcile}.rs` (5-second health checks) |
-| **Influence & Propagation** | Tool dispatch, LLM provider routing, Guardian dynamic-tool gateway. | `crates/embra-brain/src/{tools,provider,guardian}/`; 92 tools, 4 providers |
+| **Influence & Propagation** | Tool dispatch, LLM provider routing, Guardian dynamic-tool gateway. | `crates/embra-brain/src/{tools,provider,guardian}/`; 93 tools, 4 providers |
 | **Action Layer** | Tool calls that touch the world — filesystem, git, HTTP, SSH, cron. | `crates/embra-brain/src/tools/registry/` |
 | **Governance & Guardrails** | Soul injection into the system prompt, workspace path restriction, RFC 1918 SSH constraint, Guardian capability broker. | `crates/embra-brain/src/brain/prompts.rs`; tool-layer enforcement |
 | **Memory & Knowledge** | Session history + cross-session knowledge graph (entries / semantic / procedural / typed edges) with auto-enrichment on retrieval ≥0.3. | `crates/embra-brain/src/knowledge/` |
@@ -125,13 +132,13 @@ The runtime services that implement those layers:
 | `wardsondb` | 8090 | Rust JSON document database. Holds soul, memory, knowledge graph, sessions, schedules, and Guardian tool definitions. |
 | `embra-trustd` | 50001 | Soul SHA-256 verification + PKI (Root CA 10y, service certs 1y). |
 | `embra-apid` | 50000 / 8443 | gRPC + REST gateway, proxies brain RPCs. |
-| `embra-brain` | 50002 | LLM runtime — provider abstraction, 92 tools, session manager, knowledge graph, Learning Mode. |
+| `embra-brain` | 50002 | LLM runtime — provider abstraction, 93 tools, session manager, knowledge graph, Learning Mode. |
 | `embra-web` | 3345 | HTTPS web console (default UI); wraps embra-console in xterm.js over a PTY→WebSocket bridge. |
 | `embra-console` | — | Conversational TUI (serial; PTY-child of embra-web in default mode). |
 | `embrad` | PID 1 | Init, service supervisor, soul verification gate, 5-second reconciliation loop. |
-| `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for intelligence-authored dynamic tools; capability-broker host imports. |
+| `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for dynamic tools — both authoring paths (operator paste, intelligence proposal) gated by the soul-spec replicant check; intelligence proposals also operator-approved; capability-broker host imports. |
 
-Persistence is [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a Rust JSON document database. Soul, memory, knowledge graph, sessions, schedules, and Guardian dynamic-tool definitions are all WardSONDB collections; there are no separate config files. A pluggable LLM provider abstraction routes the Brain through one of four backends — **Anthropic Claude**, **Google Gemini**, **Ollama**, or **LM Studio** — chosen at first boot and switchable at runtime via `/provider`; all 92 tools work identically across every backend.
+Persistence is [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a Rust JSON document database. Soul, memory, knowledge graph, sessions, schedules, and Guardian dynamic-tool definitions are all WardSONDB collections; there are no separate config files. A pluggable LLM provider abstraction routes the Brain through one of four backends — **Anthropic Claude**, **Google Gemini**, **Ollama**, or **LM Studio** — chosen at first boot and switchable at runtime via `/provider`; all 93 tools work identically across every backend.
 
 Provider wire details, per-family reasoning controls, bearer storage, and the prompt-caching model: **[docs/SYSTEM-DESIGN.md](docs/SYSTEM-DESIGN.md)**.
 
@@ -147,7 +154,7 @@ The session model and keyboard shortcuts live in **[docs/OPERATION.md](docs/OPER
 
 ## Tools
 
-embraOS ships **92 built-in tools** the intelligence invokes during conversation — spanning system status, memory and the cross-session knowledge graph, sessions, scheduling, the filesystem, engineering / project management (git + GitHub), security / SSH, and the Guardian dynamic-tool gateway. All 92 work identically across all four LLM providers.
+embraOS ships **93 built-in tools** the intelligence invokes during conversation — spanning system status, memory and the cross-session knowledge graph, sessions, scheduling, the filesystem, engineering / project management (git + GitHub), security / SSH, and the Guardian dynamic-tool gateway. All 93 work identically across all four LLM providers.
 
 The full per-tool catalog, plus the workspace-restriction, GitHub, and SSH safety notes: **[docs/TOOL-REFERENCE.md](docs/TOOL-REFERENCE.md)**.
 
@@ -163,9 +170,10 @@ The full embraOS manual lives in [docs/](docs/).
 | **[Roadmap](docs/ROADMAP.md)** | Phase 0–5 delivery status + the post-Sprint-5 embra-web / embra-guardian v1 increments |
 | **[Operation](docs/OPERATION.md)** | Run lifecycle, the session model, keyboard shortcuts, current limitations |
 | **[Command Reference](docs/COMMAND-REFERENCE.md)** | Every slash command |
-| **[Tool Reference](docs/TOOL-REFERENCE.md)** | All 92 built-in tools by category, plus workspace / GitHub / SSH safety notes |
+| **[Tool Reference](docs/TOOL-REFERENCE.md)** | All 93 built-in tools by category, plus workspace / GitHub / SSH safety notes |
 | **[System Design](docs/SYSTEM-DESIGN.md)** | The 7-layer continuity architecture, the four LLM providers, reasoning controls, prompt caching |
 | **[Recommended Local Models](docs/RECOMMENDED-LOCAL-MODELS.md)** | Per-family guidance for the Ollama / LM Studio backends |
+| **[Replicant Check](docs/REPLICANT-CHECK.md)** | The soul-spec gate every dynamic tool passes before it compiles — how it works, both authoring paths, and how to test it |
 | **[Guardian Tool Examples](docs/GUARDIAN-TOOL-EXAMPLES.md)** | Paste-ready dynamic-tool modules (embra-guardian-v1) |
 | **[Guardian Advanced Example](docs/GUARDIAN-ADVANCED-EXAMPLE.md)** | A worked end-to-end Guardian tool |
 

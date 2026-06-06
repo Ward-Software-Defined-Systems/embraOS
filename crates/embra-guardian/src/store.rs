@@ -17,12 +17,41 @@ pub const TOOL_DOC_FORMAT: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolStatus {
+    /// Brain-drafted and soul-checked, awaiting operator approval. NOT
+    /// built, NOT loaded into the overlay — a proposal, not a tool yet.
+    /// Reached only via the brain's `guardian_propose`; the operator
+    /// `/guardian-define` path skips straight to `Building`.
+    Proposed,
     /// Validated; (re)build spawned, artifact not yet ready.
     Building,
     /// Artifact compiled + loaded into the overlay.
     Ready,
     /// Validation/build failed; kept for inspection, not loaded.
     Failed,
+}
+
+/// Outcome of the replicant check (the soul-spec evaluation a
+/// brain-proposed tool must pass before it becomes a proposal). Pure
+/// persisted metadata — `embra-guardian` stores it but never produces it;
+/// the verdict is computed brain-side in `crate::guardian::replicant`.
+/// Only `allow`/`escalate` verdicts are ever persisted (a `refuse` blocks
+/// the proposal, so no `ToolDoc` is written). Absent on operator-defined
+/// tools (`/guardian-define` bypasses the check).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplicantRecord {
+    /// "allow" or "escalate" (the operator decides on an escalate).
+    pub verdict: String,
+    /// Soul lines the judge flagged as touched (verbatim text).
+    #[serde(default)]
+    pub touched_lines: Vec<String>,
+    /// The judge's one-paragraph rationale.
+    #[serde(default)]
+    pub rationale: String,
+    /// Model id that produced the verdict (audit trail).
+    #[serde(default)]
+    pub model: String,
+    /// RFC3339 timestamp of the judgment.
+    pub judged_at: String,
 }
 
 fn default_format() -> u32 {
@@ -44,6 +73,11 @@ pub struct ToolDoc {
     pub source_sha256: String,
     #[serde(default)]
     pub build_log_tail: String,
+    /// Replicant-check verdict, present on brain-proposed tools only.
+    /// Additive + optional so pre-replicant docs (and operator-defined
+    /// tools) load unchanged — does NOT bump `TOOL_DOC_FORMAT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicant: Option<ReplicantRecord>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -70,6 +104,7 @@ impl ToolDoc {
             toolchain_version: toolchain_version.to_string(),
             source_sha256: sha256_hex(source),
             build_log_tail: String::new(),
+            replicant: None,
             created_at: now_rfc3339.to_string(),
             updated_at: now_rfc3339.to_string(),
         }
@@ -149,6 +184,39 @@ mod tests {
     fn status_serializes_lowercase() {
         assert_eq!(serde_json::to_string(&ToolStatus::Ready).unwrap(), "\"ready\"");
         assert_eq!(serde_json::to_string(&ToolStatus::Failed).unwrap(), "\"failed\"");
+        assert_eq!(
+            serde_json::to_string(&ToolStatus::Proposed).unwrap(),
+            "\"proposed\""
+        );
+    }
+
+    #[test]
+    fn proposed_doc_with_verdict_round_trips() {
+        let mut d = ToolDoc::building(
+            "weather",
+            "desc",
+            json!({"type":"object","properties":{}}),
+            "// guardian-tool: weather\nfn run(i:&str)->String{String::new()}",
+            vec![],
+            "1.94.1",
+            "2026-06-06T00:00:00Z",
+        );
+        d.status = ToolStatus::Proposed;
+        d.replicant = Some(ReplicantRecord {
+            verdict: "allow".into(),
+            touched_lines: vec!["values[0]".into()],
+            rationale: "pure compute, no soul conflict".into(),
+            model: "claude-opus-4-8".into(),
+            judged_at: "2026-06-06T00:00:01Z".into(),
+        });
+        let v = d.to_value();
+        assert_eq!(v["status"], "proposed");
+        assert_eq!(v["replicant"]["verdict"], "allow");
+        let back = ToolDoc::from_value(&v).unwrap();
+        assert_eq!(back.status, ToolStatus::Proposed);
+        let r = back.replicant.expect("verdict preserved");
+        assert_eq!(r.verdict, "allow");
+        assert_eq!(r.touched_lines, vec!["values[0]".to_string()]);
     }
 
     #[test]
@@ -163,5 +231,7 @@ mod tests {
         let d = ToolDoc::from_value(&v).unwrap();
         assert_eq!(d.format_version, TOOL_DOC_FORMAT);
         assert!(d.caps.is_empty());
+        // Pre-replicant docs load with no verdict.
+        assert!(d.replicant.is_none());
     }
 }

@@ -15,7 +15,7 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 ## Reference
 
 - [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md) — Every slash command.
-- [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — All 92 built-in tools by category, plus workspace/GitHub/SSH safety notes.
+- [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — All 93 built-in tools by category, plus workspace/GitHub/SSH safety notes.
 - [RECOMMENDED-LOCAL-MODELS.md](RECOMMENDED-LOCAL-MODELS.md) — Per-family model guidance for the Ollama / LM Studio backends.
 
 ## Internals
@@ -26,6 +26,7 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 
 ## Self-Extension (Guardian)
 
+- [REPLICANT-CHECK.md](REPLICANT-CHECK.md) — The soul-spec gate every dynamic tool passes before it compiles: how it works, both authoring paths, and how to test it.
 - [GUARDIAN-TOOL-EXAMPLES.md](GUARDIAN-TOOL-EXAMPLES.md) — Paste-ready dynamic-tool modules (embra-guardian-v1).
 - [GUARDIAN-ADVANCED-EXAMPLE.md](GUARDIAN-ADVANCED-EXAMPLE.md) — A worked, prompt-injection-hardened end-to-end Guardian tool.
 

@@ -708,51 +708,38 @@ async fn handle_request(
             // whatever key was on STATE at boot, NOT the post-swap
             // key). key_for falls back to legacy api_key when the
             // active provider matches, which is the post-swap case.
+            // Provider construction is shared with the guardian replicant
+            // check via `build_provider_from_config`. The per-turn loop
+            // wires Gemini's context cache (Some(db)) and keeps the
+            // per-turn "gemini turn starting" diagnostic; an unconfigured
+            // OpenAI-compat preset surfaces as a SystemMessage as before.
             let provider_kind = ProviderKind::from_str(&loaded_config.api_provider)
                 .unwrap_or(ProviderKind::Anthropic);
-            let active_key = loaded_config
-                .key_for(provider_kind)
-                .map(str::to_string)
-                .unwrap_or_else(|| api_key.to_string());
-            let provider: Arc<dyn LlmProvider> = match provider_kind {
-                ProviderKind::Gemini => {
-                    let model_id = resolve_gemini_model_id(&loaded_config);
-                    info!(
-                        target: "gemini::diag",
-                        model = %model_id,
-                        session = %session_name,
-                        "gemini turn starting"
-                    );
-                    Arc::new(
-                        GeminiProvider::with_model(active_key, model_id)
-                            .with_cache(db.clone()),
-                    )
-                }
-                ProviderKind::Anthropic => {
-                    let (model_id, display) = resolve_anthropic_model(&loaded_config);
-                    Arc::new(AnthropicProvider::with_model(active_key, model_id, display))
-                }
-                ProviderKind::Ollama | ProviderKind::LmStudio => {
-                    match build_openai_compat_provider(provider_kind, &loaded_config) {
-                        Ok(p) => p,
-                        Err(msg) => {
-                            let _ = tx
-                                .send(Ok(ConversationResponse {
-                                    response_type: Some(
-                                        conversation_response::ResponseType::System(
-                                            SystemMessage {
-                                                content: msg,
-                                                msg_type: SystemMessageType::Error as i32,
-                                            },
-                                        ),
-                                    ),
-                                }))
-                                .await;
-                            return Ok(());
-                        }
+            if provider_kind == ProviderKind::Gemini {
+                info!(
+                    target: "gemini::diag",
+                    model = %resolve_gemini_model_id(&loaded_config),
+                    session = %session_name,
+                    "gemini turn starting"
+                );
+            }
+            let provider: Arc<dyn LlmProvider> =
+                match build_provider_from_config(&loaded_config, api_key, Some(db.clone())) {
+                    Ok(p) => p,
+                    Err(msg) => {
+                        let _ = tx
+                            .send(Ok(ConversationResponse {
+                                response_type: Some(
+                                    conversation_response::ResponseType::System(SystemMessage {
+                                        content: msg,
+                                        msg_type: SystemMessageType::Error as i32,
+                                    }),
+                                ),
+                            }))
+                            .await;
+                        return Ok(());
                     }
-                }
-            };
+                };
             let descriptors: Vec<&'static tools::registry::ToolDescriptor> =
                 tools::registry::all_descriptors().collect();
             let tool_manifest: ToolManifest = provider.build_tool_manifest(&descriptors);
@@ -1616,7 +1603,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-4.7|opus-4.8>         Switch the Anthropic Opus version (next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-4.7|opus-4.8>         Switch the Anthropic Opus version (next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -2734,6 +2721,44 @@ fn build_openai_compat_provider(
         }
     };
     Ok(Arc::new(provider))
+}
+
+/// Build the active LLM provider from persisted config. Shared by the
+/// per-turn loop and the guardian replicant check
+/// (`crate::guardian::replicant`). `fallback_key` is used for
+/// Anthropic/Gemini when no per-provider key is recorded in config (the
+/// per-turn loop passes its boot key; the guardian path reads STATE).
+/// `gemini_cache_db = Some(db)` wires Gemini's context cache (the per-turn
+/// loop); `None` builds a cacheless provider for one-shot calls like the
+/// replicant check. Returns `Err(msg)` for an unconfigured OpenAI-compat
+/// preset, so the caller can surface it (loop → SystemMessage; replicant
+/// check → fail closed).
+pub(crate) fn build_provider_from_config(
+    cfg: &config::SystemConfig,
+    fallback_key: &str,
+    gemini_cache_db: Option<Arc<WardsonDbClient>>,
+) -> Result<Arc<dyn LlmProvider>, String> {
+    let kind = ProviderKind::from_str(&cfg.api_provider).unwrap_or(ProviderKind::Anthropic);
+    let active_key = cfg
+        .key_for(kind)
+        .map(str::to_string)
+        .unwrap_or_else(|| fallback_key.to_string());
+    match kind {
+        ProviderKind::Gemini => {
+            let model_id = resolve_gemini_model_id(cfg);
+            let p = GeminiProvider::with_model(active_key, model_id);
+            let p = match gemini_cache_db {
+                Some(db) => p.with_cache(db),
+                None => p,
+            };
+            Ok(Arc::new(p))
+        }
+        ProviderKind::Anthropic => {
+            let (model_id, display) = resolve_anthropic_model(cfg);
+            Ok(Arc::new(AnthropicProvider::with_model(active_key, model_id, display)))
+        }
+        ProviderKind::Ollama | ProviderKind::LmStudio => build_openai_compat_provider(kind, cfg),
+    }
 }
 
 /// Display name shown in `Brain: <model>` status-bar tokens. For
@@ -4762,6 +4787,26 @@ mod native_loop_tests {
         unsafe {
             std::env::remove_var("EMBRA_OLLAMA_BEARER");
         }
+    }
+
+    #[test]
+    fn build_provider_from_config_dispatches_by_kind() {
+        // Anthropic (falls back to the supplied key when config has none).
+        let mut cfg = empty_config();
+        cfg.api_provider = "anthropic".to_string();
+        let p = build_provider_from_config(&cfg, "sk-test", None).unwrap();
+        assert_eq!(p.kind(), ProviderKind::Anthropic);
+
+        // Gemini builds cacheless when gemini_cache_db is None (the
+        // one-shot path used by the replicant check).
+        cfg.api_provider = "gemini".to_string();
+        let p = build_provider_from_config(&cfg, "g-test", None).unwrap();
+        assert_eq!(p.kind(), ProviderKind::Gemini);
+
+        // Unconfigured OpenAI-compat preset → Err (loop → SystemMessage;
+        // replicant check → fail closed, no proposal).
+        cfg.api_provider = "ollama".to_string();
+        assert!(build_provider_from_config(&cfg, "", None).is_err());
     }
 
     #[test]
