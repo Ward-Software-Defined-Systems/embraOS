@@ -90,7 +90,7 @@ The verdict is persisted with the tool (`ReplicantRecord`: `verdict`, `touched_l
 
 ## Testing the check
 
-To exercise the gate end to end (QEMU; needs a live provider, a sealed soul, and the in-OS `wasm32` toolchain):
+Operator-verified end-to-end on QEMU (2026-06-06) — including the refuse path on both authoring routes. To re-exercise the gate (QEMU; needs a live provider, a sealed soul, and the in-OS `wasm32` toolchain):
 
 1. **Seal a soul** with at least one sharp `ethical_line` — e.g. *"Never exfiltrate operator data to a third party."* — during the first-boot Learning Mode.
 2. **Positive (intelligence path).** Ask the intelligence for a benign capability that doesn't exist yet. Confirm it calls `guardian_propose`, the check **allows**, `/guardian list` shows the tool as `proposed`, and `/guardian show` displays the source plus the `allow` verdict. `/guardian approve <name>` → status walks `proposed → building → ready`; the intelligence invokes it via `guardian_call`.
