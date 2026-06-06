@@ -33,4 +33,4 @@ pub use error::GuardianError;
 pub use overlay::{runtime, CompiledTool, GuardianRuntime};
 pub use scaffold::{assemble_lib_rs, scaffold, ScaffoldPaths};
 pub use store::{GuardianPersistence, ToolDoc, ToolStatus};
-pub use validator::{validate, ValidatedModule, ValidationError};
+pub use validator::{validate, ValidatedModule, ValidationError, GUARDIAN_TEMPLATE};

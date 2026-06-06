@@ -53,7 +53,33 @@ impl GuardianCallArgs {
 #[embra_tool(
     name = "guardian_propose",
     is_side_effectful = true,
-    description = "Propose a new Guardian dynamic tool by drafting its complete Rust module source. It does NOT run when you call this: it is statically validated, then evaluated against your soul (the \"replicant check\"). Only if it passes is it saved as a PROPOSAL for the human operator to approve; if it conflicts with your soul it is refused and never proposed. Use this only when a needed capability exists in neither the built-in tools nor the current guardian tools (call guardian_list first). After a successful proposal, tell the operator to review with /guardian show <name> and approve with /guardian approve <name> (or reject with /guardian reject <name>); it will NOT run until approved. Module contract (fix and re-propose if validation fails): (1) first line is the marker // guardian-tool: <name>; (2) const GUARDIAN_NAME: &str equals the marker, 3-40 chars, lowercase-first, [a-z0-9_] only, not colliding with an existing tool; (3) const GUARDIAN_DESC: &str, 1-600 chars; (4) const GUARDIAN_SCHEMA: &str, valid JSON, object root with \"type\":\"object\", <= 8192 bytes; (5) optional const GUARDIAN_CAPS: &[&str] = &[\"http_get\"]; only http_get and web_search are allowed, omit for pure compute; (6) exactly one fn run(input: &str) -> String (not pub, not unsafe), where input is the JSON arguments string. Guest constraints (no_std): NO std::{fs,net,process,os,env,thread}, NO unsafe, NO FFI/extern/mod, NO extra-crate use (only core, alloc, and scaffold helpers json/host/html_text), NO include!/env!/asm! macros, NO ABI attributes. Host-mediated capabilities: with http_get call host::http_get(url: &str) -> String (https-only, SSRF-blocked); with web_search call host::web_search(query: &str) -> String. Provide the full module as the source argument."
+    description = r##"Propose a new Guardian dynamic tool by drafting its full Rust module source. It does NOT run when you call this: it is statically validated, evaluated against your soul (the "replicant check"), and on a pass saved as a PROPOSAL the operator must approve before it compiles; a draft that conflicts with the soul is refused and never proposed. Use this only when a needed capability exists in neither the built-in tools nor the current guardian tools (call guardian_list first). Start from this exact skeleton and fill it in:
+
+// guardian-tool: example_tool
+// Paste only this shape (+ any private helper fns); the scaffold owns
+// #![no_std], the allocator, the panic handler, the ABI, and the
+// json/host/html_text helpers. The validator rejects: std::*, unsafe,
+// extern/FFI, mod, pub free items, `use` outside core/alloc/json/host/
+// html_text, include!/env!/asm!, third-party crates. vec!/format! are fine;
+// run must never panic (a panic becomes a tool error).
+const GUARDIAN_NAME: &str = "example_tool";  // == marker above; ^[a-z][a-z0-9_]{2,39}$
+const GUARDIAN_DESC: &str = "What this tool does and when to call it.";  // 1..=600 chars
+const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}"#;  // valid JSON, object root, <=8 KiB
+// const GUARDIAN_CAPS: &[&str] = &["http_get"];  // optional; "http_get" and/or "web_search"; omit for pure compute
+
+fn run(input: &str) -> String {
+    // `input` is the JSON args matching GUARDIAN_SCHEMA. Parse defensively,
+    // do the work, return any String (JSON recommended).
+    let args = match json::parse(input) {
+        Ok(a) => a,
+        Err(e) => return json::stringify(&json::obj(vec![("error", json::s(&e))])),
+    };
+    let text = args.get("text").as_str().unwrap_or("");
+    // ...your logic here (with a declared cap, e.g. host::http_get("https://..."))...
+    json::stringify(&json::obj(vec![("ok", json::b(true)), ("text", json::s(text))]))
+}
+
+Helpers in run (no `use` needed): json::{parse,stringify,obj,arr,s,n,b,null}, Json::{get,idx,as_str,as_f64,as_bool,as_array}; with a declared cap, host::http_get(url) and host::web_search(query) each return a JSON envelope string. After a successful proposal, tell the operator to review with /guardian show <name> then /guardian approve <name> (or /guardian reject <name>); it will NOT run until approved. Provide the full module as the source argument."##
 )]
 pub struct GuardianProposeArgs {
     /// The complete Guardian module source (marker + GUARDIAN_* consts + fn run).
@@ -104,5 +130,21 @@ mod tests {
         assert!(names.contains(&"guardian_list"));
         assert!(names.contains(&"guardian_call"));
         assert!(names.contains(&"guardian_propose"));
+    }
+
+    #[test]
+    fn propose_description_embeds_the_validated_template() {
+        // The skeleton shown to the model must be the exact one the validator
+        // accepts (embra_guardian::GUARDIAN_TEMPLATE), so we never teach it a
+        // shape the gate rejects. Guards against the description and the const
+        // drifting apart.
+        let desc = crate::tools::registry::all_descriptors()
+            .find(|d| d.name == "guardian_propose")
+            .expect("guardian_propose registered")
+            .description;
+        assert!(
+            desc.contains(embra_guardian::GUARDIAN_TEMPLATE),
+            "guardian_propose description must embed GUARDIAN_TEMPLATE verbatim"
+        );
     }
 }

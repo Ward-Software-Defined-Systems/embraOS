@@ -19,6 +19,7 @@ Commands:
   /ml                            Toggle multi-line mode (. on own line to send)
   /guardian-define               Define a dynamic tool (paste a Rust module)
   /guardian list|status <n>|show <n>|delete <n>   Manage dynamic tools
+  /guardian approve <n>|reject <n>   Approve/reject a tool the intelligence proposed
   /guardian key brave <token>    Set the Brave Search API key (web_search tools)
   /status                        System status
   /sessions                      List all sessions

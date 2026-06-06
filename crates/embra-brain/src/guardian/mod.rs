@@ -261,7 +261,12 @@ async fn define(db: &Arc<WardsonDbClient>, source: &str) -> String {
     let names = reserved_names();
     let module = match embra_guardian::validate(source, &names) {
         Ok(m) => m,
-        Err(e) => return format!("guardian: validation failed — {e}"),
+        Err(e) => {
+            return format!(
+                "guardian: validation failed — {e}\n\nStart from this exact skeleton and adjust:\n{}",
+                embra_guardian::GUARDIAN_TEMPLATE
+            );
+        }
     };
 
     // The replicant check gates operator-pasted tools too: the soul
@@ -408,10 +413,16 @@ pub async fn propose(
                 .to_string(),
         ));
     }
-    // Gate 1 — static validation (syn + denylist + contract).
+    // Gate 1 — static validation (syn + denylist + contract). On failure,
+    // hand back the exact skeleton so the redraft converges in one pass
+    // instead of looping against the gate.
     let names = reserved_names();
-    let module = embra_guardian::validate(source, &names)
-        .map_err(|e| DispatchError::Handler(format!("guardian: validation failed — {e}")))?;
+    let module = embra_guardian::validate(source, &names).map_err(|e| {
+        DispatchError::Handler(format!(
+            "guardian: validation failed — {e}\n\nStart from this exact skeleton and adjust:\n{}",
+            embra_guardian::GUARDIAN_TEMPLATE
+        ))
+    })?;
 
     // Don't let a proposal clobber a working (or building) operator tool.
     if let Some(existing) = load_doc(db, &module.name).await

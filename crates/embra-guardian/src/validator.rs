@@ -27,6 +27,39 @@ use crate::abi;
 const MAX_DESC: usize = 600;
 const MAX_SCHEMA: usize = 8 * 1024;
 
+/// Copy-fill skeleton handed to the intelligence — inlined in the
+/// `guardian_propose` tool description (so the model sees it before
+/// drafting) and appended to validation-failure messages (so a failed
+/// attempt converges in one redraft). Reduces the propose→validate-fail
+/// loop the contract prose alone didn't prevent. This exact text is run
+/// through [`validate`] in the tests, so the skeleton we hand out always
+/// passes the gate; `embra-brain` asserts the propose description contains
+/// it verbatim, so the two never drift.
+pub const GUARDIAN_TEMPLATE: &str = r##"// guardian-tool: example_tool
+// Paste only this shape (+ any private helper fns); the scaffold owns
+// #![no_std], the allocator, the panic handler, the ABI, and the
+// json/host/html_text helpers. The validator rejects: std::*, unsafe,
+// extern/FFI, mod, pub free items, `use` outside core/alloc/json/host/
+// html_text, include!/env!/asm!, third-party crates. vec!/format! are fine;
+// run must never panic (a panic becomes a tool error).
+const GUARDIAN_NAME: &str = "example_tool";  // == marker above; ^[a-z][a-z0-9_]{2,39}$
+const GUARDIAN_DESC: &str = "What this tool does and when to call it.";  // 1..=600 chars
+const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}"#;  // valid JSON, object root, <=8 KiB
+// const GUARDIAN_CAPS: &[&str] = &["http_get"];  // optional; "http_get" and/or "web_search"; omit for pure compute
+
+fn run(input: &str) -> String {
+    // `input` is the JSON args matching GUARDIAN_SCHEMA. Parse defensively,
+    // do the work, return any String (JSON recommended).
+    let args = match json::parse(input) {
+        Ok(a) => a,
+        Err(e) => return json::stringify(&json::obj(vec![("error", json::s(&e))])),
+    };
+    let text = args.get("text").as_str().unwrap_or("");
+    // ...your logic here (with a declared cap, e.g. host::http_get("https://..."))...
+    json::stringify(&json::obj(vec![("ok", json::b(true)), ("text", json::s(text))]))
+}
+"##;
+
 /// A module that passed every static check. `input_schema` is normalized
 /// (object root guaranteed, `properties` stamped if absent).
 #[derive(Debug, Clone)]
@@ -410,6 +443,14 @@ fn use_root(tree: &syn::UseTree) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guardian_template_passes_the_gate() {
+        // The skeleton we hand the intelligence must itself validate, or we'd
+        // be teaching it to write modules the gate rejects.
+        validate(GUARDIAN_TEMPLATE, &[])
+            .expect("GUARDIAN_TEMPLATE must pass the validator");
+    }
 
     const GOOD: &str = r##"
 // guardian-tool: temp_delta
