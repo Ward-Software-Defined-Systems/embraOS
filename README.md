@@ -8,6 +8,8 @@
 
 **embraOS** is a Rust operating system for one AI. The image is immutable. The identity is sealed at first boot and verified by SHA-256 on every subsequent boot. Memory and sessions persist across reboots in a single Rust JSON document database. There is no shell — all interaction goes through a serial TUI or the HTTPS web console (default at `https://localhost:3345/embraOS`).
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20673525.svg)](https://doi.org/10.5281/zenodo.20673525)
+
 <p align="center">
   <img src="assets/embra-web.png" alt="embraOS web console (embra-web) — the conversational TUI in the browser over a PTY→WebSocket bridge" width="100%">
 </p>
