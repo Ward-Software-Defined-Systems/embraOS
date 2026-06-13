@@ -2,7 +2,7 @@
 name = "embra-common"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 
 [dependencies]
 prost = { workspace = true }

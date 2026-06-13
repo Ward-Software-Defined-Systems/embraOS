@@ -2,7 +2,7 @@
 name = "embra-guardian"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license-file.workspace = true
 repository.workspace = true
 description = "embra-guardian-v1 — validate, build, and sandbox-run intelligence-authored dynamic WASM tools"
 
