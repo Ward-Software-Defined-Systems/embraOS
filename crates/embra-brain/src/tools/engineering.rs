@@ -20,7 +20,9 @@ const WORKSPACE_ROOT: &str = "/embra/workspace";
 /// unification) — prior to these fixes, git_clone took relative subpaths,
 /// the rest of the git family required absolute, and the file/dir family
 /// required absolute with a looser helper that skipped the `..` check.
-fn resolve_workspace_path(path: &str) -> Result<String, String> {
+/// `pub(crate)` so guardian_call's `data_file` bridge shares the exact same
+/// jail (tools/guardian.rs) instead of growing a second resolver.
+pub(crate) fn resolve_workspace_path(path: &str) -> Result<String, String> {
     let trimmed = path.trim();
     let resolved = if trimmed.is_empty() {
         WORKSPACE_ROOT.to_string()
