@@ -15,6 +15,12 @@ use super::types::{
 
 /// Breadth-first traversal starting from a single node.
 ///
+/// - **Undirected expansion** (2026-07-03): each hop follows edges touching
+///   the node from EITHER side. Auto-derived edges are double-written (both
+///   directions exist as docs) but brain-created structural edges are stored
+///   as one directed doc — the old outgoing-only hop silently hid them from
+///   every node except their source. Result edges keep their true stored
+///   direction; only reachability is undirected.
 /// - `max_depth` is clamped to `config.kg_traversal_depth_ceiling`.
 /// - Increments `access_count` + sets `last_accessed` on each visited node
 ///   via fire-and-forget PATCH.
@@ -61,17 +67,7 @@ pub async fn traverse(
         }
         if depth >= max_depth { continue; }
 
-        // Build edge filter
-        let mut filter = serde_json::Map::new();
-        filter.insert("source_id".into(), json!(id));
-        filter.insert("source_collection".into(), json!(coll));
-        if let Some(types) = &edge_type_filter {
-            let names: Vec<&str> = types.iter().map(|t| t.as_str()).collect();
-            filter.insert("edge_type".into(), json!({ "$in": names }));
-        }
-        if let Some(w) = min_weight {
-            filter.insert("weight".into(), json!({ "$gte": w }));
-        }
+        let filter = hop_edge_filter(&coll, &id, edge_type_filter.as_deref(), min_weight);
 
         let edges_docs = match db
             .query("memory.edges", &edge_query_body(filter, config.kg_traversal_edge_limit))
@@ -98,22 +94,26 @@ pub async fn traverse(
 
         for edge_val in edges_docs {
             let Some(edge) = parse_edge(&edge_val) else { continue; };
-            let target_key = (edge.target_collection.clone(), edge.target_id.clone());
-            if visited.contains(&target_key) { continue; }
-            visited.insert(target_key.clone());
+            // Neighbor = whichever endpoint is NOT the node being expanded
+            // (for an incoming edge that's the source). The visited check on
+            // the neighbor also dedupes the twin docs of auto-derived
+            // bidirectional edges — the second doc resolves to an
+            // already-visited neighbor and is skipped, so result_edges stays
+            // a spanning set, as before.
+            let (n_coll, n_id) = neighbor_of(&edge, &coll, &id);
+            let neighbor_key = (n_coll.to_string(), n_id.to_string());
+            if visited.contains(&neighbor_key) { continue; }
+            visited.insert(neighbor_key.clone());
 
             let next_depth = depth + 1;
 
-            if let Some(node) = load_graph_node(db, &edge.target_collection, &edge.target_id, next_depth).await {
-                result_edges.push(edge.clone());
+            if let Some(node) = load_graph_node(db, n_coll, n_id, next_depth).await {
+                let (n_coll, n_id) = neighbor_key;
+                result_edges.push(edge);
                 result_nodes.push(node);
-                spawn_access_touch(
-                    db.clone(),
-                    edge.target_collection.clone(),
-                    edge.target_id.clone(),
-                );
+                spawn_access_touch(db.clone(), n_coll.clone(), n_id.clone());
                 if next_depth > depth_reached { depth_reached = next_depth; }
-                queue.push_back((edge.target_collection, edge.target_id, next_depth));
+                queue.push_back((n_coll, n_id, next_depth));
             }
         }
     }
@@ -138,6 +138,49 @@ fn edge_query_body(filter: serde_json::Map<String, serde_json::Value>, limit: u3
         "sort": [{"weight": "desc"}, {"created_at": "desc"}],
         "limit": limit,
     })
+}
+
+/// Undirected per-hop filter: edges touching `(coll, id)` from either side
+/// (`$or` over the source and target arms — same shape as the
+/// `knowledge_unlink_node` cascade; WardSONDB ANDs sibling keys with `$or`),
+/// optionally restricted by edge types and minimum weight. One ranked window
+/// covers both directions — an auto-derived link's twin docs occupy two
+/// slots, so hub saturation fires somewhat earlier (the existing warn +
+/// locked D3 escalation govern; the cap is not raised for this).
+fn hop_edge_filter(
+    coll: &str,
+    id: &str,
+    edge_type_filter: Option<&[EdgeType]>,
+    min_weight: Option<f64>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut filter = serde_json::Map::new();
+    filter.insert(
+        "$or".into(),
+        json!([
+            { "source_id": id, "source_collection": coll },
+            { "target_id": id, "target_collection": coll }
+        ]),
+    );
+    if let Some(types) = edge_type_filter {
+        let names: Vec<&str> = types.iter().map(|t| t.as_str()).collect();
+        filter.insert("edge_type".into(), json!({ "$in": names }));
+    }
+    if let Some(w) = min_weight {
+        filter.insert("weight".into(), json!({ "$gte": w }));
+    }
+    filter
+}
+
+/// The endpoint of `edge` that is NOT the node currently being expanded.
+/// Self-loops are rejected at link time; if neither endpoint matches
+/// (unreachable given the `$or` filter) the target arm wins and the
+/// visited check makes the choice harmless.
+fn neighbor_of<'a>(edge: &'a KnowledgeEdge, coll: &str, id: &str) -> (&'a str, &'a str) {
+    if edge.source_collection == coll && edge.source_id == id {
+        (&edge.target_collection, &edge.target_id)
+    } else {
+        (&edge.source_collection, &edge.source_id)
+    }
 }
 
 fn parse_edge(v: &serde_json::Value) -> Option<KnowledgeEdge> {
@@ -210,19 +253,12 @@ fn spawn_access_touch(db: WardsonDbClient, collection: String, id: String) {
 
 #[cfg(test)]
 mod edge_query_body_tests {
-    //! FIX-7 body-shape guards (no DB mock in this crate — the ranked-window
-    //! contract is enforced at the builder level).
-    use super::edge_query_body;
+    //! FIX-7 body-shape guards + undirected-hop guards (no DB mock in this
+    //! crate — the ranked-window and both-endpoint contracts are enforced at
+    //! the builder level).
+    use super::super::types::{EdgeType, KnowledgeEdge};
+    use super::{edge_query_body, hop_edge_filter, neighbor_of};
     use serde_json::json;
-
-    fn sample_filter() -> serde_json::Map<String, serde_json::Value> {
-        let mut filter = serde_json::Map::new();
-        filter.insert("source_id".into(), json!("node-1"));
-        filter.insert("source_collection".into(), json!("memory.semantic"));
-        filter.insert("edge_type".into(), json!({ "$in": ["same_session"] }));
-        filter.insert("weight".into(), json!({ "$gte": 0.5 }));
-        filter
-    }
 
     #[test]
     fn edge_body_ranked_weight_then_recency() {
@@ -241,10 +277,96 @@ mod edge_query_body_tests {
 
     #[test]
     fn edge_body_preserves_filter_keys() {
-        let body = edge_query_body(sample_filter(), 500);
-        assert_eq!(body["filter"]["source_id"], json!("node-1"));
-        assert_eq!(body["filter"]["source_collection"], json!("memory.semantic"));
+        let filter = hop_edge_filter(
+            "memory.semantic",
+            "node-1",
+            Some(&[EdgeType::SameSession]),
+            Some(0.5),
+        );
+        let body = edge_query_body(filter, 500);
+        assert!(body["filter"]["$or"].is_array());
         assert_eq!(body["filter"]["edge_type"], json!({ "$in": ["same_session"] }));
         assert_eq!(body["filter"]["weight"], json!({ "$gte": 0.5 }));
+    }
+
+    #[test]
+    fn hop_filter_is_undirected_or_over_both_endpoints() {
+        // The undirected-hop contract: brain-created edges are stored as ONE
+        // directed doc, so the hop must match the node as source OR target —
+        // an outgoing-only filter hides structural edges from every node but
+        // their source (the 2026-07-03 operator-testing find).
+        let filter = hop_edge_filter("memory.semantic", "node-1", None, None);
+        assert_eq!(
+            filter["$or"],
+            json!([
+                { "source_id": "node-1", "source_collection": "memory.semantic" },
+                { "target_id": "node-1", "target_collection": "memory.semantic" }
+            ])
+        );
+    }
+
+    #[test]
+    fn hop_filter_omits_type_and_weight_when_absent() {
+        let filter = hop_edge_filter("memory.entries", "e-1", None, None);
+        assert_eq!(filter.len(), 1, "only the $or arms expected: {filter:?}");
+        assert!(filter.contains_key("$or"));
+    }
+
+    #[test]
+    fn hop_filter_preserves_type_and_weight_siblings() {
+        // Sibling keys AND with $or in WardSONDB's parser — the type/weight
+        // constraints must ride alongside the arms, not inside them.
+        let filter = hop_edge_filter(
+            "memory.semantic",
+            "node-1",
+            Some(&[EdgeType::Enables, EdgeType::DependsOn]),
+            Some(0.7),
+        );
+        assert_eq!(
+            filter["edge_type"],
+            json!({ "$in": ["enables", "depends_on"] })
+        );
+        assert_eq!(filter["weight"], json!({ "$gte": 0.7 }));
+        assert!(filter["$or"].is_array());
+    }
+
+    fn edge(src_coll: &str, src: &str, tgt_coll: &str, tgt: &str) -> KnowledgeEdge {
+        KnowledgeEdge {
+            _id: Some("e-1".into()),
+            source_id: src.into(),
+            source_collection: src_coll.into(),
+            target_id: tgt.into(),
+            target_collection: tgt_coll.into(),
+            edge_type: EdgeType::Enables,
+            weight: 0.9,
+            metadata: serde_json::Value::Null,
+            created_at: "2026-07-03T00:00:00Z".into(),
+        }
+    }
+
+    #[test]
+    fn neighbor_of_outgoing_picks_target() {
+        let e = edge("memory.semantic", "a", "memory.procedural", "b");
+        assert_eq!(
+            neighbor_of(&e, "memory.semantic", "a"),
+            ("memory.procedural", "b")
+        );
+    }
+
+    #[test]
+    fn neighbor_of_incoming_picks_source() {
+        // Standing on the TARGET of a directed edge, the neighbor is the
+        // source — this is the reachability the outgoing-only hop lacked.
+        let e = edge("memory.semantic", "a", "memory.procedural", "b");
+        assert_eq!(
+            neighbor_of(&e, "memory.procedural", "b"),
+            ("memory.semantic", "a")
+        );
+        // Same id in a different collection is NOT the same node.
+        let e2 = edge("memory.semantic", "a", "memory.procedural", "a");
+        assert_eq!(
+            neighbor_of(&e2, "memory.procedural", "a"),
+            ("memory.semantic", "a")
+        );
     }
 }
