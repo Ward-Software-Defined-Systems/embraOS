@@ -31,6 +31,17 @@ pub struct SystemConfig {
     pub kg_traversal_depth_ceiling: u32,
     #[serde(default = "default_kg_candidate_limit")]
     pub kg_edge_candidate_limit: u32,
+    /// Per-hop edge fetch window for graph traversal (FIX-7, locked D3).
+    /// Ranked `weight desc, created_at desc` so saturation prunes the
+    /// weakest/oldest edges. 500 > the structural creation ceiling
+    /// (~450 outgoing docs) at kg_edge_candidate_limit=50.
+    #[serde(default = "default_kg_traversal_edge_limit")]
+    pub kg_traversal_edge_limit: u32,
+    /// BFS node budget for graph traversal (FIX-7, locked D3). Inert at
+    /// current node counts; bounds dense-graph BFS cost below the depth
+    /// ceiling. Budget hit → warn + `TraversalResult.truncated`.
+    #[serde(default = "default_kg_traversal_node_budget")]
+    pub kg_traversal_node_budget: u32,
     /// Active LLM provider — `"anthropic"` or `"gemini"` (Sprint 4
     /// schema v9). Missing on pre-v9 docs; defaults to anthropic for
     /// backward compatibility.
@@ -181,6 +192,8 @@ fn default_kg_temporal_window() -> u64 { 1800 }
 fn default_kg_max_depth() -> u32 { 3 }
 fn default_kg_depth_ceiling() -> u32 { 5 }
 fn default_kg_candidate_limit() -> u32 { 50 }
+fn default_kg_traversal_edge_limit() -> u32 { 500 }
+fn default_kg_traversal_node_budget() -> u32 { 1000 }
 fn default_api_provider() -> String { "anthropic".to_string() }
 
 const PROVIDER_ANTHROPIC_LABEL: &str = "Anthropic Claude Opus 4.7";
@@ -255,6 +268,8 @@ pub async fn run_config_wizard() -> Result<SystemConfig> {
         kg_max_traversal_depth: default_kg_max_depth(),
         kg_traversal_depth_ceiling: default_kg_depth_ceiling(),
         kg_edge_candidate_limit: default_kg_candidate_limit(),
+        kg_traversal_edge_limit: default_kg_traversal_edge_limit(),
+        kg_traversal_node_budget: default_kg_traversal_node_budget(),
         api_provider: default_api_provider(),
         gemini_model: None,
         anthropic_model: None,
@@ -736,6 +751,8 @@ pub async fn run_config_wizard_grpc(
         kg_max_traversal_depth: default_kg_max_depth(),
         kg_traversal_depth_ceiling: default_kg_depth_ceiling(),
         kg_edge_candidate_limit: default_kg_candidate_limit(),
+        kg_traversal_edge_limit: default_kg_traversal_edge_limit(),
+        kg_traversal_node_budget: default_kg_traversal_node_budget(),
         api_provider: provider_kind.as_str().to_string(),
         gemini_model: None,
         anthropic_model,
@@ -905,6 +922,8 @@ mod key_lookup_tests {
             kg_max_traversal_depth: 3,
             kg_traversal_depth_ceiling: 5,
             kg_edge_candidate_limit: 50,
+            kg_traversal_edge_limit: 500,
+            kg_traversal_node_budget: 1000,
             api_provider: provider.into(),
             gemini_model: None,
             anthropic_model: None,
@@ -992,6 +1011,8 @@ mod max_tool_iterations_serde_tests {
             kg_max_traversal_depth: 3,
             kg_traversal_depth_ceiling: 5,
             kg_edge_candidate_limit: 50,
+            kg_traversal_edge_limit: 500,
+            kg_traversal_node_budget: 1000,
             api_provider: "anthropic".into(),
             gemini_model: None,
             anthropic_model: None,
@@ -1050,6 +1071,50 @@ mod max_tool_iterations_serde_tests {
         let json = serde_json::to_value(&cfg).unwrap();
         let back: SystemConfig = serde_json::from_value(json).unwrap();
         assert_eq!(back.max_tool_iterations, Some(42));
+    }
+}
+
+#[cfg(test)]
+mod kg_traversal_config_tests {
+    //! FIX-7 traversal knobs (locked D3): serde-additive concrete fields,
+    //! same pattern as the existing kg_* block — pre-existing config docs
+    //! lack them and must deserialize to the defaults (no schema bump).
+    use super::*;
+    use serde_json::json;
+
+    fn minimal_doc() -> serde_json::Value {
+        // Same minimal doc shape as production pre-fix config docs.
+        json!({
+            "name": "Embra",
+            "api_key": "k",
+            "timezone": "UTC",
+            "deployment_mode": "phase1",
+            "created_at": "",
+            "version": "test",
+            "kg_temporal_window_secs": 1800,
+            "kg_max_traversal_depth": 3,
+            "kg_traversal_depth_ceiling": 5,
+            "kg_edge_candidate_limit": 50,
+            "api_provider": "anthropic",
+        })
+    }
+
+    #[test]
+    fn kg_traversal_fields_default_when_missing() {
+        let cfg: SystemConfig = serde_json::from_value(minimal_doc()).unwrap();
+        assert_eq!(cfg.kg_traversal_edge_limit, 500);
+        assert_eq!(cfg.kg_traversal_node_budget, 1000);
+    }
+
+    #[test]
+    fn kg_traversal_fields_round_trip() {
+        let mut cfg: SystemConfig = serde_json::from_value(minimal_doc()).unwrap();
+        cfg.kg_traversal_edge_limit = 750;
+        cfg.kg_traversal_node_budget = 2500;
+        let json = serde_json::to_value(&cfg).unwrap();
+        let back: SystemConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(back.kg_traversal_edge_limit, 750);
+        assert_eq!(back.kg_traversal_node_budget, 2500);
     }
 }
 

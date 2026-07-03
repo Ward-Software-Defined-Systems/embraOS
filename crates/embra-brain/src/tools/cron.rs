@@ -234,6 +234,8 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
             kg_max_traversal_depth: 3,
             kg_traversal_depth_ceiling: 5,
             kg_edge_candidate_limit: 50,
+            kg_traversal_edge_limit: 500,
+            kg_traversal_node_budget: 1000,
             api_provider: "anthropic".to_string(),
             gemini_model: None,
             anthropic_model: None,

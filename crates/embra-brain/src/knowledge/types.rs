@@ -262,6 +262,10 @@ pub struct TraversalResult {
     pub edges: Vec<KnowledgeEdge>,
     pub depth_reached: u32,
     pub nodes_visited: usize,
+    /// True when the BFS stopped at `kg_traversal_node_budget` before
+    /// exhausting the frontier (FIX-7). Serde-additive default.
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

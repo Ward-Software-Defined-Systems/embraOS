@@ -474,6 +474,9 @@ pub async fn knowledge_traverse(
         "Summary: {} nodes visited, max depth {}, edges: {}",
         result.nodes_visited, max_seen, if dist.is_empty() { "none".into() } else { dist.join(", ") }
     ));
+    if result.truncated {
+        out.push_str("\n[!] traversal truncated: node budget reached (kg_traversal_node_budget)");
+    }
     let _ = max_seen;
     out
 }

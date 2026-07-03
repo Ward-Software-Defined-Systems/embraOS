@@ -38,6 +38,7 @@ pub async fn traverse(
     let mut result_nodes: Vec<GraphNode> = Vec::new();
     let mut result_edges: Vec<KnowledgeEdge> = Vec::new();
     let mut depth_reached: u32 = 0;
+    let mut truncated = false;
 
     // Include the start node in result set for downstream rendering.
     if let Some(start_node) = load_graph_node(db, start_collection, start_id, 0).await {
@@ -46,6 +47,18 @@ pub async fn traverse(
     }
 
     while let Some((coll, id, depth)) = queue.pop_front() {
+        // Node budget (FIX-7, locked D3): bounds dense-graph BFS cost below
+        // the depth ceiling. Overshoot within the final hop is bounded by
+        // kg_traversal_edge_limit.
+        if visited.len() as u32 >= config.kg_traversal_node_budget {
+            warn!(
+                target: "kg::traversal",
+                budget = config.kg_traversal_node_budget,
+                "traversal node budget reached — BFS truncated"
+            );
+            truncated = true;
+            break;
+        }
         if depth >= max_depth { continue; }
 
         // Build edge filter
@@ -61,7 +74,7 @@ pub async fn traverse(
         }
 
         let edges_docs = match db
-            .query("memory.edges", &json!({ "filter": filter, "limit": 200 }))
+            .query("memory.edges", &edge_query_body(filter, config.kg_traversal_edge_limit))
             .await
         {
             Ok(docs) => docs,
@@ -70,6 +83,18 @@ pub async fn traverse(
                 continue;
             }
         };
+        // Ranked window (FIX-7): saturation prunes the weakest/oldest edges
+        // for this hub. Per locked D3 the escalation on a real saturation is
+        // a type-partitioned fetch, NOT raising the cap.
+        if crate::db::client::window_saturated(edges_docs.len(), config.kg_traversal_edge_limit as usize) {
+            warn!(
+                target: "kg::traversal",
+                node_id = %id,
+                collection = %coll,
+                limit = config.kg_traversal_edge_limit,
+                "per-hop edge window saturated — lowest-ranked edges pruned for this hub"
+            );
+        }
 
         for edge_val in edges_docs {
             let Some(edge) = parse_edge(&edge_val) else { continue; };
@@ -98,6 +123,20 @@ pub async fn traverse(
         edges: result_edges,
         depth_reached,
         nodes_visited: visited.len(),
+        truncated,
+    })
+}
+
+/// Per-hop edge query (FIX-7): explicit ranked window instead of the old
+/// unsorted `limit: 200` (which returned edges in key order — creation
+/// order — silently dropping the newest edges of any hub past the limit).
+/// Sort keys are doc fields (`weight`, `created_at`), one per array element,
+/// matching the edge-derivation reference pattern in `edges.rs`.
+fn edge_query_body(filter: serde_json::Map<String, serde_json::Value>, limit: u32) -> serde_json::Value {
+    json!({
+        "filter": filter,
+        "sort": [{"weight": "desc"}, {"created_at": "desc"}],
+        "limit": limit,
     })
 }
 
@@ -167,4 +206,45 @@ fn spawn_access_touch(db: WardsonDbClient, collection: String, id: String) {
         });
         let _ = db.patch_document(&collection, &id, &patch).await;
     });
+}
+
+#[cfg(test)]
+mod edge_query_body_tests {
+    //! FIX-7 body-shape guards (no DB mock in this crate — the ranked-window
+    //! contract is enforced at the builder level).
+    use super::edge_query_body;
+    use serde_json::json;
+
+    fn sample_filter() -> serde_json::Map<String, serde_json::Value> {
+        let mut filter = serde_json::Map::new();
+        filter.insert("source_id".into(), json!("node-1"));
+        filter.insert("source_collection".into(), json!("memory.semantic"));
+        filter.insert("edge_type".into(), json!({ "$in": ["same_session"] }));
+        filter.insert("weight".into(), json!({ "$gte": 0.5 }));
+        filter
+    }
+
+    #[test]
+    fn edge_body_ranked_weight_then_recency() {
+        let body = edge_query_body(serde_json::Map::new(), 500);
+        assert_eq!(
+            body["sort"],
+            json!([{"weight": "desc"}, {"created_at": "desc"}])
+        );
+    }
+
+    #[test]
+    fn edge_body_limit_from_config_value() {
+        let body = edge_query_body(serde_json::Map::new(), 750);
+        assert_eq!(body["limit"], json!(750));
+    }
+
+    #[test]
+    fn edge_body_preserves_filter_keys() {
+        let body = edge_query_body(sample_filter(), 500);
+        assert_eq!(body["filter"]["source_id"], json!("node-1"));
+        assert_eq!(body["filter"]["source_collection"], json!("memory.semantic"));
+        assert_eq!(body["filter"]["edge_type"], json!({ "$in": ["same_session"] }));
+        assert_eq!(body["filter"]["weight"], json!({ "$gte": 0.5 }));
+    }
 }

@@ -3,6 +3,39 @@ use serde::{Deserialize, Serialize};
 
 use super::error::WardsonDbError;
 
+/// Recency window for memory search/scan fetches (FIX-2/3/4/6).
+///
+/// Every windowed fetch over the memory collections goes through
+/// `fetch_recent`/`fetch_recent_with_fields` with this limit so the window
+/// covers the *most recent* documents (WardSONDB's server default is
+/// `limit: 100` in UUIDv7 key order — oldest first — which froze search
+/// over the oldest ~100 docs once collections grew past it). `system_status`
+/// compares live collection counts against this same constant and raises
+/// SEARCH_WINDOW_SATURATED when a collection outgrows it.
+pub const MEMORY_FETCH_WINDOW: usize = 10_000;
+
+/// Body for a most-recent-first windowed fetch. Sort keys are one-per-array-
+/// element (WardSONDB requirement — a multi-key object degrades to
+/// alphabetical priority); `_id` (UUIDv7) breaks sub-second `_created_at`
+/// ties so the window edge is a total order.
+pub(crate) fn recent_query_body(limit: usize, fields: Option<&[&str]>) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "sort": [{"_created_at": "desc"}, {"_id": "desc"}],
+        "limit": limit,
+    });
+    if let Some(fields) = fields {
+        body["fields"] = serde_json::json!(fields);
+    }
+    body
+}
+
+/// A window is saturated when it came back full — results past the limit
+/// were silently pruned. Callers log this loudly; silent truncation is the
+/// defect class the windowed helpers exist to eliminate.
+pub(crate) fn window_saturated(returned: usize, limit: usize) -> bool {
+    limit > 0 && returned >= limit
+}
+
 #[derive(Clone)]
 pub struct WardsonDbClient {
     base_url: String,
@@ -217,6 +250,53 @@ impl WardsonDbClient {
         }
         let envelope: WardsonEnvelope<Vec<serde_json::Value>> = resp.json().await?;
         Ok(envelope.data)
+    }
+
+    /// Fetch up to `limit` most-recent documents (sorted `_created_at desc,
+    /// _id desc`). Logs a saturation warning when the window fills, so
+    /// silent truncation can never recur (FIX-1).
+    pub async fn fetch_recent(
+        &self,
+        collection: &str,
+        limit: usize,
+    ) -> Result<Vec<serde_json::Value>> {
+        self.fetch_recent_with_fields(collection, limit, None).await
+    }
+
+    /// `fetch_recent` with an optional server-side projection (`fields`).
+    pub async fn fetch_recent_with_fields(
+        &self,
+        collection: &str,
+        limit: usize,
+        fields: Option<&[&str]>,
+    ) -> Result<Vec<serde_json::Value>> {
+        let body = recent_query_body(limit, fields);
+        let docs = self.query(collection, &body).await?;
+        if window_saturated(docs.len(), limit) {
+            tracing::warn!(
+                target: "wardsondb::window",
+                collection,
+                limit,
+                "fetch_recent window saturated — results may be incomplete; raise limit or page"
+            );
+        }
+        Ok(docs)
+    }
+
+    /// Authoritative document count for a collection via `count_only`
+    /// (FIX-6). Uses `query_with_options` because the count response's
+    /// `data` is an object (`{"count": N}`), not the array `query()`
+    /// expects.
+    pub async fn count(&self, collection: &str) -> Result<u64> {
+        let data = self
+            .query_with_options(collection, &serde_json::json!({"count_only": true}))
+            .await?;
+        data.get("count").and_then(|v| v.as_u64()).ok_or_else(|| {
+            anyhow::anyhow!(
+                "count_only response for '{}' missing numeric count",
+                collection
+            )
+        })
     }
 
     pub async fn update(
@@ -460,5 +540,45 @@ impl WardsonDbClient {
         }
         let envelope: WardsonEnvelope<Vec<serde_json::Value>> = resp.json().await?;
         Ok(envelope.data)
+    }
+}
+
+#[cfg(test)]
+mod window_query_tests {
+    //! FIX-1 query-body shape guards. There is no DB mock in this crate, so
+    //! the windowed-fetch contract is enforced at the body-builder level:
+    //! every windowed fetch must carry an explicit limit and a recency sort
+    //! with `_id` tiebreak (one key per sort-array element).
+    use super::{recent_query_body, window_saturated};
+    use serde_json::json;
+
+    #[test]
+    fn recent_body_sorts_created_desc_then_id_desc() {
+        let body = recent_query_body(100, None);
+        assert_eq!(
+            body["sort"],
+            json!([{"_created_at": "desc"}, {"_id": "desc"}])
+        );
+    }
+
+    #[test]
+    fn recent_body_carries_exact_limit() {
+        let body = recent_query_body(10_000, None);
+        assert_eq!(body["limit"], json!(10_000));
+    }
+
+    #[test]
+    fn recent_body_includes_projection_when_given() {
+        let body = recent_query_body(50, Some(&["content", "tags"]));
+        assert_eq!(body["fields"], json!(["content", "tags"]));
+        let bare = recent_query_body(50, None);
+        assert!(bare.get("fields").is_none());
+    }
+
+    #[test]
+    fn window_saturated_fires_at_limit_not_below() {
+        assert!(!window_saturated(9, 10));
+        assert!(window_saturated(10, 10));
+        assert!(!window_saturated(0, 0)); // zero-limit guard: never "saturated"
     }
 }

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::config::SystemConfig;
-use crate::db::WardsonDbClient;
+use crate::db::{WardsonDbClient, MEMORY_FETCH_WINDOW};
 use crate::knowledge;
 
 pub mod cron;
@@ -56,6 +56,19 @@ pub struct WardsondbLifetime {
     pub deletes: Option<u64>,
 }
 
+/// Per-collection search-window parity (FIX-6). `count` is the authoritative
+/// server-side document count (`count_only`); `saturated` means the
+/// collection has outgrown the tool fetch window and windowed search is no
+/// longer covering every document.
+#[derive(Debug, Serialize)]
+pub struct MemoryCollectionStatus {
+    pub name: String,
+    /// None when the count query failed (serializes as null).
+    pub count: Option<u64>,
+    pub window: usize,
+    pub saturated: bool,
+}
+
 #[derive(Debug, Serialize)]
 pub struct WardsondbSection {
     pub healthy: bool,
@@ -64,6 +77,7 @@ pub struct WardsondbSection {
     pub storage_poisoned: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lifetime: Option<WardsondbLifetime>,
+    pub memory_collections: Vec<MemoryCollectionStatus>,
 }
 
 #[derive(Debug, Serialize)]
@@ -72,7 +86,22 @@ pub struct SystemStatus {
     pub uptime_seconds: u64,
     pub memory_usage_mb: Option<u64>,
     pub soul_status: String,
+    /// True iff any memory collection exceeds the search window (FIX-6) —
+    /// the correct replacement for the confabulated "frozen FTS indexer"
+    /// monitoring idea: it watches the thing that can actually fail.
+    pub search_window_saturated: bool,
     pub wardsondb: WardsondbSection,
+}
+
+/// Collections covered by the FIX-6 parity check — the three windowed-search
+/// targets. Deliberately local to system_status.
+const MEMORY_STATUS_COLLECTIONS: [&str; 3] =
+    ["memory.entries", "memory.semantic", "memory.procedural"];
+
+/// Saturation predicate: a known count strictly above the window means
+/// windowed fetches are pruning; an unknown count is not reported saturated.
+fn count_exceeds_window(count: Option<u64>, window: usize) -> bool {
+    matches!(count, Some(c) if c as usize > window)
 }
 
 pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
@@ -99,16 +128,41 @@ pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
             deletes: l.get("deletes").and_then(|v| v.as_u64()),
         });
 
+    // FIX-6: parity check — authoritative counts vs the tool fetch window.
+    let mut memory_collections = Vec::with_capacity(MEMORY_STATUS_COLLECTIONS.len());
+    for coll in MEMORY_STATUS_COLLECTIONS {
+        let count = db.count(coll).await.ok();
+        let saturated = count_exceeds_window(count, MEMORY_FETCH_WINDOW);
+        if saturated {
+            tracing::warn!(
+                target: "wardsondb::window",
+                collection = coll,
+                count = count.unwrap_or(0),
+                window = MEMORY_FETCH_WINDOW,
+                "memory collection exceeds search window — SEARCH_WINDOW_SATURATED"
+            );
+        }
+        memory_collections.push(MemoryCollectionStatus {
+            name: coll.to_string(),
+            count,
+            window: MEMORY_FETCH_WINDOW,
+            saturated,
+        });
+    }
+    let search_window_saturated = memory_collections.iter().any(|m| m.saturated);
+
     SystemStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_seconds: process_uptime_secs(),
         memory_usage_mb: get_memory_usage_mb(),
         soul_status: soul_status.into(),
+        search_window_saturated,
         wardsondb: WardsondbSection {
             healthy,
             collections,
             storage_poisoned,
             lifetime: lifetime_block,
+            memory_collections,
         },
     }
 }
@@ -165,9 +219,13 @@ async fn ensure_collection(db: &WardsonDbClient, name: &str) {
 async fn recall(db: &WardsonDbClient, query: &str) -> String {
     ensure_collection(db, "memory.entries").await;
 
-    let entries = db.query("memory.entries", &serde_json::json!({})).await.unwrap_or_default();
-    let semantic = db.query("memory.semantic", &serde_json::json!({})).await.unwrap_or_default();
-    let procedural = db.query("memory.procedural", &serde_json::json!({})).await.unwrap_or_default();
+    // FIX-2: explicit recency windows. The old empty bodies fell into the
+    // server default (limit:100, UUIDv7 key order = oldest first), freezing
+    // recall over the oldest ~100 docs per collection forever. Newest-first
+    // also means the 10-line display cap below shows the most recent matches.
+    let entries = db.fetch_recent("memory.entries", MEMORY_FETCH_WINDOW).await.unwrap_or_default();
+    let semantic = db.fetch_recent("memory.semantic", MEMORY_FETCH_WINDOW).await.unwrap_or_default();
+    let procedural = db.fetch_recent("memory.procedural", MEMORY_FETCH_WINDOW).await.unwrap_or_default();
 
     if entries.is_empty() && semantic.is_empty() && procedural.is_empty() {
         return "No memory entries found.".into();
@@ -320,6 +378,24 @@ mod tokens_all_match_tests {
     fn single_token_still_works() {
         assert!(tokens_all_match("express panel", &toks(&["express"])));
         assert!(!tokens_all_match("panel only", &toks(&["express"])));
+    }
+}
+
+#[cfg(test)]
+mod status_window_tests {
+    //! FIX-6 saturation predicate.
+    use super::count_exceeds_window;
+
+    #[test]
+    fn saturated_only_when_count_exceeds_window() {
+        assert!(!count_exceeds_window(Some(10_000), 10_000)); // at window: covered
+        assert!(count_exceeds_window(Some(10_001), 10_000)); // past window: pruning
+        assert!(!count_exceeds_window(Some(0), 10_000));
+    }
+
+    #[test]
+    fn unknown_count_is_not_saturated() {
+        assert!(!count_exceeds_window(None, 10_000));
     }
 }
 
@@ -1575,6 +1651,7 @@ mod native_args_tests {
             uptime_seconds: 0,
             memory_usage_mb: None,
             soul_status: "sealed".into(),
+            search_window_saturated: false,
             wardsondb: WardsondbSection {
                 healthy: true,
                 collections: vec!["memory.entries".into()],
@@ -1585,6 +1662,12 @@ mod native_args_tests {
                     queries: Some(4),
                     deletes: Some(0),
                 }),
+                memory_collections: vec![MemoryCollectionStatus {
+                    name: "memory.entries".into(),
+                    count: Some(42),
+                    window: MEMORY_FETCH_WINDOW,
+                    saturated: false,
+                }],
             },
         };
         let v = serde_json::to_value(&s).unwrap();
@@ -1599,6 +1682,12 @@ mod native_args_tests {
         assert_eq!(v["wardsondb"]["lifetime"]["inserts"], 3);
         assert_eq!(v["wardsondb"]["lifetime"]["queries"], 4);
         assert_eq!(v["wardsondb"]["lifetime"]["deletes"], 0);
+        // FIX-6 additions: parity section nests under wardsondb; the
+        // saturation headline is top-level.
+        assert_eq!(v["search_window_saturated"], false);
+        assert_eq!(v["wardsondb"]["memory_collections"][0]["name"], "memory.entries");
+        assert_eq!(v["wardsondb"]["memory_collections"][0]["count"], 42);
+        assert_eq!(v["wardsondb"]["memory_collections"][0]["saturated"], false);
     }
 
     #[test]

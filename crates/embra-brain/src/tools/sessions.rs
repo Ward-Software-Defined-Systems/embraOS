@@ -35,13 +35,32 @@ async fn session_names(db: &WardsonDbClient) -> Vec<String> {
         .collect()
 }
 
+/// History query body (FIX-5): explicit limit + oldest-first sort so the
+/// FIRST document is deterministically the canonical history doc (the data
+/// model stores one doc per session; the old empty body relied on the
+/// server's default limit and key order).
+fn history_query_body() -> serde_json::Value {
+    serde_json::json!({ "limit": 10, "sort": [{"_created_at": "asc"}] })
+}
+
 /// Fetch the turns array for a session. Returns (turns_vec, total_count).
 async fn fetch_turns(db: &WardsonDbClient, name: &str) -> (Vec<serde_json::Value>, usize) {
     let collection = format!("sessions.{}.history", name);
     let results = db
-        .query(&collection, &serde_json::json!({}))
+        .query(&collection, &history_query_body())
         .await
         .unwrap_or_default();
+
+    // The single-doc-per-session invariant is load-bearing here: any extra
+    // documents are silently dropped, so make a violation loud (FIX-5).
+    if results.len() > 1 {
+        tracing::warn!(
+            target: "sessions",
+            collection = %collection,
+            count = results.len(),
+            "history collection holds multiple documents; only the first is read"
+        );
+    }
 
     if let Some(doc) = results.into_iter().next() {
         if let Some(turns) = doc.get("turns").and_then(|v| v.as_array()) {
@@ -50,6 +69,19 @@ async fn fetch_turns(db: &WardsonDbClient, name: &str) -> (Vec<serde_json::Value
         }
     }
     (Vec::new(), 0)
+}
+
+#[cfg(test)]
+mod history_query_tests {
+    use super::history_query_body;
+    use serde_json::json;
+
+    #[test]
+    fn history_body_limit_10_oldest_first() {
+        let body = history_query_body();
+        assert_eq!(body["limit"], json!(10));
+        assert_eq!(body["sort"], json!([{"_created_at": "asc"}]));
+    }
 }
 
 /// Format a single turn for output. Truncates content to `max_chars`.
@@ -631,13 +663,24 @@ pub async fn session_delta(db: &WardsonDbClient, param: &str) -> String {
 
 /// Inventory and analysis of memory.entries.
 /// Param: optional tag filter.
+/// Cap on the O(n²) duplicate-candidate pass in `memory_scan`/`memory_dedup`.
+/// Applied to the newest entries (fetches are recency-sorted); without it a
+/// saturated 10k window would mean ~5×10⁷ substring checks and risk the
+/// global tool timeout.
+const MEMORY_SCAN_DUPE_SCAN_CAP: usize = 500;
+
 pub async fn memory_scan(db: &WardsonDbClient, param: &str) -> String {
     ensure_collection(db, "memory.entries").await;
 
+    // FIX-3: explicit recency window (the old projection-only body fell into
+    // the server's default limit:100 over the OLDEST entries, freezing the
+    // scan at the first ~9 sessions). Newest-first; saturation warned by the
+    // shared helper.
     let entries = db
-        .query(
+        .fetch_recent_with_fields(
             "memory.entries",
-            &serde_json::json!({"fields": ["content", "tags", "session", "created_at"]}),
+            crate::db::MEMORY_FETCH_WINDOW,
+            Some(&["content", "tags", "session", "created_at"]),
         )
         .await
         .unwrap_or_default();
@@ -725,10 +768,15 @@ pub async fn memory_scan(db: &WardsonDbClient, param: &str) -> String {
         }
     }
 
-    // Duplicate candidates: find pairs where content is very similar
+    // Duplicate candidates: find pairs where content is very similar.
+    // The pairwise pass is O(n²); at the 10k fetch window that's ~5×10⁷
+    // substring checks, so bound it to the newest entries (the fetch is
+    // newest-first). Tag/session/age stats above still use the full window.
+    let dupe_scan_truncated = entries.len() > MEMORY_SCAN_DUPE_SCAN_CAP;
     let mut dupes = Vec::new();
     let normalized: Vec<(usize, String, String)> = entries
         .iter()
+        .take(MEMORY_SCAN_DUPE_SCAN_CAP)
         .enumerate()
         .map(|(i, doc)| {
             let id = doc
@@ -798,6 +846,12 @@ pub async fn memory_scan(db: &WardsonDbClient, param: &str) -> String {
         output.push_str(&format!("  {}: {}\n", session, count));
     }
 
+    if dupe_scan_truncated {
+        output.push_str(&format!(
+            "\n(duplicate scan limited to the {} most-recent entries)\n",
+            MEMORY_SCAN_DUPE_SCAN_CAP
+        ));
+    }
     if !dupes.is_empty() {
         output.push_str(&format!("\nDuplicate candidates ({}):\n", dupes.len()));
         for d in &dupes {
@@ -823,8 +877,12 @@ pub async fn memory_scan(db: &WardsonDbClient, param: &str) -> String {
 pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
     ensure_collection(db, "memory.entries").await;
 
+    // FIX-8 (spec-gap sibling of FIX-3): the old empty body froze this tool
+    // on the server's default window of the OLDEST 100 entries. Explicit
+    // recency window; the pairwise pass below is O(n²) so the no-param path
+    // is additionally capped to the newest MEMORY_SCAN_DUPE_SCAN_CAP.
     let all_entries = db
-        .query("memory.entries", &serde_json::json!({}))
+        .fetch_recent("memory.entries", crate::db::MEMORY_FETCH_WINDOW)
         .await
         .unwrap_or_default();
 
@@ -833,8 +891,10 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
     }
 
     // Filter to specific IDs if provided
+    let mut dedup_scan_truncated = false;
     let entries: Vec<&serde_json::Value> = if param.is_empty() {
-        all_entries.iter().collect()
+        dedup_scan_truncated = all_entries.len() > MEMORY_SCAN_DUPE_SCAN_CAP;
+        all_entries.iter().take(MEMORY_SCAN_DUPE_SCAN_CAP).collect()
     } else {
         let ids: Vec<&str> = param.split(',').map(|s| s.trim()).collect();
         all_entries
@@ -949,13 +1009,26 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
         }
     }
 
+    let scan_note = if dedup_scan_truncated {
+        format!(
+            " (scan limited to the {} most-recent entries)",
+            MEMORY_SCAN_DUPE_SCAN_CAP
+        )
+    } else {
+        String::new()
+    };
+
     if groups.is_empty() {
-        return "No duplicates found. Memory entries appear unique.".into();
+        return format!(
+            "No duplicates found. Memory entries appear unique.{}",
+            scan_note
+        );
     }
 
     let mut output = format!(
-        "Deduplication Plan\n==================\nFound {} duplicate group(s):\n\n",
-        groups.len()
+        "Deduplication Plan\n==================\nFound {} duplicate group(s){}:\n\n",
+        groups.len(),
+        scan_note
     );
 
     for (g_idx, (strategy, indices)) in groups.iter().enumerate() {
@@ -990,7 +1063,14 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
 
     // Cross-collection duplicate detection (Sprint 2): flag unpromoted entries whose
     // normalized content is a subset/superset of an existing semantic node's content.
-    let semantic = db.query("memory.semantic", &serde_json::json!({})).await.unwrap_or_default();
+    // Same recency-window treatment as the main pass (FIX-8): the old empty body
+    // froze this check on the oldest-100 semantic nodes; the O(entries × semantic)
+    // comparison is bounded to the newest MEMORY_SCAN_DUPE_SCAN_CAP nodes.
+    let mut semantic = db
+        .fetch_recent("memory.semantic", crate::db::MEMORY_FETCH_WINDOW)
+        .await
+        .unwrap_or_default();
+    semantic.truncate(MEMORY_SCAN_DUPE_SCAN_CAP);
     if !semantic.is_empty() {
         let mut cross_dupes: Vec<String> = Vec::new();
         for entry in &normalized {

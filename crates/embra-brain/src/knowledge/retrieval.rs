@@ -42,11 +42,7 @@ pub async fn retrieve_relevant_knowledge(
     for tag in tags {
         if tag.is_empty() { continue; }
         for coll in &["memory.semantic", "memory.procedural"] {
-            let filter = json!({
-                "filter": { "tags": { "$contains": tag } },
-                "limit": 20,
-            });
-            if let Ok(docs) = db.query(coll, &filter).await {
+            if let Ok(docs) = db.query(coll, &tag_query_body(tag)).await {
                 for doc in docs {
                     insert_collected(&mut collected, &doc, coll, "direct_query");
                 }
@@ -55,24 +51,13 @@ pub async fn retrieve_relevant_knowledge(
     }
 
     // Step 2: Session-based — find edges from current-session entries.
-    let session_filter = json!({
-        "filter": { "session": session_name },
-        "limit": 50,
-    });
-    if let Ok(entries) = db.query("memory.entries", &session_filter).await {
+    if let Ok(entries) = db.query("memory.entries", &session_entries_query_body(session_name)).await {
         let session_ids: Vec<String> = entries
             .iter()
             .filter_map(|d| d.get("_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
             .collect();
         for entry_id in session_ids.iter().take(20) {
-            let edge_filter = json!({
-                "filter": {
-                    "source_id": entry_id,
-                    "edge_type": "same_session",
-                },
-                "limit": 20,
-            });
-            if let Ok(edges) = db.query("memory.edges", &edge_filter).await {
+            if let Ok(edges) = db.query("memory.edges", &session_edge_query_body(entry_id)).await {
                 for edge in edges {
                     let Some(target_coll) = edge.get("target_collection").and_then(|v| v.as_str()) else { continue; };
                     let Some(target_id) = edge.get("target_id").and_then(|v| v.as_str()) else { continue; };
@@ -85,10 +70,15 @@ pub async fn retrieve_relevant_knowledge(
         }
     }
 
-    // Step 3: Content-based substring match on memory.entries.
+    // Step 3: Content-based substring match on memory.entries. Recency
+    // window via fetch_recent (FIX-4) — the old `limit: 500` with no sort
+    // was a second latent freeze at entry #500 in key (oldest-first) order.
     if !query_text.is_empty() {
         let q_lower = query_text.to_lowercase();
-        let all_entries = db.query("memory.entries", &json!({ "filter": {}, "limit": 500 })).await.unwrap_or_default();
+        let all_entries = db
+            .fetch_recent("memory.entries", crate::db::MEMORY_FETCH_WINDOW)
+            .await
+            .unwrap_or_default();
         for doc in all_entries {
             let content = doc.get("content").and_then(|v| v.as_str()).unwrap_or("");
             if !content.to_lowercase().contains(&q_lower) { continue; }
@@ -124,6 +114,47 @@ pub async fn retrieve_relevant_knowledge(
     // Step 5: Score and rank.
     let ranked = score_and_rank(collected.into_values().collect(), tags, max_results);
     Ok(ranked)
+}
+
+// --- Step query bodies (FIX-4) ---------------------------------------------
+// Every retrieval window carries an explicit limit AND a recency/rank sort so
+// it covers the most relevant documents, never key-order (oldest-first) ones.
+// Sort keys are doc fields, one per array element (WardSONDB requirement).
+
+/// Step 1: tag match on semantic/procedural — newest 20 per tag per collection.
+fn tag_query_body(tag: &str) -> serde_json::Value {
+    json!({
+        "filter": { "tags": { "$contains": tag } },
+        "sort": [{"created_at": "desc"}],
+        "limit": 20,
+    })
+}
+
+/// Step 2a: current-session entries — newest 50.
+fn session_entries_query_body(session: &str) -> serde_json::Value {
+    json!({
+        "filter": { "session": session },
+        "sort": [{"created_at": "desc"}],
+        "limit": 50,
+    })
+}
+
+/// Step 2b: same-session edges from one entry, ranked `weight desc,
+/// created_at desc`, limit 50 (locked D3). The `memory.entries` exclusion is
+/// server-side (`$ne`) so the window is spent only on useful targets — safe
+/// because every edge doc carries `target_collection` (`edges.rs::
+/// push_bidirectional` and the manual `knowledge_link` write both set it
+/// unconditionally; WardSONDB's `$ne` would drop docs missing the field).
+fn session_edge_query_body(entry_id: &str) -> serde_json::Value {
+    json!({
+        "filter": {
+            "source_id": entry_id,
+            "edge_type": "same_session",
+            "target_collection": { "$ne": "memory.entries" },
+        },
+        "sort": [{"weight": "desc"}, {"created_at": "desc"}],
+        "limit": 50,
+    })
 }
 
 fn insert_collected(
@@ -254,4 +285,49 @@ fn score_and_rank(
     scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(max_results);
     scored
+}
+
+#[cfg(test)]
+mod step_query_body_tests {
+    //! FIX-4 body-shape guards (no DB mock in this crate — the windowed-
+    //! retrieval contract is enforced at the builder level).
+    use super::{session_edge_query_body, session_entries_query_body, tag_query_body};
+    use serde_json::json;
+
+    #[test]
+    fn tag_body_recency_sorted_limit_20() {
+        let body = tag_query_body("rust");
+        assert_eq!(body["filter"]["tags"], json!({ "$contains": "rust" }));
+        assert_eq!(body["sort"], json!([{"created_at": "desc"}]));
+        assert_eq!(body["limit"], json!(20));
+    }
+
+    #[test]
+    fn session_body_recency_sorted_limit_50() {
+        let body = session_entries_query_body("main");
+        assert_eq!(body["filter"]["session"], json!("main"));
+        assert_eq!(body["sort"], json!([{"created_at": "desc"}]));
+        assert_eq!(body["limit"], json!(50));
+    }
+
+    #[test]
+    fn edge_body_excludes_entry_targets_server_side() {
+        let body = session_edge_query_body("entry-1");
+        assert_eq!(
+            body["filter"]["target_collection"],
+            json!({ "$ne": "memory.entries" })
+        );
+    }
+
+    #[test]
+    fn edge_body_ranked_and_limited_50() {
+        let body = session_edge_query_body("entry-1");
+        assert_eq!(body["filter"]["source_id"], json!("entry-1"));
+        assert_eq!(body["filter"]["edge_type"], json!("same_session"));
+        assert_eq!(
+            body["sort"],
+            json!([{"weight": "desc"}, {"created_at": "desc"}])
+        );
+        assert_eq!(body["limit"], json!(50));
+    }
 }
