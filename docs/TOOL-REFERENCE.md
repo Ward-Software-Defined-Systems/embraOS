@@ -8,7 +8,7 @@ Phase 1 includes 93 internal tools the intelligence invokes during conversation.
 
 | Tool | Description |
 |---|---|
-| **system_status** | Report system health — version, uptime, soul status, memory, plus a nested `wardsondb` block (health, collections, storage_poisoned, lifetime counters: requests/inserts/queries/deletes — all wardsondb-scoped, NOT global) |
+| **system_status** | Report system health — version, uptime, soul status, memory, a top-level `search_window_saturated` flag, plus a nested `wardsondb` block (health, collections, storage_poisoned, lifetime counters: requests/inserts/queries/deletes — all wardsondb-scoped, NOT global — and per-collection `memory_collections[]` parity: authoritative count vs the 10,000-doc search window, `saturated` when the collection has outgrown it) |
 | **uptime_report** | Rich system report — uptime, WardSONDB health, collection count, sessions, total messages, memory entries, soul status |
 | **check_update** | Check GitHub for newer WardSONDB releases and report available updates |
 | **changelog** | What changed since the current session started — new memories, session activity |
@@ -19,15 +19,16 @@ Phase 1 includes 93 internal tools the intelligence invokes during conversation.
 
 | Tool | Description |
 |---|---|
-| **recall** | Search past conversations and saved memories by query — returns up to 10 results with IDs, content, tags, and timestamps. Searches `memory.entries` + `memory.semantic` + `memory.procedural` and marks promoted entries. Unquoted multi-token queries AND-match (every token must appear); wrap in double quotes for literal phrase |
+| **recall** | Search past conversations and saved memories by query — returns up to 10 results with IDs, content, tags, and timestamps. Searches the 10,000 most-recent docs per collection (`memory.entries` + `memory.semantic` + `memory.procedural`, recency-sorted window with a saturation warning when full) and marks promoted entries. The 10-result display shows the newest matches first. Unquoted multi-token queries AND-match (every token must appear); wrap in double quotes for literal phrase |
 | **remember** | Save a note or fact to persistent memory with optional hashtag tags. Tags stored as JSON array; triggers background edge derivation |
 | **forget** | Remove a specific memory entry by ID and cascade-delete every edge in `memory.edges` referencing it on either side (mirrors `knowledge_unlink_node`'s cascade pattern). Reports the cascaded edge count |
-| **memory_search** | Search and retrieve from the intelligence's memory stores. Cross-collection like `recall` |
+| **memory_search** | Search and retrieve from the intelligence's memory stores. Alias for `recall` — same cross-collection recency window |
+| **search_memory** | Alias for `recall` (identical dispatch) |
 | **get** | Retrieve any document by collection and ID from WardSONDB |
 | **define** | Look up or add terminology — `define term` to read, `define term | definition` to write, `define delete term` to remove (case-insensitive) |
 | **introspect** | Reflect on soul, identity, and user documents — focus filter extracts relevant subset (purpose, ethics, constraints, identity, user, knowledge) |
-| **memory_scan** | Memory inventory — total count, tag frequency, per-session breakdown, age buckets, duplicate candidates. Includes a Knowledge Graph summary section (semantic/procedural/edge counts, promoted ratio) |
-| **memory_dedup** | Find duplicate memory groups (identical, near-duplicate, subset) with merge strategy proposals. Also flags cross-collection overlap between unpromoted entries and semantic nodes |
+| **memory_scan** | Memory inventory — total count, tag frequency, per-session breakdown, age buckets, duplicate candidates. Stats cover the 10,000 most-recent entries (recency-sorted window, saturation-warned); the duplicate scan is bounded to the newest 500 (noted in the report when it truncates). Includes a Knowledge Graph summary section (semantic/procedural/edge counts, promoted ratio) |
+| **memory_dedup** | Find duplicate memory groups (identical, near-duplicate, subset) with merge strategy proposals over the 10,000 most-recent entries; the pairwise scan is bounded to the newest 500 when no explicit IDs are given (noted in the report). Also flags cross-collection overlap between unpromoted entries and semantic nodes |
 
 **Knowledge Graph** *(Sprint 2 — EXPERIMENTAL)*
 
@@ -40,8 +41,8 @@ For the data model, edge taxonomy, density rationale, promotion path, auto-enric
 | **knowledge_unlink_edge** | Delete edges by ID or by `source \| type \| target` triple. Bidirectional deletion for auto-derived edge types |
 | **knowledge_unlink_node** | Delete a semantic or procedural node and cascade-remove every edge referencing it (source or target). Scoped to `memory.semantic`/`memory.procedural` — use `forget` for episodic entries |
 | **knowledge_update** | Update fields on a semantic or procedural node in place via JSON patch while preserving every referencing edge. Immutable fields (provenance, timestamps, access counters) rejected |
-| **knowledge_traverse** | BFS traversal from a starting node with depth cap (default 3, ceiling 5), edge-type filter, min-weight filter. Validates start node exists |
-| **knowledge_query** | Context-aware retrieval — direct tag match, session context, depth-2 graph expansion, multi-signal ranking. Supports `query \| max \| categories_csv` syntax. Output shows source breakdown (direct/session/graph). Promoted-entry/target pairs are deduplicated so the same claim doesn't fill two slots |
+| **knowledge_traverse** | BFS traversal from a starting node with depth cap (default 3, ceiling 5), edge-type filter, min-weight filter. Per-hop edge window `kg_traversal_edge_limit` (500) ranked `weight desc, created_at desc`; BFS bounded by `kg_traversal_node_budget` (1000) — budget hits are flagged in the summary (`truncated`) and logged under `kg::traversal`. Validates start node exists |
+| **knowledge_query** | Context-aware retrieval — direct tag match, session context, depth-2 graph expansion, multi-signal ranking. Every step window is recency/rank-sorted (tags: newest 20/tag; session edges: top 50 ranked, entry targets excluded server-side; free text: 10,000 most-recent entries). Supports `query \| max \| categories_csv` syntax. Output shows source breakdown (direct/session/graph). Promoted-entry/target pairs are deduplicated so the same claim doesn't fill two slots |
 | **knowledge_graph_stats** | Node counts, category distribution, edge type distribution, promoted ratio, graph density, and orphan-edge count (drift surfaced passively without running the sweep) |
 | **knowledge_sweep_orphans** | Scan `memory.edges` and remove edges whose source or target doc no longer resolves. `dry_run=true` previews; `limit` caps work per call. Cleans residue from pre-cascade `forget` calls or any direct-delete that bypassed `knowledge_unlink_node` |
 
@@ -52,7 +53,7 @@ For the data model, edge taxonomy, density rationale, promotion path, auto-enric
 | **session_summary** | Message counts and recent conversation turns for the intelligence to summarize |
 | **session_list** | List all sessions with status, turn count, last active, and created dates |
 | **session_read** | Read session transcript with optional range (`1-20`, `80-`, last N). Messages truncated to 500 chars |
-| **session_search** | Case-insensitive search across sessions — quoted (`"tool sweep"`) is a literal phrase match, unquoted is whitespace-tokenized AND match (every token must appear in the same turn). `session` (optional) narrows to a single session. Returns up to 20 matches with context |
+| **session_search** | Case-insensitive search across sessions — quoted (`"tool sweep"`) is a literal phrase match, unquoted is whitespace-tokenized AND match (every token must appear in the same turn). `session` (optional) narrows to a single session. Returns up to 20 matches with context (an intentional output bound, not a fetch window — the search itself covers the full transcripts) |
 | **session_meta** | Structured session metadata — status, dates, turn counts (total/user/assistant), summary availability |
 | **session_delta** | Returns all turns from a given turn number onward |
 | **session_summarize** | Generate or retrieve cached session summaries — cache-aware with SHA-256 source hashing |

@@ -35,7 +35,7 @@ The engine takes the new document's `(session, tags, created_at)` and queries al
 | temporal | `{created_at: {$gte: now-1800s, $lte: now+1800s}}` | 50 |
 | tag-overlap (one query per tag on the new doc) | `{tags: {$contains: <tag>}}` | 50 |
 
-The limit (50) and the temporal window (1800s) come from `config.system` — `kg_edge_candidate_limit` and `kg_temporal_window_secs` respectively. Rust defaults at `crates/embra-brain/src/config/mod.rs:170-173`; the v5 migration writes the same values into `config.system` at first boot (`crates/embra-brain/src/migrations/mod.rs:602-605`).
+The limit (50) and the temporal window (1800s) come from `config.system` — `kg_edge_candidate_limit` and `kg_temporal_window_secs` respectively. Rust defaults in the `default_kg_*` block of `crates/embra-brain/src/config/mod.rs` (~:191-196); the v5 migration writes the same values into `config.system` at first boot (`crates/embra-brain/src/migrations/mod.rs:602-605`).
 
 For an active session with two tags on the new doc, the candidate pools could each be the full 50 across each of the 3 collections. The engine then dedupes within each pool and emits edge documents bidirectionally (`push_bidirectional`, `edges.rs:229-258` — two records per logical edge):
 
@@ -159,9 +159,11 @@ The KG accumulates auto-derived edges aggressively and never proactively prunes.
 
 `same_session` is even simpler: a constant `1.0` keyed on session identity. There is no recompute path at all.
 
-### No pruning logic exists
+### No stored-data pruning exists
 
-Anywhere in the codebase. There is no density cap, no TTL, no eviction, no background reaper. The only bounds in the write path are the per-query candidate limit (`kg_edge_candidate_limit`, default 50) and the temporal window (`kg_temporal_window_secs`, default 1800). Both are bounds on how many edges *could* be written per insert, not on how many can exist.
+There is no density cap, no TTL, no eviction, no background reaper — nothing ever deletes stored edges or nodes. The only bounds in the write path are the per-query candidate limit (`kg_edge_candidate_limit`, default 50) and the temporal window (`kg_temporal_window_secs`, default 1800). Both are bounds on how many edges *could* be written per insert, not on how many can exist.
+
+Read paths, by contrast, are deliberately **ranked, bounded, and observable** (the two-layer doctrine, locked decision D1 of the 2026-07-02 search-freeze fix): traversal fetches at most `kg_traversal_edge_limit` (500) edges per hop ranked `weight desc, created_at desc`, walks at most `kg_traversal_node_budget` (1000) nodes per BFS, and logs a `kg::traversal` warning whenever a window saturates. Ranked pruning at a read-window boundary is design behavior — the *comprehensive* layer is server-side filtered queries over all documents, while the graph is the associative/ranked layer.
 
 The only edge-removing maintenance tool is `knowledge_sweep_orphans` (`tools.rs:744-773`), and it only removes edges whose endpoints (source or target node) fail to resolve in their declared collection — see **`knowledge_sweep_orphans`** under **Tool reference** below.
 
@@ -275,10 +277,12 @@ When a session resumes (`SessionManager.pending_resume_briefing` is set), `build
 
 ### Collection steps
 
-1. **Direct tag query** (`retrieval.rs:42-55`) — for each input tag, `{tags: {$contains: <tag>}}` filter on `memory.semantic` + `memory.procedural`, limit 20 per collection. Source label: `direct_query`.
-2. **Session-based** (`retrieval.rs:58-86`) — find all `memory.entries` in the current session (limit 50), then walk `same_session` edges from each (top 20, limit 20 per walk) to surface adjacent semantic/procedural nodes (`memory.entries` targets skipped). Source label: `session_based`.
-3. **Content substring** (`retrieval.rs:89-101`) — case-insensitive `contains` match on `memory.entries.content` (limit 500). If `promoted_to` is set, `redirect_if_promoted` substitutes the target node. Source label: `direct_query`.
-4. **Graph expansion** (`retrieval.rs:103-122`) — top 10 unique seeds from steps 1-3, BFS-traverse to depth 2 (no edge-type filter, no min-weight filter). For each discovered node, redirect-if-promoted and `insert_collected`. Source label: `graph_expansion`.
+Every step window is recency- or rank-sorted with an explicit limit (2026-07-02 search-freeze fix — an unsorted, unlimited WardSONDB query silently returns the *oldest* 100 docs, which froze retrieval as collections grew). Query bodies are built by pure per-step builder functions with shape-asserting unit tests (`step_query_body_tests`).
+
+1. **Direct tag query** (`tag_query_body`) — for each input tag, `{tags: {$contains: <tag>}}` on `memory.semantic` + `memory.procedural`, sorted `created_at desc`, limit 20 per collection (newest 20 per tag). Source label: `direct_query`.
+2. **Session-based** (`session_entries_query_body` + `session_edge_query_body`) — the newest 50 `memory.entries` in the current session (`created_at desc`), then walk `same_session` edges from each (top 20 entries; per-entry edge window ranked `weight desc, created_at desc`, limit 50, with `memory.entries` targets excluded **server-side** via `target_collection: {$ne: "memory.entries"}` so the window is spent only on useful targets — a client-side skip remains as defense-in-depth). Source label: `session_based`.
+3. **Content substring** (`retrieval.rs` step 3) — case-insensitive `contains` match over the 10,000 most-recent `memory.entries` (`fetch_recent`, sorted `_created_at desc, _id desc`, saturation-warned). If `promoted_to` is set, `redirect_if_promoted` substitutes the target node. Source label: `direct_query`.
+4. **Graph expansion** — top 10 unique seeds from steps 1-3, BFS-traverse to depth 2 (no edge-type filter, no min-weight filter; bounded by the traversal edge window and node budget — see **Traversal**). For each discovered node, redirect-if-promoted and `insert_collected`. Source label: `graph_expansion`.
 
 The four steps populate a `HashMap<(collection, id), Collected>` keyed by `(collection, id)` (`retrieval.rs:39`) — same key everywhere else in the codebase. First insert wins; subsequent inserts of the same key are skipped (`retrieval.rs:137`).
 
@@ -331,10 +335,12 @@ Final: `score = base * source_mult`. Results are sorted descending by score and 
 |---|---|---|
 | start node | required arg | validated with `db.read` — returns `Error: Node not found` if missing (`tools.rs:411-413`) |
 | `max_depth` | optional, default `config.kg_max_traversal_depth` (3) | clamped to `config.kg_traversal_depth_ceiling` (5 — `traversal.rs:30`) |
-| `edge_types` | optional CSV | passed to `$in` filter (`traversal.rs:55-58`) |
-| `min_weight` | optional `f64` | passed to `$gte` filter (`traversal.rs:59-61`) |
+| `edge_types` | optional CSV | passed to `$in` filter |
+| `min_weight` | optional `f64` | passed to `$gte` filter |
+| edge window | `config.kg_traversal_edge_limit` (500) | per-hop fetch, ranked `weight desc, created_at desc` (`edge_query_body`) |
+| node budget | `config.kg_traversal_node_budget` (1000) | BFS stops (with `truncated: true`) once the visited set reaches it |
 
-The queue holds `(collection, id, depth)` tuples (`traversal.rs:35-36`). A visited-set keyed on `(collection, id)` prevents revisiting (`traversal.rs:32-33, 77-78`). Each query inside the loop pulls at most 200 edges (`traversal.rs:64`).
+The queue holds `(collection, id, depth)` tuples. A visited-set keyed on `(collection, id)` prevents revisiting. Each query inside the loop pulls at most `kg_traversal_edge_limit` (500) edges, ranked `weight desc, created_at desc` — saturation prunes a hub's *weakest, oldest* edges (for all-1.0 `same_session` ties the recency tiebreak keeps the newest neighbors) and logs a `kg::traversal` warning. The 500 default sits above the structural creation ceiling (~450 outgoing docs per node at `kg_edge_candidate_limit=50`), so no warning is expected at current scale; on the first real saturation, inspect the pruned tail — the designed escalation is a type-partitioned fetch (directional/manual edge types unbounded, cap only the three auto types), **not** raising the cap.
 
 ### Access-count side effect
 
@@ -342,15 +348,15 @@ Each visited node (including the start node) triggers a fire-and-forget `tokio::
 
 ### Output
 
-`TraversalResult { nodes: Vec<GraphNode>, edges: Vec<KnowledgeEdge>, depth_reached: u32, nodes_visited: usize }` (`types.rs:259-265`). Nodes carry a `depth` field (0 for the start node, 1+ for discovered nodes) and a `content_preview` truncated to 200 chars (`types.rs:276-283`). Edges carry the full `KnowledgeEdge` struct including the weight and metadata.
+`TraversalResult { nodes: Vec<GraphNode>, edges: Vec<KnowledgeEdge>, depth_reached: u32, nodes_visited: usize, truncated: bool }` (`types.rs`). Nodes carry a `depth` field (0 for the start node, 1+ for discovered nodes) and a `content_preview` truncated to 200 chars. Edges carry the full `KnowledgeEdge` struct including the weight and metadata. `truncated` (serde-additive) is true when the BFS stopped at the node budget.
 
-The tool-side renderer (`tools.rs:432-478`) groups discovered nodes by depth and prints the edge-type distribution as a summary footer (`Summary: N nodes visited, max depth M, edges: same_session=X, temporal=Y, ...`).
+The tool-side renderer groups discovered nodes by depth and prints the edge-type distribution as a summary footer (`Summary: N nodes visited, max depth M, edges: same_session=X, temporal=Y, ...`), appending `[!] traversal truncated: node budget reached` when the budget hit.
 
 ---
 
 ## Tool reference
 
-Nine `knowledge_*` tools registered via `#[embra_tool(...)]` macros at `crates/embra-brain/src/knowledge/tools.rs:792-1047`. The full registration is verified by `knowledge_tools_register` (`tools.rs:1128-1146`). The intelligence chooses which to invoke as conversation requires; the args below are what the intelligence fills in, not what an operator types. For the broader tool catalog the intelligence draws from (all 92 tools), see [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — this section covers KG-specific contract details.
+Nine `knowledge_*` tools registered via `#[embra_tool(...)]` macros at `crates/embra-brain/src/knowledge/tools.rs:792-1047`. The full registration is verified by `knowledge_tools_register` (`tools.rs:1128-1146`). The intelligence chooses which to invoke as conversation requires; the args below are what the intelligence fills in, not what an operator types. For the broader tool catalog the intelligence draws from (all 93 tools), see [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — this section covers KG-specific contract details.
 
 ### Read tools
 
@@ -425,7 +431,7 @@ Edges referencing the forgotten entry from all three types — auto-derived (`sa
 
 ## Configuration knobs
 
-Four `config.system` fields set up by migration v5 and tunable per-instance. Rust default constants at `crates/embra-brain/src/config/mod.rs:170-173`; v5 first-boot writes the same values into `config.system` at `crates/embra-brain/src/migrations/mod.rs:602-605`.
+Six kg_* config fields tunable per-instance. The first four are set up by migration v5 (first-boot writes into `config.system` at `crates/embra-brain/src/migrations/mod.rs:602-605`); the two traversal knobs (2026-07-02 search-freeze fix, locked decision D3) are serde-additive with Rust defaults — pre-existing config docs simply lack them and deserialize to the defaults, no migration needed. Rust default constants in the `default_kg_*` block of `crates/embra-brain/src/config/mod.rs` (~:191-196).
 
 | Field | Default | Used by |
 |---|---|---|
@@ -433,14 +439,17 @@ Four `config.system` fields set up by migration v5 and tunable per-instance. Rus
 | `kg_edge_candidate_limit` | 50 | per-query candidate cap in `derive_edges` (`edges.rs:60, 76, 89, 102`) |
 | `kg_traversal_depth_ceiling` | 5 | hard cap on `knowledge_traverse` depth (`traversal.rs:30`) |
 | `kg_max_traversal_depth` | 3 | default depth when `knowledge_traverse` omits it (`tools.rs:417`) |
+| `kg_traversal_edge_limit` | 500 | per-hop ranked edge window in `traverse` (`weight desc, created_at desc`; saturation → `kg::traversal` warn) |
+| `kg_traversal_node_budget` | 1000 | BFS node budget in `traverse` (budget hit → warn + `TraversalResult.truncated`) |
 
 Tuning notes:
 
 - **Raise `kg_temporal_window_secs`** to consider more remote edges in time. Linear decay still applies — an edge at the new window edge has weight approaching 0.
-- **Raise `kg_edge_candidate_limit`** to widen the candidate pool per query. Counterbalances slow density growth in long-running instances where the 50-doc top-N might miss older relevant docs.
+- **Raise `kg_edge_candidate_limit`** to widen the candidate pool per query. Counterbalances slow density growth in long-running instances where the 50-doc top-N might miss older relevant docs. **This is the only change that reopens the D3 traversal values** — the structural degree ceiling (~450 outgoing docs/node) scales roughly linearly with it, so `kg_traversal_edge_limit` must stay above the new ceiling.
 - **Lower `kg_max_traversal_depth`** if traversal output is too verbose. The ceiling stays the upper bound; the default just sets what the brain reaches for when not specified.
+- **On a `kg::traversal` edge-window saturation warning**, inspect the pruned tail for that hub before touching anything: all weight-1.0 `same_session` ties → working as designed (recency tiebreak pruned near-duplicate structural neighbors); manual (`knowledge_link`) or high-Jaccard `tag_overlap` edges pruned → the designed escalation is a type-partitioned fetch (directional/manual types unbounded — they are rare by construction; the cap applies only to the three auto types). Raising `kg_traversal_edge_limit` is **not** the default response.
 
-Schema lineage: v5 introduced the 3 KG collections + 7 indexes + the 4 config fields (`run_v5_knowledge_graph` in `crates/embra-brain/src/migrations/mod.rs:490`, called from `:51`). v12 (current) added `guardian.tools` for embra-guardian-v1; KG schema has been stable since v5. Serde-additive `Option<_>` fields can be added to the config struct without bumping the schema (follows the precedent set for `max_tool_iterations`, `show_reasoning`).
+Schema lineage: v5 introduced the 3 KG collections + 7 indexes + the 4 original config fields (`run_v5_knowledge_graph` in `crates/embra-brain/src/migrations/mod.rs:490`, called from `:51`). v12 (current) added `guardian.tools` for embra-guardian-v1; KG schema has been stable since v5. Serde-additive fields can be added to the config struct without bumping the schema (precedent: `max_tool_iterations`, `show_reasoning`, and now the two `kg_traversal_*` knobs).
 
 ---
 
@@ -485,7 +494,7 @@ If any step diverges from what the code claims here, the code is right and the d
 
 ## Related
 
-- [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — catalog of all 92 tools the intelligence draws from (the **Knowledge Graph** table covers these nine).
+- [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — catalog of all 93 tools the intelligence draws from (the **Knowledge Graph** table covers these nine).
 - [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md) — the 7-layer architecture (KG is the **Memory & Knowledge** row).
 - [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md) — slash commands; the KG layer is reached via brain tools, not slash commands.
 - `ARCHITECTURE.md` (local) — historical Sprint 2 narrative with commit SHAs and the fix-wave for `knowledge_unlink_node` cascade, the `derived_from` cleanup, and orphan-sweep introduction.
