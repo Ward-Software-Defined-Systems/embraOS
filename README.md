@@ -59,7 +59,11 @@ Phase 2–5 add A/B partitioned rollback, an `embractl` management CLI, bare-met
 > graph — it has the `remember` and `knowledge_*` tools and will write the entries
 > itself. Separately, **`/feedback-loop`** (**experimental**) runs a full
 > self-realignment against the intelligence's identity and soul — a different
-> concern, not a memory-promotion sweep. See
+> concern, not a memory-promotion sweep. Memory search and graph retrieval read
+> **recency-ranked windows** (the 10,000 most-recent documents per memory
+> collection; graph traversal ranked by edge weight and recency), and every window
+> is observable — `system_status` reports per-collection counts against the window
+> and flags `search_window_saturated` if a collection ever outgrows it. See
 > [`docs/KNOWLEDGE-GRAPH.md`](docs/KNOWLEDGE-GRAPH.md) for the data model, edge
 > taxonomy, auto-derived edge density rationale, and the nine `knowledge_*` tools.
 
