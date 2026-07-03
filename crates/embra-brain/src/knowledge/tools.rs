@@ -911,6 +911,449 @@ pub async fn knowledge_sweep_orphans(
     )
 }
 
+// ── knowledge_dump — JSONL export of the knowledge graph ──
+
+/// Dump directory. Inside the tool-layer workspace jail (`/embra/workspace`,
+/// bind-mounted from DATA at boot) but outside `repos/` — dumps are exports,
+/// not repository content. Full-path const per repo precedent; do not widen
+/// engineering's `WORKSPACE_ROOT` visibility for this.
+const KG_DUMPS_DIR: &str = "/embra/workspace/KG_DUMPS";
+
+/// Page size for the exhaustive dump scan — same bound rationale as
+/// `ORPHAN_SCAN_PAGE` (well under the server's 100k `--max-query-limit`,
+/// bounds per-page memory).
+const DUMP_SCAN_PAGE: usize = 20_000;
+
+/// The dumpable collections as `(short_name, wardsondb_collection)` in
+/// canonical dump order: nodes first (entries, semantic, procedural), then
+/// edges. Short names are the tool-facing vocabulary.
+const DUMP_COLLECTIONS: &[(&str, &str)] = &[
+    ("entries", "memory.entries"),
+    ("semantic", "memory.semantic"),
+    ("procedural", "memory.procedural"),
+    ("edges", "memory.edges"),
+];
+
+/// One page of the exhaustive dump scan. Deliberately UNSORTED — the same
+/// doctrine exception as `orphan_page_query_body`: offset pagination rides
+/// the stable UUIDv7 key order as its cursor (exhaustive coverage, not a
+/// relevance window). WardSONDB applies `offset`/`limit` after the filter in
+/// every executor path, so a constant filter tiles the matched set without
+/// skips or duplicates.
+fn dump_page_query_body(
+    filter: &serde_json::Value,
+    page_limit: usize,
+    offset: usize,
+) -> serde_json::Value {
+    json!({ "filter": filter, "limit": page_limit, "offset": offset })
+}
+
+/// Edge-type restriction for the edges pass.
+fn dump_edge_type_filter(edge_types: &[String]) -> serde_json::Value {
+    json!({ "edge_type": { "$in": edge_types } })
+}
+
+/// Map tool-facing short names to `memory.*` collections in canonical dump
+/// order regardless of input order. `None` selects all four; unknown names
+/// and an empty selection are errors.
+fn resolve_dump_collections(requested: Option<&[String]>) -> Result<Vec<&'static str>, String> {
+    let Some(requested) = requested else {
+        return Ok(DUMP_COLLECTIONS.iter().map(|(_, full)| *full).collect());
+    };
+    if requested.is_empty() {
+        return Err(
+            "collections is empty — omit it for a full dump, or pick from: entries, semantic, procedural, edges"
+                .into(),
+        );
+    }
+    for name in requested {
+        if !DUMP_COLLECTIONS
+            .iter()
+            .any(|(short, _)| *short == name.as_str())
+        {
+            return Err(format!(
+                "Unknown collection '{}'. Valid: entries, semantic, procedural, edges",
+                name
+            ));
+        }
+    }
+    Ok(DUMP_COLLECTIONS
+        .iter()
+        .filter(|(short, _)| requested.iter().any(|r| r.as_str() == *short))
+        .map(|(_, full)| *full)
+        .collect())
+}
+
+/// Reject unknown edge types up front (all 9 stored types are dumpable —
+/// auto-derived and brain-created alike); an empty list is an error.
+fn validate_dump_edge_types(edge_types: &[String]) -> Result<(), String> {
+    if edge_types.is_empty() {
+        return Err("edge_types is empty — omit it to dump all edge types".into());
+    }
+    for t in edge_types {
+        if EdgeType::from_str(t).is_none() {
+            return Err(format!(
+                "Unknown edge type '{}'. Valid: same_session, temporal, tag_overlap, derived_from, enables, contradicts, refines, depends_on, related_to",
+                t
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// First line of every dump — provenance for the file itself. Consumers
+/// keyed on `type` (e.g. the kg_scan guardian example) skip it as an
+/// unknown record type.
+fn dump_meta_record(
+    collections: &[&'static str],
+    edge_types: Option<&[String]>,
+    include_payload: bool,
+) -> serde_json::Value {
+    json!({
+        "type": "meta",
+        "generated_at": chrono::Utc::now().to_rfc3339(),
+        "collections": collections,
+        "edge_types": edge_types,
+        "include_payload": include_payload,
+    })
+}
+
+/// A node line: `type`/`_id`/`collection` lifted top-level for scanners; the
+/// full stored doc rides under `data` unless the dump is slim.
+fn dump_node_record(
+    doc: &serde_json::Value,
+    collection: &str,
+    include_payload: bool,
+) -> serde_json::Value {
+    let mut rec = json!({
+        "type": "node",
+        "_id": doc.get("_id").cloned().unwrap_or(serde_json::Value::Null),
+        "collection": collection,
+    });
+    if include_payload {
+        rec["data"] = doc.clone();
+    }
+    rec
+}
+
+/// An edge line: the stored doc's fields spread at top level (they already
+/// carry source/target/edge_type/weight — see the `knowledge_link` write
+/// shape) plus the `type` discriminator, which wins over any stored `type`
+/// field.
+fn dump_edge_record(doc: &serde_json::Value) -> serde_json::Value {
+    let mut rec = doc.clone();
+    if let Some(obj) = rec.as_object_mut() {
+        obj.insert("type".to_string(), json!("edge"));
+    }
+    rec
+}
+
+/// Per-collection outcome of one dump pass.
+struct DumpCollectionStat {
+    collection: &'static str,
+    written: usize,
+    /// Authoritative server-side count for the same filter (parity signal;
+    /// `None` when the count call itself failed).
+    server_count: Option<u64>,
+}
+
+/// Write the meta line plus every selected collection into `writer`,
+/// tiling each collection exhaustively via unsorted key-order pagination.
+/// Returns per-collection stats and the byte total. Any query or write
+/// error aborts the whole dump (the caller removes the partial file).
+async fn write_dump_contents(
+    db: &WardsonDbClient,
+    writer: &mut tokio::io::BufWriter<tokio::fs::File>,
+    selected: &[&'static str],
+    edge_types: Option<&[String]>,
+    include_payload: bool,
+) -> Result<(Vec<DumpCollectionStat>, u64), String> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut bytes: u64 = 0;
+    let meta_line = format!(
+        "{}\n",
+        dump_meta_record(selected, edge_types, include_payload)
+    );
+    writer
+        .write_all(meta_line.as_bytes())
+        .await
+        .map_err(|e| format!("write failed: {}", e))?;
+    bytes += meta_line.len() as u64;
+
+    let mut stats = Vec::new();
+    for coll in selected {
+        let is_edges = *coll == "memory.edges";
+        let filter = if is_edges && let Some(types) = edge_types {
+            dump_edge_type_filter(types)
+        } else {
+            json!({})
+        };
+
+        let mut written = 0usize;
+        let mut offset = 0usize;
+        loop {
+            let docs = db
+                .query(coll, &dump_page_query_body(&filter, DUMP_SCAN_PAGE, offset))
+                .await
+                .map_err(|e| format!("query {} failed at offset {}: {}", coll, offset, e))?;
+            if docs.is_empty() {
+                break;
+            }
+            let page_len = docs.len();
+            for doc in &docs {
+                let rec = if is_edges {
+                    dump_edge_record(doc)
+                } else {
+                    dump_node_record(doc, coll, include_payload)
+                };
+                let line = format!("{}\n", rec);
+                writer
+                    .write_all(line.as_bytes())
+                    .await
+                    .map_err(|e| format!("write failed: {}", e))?;
+                bytes += line.len() as u64;
+                written += 1;
+            }
+            offset += page_len;
+            if page_len < DUMP_SCAN_PAGE {
+                break; // final partial page — collection exhausted
+            }
+        }
+
+        // Parity: authoritative server-side count for the same filter. A soft
+        // signal only — a live instance can legitimately drift between the
+        // scan and the count.
+        let server_count = if is_edges && edge_types.is_some() {
+            db.count_filtered(coll, &filter).await.ok()
+        } else {
+            db.count(coll).await.ok()
+        };
+        stats.push(DumpCollectionStat {
+            collection: coll,
+            written,
+            server_count,
+        });
+    }
+
+    writer
+        .flush()
+        .await
+        .map_err(|e| format!("flush failed: {}", e))?;
+    Ok((stats, bytes))
+}
+
+/// Export the knowledge graph as a JSONL dump under `KG_DUMPS_DIR`. On any
+/// query or write error the partial file is removed — the format has a
+/// header but no trailer, so a partial dump would otherwise be
+/// indistinguishable from a complete one.
+pub async fn run_knowledge_dump(
+    db: &WardsonDbClient,
+    collections: Option<Vec<String>>,
+    edge_types: Option<Vec<String>>,
+    include_payload: bool,
+) -> Result<String, String> {
+    let started = std::time::Instant::now();
+
+    let selected = resolve_dump_collections(collections.as_deref())?;
+    if let Some(types) = edge_types.as_deref() {
+        validate_dump_edge_types(types)?;
+        if !selected.contains(&"memory.edges") {
+            return Err(
+                "edge_types was provided but 'edges' is not among the dumped collections".into(),
+            );
+        }
+    }
+
+    tokio::fs::create_dir_all(KG_DUMPS_DIR)
+        .await
+        .map_err(|e| format!("Failed to create {}: {}", KG_DUMPS_DIR, e))?;
+    let path = format!(
+        "{}/kg-dump-{}.jsonl",
+        KG_DUMPS_DIR,
+        chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+    );
+    let file = tokio::fs::File::create(&path)
+        .await
+        .map_err(|e| format!("Failed to create {}: {}", path, e))?;
+    let mut writer = tokio::io::BufWriter::new(file);
+
+    match write_dump_contents(
+        db,
+        &mut writer,
+        &selected,
+        edge_types.as_deref(),
+        include_payload,
+    )
+    .await
+    {
+        Ok((stats, bytes)) => {
+            let mut out = format!("knowledge_dump → {}\n", path);
+            for s in &stats {
+                let parity = match s.server_count {
+                    Some(n) if n == s.written as u64 => format!("server count {}", n),
+                    Some(n) => format!("server count {} — mismatch, likely concurrent writes", n),
+                    None => "server count unavailable".to_string(),
+                };
+                out.push_str(&format!(
+                    "  {}: {} written ({})\n",
+                    s.collection, s.written, parity
+                ));
+            }
+            if let Some(types) = edge_types.as_deref() {
+                out.push_str(&format!("  edge filter: {}\n", types.join(", ")));
+            }
+            if !include_payload {
+                out.push_str("  mode: slim (node payloads omitted)\n");
+            }
+            let total: usize = stats.iter().map(|s| s.written).sum();
+            out.push_str(&format!(
+                "  total: {} records (+1 meta line), {} bytes, {:.2}s",
+                total,
+                bytes,
+                started.elapsed().as_secs_f64()
+            ));
+            Ok(out)
+        }
+        Err(e) => {
+            drop(writer);
+            let _ = tokio::fs::remove_file(&path).await;
+            Err(format!("Dump aborted ({}); partial file removed", e))
+        }
+    }
+}
+
+#[cfg(test)]
+mod dump_shape_tests {
+    //! Shape guards for the dump builders — contracts enforced at the
+    //! builder level (no DB mock in this crate), same pattern as
+    //! `windowless_stats_tests`.
+    use super::{
+        dump_edge_record, dump_edge_type_filter, dump_meta_record, dump_node_record,
+        dump_page_query_body, resolve_dump_collections, validate_dump_edge_types,
+    };
+    use serde_json::json;
+
+    #[test]
+    fn dump_page_body_paginates_key_order_no_sort() {
+        // Same doctrine exception as the orphan scan: exhaustive pagination
+        // rides stable key order; a sort key must never appear.
+        let empty = json!({});
+        let body = dump_page_query_body(&empty, 20_000, 40_000);
+        assert_eq!(body["limit"], json!(20_000));
+        assert_eq!(body["offset"], json!(40_000));
+        assert_eq!(body["filter"], json!({}));
+        assert!(body.get("sort").is_none());
+
+        let filtered = dump_edge_type_filter(&["enables".to_string()]);
+        let body = dump_page_query_body(&filtered, 20_000, 0);
+        assert_eq!(body["filter"], json!({"edge_type": {"$in": ["enables"]}}));
+        assert!(body.get("sort").is_none());
+    }
+
+    #[test]
+    fn dump_edge_type_filter_builds_dollar_in() {
+        let f = dump_edge_type_filter(&["enables".to_string(), "refines".to_string()]);
+        assert_eq!(f, json!({"edge_type": {"$in": ["enables", "refines"]}}));
+    }
+
+    #[test]
+    fn dump_collections_default_and_canonical_order() {
+        let all = resolve_dump_collections(None).unwrap();
+        assert_eq!(
+            all,
+            vec![
+                "memory.entries",
+                "memory.semantic",
+                "memory.procedural",
+                "memory.edges"
+            ]
+        );
+        // Selections are re-ordered canonically (nodes before edges), not
+        // echoed in input order.
+        let sel = vec!["edges".to_string(), "semantic".to_string()];
+        let some = resolve_dump_collections(Some(&sel)).unwrap();
+        assert_eq!(some, vec!["memory.semantic", "memory.edges"]);
+    }
+
+    #[test]
+    fn dump_collections_reject_unknown_and_empty() {
+        let bogus = vec!["bogus".to_string()];
+        let err = resolve_dump_collections(Some(&bogus)).unwrap_err();
+        assert!(err.contains("entries"), "should list valid names: {err}");
+        let empty: Vec<String> = vec![];
+        assert!(resolve_dump_collections(Some(&empty)).is_err());
+    }
+
+    #[test]
+    fn dump_edge_types_reject_unknown() {
+        let bad = vec!["enables".to_string(), "nope".to_string()];
+        let err = validate_dump_edge_types(&bad).unwrap_err();
+        assert!(err.contains("related_to"), "should list valid types: {err}");
+        let good = vec!["same_session".to_string(), "depends_on".to_string()];
+        assert!(validate_dump_edge_types(&good).is_ok());
+        assert!(validate_dump_edge_types(&[]).is_err());
+    }
+
+    #[test]
+    fn dump_node_record_full_includes_data_slim_omits() {
+        let doc = json!({"_id": "abc", "content": "x", "tags": ["t"]});
+        let full = dump_node_record(&doc, "memory.semantic", true);
+        assert_eq!(full["type"], "node");
+        assert_eq!(full["_id"], "abc");
+        assert_eq!(full["collection"], "memory.semantic");
+        assert_eq!(full["data"], doc);
+        let slim = dump_node_record(&doc, "memory.semantic", false);
+        assert_eq!(slim["_id"], "abc");
+        assert!(slim.get("data").is_none());
+    }
+
+    #[test]
+    fn dump_edge_record_spreads_fields_and_sets_type() {
+        let doc = json!({
+            "_id": "e1",
+            "source_id": "a",
+            "source_collection": "memory.semantic",
+            "target_id": "b",
+            "target_collection": "memory.procedural",
+            "edge_type": "enables",
+            "weight": 0.9,
+            "metadata": {},
+            "created_at": "t"
+        });
+        let rec = dump_edge_record(&doc);
+        assert_eq!(rec["type"], "edge");
+        for key in [
+            "_id",
+            "source_id",
+            "source_collection",
+            "target_id",
+            "target_collection",
+            "edge_type",
+            "weight",
+            "metadata",
+            "created_at",
+        ] {
+            assert_eq!(rec[key], doc[key], "{key} must spread top-level");
+        }
+    }
+
+    #[test]
+    fn dump_meta_record_shape() {
+        let m = dump_meta_record(&["memory.edges"], None, true);
+        assert_eq!(m["type"], "meta");
+        assert!(m["generated_at"].as_str().is_some());
+        assert_eq!(m["collections"], json!(["memory.edges"]));
+        assert!(m["edge_types"].is_null());
+        assert_eq!(m["include_payload"], json!(true));
+
+        let types = vec!["enables".to_string()];
+        let m2 = dump_meta_record(&["memory.edges"], Some(&types), false);
+        assert_eq!(m2["edge_types"], json!(["enables"]));
+        assert_eq!(m2["include_payload"], json!(false));
+    }
+}
+
 // ── Native tool-use registrations (NATIVE-TOOLS-01) ──
 
 use embra_tool_macro::embra_tool;
@@ -1187,6 +1630,39 @@ impl KnowledgeSweepOrphansArgs {
     }
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "knowledge_dump",
+    is_side_effectful = true,
+    description = "Export the knowledge graph as a JSONL dump file under /embra/workspace/KG_DUMPS (first line: meta header; then node lines from memory.entries/semantic/procedural and edge lines from memory.edges). collections optionally restricts to: entries, semantic, procedural, edges (default all four). edge_types optionally filters the edge pass by type. include_payload=false omits node payloads — slim dumps for structural scanning, sized for guardian_call's 2 MiB data_file bridge. Returns the file path plus per-collection written-vs-counted parity, byte total, and elapsed time."
+)]
+pub struct KnowledgeDumpArgs {
+    /// Short collection names: entries | semantic | procedural | edges.
+    /// Omit for all four.
+    #[serde(default)]
+    pub collections: Option<Vec<String>>,
+    /// Edge types to include (same_session, temporal, tag_overlap,
+    /// derived_from, enables, contradicts, refines, depends_on, related_to).
+    /// Omit for all. Requires 'edges' among the dumped collections.
+    #[serde(default)]
+    pub edge_types: Option<Vec<String>>,
+    /// When false, node lines omit the `data` payload (slim structural dump).
+    #[serde(default = "default_include_payload")]
+    pub include_payload: bool,
+}
+
+fn default_include_payload() -> bool {
+    true
+}
+
+impl KnowledgeDumpArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        run_knowledge_dump(ctx.db, self.collections, self.edge_types, self.include_payload)
+            .await
+            .map_err(DispatchError::Handler)
+    }
+}
+
 #[cfg(test)]
 mod native_args_tests {
     use super::*;
@@ -1281,6 +1757,7 @@ mod native_args_tests {
             "knowledge_query",
             "knowledge_graph_stats",
             "knowledge_sweep_orphans",
+            "knowledge_dump",
         ] {
             assert!(names.contains(&expected), "{} not registered", expected);
         }
@@ -1303,6 +1780,26 @@ mod native_args_tests {
         .unwrap();
         assert!(a.dry_run);
         assert_eq!(a.limit, 500);
+    }
+
+    #[test]
+    fn knowledge_dump_args_defaults() {
+        // Cron fires registry tools with json!({}), so the defaults ARE the
+        // cron behavior: full dump, all collections, all edge types.
+        let a: KnowledgeDumpArgs = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(a.collections.is_none());
+        assert!(a.edge_types.is_none());
+        assert!(a.include_payload);
+    }
+
+    #[test]
+    fn knowledge_dump_schema_is_plain_object() {
+        let schema = schemars::schema_for!(KnowledgeDumpArgs);
+        let v = serde_json::to_value(&schema).unwrap();
+        assert!(v.get("oneOf").is_none());
+        assert!(v.get("allOf").is_none());
+        assert!(v.get("anyOf").is_none());
+        assert_eq!(v["type"], "object");
     }
 
     #[test]
