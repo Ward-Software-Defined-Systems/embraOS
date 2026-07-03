@@ -576,19 +576,21 @@ pub async fn knowledge_query(
     out
 }
 
-/// `knowledge_graph_stats`
+/// `knowledge_graph_stats` — windowless. Totals come from server-side
+/// `count_only` and distributions from aggregate `$group`, so the report is
+/// exact at ANY collection size. (The old version pulled every document
+/// through fixed 10k/100k windows — ~91k full edge docs per call at
+/// production scale — and went silently partial once a collection outgrew
+/// its window.)
 pub async fn knowledge_graph_stats(db: &WardsonDbClient) -> String {
     let mut out = String::from("Knowledge Graph Statistics:\n\n");
 
-    // Semantic counts by category
-    let sem_all = db.query("memory.semantic", &json!({ "filter": {}, "limit": 10000 })).await.unwrap_or_default();
-    let mut cat_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for doc in &sem_all {
-        if let Some(c) = doc.get("category").and_then(|v| v.as_str()) {
-            *cat_counts.entry(c.to_string()).or_insert(0) += 1;
-        }
-    }
-    out.push_str(&format!("memory.semantic: {} nodes\n", sem_all.len()));
+    // Semantic count + category distribution
+    let sem_total = db.count("memory.semantic").await.unwrap_or(0);
+    out.push_str(&format!("memory.semantic: {} nodes\n", sem_total));
+    let cat_counts = group_counts(
+        &db.aggregate("memory.semantic", &group_by_pipeline("category")).await.unwrap_or_default(),
+    );
     if !cat_counts.is_empty() {
         let cats: Vec<String> = ["fact", "preference", "decision", "observation", "pattern"]
             .iter()
@@ -599,52 +601,63 @@ pub async fn knowledge_graph_stats(db: &WardsonDbClient) -> String {
     out.push('\n');
 
     // Procedural count
-    let proc_all = db.query("memory.procedural", &json!({ "filter": {}, "limit": 10000 })).await.unwrap_or_default();
-    out.push_str(&format!("memory.procedural: {} nodes\n\n", proc_all.len()));
+    let proc_total = db.count("memory.procedural").await.unwrap_or(0);
+    out.push_str(&format!("memory.procedural: {} nodes\n\n", proc_total));
 
-    // Edge counts by type
-    let edges_all = db.query("memory.edges", &json!({ "filter": {}, "limit": 100000 })).await.unwrap_or_default();
-    let mut etype_counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
-    for doc in &edges_all {
-        if let Some(t) = doc.get("edge_type").and_then(|v| v.as_str()) {
-            *etype_counts.entry(t.to_string()).or_insert(0) += 1;
-        }
-    }
-    out.push_str(&format!("memory.edges: {} edges\n", edges_all.len()));
+    // Edge count + type distribution
+    let edge_total = db.count("memory.edges").await.unwrap_or(0);
+    out.push_str(&format!("memory.edges: {} edges\n", edge_total));
+    let etype_counts = group_counts(
+        &db.aggregate("memory.edges", &group_by_pipeline("edge_type")).await.unwrap_or_default(),
+    );
     if !etype_counts.is_empty() {
-        let mut pairs: Vec<(String, usize)> = etype_counts.into_iter().collect();
-        pairs.sort_by(|a, b| b.1.cmp(&a.1));
+        let mut pairs: Vec<(String, u64)> = etype_counts.into_iter().collect();
+        pairs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         let summary: Vec<String> = pairs.iter().map(|(t, c)| format!("{}={}", t, c)).collect();
         out.push_str(&format!("  Types: {}\n", summary.join(", ")));
     }
     out.push('\n');
 
-    // Entry promotion stats
-    let entries_all = db.query("memory.entries", &json!({ "filter": {}, "limit": 10000 })).await.unwrap_or_default();
-    let promoted: usize = entries_all.iter().filter(|d| {
-        d.get("promoted_to").map(|v| !v.is_null()).unwrap_or(false)
-    }).count();
-    let total = entries_all.len();
+    // Entry promotion stats — promoted counted server-side via the filter
+    // form of the is-promoted predicate (live non-null promoted_to pointer).
+    let entries_total = db.count("memory.entries").await.unwrap_or(0);
+    let promoted = db
+        .count_filtered("memory.entries", &promoted_entries_filter())
+        .await
+        .unwrap_or(0);
     out.push_str(&format!(
         "memory.entries: {} total, {} promoted, {} unpromoted\n\n",
-        total, promoted, total.saturating_sub(promoted)
+        entries_total,
+        promoted,
+        entries_total.saturating_sub(promoted)
     ));
 
     // Graph density (rough)
-    let node_total = sem_all.len() + proc_all.len() + total;
+    let node_total = sem_total + proc_total + entries_total;
     if node_total > 0 {
-        let density = edges_all.len() as f64 / node_total as f64;
+        let density = edge_total as f64 / node_total as f64;
         out.push_str(&format!("Graph density: {:.1} edges/node\n", density));
     }
 
     // Orphan edges (endpoints that don't resolve) — surfaces the #40 issue
     // passively so users don't have to call knowledge_sweep_orphans to know.
-    let (scanned, orphans) = find_orphan_edges(db, 100_000).await;
+    // Bounded work per stats call; coverage reported honestly against the
+    // exact edge total now that we have one.
+    let (scanned, orphans) = find_orphan_edges(db, PASSIVE_ORPHAN_SCAN_LIMIT).await;
     if scanned > 0 {
+        let coverage = if (scanned as u64) < edge_total {
+            format!(
+                " (of {} total — raise knowledge_sweep_orphans limit for full coverage)",
+                edge_total
+            )
+        } else {
+            String::new()
+        };
         out.push_str(&format!(
-            "Orphan edges: {} of {} scanned{}",
+            "Orphan edges: {} of {} scanned{}{}",
             orphans.len(),
             scanned,
+            coverage,
             if !orphans.is_empty() {
                 " (run knowledge_sweep_orphans to clean up)"
             } else {
@@ -656,25 +669,146 @@ pub async fn knowledge_graph_stats(db: &WardsonDbClient) -> String {
     out
 }
 
+/// Edges scanned by graph_stats' passive orphan check — bounds the work a
+/// stats call does; the sweep tool's own `limit` goes higher for full runs.
+const PASSIVE_ORPHAN_SCAN_LIMIT: usize = 100_000;
+
+/// Aggregate pipeline: count documents grouped by `field`. Output row count
+/// is bounded by the field's cardinality (edge_type ≤ 9, category = 5), so
+/// no result window is needed — the scan itself runs server-side.
+fn group_by_pipeline(field: &str) -> serde_json::Value {
+    json!([{ "$group": { "_id": field, "count": { "$count": {} } } }])
+}
+
+/// Parse aggregate `$group` rows (`{"_id": <key>, "count": N}`) into a map.
+/// Rows with non-string keys or missing counts are skipped.
+fn group_counts(rows: &[serde_json::Value]) -> std::collections::HashMap<String, u64> {
+    rows.iter()
+        .filter_map(|r| {
+            let key = r.get("_id").and_then(|v| v.as_str())?;
+            let count = r.get("count").and_then(|v| v.as_u64())?;
+            Some((key.to_string(), count))
+        })
+        .collect()
+}
+
+/// Server-side form of the is-promoted predicate: a live (non-null)
+/// `promoted_to` pointer. WardSONDB's `$ne` skips explicit-null AND
+/// missing-field docs — exactly matching `tools::entry_is_promoted`.
+fn promoted_entries_filter() -> serde_json::Value {
+    json!({ "promoted_to": { "$ne": null } })
+}
+
+#[cfg(test)]
+mod windowless_stats_tests {
+    //! Shape guards for the windowless graph_stats / paginated orphan scan
+    //! (no DB mock in this crate — contracts are enforced at the builder
+    //! level, same pattern as the FIX-1..8 query-body tests).
+    use super::{group_by_pipeline, group_counts, orphan_page_query_body, promoted_entries_filter};
+    use serde_json::json;
+
+    #[test]
+    fn group_pipeline_counts_by_field() {
+        let p = group_by_pipeline("edge_type");
+        assert_eq!(
+            p,
+            json!([{ "$group": { "_id": "edge_type", "count": { "$count": {} } } }])
+        );
+    }
+
+    #[test]
+    fn group_counts_parses_rows_and_skips_malformed() {
+        let rows = vec![
+            json!({"_id": "same_session", "count": 42}),
+            json!({"_id": "temporal", "count": 7}),
+            json!({"_id": null, "count": 3}),        // non-string key: skipped
+            json!({"_id": "tag_overlap"}),            // missing count: skipped
+        ];
+        let m = group_counts(&rows);
+        assert_eq!(m.get("same_session"), Some(&42));
+        assert_eq!(m.get("temporal"), Some(&7));
+        assert_eq!(m.len(), 2);
+    }
+
+    #[test]
+    fn promoted_filter_is_ne_null() {
+        // $ne null matches live pointer objects only — explicit-null and
+        // missing-field docs both read as unpromoted, matching
+        // entry_is_promoted.
+        assert_eq!(
+            promoted_entries_filter(),
+            json!({ "promoted_to": { "$ne": null } })
+        );
+    }
+
+    #[test]
+    fn orphan_page_body_paginates_key_order_no_sort() {
+        let body = orphan_page_query_body(20_000, 40_000);
+        assert_eq!(body["limit"], json!(20_000));
+        assert_eq!(body["offset"], json!(40_000));
+        // Deliberately unsorted (doctrine exception): exhaustive pagination
+        // rides stable key order; a sort would re-sort the whole collection
+        // per page.
+        assert!(body.get("sort").is_none());
+    }
+}
+
+/// Page size for the exhaustive edge scan — well under WardSONDB's
+/// `--max-query-limit` (100k) and bounds per-page memory.
+const ORPHAN_SCAN_PAGE: usize = 20_000;
+
+/// One page of the exhaustive edge scan. Deliberately UNSORTED — a doctrine
+/// exception: offset pagination rides the stable UUIDv7 key order (the
+/// storage scan order) as its cursor. This is a full-coverage maintenance
+/// sweep, not a relevance window (the invariant's target), and adding a
+/// sort would re-sort the whole matched set on every page.
+fn orphan_page_query_body(page_limit: usize, offset: usize) -> serde_json::Value {
+    json!({ "filter": {}, "limit": page_limit, "offset": offset })
+}
+
 /// Scan up to `limit` edges and return `(scanned, orphan_edge_ids)` where
-/// orphans are edges whose source or target doc fails to resolve. Batches
-/// endpoint reads per collection via `{"_id": {"$in": [...]}}` so we run
-/// at most one extra query per endpoint collection.
+/// orphans are edges whose source or target doc fails to resolve.
+/// Paginated (pages of `ORPHAN_SCAN_PAGE`), so coverage is bounded only by
+/// `limit` — not by any single query window; the old single-query version
+/// went silently partial past the server's 100k max-query-limit.
 async fn find_orphan_edges(db: &WardsonDbClient, limit: usize) -> (usize, Vec<String>) {
+    let mut scanned = 0usize;
+    let mut offset = 0usize;
+    let mut orphan_ids: Vec<String> = Vec::new();
+
+    while scanned < limit {
+        let page_limit = ORPHAN_SCAN_PAGE.min(limit - scanned);
+        let edges = db
+            .query("memory.edges", &orphan_page_query_body(page_limit, offset))
+            .await
+            .unwrap_or_default();
+        if edges.is_empty() {
+            break;
+        }
+        scanned += edges.len();
+        offset += edges.len();
+        orphan_ids.extend(orphans_in_page(db, &edges).await);
+        if edges.len() < page_limit {
+            break; // final partial page — collection exhausted
+        }
+    }
+
+    (scanned, orphan_ids)
+}
+
+/// Orphan detection over one page of edges. Batches endpoint reads per
+/// collection via `{"_id": {"$in": [...]}}` so each page costs at most one
+/// extra query per endpoint collection.
+async fn orphans_in_page(db: &WardsonDbClient, edges: &[serde_json::Value]) -> Vec<String> {
     use std::collections::{HashMap, HashSet};
 
-    let edges = db
-        .query("memory.edges", &json!({ "filter": {}, "limit": limit }))
-        .await
-        .unwrap_or_default();
-    let scanned = edges.len();
-    if scanned == 0 {
-        return (0, Vec::new());
+    if edges.is_empty() {
+        return Vec::new();
     }
 
     // Collect unique (collection, id) endpoints per collection.
     let mut endpoints: HashMap<String, HashSet<String>> = HashMap::new();
-    for edge in &edges {
+    for edge in edges {
         for (coll_key, id_key) in [
             ("source_collection", "source_id"),
             ("target_collection", "target_id"),
@@ -716,7 +850,7 @@ async fn find_orphan_edges(db: &WardsonDbClient, limit: usize) -> (usize, Vec<St
 
     // Identify edges whose source or target is missing.
     let mut orphan_ids: Vec<String> = Vec::new();
-    for edge in &edges {
+    for edge in edges {
         let src_missing = match (
             edge.get("source_collection").and_then(|v| v.as_str()),
             edge.get("source_id").and_then(|v| v.as_str()),
@@ -738,7 +872,7 @@ async fn find_orphan_edges(db: &WardsonDbClient, limit: usize) -> (usize, Vec<St
         }
     }
 
-    (scanned, orphan_ids)
+    orphan_ids
 }
 
 /// Scan `memory.edges` for edges whose endpoints no longer resolve. Used to
@@ -749,7 +883,9 @@ pub async fn knowledge_sweep_orphans(
     dry_run: bool,
     limit: usize,
 ) -> String {
-    let limit = limit.clamp(1, 100_000);
+    // The scan is paginated, so the ceiling is a work bound (the 600s global
+    // tool cap is the real backstop), not a query-window limit.
+    let limit = limit.clamp(1, 1_000_000);
     let (scanned, orphans) = find_orphan_edges(db, limit).await;
     let orphan_count = orphans.len();
 
@@ -1034,7 +1170,9 @@ pub struct KnowledgeSweepOrphansArgs {
     /// Preview orphan edges without deleting.
     #[serde(default)]
     pub dry_run: bool,
-    /// Cap edges scanned per invocation; clamped to [1, 100000].
+    /// Cap edges scanned per invocation; clamped to [1, 1000000]. The scan
+    /// is paginated, so full-graph coverage just needs limit >= the edge
+    /// total reported by knowledge_graph_stats.
     #[serde(default = "default_sweep_limit")]
     pub limit: usize,
 }

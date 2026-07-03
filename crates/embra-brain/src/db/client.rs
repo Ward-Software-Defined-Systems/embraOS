@@ -36,6 +36,15 @@ pub(crate) fn window_saturated(returned: usize, limit: usize) -> bool {
     limit > 0 && returned >= limit
 }
 
+/// Body for a `count_only` query, optionally filtered. Counts are computed
+/// server-side over ALL matching documents — no window, no limit needed.
+pub(crate) fn count_query_body(filter: Option<&serde_json::Value>) -> serde_json::Value {
+    match filter {
+        Some(f) => serde_json::json!({"count_only": true, "filter": f}),
+        None => serde_json::json!({"count_only": true}),
+    }
+}
+
 #[derive(Clone)]
 pub struct WardsonDbClient {
     base_url: String,
@@ -288,9 +297,25 @@ impl WardsonDbClient {
     /// `data` is an object (`{"count": N}`), not the array `query()`
     /// expects.
     pub async fn count(&self, collection: &str) -> Result<u64> {
-        let data = self
-            .query_with_options(collection, &serde_json::json!({"count_only": true}))
-            .await?;
+        self.count_with_body(collection, count_query_body(None)).await
+    }
+
+    /// `count` with a server-side filter — exact matched-document counts at
+    /// any scale (windowless maintenance stats ride this).
+    pub async fn count_filtered(
+        &self,
+        collection: &str,
+        filter: &serde_json::Value,
+    ) -> Result<u64> {
+        self.count_with_body(collection, count_query_body(Some(filter))).await
+    }
+
+    async fn count_with_body(
+        &self,
+        collection: &str,
+        body: serde_json::Value,
+    ) -> Result<u64> {
+        let data = self.query_with_options(collection, &body).await?;
         data.get("count").and_then(|v| v.as_u64()).ok_or_else(|| {
             anyhow::anyhow!(
                 "count_only response for '{}' missing numeric count",
@@ -580,5 +605,19 @@ mod window_query_tests {
         assert!(!window_saturated(9, 10));
         assert!(window_saturated(10, 10));
         assert!(!window_saturated(0, 0)); // zero-limit guard: never "saturated"
+    }
+
+    #[test]
+    fn count_body_is_count_only() {
+        let body = super::count_query_body(None);
+        assert_eq!(body, json!({"count_only": true}));
+    }
+
+    #[test]
+    fn count_body_includes_filter_when_given() {
+        let filter = json!({"promoted_to": {"$ne": null}});
+        let body = super::count_query_body(Some(&filter));
+        assert_eq!(body["count_only"], json!(true));
+        assert_eq!(body["filter"], filter);
     }
 }

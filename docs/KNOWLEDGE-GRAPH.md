@@ -181,18 +181,18 @@ A sparse graph would expand to nothing useful. The auto-derived layer's job is t
 
 ### `knowledge_sweep_orphans` is the only edge-removing maintenance tool
 
-It scans `memory.edges` up to a limit (default 10k, clamp `[1, 100000]`), collects `(collection, id)` endpoints into per-collection HashSets, batch-resolves each via `{"_id": {"$in": [...]}}`, and set-diffs to find missing endpoints (`tools.rs:660-739`). Edges with a dangling source or target are reported (and optionally deleted in chunks of 100).
+It scans `memory.edges` up to a limit (default 10k, clamp `[1, 1000000]`) in paginated 20k-edge pages; per page it collects `(collection, id)` endpoints into per-collection HashSets, batch-resolves each via `{"_id": {"$in": [...]}}`, and set-diffs to find missing endpoints. Edges with a dangling source or target are reported (and optionally deleted in chunks of 100).
 
 It runs when the intelligence reports `knowledge_graph_stats` output with `Orphan edges: N of M scanned` and `N > 0`, and the operator asks for a sweep (the intelligence then calls `knowledge_sweep_orphans`). Orphan detection is also called passively by `graph_stats` (`tools.rs:639-651`) so the drift surfaces in the report without an explicit sweep. It is not a density-management tool. There is no analogous "edges with low weight" or "edges older than X" sweep.
 
 ### What does scale poorly
 
-Two things can degrade with graph size:
+Less than it used to (2026-07-03 windowless-maintenance rewrite — prompted by the production graph approaching the old tools' 100k edge ceiling at ~91k edges):
 
-- `knowledge_graph_stats` scans up to 100k edges (`tools.rs:603`) and up to 10k nodes per collection (`tools.rs:581, 599, 620`) to build the report. On a very large graph the report runs slower.
-- `find_orphan_edges` (called by both `knowledge_graph_stats` and `knowledge_sweep_orphans`) scans up to its `limit` edges per invocation. For large graphs, raise the limit explicitly or run in batches.
+- `knowledge_graph_stats` no longer pulls documents at all for its numbers — totals come from server-side `count_only` and distributions from aggregate `$group`, so the report is **exact at any graph size** (the old version fetched every edge doc through a 100k window and went silently partial past it). The only remaining scan is the passive orphan check, bounded at 100k edges per stats call with coverage reported against the exact total.
+- `find_orphan_edges` (called by both `knowledge_graph_stats` and `knowledge_sweep_orphans`) is **paginated** (20k-edge pages), so its coverage is bounded only by the caller's `limit` — not by any single query window. For full-graph sweeps on large graphs, set the sweep `limit` at or above the edge total from `knowledge_graph_stats`; the 600 s global tool cap is the practical bound.
 
-Both are query-time costs, not write-time costs. Neither is on a hot path. The auto-enrichment retrieval path doesn't go through either.
+Both are query-time costs, not write-time costs. Neither is on a hot path. The auto-enrichment retrieval path doesn't go through either. Deleting auto-derived edges to stay under a tool window is never the answer — the windows moved server-side instead (deleted edges would be unrecoverable: derivation only runs at write time for new documents, nothing re-derives edges between existing nodes).
 
 ---
 
@@ -364,7 +364,7 @@ Nine `knowledge_*` tools registered via `#[embra_tool(...)]` macros at `crates/e
 
 **`knowledge_traverse`** — BFS from a single start node. Default depth comes from `config.kg_max_traversal_depth` (3), ceiling is `config.kg_traversal_depth_ceiling` (5). `edge_types` is an optional CSV filter; `min_weight` is an optional `f64` floor. Side-effect: increments `access_count` + `last_accessed` on every visited node (which then feeds the `access_frequency` ranking signal).
 
-**`knowledge_graph_stats`** — zero-arg. Returns node counts per collection, semantic category breakdown, edge-type distribution sorted descending by count, promoted/unpromoted ratio for `memory.entries`, density (`edges / total_nodes`), and a passive orphan-edge count via `find_orphan_edges` (which scans up to 100k edges).
+**`knowledge_graph_stats`** — zero-arg, windowless. Node counts per collection and the promoted/unpromoted ratio come from server-side `count_only` (promoted = `{"promoted_to": {"$ne": null}}`, the filter form of the is-promoted predicate); the semantic category breakdown and the edge-type distribution come from aggregate `$group`; density (`edges / total_nodes`) from the counts. All exact at any graph size. The passive orphan-edge check scans up to 100k edges per call and reports its coverage against the exact edge total.
 
 ### Mutation tools
 
@@ -380,7 +380,7 @@ Nine `knowledge_*` tools registered via `#[embra_tool(...)]` macros at `crates/e
 
 ### Maintenance
 
-**`knowledge_sweep_orphans`** — `dry_run: bool` (default `false`) + `limit: usize` (default `10_000`, clamp `[1, 100_000]`). Scans `memory.edges`, batch-resolves endpoints per collection via `{"_id": {"$in": [...]}}`, identifies edges with a missing source or target, and deletes them in chunks of 100 (`tools.rs:660-773`). Dry-run reports counts without deleting. Orphan detection is also called passively by `knowledge_graph_stats` (`tools.rs:639-651`), so the orphan count surfaces without an explicit sweep.
+**`knowledge_sweep_orphans`** — `dry_run: bool` (default `false`) + `limit: usize` (default `10_000`, clamp `[1, 1_000_000]`). Scans `memory.edges` in paginated 20k pages up to `limit`, batch-resolves endpoints per collection via `{"_id": {"$in": [...]}}` per page, identifies edges with a missing source or target, and deletes them in chunks of 100. Dry-run reports counts without deleting. Full-graph coverage = set `limit` ≥ the edge total from `knowledge_graph_stats`. Orphan detection is also called passively by `knowledge_graph_stats`, so the orphan count surfaces without an explicit sweep.
 
 ---
 
@@ -419,7 +419,7 @@ No. The graph grows monotonically until the operator explicitly asks for an unli
 
 This is intentional: continuity is the value the KG provides. An eviction policy would either lose information silently (failure mode: model forgets old context) or force the system to decide what to drop without operator input. Better to leave removal explicit and conversation-driven via `knowledge_unlink_node` / `forget`.
 
-If a graph ever does grow large enough that `knowledge_graph_stats` becomes slow, the bottleneck is the report-side scan limits (10k nodes per collection, 100k edges), not the ranking or auto-enrichment paths — both of which truncate at fixed small sizes regardless of graph size.
+If a graph ever does grow large enough that `knowledge_graph_stats` feels slow, the cost is the server-side aggregate scans and the passive 100k-edge orphan check, not the ranking or auto-enrichment paths — both of which truncate at fixed small sizes regardless of graph size. The report's numbers stay exact regardless.
 
 ### "Does `forget` clean up edges?"
 
