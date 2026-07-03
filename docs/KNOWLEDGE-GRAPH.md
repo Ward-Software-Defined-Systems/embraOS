@@ -2,9 +2,9 @@
 
 The embraOS knowledge graph (KG) is the cross-session memory layer. It lives in `crates/embra-brain/src/knowledge/` and is backed by four WardSONDB collections (`memory.entries`, `memory.semantic`, `memory.procedural`, `memory.edges`). Schema introduced in migration v5; `CURRENT_SCHEMA_VERSION = 12` (`crates/embra-brain/src/migrations/mod.rs:7`) has not changed the KG since.
 
-This doc covers the write-side (auto-derived edges, promotion), the read-side (auto-enrichment, retrieval ranking, traversal), the nine `knowledge_*` tools, and the design rationale behind a deliberately dense edge layer.
+This doc covers the write-side (auto-derived edges, promotion), the read-side (auto-enrichment, retrieval ranking, traversal), the ten `knowledge_*` tools, and the design rationale behind a deliberately dense edge layer.
 
-The shorter inventory of KG tools (as part of the broader 92-tool catalog) lives in [TOOL-REFERENCE.md](TOOL-REFERENCE.md). The architectural placement (the 7-layer model's *Memory & Knowledge* row) is in [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md).
+The shorter inventory of KG tools (as part of the broader 94-tool catalog) lives in [TOOL-REFERENCE.md](TOOL-REFERENCE.md). The architectural placement (the 7-layer model's *Memory & Knowledge* row) is in [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md).
 
 > **How operators interact with the KG.** Every `knowledge_*` reference below is a *tool the intelligence calls during conversation*, not a command the operator types. The intelligence owns KG management — it decides when to `remember`, when to `knowledge_promote`, when to `knowledge_query` for context before answering, when to `knowledge_unlink_edge` after a tag rename. Operators participate by talking to the intelligence in natural language ("remember that the cert refresh works after manual generation", "promote that as a semantic observation", "what do we know about embra-web cert failures?", "looks like there are orphan edges — sweep them"). Tool names appear throughout this doc as references to the intelligence's capabilities, not as operator command syntax.
 
@@ -356,7 +356,7 @@ The tool-side renderer groups discovered nodes by depth and prints the edge-type
 
 ## Tool reference
 
-Nine `knowledge_*` tools registered via `#[embra_tool(...)]` macros at `crates/embra-brain/src/knowledge/tools.rs:792-1047`. The full registration is verified by `knowledge_tools_register` (`tools.rs:1128-1146`). The intelligence chooses which to invoke as conversation requires; the args below are what the intelligence fills in, not what an operator types. For the broader tool catalog the intelligence draws from (all 93 tools), see [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — this section covers KG-specific contract details.
+Ten `knowledge_*` tools registered via `#[embra_tool(...)]` macros at `crates/embra-brain/src/knowledge/tools.rs:1357-1664`. The full registration is verified by `knowledge_tools_register` (`tools.rs:1745`). The intelligence chooses which to invoke as conversation requires; the args below are what the intelligence fills in, not what an operator types. For the broader tool catalog the intelligence draws from (all 94 tools), see [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — this section covers KG-specific contract details.
 
 ### Read tools
 
@@ -381,6 +381,8 @@ Nine `knowledge_*` tools registered via `#[embra_tool(...)]` macros at `crates/e
 ### Maintenance
 
 **`knowledge_sweep_orphans`** — `dry_run: bool` (default `false`) + `limit: usize` (default `10_000`, clamp `[1, 1_000_000]`). Scans `memory.edges` in paginated 20k pages up to `limit`, batch-resolves endpoints per collection via `{"_id": {"$in": [...]}}` per page, identifies edges with a missing source or target, and deletes them in chunks of 100. Dry-run reports counts without deleting. Full-graph coverage = set `limit` ≥ the edge total from `knowledge_graph_stats`. Orphan detection is also called passively by `knowledge_graph_stats`, so the orphan count surfaces without an explicit sweep.
+
+**`knowledge_dump`** — JSONL export of the graph to `/embra/workspace/KG_DUMPS/kg-dump-<utc>.jsonl`. Line 1 is a `{"type":"meta",...}` header (generated_at, collections, edge filter, payload mode); node lines lift `type`/`_id`/`collection` top-level with the full stored doc under `data`; edge lines are the stored edge doc spread top-level plus `"type":"edge"`. `collections` restricts to a subset of `entries | semantic | procedural | edges` (canonical order regardless of input order); `edge_types` filters the edge pass server-side via `$in`; `include_payload=false` emits slim node lines for structural scanning. Each collection is tiled exhaustively with **unsorted key-order offset pagination** (20k pages) — the same sanctioned no-sort exception as the orphan scan (exhaustive coverage, not a relevance window; WardSONDB applies `offset`/`limit` after the filter in every executor path, so a constant filter tiles without skips or duplicates). Per-collection written-vs-`count_only` parity is reported (soft signal — a live instance can drift between scan and count). Any query/write failure removes the partial file: the format has a header but no trailer, so a partial dump would otherwise be indistinguishable from a complete one. Same-second re-runs reuse the filename (truncate). Dumps accumulate with no rotation — remove stale ones with `file_delete`. Consumer example: [GUARDIAN-KG-SCAN-EXAMPLE.md](GUARDIAN-KG-SCAN-EXAMPLE.md) (fed through `guardian_call`'s 2 MiB `data_file` bridge).
 
 ---
 
@@ -494,7 +496,7 @@ If any step diverges from what the code claims here, the code is right and the d
 
 ## Related
 
-- [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — catalog of all 93 tools the intelligence draws from (the **Knowledge Graph** table covers these nine).
+- [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — catalog of all 94 tools the intelligence draws from (the **Knowledge Graph** table covers these ten).
 - [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md) — the 7-layer architecture (KG is the **Memory & Knowledge** row).
 - [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md) — slash commands; the KG layer is reached via brain tools, not slash commands.
 - `ARCHITECTURE.md` (local) — historical Sprint 2 narrative with commit SHAs and the fix-wave for `knowledge_unlink_node` cascade, the `derived_from` cleanup, and orphan-sweep introduction.

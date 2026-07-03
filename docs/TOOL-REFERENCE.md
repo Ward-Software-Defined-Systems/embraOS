@@ -1,6 +1,6 @@
 # Tool Reference
 
-Phase 1 includes 93 internal tools the intelligence invokes during conversation. All 93 work identically across all four LLM providers (Anthropic, Gemini, Ollama, LM Studio) via per-provider tool-schema translators that share a common JSON Schema cleanup pipeline (`provider/schema_util.rs::inline_refs`). They are organized below by category.
+Phase 1 includes 94 internal tools the intelligence invokes during conversation. All 94 work identically across all four LLM providers (Anthropic, Gemini, Ollama, LM Studio) via per-provider tool-schema translators that share a common JSON Schema cleanup pipeline (`provider/schema_util.rs::inline_refs`). They are organized below by category.
 
 > **⚠️ Testing Notice:** The default tools and slash commands are actively being tested. If you encounter bugs or unexpected behavior, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
@@ -45,6 +45,7 @@ For the data model, edge taxonomy, density rationale, promotion path, auto-enric
 | **knowledge_query** | Context-aware retrieval — direct tag match, session context, depth-2 graph expansion, multi-signal ranking. Every step window is recency/rank-sorted (tags: newest 20/tag; session edges: top 50 ranked, entry targets excluded server-side; free text: 10,000 most-recent entries). Supports `query \| max \| categories_csv` syntax. Output shows source breakdown (direct/session/graph). Promoted-entry/target pairs are deduplicated so the same claim doesn't fill two slots |
 | **knowledge_graph_stats** | Node counts, category distribution, edge type distribution, promoted ratio, graph density, and orphan-edge count (drift surfaced passively without running the sweep). Windowless since 2026-07-03: counts via server-side `count_only`, distributions via aggregate `$group` — exact at any graph size |
 | **knowledge_sweep_orphans** | Scan `memory.edges` and remove edges whose source or target doc no longer resolves. `dry_run=true` previews; `limit` caps work per call (clamp 1–1,000,000; the scan is paginated, so `limit` ≥ the edge total gives full-graph coverage). Cleans residue from pre-cascade `forget` calls or any direct-delete that bypassed `knowledge_unlink_node` |
+| **knowledge_dump** | Export the graph as a JSONL file under `/embra/workspace/KG_DUMPS/` — one meta header line, then node lines (`memory.entries`/`semantic`/`procedural`) and edge lines (`memory.edges`, stored doc spread top-level + `type` discriminator). `collections` restricts to a subset; `edge_types` filters the edge pass; `include_payload=false` emits slim node lines sized for `guardian_call`'s 2 MiB `data_file` bridge. Each collection tiled exhaustively (unsorted key-order pagination, 20k pages); reports written-vs-server-count parity; a failed dump removes its partial file. Worked example: [GUARDIAN-KG-SCAN-EXAMPLE.md](GUARDIAN-KG-SCAN-EXAMPLE.md) |
 
 **Conversations & Sessions**
 
@@ -151,10 +152,12 @@ The replicant check is an independent soul-verdict model call returning **allow 
 
 Dynamic tools are **never** injected into the provider tool schema — they are reachable only through the static meta-tools below, so the tool snapshot stays prompt-cache-stable.
 
+Worked examples: [GUARDIAN-TOOL-EXAMPLES.md](GUARDIAN-TOOL-EXAMPLES.md) (contract + starter modules), [GUARDIAN-ADVANCED-EXAMPLE.md](GUARDIAN-ADVANCED-EXAMPLE.md) (prompt-injection-hardened `web_search`), and [GUARDIAN-KG-SCAN-EXAMPLE.md](GUARDIAN-KG-SCAN-EXAMPLE.md) (`kg_scan`, the first intelligence-proposed tool — scans a `knowledge_dump` JSONL for structural patterns).
+
 | Tool | Description |
 |---|---|
 | **guardian_list** | List the dynamically-defined Guardian tools available to call — name, description, declared capabilities, build status, and input schema. Call this before `guardian_call` to discover what dynamic tools exist |
-| **guardian_call** | Invoke a Guardian-defined dynamic tool by name with a JSON input object (`action="invoke"`), or poll a tool's build state (`action="status"`). A tool only runs once its status is `ready`. Side-effectful |
+| **guardian_call** | Invoke a Guardian-defined dynamic tool by name with a JSON input object (`action="invoke"`), or poll a tool's build state (`action="status"`). A tool only runs once its status is `ready`. Optional `data_file`: a path under `/embra/workspace` read host-side (2 MiB cap) and injected as the `input.data` string before dispatch — feeds files (e.g. a `knowledge_dump` JSONL) to sandboxed tools, which cannot read the filesystem; rejected if `input.data` is already set. Side-effectful |
 | **guardian_propose** | Draft a new Guardian tool's complete Rust module source. Does not run or build — the draft is validated, soul-checked (the replicant check), and on a pass saved as a `proposed` tool awaiting `/guardian approve`. Refused if it conflicts with the soul. Side-effectful |
 
 > **⚠️ Guardian Security:** Dynamic tools execute in an epoch- and memory-capped `wasmtime` sandbox, one fresh instance per call, with no ambient authority. Any capability beyond pure compute (e.g. `http_get`, Brave `web_search`) is a Guardian-mediated host import added host-side **at the guard level**, never by widening guest authority. Tool source is statically validated (`syn` contract + denylist) before it ever compiles. Both authoring paths must pass the soul-spec replicant check — a `refuse` blocks compilation even for an operator paste (the soul is not operator-waivable) — and an intelligence proposal additionally requires operator approval before it compiles. Marked EXPERIMENTAL — use at your own risk.

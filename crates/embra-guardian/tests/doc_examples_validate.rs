@@ -5,6 +5,7 @@
 const DOCS: &[&str] = &[
     include_str!("../../../docs/GUARDIAN-TOOL-EXAMPLES.md"),
     include_str!("../../../docs/GUARDIAN-ADVANCED-EXAMPLE.md"),
+    include_str!("../../../docs/GUARDIAN-KG-SCAN-EXAMPLE.md"),
 ];
 
 #[test]
@@ -61,7 +62,7 @@ fn every_doc_module_passes_the_validator() {
         }
     }
     assert!(
-        count >= 5,
-        "expected >=5 guardian modules across the docs/ examples, found {count}"
+        count >= 6,
+        "expected >=6 guardian modules across the docs/ examples, found {count}"
     );
 }

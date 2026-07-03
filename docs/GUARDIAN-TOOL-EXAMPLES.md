@@ -268,3 +268,8 @@ fn run(input: &str) -> String {
 /guardian list
 /guardian delete sum
 ```
+
+## See also
+
+- [GUARDIAN-ADVANCED-EXAMPLE.md](./GUARDIAN-ADVANCED-EXAMPLE.md) — the flagship: prompt-injection-hardened `web_search` declaring two capabilities.
+- [GUARDIAN-KG-SCAN-EXAMPLE.md](./GUARDIAN-KG-SCAN-EXAMPLE.md) — `kg_scan`, the first intelligence-proposed tool: pure-compute structural scanning over a `knowledge_dump` JSONL, fed in via `guardian_call`'s `data_file` bridge.
