@@ -216,16 +216,41 @@ async fn ensure_collection(db: &WardsonDbClient, name: &str) {
     }
 }
 
-async fn recall(db: &WardsonDbClient, query: &str) -> String {
+/// Canonical is-promoted predicate: `promoted_to` present and non-null.
+/// `promoted_to` is the maintained pointer — set by `knowledge_promote`,
+/// cleared by `knowledge_unlink_node`'s cascade and the dangling-pointer
+/// repair in `knowledge/promotion.rs`. (The `derived_from` edge also exists
+/// per promotion but can drift via unlink_edge/sweep_orphans, so it is NOT
+/// used as the promotion signal.) Missing and null are both "unpromoted" —
+/// entries predating the field lack the key entirely.
+fn entry_is_promoted(doc: &serde_json::Value) -> bool {
+    doc.get("promoted_to").map(|v| !v.is_null()).unwrap_or(false)
+}
+
+/// Display caps: recall shows the newest matches (fetches are recency-
+/// sorted). The unpromoted worklist mode shows more because its purpose is
+/// enumerating what still needs promotion, not answering a lookup.
+const RECALL_DISPLAY_CAP: usize = 10;
+const RECALL_UNPROMOTED_DISPLAY_CAP: usize = 50;
+
+async fn recall(db: &WardsonDbClient, query: &str, unpromoted_only: bool) -> String {
     ensure_collection(db, "memory.entries").await;
 
     // FIX-2: explicit recency windows. The old empty bodies fell into the
     // server default (limit:100, UUIDv7 key order = oldest first), freezing
     // recall over the oldest ~100 docs per collection forever. Newest-first
-    // also means the 10-line display cap below shows the most recent matches.
+    // also means the display cap below shows the most recent matches.
     let entries = db.fetch_recent("memory.entries", MEMORY_FETCH_WINDOW).await.unwrap_or_default();
-    let semantic = db.fetch_recent("memory.semantic", MEMORY_FETCH_WINDOW).await.unwrap_or_default();
-    let procedural = db.fetch_recent("memory.procedural", MEMORY_FETCH_WINDOW).await.unwrap_or_default();
+    // Unpromoted-worklist mode only concerns memory.entries — semantic and
+    // procedural docs are promoted by definition.
+    let (semantic, procedural) = if unpromoted_only {
+        (Vec::new(), Vec::new())
+    } else {
+        (
+            db.fetch_recent("memory.semantic", MEMORY_FETCH_WINDOW).await.unwrap_or_default(),
+            db.fetch_recent("memory.procedural", MEMORY_FETCH_WINDOW).await.unwrap_or_default(),
+        )
+    };
 
     if entries.is_empty() && semantic.is_empty() && procedural.is_empty() {
         return "No memory entries found.".into();
@@ -275,6 +300,7 @@ async fn recall(db: &WardsonDbClient, query: &str) -> String {
 
     // Episodic entries
     for doc in entries.iter() {
+        if unpromoted_only && entry_is_promoted(doc) { continue; }
         let content = doc.get("content").and_then(|v| v.as_str()).unwrap_or("");
         let tags = tags_to_str(doc);
         if !matches_query(content, &tags) { continue; }
@@ -289,6 +315,13 @@ async fn recall(db: &WardsonDbClient, query: &str) -> String {
     }
 
     if output_lines.is_empty() {
+        if unpromoted_only {
+            return if query_tokens.is_empty() {
+                "No unpromoted memory entries — everything has been promoted.".into()
+            } else {
+                format!("No unpromoted memory entries matching '{}'.", query)
+            };
+        }
         info!(target: "recall", query = %query, token_count = query_tokens.len(), "zero-result recall");
         let mut msg = format!("No memory entries matching '{}'.", query);
         if query_tokens.len() > 1 {
@@ -298,8 +331,13 @@ async fn recall(db: &WardsonDbClient, query: &str) -> String {
     }
 
     let total = output_lines.len();
-    output_lines.truncate(10);
-    format!("Found {} matching entries:\n{}", total, output_lines.join("\n"))
+    if unpromoted_only {
+        output_lines.truncate(RECALL_UNPROMOTED_DISPLAY_CAP);
+        format!("Found {} unpromoted entries:\n{}", total, output_lines.join("\n"))
+    } else {
+        output_lines.truncate(RECALL_DISPLAY_CAP);
+        format!("Found {} matching entries:\n{}", total, output_lines.join("\n"))
+    }
 }
 
 /// Return true iff every token appears as a substring of `hay` (already lowercased).
@@ -378,6 +416,33 @@ mod tokens_all_match_tests {
     fn single_token_still_works() {
         assert!(tokens_all_match("express panel", &toks(&["express"])));
         assert!(!tokens_all_match("panel only", &toks(&["express"])));
+    }
+}
+
+#[cfg(test)]
+mod entry_is_promoted_tests {
+    //! `promoted_to` is the maintained promotion pointer; missing and null
+    //! must both read as unpromoted (entries predating the field lack the
+    //! key; unlink_node's cascade PATCHes it to null).
+    use super::entry_is_promoted;
+    use serde_json::json;
+
+    #[test]
+    fn promoted_pointer_object_is_promoted() {
+        let doc = json!({"content": "x", "promoted_to": {"collection": "memory.semantic", "id": "abc"}});
+        assert!(entry_is_promoted(&doc));
+    }
+
+    #[test]
+    fn null_pointer_is_unpromoted() {
+        let doc = json!({"content": "x", "promoted_to": null});
+        assert!(!entry_is_promoted(&doc));
+    }
+
+    #[test]
+    fn missing_field_is_unpromoted() {
+        let doc = json!({"content": "x"});
+        assert!(!entry_is_promoted(&doc));
     }
 }
 
@@ -1384,17 +1449,21 @@ impl SessionSummaryArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "recall",
-    description = "Search past conversations and saved memories. Free-text query; unquoted terms AND-match (all must appear); hashtags supported; empty query lists recent entries."
+    description = "Search past conversations and saved memories. Free-text query; unquoted terms AND-match (all must appear); hashtags supported; empty query lists recent entries. Set unpromoted_only=true for a worklist of memory.entries not yet promoted to the knowledge graph (up to 50 shown, newest first; query still narrows it)."
 )]
 pub struct RecallArgs {
     /// Search query. Free-text; hashtags supported; empty to list all.
     #[serde(default)]
     pub query: String,
+    /// When true, list only memory.entries that have NOT been promoted to
+    /// the knowledge graph (no promoted_to pointer) — a promotion worklist.
+    #[serde(default)]
+    pub unpromoted_only: bool,
 }
 
 impl RecallArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        Ok(recall(ctx.db, &self.query).await)
+        Ok(recall(ctx.db, &self.query, self.unpromoted_only).await)
     }
 }
 
@@ -1410,7 +1479,7 @@ pub struct MemorySearchArgs {
 
 impl MemorySearchArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        RecallArgs { query: self.query }.run(ctx).await
+        RecallArgs { query: self.query, unpromoted_only: false }.run(ctx).await
     }
 }
 
@@ -1426,7 +1495,7 @@ pub struct SearchMemoryArgs {
 
 impl SearchMemoryArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        RecallArgs { query: self.query }.run(ctx).await
+        RecallArgs { query: self.query, unpromoted_only: false }.run(ctx).await
     }
 }
 
@@ -1638,8 +1707,13 @@ mod native_args_tests {
     fn recall_round_trips_empty_and_filled() {
         let a: RecallArgs = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(a.query, "");
+        assert!(!a.unpromoted_only, "unpromoted_only must default false");
         let b: RecallArgs = serde_json::from_value(serde_json::json!({"query": "alerts"})).unwrap();
         assert_eq!(b.query, "alerts");
+        let c: RecallArgs =
+            serde_json::from_value(serde_json::json!({"unpromoted_only": true})).unwrap();
+        assert!(c.unpromoted_only);
+        assert_eq!(c.query, "");
     }
 
     #[test]
@@ -1695,6 +1769,7 @@ mod native_args_tests {
         let schema = schemars::schema_for!(RecallArgs);
         let v = serde_json::to_value(&schema).unwrap();
         assert_eq!(v["properties"]["query"]["type"], "string");
+        assert_eq!(v["properties"]["unpromoted_only"]["type"], "boolean");
     }
 
     #[test]
