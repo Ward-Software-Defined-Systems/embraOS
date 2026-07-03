@@ -13,16 +13,14 @@ use super::state::{AppMode, AppState, SetupStep};
 
 pub fn draw(f: &mut Frame, app: &AppState) {
     let available_width = f.area().width.saturating_sub(2) as usize; // minus borders
-    let input_lines = if app.pasted_lines.is_some() {
-        1
-    } else if available_width == 0 {
+    // Input height from the same char-wrap packing that renders the text and
+    // places the cursor (input_layout) — the three can't disagree. Cap at 10
+    // (8 content rows); draw_input scrolls to keep the cursor row visible.
+    let input_lines = if app.pasted_lines.is_some() || available_width == 0 || app.input_buffer.is_empty() {
         1
     } else {
-        // Count visual lines including wrapping
-        app.input_buffer.split('\n').map(|line| {
-            let w = UnicodeWidthStr::width(line);
-            ((w / available_width) + 1).max(1)
-        }).sum::<usize>()
+        super::input_layout::layout_input(&app.input_buffer, app.cursor_pos, available_width)
+            .content_rows()
     };
     let input_height = (input_lines as u16 + 2).min(10);
 
@@ -443,7 +441,14 @@ fn draw_input(f: &mut Frame, area: Rect, app: &AppState) {
         _ => " You ",
     };
 
-    let (input_text, style) = if let Some(ref pasted) = app.pasted_lines {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .title_style(Style::default().fg(Color::LightBlue));
+
+    // Pasted-preview and placeholder branches: single synthetic line, no
+    // cursor — unchanged rendering.
+    if let Some(ref pasted) = app.pasted_lines {
         let total_chars: usize = pasted.iter().map(|l| l.chars().count()).sum::<usize>() + pasted.len().saturating_sub(1);
         let preview = if pasted.len() == 1 && total_chars > 200 {
             format!("[{} chars pasted] press Enter to send", total_chars)
@@ -460,52 +465,48 @@ fn draw_input(f: &mut Frame, area: Rect, app: &AppState) {
         } else {
             format!("[{} lines pasted] press Enter to send", pasted.len())
         };
-        (preview, Style::default().fg(Color::Yellow))
-    } else if app.input_buffer.is_empty() {
-        (placeholder.to_string(), Style::default().fg(Color::DarkGray))
-    } else {
-        (app.input_buffer.clone(), Style::default().fg(Color::White))
-    };
+        let input = Paragraph::new(preview)
+            .style(Style::default().fg(Color::Yellow))
+            .wrap(Wrap { trim: false })
+            .block(block);
+        f.render_widget(input, area);
+        return;
+    }
+    if app.input_buffer.is_empty() {
+        let input = Paragraph::new(placeholder.to_string())
+            .style(Style::default().fg(Color::DarkGray))
+            .wrap(Wrap { trim: false })
+            .block(block);
+        f.render_widget(input, area);
+        return;
+    }
 
-    let input = Paragraph::new(input_text).style(style)
-        .wrap(Wrap { trim: false })
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title)
-                .title_style(Style::default().fg(Color::LightBlue)),
-        );
-
+    // Non-empty buffer: text rows, box height, and cursor all come from ONE
+    // char-wrap packing (input_layout) — the render is pre-wrapped, so no
+    // Paragraph::wrap here. The old code word-wrapped the render while
+    // char-wrapping the cursor math, landing the cursor inside the text on
+    // any soft-wrapped line. Scroll keeps the cursor row visible once the
+    // input outgrows the box's height cap.
+    let inner_width = area.width.saturating_sub(2) as usize; // minus borders
+    let visible_rows = area.height.saturating_sub(2) as usize;
+    let layout = super::input_layout::layout_input(&app.input_buffer, app.cursor_pos, inner_width);
+    let scroll = super::input_layout::scroll_offset(layout.cursor_row, visible_rows);
+    let end = (scroll + visible_rows).min(layout.rows.len());
+    let start = scroll.min(end);
+    let lines: Vec<Line> = layout.rows[start..end]
+        .iter()
+        .map(|row| Line::from(row.clone()))
+        .collect();
+    let input = Paragraph::new(Text::from(lines))
+        .style(Style::default().fg(Color::White))
+        .block(block);
     f.render_widget(input, area);
 
-    if app.pasted_lines.is_none() && !app.input_buffer.is_empty() {
-        let inner_width = area.width.saturating_sub(2) as usize; // minus borders
-        let before_cursor: String = app.input_buffer.chars().take(app.cursor_pos).collect();
-
-        // Calculate visual row and column accounting for wrapping
-        let mut visual_row: u16 = 0;
-        let mut visual_col: u16 = 0;
-        for (i, line) in before_cursor.split('\n').enumerate() {
-            let is_last = i == before_cursor.matches('\n').count();
-            let w = UnicodeWidthStr::width(line);
-            if is_last {
-                // Cursor is on this line — compute wrapped position
-                if inner_width > 0 {
-                    visual_row += (w / inner_width) as u16;
-                    visual_col = (w % inner_width) as u16;
-                } else {
-                    visual_col = w as u16;
-                }
-            } else {
-                // Full line — count its visual lines
-                if inner_width > 0 {
-                    visual_row += ((w / inner_width) + 1) as u16;
-                } else {
-                    visual_row += 1;
-                }
-            }
-        }
-        f.set_cursor_position((area.x + visual_col + 1, area.y + 1 + visual_row));
+    if visible_rows > 0 {
+        f.set_cursor_position((
+            area.x + 1 + layout.cursor_col,
+            area.y + 1 + (layout.cursor_row - scroll) as u16,
+        ));
     }
 }
 
