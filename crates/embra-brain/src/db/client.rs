@@ -45,6 +45,58 @@ pub(crate) fn count_query_body(filter: Option<&serde_json::Value>) -> serde_json
     }
 }
 
+/// Slow-query observability thresholds. WardSONDB reports per-query cost in
+/// the response envelope's `meta` (`duration_ms`, `docs_scanned`,
+/// `index_used`); a query at/over `SLOW_QUERY_MS` server-side, or one that
+/// scanned `SLOW_QUERY_SCAN_RATIO`× more docs than it returned (floor keeps
+/// tiny-collection ratio noise out), warns loudly. An unindexed filter shape
+/// on a hot path is the defect class that put 5–8 min knowledge_query
+/// latencies into production at 99k edges (`$or` → full scan, 2026-07-04).
+const SLOW_QUERY_MS: f64 = 100.0;
+const SLOW_QUERY_SCAN_FLOOR: u64 = 1_000;
+const SLOW_QUERY_SCAN_RATIO: u64 = 10;
+
+/// Why a query is considered slow, if it is. Pure — unit-tested; `None`
+/// when meta fields are absent (older server builds omit them).
+pub(crate) fn slow_query_reason(
+    duration_ms: Option<f64>,
+    docs_scanned: Option<u64>,
+    returned: usize,
+) -> Option<&'static str> {
+    if duration_ms.is_some_and(|d| d >= SLOW_QUERY_MS) {
+        return Some("duration");
+    }
+    if docs_scanned.is_some_and(|s| {
+        s >= SLOW_QUERY_SCAN_FLOOR && s >= SLOW_QUERY_SCAN_RATIO * (returned.max(1) as u64)
+    }) {
+        return Some("scan_ratio");
+    }
+    None
+}
+
+/// Warn (target `wardsondb::slowquery`) when the server-reported query cost
+/// crosses `slow_query_reason`'s thresholds. Deliberate maintenance
+/// full-scans (orphan sweep / dump pages) will trip this — that is honest
+/// observability, not noise ("every window is observable").
+fn maybe_warn_slow_query(collection: &str, meta: &serde_json::Value, returned: usize) {
+    let duration_ms = meta.get("duration_ms").and_then(|v| v.as_f64());
+    let docs_scanned = meta.get("docs_scanned").and_then(|v| v.as_u64());
+    let Some(reason) = slow_query_reason(duration_ms, docs_scanned, returned) else {
+        return;
+    };
+    tracing::warn!(
+        target: "wardsondb::slowquery",
+        collection,
+        duration_ms = duration_ms.unwrap_or(0.0),
+        docs_scanned = docs_scanned.unwrap_or(0),
+        returned,
+        index_used = meta.get("index_used").and_then(|v| v.as_str()).unwrap_or("none"),
+        scan_strategy = meta.get("scan_strategy").and_then(|v| v.as_str()).unwrap_or(""),
+        reason,
+        "slow WardSONDB query — unindexed filter shape on a hot path?"
+    );
+}
+
 #[derive(Clone)]
 pub struct WardsonDbClient {
     base_url: String,
@@ -258,6 +310,7 @@ impl WardsonDbClient {
             return Err(WardsonDbError::Api { status, body }.into());
         }
         let envelope: WardsonEnvelope<Vec<serde_json::Value>> = resp.json().await?;
+        maybe_warn_slow_query(collection, &envelope.meta, envelope.data.len());
         Ok(envelope.data)
     }
 
@@ -491,6 +544,8 @@ impl WardsonDbClient {
             return Err(WardsonDbError::Api { status, body }.into());
         }
         let envelope: WardsonEnvelope<serde_json::Value> = resp.json().await?;
+        let returned = envelope.data.as_array().map(|a| a.len()).unwrap_or(1);
+        maybe_warn_slow_query(collection, &envelope.meta, returned);
         Ok(envelope.data)
     }
 
@@ -619,5 +674,36 @@ mod window_query_tests {
         let body = super::count_query_body(Some(&filter));
         assert_eq!(body["count_only"], json!(true));
         assert_eq!(body["filter"], filter);
+    }
+}
+
+#[cfg(test)]
+mod slow_query_tests {
+    //! P5 observability guards: thresholds are pure and unit-enforced here;
+    //! the warn itself is a tracing side effect exercised in production.
+    use super::slow_query_reason;
+
+    #[test]
+    fn slow_query_reason_fires_over_100ms() {
+        assert_eq!(slow_query_reason(Some(100.0), None, 10), Some("duration"));
+        assert_eq!(slow_query_reason(Some(418.6), Some(99_417), 250), Some("duration"));
+        assert_eq!(slow_query_reason(Some(99.9), None, 10), None);
+    }
+
+    #[test]
+    fn slow_query_reason_fires_on_scan_ratio_above_floor() {
+        // 5000 scanned for 20 returned: ratio 250x, above the 1000-doc floor.
+        assert_eq!(slow_query_reason(Some(5.0), Some(5_000), 20), Some("scan_ratio"));
+        // Zero returned still fires (the no-match full-scan case).
+        assert_eq!(slow_query_reason(None, Some(99_417), 0), Some("scan_ratio"));
+        // Under the floor: a tiny collection full-scan is not noise-worthy.
+        assert_eq!(slow_query_reason(None, Some(500), 3), None);
+        // Above the floor but ratio not met (healthy windowed fetch).
+        assert_eq!(slow_query_reason(None, Some(1_500), 400), None);
+    }
+
+    #[test]
+    fn slow_query_reason_silent_when_meta_absent() {
+        assert_eq!(slow_query_reason(None, None, 0), None);
     }
 }
