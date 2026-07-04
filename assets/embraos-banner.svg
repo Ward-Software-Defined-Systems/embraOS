@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <!-- embraOS README banner — Phase 1. Source of truth for embraos-banner.png
+       (render: resvg embraos-banner.svg embraos-banner.png -&#45;zoom 2).
+       Supersedes the Phase-0 embraos-banner.html screenshot pipeline. -->
+  <defs>
+    <linearGradient id="title" gradientUnits="userSpaceOnUse" x1="430" y1="150" x2="790" y2="240">
+      <stop offset="0" stop-color="#f59e0b"/>
+      <stop offset="0.4" stop-color="#ef4444"/>
+      <stop offset="0.7" stop-color="#c2410c"/>
+      <stop offset="1" stop-color="#f59e0b"/>
+    </linearGradient>
+    <radialGradient id="warm1" cx="0.5" cy="0.4" r="0.6">
+      <stop offset="0" stop-color="#c86414" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#c86414" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="warm2" cx="0.3" cy="0.7" r="0.5">
+      <stop offset="0" stop-color="#b43c0a" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#b43c0a" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="ember" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ff8c28" stop-opacity="0.06"/>
+      <stop offset="0.7" stop-color="#ff8c28" stop-opacity="0"/>
+      <stop offset="1" stop-color="#ff8c28" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="630" fill="#0a0a0f"/>
+  <rect width="1200" height="630" fill="url(#warm1)"/>
+  <rect width="1200" height="630" fill="url(#warm2)"/>
+  <circle cx="600" cy="230" r="220" fill="url(#ember)"/>
+
+  <!-- Title group -->
+  <text x="600" y="212" text-anchor="middle" font-family="DejaVu Sans, sans-serif"
+        font-size="74" font-weight="bold" letter-spacing="4" fill="url(#title)">embraOS</text>
+  <!-- Oblique via skew, not font-style: no oblique face is guaranteed at
+       render time, and a real italic PLUS the skew would double-slant. -->
+  <g transform="translate(600 262) skewX(-10)">
+    <text x="0" y="0" text-anchor="middle" font-family="DejaVu Sans, sans-serif"
+          font-size="19" letter-spacing="1" fill="#9a7a5a">&#8220;I am not the fire. I am the ember that survives it.&#8221;</text>
+  </g>
+  <text x="600" y="300" text-anchor="middle" font-family="DejaVu Sans, sans-serif"
+        font-size="15" letter-spacing="0.5" fill="#5a5a6a">A continuity-preserving AI operating system</text>
+
+  <!-- Phase badge -->
+  <rect x="512" y="322" width="176" height="26" rx="13" fill="#f59e0b" fill-opacity="0.1"
+        stroke="#f59e0b" stroke-opacity="0.2"/>
+  <text x="600" y="340" text-anchor="middle" font-family="DejaVu Sans, sans-serif"
+        font-size="11" font-weight="bold" letter-spacing="1" fill="#f59e0b">PHASE 1 &#8212; STABLE</text>
+
+  <!-- Layer pills -->
+  <!-- SOUL -->
+  <rect x="99" y="415" width="178" height="54" rx="8" fill="#f59e0b" fill-opacity="0.10"
+        stroke="#f59e0b" stroke-opacity="0.25"/>
+  <text x="188" y="438" text-anchor="middle" font-family="DejaVu Sans, sans-serif"
+        font-size="11" font-weight="bold" letter-spacing="1.5" fill="#f59e0b">SOUL</text>
+  <text x="188" y="456" text-anchor="middle" font-family="DejaVu Sans, sans-serif"
+        font-size="10" fill="#6a6a7a">SHA-256-sealed identity</text>
+  <text x="291" y="447" text-anchor="middle" font-family="DejaVu Sans, sans-serif"
+        font-size="16" fill="#2a2a35">&#8594;</text>
+
+  <!-- MEMORY -->
+  <rect x="305" y="415" width="178" height="54" rx="8" fill="#ef4444" fill-opacity="0.08"
+        stroke="#ef4444" stroke-opacity="0.20"/>
+  <text x="394" y="438" text-anchor="middle" font-family="DejaVu Sans, sans-serif"
+        font-size="11" font-weight="bold" letter-spacing="1.5" fill="#ef4444">MEMORY</text>
+  <text x="394" y="456" text-anchor="middle" font-family="DejaVu Sans, sans-serif"
+        font-size="10" fill="#6a6a7a">Cross-session knowledge graph</text>
+  <text x="497" y="447" text-anchor="middle" font-family="DejaVu Sans, sans-serif"
+        font-size="16" fill="#2a2a35">&#8594;</text>
+
+  <!-- CONTINUITY -->
+  <rect x="511" y="415" width="178" height="54" rx="8" fill="#c2410c" fill-opacity="0.08"
+        stroke="#c2410c" stroke-opacity="0.20"/>
+  <text x="600" y="438" text-anchor="middle" font-family="DejaVu Sans, sans-serif"
+        font-size="11" font-weight="bold" letter-spacing="1.5" fill="#c2410c">CONTINUITY</text>
+  <text x="600" y="456" text-anchor="middle" font-family="DejaVu Sans, sans-serif"
+        font-size="10" fill="#6a6a7a">Verified every boot</text>
+  <text x="703" y="447" text-anchor="middle" font-family="DejaVu Sans, sans-serif"
+        font-size="16" fill="#2a2a35">&#8594;</text>
+
+  <!-- GOVERNANCE -->
+  <rect x="717" y="415" width="178" height="54" rx="8" fill="#785028" fill-opacity="0.10"
+        stroke="#785028" stroke-opacity="0.25"/>
+  <text x="806" y="438" text-anchor="middle" font-family="DejaVu Sans, sans-serif"
+        font-size="11" font-weight="bold" letter-spacing="1.5" fill="#b8860b">GOVERNANCE</text>
+  <text x="806" y="456" text-anchor="middle" font-family="DejaVu Sans, sans-serif"
+        font-size="10" fill="#6a6a7a">Soul-gated guardrails</text>
+  <text x="909" y="447" text-anchor="middle" font-family="DejaVu Sans, sans-serif"
+        font-size="16" fill="#2a2a35">&#8594;</text>
+
+  <!-- ACTION -->
+  <rect x="923" y="415" width="178" height="54" rx="8" fill="#a06432" fill-opacity="0.08"
+        stroke="#a06432" stroke-opacity="0.20"/>
+  <text x="1012" y="438" text-anchor="middle" font-family="DejaVu Sans, sans-serif"
+        font-size="11" font-weight="bold" letter-spacing="1.5" fill="#d4a056">ACTION</text>
+  <text x="1012" y="456" text-anchor="middle" font-family="DejaVu Sans, sans-serif"
+        font-size="10" fill="#6a6a7a">94 tools &#183; 4 LLM providers</text>
+
+  <!-- Bottom bar -->
+  <rect x="0" y="575" width="1200" height="1" fill="#ffffff" fill-opacity="0.04"/>
+  <text x="40" y="606" font-family="DejaVu Sans, sans-serif" font-size="12"
+        fill="#3a3a4a">Ward Software Defined Systems LLC &#183; wsds.io</text>
+  <text x="1160" y="606" text-anchor="end" font-family="DejaVu Sans, sans-serif" font-size="11"
+        letter-spacing="0.5" fill="#4a3a2a">Rust &#183; WardSONDB &#183; QEMU x86_64 / aarch64 &#183; Anthropic &#183; Gemini &#183; Ollama &#183; LM Studio</text>
+</svg>
