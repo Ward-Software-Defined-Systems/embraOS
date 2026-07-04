@@ -37,8 +37,8 @@ if [ ! -f "$KERNEL" ]; then
     exit 1
 fi
 
-MEMORY="2G"
-CPUS="2"
+MEMORY="4G"
+CPUS="4"
 
 # Auto-detect best acceleration
 ACCEL=""
