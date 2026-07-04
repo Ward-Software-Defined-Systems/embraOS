@@ -10,6 +10,7 @@
 
 pub mod edges;
 pub mod enrichment;
+pub(crate) mod node_store;
 pub mod promotion;
 pub mod retrieval;
 pub mod tools;

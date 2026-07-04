@@ -550,6 +550,10 @@ async fn forget(db: &WardsonDbClient, id: &str) -> String {
         return format!("Failed to remove entry: {}", e);
     }
 
+    // Cold-path cascade delete: `$or` forces a WardSONDB full scan —
+    // acceptable for an operator-invoked one-off. NEVER copy this shape into
+    // a `query()` hot path; hot paths arm-split for the indexes
+    // (knowledge/traversal.rs, 2026-07-04).
     let edge_filter = serde_json::json!({
         "$or": [
             {"source_id": id, "source_collection": "memory.entries"},

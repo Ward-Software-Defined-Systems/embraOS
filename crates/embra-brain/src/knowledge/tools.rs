@@ -8,8 +8,9 @@ use crate::config::SystemConfig;
 use crate::db::WardsonDbClient;
 
 use super::promotion::{promote_to_procedural, promote_to_semantic};
+use super::node_store::NodeStore;
 use super::retrieval::retrieve_relevant_knowledge;
-use super::traversal::traverse;
+use super::traversal::{spawn_access_touches, traverse_multi};
 use super::types::{content_preview, EdgeType, NodeType, SemanticCategory};
 
 /// `knowledge_promote <entry_id> | <type> | <data>`
@@ -157,6 +158,10 @@ pub async fn knowledge_unlink_edge(params: &str, db: &WardsonDbClient) -> String
 
         let etype = edge_type.as_str();
         let symmetric = edge_type.is_symmetric();
+        // Cold-path cascade delete: `$or` forces a WardSONDB full scan —
+        // acceptable for an operator-invoked one-off. NEVER copy this shape
+        // into a `query()` hot path; hot paths arm-split for the indexes
+        // (traversal.rs, 2026-07-04).
         let filter = if symmetric {
             json!({
                 "$or": [
@@ -272,6 +277,10 @@ pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String
         }
     }
 
+    // Cold-path cascade delete: `$or` forces a WardSONDB full scan —
+    // acceptable for an operator-invoked one-off. NEVER copy this shape into
+    // a `query()` hot path; hot paths arm-split for the indexes
+    // (traversal.rs, 2026-07-04).
     let edge_filter = json!({
         "$or": [
             {"source_id": id, "source_collection": coll},
@@ -425,7 +434,11 @@ pub async fn knowledge_traverse(
 
     let min_weight: Option<f64> = toks.next().and_then(|s| s.parse().ok());
 
-    let result = match traverse(db, start_id, start_coll, depth, edge_types, min_weight, config).await {
+    // Prefetch the promoted-node collections (7ms for the whole set) so the
+    // BFS resolves node docs in memory; entries hit the point-read fallback.
+    let mut store = NodeStore::prefetch_promoted(db).await;
+    let start = [(start_coll.to_string(), start_id.to_string())];
+    let result = match traverse_multi(db, &start, depth, edge_types, min_weight, config, &mut store).await {
         Ok(r) => r,
         Err(e) => return format!("Error: traversal failed: {}", e),
     };
@@ -477,6 +490,12 @@ pub async fn knowledge_traverse(
     if result.truncated {
         out.push_str("\n[!] traversal truncated: node budget reached (kg_traversal_node_budget)");
     }
+    // Access-touch the RETURNED node set (2026-07-04 returned-only
+    // semantics) in one background task — BFS visiting no longer touches.
+    spawn_access_touches(
+        db.clone(),
+        result.nodes.iter().map(|n| (n.collection.clone(), n.id.clone())).collect(),
+    );
     let _ = max_seen;
     out
 }
