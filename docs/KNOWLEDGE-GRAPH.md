@@ -66,7 +66,7 @@ Four WardSONDB collections, three node types and one edge layer. Indexed at migr
 
 ### Node identity
 
-There is no unified `NodeId` enum. Nodes are addressed everywhere as the tuple `(collection, id)` — see the visited-set keying at `crates/embra-brain/src/knowledge/edges.rs:115, 131, 155` and the traversal visited-set at `crates/embra-brain/src/knowledge/traversal.rs:32-33`. WardSONDB issues the `_id` per write; the collection comes from the caller.
+There is no unified `NodeId` enum. Nodes are addressed everywhere as the tuple `(collection, id)` — see the visited-set keying at `crates/embra-brain/src/knowledge/edges.rs:115, 131, 155` and the traversal visited set in `traversal.rs::traverse_multi`. WardSONDB issues the `_id` per write; the collection comes from the caller.
 
 ### `SemanticNode` (`memory.semantic`)
 
@@ -74,7 +74,7 @@ Promoted factual knowledge with five categories (`SemanticCategory`, `types.rs:7
 
 - `content`, `category`, `tags`, `confidence` (default `0.9`, contributes to ranking)
 - `source_entry_id`, `source_session` (provenance back to the episodic entry)
-- `access_count`, `last_accessed` (incremented by traversal as a side-effect — see **Traversal** below)
+- `access_count`, `last_accessed` (incremented only for nodes actually *returned* by retrieval/traversal since 2026-07-04 — see **Traversal** below)
 - `created_at`, `updated_at`
 
 ### `ProceduralNode` (`memory.procedural`)
@@ -175,7 +175,7 @@ Auto-enrichment is even more aggressive: `MAX_INJECTED = 5` (`crates/embra-brain
 
 ### Depth-2 expansion needs the density
 
-`knowledge_query`'s graph-expansion step (`crates/embra-brain/src/knowledge/retrieval.rs:103-122`) takes the top 10 unique seeds collected from direct + session retrieval and BFS-walks each to depth 2. The point of expansion is to surface adjacent knowledge the operator didn't explicitly ask about — *"the user asked about cert refresh; the graph also says cert refresh contradicts the old systemd unit cleanup"*.
+`knowledge_query`'s graph-expansion step (`crates/embra-brain/src/knowledge/retrieval.rs`, Step 4) seeds ONE multi-source depth-2 traversal with the top 10 *scored* candidates from direct + session retrieval (since 2026-07-04; previously 10 HashMap-order seeds each walked their own ~90%-overlapping BFS). The point of expansion is to surface adjacent knowledge the operator didn't explicitly ask about — *"the user asked about cert refresh; the graph also says cert refresh contradicts the old systemd unit cleanup"*.
 
 A sparse graph would expand to nothing useful. The auto-derived layer's job is to be the substrate that depth-2 expansion can actually find adjacent nodes through.
 
@@ -215,7 +215,7 @@ The promotion flow, in order:
 
 Promotion is one-way. There is no demote tool. To reverse a promotion, the operator asks the intelligence to unlink the semantic/procedural node; the intelligence calls `knowledge_unlink_node`, which cascades the `derived_from` edge plus every other edge referencing the node, then clears the source entry's `promoted_to` pointer (`tools.rs:253-272`).
 
-`retrieve_relevant_knowledge` uses `redirect_if_promoted` (`retrieval.rs:186-198`) to short-circuit the indirection: when Step 3 (content-substring on `memory.entries`) finds a doc with a non-null `promoted_to`, it loads the target node instead and adds *that* to the result set, keyed by the target's `(collection, id)`. Step 4 (graph expansion) does the same redirect with a duplicate-check (`retrieval.rs:112-115`). Effect: a promoted entry and its target never both surface in the same retrieval result.
+`retrieve_relevant_knowledge` uses `redirect_if_promoted` (`retrieval.rs`, store-backed since 2026-07-04 — the target resolves from the per-call `NodeStore` prefetch, with a point-read fallback for window misses) to short-circuit the indirection: when Step 3 (content-substring on `memory.entries`) finds a doc with a non-null `promoted_to`, it loads the target node instead and adds *that* to the result set, keyed by the target's `(collection, id)`. Step 4 (graph expansion) does the same redirect with a duplicate-check. Effect: a promoted entry and its target never both surface in the same retrieval result.
 
 ---
 
@@ -263,7 +263,7 @@ The wrapper instructs the model to treat injected context as background rather t
 The wrapped message is used for the in-flight provider call only. `grpc_service.rs` persists the raw `msg.content` to session history. On the next turn, the model sees the previous turn's raw user message without the wrapper. Two consequences:
 
 - The wrapper never appears in conversation history. There is no leakage.
-- The system prompt is never modified by enrichment, so Anthropic ephemeral prompt caching stays warm across turns. The cost of enrichment is one extra (cached-after-first) DB query, not a cache invalidation.
+- The system prompt is never modified by enrichment, so Anthropic ephemeral prompt caching stays warm across turns. The cost of enrichment is the retrieval pipeline itself — a handful of windowed fetches plus indexed edge hops since the 2026-07-04 arm-split/prefetch rework (measured ~2 s worst-case, sub-second typical, against a ~99k-edge production graph) — not a cache invalidation.
 
 ### Resume briefing variant
 
@@ -273,22 +273,24 @@ When a session resumes (`SessionManager.pending_resume_briefing` is set), `build
 
 ## Retrieval and ranking (`knowledge_query` internals)
 
-`retrieve_relevant_knowledge` (`crates/embra-brain/src/knowledge/retrieval.rs:31-127`) is shared by `knowledge_query` and auto-enrichment. It collects candidates from four sources, then ranks-and-truncates.
+`retrieve_relevant_knowledge` (`crates/embra-brain/src/knowledge/retrieval.rs`) is shared by `knowledge_query` and auto-enrichment. It collects candidates from four sources, then ranks-and-truncates.
 
 ### Collection steps
 
 Every step window is recency- or rank-sorted with an explicit limit (2026-07-02 search-freeze fix — an unsorted, unlimited WardSONDB query silently returns the *oldest* 100 docs, which froze retrieval as collections grew). Query bodies are built by pure per-step builder functions with shape-asserting unit tests (`step_query_body_tests`).
 
-1. **Direct tag query** (`tag_query_body`) — for each input tag, `{tags: {$contains: <tag>}}` on `memory.semantic` + `memory.procedural`, sorted `created_at desc`, limit 20 per collection (newest 20 per tag). Source label: `direct_query`.
-2. **Session-based** (`session_entries_query_body` + `session_edge_query_body`) — the newest 50 `memory.entries` in the current session (`created_at desc`), then walk `same_session` edges from each (top 20 entries; per-entry edge window ranked `weight desc, created_at desc`, limit 50, with `memory.entries` targets excluded **server-side** via `target_collection: {$ne: "memory.entries"}` so the window is spent only on useful targets — a client-side skip remains as defense-in-depth). Source label: `session_based`.
-3. **Content substring** (`retrieval.rs` step 3) — case-insensitive `contains` match over the 10,000 most-recent `memory.entries` (`fetch_recent`, sorted `_created_at desc, _id desc`, saturation-warned). If `promoted_to` is set, `redirect_if_promoted` substitutes the target node. Source label: `direct_query`.
-4. **Graph expansion** — top 10 unique seeds from steps 1-3, BFS-traverse to depth 2 (no edge-type filter, no min-weight filter; bounded by the traversal edge window and node budget — see **Traversal**). For each discovered node, redirect-if-promoted and `insert_collected`. Source label: `graph_expansion`.
+Since 2026-07-04 the pipeline opens by prefetching `memory.semantic` + `memory.procedural` into a per-call **`NodeStore`** (`knowledge/node_store.rs`; two `fetch_recent` windows at `MEMORY_FETCH_WINDOW`, saturation-warned) — every later node lookup in Steps 1–4 joins in memory, with a cached point-read fallback for docs outside the windows. This replaced hundreds of sequential HTTP point reads per retrieval.
 
-The four steps populate a `HashMap<(collection, id), Collected>` keyed by `(collection, id)` (`retrieval.rs:39`) — same key everywhere else in the codebase. First insert wins; subsequent inserts of the same key are skipped (`retrieval.rs:137`).
+1. **Direct tag match** (in-memory, `step1_tag_hits`) — each input tag is matched against the prefetched node collections with the exact server `$contains` semantics: **case-sensitive** array membership (`node_store::doc_tag_contains` — query tags arrive lowercased while stored tags are as-typed, so only lowercase-stored tags match, same as the old server query), newest 20 per tag per collection by doc `created_at` (missing-last, mirroring the server comparator). Zero round trips per tag (was: one query per tag per collection). Source label: `direct_query`.
+2. **Session-based** (`session_entries_query_body` + `session_edge_query_body`) — the newest 50 `memory.entries` in the current session (`created_at desc`), then walk `same_session` edges from each (top 20 entries; per-entry edge window ranked `weight desc, created_at desc`, limit 50, with `memory.entries` targets excluded **server-side** via `target_collection: {$ne: "memory.entries"}` so the window is spent only on useful targets — a client-side skip remains as defense-in-depth). Edge targets resolve through the NodeStore. Source label: `session_based`.
+3. **Content substring** (`retrieval.rs` step 3) — case-insensitive `contains` match over the 10,000 most-recent `memory.entries` (`fetch_recent`, sorted `_created_at desc, _id desc`, saturation-warned). If `promoted_to` is set, `redirect_if_promoted` substitutes the target node (store-backed). The fetched entries window then joins the NodeStore so Step 4 resolves entry neighbors without point reads. Source label: `direct_query`.
+4. **Graph expansion** — the top 10 *scored* candidates from steps 1-3 (`seed_keys`: shared scoring core, deterministic `(collection, id)` tie-break — never HashMap iteration order) seed **one** multi-source depth-2 `traverse_multi` call (no edge-type filter, no min-weight filter; bounded by the per-hop edge window and the global node budget — see **Traversal**). For each discovered node (`depth > 0`), redirect-if-promoted and `insert_collected`. Source label: `graph_expansion`.
+
+The four steps populate a `HashMap<(collection, id), Collected>` keyed by `(collection, id)` — same key everywhere else in the codebase. First insert wins; subsequent inserts of the same key are skipped (`insert_collected`).
 
 ### Ranking
 
-`score_and_rank` (`retrieval.rs:200-257`) applies a 4-signal base score and a source-quality multiplier.
+`score_and_rank` (`retrieval.rs`) applies a 4-signal base score and a source-quality multiplier. One scoring core (`score_one` + `build_score_ctx`) drives both this final ranking and Step 4's seed selection, so the two cannot drift.
 
 Base score:
 
@@ -303,12 +305,12 @@ Signal definitions:
 
 | Signal | Weight | Calculation |
 |---|---|---|
-| `tag_relevance` | 0.4 | `min(matching_tags / input_tag_count, 1.0)` (case-insensitive — `retrieval.rs:223-226`) |
-| `recency` | 0.3 | `(ts - ts_min) / (ts_max - ts_min)` — normalized over the result set (`retrieval.rs:209-217, 228-230`) |
-| `access_frequency` | 0.2 | `access_count / max(access_count in result set)` (`retrieval.rs:220, 232`) |
-| `confidence` | 0.1 | per-node field — `0.9` semantic default, `1.0` for procedural/episodic (`retrieval.rs:144, 154, 159`) |
+| `tag_relevance` | 0.4 | `min(matching_tags / input_tag_count, 1.0)` (case-insensitive — `score_one`) |
+| `recency` | 0.3 | `(ts - ts_min) / (ts_max - ts_min)` — normalized over the candidate set (`build_score_ctx`) |
+| `access_frequency` | 0.2 | `access_count / max(access_count in candidate set)`; since 2026-07-04 `access_count` counts *retrieval hits* (returned-only touching), not BFS sweeps, so the signal is meaningful again |
+| `confidence` | 0.1 | per-node field — `0.9` semantic default, `1.0` for procedural/episodic (`insert_collected`) |
 
-Source multiplier (`retrieval.rs:236-241`):
+Source multiplier (`score_one`):
 
 | Source | Multiplier | When |
 |---|---|---|
@@ -317,7 +319,7 @@ Source multiplier (`retrieval.rs:236-241`):
 | `graph_expansion` | 0.5 | discovered by depth-2 BFS expansion |
 | fallback | 0.5 | unrecognized source string |
 
-Final: `score = base * source_mult`. Results are sorted descending by score and truncated to `max_results` (`retrieval.rs:254-256`).
+Final: `score = base * source_mult`. Results are sorted descending by score (exact-score ties order deterministically by `(collection, id)`) and truncated to `max_results`. The finally-returned top-K — and only it — is then access-touched in one background task (`spawn_access_touches`).
 
 ### `knowledge_query` output
 
@@ -329,24 +331,27 @@ Final: `score = base * source_mult`. Results are sorted descending by score and 
 
 ## Traversal (`knowledge_traverse` internals)
 
-`traverse` (`crates/embra-brain/src/knowledge/traversal.rs:21-102`) is a straightforward BFS over `memory.edges`.
+`traverse_multi` (`crates/embra-brain/src/knowledge/traversal.rs`) is a multi-source, level-synchronous BFS over `memory.edges`. `knowledge_traverse` passes one start node; retrieval Step 4 passes up to 10 seeds into one shared walk (shared visited set, shared budget).
 
 | Parameter | Source | Note |
 |---|---|---|
-| start node | required arg | validated with `db.read` — returns `Error: Node not found` if missing (`tools.rs:411-413`) |
-| `max_depth` | optional, default `config.kg_max_traversal_depth` (3) | clamped to `config.kg_traversal_depth_ceiling` (5 — `traversal.rs:30`) |
-| `edge_types` | optional CSV | passed to `$in` filter |
-| `min_weight` | optional `f64` | passed to `$gte` filter |
-| edge window | `config.kg_traversal_edge_limit` (500) | per-hop fetch, ranked `weight desc, created_at desc` (`edge_query_body`) |
-| node budget | `config.kg_traversal_node_budget` (1000) | BFS stops (with `truncated: true`) once the visited set reaches it |
+| start node(s) | required arg | the tool validates its single start with `db.read` — returns `Error: Node not found` if missing (`tools.rs::knowledge_traverse`) |
+| `max_depth` | optional, default `config.kg_max_traversal_depth` (3) | clamped to `config.kg_traversal_depth_ceiling` (5) |
+| `edge_types` | optional CSV | passed to `$in` filter (both arms) |
+| `min_weight` | optional `f64` | passed to `$gte` filter (both arms) |
+| edge window | `config.kg_traversal_edge_limit` (500) | per-hop merged arm window, ranked `weight desc, created_at desc` (`edge_query_body` + `merge_arm_edges`) |
+| node budget | `config.kg_traversal_node_budget` (1000) | GLOBAL per call; BFS stops (with `truncated: true`) once the visited set reaches it |
+| node docs | caller-supplied `NodeStore` | prefetched collections resolve in memory; anything else is a cached point-read fallback |
 
-The queue holds `(collection, id, depth)` tuples. A visited-set keyed on `(collection, id)` prevents revisiting. **Expansion is undirected** (since 2026-07-03): each hop queries edges touching the node from either side — `$or` over the source and target arms (`hop_edge_filter`, the same shape as the `knowledge_unlink_node` cascade), with the neighbor resolved as the *other* endpoint (`neighbor_of`). This matters because brain-created structural edges are stored as **one** directed doc while auto-derived edges are double-written: the old outgoing-only hop silently hid `enables`/`contradicts`/`refines`/`depends_on`/`related_to`/`derived_from` from every node except their source (an operator-testing find — the tool appeared to traverse only auto-derived edges). Result edges keep their true stored direction; only reachability is undirected, and the visited check dedupes the twin docs of bidirectional auto edges.
+A visited set keyed on `(collection, id)` prevents revisiting. **Expansion is undirected** (since 2026-07-03) and **arm-split** (since 2026-07-04): each hop fetches the edges touching a node via TWO indexed equality queries — the source arm (`{source_id, source_collection}`) and the target arm (`{target_id, target_collection}`) — merged client-side by the server's own comparator (`weight desc, created_at desc`, plus an `_id desc` tie-break the server lacks), deduped by `_id`, truncated to the window. The neighbor is the *other* endpoint (`neighbor_of`). Undirectedness matters because brain-created structural edges are stored as **one** directed doc while auto-derived edges are double-written: an outgoing-only hop silently hid `enables`/`contradicts`/`refines`/`depends_on`/`related_to`/`derived_from` from every node except their source. Result edges keep their true stored direction; the visited check dedupes the twin docs of bidirectional auto edges. Multi-source caveat: edges *between* two seeds are not recorded in `result.edges` (both endpoints pre-visited) — retrieval only consumes `result.nodes`, and the tool is single-start, so nothing observable changes.
 
-Each query inside the loop pulls at most `kg_traversal_edge_limit` (500) edges, ranked `weight desc, created_at desc` — saturation prunes a hub's *weakest, oldest* edges (for all-1.0 `same_session` ties the recency tiebreak keeps the newest neighbors) and logs a `kg::traversal` warning. One ranked window covers both directions, and an auto-derived link's twin docs occupy **two** slots — so a hub's effective auto-edge capacity is roughly half the cap, and the warning fires somewhat earlier than under the old outgoing-only hop. On a real saturation, inspect the pruned tail — the designed escalation is a type-partitioned fetch (directional/manual edge types unbounded, cap only the three auto types), **not** raising the cap.
+**Why arm-split (2026-07-04 performance rework):** WardSONDB's planner sends every `$or` filter to a full collection scan — at 99,417 production edges that was ~300–420 ms *per hop*, and a hub-seeded retrieval issues hundreds to thousands of hops, which put 5–8 **minute** `knowledge_query` latencies (and per-turn enrichment stalls) into production. The two arm queries ride `idx_edge_source`/`idx_edge_source_target` and `idx_edge_target` (~0.6 ms each, `docs_scanned` = actual matches) and their merged window is provably identical to the `$or` window (any member of the union's top-K is in its own arm's top-K; only exact weight/`created_at` ties at the truncation boundary can differ). Measured end-to-end on a production copy: the worst benchmark query went from ~417 s to ~1.9 s. Arm queries within a BFS level run with bounded concurrency (`HOP_CONCURRENCY` = 8, ordered so output stays deterministic). The arm filters MUST keep the id+collection pair as top-level sibling equality keys — wrapping them in any combinator reverts to the full scan (guarded by `hot_path_arm_bodies_never_contain_or`).
+
+Each hop's merged window holds at most `kg_traversal_edge_limit` (500) edges — saturation (either arm full, or the merged unique set overflowing the limit) prunes a hub's *weakest, oldest* edges (for all-1.0 `same_session` ties the recency tiebreak keeps the newest neighbors) and logs a `kg::traversal` warning. One ranked window covers both directions, and an auto-derived link's twin docs occupy **two** slots — so a hub's effective auto-edge capacity is roughly half the cap. On a real saturation, inspect the pruned tail — the designed escalation is a type-partitioned fetch (directional/manual edge types unbounded, cap only the three auto types), **not** raising the cap.
 
 ### Access-count side effect
 
-Each visited node (including the start node) triggers a fire-and-forget `tokio::spawn` PATCH that increments `access_count` and sets `last_accessed = now()` (`traversal.rs:45-46, 85-89, 156-170`). The PATCH is non-atomic (read → increment → write) and best-effort — if it fails, the traversal result is unaffected. This is the signal that feeds the `access_frequency` ranking signal (§ **Retrieval**).
+Since 2026-07-04, only nodes actually **returned** are touched: retrieval touches its final ranked top-K; `knowledge_traverse` touches its returned node set. One background task (`spawn_access_touches`) walks the keys sequentially with the same non-atomic read → increment → PATCH (best-effort — failures never affect the result). Previously *every BFS-visited node* spawned its own touch task — thousands of writes per retrieval that pushed `access_count` toward "times swept" uniform noise; the signal now counts retrieval hits, which is what the `access_frequency` ranking weight (§ **Retrieval**) wants. Historical inflated counts remain in the data — the ranking normalizes relative to the candidate set, so they age out gracefully as real hits accrue.
 
 ### Output
 
@@ -364,7 +369,7 @@ Ten `knowledge_*` tools registered via `#[embra_tool(...)]` macros at `crates/em
 
 **`knowledge_query`** — multi-signal ranking + depth-2 expansion. `query` is required; `max_results` defaults to 20 (clamp `[1, 100]`); `categories` is an optional CSV of semantic categories (filter applied after ranking, semantic-only). Output renders the source breakdown (`direct: N, session: N, graph: N`); when the intelligence relays this back in conversation, the operator can read whether the retrieval is hitting direct matches or only expansion noise.
 
-**`knowledge_traverse`** — BFS from a single start node, **undirected** since 2026-07-03: each hop follows edges touching the node from either side, so directional structural edges (stored as one doc) are reachable from both endpoints — previously they were invisible from everywhere but their source. Result edges still render their true stored direction. Default depth comes from `config.kg_max_traversal_depth` (3), ceiling is `config.kg_traversal_depth_ceiling` (5). `edge_types` is an optional CSV filter; `min_weight` is an optional `f64` floor. Side-effect: increments `access_count` + `last_accessed` on every visited node (which then feeds the `access_frequency` ranking signal).
+**`knowledge_traverse`** — BFS from a single start node, **undirected** since 2026-07-03: each hop follows edges touching the node from either side, so directional structural edges (stored as one doc) are reachable from both endpoints — previously they were invisible from everywhere but their source. Since 2026-07-04 each hop is two indexed arm queries merged client-side (no `$or` full scan — see **Traversal**), node docs resolve from a prefetched `NodeStore`, and result edges still render their true stored direction. Default depth comes from `config.kg_max_traversal_depth` (3), ceiling is `config.kg_traversal_depth_ceiling` (5). `edge_types` is an optional CSV filter; `min_weight` is an optional `f64` floor. Side-effect: increments `access_count` + `last_accessed` on the *returned* node set, in one background task (which then feeds the `access_frequency` ranking signal).
 
 **`knowledge_graph_stats`** — zero-arg, windowless. Node counts per collection and the promoted/unpromoted ratio come from server-side `count_only` (promoted = `{"promoted_to": {"$ne": null}}`, the filter form of the is-promoted predicate); the semantic category breakdown and the edge-type distribution come from aggregate `$group`; density (`edges / total_nodes`) from the counts. All exact at any graph size. The passive orphan-edge check scans up to 100k edges per call and reports its coverage against the exact edge total.
 
@@ -441,10 +446,10 @@ Six kg_* config fields tunable per-instance. The first four are set up by migrat
 |---|---|---|
 | `kg_temporal_window_secs` | 1800 (30 min) | `derive_edges` temporal candidate window + weight denominator (`edges.rs:61, 84-85, 140`) |
 | `kg_edge_candidate_limit` | 50 | per-query candidate cap in `derive_edges` (`edges.rs:60, 76, 89, 102`) |
-| `kg_traversal_depth_ceiling` | 5 | hard cap on `knowledge_traverse` depth (`traversal.rs:30`) |
-| `kg_max_traversal_depth` | 3 | default depth when `knowledge_traverse` omits it (`tools.rs:417`) |
-| `kg_traversal_edge_limit` | 500 | per-hop ranked edge window in `traverse` (`weight desc, created_at desc`; saturation → `kg::traversal` warn) |
-| `kg_traversal_node_budget` | 1000 | BFS node budget in `traverse` (budget hit → warn + `TraversalResult.truncated`) |
+| `kg_traversal_depth_ceiling` | 5 | hard cap on `knowledge_traverse` depth (`traverse_multi`) |
+| `kg_max_traversal_depth` | 3 | default depth when `knowledge_traverse` omits it (`tools.rs::knowledge_traverse`) |
+| `kg_traversal_edge_limit` | 500 | per-hop ranked merged arm window in `traverse_multi` (`weight desc, created_at desc`; saturation → `kg::traversal` warn) |
+| `kg_traversal_node_budget` | 1000 | BFS node budget in `traverse_multi`, global per call (budget hit → warn + `TraversalResult.truncated`) |
 
 Tuning notes:
 
