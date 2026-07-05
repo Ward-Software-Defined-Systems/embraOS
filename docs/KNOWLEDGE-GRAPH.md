@@ -412,9 +412,9 @@ The reason `knowledge_update` doesn't re-derive is that doing so would require e
 
 ### "Why are there two records per relationship?"
 
-Bidirectional storage simplifies the query path. A graph walk starting from either endpoint finds the same edge via a single `{source_id: <start>}` filter — no `$or` over both directions, no application-side dedup of duplicate edge IDs. The cost is doubled storage for symmetric edges (`same_session`, `temporal`, `tag_overlap`, `related_to`). The bidirectional records are written together by `push_bidirectional` (`edges.rs:229-258`) and deleted together by the symmetric branch of `knowledge_unlink_edge` (`tools.rs:160-166`).
+Historical write-path design: under the original outgoing-only graph walk (a single `{source_id: <start>}` filter, Sprint-2 → 2026-07-03), double-writing symmetric edges was what made them reachable from either endpoint. The walk has since changed twice — undirected (2026-07-03: both endpoints queried) and arm-split (2026-07-04: two indexed arm queries merged client-side, with the visited check / `_id` dedupe collapsing a twin pair to one hop) — so the double-write is no longer load-bearing for reachability. It persists as the storage convention: the twin records are written together by `push_bidirectional` (`edges.rs:229-258`), deleted together by the symmetric branch of `knowledge_unlink_edge` (`tools.rs:160-173`), and cost doubled storage for the symmetric types (`same_session`, `temporal`, `tag_overlap`, `related_to`) plus two slots of the per-hop ranked window (see **Traversal**). Rewriting stored data to collapse the twins was considered and rejected with the same reasoning as every other stored-data prune: deleted edges are unrecoverable, and the read path already handles both shapes.
 
-Directional edges (`enables`, `contradicts`, `refines`, `depends_on`, `derived_from`) are stored as a single record.
+Directional edges (`enables`, `contradicts`, `refines`, `depends_on`, `derived_from`) are stored as a single record, reachable from both endpoints since the undirected fix.
 
 ### "When does a `knowledge_sweep_orphans` call make sense?"
 
