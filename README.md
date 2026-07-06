@@ -18,7 +18,7 @@
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — dense multigraph with auto-derived edges" width="100%">
 </p>
 
-**Current Status:** Phase 1 — Stable (embra-desktop branch is experimental).
+**Current Status:** Phase 1 — Stable.
 
 Phase 2–5 add A/B partitioned rollback, an `embractl` management CLI, bare-metal and Kubernetes deployment targets, and operator-governed module surfaces. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
