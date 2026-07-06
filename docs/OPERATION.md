@@ -25,7 +25,8 @@ All sessions share the same intelligence — same memory, same identity, same so
 |---|---|
 | `Enter` | Send message (or newline in `/ml` multi-line mode) |
 | `Alt+Enter` | New line |
-| `Up/Down` | Scroll history |
+| `Up/Down` | Scroll history (`PageUp/PageDown` = 10 rows) |
+| `Shift+Up/Down` | Scroll the expression/reasoning panel (`Shift+PageUp/PageDown` = 5 rows; snaps back to the tail on your next message, on errors, or when new expression content arrives) |
 | `Ctrl+C` | Graceful detach |
 | `Ctrl+D` | Graceful detach |
 
