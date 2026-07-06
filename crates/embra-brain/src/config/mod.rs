@@ -55,16 +55,25 @@ pub struct SystemConfig {
     /// env var which takes precedence over this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gemini_model: Option<String>,
-    /// Active Anthropic model alias (e.g. `"opus-4.7"`, `"opus-4.8"`).
-    /// `None` (additive default) means the provider's `DEFAULT_MODEL`
-    /// (`claude-opus-4-7`). The brain also honors the `EMBRA_ANTHROPIC_MODEL`
-    /// env var, which takes precedence. Settable at runtime via `/model`;
-    /// the request shape (adaptive thinking, `effort: max`) is identical
-    /// across Opus versions, so this only swaps the API `model` id.
-    /// Serde-additive `Option` — no schema bump (same precedent as
-    /// `gemini_model` / `max_tool_iterations` / `show_reasoning`).
+    /// Active Anthropic model alias (e.g. `"opus-4.8"`, `"opus-4.7"`,
+    /// `"fable-5"`). `None` (additive default) means the provider's
+    /// `DEFAULT_MODEL` (`claude-opus-4-8`). The brain also honors the
+    /// `EMBRA_ANTHROPIC_MODEL` env var, which takes precedence. Settable
+    /// at runtime via `/model`; the request shape (adaptive thinking,
+    /// tunable `effort`) is identical across supported models, so this
+    /// only swaps the API `model` id. Serde-additive `Option` — no schema
+    /// bump (same precedent as `gemini_model` / `max_tool_iterations` /
+    /// `show_reasoning`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anthropic_model: Option<String>,
+    /// Anthropic `output_config.effort` level (`"low"|"medium"|"high"|
+    /// "xhigh"|"max"`). `None` (additive default) means `"max"`. The brain
+    /// also honors the `EMBRA_ANTHROPIC_EFFORT` env var, which takes
+    /// precedence. Settable at runtime via `/effort`; invalid values fall
+    /// through to the default at the read site. Serde-additive `Option` —
+    /// no schema bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_effort: Option<String>,
     /// Per-provider API keys (Sprint 4 schema v10, spec D2). The
     /// legacy `api_key` field above mirrors whichever of these is
     /// active so existing read paths keep working; new writes
@@ -198,6 +207,7 @@ fn default_api_provider() -> String { "anthropic".to_string() }
 
 const PROVIDER_ANTHROPIC_LABEL: &str = "Anthropic Claude Opus 4.7";
 const PROVIDER_ANTHROPIC_48_LABEL: &str = "Anthropic Claude Opus 4.8";
+const PROVIDER_ANTHROPIC_FABLE_LABEL: &str = "Anthropic Claude Fable 5";
 const PROVIDER_GEMINI_LABEL: &str = "Google Gemini 3.1 Pro";
 const PROVIDER_OLLAMA_LABEL: &str = "Ollama (OpenAI-compat)";
 const PROVIDER_LM_STUDIO_LABEL: &str = "LM Studio (OpenAI-compat)";
@@ -207,18 +217,25 @@ fn provider_from_label(label: &str) -> ProviderKind {
         PROVIDER_GEMINI_LABEL => ProviderKind::Gemini,
         PROVIDER_OLLAMA_LABEL => ProviderKind::Ollama,
         PROVIDER_LM_STUDIO_LABEL => ProviderKind::LmStudio,
-        // Both Anthropic labels (Opus 4.7 / 4.8) map here; the chosen
-        // Opus version is captured separately by `anthropic_model_from_label`.
+        // All Anthropic labels (Opus 4.7 / 4.8, Fable 5) map here; the
+        // chosen model is captured separately by `anthropic_model_from_label`.
         _ => ProviderKind::Anthropic,
     }
 }
 
-/// Which Opus version a provider-selection label implies, as the value
-/// persisted to `SystemConfig.anthropic_model`. `Some("opus-4.8")` for the
-/// 4.8 entry; `None` (the additive default) for 4.7 or any non-Anthropic
-/// label. Later switchable at runtime via `/model`.
+/// Which Anthropic model a provider-selection label implies, as the value
+/// persisted to `SystemConfig.anthropic_model`. Every Anthropic label seeds
+/// its model EXPLICITLY (never `None` = "ride the default") so a wizard
+/// choice keeps meaning what the operator picked even if the provider's
+/// `DEFAULT_MODEL` changes in a later build. Non-Anthropic labels yield
+/// `None`. Later switchable at runtime via `/model`.
 fn anthropic_model_from_label(label: &str) -> Option<String> {
-    (label == PROVIDER_ANTHROPIC_48_LABEL).then(|| "opus-4.8".to_string())
+    match label {
+        PROVIDER_ANTHROPIC_LABEL => Some("opus-4.7".to_string()),
+        PROVIDER_ANTHROPIC_48_LABEL => Some("opus-4.8".to_string()),
+        PROVIDER_ANTHROPIC_FABLE_LABEL => Some("fable-5".to_string()),
+        _ => None,
+    }
 }
 
 pub async fn run_config_wizard() -> Result<SystemConfig> {
@@ -273,6 +290,7 @@ pub async fn run_config_wizard() -> Result<SystemConfig> {
         api_provider: default_api_provider(),
         gemini_model: None,
         anthropic_model: None,
+        anthropic_effort: None,
         anthropic_api_key: None,
         gemini_api_key: None,
         max_tool_iterations: None,
@@ -484,7 +502,8 @@ pub async fn run_config_wizard_grpc(
     };
     info!("Config wizard: name = {}", name);
 
-    // Step 2: Provider selection (Sprint 4 → Sprint 5 4-way) — Selector UI.
+    // Step 2: Provider selection (Sprint 4 → Sprint 5 4-way, +Fable 5) —
+    // Selector UI. Default tracks the provider's DEFAULT_MODEL (Opus 4.8).
     let _ = tx.send(Ok(ConversationResponse {
         response_type: Some(conversation_response::ResponseType::Setup(
             SetupPrompt {
@@ -493,21 +512,22 @@ pub async fn run_config_wizard_grpc(
                 options: vec![
                     PROVIDER_ANTHROPIC_LABEL.to_string(),
                     PROVIDER_ANTHROPIC_48_LABEL.to_string(),
+                    PROVIDER_ANTHROPIC_FABLE_LABEL.to_string(),
                     PROVIDER_GEMINI_LABEL.to_string(),
                     PROVIDER_OLLAMA_LABEL.to_string(),
                     PROVIDER_LM_STUDIO_LABEL.to_string(),
                 ],
-                default_value: PROVIDER_ANTHROPIC_LABEL.to_string(),
+                default_value: PROVIDER_ANTHROPIC_48_LABEL.to_string(),
             }
         )),
     })).await;
     let provider_choice = match response_rx.recv().await {
         Some(input) if !input.is_empty() => input,
-        _ => PROVIDER_ANTHROPIC_LABEL.to_string(),
+        _ => PROVIDER_ANTHROPIC_48_LABEL.to_string(),
     };
     let provider_kind = provider_from_label(&provider_choice);
-    // Capture the chosen Opus version (4.7 default / 4.8) for the Anthropic
-    // path; persisted below as `SystemConfig.anthropic_model`.
+    // Capture the chosen Anthropic model (Opus 4.7/4.8, Fable 5) for the
+    // Anthropic path; persisted below as `SystemConfig.anthropic_model`.
     let anthropic_model = anthropic_model_from_label(&provider_choice);
     info!(
         "Config wizard: provider = {}{}",
@@ -756,6 +776,7 @@ pub async fn run_config_wizard_grpc(
         api_provider: provider_kind.as_str().to_string(),
         gemini_model: None,
         anthropic_model,
+        anthropic_effort: None,
         anthropic_api_key,
         gemini_api_key,
         max_tool_iterations: None,
@@ -858,7 +879,7 @@ pub async fn run_config_wizard_grpc(
         OperatingMode::Learning
     };
     // Sprint 4: include the active model so the console status bar
-    // refreshes from its default ("opus-4.7") to whatever provider
+    // refreshes from its default ("opus-4.8") to whatever provider
     // the operator just selected. Inline match — display_model_for
     // lives in grpc_service.rs and we don't want a circular dep.
     // Sprint 5: OpenAI-compat presets show the operator-selected
@@ -879,15 +900,16 @@ pub async fn run_config_wizard_grpc(
                 config.openai_compat.lm_studio_model.clone()
             }
         }
-        // Anthropic (and any unknown): reflect the chosen/persisted Opus
-        // version so the status bar shows opus-4.8 when selected, not the
-        // hardcoded 4.7. (Inline rather than calling grpc_service's
-        // resolver — that would be a circular dep, per the note above.)
+        // Anthropic (and any unknown): reflect the chosen/persisted model
+        // so the status bar shows what the operator selected (every
+        // Anthropic wizard label now seeds it explicitly). (Inline rather
+        // than calling grpc_service's resolver — that would be a circular
+        // dep, per the note above.)
         _ => config
             .anthropic_model
             .clone()
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "opus-4.7".to_string()),
+            .unwrap_or_else(|| "opus-4.8".to_string()),
     };
     let _ = tx.send(Ok(ConversationResponse {
         response_type: Some(conversation_response::ResponseType::ModeChange(
@@ -927,6 +949,7 @@ mod key_lookup_tests {
             api_provider: provider.into(),
             gemini_model: None,
             anthropic_model: None,
+            anthropic_effort: None,
             anthropic_api_key: anth.map(str::to_string),
             gemini_api_key: gem.map(str::to_string),
             max_tool_iterations: None,
@@ -1016,6 +1039,7 @@ mod max_tool_iterations_serde_tests {
             api_provider: "anthropic".into(),
             gemini_model: None,
             anthropic_model: None,
+            anthropic_effort: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
@@ -1121,35 +1145,82 @@ mod kg_traversal_config_tests {
 #[cfg(test)]
 mod provider_label_tests {
     //! Wizard provider-selection labels → (ProviderKind, anthropic_model).
-    //! Both Anthropic Opus entries resolve to the Anthropic provider; the
-    //! 4.8 entry additionally seeds `anthropic_model` (added with the Opus
-    //! 4.8 option). The selector itself is server-driven, so the console
-    //! and chat-mobile UIs render whichever labels appear here.
+    //! All three Anthropic entries resolve to the Anthropic provider and
+    //! each seeds `anthropic_model` EXPLICITLY (a wizard choice must keep
+    //! meaning what the operator picked even if `DEFAULT_MODEL` moves —
+    //! it did, 4.7 → 4.8). The selector itself is server-driven, so the
+    //! console and chat-mobile UIs render whichever labels appear here.
     use super::{
         anthropic_model_from_label, provider_from_label, PROVIDER_ANTHROPIC_48_LABEL,
-        PROVIDER_ANTHROPIC_LABEL, PROVIDER_GEMINI_LABEL,
+        PROVIDER_ANTHROPIC_FABLE_LABEL, PROVIDER_ANTHROPIC_LABEL, PROVIDER_GEMINI_LABEL,
     };
     use crate::provider::ProviderKind;
 
     #[test]
-    fn both_opus_labels_map_to_anthropic() {
-        assert_eq!(
-            provider_from_label(PROVIDER_ANTHROPIC_LABEL),
-            ProviderKind::Anthropic
-        );
-        assert_eq!(
-            provider_from_label(PROVIDER_ANTHROPIC_48_LABEL),
-            ProviderKind::Anthropic
-        );
+    fn all_anthropic_labels_map_to_anthropic() {
+        for label in [
+            PROVIDER_ANTHROPIC_LABEL,
+            PROVIDER_ANTHROPIC_48_LABEL,
+            PROVIDER_ANTHROPIC_FABLE_LABEL,
+        ] {
+            assert_eq!(provider_from_label(label), ProviderKind::Anthropic);
+        }
     }
 
     #[test]
-    fn only_the_4_8_label_seeds_anthropic_model() {
+    fn anthropic_labels_seed_expected_models() {
+        assert_eq!(
+            anthropic_model_from_label(PROVIDER_ANTHROPIC_LABEL),
+            Some("opus-4.7".to_string())
+        );
         assert_eq!(
             anthropic_model_from_label(PROVIDER_ANTHROPIC_48_LABEL),
             Some("opus-4.8".to_string())
         );
-        assert_eq!(anthropic_model_from_label(PROVIDER_ANTHROPIC_LABEL), None);
+        assert_eq!(
+            anthropic_model_from_label(PROVIDER_ANTHROPIC_FABLE_LABEL),
+            Some("fable-5".to_string())
+        );
         assert_eq!(anthropic_model_from_label(PROVIDER_GEMINI_LABEL), None);
+    }
+}
+
+#[cfg(test)]
+mod anthropic_effort_serde_tests {
+    //! `/effort` config field: serde-additive `Option<String>`, same
+    //! pattern as `max_tool_iterations` — pre-existing config docs lack
+    //! it and must deserialize to `None` (no schema bump).
+    use super::SystemConfig;
+    use serde_json::json;
+
+    #[test]
+    fn anthropic_effort_absent_from_json_when_none() {
+        let doc = json!({
+            "name": "Embra",
+            "api_key": "k",
+            "timezone": "UTC",
+            "deployment_mode": "phase1",
+            "created_at": "",
+            "version": "test",
+            "kg_temporal_window_secs": 1800,
+            "kg_max_traversal_depth": 3,
+            "kg_traversal_depth_ceiling": 5,
+            "kg_edge_candidate_limit": 50,
+            "api_provider": "anthropic",
+        });
+        let cfg: SystemConfig = serde_json::from_value(doc).unwrap();
+        assert!(cfg.anthropic_effort.is_none());
+
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert!(
+            json.get("anthropic_effort").is_none(),
+            "None should serialize as absent (skip_serializing_if): {json:?}"
+        );
+
+        let mut cfg = cfg;
+        cfg.anthropic_effort = Some("high".into());
+        let json = serde_json::to_value(&cfg).unwrap();
+        let back: SystemConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(back.anthropic_effort.as_deref(), Some("high"));
     }
 }

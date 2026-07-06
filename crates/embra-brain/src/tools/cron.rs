@@ -239,6 +239,7 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
             api_provider: "anthropic".to_string(),
             gemini_model: None,
             anthropic_model: None,
+            anthropic_effort: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,

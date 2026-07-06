@@ -283,6 +283,7 @@ impl ParserState {
                 content,
                 outcome,
                 usage: None,
+                stop_details: None,
             }))
             .await;
     }

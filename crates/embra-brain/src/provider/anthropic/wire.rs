@@ -69,6 +69,20 @@ pub enum StopReason {
     PauseTurn,
 }
 
+/// Structured detail accompanying `stop_reason: "refusal"` in the final
+/// `message_delta`. The API populates it ONLY on refusals; `category` can
+/// be null (values seen: `cyber`, `bio`, `reasoning_extraction`,
+/// `frontier_llm`) and `explanation` is not guaranteed — every read must
+/// be Option-guarded. The wire `type` field (always `"refusal"`) is
+/// deliberately not modeled.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct StopDetails {
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub explanation: Option<String>,
+}
+
 /// Fully assembled assistant response from a single API call.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AssistantResponse {
@@ -78,6 +92,9 @@ pub struct AssistantResponse {
     pub stop_reason: StopReason,
     #[serde(default)]
     pub stop_sequence: Option<String>,
+    /// Present only when `stop_reason` is `Refusal`.
+    #[serde(default)]
+    pub stop_details: Option<StopDetails>,
 }
 
 /// Internal-only event type used between the SSE parser and the

@@ -110,6 +110,17 @@ pub enum EarlyStopReason {
     Other,
 }
 
+/// Structured detail accompanying a terminal early stop. Anthropic
+/// populates it only on `stop_reason: "refusal"` (category values seen:
+/// `cyber`, `bio`, `reasoning_extraction`, `frontier_llm`; both fields
+/// are optional even then — guard every read). Other providers leave it
+/// `None` today; Gemini safety detail could ride here later.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StopDetails {
+    pub category: Option<String>,
+    pub explanation: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AssistantTurn {
     pub content: Vec<Block>,
@@ -117,6 +128,9 @@ pub struct AssistantTurn {
     /// Provider-specific usage JSON (token counts, cache stats). Used
     /// only for tracing — never for control flow.
     pub usage: Option<JsonValue>,
+    /// Populated only alongside `TurnOutcome::EarlyStop(Refusal)` — the
+    /// loop driver folds it into the operator-facing refusal notice.
+    pub stop_details: Option<StopDetails>,
 }
 
 impl AssistantTurn {

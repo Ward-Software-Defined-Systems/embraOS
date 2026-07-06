@@ -15,7 +15,7 @@ use futures_util::StreamExt;
 use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
-use super::wire::{AnthropicStreamEvent, AssistantResponse, MessageBlock, StopReason};
+use super::wire::{AnthropicStreamEvent, AssistantResponse, MessageBlock, StopDetails, StopReason};
 
 #[derive(Debug)]
 enum BlockKind {
@@ -120,6 +120,7 @@ pub async fn process_sse_stream(
     let mut full_text = String::new();
     let mut blocks: BTreeMap<usize, BlockAccumulator> = BTreeMap::new();
     let mut stop_reason: Option<StopReason> = None;
+    let mut stop_details: Option<StopDetails> = None;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk?;
@@ -138,7 +139,7 @@ pub async fn process_sse_stream(
                 continue;
             };
             if data == "[DONE]" {
-                emit_complete(&tx, &mut blocks, stop_reason, &full_text).await;
+                emit_complete(&tx, &mut blocks, stop_reason, stop_details, &full_text).await;
                 return Ok(());
             }
 
@@ -256,10 +257,13 @@ pub async fn process_sse_stream(
                         if let Some(sr) = delta.get("stop_reason").and_then(|v| v.as_str()) {
                             stop_reason = parse_stop_reason(sr);
                         }
+                        if let Some(sd) = parse_stop_details(delta) {
+                            stop_details = Some(sd);
+                        }
                     }
                 }
                 "message_stop" => {
-                    emit_complete(&tx, &mut blocks, stop_reason, &full_text).await;
+                    emit_complete(&tx, &mut blocks, stop_reason, stop_details, &full_text).await;
                     return Ok(());
                 }
                 "error" => {
@@ -278,7 +282,7 @@ pub async fn process_sse_stream(
 
     // Stream ended without message_stop — emit Complete anyway so
     // consumers don't hang.
-    emit_complete(&tx, &mut blocks, stop_reason, &full_text).await;
+    emit_complete(&tx, &mut blocks, stop_reason, stop_details, &full_text).await;
     Ok(())
 }
 
@@ -286,6 +290,7 @@ async fn emit_complete(
     tx: &mpsc::Sender<AnthropicStreamEvent>,
     blocks: &mut BTreeMap<usize, BlockAccumulator>,
     stop_reason: Option<StopReason>,
+    stop_details: Option<StopDetails>,
     full_text: &str,
 ) {
     let content: Vec<MessageBlock> = std::mem::take(blocks)
@@ -309,6 +314,7 @@ async fn emit_complete(
         content,
         stop_reason: effective_stop,
         stop_sequence: None,
+        stop_details,
     };
     let _ = tx
         .send(AnthropicStreamEvent::Complete {
@@ -330,6 +336,17 @@ fn parse_stop_reason(s: &str) -> Option<StopReason> {
         "pause_turn" => StopReason::PauseTurn,
         _ => return None,
     })
+}
+
+/// Extract `stop_details` from a `message_delta`'s `delta` object. The
+/// API includes it only alongside `stop_reason: "refusal"`; absent,
+/// null, or malformed → `None`. Shared by the production parser and the
+/// `drive_fake` test mirror so the two can't drift.
+fn parse_stop_details(delta: &serde_json::Value) -> Option<StopDetails> {
+    delta
+        .get("stop_details")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok())
 }
 
 #[cfg(test)]
@@ -365,6 +382,7 @@ mod tests {
         let mut full_text = String::new();
         let mut blocks: BTreeMap<usize, BlockAccumulator> = BTreeMap::new();
         let mut stop_reason: Option<StopReason> = None;
+        let mut stop_details: Option<StopDetails> = None;
         buffer.push_str(&body);
 
         while let Some(newline_pos) = buffer.find('\n') {
@@ -377,7 +395,7 @@ mod tests {
                 continue;
             };
             if data == "[DONE]" {
-                emit_complete(&tx, &mut blocks, stop_reason, &full_text).await;
+                emit_complete(&tx, &mut blocks, stop_reason, stop_details, &full_text).await;
                 return Ok(());
             }
             let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
@@ -478,16 +496,19 @@ mod tests {
                         if let Some(sr) = delta.get("stop_reason").and_then(|v| v.as_str()) {
                             stop_reason = parse_stop_reason(sr);
                         }
+                        if let Some(sd) = parse_stop_details(delta) {
+                            stop_details = Some(sd);
+                        }
                     }
                 }
                 "message_stop" => {
-                    emit_complete(&tx, &mut blocks, stop_reason, &full_text).await;
+                    emit_complete(&tx, &mut blocks, stop_reason, stop_details, &full_text).await;
                     return Ok(());
                 }
                 _ => {}
             }
         }
-        emit_complete(&tx, &mut blocks, stop_reason, &full_text).await;
+        emit_complete(&tx, &mut blocks, stop_reason, stop_details, &full_text).await;
         Ok(())
     }
 
@@ -650,5 +671,68 @@ mod tests {
         assert!(matches!(complete.content[0], MessageBlock::Thinking { .. }));
         assert!(matches!(complete.content[1], MessageBlock::Text { .. }));
         assert!(matches!(complete.content[2], MessageBlock::ToolUse { .. }));
+    }
+
+    #[tokio::test]
+    async fn refusal_message_delta_carries_stop_details() {
+        // A pre-output refusal: HTTP 200, no content blocks, final
+        // message_delta carries stop_reason + stop_details.
+        let events = [
+            r#"{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber","explanation":"Request declined by safety classifier."}}}"#,
+            r#"{"type":"message_stop"}"#,
+        ];
+        let out = run_stream(&events).await;
+        let complete = out
+            .iter()
+            .find_map(|e| match e {
+                AnthropicStreamEvent::Complete { response } => Some(response.clone()),
+                _ => None,
+            })
+            .expect("Complete event");
+        assert_eq!(complete.stop_reason, StopReason::Refusal);
+        assert!(complete.content.is_empty());
+        let details = complete.stop_details.expect("stop_details parsed");
+        assert_eq!(details.category.as_deref(), Some("cyber"));
+        assert_eq!(
+            details.explanation.as_deref(),
+            Some("Request declined by safety classifier.")
+        );
+    }
+
+    #[tokio::test]
+    async fn refusal_stop_details_with_null_category_and_missing_explanation_parses() {
+        // category is nullable and explanation is not guaranteed —
+        // both must parse without erroring (guarded reads downstream).
+        let events = [
+            r#"{"type":"message_delta","delta":{"stop_reason":"refusal","stop_details":{"type":"refusal","category":null}}}"#,
+            r#"{"type":"message_stop"}"#,
+        ];
+        let out = run_stream(&events).await;
+        let complete = out
+            .iter()
+            .find_map(|e| match e {
+                AnthropicStreamEvent::Complete { response } => Some(response.clone()),
+                _ => None,
+            })
+            .expect("Complete event");
+        assert_eq!(complete.stop_reason, StopReason::Refusal);
+        let details = complete.stop_details.expect("stop_details parsed");
+        assert_eq!(details.category, None);
+        assert_eq!(details.explanation, None);
+
+        // And a plain non-refusal delta leaves stop_details None.
+        let events = [
+            r#"{"type":"message_delta","delta":{"stop_reason":"end_turn"}}"#,
+            r#"{"type":"message_stop"}"#,
+        ];
+        let out = run_stream(&events).await;
+        let complete = out
+            .iter()
+            .find_map(|e| match e {
+                AnthropicStreamEvent::Complete { response } => Some(response.clone()),
+                _ => None,
+            })
+            .expect("Complete event");
+        assert_eq!(complete.stop_details, None);
     }
 }

@@ -166,7 +166,7 @@ pub struct LlmRequestOptions {
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     /// Human-readable model identifier for the status bar.
-    /// Anthropic: `"opus-4.7"`. Gemini: `"gemini-3.1-pro"`.
+    /// Anthropic: `"opus-4.8"`. Gemini: `"gemini-3.1-pro"`.
     fn display_name(&self) -> &str;
 
     /// For persistence + slash-command UX.

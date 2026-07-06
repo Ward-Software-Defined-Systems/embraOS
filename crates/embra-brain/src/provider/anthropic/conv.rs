@@ -126,6 +126,17 @@ pub fn stop_reason_to_outcome(reason: StopReason) -> TurnOutcome {
     }
 }
 
+/// Translate wire `stop_details` (refusal detail) into the neutral IR
+/// shape — a straight field map; both sides keep everything optional.
+pub fn wire_stop_details_to_ir(
+    w: super::wire::StopDetails,
+) -> crate::provider::ir::StopDetails {
+    crate::provider::ir::StopDetails {
+        category: w.category,
+        explanation: w.explanation,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,5 +272,15 @@ mod tests {
             stop_reason_to_outcome(StopReason::Refusal),
             TurnOutcome::EarlyStop(EarlyStopReason::Refusal)
         );
+    }
+
+    #[test]
+    fn wire_stop_details_maps_to_ir() {
+        let ir = wire_stop_details_to_ir(super::super::wire::StopDetails {
+            category: Some("cyber".into()),
+            explanation: None,
+        });
+        assert_eq!(ir.category.as_deref(), Some("cyber"));
+        assert_eq!(ir.explanation, None);
     }
 }

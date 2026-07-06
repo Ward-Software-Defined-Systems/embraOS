@@ -303,6 +303,7 @@ impl ParserState {
                 content,
                 outcome,
                 usage: self.usage_metadata.take(),
+                stop_details: None,
             }))
             .await;
     }

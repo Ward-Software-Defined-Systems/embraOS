@@ -112,10 +112,18 @@ impl SessionManager {
         let (provider, model) = match crate::config::load_config(&self.db).await {
             Ok(cfg) => {
                 let m = match cfg.api_provider.as_str() {
-                    "gemini" => "gemini-3.1-pro",
-                    _ => "opus-4.7",
+                    "gemini" => "gemini-3.1-pro".to_string(),
+                    // Anthropic: reflect the persisted model alias (set by
+                    // the wizard / `/model`), falling back to the default's
+                    // display. Display metadata only — the resolver in
+                    // grpc_service.rs owns the request-time id.
+                    _ => cfg
+                        .anthropic_model
+                        .clone()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| "opus-4.8".to_string()),
                 };
-                (Some(cfg.api_provider), Some(m.to_string()))
+                (Some(cfg.api_provider), Some(m))
             }
             Err(_) => (None, None),
         };

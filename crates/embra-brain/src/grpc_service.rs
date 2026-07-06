@@ -9,7 +9,9 @@ use crate::learning;
 use crate::proactive::Notification;
 use crate::provider::anthropic::AnthropicProvider;
 use crate::provider::gemini::GeminiProvider;
-use crate::provider::ir::{ApiMessage, AssistantTurn, Block, EarlyStopReason, TurnOutcome};
+use crate::provider::ir::{
+    ApiMessage, AssistantTurn, Block, EarlyStopReason, StopDetails, TurnOutcome,
+};
 use crate::provider::{
     LlmProvider, LlmRequestOptions, ProviderKind, StreamEvent, SystemPromptBundle, ToolManifest,
 };
@@ -278,6 +280,7 @@ impl BrainService for BrainGrpcService {
                     api_provider: "anthropic".to_string(),
                     gemini_model: None,
                     anthropic_model: None,
+                    anthropic_effort: None,
                     anthropic_api_key: None,
                     gemini_api_key: None,
                     max_tool_iterations: None,
@@ -616,6 +619,7 @@ async fn handle_request(
                 api_provider: "anthropic".to_string(),
                 gemini_model: None,
                 anthropic_model: None,
+                anthropic_effort: None,
                 anthropic_api_key: None,
                 gemini_api_key: None,
                 max_tool_iterations: None,
@@ -1270,6 +1274,40 @@ async fn handle_request(
                     }
                 }
             }
+
+            // Surface refusal / truncation terminal outcomes as operator-
+            // facing frames — a refusal must never end a turn silently (and
+            // is never silently retried on a fallback model; rationale in
+            // `terminal_outcome_notice`). Single post-loop site so every
+            // exit path from the tool loop is covered; normal outcomes and
+            // the stale-turn abort paths (`ToolUse`/`Pause`) yield no frame.
+            if let Some((kind, content)) =
+                terminal_outcome_notice(current_turn.outcome, current_turn.stop_details.as_ref())
+            {
+                if current_turn.outcome == TurnOutcome::EarlyStop(EarlyStopReason::Refusal) {
+                    warn!(
+                        target: "dispatch",
+                        session = %session_name,
+                        category = current_turn
+                            .stop_details
+                            .as_ref()
+                            .and_then(|d| d.category.as_deref())
+                            .unwrap_or("unspecified"),
+                        "turn ended with provider refusal"
+                    );
+                }
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::System(
+                            SystemMessage {
+                                content,
+                                msg_type: kind as i32,
+                            },
+                        )),
+                    }))
+                    .await;
+            }
+
             // Per-turn telemetry — surfaces the customtools-needed
             // pattern (spec D8). Operators can grep journalctl for
             // turns where Gemini emitted text but zero tool calls
@@ -1338,13 +1376,11 @@ async fn handle_request(
                     })).await;
                     return Ok(());
                 }
-                let final_text = if !last_response_text.trim().is_empty() {
-                    last_response_text.clone()
-                } else if !tool_names_in_turn.is_empty() {
-                    render_tool_only_placeholder(&tool_names_in_turn)
-                } else {
-                    "(no response)".to_string()
-                };
+                let final_text = final_assistant_text(
+                    &last_response_text,
+                    &tool_names_in_turn,
+                    current_turn.outcome,
+                );
                 let _ = mgr
                     .append_message(&session_name, &Message::assistant(&final_text))
                     .await;
@@ -1489,7 +1525,7 @@ async fn handle_request(
             let active_provider = cfg.as_ref().map(|c| c.api_provider.clone()).unwrap_or_else(|| "anthropic".to_string());
             let model = match cfg.as_ref() {
                 Some(c) => display_model_for(&active_provider, c),
-                None => "opus-4.7".to_string(),
+                None => "opus-4.8".to_string(),
             };
             let _ = tx.send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::ModeChange(
@@ -1578,7 +1614,7 @@ async fn handle_slash_command(
         .unwrap_or_else(|| "anthropic".to_string());
     let model = match cfg_loaded.as_ref() {
         Some(c) => display_model_for(&active_provider, c),
-        None => "opus-4.7".to_string(),
+        None => "opus-4.8".to_string(),
     };
     let send_session_update = {
         let config_name = config_name.clone();
@@ -1607,7 +1643,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-4.7|opus-4.8>         Switch the Anthropic Opus version (next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-4.7|opus-4.8|fable-5> Switch the Anthropic model (next message)\n  /effort                            Show the Anthropic effort level\n  /effort <low|medium|high|xhigh|max>  Set effort (default max, next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -1624,6 +1660,9 @@ async fn handle_slash_command(
         }
         "/model" => {
             handle_model_command(args, tx, db, session_mgr).await;
+        }
+        "/effort" => {
+            handle_effort_command(args, tx, db).await;
         }
         "/guardian" => {
             // Operator affordance (define/list/status/show/delete/key).
@@ -2105,7 +2144,7 @@ async fn handle_provider_command(
                 .unwrap_or_else(|| "anthropic".to_string());
             let model = match cfg.as_ref() {
                 Some(c) => display_model_for(&provider, c),
-                None => "opus-4.7".to_string(),
+                None => "opus-4.8".to_string(),
             };
             let session = session_mgr
                 .read()
@@ -2759,7 +2798,10 @@ pub(crate) fn build_provider_from_config(
         }
         ProviderKind::Anthropic => {
             let (model_id, display) = resolve_anthropic_model(cfg);
-            Ok(Arc::new(AnthropicProvider::with_model(active_key, model_id, display)))
+            Ok(Arc::new(
+                AnthropicProvider::with_model(active_key, model_id, display)
+                    .with_effort(resolve_anthropic_effort(cfg)),
+            ))
         }
         ProviderKind::Ollama | ProviderKind::LmStudio => build_openai_compat_provider(kind, cfg),
     }
@@ -2790,7 +2832,7 @@ fn display_model_for(provider: &str, config: &config::SystemConfig) -> String {
                 config.openai_compat.lm_studio_model.clone()
             }
         }
-        _ => "opus-4.7".to_string(),
+        _ => "opus-4.8".to_string(),
     }
 }
 
@@ -3429,9 +3471,10 @@ fn resolve_gemini_model_id_inner(env: Option<&str>, cfg_field: Option<&str>) -> 
 /// 1. `EMBRA_ANTHROPIC_MODEL` env var (boot/dev override).
 /// 2. `config.anthropic_model` (persistent, set via `/model`).
 /// 3. The provider's [`DEFAULT_MODEL`](crate::provider::anthropic::DEFAULT_MODEL)
-///    (`claude-opus-4-7`).
-/// The request shape is identical across Opus versions, so this only swaps
-/// the `model` id + display name. Inner fn is pure for env-race-free tests.
+///    (`claude-opus-4-8`).
+/// The request shape is identical across supported Anthropic models
+/// (Opus 4.7/4.8, Fable 5), so this only swaps the `model` id + display
+/// name. Inner fn is pure for env-race-free tests.
 fn resolve_anthropic_model(cfg: &config::SystemConfig) -> (String, String) {
     let env_override = std::env::var("EMBRA_ANTHROPIC_MODEL").ok();
     resolve_anthropic_model_inner(env_override.as_deref(), cfg.anthropic_model.as_deref())
@@ -3455,7 +3498,7 @@ fn resolve_anthropic_model_inner(
     }
 }
 
-/// Map a known Opus alias to `(api_id, display)`. The `/model` command only
+/// Map a known model alias to `(api_id, display)`. The `/model` command only
 /// accepts these (so a typo can't persist a bogus id that 400s every turn);
 /// the resolver additionally allows env/config passthrough for a model this
 /// build predates — see [`normalize_anthropic_model`].
@@ -3466,6 +3509,9 @@ fn parse_anthropic_model_choice(s: &str) -> Option<(&'static str, &'static str)>
         }
         "opus-4.7" | "4.7" | "opus4.7" | "claude-opus-4-7" => {
             Some(("claude-opus-4-7", "opus-4.7"))
+        }
+        "fable-5" | "fable5" | "fable" | "claude-fable-5" => {
+            Some(("claude-fable-5", "fable-5"))
         }
         _ => None,
     }
@@ -3481,12 +3527,47 @@ fn normalize_anthropic_model(s: &str) -> (String, String) {
     }
 }
 
-/// `/model [<opus-4.7|opus-4.8>]` — show or switch the Anthropic Opus model.
-/// Persists `SystemConfig.anthropic_model`; the loop driver rebuilds the
-/// provider per-turn from config, so a switch takes effect on the next user
-/// message. Only meaningful for the Anthropic provider (Gemini / OpenAI-compat
-/// models are set via `/provider --setup`). On a successful switch it emits an
-/// Operational ModeChange so the status bar reflects the new Brain immediately.
+/// Validate an `output_config.effort` choice against the API allowlist.
+/// Unlike the model resolver there is NO unknown-value passthrough — an
+/// unrecognized effort would 400 every turn, and unlike model ids the
+/// value set is stable across models, so strictness costs nothing.
+fn parse_anthropic_effort_choice(s: &str) -> Option<&'static str> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "low" => Some("low"),
+        "medium" => Some("medium"),
+        "high" => Some("high"),
+        "xhigh" => Some("xhigh"),
+        "max" => Some("max"),
+        _ => None,
+    }
+}
+
+/// Resolve the active Anthropic effort level. Precedence mirrors
+/// [`resolve_anthropic_model`]: env `EMBRA_ANTHROPIC_EFFORT` >
+/// `config.anthropic_effort` (set via `/effort`) > `"max"`. Invalid
+/// values fall through to the next source (a hand-edited bogus config
+/// value can't 400 every turn). Inner fn is pure for env-race-free tests.
+fn resolve_anthropic_effort(cfg: &config::SystemConfig) -> String {
+    let env_override = std::env::var("EMBRA_ANTHROPIC_EFFORT").ok();
+    resolve_anthropic_effort_inner(env_override.as_deref(), cfg.anthropic_effort.as_deref())
+}
+
+fn resolve_anthropic_effort_inner(env: Option<&str>, cfg_field: Option<&str>) -> String {
+    [env, cfg_field]
+        .into_iter()
+        .flatten()
+        .find_map(parse_anthropic_effort_choice)
+        .unwrap_or("max")
+        .to_string()
+}
+
+/// `/model [<opus-4.7|opus-4.8|fable-5>]` — show or switch the Anthropic
+/// model. Persists `SystemConfig.anthropic_model`; the loop driver rebuilds
+/// the provider per-turn from config, so a switch takes effect on the next
+/// user message. Only meaningful for the Anthropic provider (Gemini /
+/// OpenAI-compat models are set via `/provider --setup`). On a successful
+/// switch it emits an Operational ModeChange so the status bar reflects the
+/// new Brain immediately.
 async fn handle_model_command(
     args: &str,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
@@ -3529,13 +3610,13 @@ async fn handle_model_command(
         let current = display_model_for(&active, &cfg);
         let msg = if active == "anthropic" {
             format!(
-                "Anthropic model: {current}. Options: opus-4.7, opus-4.8. \
-                 Use `/model opus-4.8` to switch (takes effect on your next message)."
+                "Anthropic model: {current}. Options: opus-4.7, opus-4.8, fable-5. \
+                 Use `/model fable-5` to switch (takes effect on your next message)."
             )
         } else {
             format!(
                 "Active provider '{active}' model: {current}. `/model` switches the \
-                 Anthropic Opus version; for {active}, use `/provider --setup {active}`."
+                 Anthropic model; for {active}, use `/provider --setup {active}`."
             )
         };
         send(msg, SystemMessageType::Info).await;
@@ -3545,7 +3626,7 @@ async fn handle_model_command(
     if active != "anthropic" {
         send(
             format!(
-                "`/model` currently switches only the Anthropic Opus version. Active \
+                "`/model` currently switches only the Anthropic model. Active \
                  provider is '{active}' — use `/provider --setup {active}` to change its model."
             ),
             SystemMessageType::Error,
@@ -3557,7 +3638,8 @@ async fn handle_model_command(
     let Some((_id, display)) = parse_anthropic_model_choice(trimmed) else {
         send(
             format!(
-                "'{trimmed}' is not a recognized Anthropic model. Options: opus-4.7, opus-4.8."
+                "'{trimmed}' is not a recognized Anthropic model. Options: opus-4.7, \
+                 opus-4.8, fable-5."
             ),
             SystemMessageType::Error,
         )
@@ -3604,6 +3686,108 @@ async fn handle_model_command(
             )),
         }))
         .await;
+}
+
+/// `/effort [<low|medium|high|xhigh|max>]` — show or set the Anthropic
+/// `output_config.effort` level. Persists `SystemConfig.anthropic_effort`;
+/// the loop driver rebuilds the provider per-turn from config, so a change
+/// takes effect on the next user message. Mirrors `handle_model_command`
+/// minus the ModeChange emit — the status pill shows the model display
+/// name, which effort doesn't change.
+async fn handle_effort_command(
+    args: &str,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    db: &Arc<WardsonDbClient>,
+) {
+    let send = |content: String, kind: SystemMessageType| {
+        let tx = tx.clone();
+        async move {
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage {
+                            content,
+                            msg_type: kind as i32,
+                        },
+                    )),
+                }))
+                .await;
+        }
+    };
+
+    let mut cfg = match config::load_config(&**db).await {
+        Ok(c) => c,
+        Err(e) => {
+            send(
+                format!("/effort: failed to load config: {e}"),
+                SystemMessageType::Error,
+            )
+            .await;
+            return;
+        }
+    };
+
+    let active = cfg.api_provider.clone();
+    let trimmed = args.trim();
+
+    // No args → show current effort + options.
+    if trimmed.is_empty() {
+        let current = resolve_anthropic_effort(&cfg);
+        let msg = if active == "anthropic" {
+            format!(
+                "Anthropic effort: {current}. Options: low, medium, high, xhigh, max \
+                 (default max). Use `/effort high` to switch (takes effect on your \
+                 next message)."
+            )
+        } else {
+            format!(
+                "`/effort` tunes the Anthropic provider only; active provider is \
+                 '{active}'. Current Anthropic effort: {current}."
+            )
+        };
+        send(msg, SystemMessageType::Info).await;
+        return;
+    }
+
+    if active != "anthropic" {
+        send(
+            format!(
+                "`/effort` currently tunes only the Anthropic provider. Active \
+                 provider is '{active}'."
+            ),
+            SystemMessageType::Error,
+        )
+        .await;
+        return;
+    }
+
+    let Some(level) = parse_anthropic_effort_choice(trimmed) else {
+        send(
+            format!(
+                "'{trimmed}' is not a recognized effort level. Options: low, medium, \
+                 high, xhigh, max."
+            ),
+            SystemMessageType::Error,
+        )
+        .await;
+        return;
+    };
+
+    cfg.anthropic_effort = Some(level.to_string());
+    if let Err(e) = config::save_config(&**db, &cfg).await {
+        send(
+            format!("/effort: failed to save: {e}"),
+            SystemMessageType::Error,
+        )
+        .await;
+        return;
+    }
+
+    send(
+        format!("Anthropic effort set to {level}. Takes effect on your next message."),
+        SystemMessageType::Info,
+    )
+    .await;
 }
 
 /// Check that `session_name`'s recorded provider matches the
@@ -3757,7 +3941,10 @@ async fn run_learning_loop(
         }
         ProviderKind::Anthropic => {
             let (model_id, display) = resolve_anthropic_model(config);
-            Arc::new(AnthropicProvider::with_model(active_key, model_id, display))
+            Arc::new(
+                AnthropicProvider::with_model(active_key, model_id, display)
+                    .with_effort(resolve_anthropic_effort(config)),
+            )
         }
         ProviderKind::Ollama | ProviderKind::LmStudio => {
             match build_openai_compat_provider(provider_kind, config) {
@@ -3786,7 +3973,7 @@ async fn run_learning_loop(
 
     // Send mode transition. Sprint 4: include Brain: <model> so the
     // console status bar refreshes during learning (would otherwise
-    // sit on the default "opus-4.7" until next session-attach).
+    // sit on the default "opus-4.8" until next session-attach).
     let learning_model = display_model_for(&config.api_provider, config);
     let _ = tx.send(Ok(ConversationResponse {
         response_type: Some(conversation_response::ResponseType::ModeChange(
@@ -4264,6 +4451,80 @@ fn render_tool_only_placeholder(names: &[String]) -> String {
     format!("[tool calls: {}{}]", head, suffix)
 }
 
+/// Operator-facing notice for a terminal turn outcome, emitted post-loop by
+/// the driver so a refusal or truncation can never end a turn silently.
+/// `None` for the normal outcomes — `EndTurn` needs no frame, and
+/// `ToolUse`/`Pause` are only terminal here when a stream aborted mid-loop,
+/// which already surfaced its own error frame.
+fn terminal_outcome_notice(
+    outcome: TurnOutcome,
+    stop_details: Option<&StopDetails>,
+) -> Option<(SystemMessageType, String)> {
+    match outcome {
+        TurnOutcome::EndTurn | TurnOutcome::ToolUse | TurnOutcome::Pause => None,
+        TurnOutcome::MaxTokens => Some((
+            SystemMessageType::Warning,
+            "Response hit the output-token limit (max_tokens) — the reply above may be \
+             truncated mid-thought."
+                .to_string(),
+        )),
+        // The Anthropic API offers server-side fallback-to-another-model on
+        // refusal (`betas: ["server-side-fallback-2026-06-01"]` + a
+        // `fallbacks` param), and it is opt-in; embraOS deliberately does
+        // NOT opt in — the OS gives a single model a sealed identity, and
+        // silently swapping models mid-conversation would be a continuity
+        // violation. Refusals surface to the operator instead.
+        TurnOutcome::EarlyStop(EarlyStopReason::Refusal) => {
+            let mut msg =
+                String::from("Anthropic declined to complete this response (refusal");
+            if let Some(cat) = stop_details.and_then(|d| d.category.as_deref()) {
+                msg.push_str(", category: ");
+                msg.push_str(cat);
+            }
+            msg.push(')');
+            if let Some(expl) = stop_details.and_then(|d| d.explanation.as_deref()) {
+                msg.push_str(" — ");
+                msg.push_str(expl);
+            }
+            msg.push_str(". Any partial text above is incomplete. No fallback model was used.");
+            Some((SystemMessageType::Error, msg))
+        }
+        TurnOutcome::EarlyStop(reason) => Some((
+            SystemMessageType::Error,
+            format!("Provider stopped this response early ({reason:?})."),
+        )),
+    }
+}
+
+/// Final assistant text persisted to session history for a terminal turn.
+/// Extracted from the inline persistence chain so refusal honesty is
+/// unit-testable: a refused turn must never persist as a bare normal
+/// message. Empty refusals persist an explicit marker (instead of
+/// `(no response)`, and taking precedence over the tool placeholder —
+/// the refusal frame and `turn_trace` carry the tool detail); refused
+/// partials carry an interruption suffix so both the operator on session
+/// reload and the model on the next turn see that the reply was cut.
+fn final_assistant_text(
+    last_response_text: &str,
+    tool_names: &[String],
+    outcome: TurnOutcome,
+) -> String {
+    let refused = matches!(outcome, TurnOutcome::EarlyStop(EarlyStopReason::Refusal));
+    if !last_response_text.trim().is_empty() {
+        if refused {
+            format!("{last_response_text}\n\n(response interrupted by provider refusal)")
+        } else {
+            last_response_text.to_string()
+        }
+    } else if refused {
+        "(request declined by provider: refusal)".to_string()
+    } else if !tool_names.is_empty() {
+        render_tool_only_placeholder(tool_names)
+    } else {
+        "(no response)".to_string()
+    }
+}
+
 /// When the loop driver hits its iteration cap with `current_turn` carrying
 /// undispatched `ToolCall` blocks, synthesize one `Block::ToolResult` per
 /// call so the next API request satisfies Anthropic's "every tool_use must
@@ -4603,6 +4864,7 @@ mod native_loop_tests {
             ],
             outcome: TurnOutcome::EndTurn,
             usage: None,
+            stop_details: None,
         };
         assert_eq!(turn_text(&turn), "Hello, world");
     }
@@ -4610,11 +4872,11 @@ mod native_loop_tests {
     #[test]
     fn display_model_maps_known_providers() {
         let cfg = empty_config();
-        assert_eq!(display_model_for("anthropic", &cfg), "opus-4.7");
+        assert_eq!(display_model_for("anthropic", &cfg), "opus-4.8");
         assert_eq!(display_model_for("gemini", &cfg), "gemini-3.1-pro");
         // Unknown defaults to anthropic display (defensive — never
         // shows an empty model name).
-        assert_eq!(display_model_for("unknown", &cfg), "opus-4.7");
+        assert_eq!(display_model_for("unknown", &cfg), "opus-4.8");
     }
 
     #[test]
@@ -4653,6 +4915,7 @@ mod native_loop_tests {
             api_provider: "anthropic".to_string(),
             gemini_model: None,
             anthropic_model: None,
+            anthropic_effort: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
@@ -4855,6 +5118,7 @@ mod native_loop_tests {
             }))],
             outcome: TurnOutcome::ToolUse,
             usage: None,
+            stop_details: None,
         };
         assert_eq!(turn_text(&turn), "");
     }
@@ -5337,6 +5601,7 @@ mod reasoning_delta_privacy_tests {
                 content: vec![Block::Text(visible.to_string())],
                 outcome: TurnOutcome::EndTurn,
                 usage: None,
+                stop_details: None,
             }),
         ];
         let brain_rx = Box::pin(stream::iter(events));
@@ -5422,6 +5687,7 @@ mod reasoning_delta_privacy_tests {
                 content: vec![Block::Text("real text".to_string())],
                 outcome: TurnOutcome::EndTurn,
                 usage: None,
+                stop_details: None,
             }),
         ];
         let brain_rx = Box::pin(stream::iter(events));
@@ -5489,6 +5755,7 @@ mod reasoning_delta_privacy_tests {
             api_provider: "anthropic".to_string(),
             gemini_model: None,
             anthropic_model: None,
+            anthropic_effort: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
@@ -5543,6 +5810,7 @@ mod soul_sealed_mode_change_tests {
             api_provider: provider.to_string(),
             gemini_model: None,
             anthropic_model: None,
+            anthropic_effort: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
@@ -5574,7 +5842,7 @@ mod soul_sealed_mode_change_tests {
         assert!(msg.contains("Name: Aria"), "got: {msg}");
         assert!(msg.contains("TZ: America/New_York"), "got: {msg}");
         // anthropic default display model
-        assert!(msg.contains("Brain: opus-4.7"), "got: {msg}");
+        assert!(msg.contains("Brain: opus-4.8"), "got: {msg}");
     }
 
     #[test]
@@ -5590,38 +5858,47 @@ mod soul_sealed_mode_change_tests {
 
 #[cfg(test)]
 mod anthropic_model_tests {
-    //! Opus model resolution + the `/model` choice parser (added in
-    //! `embra-brain-broadcaster`). The API id is load-bearing (sent in the
-    //! request body); the inner resolver is pure so the env var isn't
+    //! Anthropic model resolution + the `/model` choice parser (added in
+    //! `embra-brain-broadcaster`; Fable 5 + the 4.8 default landed on
+    //! `llm-provider-optimizations`). The API id is load-bearing (sent in
+    //! the request body); the inner resolver is pure so the env var isn't
     //! mutated across the suite (same discipline as the Gemini resolver).
     use super::{
         normalize_anthropic_model, parse_anthropic_model_choice, resolve_anthropic_model_inner,
     };
 
     #[test]
-    fn defaults_to_opus_4_7_when_unset() {
+    fn defaults_to_opus_4_8_when_unset() {
         let (id, disp) = resolve_anthropic_model_inner(None, None);
-        assert_eq!(id, "claude-opus-4-7");
-        assert_eq!(disp, "opus-4.7");
-    }
-
-    #[test]
-    fn config_field_selects_4_8() {
-        let (id, disp) = resolve_anthropic_model_inner(None, Some("opus-4.8"));
         assert_eq!(id, "claude-opus-4-8");
         assert_eq!(disp, "opus-4.8");
     }
 
     #[test]
+    fn config_field_selects_opus_4_7() {
+        // 4.7 is still selectable explicitly now that it's non-default.
+        let (id, disp) = resolve_anthropic_model_inner(None, Some("opus-4.7"));
+        assert_eq!(id, "claude-opus-4-7");
+        assert_eq!(disp, "opus-4.7");
+    }
+
+    #[test]
+    fn config_field_selects_fable_5() {
+        let (id, disp) = resolve_anthropic_model_inner(None, Some("fable-5"));
+        assert_eq!(id, "claude-fable-5");
+        assert_eq!(disp, "fable-5");
+    }
+
+    #[test]
     fn env_overrides_config() {
-        let (id, _) = resolve_anthropic_model_inner(Some("opus-4.8"), Some("opus-4.7"));
-        assert_eq!(id, "claude-opus-4-8");
+        let (id, _) = resolve_anthropic_model_inner(Some("fable-5"), Some("opus-4.7"));
+        assert_eq!(id, "claude-fable-5");
     }
 
     #[test]
     fn blank_values_fall_through_to_default() {
         let (id, _) = resolve_anthropic_model_inner(Some("  "), Some(""));
-        assert_eq!(id, "claude-opus-4-7");
+        assert_eq!(id, "claude-opus-4-8");
     }
 
     #[test]
@@ -5640,6 +5917,13 @@ mod anthropic_model_tests {
                 "input: {s}"
             );
         }
+        for s in ["fable-5", "fable5", "fable", "claude-fable-5", "FABLE-5"] {
+            assert_eq!(
+                parse_anthropic_model_choice(s),
+                Some(("claude-fable-5", "fable-5")),
+                "input: {s}"
+            );
+        }
     }
 
     #[test]
@@ -5650,5 +5934,169 @@ mod anthropic_model_tests {
         let (id, disp) = normalize_anthropic_model("claude-opus-5-0");
         assert_eq!(id, "claude-opus-5-0");
         assert_eq!(disp, "claude-opus-5-0");
+    }
+}
+
+#[cfg(test)]
+mod anthropic_effort_tests {
+    //! `/effort` allowlist + resolver. Unlike the model resolver there is
+    //! deliberately NO unknown-value passthrough — an invalid effort would
+    //! 400 every turn, so bogus env/config values fall through to `"max"`.
+    use super::{parse_anthropic_effort_choice, resolve_anthropic_effort_inner};
+
+    #[test]
+    fn effort_allowlist_accepts_five_levels_rejects_junk() {
+        for s in ["low", "medium", "high", "xhigh", "max", " HIGH ", "Max"] {
+            assert!(
+                parse_anthropic_effort_choice(s).is_some(),
+                "should accept: {s}"
+            );
+        }
+        for s in ["", "maximum", "x-high", "ultra", "0.8"] {
+            assert_eq!(parse_anthropic_effort_choice(s), None, "should reject: {s}");
+        }
+    }
+
+    #[test]
+    fn resolve_effort_defaults_to_max_and_env_overrides_config() {
+        assert_eq!(resolve_anthropic_effort_inner(None, None), "max");
+        assert_eq!(resolve_anthropic_effort_inner(None, Some("high")), "high");
+        assert_eq!(
+            resolve_anthropic_effort_inner(Some("low"), Some("high")),
+            "low"
+        );
+        // Invalid values fall through to the next source, then the default.
+        assert_eq!(
+            resolve_anthropic_effort_inner(Some("bogus"), Some("xhigh")),
+            "xhigh"
+        );
+        assert_eq!(
+            resolve_anthropic_effort_inner(Some("bogus"), Some("also-bogus")),
+            "max"
+        );
+    }
+}
+
+#[cfg(test)]
+mod terminal_outcome_tests {
+    //! Refusal-as-error + max_tokens truncation surfacing. A terminal
+    //! refusal must produce an Error frame (never a silent `(no response)`
+    //! persist, never a fallback-model retry) and honest history text;
+    //! max_tokens produces a Warning frame. Pure-helper tests — the loop
+    //! driver has no full fake-provider harness, so `terminal_outcome_notice`
+    //! and `final_assistant_text` are the designed test seams.
+    use super::{final_assistant_text, terminal_outcome_notice};
+    use crate::provider::ir::{EarlyStopReason, StopDetails, TurnOutcome};
+    use embra_common::proto::brain::SystemMessageType;
+
+    #[test]
+    fn refusal_notice_is_error_frame_with_category_and_explanation() {
+        let details = StopDetails {
+            category: Some("cyber".into()),
+            explanation: Some("Request declined by safety classifier.".into()),
+        };
+        let (kind, msg) = terminal_outcome_notice(
+            TurnOutcome::EarlyStop(EarlyStopReason::Refusal),
+            Some(&details),
+        )
+        .expect("refusal must produce a frame");
+        assert_eq!(kind, SystemMessageType::Error);
+        assert!(msg.contains("refusal, category: cyber"), "{msg}");
+        assert!(msg.contains("Request declined by safety classifier."), "{msg}");
+        assert!(msg.contains("No fallback model was used."), "{msg}");
+    }
+
+    #[test]
+    fn refusal_notice_guards_missing_details() {
+        // category can be null and explanation absent even on a refusal —
+        // and stop_details itself can be missing entirely.
+        for details in [
+            None,
+            Some(StopDetails {
+                category: None,
+                explanation: None,
+            }),
+        ] {
+            let (kind, msg) = terminal_outcome_notice(
+                TurnOutcome::EarlyStop(EarlyStopReason::Refusal),
+                details.as_ref(),
+            )
+            .expect("refusal must produce a frame");
+            assert_eq!(kind, SystemMessageType::Error);
+            assert!(msg.contains("(refusal)"), "{msg}");
+            assert!(!msg.contains("category:"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn max_tokens_notice_is_warning_frame() {
+        let (kind, msg) =
+            terminal_outcome_notice(TurnOutcome::MaxTokens, None).expect("frame");
+        assert_eq!(kind, SystemMessageType::Warning);
+        assert!(msg.contains("max_tokens"), "{msg}");
+
+        // Non-refusal early stops get a generic Error frame (Gemini
+        // Safety/Recitation/Malformed + Anthropic StopSequence).
+        let (kind, msg) =
+            terminal_outcome_notice(TurnOutcome::EarlyStop(EarlyStopReason::Safety), None)
+                .expect("frame");
+        assert_eq!(kind, SystemMessageType::Error);
+        assert!(msg.contains("Safety"), "{msg}");
+    }
+
+    #[test]
+    fn end_turn_tool_use_pause_produce_no_notice() {
+        for outcome in [TurnOutcome::EndTurn, TurnOutcome::ToolUse, TurnOutcome::Pause] {
+            assert_eq!(terminal_outcome_notice(outcome, None), None);
+        }
+    }
+
+    #[test]
+    fn final_assistant_text_marks_refused_empty_turn() {
+        // Empty refusal → explicit marker, taking precedence over the
+        // tool-only placeholder.
+        let text = final_assistant_text(
+            "  ",
+            &["web_search".to_string()],
+            TurnOutcome::EarlyStop(EarlyStopReason::Refusal),
+        );
+        assert_eq!(text, "(request declined by provider: refusal)");
+    }
+
+    #[test]
+    fn final_assistant_text_appends_refusal_suffix_to_partial() {
+        let text = final_assistant_text(
+            "I was saying",
+            &[],
+            TurnOutcome::EarlyStop(EarlyStopReason::Refusal),
+        );
+        assert_eq!(
+            text,
+            "I was saying\n\n(response interrupted by provider refusal)"
+        );
+    }
+
+    #[test]
+    fn final_assistant_text_keeps_tool_placeholder_and_no_response_fallbacks() {
+        // Non-refusal behavior is byte-identical to the pre-extraction
+        // inline chain.
+        assert_eq!(
+            final_assistant_text("hello", &[], TurnOutcome::EndTurn),
+            "hello"
+        );
+        assert_eq!(
+            final_assistant_text("", &["time".to_string()], TurnOutcome::ToolUse),
+            "[tool calls: time]"
+        );
+        assert_eq!(
+            final_assistant_text("", &[], TurnOutcome::EndTurn),
+            "(no response)"
+        );
+        // MaxTokens keeps the partial verbatim — the Warning frame carries
+        // the truncation signal, not the transcript.
+        assert_eq!(
+            final_assistant_text("partial", &[], TurnOutcome::MaxTokens),
+            "partial"
+        );
     }
 }

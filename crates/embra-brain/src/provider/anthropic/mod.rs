@@ -1,8 +1,8 @@
-//! Anthropic provider: `claude-opus-4-7` (default) or `claude-opus-4-8`
-//! via `/v1/messages`. The model id is per-instance (`with_model`); the
-//! request shape — adaptive thinking, `effort: max`, prompt-caching beta —
-//! is identical across models, so switching Opus versions changes only the
-//! `model` field.
+//! Anthropic provider: `claude-opus-4-8` (default), `claude-opus-4-7`, or
+//! `claude-fable-5` via `/v1/messages`. The model id is per-instance
+//! (`with_model`); the request shape — adaptive thinking, `effort`
+//! (default `max`), prompt-caching beta — is identical across supported
+//! models, so switching models changes only the `model` field.
 //!
 //! Implements `LlmProvider` over the `/v1/messages` streaming endpoint.
 //! Internal structure:
@@ -35,26 +35,43 @@ use crate::provider::{
 use crate::tools::registry::ToolDescriptor;
 
 /// Default Anthropic model when none is configured. `with_model` overrides
-/// it (e.g. `claude-opus-4-8`); the resolver in `grpc_service.rs` picks the
-/// active id from env/config.
-pub const DEFAULT_MODEL: &str = "claude-opus-4-7";
+/// it (e.g. `claude-opus-4-7` or `claude-fable-5`); the resolver in
+/// `grpc_service.rs` picks the active id from env/config.
+pub const DEFAULT_MODEL: &str = "claude-opus-4-8";
 const MAX_TOKENS: u32 = 128_000;
+/// Default `output_config.effort`. Runtime-tunable via `/effort`
+/// (`with_effort`); the full `low..max` range is valid on every
+/// supported model (Opus 4.7/4.8, Fable 5).
+const DEFAULT_EFFORT: &str = "max";
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
 const BETA: &str = "prompt-caching-2024-07-31";
 const MODELS_URL: &str = "https://api.anthropic.com/v1/models";
 const VALIDATE_TIMEOUT: Duration = Duration::from_secs(10);
+/// TCP + TLS establishment bound for the streaming client.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Per-read idle timeout for the streaming client. Resets on every byte
+/// received; the API emits periodic SSE `ping` events well under this,
+/// so a live stream can never trip it — it only unsticks a genuinely
+/// dead connection. Do NOT replace with (or add) a total request
+/// `.timeout()`: turns legitimately run many minutes at high effort
+/// (especially Fable 5), and a total timeout would cut them mid-stream.
+const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Display name paired with [`DEFAULT_MODEL`] for the status bar.
-pub const DEFAULT_DISPLAY_NAME: &str = "opus-4.7";
+pub const DEFAULT_DISPLAY_NAME: &str = "opus-4.8";
 
 pub struct AnthropicProvider {
     api_key: String,
-    /// API model id sent in the request body (e.g. `claude-opus-4-7`).
+    /// API model id sent in the request body (e.g. `claude-opus-4-8`).
     model: String,
-    /// Short display name (e.g. `opus-4.7`); backs the
+    /// Short display name (e.g. `opus-4.8`); backs the
     /// `LlmProvider::display_name` accessor, exercised in tests like the
     /// sibling Gemini / OpenAI-compat providers' equivalent field.
     display_name: String,
+    /// `output_config.effort` sent in the request body. Defaults to
+    /// [`DEFAULT_EFFORT`]; overridden per-instance via [`Self::with_effort`]
+    /// from the `/effort`-persisted config value.
+    effort: String,
     http: Client,
 }
 
@@ -73,12 +90,96 @@ impl AnthropicProvider {
     /// shape is identical regardless of model — only the `model` field and
     /// the reported `display_name` differ.
     pub fn with_model(api_key: String, model: String, display_name: String) -> Self {
+        // Hardened streaming client: bounded connect + per-read idle
+        // timeouts only (see the const docs — a total timeout is
+        // deliberately absent). Builder failure is not expected with
+        // these options; fall back to the stock client rather than
+        // panic in PID-1-adjacent code.
+        let http = Client::builder()
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_IDLE_TIMEOUT)
+            .build()
+            .unwrap_or_else(|_| Client::new());
         Self {
             api_key,
             model,
             display_name,
-            http: Client::new(),
+            effort: DEFAULT_EFFORT.to_string(),
+            http,
         }
+    }
+
+    /// Override `output_config.effort` (builder-style, chained after
+    /// [`Self::with_model`]). The caller validates the value against the
+    /// API allowlist (`low|medium|high|xhigh|max`) — see
+    /// `parse_anthropic_effort_choice` in `grpc_service.rs`.
+    pub fn with_effort(mut self, effort: String) -> Self {
+        self.effort = effort;
+        self
+    }
+
+    /// Build the `/v1/messages` request body. Pure (no I/O) so the exact
+    /// shape is unit-testable per model — the shape is identical across
+    /// supported models (Opus 4.7/4.8, Fable 5); only `model` and the
+    /// configured `effort` vary per instance.
+    ///
+    /// Request body matches the pre-refactor send_message_streaming_with_tools
+    /// exactly — same model id, max_tokens, thinking config,
+    /// output_config, system-as-content-block-with-cache,
+    /// tool_choice: auto, prompt-caching beta header (set by the caller).
+    ///
+    /// `display: "summarized"` opts the API into emitting human-
+    /// readable `thinking_delta` SSE events (translated to
+    /// `StreamEvent::ReasoningDelta` for the live panel).
+    /// `"omitted"` suppresses those deltas entirely. The API
+    /// rejects any other value with 400 invalid_request_error
+    /// ("Input should be 'summarized', 'omitted'") — do NOT change
+    /// these strings without re-checking against the live API.
+    /// Signature round-trip (signed `thinking` block carrying
+    /// `signature_delta`) is unaffected by either setting and
+    /// still rides via `Block::ProviderOpaque`.
+    ///
+    /// Fable 5 note: `claude-fable-5` rejects `thinking:{type:"disabled"}`,
+    /// `budget_tokens`, and `temperature`/`top_p`/`top_k` with 400 — this
+    /// body sends none of them, and `{type:"adaptive", display:…}` +
+    /// `output_config.effort` are valid on it unchanged.
+    fn request_body(
+        &self,
+        system_text: &str,
+        wire_messages_json: Vec<serde_json::Value>,
+        tools: &ToolManifest,
+        options: &LlmRequestOptions,
+    ) -> serde_json::Value {
+        // Empty tool manifest → omit `tools` and `tool_choice` from
+        // the request body. Anthropic accepts the request without them
+        // (legacy text-only path used this shape for the learning
+        // flow).
+        let tools_empty = matches!(&tools.wire_json, serde_json::Value::Array(a) if a.is_empty());
+        let thinking_display = if options.include_reasoning {
+            "summarized"
+        } else {
+            "omitted"
+        };
+        let mut body = json!({
+            "model": self.model,
+            "max_tokens": MAX_TOKENS,
+            "thinking": {"type": "adaptive", "display": thinking_display},
+            "output_config": {"effort": self.effort},
+            "system": [{
+                "type": "text",
+                "text": system_text,
+                "cache_control": {"type": "ephemeral"}
+            }],
+            "messages": wire_messages_json,
+            "stream": true,
+        });
+        if !tools_empty {
+            if let Some(obj) = body.as_object_mut() {
+                obj.insert("tools".into(), tools.wire_json.clone());
+                obj.insert("tool_choice".into(), json!({"type": "auto"}));
+            }
+        }
+        body
     }
 }
 
@@ -131,51 +232,9 @@ impl LlmProvider for AnthropicProvider {
         let wire_messages = conv::ir_messages_to_wire(messages);
         let wire_messages_json = build_cached_messages(&wire_messages);
 
-        // Empty tool manifest → omit `tools` and `tool_choice` from
-        // the request body. Anthropic accepts the request without them
-        // (legacy text-only path used this shape for the learning
-        // flow).
-        let tools_empty = matches!(&tools.wire_json, serde_json::Value::Array(a) if a.is_empty());
-
-        // Request body matches the pre-refactor send_message_streaming_with_tools
-        // exactly — same model id, max_tokens, thinking config,
-        // output_config, system-as-content-block-with-cache,
-        // tool_choice: auto, prompt-caching beta header.
-        //
-        // `display: "summarized"` opts the API into emitting human-
-        // readable `thinking_delta` SSE events (translated to
-        // `StreamEvent::ReasoningDelta` for the live panel).
-        // `"omitted"` suppresses those deltas entirely. The API
-        // rejects any other value with 400 invalid_request_error
-        // ("Input should be 'summarized', 'omitted'") — do NOT change
-        // these strings without re-checking against the live API.
-        // Signature round-trip (signed `thinking` block carrying
-        // `signature_delta`) is unaffected by either setting and
-        // still rides via `Block::ProviderOpaque`.
-        let thinking_display = if options.include_reasoning {
-            "summarized"
-        } else {
-            "omitted"
-        };
-        let mut body = json!({
-            "model": self.model,
-            "max_tokens": MAX_TOKENS,
-            "thinking": {"type": "adaptive", "display": thinking_display},
-            "output_config": {"effort": "max"},
-            "system": [{
-                "type": "text",
-                "text": &system.text,
-                "cache_control": {"type": "ephemeral"}
-            }],
-            "messages": wire_messages_json,
-            "stream": true,
-        });
-        if !tools_empty {
-            if let Some(obj) = body.as_object_mut() {
-                obj.insert("tools".into(), tools.wire_json.clone());
-                obj.insert("tool_choice".into(), json!({"type": "auto"}));
-            }
-        }
+        // Body construction lives in `request_body` (pure, unit-tested);
+        // see its doc comment for the load-bearing shape notes.
+        let body = self.request_body(&system.text, wire_messages_json, tools, &options);
 
         // Spawn the request + SSE consumer; events flow through an
         // mpsc channel to keep the parser code unchanged. The
@@ -254,11 +313,14 @@ impl LlmProvider for AnthropicProvider {
                     }
                     wire::AnthropicStreamEvent::Complete { response } => {
                         let outcome = conv::stop_reason_to_outcome(response.stop_reason);
+                        let stop_details =
+                            response.stop_details.map(conv::wire_stop_details_to_ir);
                         let content = conv::wire_blocks_to_ir(response.content);
                         Some(StreamEvent::Complete(AssistantTurn {
                             content,
                             outcome,
                             usage: None,
+                            stop_details,
                         }))
                     }
                 }
@@ -336,21 +398,112 @@ mod tests {
     use crate::provider::ir::Block;
 
     #[test]
-    fn new_defaults_to_opus_4_7() {
+    fn new_defaults_to_opus_4_8() {
         let p = AnthropicProvider::new(String::new());
+        assert_eq!(p.model, "claude-opus-4-8");
+        assert_eq!(p.display_name(), "opus-4.8");
+        assert_eq!(p.effort, "max");
+    }
+
+    #[test]
+    fn with_model_sets_opus_4_7() {
+        let p = AnthropicProvider::with_model(
+            String::new(),
+            "claude-opus-4-7".to_string(),
+            "opus-4.7".to_string(),
+        );
         assert_eq!(p.model, "claude-opus-4-7");
         assert_eq!(p.display_name(), "opus-4.7");
     }
 
     #[test]
-    fn with_model_sets_opus_4_8() {
+    fn with_model_sets_fable_5() {
         let p = AnthropicProvider::with_model(
+            String::new(),
+            "claude-fable-5".to_string(),
+            "fable-5".to_string(),
+        );
+        assert_eq!(p.model, "claude-fable-5");
+        assert_eq!(p.display_name(), "fable-5");
+    }
+
+    fn empty_manifest() -> ToolManifest {
+        ToolManifest {
+            wire_json: json!([]),
+            fingerprint: String::new(),
+        }
+    }
+
+    /// The request shape must be byte-identical across supported models
+    /// (only `model` differs) and must never contain the fields Fable 5
+    /// rejects with 400 (`temperature`/`top_p`/`top_k`, `budget_tokens`,
+    /// `thinking.type: disabled`).
+    #[test]
+    fn fable_5_request_body_shape_matches_opus() {
+        let opts = LlmRequestOptions {
+            include_reasoning: true,
+        };
+        let tools = ToolManifest {
+            wire_json: json!([{"name": "time", "description": "d", "input_schema": {}}]),
+            fingerprint: String::new(),
+        };
+        let fable = AnthropicProvider::with_model(
+            String::new(),
+            "claude-fable-5".to_string(),
+            "fable-5".to_string(),
+        );
+        let body = fable.request_body("sys", vec![json!({"role": "user"})], &tools, &opts);
+
+        assert_eq!(body["model"], "claude-fable-5");
+        assert_eq!(body["max_tokens"], MAX_TOKENS);
+        assert_eq!(body["thinking"]["type"], "adaptive");
+        assert_eq!(body["thinking"]["display"], "summarized");
+        assert_eq!(body["output_config"]["effort"], "max");
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["tool_choice"]["type"], "auto");
+        for forbidden in ["temperature", "top_p", "top_k"] {
+            assert!(body.get(forbidden).is_none(), "{forbidden} must be absent");
+        }
+        assert!(body["thinking"].get("budget_tokens").is_none());
+
+        // Same shape as an Opus instance modulo the model id.
+        let opus = AnthropicProvider::with_model(
             String::new(),
             "claude-opus-4-8".to_string(),
             "opus-4.8".to_string(),
         );
-        assert_eq!(p.model, "claude-opus-4-8");
-        assert_eq!(p.display_name(), "opus-4.8");
+        let mut opus_body =
+            opus.request_body("sys", vec![json!({"role": "user"})], &tools, &opts);
+        opus_body["model"] = json!("claude-fable-5");
+        assert_eq!(body, opus_body);
+
+        // display gating: include_reasoning=false → "omitted"; empty
+        // manifest → tools/tool_choice omitted entirely.
+        let body = fable.request_body(
+            "sys",
+            vec![],
+            &empty_manifest(),
+            &LlmRequestOptions {
+                include_reasoning: false,
+            },
+        );
+        assert_eq!(body["thinking"]["display"], "omitted");
+        assert!(body.get("tools").is_none());
+        assert!(body.get("tool_choice").is_none());
+    }
+
+    #[test]
+    fn request_body_carries_configured_effort() {
+        let p = AnthropicProvider::new(String::new()).with_effort("high".to_string());
+        let body = p.request_body(
+            "sys",
+            vec![],
+            &empty_manifest(),
+            &LlmRequestOptions {
+                include_reasoning: true,
+            },
+        );
+        assert_eq!(body["output_config"]["effort"], "high");
     }
 
     #[test]
