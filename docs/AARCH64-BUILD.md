@@ -12,8 +12,8 @@
 > in-OS Rust toolchain → Buildroot, including the new `embra-web` and
 > `embra-rust-toolchain` packages), HVF boot, soul formation, the serial TUI
 > (`EMBRA_TUI=1`), and **embra-guardian-v1** (a dynamic tool compiled in-guest via
-> `/opt/rust` and run in the wasmtime sandbox). embra-web and embra-guardian-v1 remain
-> **experimental** features upstream (project-wide, not aarch64-specific). On an 8 GB
+> `/opt/rust` and run in the wasmtime sandbox). embra-guardian-v1 remains an
+> **experimental** feature upstream (project-wide, not aarch64-specific). On an 8 GB
 > host, cap build parallelism — see the `JOBS` knob below. Re-run the [End-to-End
 > Validation](#end-to-end-validation) checklist after any canonical-build bump and
 > re-stamp this date.
@@ -32,11 +32,11 @@ Builds a QEMU-bootable ARM64 embraOS image that runs natively on Apple Silicon v
 Steps 0.5–3 (frontend + Rust cross-compile + initramfs) run on macOS; Step 3.5 (in-OS
 Rust toolchain) and Step 4 (Buildroot) run in a `linux/arm64` Docker container.
 
-> ⚠️ **Default UI is the browser console — experimental.** `run-qemu-aarch64.sh`
-> boots the **embra-web** console by default, served over HTTPS at
+> **Default UI is the browser console.** `run-qemu-aarch64.sh` boots the
+> **embra-web** console by default, served over HTTPS at
 > **https://localhost:3345/embraOS** (accept the embraOS-CA cert on first visit). Set
-> **`EMBRA_TUI=1`** before `run-qemu-aarch64.sh` to boot the stable Phase 1 serial TUI
-> on this terminal instead — no image rebuild needed.
+> **`EMBRA_TUI=1`** before `run-qemu-aarch64.sh` to boot the serial TUI on this
+> terminal instead — no image rebuild needed.
 
 > **zsh paste gotcha:** macOS's default `zsh` doesn't treat `#` as a comment in
 > interactive shells — pasting a multi-line code block from this guide makes

@@ -2,12 +2,11 @@
 
 Build a QEMU-bootable embraOS disk image from source and boot it. The project landing page is [../README.md](../README.md).
 
-> ⚠️ **New default UI — experimental.** The browser-based **embra-web** console is now
-> the default UI, served over HTTPS at **https://localhost:3345/embraOS** (accept the
-> embraOS-CA cert on first visit). It wraps the same Phase 1 conversational TUI in
-> xterm.js over a PTY→WebSocket bridge and is **experimental**. Set **`EMBRA_TUI=1`**
-> before `run-qemu.sh` to boot the stable Phase 1 serial TUI instead — no image
-> rebuild needed.
+> **Default UI.** The browser-based **embra-web** console is the default UI, served
+> over HTTPS at **https://localhost:3345/embraOS** (accept the embraOS-CA cert on
+> first visit). It wraps the same Phase 1 conversational TUI in xterm.js over a
+> PTY→WebSocket bridge. Set **`EMBRA_TUI=1`** before `run-qemu.sh` to boot the
+> serial TUI instead — no image rebuild needed.
 
 ## Phase 1 — Build from Source (QEMU Bootable Image)
 
@@ -80,10 +79,10 @@ cd ~/projects/embraOS
 # Build and run — pick a storage engine: rocksdb (battle-tested) or fjall (pure Rust)
 ./scripts/build-image.sh --storage-engine rocksdb   # Full pipeline: Rust → initramfs → Buildroot → disk image
 
-# Default UI is the embra-web console (experimental) — https://localhost:3345/embraOS
+# Default UI is the embra-web console — https://localhost:3345/embraOS
 ./scripts/run-qemu.sh                                # Boot in QEMU — web console (default)
 
-# Or fall back to the stable Phase 1 serial TUI on this terminal (no rebuild needed)
+# Or fall back to the serial TUI on this terminal (no rebuild needed)
 EMBRA_TUI=1 ./scripts/run-qemu.sh                    # Boot in QEMU — serial TUI
 ```
 

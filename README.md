@@ -94,7 +94,7 @@ Operators can edit the soul out-of-band; the brain cannot request that.
 
 Build from source: **[docs/QUICK-START.md](docs/QUICK-START.md)** (Apple Silicon: **[docs/AARCH64-BUILD.md](docs/AARCH64-BUILD.md)**; Intel Mac: **[docs/INTEL-MAC-BUILD.md](docs/INTEL-MAC-BUILD.md)**).
 
-> ⚠️ **Default UI — experimental.** The browser-based **embra-web** console is the default UI, served over HTTPS at **https://localhost:3345/embraOS**. Set **`EMBRA_TUI=1`** before `run-qemu.sh` for the stable Phase 1 serial TUI instead — no image rebuild needed.
+> **Default UI.** The browser-based **embra-web** console is the default UI, served over HTTPS at **https://localhost:3345/embraOS**. Set **`EMBRA_TUI=1`** before `run-qemu.sh` for the serial TUI instead — no image rebuild needed.
 
 ---
 

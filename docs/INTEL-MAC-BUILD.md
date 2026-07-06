@@ -13,8 +13,8 @@
 > `qemu-system-x86_64`, Config Wizard + soul-formation, the serial TUI
 > (`EMBRA_TUI=1`), embra-guardian-v1 (a dynamic tool compiled in-guest via
 > `/opt/rust` and run in the wasmtime sandbox), and reboot + second-boot
-> soul SHA-256 verify. embra-web and embra-guardian-v1 remain experimental
-> features upstream (project-wide, not Intel-Mac-specific). Re-run the
+> soul SHA-256 verify. embra-guardian-v1 remains an experimental
+> feature upstream (project-wide, not Intel-Mac-specific). Re-run the
 > [End-to-End Validation](#end-to-end-validation) checklist after any
 > canonical-build bump and re-stamp this date.
 >
@@ -33,11 +33,11 @@ Builds the x86_64 embraOS image that runs natively on Intel Mac via HVF. Steps
 0.5–3.5 (frontend + Rust cross-compile + initramfs + in-OS Rust toolchain stage)
 run on macOS; Step 4 (Buildroot) runs in a `linux/amd64` Docker container.
 
-> ⚠️ **Default UI is the browser console — experimental.** `run-qemu.sh` boots
-> the **embra-web** console by default, served over HTTPS at
+> **Default UI is the browser console.** `run-qemu.sh` boots the **embra-web**
+> console by default, served over HTTPS at
 > **https://localhost:3345/embraOS** (accept the embraOS-CA cert on first visit).
-> Set **`EMBRA_TUI=1`** before `run-qemu.sh` to boot the stable Phase 1 serial
-> TUI on this terminal instead — no image rebuild needed.
+> Set **`EMBRA_TUI=1`** before `run-qemu.sh` to boot the serial TUI on this
+> terminal instead — no image rebuild needed.
 
 > **zsh paste gotcha:** macOS's default `zsh` doesn't treat `#` as a comment in
 > interactive shells — pasting a multi-line code block from this guide makes
