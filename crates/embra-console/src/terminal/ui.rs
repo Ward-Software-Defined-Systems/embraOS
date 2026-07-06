@@ -26,7 +26,7 @@ pub fn draw(f: &mut Frame, app: &AppState) {
 
     // EXPR-01: optional expression panel as a horizontal band below the header.
     // Hidden on small terminals so the conversation keeps enough rows.
-    let show_panel = app.viewport_cols >= 80 && app.viewport_rows >= 20;
+    let show_panel = app.expression_panel_visible();
     let panel_height: u16 = if show_panel { 8 } else { 0 };
 
     let chunks = Layout::default()
@@ -55,14 +55,22 @@ fn draw_expression_panel(f: &mut Frame, area: Rect, app: &AppState) {
     // italic dark-gray for ephemeral reasoning vs solid gray for
     // operator-set expression — without consuming any of the 6 visible
     // content rows for a header.
+    //
+    // Both sources render through the same tail-anchored window so
+    // `expression_scroll` (Shift+Up/Down/PageUp/PageDown) works on
+    // either. Long `express` content therefore shows its TAIL by
+    // default now (previously it head-clipped at the panel bottom with
+    // the overflow unreachable) — with scroll, all of it is reachable.
     let inner_width = area.width.saturating_sub(2) as usize; // minus borders
     let inner_rows = area.height.saturating_sub(2) as usize; // minus borders
+    let skip = app.expression_scroll as usize;
     let (rendered, style) = if !app.live_reasoning.is_empty() {
         (
             window_to_visible_rows(
                 &sanitize_for_render(&app.live_reasoning),
                 inner_width,
                 inner_rows,
+                skip,
             ),
             Style::default()
                 .fg(Color::DarkGray)
@@ -70,7 +78,12 @@ fn draw_expression_panel(f: &mut Frame, area: Rect, app: &AppState) {
         )
     } else {
         (
-            sanitize_for_render(&app.expression_content),
+            window_to_visible_rows(
+                &sanitize_for_render(&app.expression_content),
+                inner_width,
+                inner_rows,
+                skip,
+            ),
             Style::default().fg(Color::Gray),
         )
     };
@@ -81,12 +94,17 @@ fn draw_expression_panel(f: &mut Frame, area: Rect, app: &AppState) {
     f.render_widget(para, area);
 }
 
-/// Soft-wrap `text` by `cols` and return only the last `rows` visual
-/// lines, joined by newlines. Pre-windowing matches `draw_conversation`'s
-/// pattern of explicit wrapping management and avoids
-/// `Paragraph::scroll`'s drift on edge cases (CJK width, trailing `\n`).
-/// `cols == 0` or `rows == 0` returns the empty string.
-fn window_to_visible_rows(text: &str, cols: usize, rows: usize) -> String {
+/// Soft-wrap `text` by `cols` and return `rows` visual lines ending
+/// `skip_from_bottom` rows above the tail, joined by newlines
+/// (`skip_from_bottom == 0` = the last `rows` lines — the original tail
+/// window). Mirrors `draw_conversation`'s `scroll_offset` math: the
+/// offset counts up from the bottom, and over-scrolling saturates at
+/// the top (possibly returning fewer than `rows` lines). Pre-windowing
+/// matches `draw_conversation`'s pattern of explicit wrapping
+/// management and avoids `Paragraph::scroll`'s drift on edge cases
+/// (CJK width, trailing `\n`). `cols == 0` or `rows == 0` returns the
+/// empty string.
+fn window_to_visible_rows(text: &str, cols: usize, rows: usize, skip_from_bottom: usize) -> String {
     if cols == 0 || rows == 0 {
         return String::new();
     }
@@ -109,8 +127,9 @@ fn window_to_visible_rows(text: &str, cols: usize, rows: usize) -> String {
         }
         wrapped.push(current);
     }
-    let start = wrapped.len().saturating_sub(rows);
-    wrapped[start..].join("\n")
+    let end = wrapped.len().saturating_sub(skip_from_bottom);
+    let start = end.saturating_sub(rows);
+    wrapped[start..end].join("\n")
 }
 
 /// Render-side ANSI and control-char strip. Second defence layer behind
@@ -547,4 +566,55 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &AppState) {
 
     let status = Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::DarkGray));
     f.render_widget(status, area);
+}
+
+#[cfg(test)]
+mod expression_window_tests {
+    //! Tail-anchored windowing for the expression panel, now with a
+    //! from-bottom scroll offset (Shift+Up/Down/PageUp/PageDown). Pure
+    //! fn — same test seam discipline as `input_layout`.
+    use super::window_to_visible_rows;
+
+    fn ten_lines() -> String {
+        (1..=10).map(|i| format!("l{i}")).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn zero_offset_keeps_the_original_tail_window() {
+        let out = window_to_visible_rows(&ten_lines(), 80, 6, 0);
+        assert_eq!(out, "l5\nl6\nl7\nl8\nl9\nl10");
+    }
+
+    #[test]
+    fn offset_scrolls_up_by_visual_rows() {
+        let out = window_to_visible_rows(&ten_lines(), 80, 6, 2);
+        assert_eq!(out, "l3\nl4\nl5\nl6\nl7\nl8");
+        let out = window_to_visible_rows(&ten_lines(), 80, 6, 4);
+        assert_eq!(out, "l1\nl2\nl3\nl4\nl5\nl6");
+    }
+
+    #[test]
+    fn over_scroll_saturates_at_the_top() {
+        // skip > total-rows pins to the head and may return fewer than
+        // `rows` lines — the conversation pane's exact semantics.
+        let out = window_to_visible_rows(&ten_lines(), 80, 6, 8);
+        assert_eq!(out, "l1\nl2");
+        let out = window_to_visible_rows(&ten_lines(), 80, 6, 100);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn offset_counts_wrapped_visual_rows_not_source_lines() {
+        // 10 chars at cols=4 wraps into 3 visual rows: "aaaa","bbbb","cc".
+        let out = window_to_visible_rows("aaaabbbbcc", 4, 2, 0);
+        assert_eq!(out, "bbbb\ncc");
+        let out = window_to_visible_rows("aaaabbbbcc", 4, 2, 1);
+        assert_eq!(out, "aaaa\nbbbb");
+    }
+
+    #[test]
+    fn zero_cols_or_rows_returns_empty() {
+        assert_eq!(window_to_visible_rows("x", 0, 6, 0), "");
+        assert_eq!(window_to_visible_rows("x", 80, 0, 3), "");
+    }
 }

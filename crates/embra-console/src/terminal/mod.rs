@@ -171,6 +171,10 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
                     if version != app.expression_version {
                         app.expression_content = content;
                         app.expression_version = version;
+                        // New content — snap the panel scroll back to the
+                        // tail so the operator isn't pinned into the old
+                        // expression.
+                        app.expression_scroll = 0;
                     }
                 }
             }
@@ -213,7 +217,7 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
             // SYSTEM_MESSAGE_TYPE_ERROR == 3. Brain failures during a
             // turn should not leave stale reasoning on the panel.
             if msg_type == "3" {
-                app.live_reasoning.clear();
+                app.clear_live_reasoning();
             }
             app.messages.push(DisplayMessage::system_with_tz(&content, &app.config_tz));
             app.scroll_offset = 0;
@@ -258,7 +262,7 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
         ConsoleEvent::ModeTransition { from_mode: _, to_mode, message } => {
             // Mode change resets per-turn UI context — drop any pending
             // reasoning from the prior phase.
-            app.live_reasoning.clear();
+            app.clear_live_reasoning();
             // Parse name from message (format: "... — Name: <name> — ...")
             if let Some(name_part) = message.split("Name: ").nth(1) {
                 let name = name_part.split(" — ").next().unwrap_or(name_part).trim().to_string();
@@ -402,7 +406,7 @@ async fn handle_key_event(
             if let Some(selector) = app.selector.take() {
                 // Send selector choice
                 let choice = selector.current().to_string();
-                app.live_reasoning.clear();
+                app.clear_live_reasoning();
                 let _ = in_tx.send(ConversationRequest {
                     request_type: Some(conversation_request::RequestType::UserMessage(
                         UserMessage { content: choice }
@@ -416,7 +420,7 @@ async fn handle_key_event(
                     app.guardian_capture = false;
                     app.multiline_mode = false;
                     app.messages.push(DisplayMessage::system_with_tz("Submitting Guardian tool module…", &app.config_tz));
-                    app.live_reasoning.clear();
+                    app.clear_live_reasoning();
                     let _ = in_tx.send(ConversationRequest {
                         request_type: Some(conversation_request::RequestType::SlashCommand(
                             SlashCommand { command: "/guardian".to_string(), args: format!("define\n{content}") }
@@ -425,7 +429,7 @@ async fn handle_key_event(
                 } else {
                     // Send pasted content
                     app.messages.push(DisplayMessage::new_with_tz("user", &content, &app.config_tz));
-                    app.live_reasoning.clear();
+                    app.clear_live_reasoning();
                     let _ = in_tx.send(ConversationRequest {
                         request_type: Some(conversation_request::RequestType::UserMessage(
                             UserMessage { content }
@@ -463,7 +467,7 @@ async fn handle_key_event(
                             // Guardian capture: deliver the typed module to
                             // the brain's /guardian define path.
                             app.messages.push(DisplayMessage::system_with_tz("Submitting Guardian tool module…", &app.config_tz));
-                            app.live_reasoning.clear();
+                            app.clear_live_reasoning();
                             let _ = in_tx.send(ConversationRequest {
                                 request_type: Some(conversation_request::RequestType::SlashCommand(
                                     SlashCommand { command: "/guardian".to_string(), args: format!("define\n{input}") }
@@ -471,7 +475,7 @@ async fn handle_key_event(
                             }).await;
                         } else {
                             app.messages.push(DisplayMessage::new_with_tz("user", &input, &app.config_tz));
-                            app.live_reasoning.clear();
+                            app.clear_live_reasoning();
                             let _ = in_tx.send(ConversationRequest {
                                 request_type: Some(conversation_request::RequestType::UserMessage(
                                     UserMessage { content: input }
@@ -535,7 +539,7 @@ async fn handle_key_event(
                         }
                     } else {
                         // Send to brain via gRPC
-                        app.live_reasoning.clear();
+                        app.clear_live_reasoning();
                         let _ = in_tx.send(ConversationRequest {
                             request_type: Some(conversation_request::RequestType::SlashCommand(
                                 SlashCommand { command: cmd.to_string(), args: args.to_string() }
@@ -545,7 +549,7 @@ async fn handle_key_event(
                 } else {
                     // Regular message
                     app.messages.push(DisplayMessage::new_with_tz("user", &input, &app.config_tz));
-                    app.live_reasoning.clear();
+                    app.clear_live_reasoning();
                     let _ = in_tx.send(ConversationRequest {
                         request_type: Some(conversation_request::RequestType::UserMessage(
                             UserMessage { content: input }
@@ -560,6 +564,35 @@ async fn handle_key_event(
             let byte_pos = char_to_byte_pos(&app.input_buffer, app.cursor_pos);
             app.input_buffer.insert(byte_pos, '\n');
             app.cursor_pos += 1;
+        }
+
+        // Expression-panel scroll (Shift chords). MUST sit before the
+        // bare `(KeyCode::Up, _)` conversation-scroll arms below — the
+        // `_` modifier wildcard would swallow Shift too (the exact
+        // shadowing that makes the Alt+Enter arm above unreachable).
+        // Guarded with `.contains` so SHIFT combined with other
+        // modifiers still routes here. No-op while the panel is hidden
+        // (small terminals) so invisible state can't drift. Offsets
+        // count rows from the bottom, mirroring `scroll_offset`.
+        (KeyCode::Up, m) if m.contains(KeyModifiers::SHIFT) => {
+            if app.expression_panel_visible() {
+                app.expression_scroll = app.expression_scroll.saturating_add(1);
+            }
+        }
+        (KeyCode::Down, m) if m.contains(KeyModifiers::SHIFT) => {
+            if app.expression_panel_visible() {
+                app.expression_scroll = app.expression_scroll.saturating_sub(1);
+            }
+        }
+        (KeyCode::PageUp, m) if m.contains(KeyModifiers::SHIFT) => {
+            if app.expression_panel_visible() {
+                app.expression_scroll = app.expression_scroll.saturating_add(5);
+            }
+        }
+        (KeyCode::PageDown, m) if m.contains(KeyModifiers::SHIFT) => {
+            if app.expression_panel_visible() {
+                app.expression_scroll = app.expression_scroll.saturating_sub(5);
+            }
         }
 
         // Scroll
@@ -749,6 +782,74 @@ mod reasoning_tests {
         let mut buf = "kept".to_string();
         append_live_reasoning(&mut buf, "");
         assert_eq!(buf, "kept");
+    }
+
+    #[test]
+    fn clear_live_reasoning_resets_panel_scroll() {
+        // The clear helper is the single seam every clear site routes
+        // through — reasoning and scroll offset must drop together so
+        // the operator is never scrolled into vanished content.
+        let mut app = AppState::new();
+        app.live_reasoning = "some reasoning".to_string();
+        app.expression_scroll = 7;
+        app.clear_live_reasoning();
+        assert!(app.live_reasoning.is_empty());
+        assert_eq!(app.expression_scroll, 0);
+    }
+
+    #[test]
+    fn error_system_message_resets_panel_scroll() {
+        let mut app = AppState::new();
+        app.live_reasoning = "reasoning".to_string();
+        app.expression_scroll = 3;
+        handle_console_event(
+            ConsoleEvent::SystemMessage {
+                content: "Brain error: boom".to_string(),
+                msg_type: "3".to_string(),
+            },
+            &mut app,
+        );
+        assert!(app.live_reasoning.is_empty());
+        assert_eq!(app.expression_scroll, 0);
+
+        // Non-error system frames keep both.
+        let mut app = AppState::new();
+        app.live_reasoning = "reasoning".to_string();
+        app.expression_scroll = 3;
+        handle_console_event(
+            ConsoleEvent::SystemMessage {
+                content: "info".to_string(),
+                msg_type: "1".to_string(),
+            },
+            &mut app,
+        );
+        assert_eq!(app.live_reasoning, "reasoning");
+        assert_eq!(app.expression_scroll, 3);
+    }
+
+    #[test]
+    fn mode_transition_resets_panel_scroll_but_response_done_keeps_it() {
+        let mut app = AppState::new();
+        app.expression_scroll = 4;
+        handle_console_event(
+            ConsoleEvent::ModeTransition {
+                from_mode: 3,
+                to_mode: 3,
+                message: "Operational — Name: Embra — Session: main — TZ: UTC — Brain: opus-4.8"
+                    .to_string(),
+            },
+            &mut app,
+        );
+        assert_eq!(app.expression_scroll, 0);
+
+        // ResponseDone deliberately preserves reasoning AND the scroll
+        // position — the operator may be mid-review when the turn ends.
+        let mut app = AppState::new();
+        app.live_reasoning = "kept".to_string();
+        app.expression_scroll = 4;
+        handle_console_event(ConsoleEvent::ResponseDone("ok".to_string()), &mut app);
+        assert_eq!(app.live_reasoning, "kept");
+        assert_eq!(app.expression_scroll, 4);
     }
 }
 

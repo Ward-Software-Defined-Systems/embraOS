@@ -193,6 +193,15 @@ pub struct AppState {
     /// contract this is NEVER persisted, NEVER replayed to the model,
     /// and the brain handler keeps it off `full_response`.
     pub live_reasoning: String,
+    /// Expression-panel scroll offset in visual rows from the BOTTOM
+    /// (0 = tail pinned, mirroring the conversation pane's
+    /// `scroll_offset` semantics). Applies to whichever source the
+    /// panel is showing (live reasoning or the `express` singleton).
+    /// Mutated by Shift+Up/Down/PageUp/PageDown; reset to 0 whenever
+    /// `live_reasoning` clears (user submit / error / mode transition)
+    /// or a poll swaps in new `expression_content`, so the operator is
+    /// never left scrolled into stale content.
+    pub expression_scroll: u16,
     // Viewport dimensions (detected once at boot) — drive the panel size gate
     pub viewport_cols: u16,
     pub viewport_rows: u16,
@@ -226,9 +235,28 @@ impl AppState {
             expression_content: String::new(),
             expression_version: 0,
             live_reasoning: String::new(),
+            expression_scroll: 0,
             viewport_cols: 80,
             viewport_rows: 24,
         }
+    }
+
+    /// Clear the live-reasoning buffer AND snap the expression-panel
+    /// scroll back to the tail. The two must travel together: every
+    /// clear also switches the panel's source (back to the `express`
+    /// singleton), and a stale scroll offset would leave the operator
+    /// pinned into content that no longer exists. Call this instead of
+    /// touching `live_reasoning` directly at the clear sites.
+    pub fn clear_live_reasoning(&mut self) {
+        self.live_reasoning.clear();
+        self.expression_scroll = 0;
+    }
+
+    /// EXPR-01 panel size gate — single source of truth shared by the
+    /// renderer (whether to draw the band) and the key handler (whether
+    /// Shift-scroll chords should mutate `expression_scroll`).
+    pub fn expression_panel_visible(&self) -> bool {
+        self.viewport_cols >= 80 && self.viewport_rows >= 20
     }
 
     /// Infer setup step from a SetupPrompt prompt string. Order
