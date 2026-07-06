@@ -10,8 +10,7 @@
     }
   ],
   "description": "embraOS is a continuity-preserving operating system for a single AI runtime, written in Rust. The disk image is immutable (SquashFS); the operator-defined identity (\"soul\") is sealed at first boot and verified by SHA-256 on every subsequent boot. Cross-session memory and named sessions persist in a single JSON document database (WardSONDB). There is no shell — interaction is through a serial TUI or an HTTPS web console. The runtime drives one of four pluggable LLM backends through a fixed 94-tool surface, with a knowledge-graph memory layer and an operator-governed dynamic-tool substrate (embra-guardian). This release marks Phase 1 (Core OS), QEMU-bootable on x86_64 and aarch64.",
-  "access_right": "restricted",
-  "access_conditions": "Proprietary software. Access is granted at the discretion of Ward Software Defined Systems LLC — contact william@wsds.io.",
+  "access_right": "open",
   "keywords": ["operating system", "artificial intelligence", "Rust", "AI alignment", "AI identity", "persistent memory", "knowledge graph", "language models"],
   "notes": "Proprietary and trademarked. \"embraOS\", \"Embra\", and \"Ward Software Defined Systems\" are trademarks of Ward Software Defined Systems LLC. All rights reserved. See LICENSE."
 }
