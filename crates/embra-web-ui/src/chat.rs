@@ -332,6 +332,7 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
     ("Provider", &[
         ("/provider", "show or switch provider"),
         ("/model", "show / switch Anthropic model"),
+        ("/effort", "show / set Anthropic effort"),
         ("/iter-cap", "show / set tool iteration cap"),
         ("/show-reasoning", "toggle reasoning panel"),
     ]),

@@ -37,7 +37,9 @@ Provider:
   /provider --setup <anthropic|gemini>   Add/replace an API key (multi-turn)
   /provider --setup <ollama|lm_studio>   Reconfigure endpoint, bearer, model (multi-turn)
   /model                                 Show the active Anthropic model
-  /model <opus-4.7|opus-4.8>             Switch the Anthropic Opus version (next message)
+  /model <opus-4.7|opus-4.8|fable-5>     Switch the Anthropic model (next message)
+  /effort                                Show the Anthropic effort level
+  /effort <low|medium|high|xhigh|max>    Set effort (default max, next message)
 
 Tool loop:
   /iter-cap                      Show the per-turn tool iteration cap
