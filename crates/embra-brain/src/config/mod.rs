@@ -327,6 +327,31 @@ pub async fn save_config(db: &WardsonDbClient, config: &SystemConfig) -> Result<
     }
 }
 
+/// Validate a proposed intelligence display name (the `set_name` tool
+/// and the Phase-2 identity→config sync both route through this; the
+/// wizard's Step-1 free-text answer predates it and stays permissive).
+/// Returns the trimmed name. Bounds are display-driven: the name renders
+/// in the status bar, the `[timestamp] Name:` message prefix, and the
+/// `You are {name}` prompt line — single line, 1..=40 chars, no control
+/// characters. It also rides the ModeTransition `"Name: X — "` token, so
+/// the ` — ` separator sequence is rejected to keep that parse unambiguous.
+pub fn validate_intelligence_name(raw: &str) -> Result<String, String> {
+    let name = raw.trim();
+    if name.is_empty() {
+        return Err("name must not be empty".to_string());
+    }
+    if name.chars().count() > 40 {
+        return Err("name must be at most 40 characters".to_string());
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return Err("name must be a single line without control characters".to_string());
+    }
+    if name.contains(" — ") {
+        return Err("name must not contain the ' — ' separator sequence".to_string());
+    }
+    Ok(name.to_string())
+}
+
 pub async fn load_config(db: &WardsonDbClient) -> Result<SystemConfig> {
     // Try direct GET by well-known ID first
     let mut config = match db.read("config.system", "config").await {
@@ -1182,6 +1207,44 @@ mod provider_label_tests {
             Some("fable-5".to_string())
         );
         assert_eq!(anthropic_model_from_label(PROVIDER_GEMINI_LABEL), None);
+    }
+}
+
+#[cfg(test)]
+mod intelligence_name_tests {
+    //! Shared validator behind the `set_name` tool and the Phase-2
+    //! identity→config sync. Display-driven bounds — see the fn doc.
+    use super::validate_intelligence_name;
+
+    #[test]
+    fn accepts_and_trims_reasonable_names() {
+        assert_eq!(validate_intelligence_name("Embra"), Ok("Embra".to_string()));
+        assert_eq!(
+            validate_intelligence_name("  Ada Lovelace  "),
+            Ok("Ada Lovelace".to_string())
+        );
+        // Unicode is fine — the bound is char count, not bytes.
+        assert_eq!(validate_intelligence_name("Émbra"), Ok("Émbra".to_string()));
+    }
+
+    #[test]
+    fn rejects_empty_overlong_and_control() {
+        assert!(validate_intelligence_name("").is_err());
+        assert!(validate_intelligence_name("   ").is_err());
+        assert!(validate_intelligence_name(&"x".repeat(41)).is_err());
+        assert!(validate_intelligence_name("two\nlines").is_err());
+        assert!(validate_intelligence_name("tab\there").is_err());
+        // 40 chars exactly is allowed.
+        assert!(validate_intelligence_name(&"x".repeat(40)).is_ok());
+    }
+
+    #[test]
+    fn rejects_the_mode_transition_separator() {
+        // "Name: X — Session: …" is parsed by splitting on " — "; a name
+        // containing the sequence would truncate at the console parser.
+        assert!(validate_intelligence_name("Embra — the second").is_err());
+        // A plain em-dash without the padded sequence is fine.
+        assert!(validate_intelligence_name("Embra—2").is_ok());
     }
 }
 

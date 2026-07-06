@@ -1236,6 +1236,37 @@ async fn handle_request(
                                     }
                                 )),
                             })).await;
+
+                            // set_name persisted a new display name — re-emit
+                            // an Operational ModeChange so the console prefix
+                            // and status bar refresh mid-turn. Tools carry no
+                            // tx; this is the loop-side companion, mirroring
+                            // the /model handler's refresh recipe. Reload
+                            // fresh: `loaded_config` still holds the old name.
+                            if name == "set_name" && !is_error {
+                                if let Ok(fresh) = config::load_config(&**db).await {
+                                    let model_display =
+                                        display_model_for(&fresh.api_provider, &fresh);
+                                    let _ = tx.send(Ok(ConversationResponse {
+                                        response_type: Some(
+                                            conversation_response::ResponseType::ModeChange(
+                                                ModeTransition {
+                                                    from_mode: OperatingMode::Operational as i32,
+                                                    to_mode: OperatingMode::Operational as i32,
+                                                    message: format!(
+                                                        "Operational — Name: {} — Session: {} — TZ: {} — Brain: {}",
+                                                        fresh.name,
+                                                        session_name,
+                                                        fresh.timezone,
+                                                        model_display
+                                                    ),
+                                                },
+                                            ),
+                                        ),
+                                    })).await;
+                                }
+                            }
+
                             result_blocks.push(Block::ToolResult {
                                 call_id: id.clone(),
                                 content,
@@ -3916,6 +3947,13 @@ async fn run_learning_loop(
 ) -> anyhow::Result<()> {
     let mut state = learning::LearningState::new();
 
+    // Local working copy of the config: Phase 2 can rename the
+    // intelligence (identity → config name sync in handle_phase_complete),
+    // and phases 3–6 prompts, thinking frames, and the seal-time
+    // ModeChange must all carry the new name without re-loading config
+    // every iteration.
+    let mut config = config.clone();
+
     // Construct the right provider once per learning session.
     // Learning never invokes tools; pass an empty tool manifest so
     // the request body omits `tools` / `tool_choice` (the provider
@@ -3929,7 +3967,7 @@ async fn run_learning_loop(
         .unwrap_or_else(|| api_key.to_string());
     let provider: Arc<dyn LlmProvider> = match provider_kind {
         ProviderKind::Gemini => {
-            let model_id = resolve_gemini_model_id(config);
+            let model_id = resolve_gemini_model_id(&config);
             info!(
                 target: "gemini::diag",
                 model = %model_id,
@@ -3940,14 +3978,14 @@ async fn run_learning_loop(
             )
         }
         ProviderKind::Anthropic => {
-            let (model_id, display) = resolve_anthropic_model(config);
+            let (model_id, display) = resolve_anthropic_model(&config);
             Arc::new(
                 AnthropicProvider::with_model(active_key, model_id, display)
-                    .with_effort(resolve_anthropic_effort(config)),
+                    .with_effort(resolve_anthropic_effort(&config)),
             )
         }
         ProviderKind::Ollama | ProviderKind::LmStudio => {
-            match build_openai_compat_provider(provider_kind, config) {
+            match build_openai_compat_provider(provider_kind, &config) {
                 Ok(p) => p,
                 Err(msg) => {
                     return Err(anyhow::anyhow!(msg));
@@ -3974,7 +4012,7 @@ async fn run_learning_loop(
     // Send mode transition. Sprint 4: include Brain: <model> so the
     // console status bar refreshes during learning (would otherwise
     // sit on the default "opus-4.8" until next session-attach).
-    let learning_model = display_model_for(&config.api_provider, config);
+    let learning_model = display_model_for(&config.api_provider, &config);
     let _ = tx.send(Ok(ConversationResponse {
         response_type: Some(conversation_response::ResponseType::ModeChange(
             ModeTransition {
@@ -4016,7 +4054,7 @@ async fn run_learning_loop(
                 )),
             })).await;
 
-            if let Err(e) = learning::handle_phase_complete(&mut state, &**db, config).await {
+            if let Err(e) = learning::handle_phase_complete(&mut state, &**db, &config).await {
                 error!("Phase 4 auto-advance failed: {}", e);
                 let _ = tx.send(Ok(ConversationResponse {
                     response_type: Some(conversation_response::ResponseType::System(
@@ -4040,7 +4078,7 @@ async fn run_learning_loop(
         }
 
         // Build system prompt for current phase
-        let system_prompt = learning::system_prompt_for_phase(&state, config);
+        let system_prompt = learning::system_prompt_for_phase(&state, &config);
         let system_bundle = SystemPromptBundle {
             fingerprint: prompt_fingerprint(&system_prompt),
             text: system_prompt,
@@ -4106,16 +4144,55 @@ async fn run_learning_loop(
 
         if phase_complete {
             // Persist extracted documents and advance phase
-            if let Err(e) = learning::handle_phase_complete(&mut state, &**db, config).await {
-                error!("Phase complete handling failed: {}", e);
-                let _ = tx.send(Ok(ConversationResponse {
-                    response_type: Some(conversation_response::ResponseType::System(
-                        SystemMessage {
-                            content: format!("Error processing phase: {}", e),
-                            msg_type: SystemMessageType::Error as i32,
-                        }
-                    )),
-                })).await;
+            match learning::handle_phase_complete(&mut state, &**db, &config).await {
+                Err(e) => {
+                    error!("Phase complete handling failed: {}", e);
+                    let _ = tx.send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::System(
+                            SystemMessage {
+                                content: format!("Error processing phase: {}", e),
+                                msg_type: SystemMessageType::Error as i32,
+                            }
+                        )),
+                    })).await;
+                }
+                Ok(Some(new_name)) => {
+                    // Phase 2 renamed the intelligence (identity → config
+                    // sync, already persisted). Adopt it in the loop's
+                    // working copy so phases 3–6 prompts and the seal-time
+                    // ModeChange carry it, tell the operator, and refresh
+                    // the console name mid-learning (the console parses the
+                    // `Name:` token on any ModeTransition).
+                    let old_name = std::mem::replace(&mut config.name, new_name);
+                    let _ = tx.send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::System(
+                            SystemMessage {
+                                content: format!(
+                                    "Name updated: {} → {} (synced from the Phase-2 \
+                                     identity; persisted to config).",
+                                    old_name, config.name
+                                ),
+                                msg_type: SystemMessageType::Info as i32,
+                            }
+                        )),
+                    })).await;
+                    let _ = tx.send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::ModeChange(
+                            ModeTransition {
+                                from_mode: OperatingMode::Learning as i32,
+                                to_mode: OperatingMode::Learning as i32,
+                                message: format!(
+                                    "Learning Mode — Name: {} — Phase: {} — TZ: {} — Brain: {}",
+                                    config.name,
+                                    learning::phase_label(&state.phase),
+                                    config.timezone,
+                                    learning_model
+                                ),
+                            }
+                        )),
+                    })).await;
+                }
+                Ok(None) => {}
             }
 
             if state.phase == learning::LearningPhase::Complete {
@@ -4123,7 +4200,7 @@ async fn run_learning_loop(
                 let _ = save_learning_history(db, &state.conversation_history).await;
 
                 // Transition to Operational
-                let _ = tx.send(Ok(soul_sealed_mode_change(config))).await;
+                let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
                 // We're the driver — soul is sealed. Wake any other stream
                 // blocked in its own learning loop so it advances too.
                 let _ = onboarding_stage.send_replace(OperatingMode::Operational as i32);
@@ -4155,7 +4232,7 @@ async fn run_learning_loop(
                         // completes onboarding. The task owns an `Arc<Sender>`
                         // clone for its lifetime, so `changed()` never errors.
                         if learning::is_soul_sealed(&**db).await.unwrap_or(false) {
-                            let _ = tx.send(Ok(soul_sealed_mode_change(config))).await;
+                            let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
                             return Ok(());
                         }
                         continue;
@@ -4167,7 +4244,7 @@ async fn run_learning_loop(
                             state.conversation_history.push(Message::user(&um.content));
 
                             // Rebuild system prompt (may include newly extracted docs)
-                            let system_prompt = learning::system_prompt_for_phase(&state, config);
+                            let system_prompt = learning::system_prompt_for_phase(&state, &config);
                             let system_bundle = SystemPromptBundle {
                                 fingerprint: prompt_fingerprint(&system_prompt),
                                 text: system_prompt,
@@ -4209,13 +4286,13 @@ async fn run_learning_loop(
                             state.conversation_history.push(Message::assistant(&history_entry));
 
                             if phase_complete {
-                                if let Err(e) = learning::handle_phase_complete(&mut state, &**db, config).await {
+                                if let Err(e) = learning::handle_phase_complete(&mut state, &**db, &config).await {
                                     error!("Phase complete handling failed: {}", e);
                                 }
 
                                 if state.phase == learning::LearningPhase::Complete {
                                     let _ = save_learning_history(db, &state.conversation_history).await;
-                                    let _ = tx.send(Ok(soul_sealed_mode_change(config))).await;
+                                    let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
                                     // Driver path — soul sealed. Wake any other
                                     // stream blocked in its own learning loop so
                                     // it advances to Operational too.

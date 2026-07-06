@@ -110,11 +110,13 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 }
 
 // Single source of truth for Phase 4 tool category counts.
-// (json_key, display_label, count). Sums to 94 — matches the descriptor count
-// in `tools::registry::REGISTRY`. Aliases (`memory_search`, `search_memory`,
-// `file_rename`, `rmdir`) are folded into their target's category so the
-// displayed total matches what the model sees in the tools manifest. Keep in
-// sync with `tools::registry::REGISTRY.len()` when tools are added or removed.
+// (json_key, display_label, count). Sums to 95 — matches the descriptor count
+// in `tools::registry::REGISTRY` (guarded by
+// `category_counts_sum_matches_registry` below). Aliases (`memory_search`,
+// `search_memory`, `file_rename`, `rmdir`) are folded into their target's
+// category so the displayed total matches what the model sees in the tools
+// manifest. Keep in sync with `tools::registry::REGISTRY.len()` when tools
+// are added or removed.
 //
 // Engineering went 28 → 33 across Sprint 3 post-merge passes:
 //   pass #1 added `plan_delete` + `task_delete` (+2),
@@ -125,10 +127,12 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 // authored *dynamic* tools are still never added to the snapshot.
 // Knowledge Graph went 9 → 10 with `knowledge_dump` (JSONL export of the
 // graph to /embra/workspace/KG_DUMPS).
+// Self-Awareness went 4 → 5 with `set_name` (intelligence-initiated,
+// operator-agreed display-name change; sealed soul untouched).
 const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
     ("system", "System", 3),
     ("memory_knowledge", "Memory & Knowledge", 7),
-    ("self_awareness", "Self-Awareness", 4),
+    ("self_awareness", "Self-Awareness", 5),
     ("time_context", "Time & Context", 3),
     ("utility", "Utility", 2),
     ("security", "Security", 6),
@@ -175,13 +179,17 @@ pub fn tool_summary_message(name: &str) -> String {
     )
 }
 
+/// Returns `Some(new_name)` when Phase 2's identity document carried a
+/// valid name differing from `config.name` and it was synced to the
+/// persisted config (see [`sync_name_from_identity`]); `None` otherwise.
 pub async fn handle_phase_complete(
     state: &mut LearningState,
     db: &WardsonDbClient,
-    _config: &SystemConfig,
-) -> Result<()> {
+    config: &SystemConfig,
+) -> Result<Option<String>> {
     // Extract the most recent JSON document from conversation
     let doc = extract_last_json_document(&state.conversation_history);
+    let mut renamed_to: Option<String> = None;
 
     match state.phase {
         LearningPhase::UserConfiguration => {
@@ -197,6 +205,7 @@ pub async fn handle_phase_complete(
                 state.identity = Some(identity.clone());
                 persist_document(db, "memory.identity", &identity, Some("identity")).await?;
                 tracing::info!("Identity persisted");
+                renamed_to = sync_name_from_identity(db, config, &identity).await;
             }
             state.phase = LearningPhase::SoulDefinition;
         }
@@ -223,7 +232,59 @@ pub async fn handle_phase_complete(
         LearningPhase::Complete => {}
     }
 
-    Ok(())
+    Ok(renamed_to)
+}
+
+/// Phase-2 identity → config name sync. The wizard's Step-1 name is
+/// chosen before the intelligence exists; Phase 2 literally asks it
+/// "Is the name {name} right?" and the operator-agreed answer lands in
+/// the identity document — but `SystemConfig.name` (the prompt's
+/// `You are {name}` line, the console prefix, the status bar) never
+/// followed. This closes that divergence: a valid identity name that
+/// differs from the config name is persisted to config. Learning
+/// dispatches no tools, so this write-time sync is the pre-seal rename
+/// mechanism (post-seal renames go through the `set_name` tool).
+/// Failures are logged, never fatal — the wizard name stands.
+async fn sync_name_from_identity(
+    db: &WardsonDbClient,
+    config: &SystemConfig,
+    identity: &serde_json::Value,
+) -> Option<String> {
+    let proposed = identity.get("name").and_then(|v| v.as_str())?;
+    let new_name = match crate::config::validate_intelligence_name(proposed) {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(
+                target: "learning",
+                proposed,
+                error = %e,
+                "Phase-2 identity name rejected; keeping the wizard name"
+            );
+            return None;
+        }
+    };
+    if new_name == config.name {
+        return None;
+    }
+    let mut cfg = match crate::config::load_config(db).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(target: "learning", error = %e, "name sync: config load failed");
+            return None;
+        }
+    };
+    cfg.name = new_name.clone();
+    if let Err(e) = crate::config::save_config(db, &cfg).await {
+        tracing::warn!(target: "learning", error = %e, "name sync: config save failed");
+        return None;
+    }
+    tracing::info!(
+        target: "learning",
+        old = %config.name,
+        new = %new_name,
+        "config name synced from the Phase-2 identity document"
+    );
+    Some(new_name)
 }
 
 async fn persist_document(
@@ -296,4 +357,24 @@ fn extract_json_from_text(text: &str) -> Option<serde_json::Value> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The Phase-4 taxonomy is hand-maintained while the registry is
+    /// inventory-collected — this pins the two together so adding or
+    /// removing a tool without bumping CATEGORY_COUNTS fails loudly
+    /// (previously the sum was only a comment).
+    #[test]
+    fn category_counts_sum_matches_registry() {
+        let sum: usize = CATEGORY_COUNTS.iter().map(|(_, _, c)| c).sum();
+        assert_eq!(
+            sum,
+            crate::tools::registry::tool_count(),
+            "CATEGORY_COUNTS (learning/phases.rs) drifted from the tool registry — \
+             update the category counts alongside the tool change"
+        );
+    }
 }

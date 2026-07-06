@@ -1556,6 +1556,68 @@ impl IntrospectArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
+    name = "set_name",
+    is_side_effectful = true,
+    description = "Change your own display name — the name shown in the console message prefix and status bar, and the one your system prompt opens with. Updates SystemConfig.name and the identity document's name field; the sealed soul is untouched. Use ONLY after the operator has explicitly agreed to the new name in this conversation — never rename unilaterally. Takes effect immediately in the console and from your next turn in the prompt."
+)]
+pub struct SetNameArgs {
+    /// The new display name (single line, 1–40 characters).
+    pub new_name: String,
+}
+
+impl SetNameArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let new_name = crate::config::validate_intelligence_name(&self.new_name)
+            .map_err(|e| DispatchError::Handler(format!("set_name rejected: {e}")))?;
+
+        // Load fresh — ctx.config is the turn's snapshot and may be stale.
+        let mut cfg = crate::config::load_config(ctx.db)
+            .await
+            .map_err(|e| DispatchError::Handler(format!("set_name: config load failed: {e}")))?;
+        let old_name = cfg.name.clone();
+        if old_name == new_name {
+            return Ok(format!("Name is already '{new_name}' — nothing changed."));
+        }
+        cfg.name = new_name.clone();
+        crate::config::save_config(ctx.db, &cfg)
+            .await
+            .map_err(|e| DispatchError::Handler(format!("set_name: config save failed: {e}")))?;
+
+        // Keep the identity portrait's Name: line in step. The identity
+        // doc is unsealed and mutable (unlike the soul — which never
+        // contains the name, so trustd verification is unaffected).
+        // Missing doc (unusual, but possible pre-learning) is not an
+        // error — config is the authoritative display name.
+        let identity_note = match ctx.db.read("memory.identity", "identity").await {
+            Ok(mut doc) => {
+                if let Some(obj) = doc.as_object_mut() {
+                    obj.insert("name".into(), serde_json::json!(new_name.clone()));
+                }
+                match ctx.db.update("memory.identity", "identity", &doc).await {
+                    Ok(_) => "config and identity documents updated",
+                    Err(_) => "config updated; identity document update failed (non-fatal)",
+                }
+            }
+            Err(_) => "config updated; no identity document found to sync",
+        };
+
+        info!(
+            target: "dispatch",
+            old = %old_name,
+            new = %new_name,
+            "intelligence display name changed via set_name"
+        );
+        Ok(format!(
+            "Display name changed: '{old_name}' → '{new_name}' ({identity_note}). \
+             The console prefix and status bar refresh immediately; your system \
+             prompt carries the new name from the next turn. The sealed soul is \
+             unchanged."
+        ))
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
     name = "countdown",
     description = "Set a reminder to fire after a duration. duration examples: \"5m\", \"30s\", \"1h\", \"20 minutes\". message defaults to \"Reminder\" if omitted."
 )]
