@@ -26,7 +26,7 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::provider::{
     ApiMessage, AssistantTurn, LlmProvider, LlmRequestOptions, ProviderError, ProviderKind,
@@ -57,6 +57,13 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// `.timeout()`: turns legitimately run many minutes at high effort
 /// (especially Fable 5), and a total timeout would cut them mid-stream.
 const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// Exponential backoff ladder (seconds) for transient-error retries on
+/// the initial POST (SDK-parity retryable set: 408/409/429/5xx — incl.
+/// 529 overloaded — plus network send errors). Mid-stream errors are
+/// never retried: a partial response cannot be recovered. Honors
+/// `Retry-After` when present, capped at 60s. Ladder shared with the
+/// Gemini provider precedent.
+const RETRY_DELAYS_SECS: &[u64] = &[1, 2, 4, 8, 16, 32, 60];
 /// Display name paired with [`DEFAULT_MODEL`] for the status bar.
 pub const DEFAULT_DISPLAY_NAME: &str = "opus-4.8";
 
@@ -239,32 +246,19 @@ impl LlmProvider for AnthropicProvider {
         // Spawn the request + SSE consumer; events flow through an
         // mpsc channel to keep the parser code unchanged. The
         // ReceiverStream + map adapter translates wire events to
-        // neutral StreamEvents.
-        let request = self
-            .http
-            .post(API_URL)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", API_VERSION)
-            .header("anthropic-beta", BETA)
-            .header("content-type", "application/json")
-            .json(&body);
+        // neutral StreamEvents. The POST goes through `send_with_retry`
+        // INSIDE the spawn: terminal failures keep arriving in-stream
+        // (`AnthropicStreamEvent::Error`) — the error path every caller
+        // is built around — and the caller gets the stream back
+        // immediately while any backoff runs.
+        let http = self.http.clone();
+        let api_key = self.api_key.clone();
 
         let (tx, rx) = mpsc::channel::<wire::AnthropicStreamEvent>(128);
         let tx_clone = tx.clone();
         tokio::spawn(async move {
-            match request.send().await {
+            match send_with_retry(&http, API_URL, &api_key, &body, RETRY_DELAYS_SECS).await {
                 Ok(response) => {
-                    if !response.status().is_success() {
-                        let status = response.status().as_u16();
-                        let body = response.text().await.unwrap_or_default();
-                        let _ = tx_clone
-                            .send(wire::AnthropicStreamEvent::Error(format!(
-                                "API error {}: {}",
-                                status, body
-                            )))
-                            .await;
-                        return;
-                    }
                     if let Err(e) =
                         streaming::process_sse_stream(response, tx_clone.clone()).await
                     {
@@ -274,9 +268,9 @@ impl LlmProvider for AnthropicProvider {
                             .await;
                     }
                 }
-                Err(e) => {
+                Err(err) => {
                     let _ = tx_clone
-                        .send(wire::AnthropicStreamEvent::Error(e.to_string()))
+                        .send(wire::AnthropicStreamEvent::Error(err.into_wire_message()))
                         .await;
                 }
             }
@@ -392,10 +386,161 @@ fn build_cached_messages(messages: &[wire::AnthropicWireMessage]) -> Vec<serde_j
         .collect()
 }
 
+/// Terminal failure from [`send_with_retry`]. Private — it exists only
+/// to be formatted into the in-stream [`wire::AnthropicStreamEvent::Error`]
+/// string via [`Self::into_wire_message`]; it never crosses the
+/// provider trait boundary.
+#[derive(Debug)]
+enum SendError {
+    /// Non-2xx response: either non-retryable (`attempts == 1`) or
+    /// retryable after exhausting the ladder. Status and body come from
+    /// the SAME (last) response — tracked as one value so a mixed
+    /// failure sequence can never pair a stale status with a later
+    /// network-error message.
+    Http {
+        status: u16,
+        body: String,
+        attempts: usize,
+    },
+    /// reqwest send error (connect/write failure) on the last attempt.
+    Network { msg: String, attempts: usize },
+}
+
+impl SendError {
+    /// Render for the in-stream error event. Keeps the historical
+    /// `"API error {status}: {body}"` family recognizable — and
+    /// byte-identical to the pre-retry format when only one attempt was
+    /// made (non-retryable status / lone network failure).
+    fn into_wire_message(self) -> String {
+        match self {
+            Self::Http {
+                status,
+                body,
+                attempts: 1,
+            } => format!("API error {}: {}", status, body),
+            Self::Http {
+                status,
+                body,
+                attempts,
+            } => format!("API error {} after {} attempts: {}", status, attempts, body),
+            Self::Network { msg, attempts: 1 } => msg,
+            Self::Network { msg, attempts } => {
+                format!("network error after {} attempts: {}", attempts, msg)
+            }
+        }
+    }
+}
+
+/// SDK-parity retryable set: 408 Request Timeout, 409 Conflict, 429
+/// rate limit, and all 5xx (incl. 529 overloaded) — what Anthropic's
+/// official clients retry.
+fn is_retryable_status(code: u16) -> bool {
+    matches!(code, 408 | 409 | 429) || (500..=599).contains(&code)
+}
+
+/// Parse an integer-seconds `Retry-After` value, capped at 60s. The
+/// HTTP-date form parses as `None` — the ladder alone paces the retry.
+fn parse_retry_after_secs(value: &str) -> Option<u64> {
+    value.trim().parse::<u64>().ok().map(|s| s.min(60))
+}
+
+/// POST `body` to `url`, retrying transient failures with the `delays`
+/// backoff ladder ([`RETRY_DELAYS_SECS`] in production; tests pass
+/// zeros). Mirrors the Gemini provider's helper: the sleep precedes
+/// each retry attempt, a `Retry-After` (capped 60s) sleeps additively
+/// on top of the next ladder step, and a retryable response's headers
+/// are read before `text()` consumes it. Returns the first 2xx response
+/// untouched — the SSE stream is consumed by the caller and is never
+/// retried here (see [`RETRY_DELAYS_SECS`]).
+async fn send_with_retry(
+    http: &Client,
+    url: &str,
+    api_key: &str,
+    body: &serde_json::Value,
+    delays: &[u64],
+) -> Result<reqwest::Response, SendError> {
+    // Placeholder is unreachable: the iterator below always yields the
+    // first (delay-0) attempt, and every arm either returns or
+    // overwrites `last_err`.
+    let mut last_err = SendError::Network {
+        msg: "no attempts made".to_string(),
+        attempts: 0,
+    };
+
+    for (attempt, delay_secs) in std::iter::once(0).chain(delays.iter().copied()).enumerate() {
+        if delay_secs > 0 {
+            tokio::time::sleep(Duration::from_secs(delay_secs)).await;
+        }
+
+        // RequestBuilder is consumed by `.send()` — rebuild the full
+        // request each attempt (the in-crate pattern; the body bytes
+        // are identical across attempts, so no prompt-cache impact).
+        let send_result = http
+            .post(url)
+            .header("x-api-key", api_key)
+            .header("anthropic-version", API_VERSION)
+            .header("anthropic-beta", BETA)
+            .header("content-type", "application/json")
+            .json(body)
+            .send()
+            .await;
+
+        match send_result {
+            Ok(resp) => {
+                let status = resp.status();
+                if status.is_success() {
+                    return Ok(resp);
+                }
+                let code = status.as_u16();
+                // Read Retry-After BEFORE text() consumes the response.
+                let retry_after = resp
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(parse_retry_after_secs);
+                let body_text = resp.text().await.unwrap_or_default();
+                if !is_retryable_status(code) {
+                    return Err(SendError::Http {
+                        status: code,
+                        body: body_text,
+                        attempts: attempt + 1,
+                    });
+                }
+                last_err = SendError::Http {
+                    status: code,
+                    body: body_text,
+                    attempts: attempt + 1,
+                };
+                warn!(
+                    target: "anthropic::http",
+                    attempt = attempt + 1,
+                    status = code,
+                    retry_after_secs = retry_after,
+                    "retryable Anthropic error; backing off"
+                );
+                if let Some(secs) = retry_after {
+                    tokio::time::sleep(Duration::from_secs(secs)).await;
+                }
+            }
+            Err(e) => {
+                last_err = SendError::Network {
+                    msg: e.to_string(),
+                    attempts: attempt + 1,
+                };
+                warn!(target: "anthropic::http", attempt = attempt + 1, "network error: {e}");
+            }
+        }
+    }
+
+    Err(last_err)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::provider::ir::Block;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn new_defaults_to_opus_4_8() {
@@ -425,6 +570,173 @@ mod tests {
         );
         assert_eq!(p.model, "claude-fable-5");
         assert_eq!(p.display_name(), "fable-5");
+    }
+
+    // ===========================================================
+    // send_with_retry — transient-error backoff (wiremock; zero-delay
+    // ladders so the suite never sleeps)
+
+    #[test]
+    fn is_retryable_status_matches_sdk_set() {
+        for code in [408u16, 409, 429, 500, 502, 503, 529, 599] {
+            assert!(is_retryable_status(code), "{code} should be retryable");
+        }
+        for code in [400u16, 401, 403, 404, 413, 422] {
+            assert!(!is_retryable_status(code), "{code} should not be retryable");
+        }
+    }
+
+    #[test]
+    fn parse_retry_after_secs_parses_and_caps() {
+        assert_eq!(parse_retry_after_secs("5"), Some(5));
+        assert_eq!(parse_retry_after_secs("0"), Some(0));
+        assert_eq!(parse_retry_after_secs(" 7 "), Some(7));
+        assert_eq!(parse_retry_after_secs("120"), Some(60)); // capped
+        assert_eq!(parse_retry_after_secs(""), None);
+        assert_eq!(parse_retry_after_secs("-1"), None);
+        // HTTP-date form falls back to the ladder alone.
+        assert_eq!(
+            parse_retry_after_secs("Wed, 21 Oct 2026 07:28:00 GMT"),
+            None
+        );
+    }
+
+    #[test]
+    fn send_error_wire_message_formats() {
+        // attempts == 1 stays byte-identical to the pre-retry formats.
+        let single_http = SendError::Http {
+            status: 400,
+            body: "bad".into(),
+            attempts: 1,
+        };
+        assert_eq!(single_http.into_wire_message(), "API error 400: bad");
+        let single_net = SendError::Network {
+            msg: "connection refused".into(),
+            attempts: 1,
+        };
+        assert_eq!(single_net.into_wire_message(), "connection refused");
+        // Exhausted ladders carry the attempt count.
+        let multi_http = SendError::Http {
+            status: 529,
+            body: "overloaded".into(),
+            attempts: 8,
+        };
+        assert_eq!(
+            multi_http.into_wire_message(),
+            "API error 529 after 8 attempts: overloaded"
+        );
+        let multi_net = SendError::Network {
+            msg: "timed out".into(),
+            attempts: 3,
+        };
+        assert_eq!(
+            multi_net.into_wire_message(),
+            "network error after 3 attempts: timed out"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_with_retry_recovers_after_529s() {
+        // Two 529s, then a 200 that requires the auth/version/beta
+        // headers — proving the per-attempt rebuild carries the full
+        // header set. The expired first mock falls through to the
+        // second (wiremock mount-order sequencing).
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(529).set_body_string("overloaded"))
+            .up_to_n_times(2)
+            .expect(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("x-api-key", "k"))
+            .and(header("anthropic-version", API_VERSION))
+            .and(header("anthropic-beta", BETA))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let url = format!("{}/v1/messages", server.uri());
+        let resp = send_with_retry(&Client::new(), &url, "k", &json!({"m": 1}), &[0, 0, 0])
+            .await
+            .expect("expected recovery on the third attempt");
+        assert_eq!(resp.status().as_u16(), 200);
+    }
+
+    #[tokio::test]
+    async fn send_with_retry_exhaustion_returns_last_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(529).set_body_string("overloaded"))
+            .expect(3)
+            .mount(&server)
+            .await;
+        let url = format!("{}/v1/messages", server.uri());
+        let err = send_with_retry(&Client::new(), &url, "k", &json!({}), &[0, 0])
+            .await
+            .err()
+            .expect("expected exhaustion");
+        match &err {
+            SendError::Http {
+                status,
+                body,
+                attempts,
+            } => {
+                assert_eq!(*status, 529);
+                assert_eq!(*attempts, 3);
+                assert!(body.contains("overloaded"));
+            }
+            other => panic!("expected Http, got {other:?}"),
+        }
+        assert_eq!(
+            err.into_wire_message(),
+            "API error 529 after 3 attempts: overloaded"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_with_retry_400_fails_after_single_request() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(400).set_body_string("bad request"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let url = format!("{}/v1/messages", server.uri());
+        let err = send_with_retry(&Client::new(), &url, "k", &json!({}), &[0, 0])
+            .await
+            .err()
+            .expect("expected immediate failure");
+        // Byte-identical to the pre-retry error format.
+        assert_eq!(err.into_wire_message(), "API error 400: bad request");
+    }
+
+    #[tokio::test]
+    async fn send_with_retry_network_error_exhausts() {
+        // Port 1 is never listening — connection refused on every
+        // attempt, no server involved.
+        let err = send_with_retry(
+            &Client::new(),
+            "http://127.0.0.1:1/v1/messages",
+            "k",
+            &json!({}),
+            &[0],
+        )
+        .await
+        .err()
+        .expect("expected network failure");
+        match &err {
+            SendError::Network { attempts, .. } => assert_eq!(*attempts, 2),
+            other => panic!("expected Network, got {other:?}"),
+        }
+        assert!(
+            err.into_wire_message()
+                .starts_with("network error after 2 attempts:")
+        );
     }
 
     fn empty_manifest() -> ToolManifest {
