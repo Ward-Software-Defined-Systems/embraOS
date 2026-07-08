@@ -417,10 +417,12 @@ impl BrainService for BrainGrpcService {
         if let Err((session_provider, active_provider)) =
             check_session_provider(&self.db, &name).await
         {
-            return Err(Status::failed_precondition(format!(
-                "Session '{}' was recorded under {}, but the active provider is {}. \
-                 Switch providers via /provider {} (with no active session) before re-attaching.",
-                name, session_provider, active_provider, session_provider
+            let active_session = self.session_manager.read().await.active_session.clone();
+            return Err(Status::failed_precondition(cross_provider_block_message(
+                &name,
+                &session_provider,
+                &active_provider,
+                active_session.as_deref(),
             )));
         }
 
@@ -1490,16 +1492,20 @@ async fn handle_request(
             // clear error rather than silently corrupting state on
             // the first turn.
             if !new_session {
-                if let Err((session_provider, _)) =
+                if let Err((session_provider, active_provider)) =
                     check_session_provider(db, &session_name).await
                 {
+                    let active_session =
+                        session_mgr.read().await.active_session.clone();
                     let _ = tx
                         .send(Ok(ConversationResponse {
                             response_type: Some(conversation_response::ResponseType::System(
                                 SystemMessage {
-                                    content: format!(
-                                        "Session '{}' was recorded under {}. Use /provider {} to continue, or /new <name> to start a fresh session.",
-                                        session_name, session_provider, session_provider
+                                    content: cross_provider_block_message(
+                                        &session_name,
+                                        &session_provider,
+                                        &active_provider,
+                                        active_session.as_deref(),
                                     ),
                                     msg_type: SystemMessageType::Error as i32,
                                 },
@@ -1755,15 +1761,18 @@ async fn handle_slash_command(
                 let mut mgr = session_mgr.write().await;
                 if mgr.session_exists(args).await.unwrap_or(false) {
                     // Cross-provider guard — same rule as SessionAttach.
-                    if let Err((session_provider, _)) =
+                    if let Err((session_provider, active_provider)) =
                         check_session_provider(db, args).await
                     {
+                        let active_session = mgr.active_session.clone();
                         drop(mgr);
                         send_msg(
                             tx,
-                            format!(
-                                "Session '{}' was recorded under {}. Use /provider {} to continue, or /new <name> to start a fresh session.",
-                                args, session_provider, session_provider
+                            cross_provider_block_message(
+                                args,
+                                &session_provider,
+                                &active_provider,
+                                active_session.as_deref(),
                             ),
                         )
                         .await;
@@ -3884,6 +3893,37 @@ async fn read_session_provider(db: &Arc<WardsonDbClient>, session_name: &str) ->
 /// before reaching this function — there is no wildcard.
 fn providers_compatible(a: &str, b: &str) -> bool {
     a == b
+}
+
+/// Operator-facing guidance when a session activation is blocked by
+/// the cross-provider pin. Shared by all three block sites
+/// (`SessionAttach`, `/switch`, and the `switch_session` RPC) so the
+/// navigation stays consistent — and STATE-AWARE, because the naive
+/// advice is a trap: `/provider <kind>` refuses to run while a session
+/// is active, so with a session attached the operator must `/close`
+/// FIRST. The old short message ("Use /provider {} to continue") sent
+/// them straight into that second refusal.
+fn cross_provider_block_message(
+    session_name: &str,
+    session_provider: &str,
+    active_provider: &str,
+    active_session: Option<&str>,
+) -> String {
+    let open_steps = match active_session {
+        Some(current) => format!(
+            "/close (detaches the active session '{}'), then /provider {}, then /switch {}",
+            current, session_provider, session_name
+        ),
+        None => format!(
+            "/provider {}, then /switch {}",
+            session_provider, session_name
+        ),
+    };
+    format!(
+        "Session '{}' was recorded under {}; the active provider is {}. \
+         To open it: {}. To stay on {} instead: /new <name> for a fresh session.",
+        session_name, session_provider, active_provider, open_steps, active_provider
+    )
 }
 
 /// Embedded feedback-loop protocol spec (Phase 3 preview, v2).
@@ -6175,5 +6215,40 @@ mod terminal_outcome_tests {
             final_assistant_text("partial", &[], TurnOutcome::MaxTokens),
             "partial"
         );
+    }
+}
+
+#[cfg(test)]
+mod cross_provider_message_tests {
+    use super::cross_provider_block_message;
+
+    /// With a session attached, `/close` must come FIRST — naming
+    /// `/provider` alone sends the operator into its
+    /// "Cannot switch providers while a session is active" refusal.
+    #[test]
+    fn active_session_message_orders_close_provider_switch() {
+        let msg = cross_provider_block_message("main", "anthropic", "gemini", Some("scratch"));
+        assert_eq!(
+            msg,
+            "Session 'main' was recorded under anthropic; the active provider is gemini. \
+             To open it: /close (detaches the active session 'scratch'), then /provider anthropic, \
+             then /switch main. To stay on gemini instead: /new <name> for a fresh session."
+        );
+        // The order is the contract: /close strictly before /provider,
+        // /provider strictly before /switch.
+        let close = msg.find("/close").unwrap();
+        let provider = msg.find("/provider").unwrap();
+        let switch = msg.find("/switch").unwrap();
+        assert!(close < provider && provider < switch);
+    }
+
+    /// With no active session (fresh attach, or right after /close),
+    /// `/provider` works directly — no /close step, no false ceremony.
+    #[test]
+    fn no_active_session_message_skips_close() {
+        let msg = cross_provider_block_message("main", "anthropic", "ollama", None);
+        assert!(!msg.contains("/close"));
+        assert!(msg.contains("To open it: /provider anthropic, then /switch main."));
+        assert!(msg.contains("To stay on ollama instead: /new <name> for a fresh session."));
     }
 }
