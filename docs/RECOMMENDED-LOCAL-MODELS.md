@@ -6,11 +6,22 @@ The wizard's selector reads `GET /v1/models` from the configured server, so any 
 
 Hardware mapping for the test fleet:
 
-- **Ollama** runs on a **M1 Mac Mini, 16 GB unified memory**
+- **Ollama** runs on an **M1 Mac Mini, 16 GB unified memory**
 - **LM Studio** runs on a **Mac Studio M4 Max, 128 GB unified memory**
 - **Ollama Cloud via M1 Mac Mini** (the `:cloud` tag suffix) — hosted by Ollama; no local hardware allocation other than resources allocated to running Ollama.
-- 
+
 ---
+
+## Vetted Models
+
+The list is deliberately short. MoE models need a minimum active-parameter threshold for honest instruction-following: below ~27–49B active they become confabulation-prone under complex multi-step protocols — enough stored knowledge to sound authoritative, not enough working memory to track what they've actually done. Dense models have no total/active split, so their parameter count is honest. Both picks below clear the threshold: Qwen3.6 27B is dense (27B = 27B active); DeepSeek-V4-Pro is 1.6T-total MoE with 49B active per token.
+
+### Local (Ollama / LM Studio)
+
+| Server | Model | Tag |
+|--------|-------|-----|
+| Ollama | Qwen3.6 27B (dense) | `qwen3.6:27b` |
+| LM Studio | Qwen3.6 27B (dense, 8-bit) | `qwen/qwen3.6-27b` |
 
 ### Ollama Cloud (no local hardware required)
 
@@ -43,11 +54,11 @@ embra-brain sends sampler params and chat-template config (including `chat_templ
 
 ### Ollama (Mac Mini)
 
-Set context size and KV cache via launchd env vars if needed (see Ollama's OpenAI-compat note: `"The OpenAI API does not have a way of setting the context size"`).
+Set context size and KV cache via launchd env vars if needed — `OLLAMA_CONTEXT_LENGTH`, `OLLAMA_FLASH_ATTENTION`, `OLLAMA_KV_CACHE_TYPE`, set all three together (see Ollama's OpenAI-compat note: `"The OpenAI API does not have a way of setting the context size"`).
 
 embra-brain sends sampler params and Ollama's `think: true` flag in each request — operators don't configure these.
 
-**`:cloud` models** (e.g. `deepseek-v4-pro:cloud`) bypass these env vars entirely — context window and KV-cache layout are managed by Ollama's hosted infrastructure. `num_ctx` is not a documented field on Ollama's OpenAI-compat endpoint anyway, regardless of local/cloud mode (per [`ollama#7063`](https://github.com/ollama/ollama/issues/7063), still open since 2024-10-01) but a mod file can be used to workaround this.
+**`:cloud` models** (e.g. `deepseek-v4-pro:cloud`) bypass these env vars entirely — context window and KV-cache layout are managed by Ollama's hosted infrastructure. `num_ctx` is not a documented field on Ollama's OpenAI-compat endpoint anyway, regardless of local/cloud mode (per [`ollama#7063`](https://github.com/ollama/ollama/issues/7063), still open since 2024-10-01); for locally-loaded models a Modelfile (`PARAMETER num_ctx`) works around it.
 
 ### Bearer auth
 

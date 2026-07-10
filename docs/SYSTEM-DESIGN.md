@@ -38,7 +38,7 @@ The loop driver consumes a neutral intermediate representation (`Block::{Text, T
 
 **Reasoning controls per family:**
 - **gpt-oss / OpenAI o-series / DeepSeek-R1·R2 / `-thinking` variants** — embraOS sends OpenAI-compat `reasoning_effort: "high"` automatically (gated on `model_supports_reasoning_effort` heuristic).
-- **Qwen3 family** (Qwen3, Qwen3.6, including `*-A3B` MoE) — thinking is integrated into the same model and toggled via `/think` and `/no_think` directives in user/system messages. `reasoning_effort` is omitted to avoid `No valid custom reasoning fields found` server warnings. See `RECOMMENDED-LOCAL-MODELS.md` for full per-family details.
+- **Qwen3 family** (Qwen3, Qwen3.6, including `*-A3B` MoE) — thinking is integrated into the same model and toggled via `/think` and `/no_think` directives in user/system messages. `reasoning_effort` is omitted to avoid `No valid custom reasoning fields found` server warnings. See `RECOMMENDED-LOCAL-MODELS.md` for the vetted roster and server configuration.
 - **Standard non-reasoning models** — no reasoning controls; embraOS omits all reasoning parameters.
 
 **Bearer storage (OpenAI-compat):** STATE files at `/embra/state/bearer_<preset>` with mode `0600` (security retroactively applied to Anthropic/Gemini api_key files in Sprint 5). Per-call resolution from `EMBRA_OLLAMA_BEARER` / `EMBRA_LM_STUDIO_BEARER` env vars so post-swap turns pick up the new value without a brain restart.

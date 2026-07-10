@@ -26,12 +26,23 @@ Phase 2–5 add A/B partitioned rollback, an `embractl` management CLI, bare-met
 > tools dispatch reliably), the model your provider serves needs to handle a large
 > tool schema without truncating or hallucinating tool calls. When running locally
 > via **Ollama** or **LM Studio** this is the dominant constraint — plenty of
-> otherwise-capable models cannot. MoE models require a minimum active parameter threshold for honest instruction-following. Total parameters measure stored knowledge; active parameters measure working memory. Below ~27-49B active, MoE models become confabulation-prone under complex multi-step protocols — they have enough knowledge to sound authoritative but not enough active capacity to track what they've actually done. Dense models don't have this split, so the parameter count is honest: 27B means 27B active. DeepSeek V4 Pro is MoE with 1.6T parameters but has enough active parameters (49B active) to clear the threshold. Models currently vetted to provide full
-> functionality: **`DeepSeek-v4-Pro:cloud`** and **`Qwen3.6-27b`**. Experiment freely with others —
-> these two are the ones confirmed to handle the full toolset, they also exhibit the least amount of hallucinations and/or confabulation so far. When
-> **`DeepSeek-v4-Pro:cloud`** is the active Ollama model, embraOS auto-sends
-> `reasoning_effort: "max"` (per [DeepSeek's docs](https://api-docs.deepseek.com/guides/thinking_mode))
-> to engage the model's Max-thinking mode — no per-turn operator action. [`See RECOMMENDED-LOCAL-MODELS.md for more details`](docs/RECOMMENDED-LOCAL-MODELS.md)
+> otherwise-capable models cannot. MoE models require a minimum active parameter
+> threshold for honest instruction-following. Total parameters measure stored
+> knowledge; active parameters measure working memory. Below ~27–49B active, MoE
+> models become confabulation-prone under complex multi-step protocols — they have
+> enough knowledge to sound authoritative but not enough active capacity to track
+> what they've actually done. Dense models don't have this split, so the parameter
+> count is honest: 27B means 27B active. DeepSeek V4 Pro is MoE with 1.6T
+> parameters but has enough active parameters (49B active) to clear the threshold.
+> Models currently vetted to provide full functionality: **`DeepSeek-v4-Pro:cloud`**
+> and **`Qwen3.6-27b`**. Experiment freely with others — these two are the ones
+> confirmed to handle the full toolset, and they exhibit the fewest
+> hallucinations/confabulations so far. When **`DeepSeek-v4-Pro:cloud`** is the
+> active Ollama model, embraOS auto-sends `reasoning_effort: "max"` (per
+> [DeepSeek's docs](https://api-docs.deepseek.com/guides/thinking_mode)) to engage
+> the model's Max-thinking mode — no per-turn operator action. See
+> [docs/RECOMMENDED-LOCAL-MODELS.md](docs/RECOMMENDED-LOCAL-MODELS.md) for the
+> full roster and server configuration.
 
 > **New — soul-gated dynamic tools: the replicant check.** The intelligence can now
 > propose its own dynamic tools (via the `guardian_propose` tool), and operators can
@@ -175,7 +186,7 @@ The full embraOS manual lives in [docs/](docs/).
 | **[Command Reference](docs/COMMAND-REFERENCE.md)** | Every slash command |
 | **[Tool Reference](docs/TOOL-REFERENCE.md)** | All 95 built-in tools by category, plus workspace / GitHub / SSH safety notes |
 | **[System Design](docs/SYSTEM-DESIGN.md)** | The 7-layer continuity architecture, the four LLM providers, reasoning controls, prompt caching |
-| **[Recommended Local Models](docs/RECOMMENDED-LOCAL-MODELS.md)** | Per-family guidance for the Ollama / LM Studio backends |
+| **[Recommended Local Models](docs/RECOMMENDED-LOCAL-MODELS.md)** | Vetted models and server configuration for the Ollama / LM Studio backends |
 | **[Replicant Check](docs/REPLICANT-CHECK.md)** | The soul-spec gate every dynamic tool passes before it compiles — how it works, both authoring paths, and how to test it |
 | **[Guardian Tool Examples](docs/GUARDIAN-TOOL-EXAMPLES.md)** | Paste-ready dynamic-tool modules (embra-guardian-v1) |
 | **[Guardian Advanced Example](docs/GUARDIAN-ADVANCED-EXAMPLE.md)** | A worked end-to-end Guardian tool |
