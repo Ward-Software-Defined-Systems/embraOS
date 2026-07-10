@@ -32,7 +32,7 @@ The list is deliberately short. MoE models need a minimum active-parameter thres
 **Notes:**
 - The `:cloud` suffix routes through Ollama's hosted infrastructure; no local VRAM or CPU cost.
 - 1.6T-parameter MoE (49B activated per token); three thinking modes — "No thinking" / "Thinking" / "Max thinking" — toggled by `reasoning_effort` per [DeepSeek's docs](https://api-docs.deepseek.com/guides/thinking_mode).
-- **embra-brain auto-engages Max thinking for this model** (and any model whose name contains `deepseek-v4-pro`, case-insensitive): the OpenAI-compat provider sends `reasoning_effort: "max"` automatically — no per-turn operator action. The route table is `reasoning_effort_for_model` in `crates/embra-brain/src/provider/openai_compat/mod.rs`. Empirical Max-thinking response-signature confirmation in QEMU is still pending — Learning-Mode boot reach is verified, but the deeper-trace signature characteristic of Max thinking has not yet been compared against a Thinking-mode baseline.
+- **embra-brain auto-engages Max thinking for this model** (and any model whose name contains `deepseek-v4-pro`, case-insensitive): the OpenAI-compat provider sends `reasoning_effort: "max"` automatically — no per-turn operator action. The route table is `reasoning_effort_for_model` in `crates/embra-brain/src/provider/openai_compat/mod.rs`. Max-thinking engagement is operator-confirmed in production use (2026-07-10).
 - Cloud models bypass the local Ollama env-var configuration below — context window and KV-cache layout are server-managed.
 
 ---
