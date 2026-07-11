@@ -1809,6 +1809,15 @@ async fn handle_slash_command(
         "/sessions" => {
             let mgr = session_mgr.read().await;
             let is_sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
+            // Configured timezone for the last-active render — fresh
+            // config wins over the threaded boot value (the SessionAttach
+            // ModeChange pattern), so a runtime timezone change shows
+            // immediately.
+            let display_tz = config::load_config(&**db)
+                .await
+                .ok()
+                .map(|c| c.timezone)
+                .unwrap_or_else(|| config_tz.to_string());
             let output = match mgr.list_with_counts().await {
                 Ok(sessions) => {
                     if sessions.is_empty() {
@@ -1825,7 +1834,7 @@ async fn handle_slash_command(
                                 "  {}{} [{:?}] {} turn{}, last active: {}",
                                 s.name, indicator, s.state,
                                 n, if n == 1 { "" } else { "s" },
-                                s.last_active.format("%Y-%m-%d %H:%M")
+                                format_local_timestamp(s.last_active, &display_tz)
                             )
                         }).collect::<Vec<_>>().join("\n")
                     }
@@ -2980,6 +2989,18 @@ fn display_model_for(provider: &str, config: &config::SystemConfig) -> String {
             }
         }
         _ => "opus-4.8".to_string(),
+    }
+}
+
+/// Render a UTC timestamp in the operator's configured timezone for
+/// display surfaces (the `/sessions` listing). Abbreviations resolve
+/// through `tools::resolve_timezone` (BUG-007) before parsing; an
+/// unparseable timezone falls back to UTC with an explicit label so
+/// the reading is never ambiguous.
+fn format_local_timestamp(utc: chrono::DateTime<chrono::Utc>, config_tz: &str) -> String {
+    match tools::resolve_timezone(config_tz).parse::<chrono_tz::Tz>() {
+        Ok(tz) => utc.with_timezone(&tz).format("%Y-%m-%d %H:%M %Z").to_string(),
+        Err(_) => utc.format("%Y-%m-%d %H:%M UTC").to_string(),
     }
 }
 
@@ -6454,5 +6475,46 @@ mod no_session_message_tests {
         assert!(msg.contains("was not processed"));
         assert!(msg.contains("/new <name>"));
         assert!(msg.contains("/sessions lists all sessions"));
+    }
+}
+
+#[cfg(test)]
+mod local_timestamp_tests {
+    //! The /sessions last-active render — configured-timezone display
+    //! with an explicit-UTC fallback (session-ux-fixes follow-up).
+    use super::format_local_timestamp;
+    use chrono::{DateTime, Utc};
+
+    fn utc(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
+    }
+
+    #[test]
+    fn iana_zone_renders_local_with_abbreviation() {
+        // Winter instant — New York is UTC-5 (EST).
+        let out = format_local_timestamp(utc("2026-01-15T15:00:00Z"), "America/New_York");
+        assert_eq!(out, "2026-01-15 10:00 EST");
+    }
+
+    #[test]
+    fn dst_shifts_the_offset_and_label() {
+        // Summer instant — the same zone is UTC-4 (EDT).
+        let out = format_local_timestamp(utc("2026-07-15T15:00:00Z"), "America/New_York");
+        assert_eq!(out, "2026-07-15 11:00 EDT");
+    }
+
+    #[test]
+    fn abbreviation_resolves_via_bug_007_map() {
+        // "EST" isn't an IANA name; resolve_timezone maps it to
+        // America/New_York, and the render then follows that zone's
+        // rules (including DST — a summer instant shows EDT).
+        let out = format_local_timestamp(utc("2026-07-15T15:00:00Z"), "EST");
+        assert_eq!(out, "2026-07-15 11:00 EDT");
+    }
+
+    #[test]
+    fn unparseable_timezone_falls_back_to_labeled_utc() {
+        let out = format_local_timestamp(utc("2026-01-15T15:00:00Z"), "not-a-timezone");
+        assert_eq!(out, "2026-01-15 15:00 UTC");
     }
 }
