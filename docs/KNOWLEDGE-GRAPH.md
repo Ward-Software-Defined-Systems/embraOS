@@ -267,7 +267,7 @@ The wrapped message is used for the in-flight provider call only. `grpc_service.
 
 ### Resume briefing variant
 
-When a session resumes (`SessionManager.pending_resume_briefing` is set), `build_resumption_context` (`enrichment.rs:113-125`) substitutes a different wrapper that instructs the model to recap the prior session in 2-4 sentences. The raw user message in this case is the synthetic `[Session resumed]` marker — not operator-typed input — so it never surfaces back through history. (See `~/.claude/projects/-home-william-projects-embraOS/memory/project_session_resume_briefing.md` for the dispatch-site wiring across `SessionAttach` and `/switch`.)
+When a session resumes (`SessionManager.pending_resume_briefing` is set), `build_resumption_context` (`enrichment.rs:113-125`) substitutes a different wrapper that instructs the model to recap the prior session in 2-4 sentences. The raw user message in this case is the synthetic `[Session resumed]` marker — not operator-typed input — so it never surfaces back through history. Since the session-ux-fixes wave (2026-07-11), `SessionAttach` sets the flag only when the session has been idle ≥ 30 minutes (`RESUME_BRIEFING_MIN_IDLE_SECS`, vs `meta.last_active`) and no briefing started in the last 120 s — transport reconnects (mobile WS flaps) resume silently; `/switch` sets it unconditionally. (See `~/.claude/projects/-home-william-projects-embraOS/memory/project_session_resume_briefing.md` for the dispatch-site wiring across `SessionAttach` and `/switch`.)
 
 ---
 

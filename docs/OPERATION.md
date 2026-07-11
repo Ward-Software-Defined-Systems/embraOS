@@ -4,7 +4,7 @@ Day-to-day use of embraOS once it is running.
 
 ## The Session Model
 
-Every interaction with embraOS happens in a persistent session. Sessions survive disconnections. When you reconnect, the full conversation history is restored and the AI provides a briefing on what happened while you were away.
+Every interaction with embraOS happens in a persistent session. Sessions survive disconnections. When you reconnect, the full conversation history is restored, and if the session has been idle for 30 minutes or more the AI opens with a briefing on where things left off (quick reconnects — a phone unlocking, a browser tab waking — resume silently; `/switch`ing to a session always briefs).
 
 You can run multiple named sessions for different contexts:
 
