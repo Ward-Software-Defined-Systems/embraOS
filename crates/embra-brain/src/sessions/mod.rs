@@ -48,6 +48,13 @@ pub struct SessionMeta {
     /// Same defaulting rule as `provider`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Message count of the session's history (`SessionHistory.turns.len()`),
+    /// stamped by `create` and re-stamped on every successful
+    /// `append_message`. `None` on pre-fix docs; `list_with_counts`
+    /// derives those from the history doc and backfills the meta.
+    /// Serde-additive — no schema-version bump (anthropic_model precedent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,6 +72,15 @@ fn default_legacy_format_version() -> u32 {
     1
 }
 
+/// Single-doc query body (FIX-5): explicit limit + oldest-first sort so the
+/// FIRST document is deterministically the canonical doc (both the
+/// `sessions.<name>.history` and `sessions.<name>.meta` collections store
+/// one doc per session; an empty body would ride the server's default
+/// limit and key order).
+pub(crate) fn history_query_body() -> serde_json::Value {
+    serde_json::json!({ "limit": 10, "sort": [{"_created_at": "asc"}] })
+}
+
 pub struct SessionManager {
     db: WardsonDbClient,
     pub active_session: Option<String>,
@@ -76,6 +92,12 @@ pub struct SessionManager {
     /// is what gets persisted to history. Pure runtime state — not
     /// serialized, no schema bump.
     pub pending_resume_briefing: bool,
+    /// When a resume briefing was last STARTED per session (runtime only,
+    /// never serialized). Read/written by the briefing dispatch sites in
+    /// grpc_service.rs to enforce `RESUME_BRIEFING_ATTEMPT_COOLDOWN_SECS`.
+    /// Suppressed attempts do NOT re-stamp — the semantics are "at most
+    /// one briefing start per session per cooldown window".
+    briefing_attempts: std::collections::HashMap<String, std::time::Instant>,
 }
 
 impl SessionManager {
@@ -84,7 +106,23 @@ impl SessionManager {
             db,
             active_session: None,
             pending_resume_briefing: false,
+            briefing_attempts: std::collections::HashMap::new(),
         }
+    }
+
+    /// True when a resume briefing was started for `name` less than
+    /// `cooldown` ago. `Instant` is monotonic, so wall-clock jumps can't
+    /// spoof the window.
+    pub fn briefing_attempt_recent(&self, name: &str, cooldown: std::time::Duration) -> bool {
+        self.briefing_attempts
+            .get(name)
+            .is_some_and(|t| t.elapsed() < cooldown)
+    }
+
+    /// Record that a resume briefing is starting for `name` now.
+    pub fn record_briefing_attempt(&mut self, name: &str) {
+        self.briefing_attempts
+            .insert(name.to_string(), std::time::Instant::now());
     }
 
     pub async fn session_exists(&self, name: &str) -> Result<bool> {
@@ -137,6 +175,7 @@ impl SessionManager {
             last_active: now,
             provider,
             model,
+            turn_count: Some(0),
         };
 
         let history = SessionHistory {
@@ -158,7 +197,7 @@ impl SessionManager {
 
     pub async fn load_history(&self, name: &str) -> Result<Vec<Message>> {
         let collection = format!("sessions.{}.history", name);
-        let results = self.db.query(&collection, &serde_json::json!({})).await?;
+        let results = self.db.query(&collection, &history_query_body()).await?;
         if let Some(doc) = results.into_iter().next() {
             let history: SessionHistory = serde_json::from_value(doc)?;
             Ok(history.turns)
@@ -175,9 +214,14 @@ impl SessionManager {
         let collection = format!("sessions.{}.history", name);
         let results = self
             .db
-            .query(&collection, &serde_json::json!({}))
+            .query(&collection, &history_query_body())
             .await
             .map_err(|e| SessionError::Io(e.into()))?;
+
+        // Stamped after a successful push so the meta update below can
+        // mirror the history length; stays None when no history doc
+        // exists (the meta rewrite still runs for last_active).
+        let mut appended_turn_count: Option<u32> = None;
 
         if let Some(doc) = results.into_iter().next() {
             let history: SessionHistory = serde_json::from_value(doc.clone())
@@ -195,6 +239,7 @@ impl SessionManager {
 
             let mut history = history;
             history.turns.push(message.clone());
+            appended_turn_count = Some(history.turns.len() as u32);
 
             if let Some(id) = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()) {
                 self.db
@@ -205,12 +250,13 @@ impl SessionManager {
             }
         }
 
-        // Update last_active on meta. Non-fatal if it fails — the history
-        // write is the source of truth for append_message's success.
+        // Update last_active (and the turn-count mirror) on meta. Non-fatal
+        // if it fails — the history write is the source of truth for
+        // append_message's success.
         let meta_collection = format!("sessions.{}.meta", name);
         let meta_results = self
             .db
-            .query(&meta_collection, &serde_json::json!({}))
+            .query(&meta_collection, &history_query_body())
             .await
             .map_err(|e| SessionError::Io(e.into()))?;
         if let Some(meta_doc) = meta_results.into_iter().next() {
@@ -223,6 +269,9 @@ impl SessionManager {
                 let mut meta: SessionMeta = serde_json::from_value(meta_doc)
                     .map_err(|e| SessionError::Io(e.into()))?;
                 meta.last_active = Utc::now();
+                if let Some(n) = appended_turn_count {
+                    meta.turn_count = Some(n);
+                }
                 self.db
                     .update(&meta_collection, &id, &serde_json::to_value(&meta)
                         .map_err(|e| SessionError::Io(e.into()))?)
@@ -257,21 +306,114 @@ impl SessionManager {
     }
 
     pub async fn list(&self) -> Result<Vec<SessionMeta>> {
+        Ok(self.list_docs().await?.into_iter().map(|(_, _, m)| m).collect())
+    }
+
+    /// `list()` plus the stored-doc address per meta, so callers that
+    /// write back (the `list_with_counts` backfill) can target the
+    /// WardSONDB document. The doc id is the server-assigned `_id`
+    /// (falling back to `id` per the append_message pattern) — NOT
+    /// `SessionMeta.id`, which is an internal uuid.
+    async fn list_docs(&self) -> Result<Vec<(String, Option<String>, SessionMeta)>> {
         let collections = self.db.list_collections().await?;
         let mut sessions = Vec::new();
 
         for col in collections {
             if col.starts_with("sessions.") && col.ends_with(".meta") {
-                let results = self.db.query(&col, &serde_json::json!({})).await?;
+                let results = self.db.query(&col, &history_query_body()).await?;
                 for doc in results {
+                    let doc_id = doc
+                        .get("_id")
+                        .or(doc.get("id"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
                     if let Ok(meta) = serde_json::from_value::<SessionMeta>(doc) {
-                        sessions.push(meta);
+                        sessions.push((col.clone(), doc_id, meta));
                     }
                 }
             }
         }
 
         Ok(sessions)
+    }
+
+    /// `list()` with `turn_count` guaranteed `Some` on every returned meta.
+    /// Metas already stamped (created or appended-to post-fix) pass through;
+    /// unstamped pre-fix metas get the count derived from their history doc,
+    /// and the derived value is backfilled onto the stored meta
+    /// fire-and-forget (spawn_access_touches precedent; `patch_document`
+    /// so a concurrent `append_message` full-doc update can't be clobbered
+    /// on other fields). A failed derivation displays as 0 but is NOT
+    /// backfilled — never persist a guess.
+    pub async fn list_with_counts(&self) -> Result<Vec<SessionMeta>> {
+        let mut out = Vec::new();
+        for (meta_collection, doc_id, mut meta) in self.list_docs().await? {
+            if meta.turn_count.is_none() {
+                match self.fetch_turn_count(&meta.name).await {
+                    Ok(n) => {
+                        meta.turn_count = Some(n);
+                        if let Some(id) = doc_id {
+                            Self::spawn_turn_count_backfill(
+                                self.db.clone(),
+                                meta_collection,
+                                id,
+                                n,
+                            );
+                        }
+                    }
+                    Err(_) => meta.turn_count = Some(0),
+                }
+            }
+            out.push(meta);
+        }
+        Ok(out)
+    }
+
+    /// Count the turns in a session's canonical history doc (raw JSON
+    /// `turns` array length — robust to legacy format_version 1 shapes
+    /// that `SessionHistory` deserialization would reject).
+    async fn fetch_turn_count(&self, name: &str) -> Result<u32> {
+        let collection = format!("sessions.{}.history", name);
+        let results = self.db.query(&collection, &history_query_body()).await?;
+        Ok(results
+            .into_iter()
+            .next()
+            .and_then(|doc| doc.get("turns").and_then(|t| t.as_array()).map(|a| a.len()))
+            .unwrap_or(0) as u32)
+    }
+
+    /// Fire-and-forget: persist a derived turn count onto a pre-fix meta
+    /// doc so subsequent listings skip the history fetch.
+    fn spawn_turn_count_backfill(
+        db: WardsonDbClient,
+        meta_collection: String,
+        doc_id: String,
+        count: u32,
+    ) {
+        tokio::spawn(async move {
+            let patch = serde_json::json!({ "turn_count": count });
+            if let Err(e) = db.patch_document(&meta_collection, &doc_id, &patch).await {
+                tracing::debug!(
+                    target: "sessions",
+                    collection = %meta_collection,
+                    error = %e,
+                    "turn_count backfill patch failed (will retry on next listing)"
+                );
+            }
+        });
+    }
+
+    /// Read one session's meta doc. `Ok(None)` when the collection is
+    /// missing/empty or the doc doesn't deserialize (same tolerance as
+    /// `list`). Query body = `history_query_body()` — meta collections
+    /// follow the same one-doc-per-session model.
+    pub async fn get_meta(&self, name: &str) -> Result<Option<SessionMeta>> {
+        let meta_collection = format!("sessions.{}.meta", name);
+        let results = self.db.query(&meta_collection, &history_query_body()).await?;
+        Ok(results
+            .into_iter()
+            .next()
+            .and_then(|doc| serde_json::from_value::<SessionMeta>(doc).ok()))
     }
 
     pub async fn get_most_recent_active(&self) -> Result<Option<SessionMeta>> {
@@ -286,7 +428,7 @@ impl SessionManager {
         let meta_collection = format!("sessions.{}.meta", name);
         let results = self
             .db
-            .query(&meta_collection, &serde_json::json!({}))
+            .query(&meta_collection, &history_query_body())
             .await?;
         if let Some(doc) = results.into_iter().next() {
             let id = doc
@@ -360,6 +502,75 @@ mod format_version_tests {
 }
 
 #[cfg(test)]
+mod history_query_tests {
+    // Relocated from tools/sessions.rs with its builder (session-ux-fixes
+    // wave); the assertions are unchanged — the body shape is load-bearing
+    // for the FIX-5 canonical-first-doc guarantee.
+    use super::history_query_body;
+    use serde_json::json;
+
+    #[test]
+    fn history_body_limit_10_oldest_first() {
+        let body = history_query_body();
+        assert_eq!(body["limit"], json!(10));
+        assert_eq!(body["sort"], json!([{"_created_at": "asc"}]));
+    }
+}
+
+#[cfg(test)]
+mod turn_count_meta_tests {
+    //! Serde shape of the additive `SessionMeta.turn_count` field. The
+    //! stamp-on-append and derive-and-backfill paths need a live
+    //! WardSONDB, so they are QEMU-verified rather than unit-tested
+    //! (same convention as pending_resume_briefing_tests below).
+    use super::*;
+    use serde_json::json;
+
+    fn pre_fix_meta_json() -> serde_json::Value {
+        json!({
+            "id": "0e0f9c1a-aaaa-bbbb-cccc-000000000001",
+            "name": "main",
+            "state": "Active",
+            "created_at": "2026-05-01T00:00:00Z",
+            "last_active": "2026-07-01T00:00:00Z",
+            "provider": "anthropic",
+        })
+    }
+
+    #[test]
+    fn pre_fix_meta_without_turn_count_deserializes_to_none() {
+        let meta: SessionMeta = serde_json::from_value(pre_fix_meta_json()).unwrap();
+        assert_eq!(
+            meta.turn_count, None,
+            "missing turn_count must read as None so list_with_counts knows to derive it"
+        );
+    }
+
+    #[test]
+    fn stamped_turn_count_round_trips() {
+        let mut meta: SessionMeta = serde_json::from_value(pre_fix_meta_json()).unwrap();
+        meta.turn_count = Some(42);
+        let serialized = serde_json::to_value(&meta).unwrap();
+        assert_eq!(serialized["turn_count"], json!(42));
+        let restored: SessionMeta = serde_json::from_value(serialized).unwrap();
+        assert_eq!(restored.turn_count, Some(42));
+    }
+
+    #[test]
+    fn none_turn_count_is_absent_from_serialized_meta() {
+        // skip_serializing_if keeps pre-fix doc shapes byte-stable when a
+        // meta is round-tripped without ever being stamped (e.g.
+        // update_state on a legacy session).
+        let meta: SessionMeta = serde_json::from_value(pre_fix_meta_json()).unwrap();
+        let serialized = serde_json::to_value(&meta).unwrap();
+        assert!(
+            serialized.get("turn_count").is_none(),
+            "None must serialize to an absent field, not null"
+        );
+    }
+}
+
+#[cfg(test)]
 mod pending_resume_briefing_tests {
     //! Verifies the in-memory `pending_resume_briefing` flag added for
     //! the SessionAttach → UserMessage resume-briefing handshake. The
@@ -392,6 +603,62 @@ mod pending_resume_briefing_tests {
         assert!(
             !mgr.pending_resume_briefing,
             "after replace, the flag must be cleared so subsequent turns are not briefings"
+        );
+    }
+}
+
+#[cfg(test)]
+mod briefing_attempt_cooldown_tests {
+    //! Verifies the runtime `briefing_attempts` map that backs the
+    //! resume-briefing attempt cooldown (session-ux-fixes). The full
+    //! gate (idle check + cooldown + synthetic dispatch) depends on a
+    //! live WardSONDB and LLM provider, so it is QEMU-verified — same
+    //! convention as pending_resume_briefing_tests above.
+    use super::*;
+    use std::time::Duration;
+
+    fn mgr() -> SessionManager {
+        // Dummy client — never connected; these tests don't touch the DB.
+        SessionManager::new(WardsonDbClient::from_url("http://127.0.0.1:1"))
+    }
+
+    #[test]
+    fn unknown_session_is_never_recent() {
+        let m = mgr();
+        assert!(
+            !m.briefing_attempt_recent("main", Duration::from_secs(3600)),
+            "a session with no recorded attempt must not be suppressed"
+        );
+    }
+
+    #[test]
+    fn recorded_attempt_is_recent_within_a_large_window() {
+        let mut m = mgr();
+        m.record_briefing_attempt("main");
+        assert!(
+            m.briefing_attempt_recent("main", Duration::from_secs(3600)),
+            "an attempt recorded just now must be inside a 1h window"
+        );
+    }
+
+    #[test]
+    fn recorded_attempt_is_stale_under_a_zero_window() {
+        let mut m = mgr();
+        m.record_briefing_attempt("main");
+        assert!(
+            !m.briefing_attempt_recent("main", Duration::ZERO),
+            "elapsed() >= 0 must never be < a zero cooldown — the window boundary is exclusive"
+        );
+    }
+
+    #[test]
+    fn attempts_are_per_session() {
+        let mut m = mgr();
+        m.record_briefing_attempt("a");
+        assert!(m.briefing_attempt_recent("a", Duration::from_secs(3600)));
+        assert!(
+            !m.briefing_attempt_recent("b", Duration::from_secs(3600)),
+            "recording session 'a' must not suppress session 'b'"
         );
     }
 }

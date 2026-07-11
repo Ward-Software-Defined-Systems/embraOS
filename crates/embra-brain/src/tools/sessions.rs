@@ -35,13 +35,11 @@ async fn session_names(db: &WardsonDbClient) -> Vec<String> {
         .collect()
 }
 
-/// History query body (FIX-5): explicit limit + oldest-first sort so the
-/// FIRST document is deterministically the canonical history doc (the data
-/// model stores one doc per session; the old empty body relied on the
-/// server's default limit and key order).
-fn history_query_body() -> serde_json::Value {
-    serde_json::json!({ "limit": 10, "sort": [{"_created_at": "asc"}] })
-}
+// The single-doc query body (FIX-5 explicit limit + oldest-first sort)
+// lives in `crate::sessions::history_query_body` — sessions/mod.rs is
+// its canonical home since the session-ux-fixes wave, shared by the
+// SessionManager internals and this tool layer.
+use crate::sessions::history_query_body;
 
 /// Fetch the turns array for a session. Returns (turns_vec, total_count).
 async fn fetch_turns(db: &WardsonDbClient, name: &str) -> (Vec<serde_json::Value>, usize) {
@@ -69,19 +67,6 @@ async fn fetch_turns(db: &WardsonDbClient, name: &str) -> (Vec<serde_json::Value
         }
     }
     (Vec::new(), 0)
-}
-
-#[cfg(test)]
-mod history_query_tests {
-    use super::history_query_body;
-    use serde_json::json;
-
-    #[test]
-    fn history_body_limit_10_oldest_first() {
-        let body = history_query_body();
-        assert_eq!(body["limit"], json!(10));
-        assert_eq!(body["sort"], json!([{"_created_at": "asc"}]));
-    }
 }
 
 /// Format a single turn for output. Truncates content to `max_chars`.

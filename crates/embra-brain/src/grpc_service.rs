@@ -38,6 +38,35 @@ use tracing::{debug, error, info, warn};
 /// the canonical default lives in exactly one place.
 const DEFAULT_MAX_TOOL_ITERATIONS: usize = 100;
 
+/// Minimum session idle time (vs `meta.last_active`) before a SessionAttach
+/// fires a resume briefing. Mobile browsers drop and reopen the chat WS on
+/// every background/lock, and each reopen is a fresh Converse stream +
+/// attach — without this gate every flap cost a full LLM recap turn. A
+/// completed briefing persists its turns and thereby bumps `last_active`,
+/// so the gate is self-limiting. `/switch` briefs unconditionally (explicit
+/// user action). Module const, not SystemConfig — SystemConfig has no
+/// Default and 17 construction literals.
+const RESUME_BRIEFING_MIN_IDLE_SECS: i64 = 30 * 60;
+
+/// Minimum spacing between briefing STARTS per session. Covers the
+/// aborted-mid-recap flap loop the idle gate can't: an aborted turn never
+/// persists, so `last_active` stays stale and every re-attach would
+/// re-qualify — and a disconnect does not cancel the in-flight turn (the
+/// converse task is detached), so rapid re-attaches could otherwise stack
+/// concurrent briefings.
+const RESUME_BRIEFING_ATTEMPT_COOLDOWN_SECS: u64 = 120;
+
+/// Idle-gate arm of the resume-briefing decision: `(allowed, idle_secs)`.
+/// Negative idle (clock skew / future `last_active`) counts as not-idle —
+/// suppress rather than brief on a nonsense timestamp.
+fn resume_briefing_idle_ok(
+    last_active: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (bool, i64) {
+    let idle = now.signed_duration_since(last_active).num_seconds();
+    (idle >= RESUME_BRIEFING_MIN_IDLE_SECS, idle)
+}
+
 pub struct BrainGrpcService {
     db: Arc<WardsonDbClient>,
     session_manager: Arc<RwLock<SessionManager>>,
@@ -375,14 +404,14 @@ impl BrainService for BrainGrpcService {
 
     async fn list_sessions(&self, _req: Request<ListSessionsRequest>) -> Result<Response<ListSessionsResponse>, Status> {
         let mgr = self.session_manager.read().await;
-        let sessions = mgr.list().await
+        let sessions = mgr.list_with_counts().await
             .map_err(|e| Status::internal(format!("Failed to list sessions: {}", e)))?;
 
         Ok(Response::new(ListSessionsResponse {
             sessions: sessions.into_iter().map(|s| SessionInfo {
                 name: s.name,
                 state: format!("{:?}", s.state),
-                turn_count: 0, // SessionMeta doesn't track turn count directly
+                turn_count: s.turn_count.unwrap_or(0),
                 created_at: Some(common::Timestamp { iso8601: s.created_at.to_rfc3339() }),
                 last_active: Some(common::Timestamp { iso8601: s.last_active.to_rfc3339() }),
                 has_summary: false,
@@ -400,7 +429,7 @@ impl BrainService for BrainGrpcService {
             session: Some(SessionInfo {
                 name: session.name,
                 state: format!("{:?}", session.state),
-                turn_count: 0,
+                turn_count: session.turn_count.unwrap_or(0),
                 created_at: Some(common::Timestamp { iso8601: session.created_at.to_rfc3339() }),
                 last_active: Some(common::Timestamp { iso8601: session.last_active.to_rfc3339() }),
                 has_summary: false,
@@ -597,10 +626,38 @@ async fn handle_request(
                 return Ok(());
             }
 
-            // Get active session name
+            // No-session guard (session-ux-fixes). The historical fallback
+            // ran the turn against a literal "default" session: normally
+            // nonexistent, so the model answered with empty history and
+            // both append_message calls silently no-opped — a ghost turn.
+            // Blocking here (after the sessionless setup intercepts above,
+            // which legitimately consume messages post-/close) also closes
+            // the cross-provider hole: this path never runs
+            // check_session_provider, so a real "default" session pinned
+            // to another provider would have been silently contaminated.
             let session_name = {
                 let mgr = session_mgr.read().await;
-                mgr.active_session.clone().unwrap_or_else(|| "default".to_string())
+                match mgr.active_session.clone() {
+                    Some(name) => name,
+                    None => {
+                        let most_recent = mgr
+                            .get_most_recent_active()
+                            .await
+                            .ok()
+                            .flatten()
+                            .map(|m| m.name);
+                        drop(mgr);
+                        let _ = tx.send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::System(
+                                SystemMessage {
+                                    content: no_session_block_message(most_recent.as_deref()),
+                                    msg_type: SystemMessageType::Error as i32,
+                                }
+                            )),
+                        })).await;
+                        return Ok(());
+                    }
+                }
             };
 
             // Load config — api_key comes from --api-key flag or env, not WardSONDB
@@ -1588,20 +1645,56 @@ async fn handle_request(
             // the `<session_resumption>` wrapper for the brain-facing call,
             // and persists `[Session resumed]` (raw) to history. No wrapper
             // leak into subsequent turns.
+            //
+            // Gated twice (session-ux-fixes): the idle gate keeps transport
+            // flaps from costing a recap turn each (mobile browsers drop and
+            // reopen the chat WS on every background/lock, and each reopen
+            // re-attaches), and the attempt cooldown keeps an aborted
+            // mid-recap briefing from restarting on every re-attach. A
+            // missing/unreadable meta fires — preserves pre-gate behavior
+            // on broken-meta paths (history already loaded fine).
             if !new_session && is_sealed && history_len > 0 {
-                session_mgr.write().await.pending_resume_briefing = true;
-                let synthetic = ConversationRequest {
-                    request_type: Some(conversation_request::RequestType::UserMessage(
-                        UserMessage {
-                            content: "[Session resumed]".to_string(),
-                            timestamp: None,
-                        }
-                    )),
+                let meta = session_mgr.read().await.get_meta(&session_name).await.ok().flatten();
+                let (idle_ok, idle_secs) = match &meta {
+                    Some(m) => resume_briefing_idle_ok(m.last_active, chrono::Utc::now()),
+                    None => (true, i64::MAX),
                 };
-                Box::pin(handle_request(
-                    synthetic, tx, db, session_mgr, config_tz, api_key, in_turn,
-                    pending_provider, pending_key_setup, pending_openai_compat_setup,
-                )).await?;
+                let fire = idle_ok && {
+                    let mut mgr = session_mgr.write().await;
+                    if mgr.briefing_attempt_recent(
+                        &session_name,
+                        std::time::Duration::from_secs(RESUME_BRIEFING_ATTEMPT_COOLDOWN_SECS),
+                    ) {
+                        false
+                    } else {
+                        mgr.record_briefing_attempt(&session_name);
+                        mgr.pending_resume_briefing = true;
+                        true
+                    }
+                };
+                if fire {
+                    let synthetic = ConversationRequest {
+                        request_type: Some(conversation_request::RequestType::UserMessage(
+                            UserMessage {
+                                content: "[Session resumed]".to_string(),
+                                timestamp: None,
+                            }
+                        )),
+                    };
+                    Box::pin(handle_request(
+                        synthetic, tx, db, session_mgr, config_tz, api_key, in_turn,
+                        pending_provider, pending_key_setup, pending_openai_compat_setup,
+                    )).await?;
+                } else {
+                    info!(
+                        target: "sessions",
+                        session = %session_name,
+                        idle_secs,
+                        min_idle_secs = RESUME_BRIEFING_MIN_IDLE_SECS,
+                        suppressed_by = if idle_ok { "attempt-cooldown" } else { "idle-gate" },
+                        "resume briefing suppressed on attach"
+                    );
+                }
             }
 
             Ok(())
@@ -1716,7 +1809,7 @@ async fn handle_slash_command(
         "/sessions" => {
             let mgr = session_mgr.read().await;
             let is_sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
-            let output = match mgr.list().await {
+            let output = match mgr.list_with_counts().await {
                 Ok(sessions) => {
                     if sessions.is_empty() {
                         "No sessions.".to_string()
@@ -1727,7 +1820,13 @@ async fn handle_slash_command(
                             } else {
                                 ""
                             };
-                            format!("  {}{} [{:?}] last active: {}", s.name, indicator, s.state, s.last_active.format("%Y-%m-%d %H:%M"))
+                            let n = s.turn_count.unwrap_or(0);
+                            format!(
+                                "  {}{} [{:?}] {} turn{}, last active: {}",
+                                s.name, indicator, s.state,
+                                n, if n == 1 { "" } else { "s" },
+                                s.last_active.format("%Y-%m-%d %H:%M")
+                            )
                         }).collect::<Vec<_>>().join("\n")
                     }
                 }
@@ -1816,9 +1915,17 @@ async fn handle_slash_command(
                     // it through, the UserMessage handler will read-and-clear
                     // the flag and substitute the `<session_resumption>`
                     // wrapper. Raw `[Session resumed]` is what persists.
+                    // Unlike SessionAttach, /switch briefs unconditionally —
+                    // it is an explicit user action, not a transport reconnect.
+                    // It still records the attempt so a WS re-attach seconds
+                    // later (while this briefing may still be in flight, with
+                    // last_active not yet bumped) is cooldown-suppressed.
                     let is_sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
                     if is_sealed && history_len > 0 {
-                        session_mgr.write().await.pending_resume_briefing = true;
+                        let mut mgr = session_mgr.write().await;
+                        mgr.record_briefing_attempt(args);
+                        mgr.pending_resume_briefing = true;
+                        drop(mgr);
                         return Some("[Session resumed]".to_string());
                     }
                 } else {
@@ -3924,6 +4031,28 @@ fn cross_provider_block_message(
          To open it: {}. To stay on {} instead: /new <name> for a fresh session.",
         session_name, session_provider, active_provider, open_steps, active_provider
     )
+}
+
+/// Operator-facing guidance when a plain prompt arrives with no session
+/// attached (after `/close`, or a failed learning loop). State-aware like
+/// `cross_provider_block_message`: names the most recent resumable session
+/// when one exists. The turn is NOT sent to the model — the old fallback
+/// ran it against a phantom "default" session whose persistence silently
+/// no-opped (a ghost turn; and genuine cross-provider contamination if a
+/// real session named "default" existed, since this path never runs
+/// `check_session_provider`).
+fn no_session_block_message(most_recent: Option<&str>) -> String {
+    match most_recent {
+        Some(name) => format!(
+            "No session is attached, so this message was not processed. \
+             To resume '{}': /switch {}. To start fresh: /new <name>. \
+             /sessions lists all sessions.",
+            name, name
+        ),
+        None => "No session is attached, so this message was not processed. \
+                 To start one: /new <name>. /sessions lists all sessions."
+            .to_string(),
+    }
 }
 
 /// Embedded feedback-loop protocol spec (Phase 3 preview, v2).
@@ -6250,5 +6379,80 @@ mod cross_provider_message_tests {
         assert!(!msg.contains("/close"));
         assert!(msg.contains("To open it: /provider anthropic, then /switch main."));
         assert!(msg.contains("To stay on ollama instead: /new <name> for a fresh session."));
+    }
+}
+
+#[cfg(test)]
+mod resume_briefing_gate_tests {
+    //! Threshold semantics of the resume-briefing idle gate
+    //! (session-ux-fixes). The full attach flow (meta read + cooldown +
+    //! synthetic dispatch) needs a live WardSONDB, so it is QEMU-verified;
+    //! the pure decision fn is locked here.
+    use super::{resume_briefing_idle_ok, RESUME_BRIEFING_MIN_IDLE_SECS};
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn one_second_under_threshold_suppresses() {
+        let now = Utc::now();
+        let last_active = now - Duration::seconds(RESUME_BRIEFING_MIN_IDLE_SECS - 1);
+        let (ok, idle) = resume_briefing_idle_ok(last_active, now);
+        assert!(!ok, "idle below the threshold must suppress the briefing");
+        assert_eq!(idle, RESUME_BRIEFING_MIN_IDLE_SECS - 1);
+    }
+
+    #[test]
+    fn exactly_threshold_fires() {
+        let now = Utc::now();
+        let last_active = now - Duration::seconds(RESUME_BRIEFING_MIN_IDLE_SECS);
+        let (ok, idle) = resume_briefing_idle_ok(last_active, now);
+        assert!(ok, "idle at the threshold must fire (>= comparison)");
+        assert_eq!(idle, RESUME_BRIEFING_MIN_IDLE_SECS);
+    }
+
+    #[test]
+    fn future_last_active_suppresses() {
+        // Clock skew / a just-written last_active slightly ahead of `now`
+        // must read as not-idle, never as a giant idle span.
+        let now = Utc::now();
+        let last_active = now + Duration::seconds(30);
+        let (ok, idle) = resume_briefing_idle_ok(last_active, now);
+        assert!(!ok, "negative idle must suppress");
+        assert!(idle < 0, "the reported idle must expose the skew for the log line");
+    }
+}
+
+#[cfg(test)]
+mod no_session_message_tests {
+    use super::no_session_block_message;
+
+    /// With a resumable session on record, resuming it is the first
+    /// suggestion (named /switch), starting fresh the second.
+    #[test]
+    fn names_most_recent_session_switch_before_new() {
+        let msg = no_session_block_message(Some("scratch"));
+        assert_eq!(
+            msg,
+            "No session is attached, so this message was not processed. \
+             To resume 'scratch': /switch scratch. To start fresh: /new <name>. \
+             /sessions lists all sessions."
+        );
+        // The order is the contract: resume the named session before
+        // the start-fresh alternative.
+        let switch = msg.find("/switch").unwrap();
+        let new = msg.find("/new").unwrap();
+        assert!(switch < new);
+        assert!(msg.contains("/sessions"));
+    }
+
+    /// With nothing resumable (e.g. the only session was /close'd —
+    /// Closed sessions are filtered by get_most_recent_active), the
+    /// message offers only /new; no dangling /switch to nowhere.
+    #[test]
+    fn without_a_session_offers_only_new() {
+        let msg = no_session_block_message(None);
+        assert!(!msg.contains("/switch"));
+        assert!(msg.contains("was not processed"));
+        assert!(msg.contains("/new <name>"));
+        assert!(msg.contains("/sessions lists all sessions"));
     }
 }
