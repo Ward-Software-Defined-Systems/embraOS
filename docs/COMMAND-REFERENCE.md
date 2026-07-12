@@ -7,7 +7,7 @@ Every slash command available in an embraOS session. See also [Keyboard Shortcut
 | `/help` | Show all commands and keyboard shortcuts |
 | `/ml` | Open a multi-line message editor. **Web console (default):** a textarea modal — Ctrl/⌘+Enter or **Send** to submit, Esc/Cancel to discard; sent verbatim as one message. **Serial TUI (`EMBRA_TUI=1`):** toggles dot-terminator mode — type lines, `.` on its own line to send |
 | `/status` | System status — version, uptime, WardSONDB health, memory, soul status |
-| `/sessions` | List all sessions with state, turn count, and last active time (configured timezone) |
+| `/sessions` | List all sessions, most recently active first, with state, turn count, and last active time (configured timezone) |
 | `/new <name>` | Create a new named session and switch to it |
 | `/switch <name>` | Switch to an existing session (restores full history) |
 | `/close` | Close the current session |
