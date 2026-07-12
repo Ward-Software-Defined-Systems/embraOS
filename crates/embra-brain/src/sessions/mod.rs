@@ -81,6 +81,13 @@ pub(crate) fn history_query_body() -> serde_json::Value {
     serde_json::json!({ "limit": 10, "sort": [{"_created_at": "asc"}] })
 }
 
+/// Operator-facing listing order: most recently active first. Stable
+/// sort, so sessions with identical timestamps keep the incoming
+/// collection-name (alphabetical) order as the deterministic tie-break.
+pub(crate) fn sort_by_last_active_desc(sessions: &mut [SessionMeta]) {
+    sessions.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+}
+
 pub struct SessionManager {
     db: WardsonDbClient,
     pub active_session: Option<String>,
@@ -337,14 +344,17 @@ impl SessionManager {
         Ok(sessions)
     }
 
-    /// `list()` with `turn_count` guaranteed `Some` on every returned meta.
-    /// Metas already stamped (created or appended-to post-fix) pass through;
-    /// unstamped pre-fix metas get the count derived from their history doc,
-    /// and the derived value is backfilled onto the stored meta
-    /// fire-and-forget (spawn_access_touches precedent; `patch_document`
-    /// so a concurrent `append_message` full-doc update can't be clobbered
-    /// on other fields). A failed derivation displays as 0 but is NOT
-    /// backfilled — never persist a guess.
+    /// `list()` with `turn_count` guaranteed `Some` on every returned meta,
+    /// sorted most-recently-active first (the operator-facing listing
+    /// order — both the `/sessions` slash output and the chat-mobile
+    /// sessions sheet render this vec as-is). Metas already stamped
+    /// (created or appended-to post-fix) pass through; unstamped pre-fix
+    /// metas get the count derived from their history doc, and the derived
+    /// value is backfilled onto the stored meta fire-and-forget
+    /// (spawn_access_touches precedent; `patch_document` so a concurrent
+    /// `append_message` full-doc update can't be clobbered on other
+    /// fields). A failed derivation displays as 0 but is NOT backfilled —
+    /// never persist a guess.
     pub async fn list_with_counts(&self) -> Result<Vec<SessionMeta>> {
         let mut out = Vec::new();
         for (meta_collection, doc_id, mut meta) in self.list_docs().await? {
@@ -366,6 +376,7 @@ impl SessionManager {
             }
             out.push(meta);
         }
+        sort_by_last_active_desc(&mut out);
         Ok(out)
     }
 
@@ -567,6 +578,54 @@ mod turn_count_meta_tests {
             serialized.get("turn_count").is_none(),
             "None must serialize to an absent field, not null"
         );
+    }
+}
+
+#[cfg(test)]
+mod list_order_tests {
+    //! Ordering contract of the operator-facing session listing
+    //! (list_with_counts sorts through this helper; the /sessions
+    //! output and the chat-mobile sheet render the vec as-is).
+    use super::*;
+    use serde_json::json;
+
+    fn meta(name: &str, last_active: &str) -> SessionMeta {
+        serde_json::from_value(json!({
+            "id": format!("uuid-{name}"),
+            "name": name,
+            "state": "Detached",
+            "created_at": "2026-05-01T00:00:00Z",
+            "last_active": last_active,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn most_recently_active_sorts_first() {
+        // Incoming order is collection-name alphabetical — the exact
+        // shape list_docs produces.
+        let mut sessions = vec![
+            meta("alpha", "2026-07-01T00:00:00Z"),
+            meta("beta", "2026-07-11T09:00:00Z"),
+            meta("main", "2026-07-10T12:00:00Z"),
+        ];
+        sort_by_last_active_desc(&mut sessions);
+        let names: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["beta", "main", "alpha"]);
+    }
+
+    #[test]
+    fn equal_timestamps_keep_alphabetical_tie_break() {
+        // Stable sort: identical last_active preserves the incoming
+        // (alphabetical) order, so the listing stays deterministic.
+        let mut sessions = vec![
+            meta("apple", "2026-07-11T09:00:00Z"),
+            meta("banana", "2026-07-11T09:00:00Z"),
+            meta("cherry", "2026-07-12T09:00:00Z"),
+        ];
+        sort_by_last_active_desc(&mut sessions);
+        let names: Vec<&str> = sessions.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["cherry", "apple", "banana"]);
     }
 }
 
