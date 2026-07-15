@@ -1,6 +1,6 @@
 # Recommended Models for OpenAI-Compatible Providers
 
-**Status:** Phase 1 stable since `v0.5.0-phase1` (2026-05-07). Models below are operator-vetted as full-toolset-capable (see also the README header callout for the same list, surfaced for fresh GitHub readers); operator-overridable at wizard time.
+**Status:** Phase 1 stable since `v0.5.0-phase1` (2026-05-07). The model below is operator-vetted as full-toolset-capable (see also the README header callout for the same pick, surfaced for fresh GitHub readers); operator-overridable at wizard time.
 
 The wizard's selector reads `GET /v1/models` from the configured server, so any pulled (Ollama) or loaded (LM Studio) model is selectable regardless of what's listed here.
 
@@ -8,13 +8,12 @@ Hardware mapping for the test fleet:
 
 - **Ollama** runs on an **M1 Mac Mini, 16 GB unified memory**
 - **LM Studio** runs on a **Mac Studio M4 Max, 128 GB unified memory**
-- **Ollama Cloud via M1 Mac Mini** (the `:cloud` tag suffix) — hosted by Ollama; no local hardware allocation other than resources allocated to running Ollama.
 
 ---
 
 ## Vetted Models
 
-The list is deliberately short. MoE models need a minimum active-parameter threshold for honest instruction-following: below ~27–49B active they become confabulation-prone under complex multi-step protocols — enough stored knowledge to sound authoritative, not enough working memory to track what they've actually done. Dense models have no total/active split, so their parameter count is honest. Both picks below clear the threshold: Qwen3.6 27B is dense (27B = 27B active); DeepSeek-V4-Pro is 1.6T-total MoE with 49B active per token.
+The list is deliberately short. MoE models need a minimum active-parameter threshold for honest instruction-following: below ~27–49B active they become confabulation-prone under complex multi-step protocols — enough stored knowledge to sound authoritative, not enough working memory to track what they've actually done. Dense models have no total/active split, so their parameter count is honest. The pick below clears the threshold: Qwen3.6 27B is dense (27B = 27B active).
 
 ### Local (Ollama / LM Studio)
 
@@ -22,18 +21,6 @@ The list is deliberately short. MoE models need a minimum active-parameter thres
 |--------|-------|-----|
 | Ollama | Qwen3.6 27B (dense) | `qwen3.6:27b` |
 | LM Studio | Qwen3.6 27B (dense, 8-bit) | `qwen/qwen3.6-27b` |
-
-### Ollama Cloud (no local hardware required)
-
-| Pick | Model | Tag | Native ctx | Role |
-|------|-------|-----|------------|------|
-| 1 | DeepSeek-V4-Pro | `deepseek-v4-pro:cloud` | 1M | Full-toolset reasoning workloads |
-
-**Notes:**
-- The `:cloud` suffix routes through Ollama's hosted infrastructure; no local VRAM or CPU cost.
-- 1.6T-parameter MoE (49B activated per token); three thinking modes — "No thinking" / "Thinking" / "Max thinking" — toggled by `reasoning_effort` per [DeepSeek's docs](https://api-docs.deepseek.com/guides/thinking_mode).
-- **embra-brain auto-engages Max thinking for this model** (and any model whose name contains `deepseek-v4-pro`, case-insensitive): the OpenAI-compat provider sends `reasoning_effort: "max"` automatically — no per-turn operator action. The route table is `reasoning_effort_for_model` in `crates/embra-brain/src/provider/openai_compat/mod.rs`. Max-thinking engagement is operator-confirmed in production use (2026-07-10).
-- Cloud models bypass the local Ollama env-var configuration below — context window and KV-cache layout are server-managed.
 
 ---
 
@@ -58,7 +45,7 @@ Set context size and KV cache via launchd env vars if needed — `OLLAMA_CONTEXT
 
 embra-brain sends sampler params and Ollama's `think: true` flag in each request — operators don't configure these.
 
-**`:cloud` models** (e.g. `deepseek-v4-pro:cloud`) bypass these env vars entirely — context window and KV-cache layout are managed by Ollama's hosted infrastructure. `num_ctx` is not a documented field on Ollama's OpenAI-compat endpoint anyway, regardless of local/cloud mode (per [`ollama#7063`](https://github.com/ollama/ollama/issues/7063), still open since 2024-10-01); for locally-loaded models a Modelfile (`PARAMETER num_ctx`) works around it.
+`num_ctx` is not a documented field on Ollama's OpenAI-compat endpoint (per [`ollama#7063`](https://github.com/ollama/ollama/issues/7063), still open since 2024-10-01); for locally-loaded models a Modelfile (`PARAMETER num_ctx`) works around it.
 
 ### Bearer auth
 
@@ -73,8 +60,8 @@ embraOS's wizard prompts for an optional bearer; supply the same token the serve
 
 ## Operator Override
 
-Both lists are operator-overridable at wizard time. Switching models post-wizard runs `/provider --setup <ollama|lm_studio>` (Sprint 5 reconfigure flow added in commit `4eb57e9`).
+The list is operator-overridable at wizard time. Switching models post-wizard runs `/provider --setup <ollama|lm_studio>` (Sprint 5 reconfigure flow added in commit `4eb57e9`).
 
 ---
 
-*Last updated: 2026-07-10.*
+*Last updated: 2026-07-14.*

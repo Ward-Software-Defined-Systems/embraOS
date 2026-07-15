@@ -38,6 +38,7 @@ The loop driver consumes a neutral intermediate representation (`Block::{Text, T
 
 **Reasoning controls per family:**
 - **gpt-oss / OpenAI o-series / DeepSeek-R1·R2 / `-thinking` variants** — embraOS sends OpenAI-compat `reasoning_effort: "high"` automatically (gated on `model_supports_reasoning_effort` heuristic).
+- **DeepSeek-V4-Pro** (any name containing `deepseek-v4-pro`, incl. `:cloud`) — embraOS sends `reasoning_effort: "max"` automatically to engage the model's Max-thinking mode (per [DeepSeek's docs](https://api-docs.deepseek.com/guides/thinking_mode)); route table `reasoning_effort_for_model` in `crates/embra-brain/src/provider/openai_compat/mod.rs`, operator-confirmed in production (2026-07-10). Fires whenever the model is selected — no longer on the vetted local roster (the `:cloud` variant is Ollama-hosted, not local).
 - **Qwen3 family** (Qwen3, Qwen3.6, including `*-A3B` MoE) — thinking is integrated into the same model and toggled via `/think` and `/no_think` directives in user/system messages. `reasoning_effort` is omitted to avoid `No valid custom reasoning fields found` server warnings. See `RECOMMENDED-LOCAL-MODELS.md` for the vetted roster and server configuration.
 - **Standard non-reasoning models** — no reasoning controls; embraOS omits all reasoning parameters.
 

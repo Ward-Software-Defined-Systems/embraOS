@@ -32,17 +32,12 @@ Phase 2–5 add A/B partitioned rollback, an `embractl` management CLI, bare-met
 > models become confabulation-prone under complex multi-step protocols — they have
 > enough knowledge to sound authoritative but not enough active capacity to track
 > what they've actually done. Dense models don't have this split, so the parameter
-> count is honest: 27B means 27B active. DeepSeek V4 Pro is MoE with 1.6T
-> parameters but has enough active parameters (49B active) to clear the threshold.
-> Models currently vetted to provide full functionality: **`DeepSeek-v4-Pro:cloud`**
-> and **`Qwen3.6-27b`**. Experiment freely with others — these two are the ones
-> confirmed to handle the full toolset, and they exhibit the fewest
-> hallucinations/confabulations so far. When **`DeepSeek-v4-Pro:cloud`** is the
-> active Ollama model, embraOS auto-sends `reasoning_effort: "max"` (per
-> [DeepSeek's docs](https://api-docs.deepseek.com/guides/thinking_mode)) to engage
-> the model's Max-thinking mode — no per-turn operator action. See
+> count is honest: 27B means 27B active. The model currently vetted to provide
+> full functionality: **`Qwen3.6-27b`**. Experiment freely with others — this is
+> the one confirmed to handle the full toolset, and it exhibits the fewest
+> hallucinations/confabulations so far. See
 > [docs/RECOMMENDED-LOCAL-MODELS.md](docs/RECOMMENDED-LOCAL-MODELS.md) for the
-> full roster and server configuration.
+> vetted roster and server configuration.
 
 > **New — soul-gated dynamic tools: the replicant check.** The intelligence can now
 > propose its own dynamic tools (via the `guardian_propose` tool), and operators can
