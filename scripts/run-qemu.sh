@@ -69,6 +69,18 @@ else
     WEB_CMDLINE="embra.web=1"
 fi
 
+# WardSONDB request-log verbosity — per-request lines are opt-in server-side
+# (--verbose). EMBRA_DB_VERBOSE=1 sets embra.dbverbose=1 on the kernel
+# cmdline; embrad then appends --verbose to the wardsondb args. Default off:
+# the log lives on the 256M boot-wiped tmpfs. Requires a WardSONDB build
+# that knows --verbose (older builds reject the flag and won't start).
+if [ "${EMBRA_DB_VERBOSE:-}" = "1" ]; then
+    DBLOG_CMDLINE="embra.dbverbose=1"
+    echo "  WardSONDB: verbose request logging (EMBRA_DB_VERBOSE=1)"
+else
+    DBLOG_CMDLINE=""
+fi
+
 echo "  Serial console: this terminal"
 if [ -n "$WEB_CMDLINE" ]; then
     echo "  UI mode: web console (default) — set EMBRA_TUI=1 for the serial TUI"
@@ -95,7 +107,7 @@ qemu-system-x86_64 \
     -drive file="$IMAGE",format=raw,if=virtio \
     -kernel "$KERNEL" \
     -initrd "$INITRD" \
-    -append "console=ttyS0 root=/dev/vda2 ro quiet embra.cols=$HOST_COLS embra.rows=$HOST_ROWS $WEB_CMDLINE" \
+    -append "console=ttyS0 root=/dev/vda2 ro quiet embra.cols=$HOST_COLS embra.rows=$HOST_ROWS $WEB_CMDLINE $DBLOG_CMDLINE" \
     -nographic \
     -serial mon:stdio \
     -nic user,hostfwd=tcp::50000-:50000,hostfwd=tcp::8443-:8443,hostfwd=tcp::3345-:3345 \

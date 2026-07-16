@@ -41,6 +41,20 @@ fn web_mode_enabled() -> bool {
         .any(|p| p == "embra.web=1")
 }
 
+/// WardSONDB verbose request logging: `embra.dbverbose=1` on the kernel
+/// cmdline (set by run-qemu.sh via EMBRA_DB_VERBOSE=1). WardSONDB's
+/// per-request log lines are opt-in (`--verbose`); the default boot keeps
+/// the tmpfs log at lifecycle/warn/error only, and this flag restores
+/// per-request lines for debugging. Only valid on WardSONDB builds with the
+/// opt-in flag — an older build rejects the unknown flag and will not
+/// start. Same parsing style as `web_mode_enabled`.
+fn db_verbose_enabled() -> bool {
+    std::fs::read_to_string("/proc/cmdline")
+        .unwrap_or_default()
+        .split_whitespace()
+        .any(|p| p == "embra.dbverbose=1")
+}
+
 /// Service definition
 #[derive(Clone)]
 pub struct ServiceDef {
@@ -132,15 +146,20 @@ impl Supervisor {
             option_env!("EMBRA_STORAGE_ENGINE").unwrap_or("rocksdb");
         info!("WardSONDB storage engine: {}", storage_engine);
         // 1. WardSONDB — no dependencies
+        let mut wardsondb_args = vec![
+            "--storage-engine".to_string(), storage_engine.to_string(),
+            "--port".to_string(), "8090".to_string(),
+            "--data-dir".to_string(), "/embra/data/wardsondb".to_string(),
+            "--log-file".to_string(), "/embra/ephemeral/wardsondb.log".to_string(),
+        ];
+        if db_verbose_enabled() {
+            info!("WardSONDB verbose request logging enabled (embra.dbverbose=1)");
+            wardsondb_args.push("--verbose".to_string());
+        }
         self.add_service(ServiceDef {
             name: "wardsondb".to_string(),
             binary: "/usr/bin/wardsondb".to_string(),
-            args: vec![
-                "--storage-engine".to_string(), storage_engine.to_string(),
-                "--port".to_string(), "8090".to_string(),
-                "--data-dir".to_string(), "/embra/data/wardsondb".to_string(),
-                "--log-file".to_string(), "/embra/ephemeral/wardsondb.log".to_string(),
-            ],
+            args: wardsondb_args,
             env: vec![],
             health_check: HealthCheck::Http {
                 url: "http://127.0.0.1:8090/_health".to_string(),

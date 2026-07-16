@@ -71,6 +71,15 @@ else
     WEB_CMDLINE="embra.web=1"
 fi
 
+# WardSONDB request-log verbosity — same contract as run-qemu.sh:
+# EMBRA_DB_VERBOSE=1 → embra.dbverbose=1 → embrad appends --verbose.
+if [ "${EMBRA_DB_VERBOSE:-}" = "1" ]; then
+    DBLOG_CMDLINE="embra.dbverbose=1"
+    echo "  WardSONDB: verbose request logging (EMBRA_DB_VERBOSE=1)"
+else
+    DBLOG_CMDLINE=""
+fi
+
 echo "Starting embraOS in QEMU (aarch64)..."
 echo "  Image: $IMAGE"
 echo "  Kernel: $KERNEL"
@@ -108,7 +117,7 @@ qemu-system-aarch64 \
     -drive file="$IMAGE",format=raw,if=virtio \
     -kernel "$KERNEL" \
     -initrd "$INITRD" \
-    -append "console=ttyAMA0 root=/dev/vda2 ro quiet embra.cols=$HOST_COLS embra.rows=$HOST_ROWS $WEB_CMDLINE" \
+    -append "console=ttyAMA0 root=/dev/vda2 ro quiet embra.cols=$HOST_COLS embra.rows=$HOST_ROWS $WEB_CMDLINE $DBLOG_CMDLINE" \
     -nographic \
     -serial mon:stdio \
     -nic user,hostfwd=tcp::50000-:50000,hostfwd=tcp::8443-:8443,hostfwd=tcp::3345-:3345 \
