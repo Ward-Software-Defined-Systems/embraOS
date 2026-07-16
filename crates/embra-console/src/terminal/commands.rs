@@ -23,6 +23,8 @@ Commands:
   /guardian key brave <token>    Set the Brave Search API key (web_search tools)
   /status                        System status
   /sessions                      List all sessions
+  /sessions delete <name>        Guided delete: summary + reason + memories, then 7-day-grace soft delete
+  /sessions restore <name>       Undo a soft delete during its grace period
   /new <name>                    Create a new session
   /switch <name>                 Switch to a session
   /close                         Close current session

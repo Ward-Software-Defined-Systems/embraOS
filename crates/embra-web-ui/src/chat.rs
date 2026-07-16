@@ -323,6 +323,8 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/new", "new session (needs name)"),
         ("/switch", "switch session (needs name)"),
         ("/close", "close current session"),
+        ("/sessions delete", "guided delete (needs name)"),
+        ("/sessions restore", "restore deleted (needs name)"),
         ("/mode", "show operating mode"),
     ]),
     ("Identity", &[

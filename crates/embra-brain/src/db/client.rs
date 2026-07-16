@@ -241,6 +241,26 @@ impl WardsonDbClient {
         Ok(resp.status().is_success())
     }
 
+    /// Drop an entire collection (docs, indexes, and registry entry).
+    /// 404 is idempotent success — the ghost-sweep caller retries partially
+    /// swept sessions, and a lazily-created `sessions.{name}.summary` may
+    /// never have existed at all. Destructive and unrecoverable server-side;
+    /// the only sanctioned caller is the boot-time reaped-session sweep
+    /// (`migrations::sweep_reaped_sessions`).
+    pub async fn drop_collection(&self, name: &str) -> Result<()> {
+        let resp = self
+            .http_client
+            .delete(format!("{}/{}", self.base_url, name))
+            .send()
+            .await?;
+        if resp.status().is_success() || resp.status().as_u16() == 404 {
+            return Ok(());
+        }
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        Err(WardsonDbError::Api { status, body }.into())
+    }
+
     pub async fn write(
         &self,
         collection: &str,

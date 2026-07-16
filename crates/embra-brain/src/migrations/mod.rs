@@ -126,8 +126,80 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
     // (unversioned on purpose — see ensure_hot_path_indexes).
     ensure_hot_path_indexes(db).await;
 
+    // Ghost-sweep for TTL-reaped soft-deleted sessions — also every boot.
+    sweep_reaped_sessions(db).await;
+
     info!("Migrations complete. Schema version: {}", CURRENT_SCHEMA_VERSION);
     Ok(())
+}
+
+/// A session's collections are reap residue exactly when BOTH canonical
+/// docs are gone: WardSONDB's TTL worker reaps the `deleted_at`-stamped
+/// docs of a soft-deleted session but never drops collections, and the
+/// name-pattern session listings would enumerate the empty ghosts forever.
+/// Either doc present = live, mid-create, or still in the grace period —
+/// never drop.
+fn session_is_reaped(meta_doc_present: bool, history_doc_present: bool) -> bool {
+    !meta_doc_present && !history_doc_present
+}
+
+/// Drop the collection residue of TTL-reaped soft-deleted sessions. Runs
+/// on every boot beside `ensure_hot_path_indexes`; warn-don't-fail. Costs
+/// one single-doc query per session (only reaped ones pay more). Drop
+/// order is summary → history → meta LAST: the loop keys on `.meta`
+/// collections, so a crash mid-sweep leaves the meta collection behind
+/// and the next boot retries (meta-first would strand the siblings).
+async fn sweep_reaped_sessions(db: &WardsonDbClient) {
+    let collections = match db.list_collections().await {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("Reaped-session sweep skipped (list_collections failed): {}", e);
+            return;
+        }
+    };
+    for coll in collections {
+        let Some(name) = coll
+            .strip_prefix("sessions.")
+            .and_then(|r| r.strip_suffix(".meta"))
+        else {
+            continue;
+        };
+        // A query error reads as "present" — conservative: never drop on
+        // uncertainty.
+        let meta_present = doc_present(db, &coll).await;
+        if meta_present {
+            continue;
+        }
+        let history_coll = format!("sessions.{}.history", name);
+        let history_present = doc_present(db, &history_coll).await;
+        if !session_is_reaped(meta_present, history_present) {
+            continue;
+        }
+        let summary_coll = format!("sessions.{}.summary", name);
+        let mut all_dropped = true;
+        for target in [&summary_coll, &history_coll, &coll] {
+            if let Err(e) = db.drop_collection(target).await {
+                warn!("Reaped-session sweep: drop {} failed (retrying next boot): {}", target, e);
+                all_dropped = false;
+                break; // keep .meta alive as the retry key
+            }
+        }
+        if all_dropped {
+            info!("Reaped-session sweep: dropped collections of TTL-reaped session '{}'", name);
+        }
+    }
+}
+
+/// True when the collection's canonical single doc exists. Errors read as
+/// present (see sweep).
+async fn doc_present(db: &WardsonDbClient, collection: &str) -> bool {
+    match db
+        .query(collection, &crate::sessions::history_query_body())
+        .await
+    {
+        Ok(docs) => !docs.is_empty(),
+        Err(_) => true,
+    }
 }
 
 /// Hot-path secondary indexes as `(collection, create_index body)`.
@@ -166,6 +238,31 @@ async fn ensure_hot_path_indexes(db: &WardsonDbClient) {
                 name, collection, e
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod reaped_sweep_tests {
+    use super::session_is_reaped;
+
+    /// Only the both-gone state is reap residue; either doc present means
+    /// live / mid-create / grace period — never droppable.
+    #[test]
+    fn only_both_docs_gone_is_reaped() {
+        assert!(session_is_reaped(false, false));
+        assert!(!session_is_reaped(true, false));
+        assert!(!session_is_reaped(false, true));
+        assert!(!session_is_reaped(true, true));
+    }
+
+    /// Dotted session names round-trip the meta-collection parse verbatim
+    /// (dots are legal in names — never parse them).
+    #[test]
+    fn dotted_names_strip_verbatim() {
+        let name = "sessions.foo.bar.meta"
+            .strip_prefix("sessions.")
+            .and_then(|r| r.strip_suffix(".meta"));
+        assert_eq!(name, Some("foo.bar"));
     }
 }
 

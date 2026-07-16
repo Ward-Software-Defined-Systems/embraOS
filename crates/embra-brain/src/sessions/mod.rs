@@ -30,7 +30,19 @@ pub enum SessionState {
     Active,
     Detached,
     Closed,
+    /// Soft-deleted: hidden from operator listings, refused by `/switch`,
+    /// docs stamped `deleted_at` and scheduled for WardSONDB TTL reaping
+    /// after [`SESSION_DELETE_RETENTION_DAYS`]. Recoverable via
+    /// `/sessions restore <name>` until reaped. Serde-additive variant —
+    /// pre-existing docs never carry it.
+    Deleted,
 }
+
+/// Grace period before WardSONDB's TTL worker reaps a soft-deleted
+/// session's docs (`deleted_at` field TTL on all three of its collections).
+/// Module const, deliberately not a `SystemConfig` field (the v4
+/// reminders-TTL precedent; avoids the 10-construction-literal churn).
+pub const SESSION_DELETE_RETENTION_DAYS: u64 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
@@ -55,6 +67,16 @@ pub struct SessionMeta {
     /// Serde-additive — no schema-version bump (anthropic_model precedent).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_count: Option<u32>,
+    /// RFC3339 stamp set by `soft_delete` (the WardSONDB TTL field — docs
+    /// without it never match the reaper's `$lt` filter). `None` = live.
+    /// Serde-additive, no schema bump (turn_count precedent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<String>,
+    /// The operator's stated reason, captured by the guided delete flow.
+    /// Lives on the meta doc until TTL reaping so the record survives the
+    /// grace period alongside the data it explains.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +108,32 @@ pub(crate) fn history_query_body() -> serde_json::Value {
 /// collection-name (alphabetical) order as the deterministic tie-break.
 pub(crate) fn sort_by_last_active_desc(sessions: &mut [SessionMeta]) {
     sessions.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+}
+
+/// Pure soft-delete transition on a meta doc (unit-tested; the async
+/// `soft_delete` persists it). `last_active` is deliberately NOT bumped —
+/// a restored session keeps its true recency in the listing order.
+pub(crate) fn apply_soft_delete(meta: &mut SessionMeta, reason: &str, stamp: &str) {
+    meta.state = SessionState::Deleted;
+    meta.deleted_at = Some(stamp.to_string());
+    meta.deleted_reason = Some(reason.to_string());
+}
+
+/// Pure restore transition — the inverse of `apply_soft_delete`. Restored
+/// sessions come back `Detached` (the operator re-attaches explicitly via
+/// `/switch`).
+pub(crate) fn apply_restore(meta: &mut SessionMeta) {
+    meta.state = SessionState::Detached;
+    meta.deleted_at = None;
+    meta.deleted_reason = None;
+}
+
+/// Patch body for the `deleted_at` stamp on a history/summary doc — the
+/// WardSONDB TTL field. Restore sends the `None` (null) form: a null stamp
+/// never matches the reaper's `$lt` cutoff (string operand, type-bracketed
+/// comparison on every server build), so null and absent are equally safe.
+pub(crate) fn deleted_at_patch(stamp: Option<&str>) -> serde_json::Value {
+    serde_json::json!({ "deleted_at": stamp })
 }
 
 pub struct SessionManager {
@@ -183,6 +231,8 @@ impl SessionManager {
             provider,
             model,
             turn_count: Some(0),
+            deleted_at: None,
+            deleted_reason: None,
         };
 
         let history = SessionHistory {
@@ -312,6 +362,105 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Soft-delete a session: stamp `deleted_at` (+ the operator's reason
+    /// on the meta doc), schedule WardSONDB TTL reaping
+    /// ([`SESSION_DELETE_RETENTION_DAYS`]) on all three of its collections,
+    /// and detach it from the active world. Recoverable via [`Self::restore`]
+    /// until the TTL worker reaps the docs; the boot-time
+    /// `migrations::sweep_reaped_sessions` drops the emptied collections
+    /// afterwards (TTL reaps docs, never collections).
+    pub async fn soft_delete(&mut self, name: &str, reason: &str) -> Result<()> {
+        let stamp = Utc::now().to_rfc3339();
+        let found = self
+            .rewrite_meta(name, |m| apply_soft_delete(m, reason, &stamp))
+            .await?;
+        if !found {
+            anyhow::bail!("session '{}' has no meta doc to delete", name);
+        }
+
+        // Best-effort per step from here (warn, don't fail): the meta
+        // rewrite above is the authoritative Deleted marker — a partially
+        // stamped session still hides correctly and reaps whatever was
+        // stamped; the ghost sweep only drops collections whose meta AND
+        // history docs are both gone.
+        let meta_coll = format!("sessions.{}.meta", name);
+        let history_coll = format!("sessions.{}.history", name);
+        let summary_coll = format!("sessions.{}.summary", name);
+
+        self.patch_deleted_at(&history_coll, Some(&stamp)).await;
+        let mut ttl_colls = vec![meta_coll, history_coll];
+        if self.db.collection_exists(&summary_coll).await.unwrap_or(false) {
+            self.patch_deleted_at(&summary_coll, Some(&stamp)).await;
+            ttl_colls.push(summary_coll);
+        }
+        for coll in &ttl_colls {
+            if let Err(e) = self
+                .db
+                .set_ttl(coll, SESSION_DELETE_RETENTION_DAYS, "deleted_at")
+                .await
+            {
+                tracing::warn!(target: "sessions", collection = %coll, error = %e,
+                    "TTL scheduling failed — session stays hidden but won't auto-reap");
+            }
+        }
+
+        if self.active_session.as_deref() == Some(name) {
+            self.active_session = None;
+        }
+        self.briefing_attempts.remove(name);
+        Ok(())
+    }
+
+    /// Undo a soft delete during the grace period: clear the stamps and
+    /// return the session `Detached`. Errors if the meta doc is already
+    /// gone (TTL-reaped — nothing left to restore). The TTL config is
+    /// deliberately left in place: docs without a `deleted_at` stamp never
+    /// match the reaper's cutoff, and a future delete of the same name
+    /// reuses it.
+    pub async fn restore(&mut self, name: &str) -> Result<()> {
+        let found = self.rewrite_meta(name, apply_restore).await?;
+        if !found {
+            anyhow::bail!(
+                "session '{}' has no meta doc — already reaped, nothing to restore",
+                name
+            );
+        }
+        let history_coll = format!("sessions.{}.history", name);
+        let summary_coll = format!("sessions.{}.summary", name);
+        self.patch_deleted_at(&history_coll, None).await;
+        if self.db.collection_exists(&summary_coll).await.unwrap_or(false) {
+            self.patch_deleted_at(&summary_coll, None).await;
+        }
+        Ok(())
+    }
+
+    /// Stamp (or clear, with `None`) `deleted_at` on a collection's
+    /// canonical single doc. Best-effort: an absent collection/doc is fine
+    /// (a session may have no summary), and the meta doc remains the
+    /// authoritative deletion marker either way.
+    async fn patch_deleted_at(&self, collection: &str, stamp: Option<&str>) {
+        let doc = match self.db.query(collection, &history_query_body()).await {
+            Ok(docs) => docs.into_iter().next(),
+            Err(e) => {
+                tracing::debug!(target: "sessions", collection = %collection, error = %e,
+                    "deleted_at patch skipped (query failed)");
+                return;
+            }
+        };
+        let Some(doc) = doc else { return };
+        let Some(id) = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()) else {
+            return;
+        };
+        if let Err(e) = self
+            .db
+            .patch_document(collection, id, &deleted_at_patch(stamp))
+            .await
+        {
+            tracing::warn!(target: "sessions", collection = %collection, error = %e,
+                "deleted_at patch failed");
+        }
+    }
+
     pub async fn list(&self) -> Result<Vec<SessionMeta>> {
         Ok(self.list_docs().await?.into_iter().map(|(_, _, m)| m).collect())
     }
@@ -436,6 +585,23 @@ impl SessionManager {
     }
 
     async fn update_state(&self, name: &str, state: SessionState) -> Result<()> {
+        self.rewrite_meta(name, |meta| {
+            meta.state = state;
+            meta.last_active = Utc::now();
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// Read-modify-write one session's meta doc. Returns whether a doc was
+    /// found and rewritten (`false` = collection empty/missing — e.g. a
+    /// TTL-reaped soft-deleted session). Shared by the state flips and the
+    /// soft-delete/restore transitions.
+    async fn rewrite_meta(
+        &self,
+        name: &str,
+        f: impl FnOnce(&mut SessionMeta),
+    ) -> Result<bool> {
         let meta_collection = format!("sessions.{}.meta", name);
         let results = self
             .db
@@ -449,14 +615,14 @@ impl SessionManager {
                 .map(|s| s.to_string());
             if let Some(id) = id {
                 let mut meta: SessionMeta = serde_json::from_value(doc)?;
-                meta.state = state;
-                meta.last_active = Utc::now();
+                f(&mut meta);
                 self.db
                     .update(&meta_collection, &id, &serde_json::to_value(&meta)?)
                     .await?;
+                return Ok(true);
             }
         }
-        Ok(())
+        Ok(false)
     }
 }
 
@@ -719,5 +885,85 @@ mod briefing_attempt_cooldown_tests {
             !m.briefing_attempt_recent("b", Duration::from_secs(3600)),
             "recording session 'a' must not suppress session 'b'"
         );
+    }
+}
+
+#[cfg(test)]
+mod soft_delete_tests {
+    //! Pure-transition + shape guards for the TTL soft-delete (no DB mock
+    //! in this crate — contracts enforced at the pure-fn level, the
+    //! turn_count/list_order pattern).
+    use super::*;
+    use serde_json::json;
+
+    fn live_meta() -> SessionMeta {
+        serde_json::from_value(json!({
+            "id": "uuid-x",
+            "name": "proj",
+            "state": "Active",
+            "created_at": "2026-05-01T00:00:00Z",
+            "last_active": "2026-07-10T00:00:00Z",
+            "turn_count": 4,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn deleted_fields_default_none_on_pre_fix_docs() {
+        let m = live_meta();
+        assert_eq!(m.deleted_at, None);
+        assert_eq!(m.deleted_reason, None);
+        // And they stay off the wire while None (byte-stability for live
+        // session docs — the turn_count skip_serializing precedent).
+        let v = serde_json::to_value(&m).unwrap();
+        assert!(v.get("deleted_at").is_none());
+        assert!(v.get("deleted_reason").is_none());
+    }
+
+    #[test]
+    fn soft_delete_transition_stamps_and_hides() {
+        let mut m = live_meta();
+        let before = m.last_active;
+        apply_soft_delete(&mut m, "superseded by v2", "2026-07-16T12:00:00+00:00");
+        assert_eq!(m.state, SessionState::Deleted);
+        assert_eq!(m.deleted_at.as_deref(), Some("2026-07-16T12:00:00+00:00"));
+        assert_eq!(m.deleted_reason.as_deref(), Some("superseded by v2"));
+        // last_active deliberately untouched — restore keeps true recency.
+        assert_eq!(m.last_active, before);
+    }
+
+    #[test]
+    fn restore_is_the_exact_inverse_to_detached() {
+        let mut m = live_meta();
+        apply_soft_delete(&mut m, "why", "2026-07-16T12:00:00+00:00");
+        apply_restore(&mut m);
+        assert_eq!(m.state, SessionState::Detached);
+        assert_eq!(m.deleted_at, None);
+        assert_eq!(m.deleted_reason, None);
+    }
+
+    #[test]
+    fn deleted_at_patch_shapes() {
+        // Stamp form — the TTL field the reaper cuts on.
+        assert_eq!(
+            deleted_at_patch(Some("2026-07-16T12:00:00+00:00")),
+            json!({ "deleted_at": "2026-07-16T12:00:00+00:00" })
+        );
+        // Null form (restore) — never matches the type-bracketed $lt
+        // string cutoff, so it is as safe as an absent field.
+        assert_eq!(deleted_at_patch(None), json!({ "deleted_at": null }));
+    }
+
+    #[test]
+    fn deleted_state_roundtrips_and_is_excluded_from_most_recent_active() {
+        let mut m = live_meta();
+        apply_soft_delete(&mut m, "r", "2026-07-16T12:00:00+00:00");
+        let v = serde_json::to_value(&m).unwrap();
+        assert_eq!(v["state"], json!("Deleted"));
+        let back: SessionMeta = serde_json::from_value(v).unwrap();
+        assert_eq!(back.state, SessionState::Deleted);
+        // The get_most_recent_active filter shape: Deleted is neither
+        // Active nor Detached.
+        assert!(back.state != SessionState::Active && back.state != SessionState::Detached);
     }
 }

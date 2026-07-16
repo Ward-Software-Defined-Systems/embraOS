@@ -17,7 +17,9 @@ use crate::term;
 const GROUPS: &[(&str, &[(&str, &str)])] = &[
     ("Session", &[
         ("/status", "overview"), ("/sessions", "list"), ("/new", "new"),
-        ("/switch", "switch"), ("/close", "close"), ("/mode", "mode"),
+        ("/switch", "switch"), ("/close", "close"),
+        ("/sessions delete", "delete"), ("/sessions restore", "restore"),
+        ("/mode", "mode"),
     ]),
     ("Identity", &[("/soul", "soul"), ("/identity", "identity")]),
     ("Provider", &[
@@ -113,6 +115,13 @@ const SPECS: &[Spec] = &[
         join: " ", guided: true,
         fields: &[sel("Provider",
             &["anthropic", "gemini", "ollama", "lm_studio"], true)] },
+    Spec { cmd: "/sessions delete", title: "Delete a session (guided)",
+        note: "The intelligence summarizes it and asks your reason, preserves memories to the KG, then soft-deletes (7-day grace).",
+        join: " ", guided: false,
+        fields: &[t("Session name", "old-project", true)] },
+    Spec { cmd: "/sessions restore", title: "Restore a deleted session",
+        note: "Undo a soft delete during its grace period.", join: " ", guided: false,
+        fields: &[t("Session name", "old-project", true)] },
     Spec { cmd: "/guardian status", title: "Guardian tool status",
         note: "Build status + log tail for a dynamic tool.", join: " ", guided: false,
         fields: &[t("Tool name", "web_search", true)] },

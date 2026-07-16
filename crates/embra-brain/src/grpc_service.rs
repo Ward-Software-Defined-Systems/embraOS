@@ -15,7 +15,7 @@ use crate::provider::ir::{
 use crate::provider::{
     LlmProvider, LlmRequestOptions, ProviderKind, StreamEvent, SystemPromptBundle, ToolManifest,
 };
-use crate::sessions::SessionManager;
+use crate::sessions::{SessionManager, SessionState};
 use crate::tools;
 
 use embra_common::proto::brain::brain_service_server::BrainService;
@@ -94,6 +94,11 @@ pub struct BrainGrpcService {
     /// token? → Model selection). Cleared on completion or any slash
     /// command cancel hatch.
     pending_openai_compat_setup: Arc<Mutex<Option<OpenAiCompatSetupState>>>,
+    /// Guided `/sessions delete` flow state. Armed by the `/sessions
+    /// delete <name>` slash arm; advanced/consumed by the UserMessage
+    /// intercept; cancelled by any slash command. See
+    /// [`PendingSessionDelete`].
+    pending_session_delete: Arc<Mutex<Option<PendingSessionDelete>>>,
     /// Cross-stream onboarding-stage signal (Setup → Learning →
     /// Operational, carried as `OperatingMode as i32`). Each `converse`
     /// call spawns its own task; while the soul is unsealed every attached
@@ -150,6 +155,95 @@ enum SetupStepOutcome {
     Error,
 }
 
+/// Guided `/sessions delete <name>` flow state (the pending_key_setup
+/// family). Armed by the `/sessions` slash arm right before it returns the
+/// kickoff synthetic prompt; the UserMessage intercept advances/consumes
+/// it; ANY slash command mid-flow cancels it (deliberately unlike
+/// `pending_key_setup`, which a slash leaves armed — that asymmetry is a
+/// documented wart, not a pattern to copy).
+#[derive(Debug, Clone)]
+pub struct PendingSessionDelete {
+    pub name: String,
+    pub phase: DeleteFlowPhase,
+}
+
+/// Two-phase intercept discriminator. `AwaitingKickoff`: the NEXT
+/// UserMessage is the kickoff synthetic the slash arm itself dispatched —
+/// advance in place and let it run as a normal turn (consuming it would
+/// eat the kickoff as the operator's reason). `AwaitingReason`: the next
+/// UserMessage is the operator's reason — take the state, swap in the
+/// memorize prompt, and execute the deletion post-turn on the model's
+/// READY marker.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DeleteFlowPhase {
+    AwaitingKickoff,
+    AwaitingReason,
+}
+
+/// Markers the memorize turn must end with — the learning-loop
+/// `[PHASE_COMPLETE]` precedent. Scanned from the final assistant text;
+/// the brain (not the model) executes the actual soft delete.
+pub(crate) const SESSION_DELETE_READY_MARKER: &str = "[SESSION_DELETE_READY]";
+pub(crate) const SESSION_DELETE_ABORT_MARKER: &str = "[SESSION_DELETE_ABORT]";
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum DeleteVerdict {
+    Ready,
+    Abort,
+    NoMarker,
+}
+
+/// Fail-closed marker scan: ABORT wins when both appear; no marker (turn
+/// error, cap, refusal, or the model simply not emitting one) never
+/// deletes.
+pub(crate) fn delete_flow_verdict(final_text: &str) -> DeleteVerdict {
+    if final_text.contains(SESSION_DELETE_ABORT_MARKER) {
+        return DeleteVerdict::Abort;
+    }
+    if final_text.contains(SESSION_DELETE_READY_MARKER) {
+        return DeleteVerdict::Ready;
+    }
+    DeleteVerdict::NoMarker
+}
+
+/// Kickoff synthetic prompt (turn 1 of the guided delete): summarize and
+/// ask for the reason. Persisted verbatim as the user turn (the
+/// /feedback-loop precedent), so it reads sensibly in history.
+pub(crate) fn build_delete_kickoff_prompt(name: &str) -> String {
+    format!(
+        "[Session delete requested: {name}]\n\
+         The operator has asked to delete the session '{name}'. Before anything is removed:\n\
+         1. Call session_summarize with name \"{name}\" and follow its instructions \
+         (generate the summary and persist it with session_summary_save).\n\
+         2. Present the operator a concise summary of what that session contains.\n\
+         3. Ask the operator why they are deleting it — the reason will be recorded.\n\
+         Do NOT write memories yet, do NOT emit any completion marker, and do NOT \
+         delete anything — deletion only proceeds after the operator replies."
+    )
+}
+
+/// Memorize synthetic prompt (turn 2, built from the operator's reason
+/// reply). The turn's raw persisted content stays the operator's reason;
+/// this replaces it brain-facing only (the resume-briefing enrichment-swap
+/// pattern).
+pub(crate) fn build_delete_memorize_prompt(name: &str, reason: &str) -> String {
+    format!(
+        "The operator replied to your deletion question for session '{name}':\n\
+         \"{reason}\"\n\n\
+         If that reply declines, cancels, or clearly is not a reason to proceed, do not \
+         save anything and end your response with {SESSION_DELETE_ABORT_MARKER} on its own line.\n\
+         Otherwise treat it as the deletion reason and preserve the session's value before it is removed:\n\
+         1. Call session_extract with name \"{name}\" and follow its instructions — save the \
+         durable learnings with remember (and knowledge_promote what is worth keeping across sessions).\n\
+         2. Also save one memory recording that session '{name}' was deleted and the operator's reason.\n\
+         3. Tell the operator what you preserved, then end your response with \
+         {SESSION_DELETE_READY_MARKER} on its own line.\n\
+         The system performs the actual deletion after your turn — it is soft (a {days}-day \
+         grace period; /sessions restore {name} undoes it).",
+        days = crate::sessions::SESSION_DELETE_RETENTION_DAYS,
+    )
+}
+
 impl BrainGrpcService {
     pub fn new(
         db: WardsonDbClient,
@@ -178,6 +272,7 @@ impl BrainGrpcService {
             pending_provider: Arc::new(Mutex::new(None)),
             pending_key_setup: Arc::new(Mutex::new(None)),
             pending_openai_compat_setup: Arc::new(Mutex::new(None)),
+            pending_session_delete: Arc::new(Mutex::new(None)),
             onboarding_stage: Arc::new(stage_tx),
         }
     }
@@ -204,6 +299,7 @@ impl BrainService for BrainGrpcService {
         let pending_provider = self.pending_provider.clone();
         let pending_key_setup = self.pending_key_setup.clone();
         let pending_openai_compat_setup = self.pending_openai_compat_setup.clone();
+        let pending_session_delete = self.pending_session_delete.clone();
         let onboarding_stage = self.onboarding_stage.clone();
 
         tokio::spawn(async move {
@@ -350,7 +446,7 @@ impl BrainService for BrainGrpcService {
                         match msg {
                             Some(Ok(req)) => {
                                 if let Err(e) = handle_request(
-                                    req, &tx, &db, &session_mgr, &config_tz, &api_key, &in_turn, &pending_provider, &pending_key_setup, &pending_openai_compat_setup
+                                    req, &tx, &db, &session_mgr, &config_tz, &api_key, &in_turn, &pending_provider, &pending_key_setup, &pending_openai_compat_setup, &pending_session_delete
                                 ).await {
                                     error!("Error handling request: {}", e);
                                     let _ = tx.send(Ok(ConversationResponse {
@@ -408,14 +504,19 @@ impl BrainService for BrainGrpcService {
             .map_err(|e| Status::internal(format!("Failed to list sessions: {}", e)))?;
 
         Ok(Response::new(ListSessionsResponse {
-            sessions: sessions.into_iter().map(|s| SessionInfo {
-                name: s.name,
-                state: format!("{:?}", s.state),
-                turn_count: s.turn_count.unwrap_or(0),
-                created_at: Some(common::Timestamp { iso8601: s.created_at.to_rfc3339() }),
-                last_active: Some(common::Timestamp { iso8601: s.last_active.to_rfc3339() }),
-                has_summary: false,
-            }).collect(),
+            // Soft-deleted sessions are hidden from the RPC (the mobile
+            // sheet renders this list as-is); the TUI /sessions arm shows
+            // them separately with a restore hint.
+            sessions: sessions.into_iter()
+                .filter(|s| s.state != SessionState::Deleted)
+                .map(|s| SessionInfo {
+                    name: s.name,
+                    state: format!("{:?}", s.state),
+                    turn_count: s.turn_count.unwrap_or(0),
+                    created_at: Some(common::Timestamp { iso8601: s.created_at.to_rfc3339() }),
+                    last_active: Some(common::Timestamp { iso8601: s.last_active.to_rfc3339() }),
+                    has_summary: false,
+                }).collect(),
         }))
     }
 
@@ -585,6 +686,7 @@ async fn handle_request(
     pending_provider: &Arc<Mutex<Option<ProviderKind>>>,
     pending_key_setup: &Arc<Mutex<Option<ProviderKind>>>,
     pending_openai_compat_setup: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
+    pending_session_delete: &Arc<Mutex<Option<PendingSessionDelete>>>,
 ) -> anyhow::Result<()> {
     let self_in_turn = in_turn.clone();
     match req.request_type {
@@ -625,6 +727,27 @@ async fn handle_request(
                 handle_pending_key_setup(target, candidate, tx, db, pending_key_setup).await;
                 return Ok(());
             }
+
+            // Guided /sessions delete flow. AwaitingKickoff: this message
+            // IS the kickoff synthetic the slash arm just dispatched —
+            // advance in place and let it run as a normal turn (consuming
+            // it here would eat the kickoff as the operator's reason).
+            // AwaitingReason: this message is the operator's reason — take
+            // the state; the enrichment step below swaps in the memorize
+            // prompt and the post-persistence step executes the deletion
+            // on the model's READY marker. Not an early-return intercept:
+            // the reason must reach the model.
+            let delete_exec: Option<PendingSessionDelete> = {
+                let mut guard = pending_session_delete.lock().await;
+                match guard.as_mut() {
+                    Some(state) if state.phase == DeleteFlowPhase::AwaitingKickoff => {
+                        state.phase = DeleteFlowPhase::AwaitingReason;
+                        None
+                    }
+                    Some(_) => guard.take(),
+                    None => None,
+                }
+            };
 
             // No-session guard (session-ux-fixes). The historical fallback
             // ran the turn against a literal "default" session: normally
@@ -845,7 +968,12 @@ async fn handle_request(
             // system prompt is left untouched so Anthropic prompt caching stays
             // warm. History persistence below saves `msg.content` (raw), so the
             // wrapper never leaks into subsequent turns.
-            let enriched = if pending_briefing {
+            let enriched = if let Some(ref del) = delete_exec {
+                // Delete-flow reason turn: the brain-facing message is the
+                // memorize prompt; the raw persisted content stays the
+                // operator's reason (same swap contract as the briefing).
+                build_delete_memorize_prompt(&del.name, &msg.content)
+            } else if pending_briefing {
                 crate::knowledge::enrichment::build_resumption_context()
             } else {
                 crate::knowledge::enrichment::build_turn_context(
@@ -1476,6 +1604,65 @@ async fn handle_request(
                     .await;
             }
 
+            // Guided-delete execution — AFTER persistence, deliberately:
+            // soft_delete stamps `deleted_at` onto the history doc, and
+            // append_message above rewrites that doc from the typed
+            // SessionHistory struct (which has no deleted_at field), so a
+            // pre-persistence stamp would be silently dropped. Fail-closed:
+            // only the READY marker deletes; ABORT / no marker / a failed
+            // turn all leave the session untouched (the flow state was
+            // already consumed, so a retry is a fresh /sessions delete).
+            if let Some(del) = delete_exec {
+                let was_active = session_name == del.name;
+                let verdict = delete_flow_verdict(&last_response_text);
+                let (kind, note) = match verdict {
+                    DeleteVerdict::Ready => {
+                        let result = {
+                            let mut mgr = session_mgr.write().await;
+                            mgr.soft_delete(&del.name, msg.content.trim()).await
+                        };
+                        match result {
+                            Ok(()) => {
+                                let mut note = format!(
+                                    "Session '{}' deleted ({}-day grace period — `/sessions restore {}` to undo). Summary and extracted memories preserved.",
+                                    del.name,
+                                    crate::sessions::SESSION_DELETE_RETENTION_DAYS,
+                                    del.name,
+                                );
+                                if was_active {
+                                    note.push_str(
+                                        " No session is now attached — /switch <name> or /new <name>.",
+                                    );
+                                }
+                                (SystemMessageType::Info, note)
+                            }
+                            Err(e) => (
+                                SystemMessageType::Error,
+                                format!("Session delete of '{}' failed: {}", del.name, e),
+                            ),
+                        }
+                    }
+                    DeleteVerdict::Abort => (
+                        SystemMessageType::Info,
+                        format!("Session deletion of '{}' not executed (aborted).", del.name),
+                    ),
+                    DeleteVerdict::NoMarker => (
+                        SystemMessageType::Warning,
+                        format!(
+                            "Session deletion of '{}' not executed — the memory turn ended without a completion marker. Re-run `/sessions delete {}` to retry.",
+                            del.name, del.name,
+                        ),
+                    ),
+                };
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::System(
+                            SystemMessage { content: note, msg_type: kind as i32 },
+                        )),
+                    }))
+                    .await;
+            }
+
             Ok(())
         }
 
@@ -1505,8 +1692,30 @@ async fn handle_request(
                     }
                 }
             }
+            // Any slash command also cancels an in-flight guided session
+            // deletion (always announced — even a /sessions delete re-entry
+            // replaces the old flow, and saying so is honest). Deliberately
+            // unlike pending_key_setup, which a slash leaves armed.
+            {
+                let cancelled = pending_session_delete.lock().await.take();
+                if let Some(state) = cancelled {
+                    let _ = tx
+                        .send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::System(
+                                SystemMessage {
+                                    content: format!(
+                                        "Session delete flow for '{}' cancelled.",
+                                        state.name
+                                    ),
+                                    msg_type: SystemMessageType::Info as i32,
+                                },
+                            )),
+                        }))
+                        .await;
+                }
+            }
             if let Some(synthetic_prompt) = handle_slash_command(
-                &cmd.command, &cmd.args, tx, db, session_mgr, config_tz, api_key, in_turn, pending_provider, pending_key_setup, pending_openai_compat_setup
+                &cmd.command, &cmd.args, tx, db, session_mgr, config_tz, api_key, in_turn, pending_provider, pending_key_setup, pending_openai_compat_setup, pending_session_delete
             ).await {
                 // Slash command requested a synthetic user turn — feed it through the Brain.
                 let synthetic = ConversationRequest {
@@ -1515,7 +1724,7 @@ async fn handle_request(
                     )),
                 };
                 Box::pin(handle_request(
-                    synthetic, tx, db, session_mgr, config_tz, api_key, in_turn, pending_provider, pending_key_setup, pending_openai_compat_setup
+                    synthetic, tx, db, session_mgr, config_tz, api_key, in_turn, pending_provider, pending_key_setup, pending_openai_compat_setup, pending_session_delete
                 )).await?;
             }
             Ok(())
@@ -1539,6 +1748,35 @@ async fn handle_request(
             let new_session = !mgr.session_exists(&session_name).await.unwrap_or(false);
             if new_session {
                 let _ = mgr.create(&session_name).await;
+            }
+
+            // Soft-deleted sessions are unattachable during their grace
+            // period (the sheet filters them out, but a stale client or an
+            // explicit name can still ask). Restore is the sanctioned path.
+            if !new_session {
+                let is_deleted = mgr
+                    .get_meta(&session_name)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|m| m.state == SessionState::Deleted);
+                if is_deleted {
+                    drop(mgr);
+                    let _ = tx
+                        .send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::System(
+                                SystemMessage {
+                                    content: format!(
+                                        "Session '{}' is deleted (grace period) — /sessions restore {} to recover it, or /new a different session.",
+                                        session_name, session_name
+                                    ),
+                                    msg_type: SystemMessageType::Error as i32,
+                                },
+                            )),
+                        }))
+                        .await;
+                    return Ok(());
+                }
             }
             drop(mgr);
 
@@ -1684,6 +1922,7 @@ async fn handle_request(
                     Box::pin(handle_request(
                         synthetic, tx, db, session_mgr, config_tz, api_key, in_turn,
                         pending_provider, pending_key_setup, pending_openai_compat_setup,
+                        pending_session_delete,
                     )).await?;
                 } else {
                     info!(
@@ -1716,6 +1955,7 @@ async fn handle_slash_command(
     pending_provider: &Arc<Mutex<Option<ProviderKind>>>,
     pending_key_setup: &Arc<Mutex<Option<ProviderKind>>>,
     pending_openai_compat_setup: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
+    pending_session_delete: &Arc<Mutex<Option<PendingSessionDelete>>>,
 ) -> Option<String> {
     // Helper to send a system message
     let send_msg = |tx: &mpsc::Sender<Result<ConversationResponse, Status>>, content: String| {
@@ -1773,7 +2013,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-4.7|opus-4.8|fable-5> Switch the Anthropic model (next message)\n  /effort                            Show the Anthropic effort level\n  /effort <low|medium|high|xhigh|max>  Set effort (default max, next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-4.7|opus-4.8|fable-5> Switch the Anthropic model (next message)\n  /effort                            Show the Anthropic effort level\n  /effort <low|medium|high|xhigh|max>  Set effort (default max, next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -1807,47 +2047,173 @@ async fn handle_slash_command(
             send_msg(tx, serde_json::to_string_pretty(&status).unwrap_or_else(|_| "Failed to get status".to_string())).await;
         }
         "/sessions" => {
-            let mgr = session_mgr.read().await;
-            let is_sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
-            // Configured timezone for the last-active render — fresh
-            // config wins over the threaded boot value (the SessionAttach
-            // ModeChange pattern), so a runtime timezone change shows
-            // immediately.
-            let display_tz = config::load_config(&**db)
-                .await
-                .ok()
-                .map(|c| c.timezone)
-                .unwrap_or_else(|| config_tz.to_string());
-            let output = match mgr.list_with_counts().await {
-                Ok(sessions) => {
-                    if sessions.is_empty() {
-                        "No sessions.".to_string()
-                    } else {
-                        sessions.iter().map(|s| {
-                            let indicator = if s.name == "learning" {
-                                if is_sealed { " [sealed]" } else { " [learning]" }
+            // Subcommand parse (the /guardian split_once pattern): the
+            // client sends the full remainder as one args string.
+            let (sub, rest) = match args.trim().split_once(char::is_whitespace) {
+                Some((s, r)) => (s, r.trim()),
+                None => (args.trim(), ""),
+            };
+            match sub {
+                "" => {
+                    let mgr = session_mgr.read().await;
+                    let is_sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
+                    // Configured timezone for the last-active render — fresh
+                    // config wins over the threaded boot value (the SessionAttach
+                    // ModeChange pattern), so a runtime timezone change shows
+                    // immediately.
+                    let display_tz = config::load_config(&**db)
+                        .await
+                        .ok()
+                        .map(|c| c.timezone)
+                        .unwrap_or_else(|| config_tz.to_string());
+                    let output = match mgr.list_with_counts().await {
+                        Ok(sessions) => {
+                            let (deleted, live): (Vec<_>, Vec<_>) = sessions
+                                .into_iter()
+                                .partition(|s| s.state == SessionState::Deleted);
+                            let mut out = if live.is_empty() {
+                                "No sessions.".to_string()
                             } else {
-                                ""
+                                live.iter().map(|s| {
+                                    let indicator = if s.name == "learning" {
+                                        if is_sealed { " [sealed]" } else { " [learning]" }
+                                    } else {
+                                        ""
+                                    };
+                                    let n = s.turn_count.unwrap_or(0);
+                                    format!(
+                                        "  {}{} [{:?}] {} turn{}, last active: {}",
+                                        s.name, indicator, s.state,
+                                        n, if n == 1 { "" } else { "s" },
+                                        format_local_timestamp(s.last_active, &display_tz)
+                                    )
+                                }).collect::<Vec<_>>().join("\n")
                             };
-                            let n = s.turn_count.unwrap_or(0);
-                            format!(
-                                "  {}{} [{:?}] {} turn{}, last active: {}",
-                                s.name, indicator, s.state,
-                                n, if n == 1 { "" } else { "s" },
-                                format_local_timestamp(s.last_active, &display_tz)
-                            )
-                        }).collect::<Vec<_>>().join("\n")
+                            if !deleted.is_empty() {
+                                let names = deleted
+                                    .iter()
+                                    .map(|s| s.name.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                out.push_str(&format!(
+                                    "\n  {} deleted session{} in grace period ({}) — /sessions restore <name> to recover",
+                                    deleted.len(),
+                                    if deleted.len() == 1 { "" } else { "s" },
+                                    names,
+                                ));
+                            }
+                            out
+                        }
+                        Err(e) => format!("Error listing sessions: {}", e),
+                    };
+                    send_msg(tx, output).await;
+                }
+                "delete" => {
+                    if rest.is_empty() {
+                        send_msg(tx, "Usage: /sessions delete <name>".to_string()).await;
+                        return None;
+                    }
+                    if rest == "learning" {
+                        send_msg(tx, "The learning session is the sealed identity record and cannot be deleted.".to_string()).await;
+                        return None;
+                    }
+                    let mgr = session_mgr.read().await;
+                    let meta = mgr.get_meta(rest).await.ok().flatten();
+                    let Some(meta) = meta else {
+                        drop(mgr);
+                        send_msg(tx, format!("Session '{}' does not exist", rest)).await;
+                        return None;
+                    };
+                    if meta.state == SessionState::Deleted {
+                        drop(mgr);
+                        send_msg(tx, format!(
+                            "Session '{}' is already deleted (grace period) — /sessions restore {} to recover it.",
+                            rest, rest
+                        )).await;
+                        return None;
+                    }
+                    if mgr.active_session.is_none() {
+                        drop(mgr);
+                        send_msg(tx, "The delete flow runs as a conversation — attach a session first (/switch <name> or /new <name>).".to_string()).await;
+                        return None;
+                    }
+                    drop(mgr);
+                    // Arm the flow, announce, and dispatch the kickoff
+                    // synthetic turn via the Some(prompt) convention. The
+                    // UserMessage intercept advances AwaitingKickoff →
+                    // AwaitingReason when that synthetic arrives, so the
+                    // kickoff itself is never mistaken for the reason.
+                    *pending_session_delete.lock().await = Some(PendingSessionDelete {
+                        name: rest.to_string(),
+                        phase: DeleteFlowPhase::AwaitingKickoff,
+                    });
+                    send_msg(tx, format!(
+                        "Starting guided deletion of session '{}' — summarizing it first. (Any slash command cancels.)",
+                        rest
+                    )).await;
+                    return Some(build_delete_kickoff_prompt(rest));
+                }
+                "restore" => {
+                    if rest.is_empty() {
+                        send_msg(tx, "Usage: /sessions restore <name>".to_string()).await;
+                        return None;
+                    }
+                    let mut mgr = session_mgr.write().await;
+                    let meta = mgr.get_meta(rest).await.ok().flatten();
+                    match meta {
+                        None => {
+                            send_msg(tx, format!(
+                                "Session '{}' does not exist (or its grace period already expired).",
+                                rest
+                            )).await;
+                        }
+                        Some(m) if m.state != SessionState::Deleted => {
+                            send_msg(tx, format!("Session '{}' isn't deleted.", rest)).await;
+                        }
+                        Some(_) => match mgr.restore(rest).await {
+                            Ok(()) => {
+                                send_msg(tx, format!(
+                                    "Session '{}' restored (Detached) — /switch {} to attach.",
+                                    rest, rest
+                                )).await;
+                            }
+                            Err(e) => {
+                                send_msg(tx, format!("Restore of '{}' failed: {}", rest, e)).await;
+                            }
+                        },
                     }
                 }
-                Err(e) => format!("Error listing sessions: {}", e),
-            };
-            send_msg(tx, output).await;
+                other => {
+                    send_msg(tx, format!(
+                        "Unknown /sessions subcommand '{}'. Usage: /sessions [delete <name>|restore <name>]",
+                        other
+                    )).await;
+                }
+            }
         }
         "/new" => {
             if args.is_empty() {
                 send_msg(tx, "Usage: /new <session-name>".to_string()).await;
             } else {
                 let mut mgr = session_mgr.write().await;
+                // A soft-deleted session reserves its name through the
+                // grace period: create() would append a SECOND meta doc to
+                // the existing collection (shadowed by the canonical-first
+                // read, then orphaned when the original reaps).
+                let grace_held = mgr
+                    .get_meta(args)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some_and(|m| m.state == SessionState::Deleted);
+                if grace_held {
+                    drop(mgr);
+                    send_msg(tx, format!(
+                        "A deleted session '{}' is in its grace period — /sessions restore {} to recover it, or pick another name.",
+                        args, args
+                    )).await;
+                    return None;
+                }
                 match mgr.create(args).await {
                     Ok(s) => {
                         mgr.active_session = Some(s.name.clone());
@@ -1868,6 +2234,23 @@ async fn handle_slash_command(
             } else {
                 let mut mgr = session_mgr.write().await;
                 if mgr.session_exists(args).await.unwrap_or(false) {
+                    // Soft-deleted sessions are unattachable during their
+                    // grace period — reattach would silently resurrect a
+                    // half-stamped session; restore is the sanctioned path.
+                    let is_deleted = mgr
+                        .get_meta(args)
+                        .await
+                        .ok()
+                        .flatten()
+                        .is_some_and(|m| m.state == SessionState::Deleted);
+                    if is_deleted {
+                        drop(mgr);
+                        send_msg(tx, format!(
+                            "Session '{}' is deleted (grace period) — /sessions restore {} first.",
+                            args, args
+                        )).await;
+                        return None;
+                    }
                     // Cross-provider guard — same rule as SessionAttach.
                     if let Err((session_provider, active_provider)) =
                         check_session_provider(db, args).await
@@ -6516,5 +6899,86 @@ mod local_timestamp_tests {
     fn unparseable_timezone_falls_back_to_labeled_utc() {
         let out = format_local_timestamp(utc("2026-01-15T15:00:00Z"), "not-a-timezone");
         assert_eq!(out, "2026-01-15 15:00 UTC");
+    }
+}
+
+#[cfg(test)]
+mod session_delete_flow_tests {
+    //! Pure-fn guards for the guided /sessions delete flow: the marker
+    //! verdict (fail-closed), the two synthetic prompts, and the phase
+    //! machine's arm/advance/consume shape.
+    use super::*;
+
+    #[test]
+    fn verdict_is_fail_closed() {
+        assert_eq!(delete_flow_verdict("all saved\n[SESSION_DELETE_READY]"), DeleteVerdict::Ready);
+        assert_eq!(delete_flow_verdict("ok\n[SESSION_DELETE_ABORT]"), DeleteVerdict::Abort);
+        // No marker — a failed/refused/capped turn must never delete.
+        assert_eq!(delete_flow_verdict("I saved three memories."), DeleteVerdict::NoMarker);
+        assert_eq!(delete_flow_verdict(""), DeleteVerdict::NoMarker);
+        // Both markers: abort wins.
+        assert_eq!(
+            delete_flow_verdict("[SESSION_DELETE_READY]\nwait no\n[SESSION_DELETE_ABORT]"),
+            DeleteVerdict::Abort
+        );
+    }
+
+    #[test]
+    fn kickoff_prompt_names_session_and_forbids_markers() {
+        let p = build_delete_kickoff_prompt("old-proj");
+        assert!(p.contains("session_summarize"));
+        assert!(p.contains("\"old-proj\""));
+        assert!(p.contains("do NOT emit any completion marker"));
+        // The kickoff must never contain a live marker the verdict scan
+        // could match if the model echoes the prompt.
+        assert!(!p.contains(SESSION_DELETE_READY_MARKER));
+        assert!(!p.contains(SESSION_DELETE_ABORT_MARKER));
+    }
+
+    #[test]
+    fn memorize_prompt_embeds_reason_and_both_markers() {
+        let p = build_delete_memorize_prompt("old-proj", "superseded by the v2 rewrite");
+        assert!(p.contains("superseded by the v2 rewrite"));
+        assert!(p.contains("session_extract"));
+        assert!(p.contains("remember"));
+        assert!(p.contains("knowledge_promote"));
+        assert!(p.contains(SESSION_DELETE_READY_MARKER));
+        assert!(p.contains(SESSION_DELETE_ABORT_MARKER));
+        // Grace-period wording rides the shared const.
+        assert!(p.contains(&format!(
+            "{}-day",
+            crate::sessions::SESSION_DELETE_RETENTION_DAYS
+        )));
+    }
+
+    #[test]
+    fn phase_machine_advances_kickoff_then_consumes_reason() {
+        // Mirrors the UserMessage-arm intercept: AwaitingKickoff advances
+        // in place (the kickoff synthetic must run as a normal turn);
+        // AwaitingReason is taken (the reason turn executes the delete).
+        let mut slot = Some(PendingSessionDelete {
+            name: "old-proj".into(),
+            phase: DeleteFlowPhase::AwaitingKickoff,
+        });
+        let first = match slot.as_mut() {
+            Some(s) if s.phase == DeleteFlowPhase::AwaitingKickoff => {
+                s.phase = DeleteFlowPhase::AwaitingReason;
+                None
+            }
+            Some(_) => slot.take(),
+            None => None,
+        };
+        assert!(first.is_none(), "kickoff message must not be consumed as the reason");
+        assert_eq!(
+            slot.as_ref().map(|s| s.phase),
+            Some(DeleteFlowPhase::AwaitingReason)
+        );
+        let second = match slot.as_mut() {
+            Some(s) if s.phase == DeleteFlowPhase::AwaitingKickoff => None,
+            Some(_) => slot.take(),
+            None => None,
+        };
+        assert_eq!(second.map(|s| s.name).as_deref(), Some("old-proj"));
+        assert!(slot.is_none(), "reason consumption must clear the flow state");
     }
 }
