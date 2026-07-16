@@ -10,6 +10,8 @@ Every slash command available in an embraOS session. See also [Keyboard Shortcut
 | `/sessions` | List all sessions, most recently active first, with state, turn count, and last active time (configured timezone) |
 | `/new <name>` | Create a new named session and switch to it |
 | `/switch <name>` | Switch to an existing session (restores full history) |
+| `/sessions delete <name>` | Guided deletion: the intelligence summarizes the session, asks your reason, preserves durable memories to the knowledge graph, then soft-deletes it (7-day grace period; any slash command mid-flow cancels; the `learning` session is never deletable) |
+| `/sessions restore <name>` | Undo a soft delete during its grace period (the session returns Detached — `/switch` to attach) |
 | `/close` | Close the current session |
 | `/soul` | Display the immutable soul document |
 | `/identity` | Display the intelligence's identity document |
