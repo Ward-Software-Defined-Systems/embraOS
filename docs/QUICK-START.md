@@ -84,6 +84,9 @@ cd ~/projects/embraOS
 
 # Or fall back to the serial TUI on this terminal (no rebuild needed)
 EMBRA_TUI=1 ./scripts/run-qemu.sh                    # Boot in QEMU — serial TUI
+
+# Optional: per-request WardSONDB log lines (default: lifecycle/warn/error only)
+EMBRA_DB_VERBOSE=1 ./scripts/run-qemu.sh             # embra.dbverbose=1 → wardsondb --verbose
 ```
 
 > **Storage engine:** The `--storage-engine` flag is required and is baked into the embrad binary at build time. WardSONDB locks the choice into the DATA partition on first boot via a `.engine` marker file — switching engines later requires wiping DATA.
