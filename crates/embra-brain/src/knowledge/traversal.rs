@@ -185,10 +185,12 @@ fn edge_query_body(filter: serde_json::Map<String, serde_json::Value>, limit: u3
 /// Source arm of the undirected hop: edges LEAVING `(coll, id)`.
 ///
 /// The id+collection pair MUST stay top-level sibling equality keys — that
-/// exact shape is what lets WardSONDB's planner ride the `source_id` prefix
-/// of `idx_edge_source`/`idx_edge_source_target`. NEVER wrap the arms in a
-/// `$or` (or any combinator): WardSONDB plans every `$or` as a full
-/// collection scan, which is the 5–8 min production latency this split
+/// exact shape is what lets WardSONDB's planner serve the arm from the
+/// single-field `idx_edge_source_id` (boot-ensured; post-F2 planners refuse
+/// to serve single-field lookups from compound indexes, while pre-F2 builds
+/// ride a `source_id`-leading compound's prefix instead). NEVER wrap the
+/// arms in a `$or` (or any combinator): WardSONDB plans every `$or` as a
+/// full collection scan, which is the 5–8 min production latency this split
 /// removed (2026-07-04). Optional type/weight constraints ride as siblings;
 /// the planner applies them as a post-filter over the index matches.
 fn source_arm_filter(
@@ -240,7 +242,9 @@ fn append_common_constraints(
 /// so the arms are disjoint in practice — the dedupe is a guard) → sort by
 /// the server comparator (`weight desc, created_at desc`, RFC3339 strings so
 /// lexicographic = chronological, parse-defaulted fields sort last) plus an
-/// `_id desc` tie-break the server doesn't have → truncate. Returns the
+/// `_id desc` tie-break → truncate. Post-F2 servers tie-break `_id` in the
+/// last sort field's direction (desc here), so the merge and a single-window
+/// server sort agree; older servers had no tie-break at all. Returns the
 /// window and whether it saturated (either arm came back full, or the merged
 /// unique set overflowed the limit).
 fn merge_arm_edges(

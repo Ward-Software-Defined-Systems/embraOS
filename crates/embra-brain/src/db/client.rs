@@ -298,6 +298,18 @@ impl WardsonDbClient {
         collection: &str,
         query: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>> {
+        Ok(self.query_with_meta(collection, query).await?.0)
+    }
+
+    /// `query` that also returns the response envelope's `meta` object.
+    /// Callers that page with `meta.next_cursor` (the maintenance scans)
+    /// need it; everything else should keep using `query()`. Same status
+    /// handling and slow-query warn.
+    pub async fn query_with_meta(
+        &self,
+        collection: &str,
+        query: &serde_json::Value,
+    ) -> Result<(Vec<serde_json::Value>, serde_json::Value)> {
         let resp = self
             .http_client
             .post(format!("{}/{}/query", self.base_url, collection))
@@ -311,7 +323,7 @@ impl WardsonDbClient {
         }
         let envelope: WardsonEnvelope<Vec<serde_json::Value>> = resp.json().await?;
         maybe_warn_slow_query(collection, &envelope.meta, envelope.data.len());
-        Ok(envelope.data)
+        Ok((envelope.data, envelope.meta))
     }
 
     /// Fetch up to `limit` most-recent documents (sorted `_created_at desc,

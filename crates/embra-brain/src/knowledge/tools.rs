@@ -723,7 +723,10 @@ mod windowless_stats_tests {
     //! Shape guards for the windowless graph_stats / paginated orphan scan
     //! (no DB mock in this crate — contracts are enforced at the builder
     //! level, same pattern as the FIX-1..8 query-body tests).
-    use super::{group_by_pipeline, group_counts, orphan_page_query_body, promoted_entries_filter};
+    use super::{
+        group_by_pipeline, group_counts, next_scan_page, orphan_page_query_body,
+        promoted_entries_filter, ScanPage,
+    };
     use serde_json::json;
 
     #[test]
@@ -762,13 +765,72 @@ mod windowless_stats_tests {
 
     #[test]
     fn orphan_page_body_paginates_key_order_no_sort() {
-        let body = orphan_page_query_body(20_000, 40_000);
+        let body = orphan_page_query_body(20_000, &ScanPage::Offset(40_000));
         assert_eq!(body["limit"], json!(20_000));
         assert_eq!(body["offset"], json!(40_000));
         // Deliberately unsorted (doctrine exception): exhaustive pagination
         // rides stable key order; a sort would re-sort the whole collection
         // per page.
         assert!(body.get("sort").is_none());
+        // Offset mode never carries a cursor (server rejects the combination).
+        assert!(body.get("cursor").is_none());
+    }
+
+    #[test]
+    fn cursor_page_body_has_cursor_no_offset_no_sort() {
+        let body = orphan_page_query_body(20_000, &ScanPage::Cursor("tok123".into()));
+        assert_eq!(body["limit"], json!(20_000));
+        assert_eq!(body["cursor"], json!("tok123"));
+        // cursor+offset is a 400 on cursor-capable servers; the modes are
+        // mutually exclusive by construction.
+        assert!(body.get("offset").is_none());
+        assert!(body.get("sort").is_none());
+    }
+
+    #[test]
+    fn scan_follows_server_cursor_when_offered() {
+        // From either mode, a string next_cursor wins.
+        let meta = json!({ "next_cursor": "abc" });
+        match next_scan_page(&meta, &ScanPage::Offset(0), 20_000, 20_000) {
+            Some(ScanPage::Cursor(t)) => assert_eq!(t, "abc"),
+            other => panic!("expected cursor page, got {:?}", other.map(|p| p.label())),
+        }
+        match next_scan_page(&meta, &ScanPage::Cursor("prev".into()), 5, 20_000) {
+            Some(ScanPage::Cursor(t)) => assert_eq!(t, "abc"),
+            other => panic!("expected cursor page, got {:?}", other.map(|p| p.label())),
+        }
+    }
+
+    #[test]
+    fn scan_without_cursor_tiles_offsets_until_partial_page() {
+        // Pre-cursor server: full page advances the offset by the returned
+        // count (legacy behavior, byte-identical bodies)…
+        let meta = json!({});
+        match next_scan_page(&meta, &ScanPage::Offset(40_000), 20_000, 20_000) {
+            Some(ScanPage::Offset(o)) => assert_eq!(o, 60_000),
+            other => panic!("expected offset page, got {:?}", other.map(|p| p.label())),
+        }
+        // …and a partial page ends the scan.
+        assert!(next_scan_page(&meta, &ScanPage::Offset(60_000), 12, 20_000).is_none());
+    }
+
+    #[test]
+    fn cursor_mode_ends_exactly_when_server_withholds_cursor() {
+        // A cursor-capable server omits next_cursor exactly at end-of-matches
+        // — even on a full page. Never fall back to offset mid-walk.
+        let meta = json!({});
+        assert!(next_scan_page(&meta, &ScanPage::Cursor("prev".into()), 20_000, 20_000).is_none());
+    }
+
+    #[test]
+    fn non_string_next_cursor_is_treated_as_absent() {
+        for bad in [json!({ "next_cursor": null }), json!({ "next_cursor": 7 })] {
+            assert!(next_scan_page(&bad, &ScanPage::Cursor("prev".into()), 5, 20_000).is_none());
+            match next_scan_page(&bad, &ScanPage::Offset(0), 20_000, 20_000) {
+                Some(ScanPage::Offset(o)) => assert_eq!(o, 20_000),
+                other => panic!("expected offset page, got {:?}", other.map(|p| p.label())),
+            }
+        }
     }
 }
 
@@ -776,13 +838,80 @@ mod windowless_stats_tests {
 /// `--max-query-limit` (100k) and bounds per-page memory.
 const ORPHAN_SCAN_PAGE: usize = 20_000;
 
-/// One page of the exhaustive edge scan. Deliberately UNSORTED — a doctrine
-/// exception: offset pagination rides the stable UUIDv7 key order (the
-/// storage scan order) as its cursor. This is a full-coverage maintenance
-/// sweep, not a relevance window (the invariant's target), and adding a
-/// sort would re-sort the whole matched set on every page.
-fn orphan_page_query_body(page_limit: usize, offset: usize) -> serde_json::Value {
-    json!({ "filter": {}, "limit": page_limit, "offset": offset })
+/// Position of one exhaustive-scan page: classic offset tiling, or a server
+/// resume cursor. Page 1 is always `Offset(0)`; the mode for every later
+/// page is decided by the server per `next_scan_page`.
+enum ScanPage {
+    Offset(usize),
+    Cursor(String),
+}
+
+impl ScanPage {
+    /// Human label for error messages ("failed at ...").
+    fn label(&self) -> String {
+        match self {
+            ScanPage::Offset(offset) => format!("offset {}", offset),
+            ScanPage::Cursor(_) => "cursor page".to_string(),
+        }
+    }
+}
+
+/// One page of an exhaustive maintenance scan. Deliberately UNSORTED — a
+/// doctrine exception: the pagination rides the stable UUIDv7 key order
+/// (the storage scan order). This is full-coverage maintenance, not a
+/// relevance window (the invariant's target), and a sort would re-sort the
+/// whole matched set on every page.
+///
+/// Offset mode tiles `offset`/`limit` (applied post-filter in every
+/// WardSONDB executor path, so a constant filter tiles without skips or
+/// duplicates) — but each page re-skips from key zero, O(n²) server work
+/// across a full scan. Cursor mode resumes at the server-issued
+/// `meta.next_cursor` token instead (O(n) total); the server rejects
+/// `cursor` combined with `offset`, so the two are mutually exclusive here
+/// by construction.
+fn scan_page_query_body(
+    filter: &serde_json::Value,
+    page_limit: usize,
+    page: &ScanPage,
+) -> serde_json::Value {
+    match page {
+        ScanPage::Offset(offset) => {
+            json!({ "filter": filter, "limit": page_limit, "offset": offset })
+        }
+        ScanPage::Cursor(token) => {
+            json!({ "filter": filter, "limit": page_limit, "cursor": token })
+        }
+    }
+}
+
+/// Decide the next page (or `None` when the scan is complete), adapting to
+/// the server build:
+/// - `meta.next_cursor` present → cursor mode. WardSONDB builds with cursor
+///   pagination emit it on no-sort full scans exactly when more matches
+///   remain, so its absence after a cursor page is an exact end-of-scan.
+/// - No cursor, offset mode → pre-cursor server (or an index-served plan,
+///   which never bootstraps a no-sort cursor): keep tiling offsets until a
+///   partial page, byte-identical to the legacy behavior.
+fn next_scan_page(
+    meta: &serde_json::Value,
+    prev: &ScanPage,
+    page_len: usize,
+    page_limit: usize,
+) -> Option<ScanPage> {
+    if let Some(token) = meta.get("next_cursor").and_then(|v| v.as_str()) {
+        return Some(ScanPage::Cursor(token.to_string()));
+    }
+    match prev {
+        ScanPage::Cursor(_) => None,
+        ScanPage::Offset(offset) => {
+            (page_len >= page_limit).then(|| ScanPage::Offset(offset + page_len))
+        }
+    }
+}
+
+/// One page of the exhaustive edge scan (see `scan_page_query_body`).
+fn orphan_page_query_body(page_limit: usize, page: &ScanPage) -> serde_json::Value {
+    scan_page_query_body(&json!({}), page_limit, page)
 }
 
 /// Scan up to `limit` edges and return `(scanned, orphan_edge_ids)` where
@@ -792,23 +921,25 @@ fn orphan_page_query_body(page_limit: usize, offset: usize) -> serde_json::Value
 /// went silently partial past the server's 100k max-query-limit.
 async fn find_orphan_edges(db: &WardsonDbClient, limit: usize) -> (usize, Vec<String>) {
     let mut scanned = 0usize;
-    let mut offset = 0usize;
+    let mut page = ScanPage::Offset(0);
     let mut orphan_ids: Vec<String> = Vec::new();
 
     while scanned < limit {
         let page_limit = ORPHAN_SCAN_PAGE.min(limit - scanned);
-        let edges = db
-            .query("memory.edges", &orphan_page_query_body(page_limit, offset))
+        let Ok((edges, meta)) = db
+            .query_with_meta("memory.edges", &orphan_page_query_body(page_limit, &page))
             .await
-            .unwrap_or_default();
+        else {
+            break; // same stop-scanning behavior as the old unwrap_or_default
+        };
         if edges.is_empty() {
             break;
         }
         scanned += edges.len();
-        offset += edges.len();
         orphan_ids.extend(orphans_in_page(db, &edges).await);
-        if edges.len() < page_limit {
-            break; // final partial page — collection exhausted
+        match next_scan_page(&meta, &page, edges.len(), page_limit) {
+            Some(next) => page = next,
+            None => break, // collection exhausted (exact in cursor mode)
         }
     }
 
@@ -953,18 +1084,14 @@ const DUMP_COLLECTIONS: &[(&str, &str)] = &[
     ("edges", "memory.edges"),
 ];
 
-/// One page of the exhaustive dump scan. Deliberately UNSORTED — the same
-/// doctrine exception as `orphan_page_query_body`: offset pagination rides
-/// the stable UUIDv7 key order as its cursor (exhaustive coverage, not a
-/// relevance window). WardSONDB applies `offset`/`limit` after the filter in
-/// every executor path, so a constant filter tiles the matched set without
-/// skips or duplicates.
+/// One page of the exhaustive dump scan (see `scan_page_query_body` for the
+/// no-sort doctrine exception and the offset/cursor mode contract).
 fn dump_page_query_body(
     filter: &serde_json::Value,
     page_limit: usize,
-    offset: usize,
+    page: &ScanPage,
 ) -> serde_json::Value {
-    json!({ "filter": filter, "limit": page_limit, "offset": offset })
+    scan_page_query_body(filter, page_limit, page)
 }
 
 /// Edge-type restriction for the edges pass.
@@ -1110,12 +1237,12 @@ async fn write_dump_contents(
         };
 
         let mut written = 0usize;
-        let mut offset = 0usize;
+        let mut page = ScanPage::Offset(0);
         loop {
-            let docs = db
-                .query(coll, &dump_page_query_body(&filter, DUMP_SCAN_PAGE, offset))
+            let (docs, meta) = db
+                .query_with_meta(coll, &dump_page_query_body(&filter, DUMP_SCAN_PAGE, &page))
                 .await
-                .map_err(|e| format!("query {} failed at offset {}: {}", coll, offset, e))?;
+                .map_err(|e| format!("query {} failed at {}: {}", coll, page.label(), e))?;
             if docs.is_empty() {
                 break;
             }
@@ -1134,9 +1261,9 @@ async fn write_dump_contents(
                 bytes += line.len() as u64;
                 written += 1;
             }
-            offset += page_len;
-            if page_len < DUMP_SCAN_PAGE {
-                break; // final partial page — collection exhausted
+            match next_scan_page(&meta, &page, page_len, DUMP_SCAN_PAGE) {
+                Some(next) => page = next,
+                None => break, // collection exhausted (exact in cursor mode)
             }
         }
 
@@ -1249,7 +1376,7 @@ mod dump_shape_tests {
     //! `windowless_stats_tests`.
     use super::{
         dump_edge_record, dump_edge_type_filter, dump_meta_record, dump_node_record,
-        dump_page_query_body, resolve_dump_collections, validate_dump_edge_types,
+        dump_page_query_body, resolve_dump_collections, validate_dump_edge_types, ScanPage,
     };
     use serde_json::json;
 
@@ -1258,15 +1385,24 @@ mod dump_shape_tests {
         // Same doctrine exception as the orphan scan: exhaustive pagination
         // rides stable key order; a sort key must never appear.
         let empty = json!({});
-        let body = dump_page_query_body(&empty, 20_000, 40_000);
+        let body = dump_page_query_body(&empty, 20_000, &ScanPage::Offset(40_000));
         assert_eq!(body["limit"], json!(20_000));
         assert_eq!(body["offset"], json!(40_000));
         assert_eq!(body["filter"], json!({}));
         assert!(body.get("sort").is_none());
+        assert!(body.get("cursor").is_none());
 
         let filtered = dump_edge_type_filter(&["enables".to_string()]);
-        let body = dump_page_query_body(&filtered, 20_000, 0);
+        let body = dump_page_query_body(&filtered, 20_000, &ScanPage::Offset(0));
         assert_eq!(body["filter"], json!({"edge_type": {"$in": ["enables"]}}));
+        assert!(body.get("sort").is_none());
+
+        // Cursor mode keeps the same filter and drops offset (mutually
+        // exclusive server-side); still no sort.
+        let body = dump_page_query_body(&filtered, 20_000, &ScanPage::Cursor("tok".into()));
+        assert_eq!(body["filter"], json!({"edge_type": {"$in": ["enables"]}}));
+        assert_eq!(body["cursor"], json!("tok"));
+        assert!(body.get("offset").is_none());
         assert!(body.get("sort").is_none());
     }
 

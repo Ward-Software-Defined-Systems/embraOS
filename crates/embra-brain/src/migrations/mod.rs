@@ -122,8 +122,75 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
         set_schema_version(db, 12).await?;
     }
 
+    // Hot-path index assertions ride EVERY boot, after the versioned ladder
+    // (unversioned on purpose — see ensure_hot_path_indexes).
+    ensure_hot_path_indexes(db).await;
+
     info!("Migrations complete. Schema version: {}", CURRENT_SCHEMA_VERSION);
     Ok(())
+}
+
+/// Hot-path secondary indexes as `(collection, create_index body)`.
+///
+/// idx_edge_source_id (single-field `source_id`): the traversal source arm
+/// queries eq `{source_id, source_collection}` (`traversal.rs`). WardSONDB
+/// builds with the F2 planner fix refuse to serve single-field lookups from
+/// compound indexes (compounds exclude docs missing any component field),
+/// so without a real single-field index every hop's source arm plans as a
+/// full memory.edges scan. The target arm already rides the single-field
+/// `idx_edge_target` (v5).
+fn hot_path_index_specs() -> Vec<(&'static str, serde_json::Value)> {
+    vec![(
+        "memory.edges",
+        serde_json::json!({"name": "idx_edge_source_id", "field": "source_id"}),
+    )]
+}
+
+/// Assert hot-path indexes exist — warn-don't-fail, runs on every boot.
+///
+/// Deliberately NOT a versioned migration: pre-F2 WardSONDB builds
+/// misdetect a single-field create shadowed by a compound index as a
+/// duplicate (409, which `create_index` treats as idempotent success), so a
+/// one-shot migration would record itself applied with the index never
+/// created — and never re-run once a fixed server build arrives.
+/// Re-asserting per boot self-heals across server upgrades; on pre-F2
+/// builds the missing index is harmless (that planner still serves the
+/// lookup from a `source_id`-leading compound).
+async fn ensure_hot_path_indexes(db: &WardsonDbClient) {
+    for (collection, body) in hot_path_index_specs() {
+        let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+        match db.create_index(collection, &body).await {
+            Ok(_) => info!("Hot-path index {} on {} ensured", name, collection),
+            Err(e) => warn!(
+                "Hot-path index {} on {} failed (continuing without it): {}",
+                name, collection, e
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod hot_path_index_tests {
+    use super::hot_path_index_specs;
+
+    /// The traversal source arm depends on this exact spec: a SINGLE-FIELD
+    /// index (`field`, not `fields`) on memory.edges.source_id. A compound
+    /// here would be refused for single-field lookups by post-F2 WardSONDB
+    /// planners and the arm would silently fall back to a full scan.
+    #[test]
+    fn source_id_index_is_single_field_on_edges() {
+        let specs = hot_path_index_specs();
+        let (collection, body) = specs
+            .iter()
+            .find(|(_, b)| b["name"] == "idx_edge_source_id")
+            .expect("idx_edge_source_id spec present");
+        assert_eq!(*collection, "memory.edges");
+        assert_eq!(body["field"], "source_id");
+        assert!(
+            body.get("fields").is_none(),
+            "must stay single-field — compound form regresses the arm to full scan"
+        );
+    }
 }
 
 async fn get_schema_version(db: &WardsonDbClient) -> i32 {
