@@ -8,7 +8,7 @@ Every slash command available in an embraOS session. See also [Keyboard Shortcut
 | `/ml` | Open a multi-line message editor. **Web console (default):** a textarea modal — Ctrl/⌘+Enter or **Send** to submit, Esc/Cancel to discard; sent verbatim as one message. **Serial TUI (`EMBRA_TUI=1`):** toggles dot-terminator mode — type lines, `.` on its own line to send |
 | `/status` | System status — version, uptime, WardSONDB health, memory, soul status |
 | `/sessions` | List all sessions, most recently active first, with state, turn count, and last active time (configured timezone) |
-| `/new <name>` | Create a new named session and switch to it |
+| `/new <name>` | Create a new named session and switch to it. Duplicate names are refused (`/switch` to attach an existing session; a soft-deleted name stays reserved through its grace period) |
 | `/switch <name>` | Switch to an existing session (restores full history) |
 | `/sessions delete <name>` | Guided deletion: the intelligence summarizes the session, asks your reason, preserves durable memories to the knowledge graph, then soft-deletes it (7-day grace period; any slash command mid-flow cancels; the `learning` session is never deletable) |
 | `/sessions restore <name>` | Undo a soft delete during its grace period (the session returns Detached — `/switch` to attach) |
