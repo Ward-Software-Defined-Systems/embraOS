@@ -64,4 +64,16 @@ The list is operator-overridable at wizard time. Switching models post-wizard ru
 
 ---
 
-*Last updated: 2026-07-14.*
+## If a Model Gets Stuck
+
+Local models occasionally fall into reasoning loops — one unbounded streaming
+response that never finishes (the tool-iteration cap doesn't apply; it counts
+tool round-trips, not tokens). Interrupt it with **`/stop`** (console: press
+**Esc** while the turn streams; mobile: the **■** button that replaces Send).
+Generation stops immediately — the connection to the Ollama/LM Studio server
+is severed — and the partial response stays in history marked as interrupted.
+See [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md).
+
+---
+
+*Last updated: 2026-07-17.*

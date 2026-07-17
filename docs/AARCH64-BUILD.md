@@ -108,6 +108,7 @@ docker run --rm -v "$PWD":/work -w /work ubuntu:24.04 bash -c \
 ```bash
 ./scripts/run-qemu-aarch64.sh                  # web console (default) — https://localhost:3345/embraOS
 EMBRA_TUI=1 ./scripts/run-qemu-aarch64.sh      # stable Phase 1 serial TUI on this terminal
+EMBRA_DB_VERBOSE=1 ./scripts/run-qemu-aarch64.sh   # opt-in per-request WardSONDB log lines
 ```
 
 Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, LLM provider
