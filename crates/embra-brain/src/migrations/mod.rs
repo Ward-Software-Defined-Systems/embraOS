@@ -126,11 +126,76 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
     // (unversioned on purpose — see ensure_hot_path_indexes).
     ensure_hot_path_indexes(db).await;
 
+    // Shadowed-duplicate healing runs BEFORE the reaped-session sweep so a
+    // half-deleted duplicate pair (canonical stamped Deleted + shadowed
+    // live dup) resolves into a clean single-doc session before any reap
+    // reasoning sees it.
+    dedupe_session_docs(db).await;
+
     // Ghost-sweep for TTL-reaped soft-deleted sessions — also every boot.
     sweep_reaped_sessions(db).await;
 
     info!("Migrations complete. Schema version: {}", CURRENT_SCHEMA_VERSION);
     Ok(())
+}
+
+/// In canonical (oldest-first) order, every doc after the first is a
+/// shadowed duplicate: no canonical read (`history_query_body` first-doc)
+/// ever returns it, so removing it changes nothing observable except
+/// un-duplicating the listing (which pushes every meta doc it finds).
+fn shadowed_duplicates(docs: &[serde_json::Value]) -> &[serde_json::Value] {
+    if docs.len() <= 1 { &[] } else { &docs[1..] }
+}
+
+/// Heal duplicate session docs left by the historical unguarded `create`
+/// (a `/new` for an existing name appended a second meta + history doc).
+/// Keeps the canonical first doc per collection, deletes the shadowed
+/// rest. Every boot, warn-don't-fail; loops per collection because the
+/// canonical query window is 10 docs (a no-progress pass breaks so a
+/// failing delete can't spin).
+async fn dedupe_session_docs(db: &WardsonDbClient) {
+    let collections = match db.list_collections().await {
+        Ok(c) => c,
+        Err(e) => {
+            warn!("Session-doc dedupe skipped (list_collections failed): {}", e);
+            return;
+        }
+    };
+    for coll in collections {
+        let is_session_doc_coll = coll.starts_with("sessions.")
+            && (coll.ends_with(".meta") || coll.ends_with(".history"));
+        if !is_session_doc_coll {
+            continue;
+        }
+        loop {
+            let docs = match db.query(&coll, &crate::sessions::history_query_body()).await {
+                Ok(d) => d,
+                Err(_) => break,
+            };
+            let dups = shadowed_duplicates(&docs);
+            if dups.is_empty() {
+                break;
+            }
+            let mut deleted = 0usize;
+            for dup in dups {
+                let Some(id) = dup.get("_id").or(dup.get("id")).and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                match db.delete(&coll, id).await {
+                    Ok(_) => {
+                        deleted += 1;
+                        info!("Session-doc dedupe: removed shadowed duplicate {} from {}", id, coll);
+                    }
+                    Err(e) => {
+                        warn!("Session-doc dedupe: delete {} from {} failed: {}", id, coll, e);
+                    }
+                }
+            }
+            if deleted == 0 {
+                break; // no progress — retry next boot rather than spin
+            }
+        }
+    }
 }
 
 /// A session's collections are reap residue exactly when BOTH canonical
@@ -238,6 +303,26 @@ async fn ensure_hot_path_indexes(db: &WardsonDbClient) {
                 name, collection, e
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod dedupe_tests {
+    use super::shadowed_duplicates;
+    use serde_json::json;
+
+    /// Canonical-first survives; everything after it is shadowed. Empty
+    /// and single-doc collections are untouched.
+    #[test]
+    fn keeps_canonical_first_only() {
+        assert!(shadowed_duplicates(&[]).is_empty());
+        let one = vec![json!({"_id": "a"})];
+        assert!(shadowed_duplicates(&one).is_empty());
+        let three = vec![json!({"_id": "a"}), json!({"_id": "b"}), json!({"_id": "c"})];
+        let dups = shadowed_duplicates(&three);
+        assert_eq!(dups.len(), 2);
+        assert_eq!(dups[0]["_id"], json!("b"));
+        assert_eq!(dups[1]["_id"], json!("c"));
     }
 }
 

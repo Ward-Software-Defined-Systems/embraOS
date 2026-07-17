@@ -189,8 +189,23 @@ impl SessionManager {
         let meta_collection = format!("sessions.{}.meta", name);
         let history_collection = format!("sessions.{}.history", name);
 
+        // Duplicate guard — DOC-level, deliberately not collection-level.
+        // One-doc-per-collection is load-bearing everywhere (canonical-
+        // first reads, turn_count stamping, soft-delete stamping): a
+        // second create for a live name would append shadowed duplicate
+        // docs that only ever surface as listing ghosts and soft-delete
+        // survivors. TTL-reaped residue collections (docs gone, awaiting
+        // the boot sweep) are legitimately reusable, so an existing but
+        // empty meta collection passes. Best-effort read: a query error
+        // here must not block creation — a genuinely down DB fails the
+        // writes below anyway.
+        let meta_coll_exists = self.db.collection_exists(&meta_collection).await?;
+        if meta_coll_exists && self.get_meta(name).await.ok().flatten().is_some() {
+            anyhow::bail!("session '{}' already exists", name);
+        }
+
         // Create collections
-        if !self.db.collection_exists(&meta_collection).await? {
+        if !meta_coll_exists {
             self.db.create_collection(&meta_collection).await?;
         }
         if !self.db.collection_exists(&history_collection).await? {

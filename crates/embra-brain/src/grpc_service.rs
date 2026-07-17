@@ -2196,22 +2196,28 @@ async fn handle_slash_command(
                 send_msg(tx, "Usage: /new <session-name>".to_string()).await;
             } else {
                 let mut mgr = session_mgr.write().await;
-                // A soft-deleted session reserves its name through the
-                // grace period: create() would append a SECOND meta doc to
-                // the existing collection (shadowed by the canonical-first
-                // read, then orphaned when the original reaps).
-                let grace_held = mgr
-                    .get_meta(args)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some_and(|m| m.state == SessionState::Deleted);
-                if grace_held {
+                // Duplicate names are refused: create() would append a
+                // SECOND meta doc to the existing collection — shadowed by
+                // the canonical-first read, visible only as a listing
+                // ghost, and a soft-delete survivor. A soft-deleted name
+                // stays reserved through its grace period (restore is the
+                // recovery path). create() carries the same guard as
+                // defense-in-depth; this pre-check exists for the tailored
+                // messages.
+                if let Some(existing) = mgr.get_meta(args).await.ok().flatten() {
                     drop(mgr);
-                    send_msg(tx, format!(
-                        "A deleted session '{}' is in its grace period — /sessions restore {} to recover it, or pick another name.",
-                        args, args
-                    )).await;
+                    let msg = if existing.state == SessionState::Deleted {
+                        format!(
+                            "A deleted session '{}' is in its grace period — /sessions restore {} to recover it, or pick another name.",
+                            args, args
+                        )
+                    } else {
+                        format!(
+                            "Session '{}' already exists — /switch {} to attach.",
+                            args, args
+                        )
+                    };
+                    send_msg(tx, msg).await;
                     return None;
                 }
                 match mgr.create(args).await {
