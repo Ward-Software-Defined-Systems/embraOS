@@ -26,6 +26,11 @@ service BrainService {
   // Lifecycle
   rpc GetMode(GetModeRequest) returns (GetModeResponse);
 
+  // Operator interrupt — out-of-band stop for a stuck in-flight turn.
+  // Unary on purpose: the Converse loop awaits each turn inline, so
+  // anything sent on the stream parks behind the running turn.
+  rpc StopTurn(StopTurnRequest) returns (StopTurnResponse);
+
   // Health
   rpc HealthCheck(embra.common.HealthCheckRequest) returns (embra.common.HealthCheckResponse);
 }
@@ -142,6 +147,15 @@ enum SetupFieldType {
   SETUP_FIELD_TYPE_TEXT = 1;      // Free text input
   SETUP_FIELD_TYPE_SELECTOR = 2;  // Arrow-key selector
   SETUP_FIELD_TYPE_CONFIRM = 3;   // Yes/no confirmation
+}
+
+// --- Operator interrupt ---
+
+message StopTurnRequest {}
+message StopTurnResponse {
+  // True when a turn was in flight and the stop signal was raised;
+  // false = nothing to stop (the request was a no-op).
+  bool was_in_turn = 1;
 }
 
 // --- Sessions ---

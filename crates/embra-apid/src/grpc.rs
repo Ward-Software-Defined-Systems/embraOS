@@ -107,6 +107,15 @@ impl EmbraApi for EmbraApiImpl {
         Ok(Response::new(ListSessionsResponse { payload }))
     }
 
+    // Out-of-band operator interrupt — unary so it bypasses the parked
+    // Converse stream (tonic runs it as its own task).
+    async fn stop_turn(&self, _request: Request<StopTurnRequest>) -> Result<Response<StopTurnResponse>, Status> {
+        let mut brain = self.backends.brain_client().await?;
+        let resp = brain.stop_turn(embra_common::proto::brain::StopTurnRequest {}).await?;
+        let payload = resp.into_inner().encode_to_vec();
+        Ok(Response::new(StopTurnResponse { payload }))
+    }
+
     async fn create_session(&self, request: Request<CreateSessionRequest>) -> Result<Response<CreateSessionResponse>, Status> {
         let req = request.into_inner();
         let mut brain = self.backends.brain_client().await?;

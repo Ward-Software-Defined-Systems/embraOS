@@ -90,6 +90,15 @@ pub async fn process_sse_stream(
                 state.emit_complete(&tx).await;
                 return Ok(());
             }
+            if state.receiver_gone {
+                // Consumer dropped the stream (operator /stop) — exit so
+                // `response` drops and the connection closes.
+                tracing::debug!(
+                    target: "gemini::streaming",
+                    "receiver dropped mid-stream; aborting SSE pump"
+                );
+                return Ok(());
+            }
         }
     }
 
@@ -117,6 +126,11 @@ struct ParserState {
     /// `StreamEvent::ReasoningDelta` emission. Default `false` keeps
     /// `Default::default()` callers (test harnesses) reasoning-off.
     include_reasoning: bool,
+    /// Set when a send fails (receiver dropped — consumer aborted the
+    /// turn, e.g. operator /stop). The pump loop checks it and exits,
+    /// dropping the `reqwest::Response` (severs the connection). Never
+    /// downgrade sends back to fire-and-forget.
+    receiver_gone: bool,
 }
 
 impl ParserState {
@@ -124,6 +138,13 @@ impl ParserState {
         Self {
             include_reasoning,
             ..Self::default()
+        }
+    }
+
+    /// Send an event, recording receiver loss instead of ignoring it.
+    async fn send(&mut self, tx: &mpsc::Sender<StreamEvent>, event: StreamEvent) {
+        if tx.send(event).await.is_err() {
+            self.receiver_gone = true;
         }
     }
 }
@@ -199,10 +220,10 @@ impl ParserState {
             // text accumulators / persistence path.
             if is_thought {
                 if self.include_reasoning {
-                    let _ = tx.send(StreamEvent::ReasoningDelta(text)).await;
+                    self.send(tx, StreamEvent::ReasoningDelta(text)).await;
                 }
             } else {
-                let _ = tx.send(StreamEvent::TextDelta(text)).await;
+                self.send(tx, StreamEvent::TextDelta(text)).await;
             }
             return;
         }

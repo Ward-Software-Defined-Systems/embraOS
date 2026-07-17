@@ -107,6 +107,10 @@ pub enum EarlyStopReason {
     Recitation,
     /// Gemini `MALFORMED_FUNCTION_CALL`.
     Malformed,
+    /// Operator-requested interrupt (`/stop` → the StopTurn RPC). Never
+    /// produced by a provider wire mapper — the loop driver synthesizes it
+    /// when the stop generation advances mid-turn.
+    OperatorStop,
     Other,
 }
 

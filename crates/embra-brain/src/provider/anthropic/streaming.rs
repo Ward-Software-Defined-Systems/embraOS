@@ -207,15 +207,25 @@ pub async fn process_sse_stream(
                             if let Some(t) = delta.get("text").and_then(|v| v.as_str()) {
                                 acc.text.push_str(t);
                                 full_text.push_str(t);
-                                let _ = tx.send(AnthropicStreamEvent::Token(t.to_string())).await;
+                                // Receiver dropped = consumer aborted the
+                                // turn (operator /stop): exit so `stream`
+                                // (and the connection) drop. Load-bearing
+                                // — never downgrade to fire-and-forget.
+                                if tx.send(AnthropicStreamEvent::Token(t.to_string())).await.is_err() {
+                                    return Ok(());
+                                }
                             }
                         }
                         "thinking_delta" => {
                             if let Some(t) = delta.get("thinking").and_then(|v| v.as_str()) {
                                 acc.thinking.push_str(t);
-                                let _ = tx
+                                if tx
                                     .send(AnthropicStreamEvent::ThinkingDelta(t.to_string()))
-                                    .await;
+                                    .await
+                                    .is_err()
+                                {
+                                    return Ok(());
+                                }
                             }
                         }
                         "signature_delta" => {
@@ -241,12 +251,16 @@ pub async fn process_sse_stream(
                         .unwrap_or(0) as usize;
                     if let Some(acc) = blocks.remove(&index) {
                         let block = acc.finalize();
-                        let _ = tx
+                        if tx
                             .send(AnthropicStreamEvent::BlockComplete {
                                 block_index: index,
                                 block: block.clone(),
                             })
-                            .await;
+                            .await
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
                         // Reinsert the finalized block so the final
                         // Complete event carries every block in order.
                         blocks.insert(index, BlockAccumulator::from_finalized(block));

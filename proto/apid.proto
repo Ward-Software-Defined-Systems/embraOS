@@ -11,6 +11,8 @@ service EmbraAPI {
   rpc SwitchSession(SwitchSessionRequest) returns (SwitchSessionResponse);
   rpc CloseSession(CloseSessionRequest) returns (CloseSessionResponse);
   rpc GetExpression(GetExpressionRequest) returns (ExpressionState);
+  // Out-of-band operator interrupt for a stuck in-flight turn (pass-through).
+  rpc StopTurn(StopTurnRequest) returns (StopTurnResponse);
 
   // --- Proxied Trust methods ---
   rpc VerifySoul(VerifySoulRequest) returns (VerifySoulResponse);
@@ -49,6 +51,8 @@ message SwitchSessionRequest { string name = 1; }
 message SwitchSessionResponse { bytes payload = 1; }
 message CloseSessionRequest {}
 message CloseSessionResponse { bytes payload = 1; }
+message StopTurnRequest {}
+message StopTurnResponse { bytes payload = 1; }  // Serialized embra.brain.StopTurnResponse
 
 message GetExpressionRequest {}
 message ExpressionState {

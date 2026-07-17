@@ -83,6 +83,18 @@ pub async fn process_sse_stream(
         if state.completed {
             return Ok(());
         }
+        if state.receiver_gone {
+            // Nobody is listening (consumer dropped the stream — e.g. an
+            // operator /stop). Returning drops `response`, which closes
+            // the TCP connection and makes the server stop generating.
+            // Load-bearing for /stop: never downgrade back to fire-and-
+            // forget sends.
+            tracing::debug!(
+                target: "provider::openai_compat::streaming",
+                "receiver dropped mid-stream; aborting SSE pump"
+            );
+            return Ok(());
+        }
     }
 
     if !state.completed {
@@ -124,7 +136,7 @@ async fn consume_sse_lines(
             continue;
         };
         state.process_chunk(chunk, tx).await;
-        if state.completed {
+        if state.completed || state.receiver_gone {
             return;
         }
     }
@@ -146,6 +158,11 @@ pub(super) struct ParserState {
     /// assembly continues unconditionally so the terminal
     /// `Block::ProviderOpaque` round-trip is unaffected.
     pub(super) include_reasoning: bool,
+    /// Set when a send fails (receiver dropped — consumer aborted the
+    /// turn). The pump loops check it and exit, which drops the
+    /// `reqwest::Response` and severs the connection — load-bearing for
+    /// the operator /stop.
+    pub(super) receiver_gone: bool,
 }
 
 #[derive(Default, Debug)]
@@ -165,6 +182,16 @@ impl ParserState {
             finish_reason: None,
             completed: false,
             include_reasoning,
+            receiver_gone: false,
+        }
+    }
+
+    /// Send an event, recording receiver loss instead of ignoring it —
+    /// the fire-and-forget `let _ = tx.send(...)` shape left the pump
+    /// draining a stream nobody consumed (the pre-/stop leak).
+    async fn send(&mut self, tx: &mpsc::Sender<StreamEvent>, event: StreamEvent) {
+        if tx.send(event).await.is_err() {
+            self.receiver_gone = true;
         }
     }
 
@@ -178,7 +205,7 @@ impl ParserState {
             if let Some(content) = choice.delta.content {
                 if !content.is_empty() {
                     self.text_buffer.push_str(&content);
-                    let _ = tx.send(StreamEvent::TextDelta(content)).await;
+                    self.send(tx, StreamEvent::TextDelta(content)).await;
                 }
             }
             // Reasoning content — accumulate for round-trip and (when
@@ -190,12 +217,12 @@ impl ParserState {
             if let Some(r) = choice.delta.reasoning {
                 self.reasoning_buffer.push_str(&r);
                 if self.include_reasoning {
-                    let _ = tx.send(StreamEvent::ReasoningDelta(r)).await;
+                    self.send(tx, StreamEvent::ReasoningDelta(r)).await;
                 }
             } else if let Some(r) = choice.delta.reasoning_content {
                 self.reasoning_buffer.push_str(&r);
                 if self.include_reasoning {
-                    let _ = tx.send(StreamEvent::ReasoningDelta(r)).await;
+                    self.send(tx, StreamEvent::ReasoningDelta(r)).await;
                 }
             }
             // Tool-call deltas — accumulate per index.
@@ -278,14 +305,16 @@ impl ParserState {
         }
 
         let outcome = map_finish_reason(self.finish_reason.as_deref(), &content);
-        let _ = tx
-            .send(StreamEvent::Complete(AssistantTurn {
+        self.send(
+            tx,
+            StreamEvent::Complete(AssistantTurn {
                 content,
                 outcome,
                 usage: None,
                 stop_details: None,
-            }))
-            .await;
+            }),
+        )
+        .await;
     }
 }
 
@@ -981,5 +1010,20 @@ mod tests {
             panic!("expected Text");
         };
         assert_eq!(t, "hi");
+    }
+
+    #[tokio::test]
+    async fn dropped_receiver_sets_receiver_gone() {
+        // The /stop contract: when the consumer drops the stream, the
+        // next send must record receiver loss so the pump loops exit and
+        // drop the reqwest::Response (severing the connection). The old
+        // fire-and-forget sends left the pump draining forever.
+        let (tx, rx) = tokio::sync::mpsc::channel::<StreamEvent>(4);
+        drop(rx);
+        let mut state = ParserState::new("test-model".to_string(), false);
+        let chunk: OpenAIChatChunk =
+            serde_json::from_value(assistant_chunk_with_text("token", None)).unwrap();
+        state.process_chunk(chunk, &tx).await;
+        assert!(state.receiver_gone, "send to a dropped receiver must flag receiver_gone");
     }
 }

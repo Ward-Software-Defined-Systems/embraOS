@@ -99,6 +99,14 @@ pub struct BrainGrpcService {
     /// intercept; cancelled by any slash command. See
     /// [`PendingSessionDelete`].
     pending_session_delete: Arc<Mutex<Option<PendingSessionDelete>>>,
+    /// Operator-stop generation counter (the `onboarding_stage` watch
+    /// precedent). The unary `StopTurn` RPC bumps it while `in_turn` is
+    /// set; every turn snapshots the value at start and treats "value >
+    /// snapshot" as a stop request — so a stop can only ever affect the
+    /// turn that was in flight when it was pressed, and no reset is
+    /// needed. Out-of-band on purpose: the Converse loop awaits each turn
+    /// inline, so anything sent on the stream parks behind the turn.
+    stop_generation: Arc<watch::Sender<u64>>,
     /// Cross-stream onboarding-stage signal (Setup → Learning →
     /// Operational, carried as `OperatingMode as i32`). Each `converse`
     /// call spawns its own task; while the soul is unsealed every attached
@@ -274,6 +282,7 @@ impl BrainGrpcService {
             pending_openai_compat_setup: Arc::new(Mutex::new(None)),
             pending_session_delete: Arc::new(Mutex::new(None)),
             onboarding_stage: Arc::new(stage_tx),
+            stop_generation: Arc::new(watch::channel(0u64).0),
         }
     }
 }
@@ -301,6 +310,7 @@ impl BrainService for BrainGrpcService {
         let pending_openai_compat_setup = self.pending_openai_compat_setup.clone();
         let pending_session_delete = self.pending_session_delete.clone();
         let onboarding_stage = self.onboarding_stage.clone();
+        let stop_rx = self.stop_generation.subscribe();
 
         tokio::spawn(async move {
             let mut config_tz = config_tz;
@@ -412,7 +422,7 @@ impl BrainService for BrainGrpcService {
                     show_reasoning: None,
                     openai_compat: crate::config::OpenAiCompatConfig::default(),
                 });
-                match run_learning_loop(&tx, &mut incoming, &db, &loaded_config, &api_key, &onboarding_stage).await {
+                match run_learning_loop(&tx, &mut incoming, &db, &loaded_config, &api_key, &onboarding_stage, &stop_rx).await {
                     Ok(()) => {
                         info!("Learning Mode complete — transitioning to Operational");
                         // Reload config in case it was updated
@@ -446,7 +456,7 @@ impl BrainService for BrainGrpcService {
                         match msg {
                             Some(Ok(req)) => {
                                 if let Err(e) = handle_request(
-                                    req, &tx, &db, &session_mgr, &config_tz, &api_key, &in_turn, &pending_provider, &pending_key_setup, &pending_openai_compat_setup, &pending_session_delete
+                                    req, &tx, &db, &session_mgr, &config_tz, &api_key, &in_turn, &pending_provider, &pending_key_setup, &pending_openai_compat_setup, &pending_session_delete, &stop_rx
                                 ).await {
                                     error!("Error handling request: {}", e);
                                     let _ = tx.send(Ok(ConversationResponse {
@@ -518,6 +528,19 @@ impl BrainService for BrainGrpcService {
                     has_summary: false,
                 }).collect(),
         }))
+    }
+
+    async fn stop_turn(&self, _request: Request<StopTurnRequest>) -> Result<Response<StopTurnResponse>, Status> {
+        // Bump the stop generation only while a turn is in flight — an
+        // idle press must not arm a stop for the NEXT turn (each turn
+        // snapshots the counter at start, so a pre-turn bump would be
+        // invisible anyway; the in_turn check makes the reply honest).
+        let was_in_turn = self.in_turn.load(Ordering::SeqCst);
+        if was_in_turn {
+            self.stop_generation.send_modify(|v| *v += 1);
+            info!(target: "dispatch", "operator stop requested — signalling in-flight turn");
+        }
+        Ok(Response::new(StopTurnResponse { was_in_turn }))
     }
 
     async fn create_session(&self, request: Request<CreateSessionRequest>) -> Result<Response<CreateSessionResponse>, Status> {
@@ -687,6 +710,7 @@ async fn handle_request(
     pending_key_setup: &Arc<Mutex<Option<ProviderKind>>>,
     pending_openai_compat_setup: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
     pending_session_delete: &Arc<Mutex<Option<PendingSessionDelete>>>,
+    stop_rx: &watch::Receiver<u64>,
 ) -> anyhow::Result<()> {
     let self_in_turn = in_turn.clone();
     match req.request_type {
@@ -944,6 +968,9 @@ async fn handle_request(
             // the flag never sticks if this future is cancelled.
             self_in_turn.store(true, Ordering::SeqCst);
             let in_turn_guard = InTurnGuard(self_in_turn.clone());
+            // Per-turn operator-stop observer: snapshots the generation
+            // now, so only a StopTurn fired DURING this turn trips it.
+            let mut stop_check = StopCheck::new(stop_rx.clone());
 
             // Load session history
             let history = {
@@ -1050,7 +1077,7 @@ async fn handle_request(
                 .await
                 .map_err(|e| anyhow::anyhow!("Brain call failed: {}", e))?;
             let Some(mut current_turn) =
-                collect_response(first_stream, &tx, &config_name).await?
+                collect_response(first_stream, &tx, &config_name, Some(&mut stop_check)).await?
             else {
                 // Stream closed without Complete — treat as error and save nothing.
                 drop(in_turn_guard);
@@ -1061,6 +1088,18 @@ async fn handle_request(
             api_messages.push(ApiMessage::assistant_blocks(current_turn.content.clone()));
 
             loop {
+                // Operator stop observed between round-trips (after a
+                // collect, or re-entering via `continue` after tool
+                // dispatches): override the outcome so the terminal arm
+                // runs and no further provider request is made.
+                if stop_check.stopped()
+                    && !matches!(
+                        current_turn.outcome,
+                        TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop)
+                    )
+                {
+                    current_turn.outcome = TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop);
+                }
                 match current_turn.outcome {
                     TurnOutcome::EndTurn
                     | TurnOutcome::MaxTokens
@@ -1130,7 +1169,7 @@ async fn handle_request(
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("Brain pause-resume failed: {}", e))?;
-                        let Some(resp) = collect_response(stream, &tx, &config_name).await? else {
+                        let Some(resp) = collect_response(stream, &tx, &config_name, Some(&mut stop_check)).await? else {
                             break;
                         };
                         current_turn = resp;
@@ -1195,7 +1234,7 @@ async fn handle_request(
                             {
                                 Ok(stream) => {
                                     if let Some(final_turn) =
-                                        collect_response(stream, &tx, &config_name).await?
+                                        collect_response(stream, &tx, &config_name, Some(&mut stop_check)).await?
                                     {
                                         let final_text = turn_text(&final_turn);
                                         api_messages.push(ApiMessage::assistant_blocks(
@@ -1282,6 +1321,14 @@ async fn handle_request(
                             let Block::ToolCall { id, name, args, .. } = block else {
                                 continue;
                             };
+                            // Operator stop: skip the remaining dispatches.
+                            // Safe to leave tool_use blocks unanswered —
+                            // the stop path below never sends a
+                            // continuation request, and persistence is
+                            // text-only.
+                            if stop_check.stopped() {
+                                break;
+                            }
                             // Embra_Debug #70: dedupe-first-seen tool
                             // name accumulator for the (no response)
                             // placeholder. Pushed before dispatch so a
@@ -1320,12 +1367,25 @@ async fn handle_request(
                                     }
                                 )),
                             })).await;
-                            let outcome = tools::registry::dispatch(
-                                name,
-                                args.clone(),
-                                ctx,
-                            )
-                            .await;
+                            // Mid-tool operator stop: abandon the dispatch
+                            // future (drops it — same subprocess-leak
+                            // caveat as the 600s timeout) and skip out.
+                            let outcome = tokio::select! {
+                                outcome = tools::registry::dispatch(
+                                    name,
+                                    args.clone(),
+                                    ctx,
+                                ) => outcome,
+                                _ = stop_check.triggered() => {
+                                    info!(
+                                        target: "dispatch",
+                                        session = %session_name,
+                                        tool = %name,
+                                        "dispatch abandoned by operator stop"
+                                    );
+                                    break;
+                                }
+                            };
                             let _ = tx.send(Ok(ConversationResponse {
                                 response_type: Some(conversation_response::ResponseType::Thinking(
                                     ThinkingState {
@@ -1461,6 +1521,15 @@ async fn handle_request(
                             });
                         }
 
+                        // Operator stop during the dispatch pass (mid-tool
+                        // select or the per-tool skip): re-enter the loop
+                        // top, which overrides the outcome to OperatorStop
+                        // and breaks through the terminal arm — the
+                        // continuation request below must NOT be sent.
+                        if stop_check.stopped() {
+                            continue;
+                        }
+
                         if result_blocks.is_empty() {
                             // outcome claimed ToolUse but no ToolCall blocks
                             // were present — treat as a terminal state and exit.
@@ -1481,7 +1550,7 @@ async fn handle_request(
                                     "Brain continuation failed (iter {tool_iter}): {e}"
                                 )
                             })?;
-                        let Some(resp) = collect_response(stream, &tx, &config_name).await? else {
+                        let Some(resp) = collect_response(stream, &tx, &config_name, Some(&mut stop_check)).await? else {
                             break;
                         };
                         current_turn = resp;
@@ -1520,6 +1589,23 @@ async fn handle_request(
                             SystemMessage {
                                 content,
                                 msg_type: kind as i32,
+                            },
+                        )),
+                    }))
+                    .await;
+            }
+
+            // A stopped turn usually never reached StreamEvent::Complete,
+            // so no Done frame was emitted — synthesize one so client
+            // streaming animations terminate (a duplicate Done after a
+            // between-iterations stop is harmless: clients treat Done as
+            // an idempotent end-of-response).
+            if current_turn.outcome == TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop) {
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::Done(
+                            StreamDone {
+                                full_response: last_response_text.clone(),
                             },
                         )),
                     }))
@@ -1724,7 +1810,7 @@ async fn handle_request(
                     )),
                 };
                 Box::pin(handle_request(
-                    synthetic, tx, db, session_mgr, config_tz, api_key, in_turn, pending_provider, pending_key_setup, pending_openai_compat_setup, pending_session_delete
+                    synthetic, tx, db, session_mgr, config_tz, api_key, in_turn, pending_provider, pending_key_setup, pending_openai_compat_setup, pending_session_delete, stop_rx
                 )).await?;
             }
             Ok(())
@@ -1922,7 +2008,7 @@ async fn handle_request(
                     Box::pin(handle_request(
                         synthetic, tx, db, session_mgr, config_tz, api_key, in_turn,
                         pending_provider, pending_key_setup, pending_openai_compat_setup,
-                        pending_session_delete,
+                        pending_session_delete, stop_rx,
                     )).await?;
                 } else {
                     info!(
@@ -2013,7 +2099,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-4.7|opus-4.8|fable-5> Switch the Anthropic model (next message)\n  /effort                            Show the Anthropic effort level\n  /effort <low|medium|high|xhigh|max>  Set effort (default max, next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-4.7|opus-4.8|fable-5> Switch the Anthropic model (next message)\n  /effort                            Show the Anthropic effort level\n  /effort <low|medium|high|xhigh|max>  Set effort (default max, next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -2045,6 +2131,13 @@ async fn handle_slash_command(
         "/status" => {
             let status = tools::system_status(db).await;
             send_msg(tx, serde_json::to_string_pretty(&status).unwrap_or_else(|_| "Failed to get status".to_string())).await;
+        }
+        "/stop" => {
+            // In-band /stop can only ever be READ when no turn is running
+            // (the Converse loop is parked during a turn — that's why the
+            // real stop path is the out-of-band StopTurn unary the clients
+            // fire). Reaching here means there is nothing to stop.
+            send_msg(tx, "No turn in flight — nothing to stop. (While a turn is running, Esc on the console or the ■ button on mobile stops it.)".to_string()).await;
         }
         "/sessions" => {
             // Subcommand parse (the /guardian split_once pattern): the
@@ -4523,6 +4616,7 @@ async fn run_learning_loop(
     config: &config::SystemConfig,
     api_key: &str,
     onboarding_stage: &Arc<watch::Sender<i32>>,
+    stop_rx: &watch::Receiver<u64>,
 ) -> anyhow::Result<()> {
     let mut state = learning::LearningState::new();
 
@@ -4705,7 +4799,8 @@ async fn run_learning_loop(
             .await
             .map_err(|e| anyhow::anyhow!("Brain call failed in learning: {}", e))?;
 
-        let full_response = stream_brain_to_grpc(&mut brain_rx, tx, &config.name).await;
+        let mut stop_check = StopCheck::new(stop_rx.clone());
+        let full_response = stream_brain_to_grpc(&mut brain_rx, tx, &config.name, Some(&mut stop_check)).await;
 
         // Check for [PHASE_COMPLETE]
         let phase_complete = full_response.contains("[PHASE_COMPLETE]");
@@ -4853,7 +4948,8 @@ async fn run_learning_loop(
                                 .await
                                 .map_err(|e| anyhow::anyhow!("Brain call failed: {}", e))?;
 
-                            let full_response = stream_brain_to_grpc(&mut brain_rx, tx, &config.name).await;
+                            let mut stop_check = StopCheck::new(stop_rx.clone());
+        let full_response = stream_brain_to_grpc(&mut brain_rx, tx, &config.name, Some(&mut stop_check)).await;
 
                             let phase_complete = full_response.contains("[PHASE_COMPLETE]");
                             let clean_response = full_response.replace("[PHASE_COMPLETE]", "").trim().to_string();
@@ -4910,11 +5006,42 @@ async fn stream_brain_to_grpc(
     brain_rx: &mut BoxStream<'static, StreamEvent>,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
     _name: &str,
+    mut stop: Option<&mut StopCheck>,
 ) -> String {
     let mut full_response = String::new();
     let mut first_token = true;
 
-    while let Some(event) = brain_rx.next().await {
+    loop {
+        // Same stop-aware receive as collect_response: on operator stop,
+        // abandon the stream (dropping it exits the provider pump and
+        // severs the connection), surface the notice + Done so the client
+        // animation terminates, and hand the partial back to the learning
+        // loop — which simply waits for the operator's next message.
+        let event = match stop.as_deref_mut() {
+            Some(check) => {
+                tokio::select! {
+                    ev = brain_rx.next() => ev,
+                    _ = check.triggered() => {
+                        let _ = tx.send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::System(
+                                SystemMessage {
+                                    content: "Turn stopped by operator — any partial response above is incomplete.".to_string(),
+                                    msg_type: SystemMessageType::Warning as i32,
+                                }
+                            )),
+                        })).await;
+                        let _ = tx.send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::Done(
+                                StreamDone { full_response: full_response.clone() }
+                            )),
+                        })).await;
+                        return full_response;
+                    }
+                }
+            }
+            None => brain_rx.next().await,
+        };
+        let Some(event) = event else { break };
         match event {
             StreamEvent::TextDelta(text) => {
                 if first_token {
@@ -5145,6 +5272,12 @@ fn terminal_outcome_notice(
             msg.push_str(". Any partial text above is incomplete. No fallback model was used.");
             Some((SystemMessageType::Error, msg))
         }
+        // Operator interrupt — not an error and not a provider action; the
+        // generic "Provider stopped..." wording below would misattribute it.
+        TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop) => Some((
+            SystemMessageType::Warning,
+            "Turn stopped by operator — any partial response above is incomplete.".to_string(),
+        )),
         TurnOutcome::EarlyStop(reason) => Some((
             SystemMessageType::Error,
             format!("Provider stopped this response early ({reason:?})."),
@@ -5166,14 +5299,22 @@ fn final_assistant_text(
     outcome: TurnOutcome,
 ) -> String {
     let refused = matches!(outcome, TurnOutcome::EarlyStop(EarlyStopReason::Refusal));
+    let stopped = matches!(outcome, TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop));
     if !last_response_text.trim().is_empty() {
         if refused {
             format!("{last_response_text}\n\n(response interrupted by provider refusal)")
+        } else if stopped {
+            format!("{last_response_text}\n\n(response interrupted by operator stop)")
         } else {
             last_response_text.to_string()
         }
     } else if refused {
         "(request declined by provider: refusal)".to_string()
+    } else if stopped {
+        // Takes precedence over the tool placeholder for the same reason
+        // the refusal marker does: the stop frame + turn_trace carry the
+        // tool detail, and the next turn must see the interruption.
+        "(turn stopped by operator)".to_string()
     } else if !tool_names.is_empty() {
         render_tool_only_placeholder(tool_names)
     } else {
@@ -5376,16 +5517,81 @@ mod iter_cap_parser_tests {
 ///
 /// Returns `Ok(None)` when the stream ended without a `Complete` event
 /// (e.g. connection dropped or fatal error mid-stream).
+/// Operator-stop observer for one turn: a subscribed watch receiver plus
+/// the stop-generation value snapshotted at turn start. "Stopped" = the
+/// counter advanced past the baseline — so a StopTurn RPC can only ever
+/// affect the turn that was in flight when it fired (a pre-turn bump is
+/// below the next turn's baseline; no reset is needed).
+pub(crate) struct StopCheck {
+    rx: watch::Receiver<u64>,
+    baseline: u64,
+}
+
+impl StopCheck {
+    pub(crate) fn new(rx: watch::Receiver<u64>) -> Self {
+        let baseline = *rx.borrow();
+        Self { rx, baseline }
+    }
+
+    /// Non-blocking poll — the between-iterations / per-tool checkpoints.
+    pub(crate) fn stopped(&self) -> bool {
+        *self.rx.borrow() > self.baseline
+    }
+
+    /// Await the stop signal (`select!` arms: mid-stream, mid-tool).
+    /// Resolves only when the generation advances past the baseline;
+    /// pends forever if the sender is gone (no stop can ever arrive).
+    pub(crate) async fn triggered(&mut self) {
+        loop {
+            if self.stopped() {
+                return;
+            }
+            if self.rx.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+}
+
 async fn collect_response(
     mut brain_rx: BoxStream<'static, StreamEvent>,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
     config_name: &str,
+    mut stop: Option<&mut StopCheck>,
 ) -> anyhow::Result<Option<AssistantTurn>> {
     let mut first_token = true;
     let mut full_turn: Option<AssistantTurn> = None;
     let mut accum_text = String::new();
 
-    while let Some(event) = brain_rx.next().await {
+    loop {
+        // Stop-aware receive: the select! wakes on the operator-stop watch
+        // even while the provider is silent. On stop, returning drops
+        // `brain_rx` — the provider pumps exit on their next send (the
+        // receiver-gone contract) and the severed connection stops a local
+        // model's generation. The partial becomes a synthetic
+        // OperatorStop turn so the driver's terminal path (notice +
+        // persistence marker + Done) runs normally.
+        let event = match stop.as_deref_mut() {
+            Some(check) => {
+                tokio::select! {
+                    ev = brain_rx.next() => ev,
+                    _ = check.triggered() => {
+                        let mut content = Vec::new();
+                        if !accum_text.is_empty() {
+                            content.push(Block::Text(std::mem::take(&mut accum_text)));
+                        }
+                        return Ok(Some(AssistantTurn {
+                            content,
+                            outcome: TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop),
+                            usage: None,
+                            stop_details: None,
+                        }));
+                    }
+                }
+            }
+            None => brain_rx.next().await,
+        };
+        let Some(event) = event else { break };
         match event {
             StreamEvent::TextDelta(text) => {
                 if first_token {
@@ -6263,7 +6469,7 @@ mod reasoning_delta_privacy_tests {
         let brain_rx = Box::pin(stream::iter(events));
         let (tx, mut rx) = mpsc::channel(64);
 
-        let turn = collect_response(brain_rx, &tx, "Embra")
+        let turn = collect_response(brain_rx, &tx, "Embra", None)
             .await
             .expect("collect_response ok")
             .expect("got Complete turn");
@@ -6349,7 +6555,7 @@ mod reasoning_delta_privacy_tests {
         let brain_rx = Box::pin(stream::iter(events));
         let (tx, mut rx) = mpsc::channel(64);
 
-        let _ = collect_response(brain_rx, &tx, "Embra").await.unwrap();
+        let _ = collect_response(brain_rx, &tx, "Embra", None).await.unwrap();
         drop(tx);
 
         let mut frames = Vec::new();
@@ -6986,5 +7192,62 @@ mod session_delete_flow_tests {
         };
         assert_eq!(second.map(|s| s.name).as_deref(), Some("old-proj"));
         assert!(slot.is_none(), "reason consumption must clear the flow state");
+    }
+}
+
+#[cfg(test)]
+mod operator_stop_tests {
+    //! /stop contract guards: the OperatorStop notice/persistence arms
+    //! (refusal-precedent honesty) and the StopCheck snapshot semantics
+    //! (a stop can only affect the turn in flight when it fired).
+    use super::{
+        final_assistant_text, terminal_outcome_notice, StopCheck,
+    };
+    use crate::provider::ir::{EarlyStopReason, TurnOutcome};
+    use embra_common::proto::brain::SystemMessageType;
+    use tokio::sync::watch;
+
+    const STOPPED: TurnOutcome = TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop);
+
+    #[test]
+    fn operator_stop_notice_is_warning_not_provider_error() {
+        let (kind, msg) = terminal_outcome_notice(STOPPED, None).expect("notice");
+        assert_eq!(kind, SystemMessageType::Warning);
+        assert!(msg.contains("stopped by operator"));
+        // Must not read as a provider action — the generic arm's wording.
+        assert!(!msg.contains("Provider stopped"));
+    }
+
+    #[test]
+    fn final_text_appends_operator_stop_suffix_to_partial() {
+        let out = final_assistant_text("half an answer", &[], STOPPED);
+        assert_eq!(out, "half an answer\n\n(response interrupted by operator stop)");
+    }
+
+    #[test]
+    fn final_text_marks_empty_stopped_turn_over_tool_placeholder() {
+        let tools = vec!["web_fetch".to_string()];
+        let out = final_assistant_text("", &tools, STOPPED);
+        assert_eq!(out, "(turn stopped by operator)");
+    }
+
+    #[tokio::test]
+    async fn stop_check_trips_only_on_bumps_after_snapshot() {
+        let (tx, rx) = watch::channel(0u64);
+
+        // Bump BEFORE the snapshot: invisible to the new turn.
+        tx.send_modify(|v| *v += 1);
+        let check = StopCheck::new(rx.clone());
+        assert!(!check.stopped(), "pre-turn stop must not arm the next turn");
+
+        // Bump DURING the turn: trips both the poll and the select arm.
+        tx.send_modify(|v| *v += 1);
+        assert!(check.stopped());
+        let mut awaited = StopCheck::new(rx.clone());
+        assert!(!awaited.stopped());
+        tx.send_modify(|v| *v += 1);
+        tokio::time::timeout(std::time::Duration::from_secs(1), awaited.triggered())
+            .await
+            .expect("triggered() must resolve once the generation advances");
     }
 }
