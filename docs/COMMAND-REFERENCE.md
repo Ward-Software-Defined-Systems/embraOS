@@ -12,6 +12,7 @@ Every slash command available in an embraOS session. See also [Keyboard Shortcut
 | `/switch <name>` | Switch to an existing session (restores full history) |
 | `/sessions delete <name>` | Guided deletion: the intelligence summarizes the session, asks your reason, preserves durable memories to the knowledge graph, then soft-deletes it (7-day grace period; any slash command mid-flow cancels; the `learning` session is never deletable) |
 | `/sessions restore <name>` | Undo a soft delete during its grace period (the session returns Detached — `/switch` to attach) |
+| `/stop` | Stop a stuck in-flight turn (local models can loop in unbounded reasoning). Console: type it or press **Esc** while the turn streams; mobile: the ■ button that replaces Send while busy. The partial response is kept, marked `(response interrupted by operator stop)` |
 | `/close` | Close the current session |
 | `/soul` | Display the immutable soul document |
 | `/identity` | Display the intelligence's identity document |
