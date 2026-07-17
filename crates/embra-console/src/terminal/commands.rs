@@ -22,6 +22,7 @@ Commands:
   /guardian approve <n>|reject <n>   Approve/reject a tool the intelligence proposed
   /guardian key brave <token>    Set the Brave Search API key (web_search tools)
   /status                        System status
+  /stop                          Stop a stuck in-flight turn (or press Esc while it streams)
   /sessions                      List all sessions
   /sessions delete <name>        Guided delete: summary + reason + memories, then 7-day-grace soft delete
   /sessions restore <name>       Undo a soft delete during its grace period

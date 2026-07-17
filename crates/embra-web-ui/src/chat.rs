@@ -323,6 +323,7 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/new", "new session (needs name)"),
         ("/switch", "switch session (needs name)"),
         ("/close", "close current session"),
+        ("/stop", "stop a stuck turn (use the \u{25a0} button mid-turn)"),
         ("/sessions delete", "guided delete (needs name)"),
         ("/sessions restore", "restore deleted (needs name)"),
         ("/mode", "show operating mode"),
@@ -545,7 +546,9 @@ pub fn ChatApp() -> impl IntoView {
             />
             <ChatScroll messages streaming />
             <SetupOverlay current_setup on_submit=send_text />
-            <ChatInput input connected slashes_open on_send=send_msg />
+            <ChatInput input connected slashes_open
+                busy=Signal::derive(move || !streaming.with(|s| s.is_empty()) || thinking.get())
+                on_send=send_msg />
 
             // ── Sessions sheet ─────────────────────────────────────
             {move || sessions_open.get().then(|| {
@@ -1360,6 +1363,7 @@ fn ChatInput<F>(
     input: RwSignal<String>,
     connected: RwSignal<bool>,
     slashes_open: RwSignal<bool>,
+    busy: Signal<bool>,
     on_send: F,
 ) -> impl IntoView
 where
@@ -1414,9 +1418,28 @@ where
                 on:keydown=keydown
                 on:focus=on_focus
                 rows="1" />
+            // Dual-role button: ▶ send when idle, ■ stop while a turn is
+            // busy. The stop fires POST /api/stop — deliberately NOT the
+            // WS slash path, which parks behind the running turn. One
+            // button (branching inside the handler) rather than <Show>:
+            // Show's children are Send-bounded and `on_send` isn't.
             <button class="ci-send"
-                disabled=move || !connected.get() || input.with(|s| s.trim().is_empty())
-                on:click=send_click>"▶"</button>
+                class:ci-stop=move || busy.get()
+                title=move || if busy.get() { "Stop the current turn" } else { "Send" }
+                disabled=move || {
+                    !busy.get() && (!connected.get() || input.with(|s| s.trim().is_empty()))
+                }
+                on:click=move |e| {
+                    if busy.get_untracked() {
+                        spawn_local(async {
+                            let _ = gloo_net::http::Request::post("/api/stop").send().await;
+                        });
+                    } else {
+                        send_click(e);
+                    }
+                }>
+                {move || if busy.get() { "■" } else { "▶" }}
+            </button>
         </div>
     }
 }

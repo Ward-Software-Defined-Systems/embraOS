@@ -17,7 +17,7 @@ use crate::term;
 const GROUPS: &[(&str, &[(&str, &str)])] = &[
     ("Session", &[
         ("/status", "overview"), ("/sessions", "list"), ("/new", "new"),
-        ("/switch", "switch"), ("/close", "close"),
+        ("/switch", "switch"), ("/close", "close"), ("/stop", "stop turn"),
         ("/sessions delete", "delete"), ("/sessions restore", "restore"),
         ("/mode", "mode"),
     ]),

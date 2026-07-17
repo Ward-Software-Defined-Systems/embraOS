@@ -165,4 +165,16 @@ impl BrainClient {
         let inner = resp.into_inner();
         Ok((inner.content, inner.version))
     }
+
+    /// Out-of-band operator interrupt for a stuck in-flight turn. Unary on
+    /// the same multiplexed channel as the Converse stream (the
+    /// get_expression precedent) — it reaches the brain even while the
+    /// stream is parked inside a turn. Returns whether a turn was actually
+    /// in flight.
+    pub async fn stop_turn(&mut self) -> anyhow::Result<bool> {
+        let resp = self.client.stop_turn(StopTurnRequest {}).await?;
+        let payload = resp.into_inner().payload;
+        let inner = embra_common::proto::brain::StopTurnResponse::decode(&payload[..])?;
+        Ok(inner.was_in_turn)
+    }
 }

@@ -17,6 +17,7 @@ mod metrics;
 mod pty_bridge;
 mod server;
 mod sessions;
+mod stop;
 mod state;
 mod status;
 mod tls;

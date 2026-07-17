@@ -172,6 +172,10 @@ pub struct AppState {
     /// before any transition arrives.
     pub provider_model: String,
     pub pasted_lines: Option<Vec<String>>,
+    /// Set by the /stop intercept and Esc-while-busy; consumed by the main
+    /// loop OUTSIDE the select! (which fires the out-of-band StopTurn
+    /// unary — the key handler has no client access by design).
+    pub stop_requested: bool,
     pub multiline_mode: bool,
     /// embra-guardian-v1: when set (via `/guardian-define`), the next
     /// submitted multi-line/pasted buffer is delivered to the brain as
@@ -230,6 +234,7 @@ impl AppState {
             config_tz: "UTC".to_string(),
             provider_model: "opus-4.8".to_string(),
             pasted_lines: None,
+            stop_requested: false,
             multiline_mode: false,
             guardian_capture: false,
             expression_content: String::new(),

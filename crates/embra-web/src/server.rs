@@ -9,7 +9,7 @@ use std::io;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::get;
+use axum::routing::{get, post};
 use rustls::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
@@ -18,6 +18,7 @@ use tokio_rustls::server::TlsStream;
 use crate::assets::static_handler;
 use crate::config::WebConfig;
 use crate::sessions::api_sessions_list;
+use crate::stop::api_stop;
 use crate::state::AppState;
 use crate::status::api_status;
 use crate::ws::ws_terminal;
@@ -68,6 +69,7 @@ pub async fn serve(
         .route("/ws/chat", get(ws_chat))
         .route("/api/status", get(api_status))
         .route("/api/sessions", get(api_sessions_list))
+        .route("/api/stop", post(api_stop))
         .fallback(static_handler)
         .with_state(state);
 

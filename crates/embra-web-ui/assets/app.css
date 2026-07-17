@@ -520,6 +520,12 @@ body.is-observer .term-wrap {
   opacity: .45;
   cursor: default;
 }
+/* Dual-role composer button in stop mode (turn busy): ■ on the error hue
+   so "interrupt" reads at a glance. */
+.ci-send.ci-stop {
+  background: var(--error, #c0392b);
+  color: #fff;
+}
 
 /* Phase 2 — topbar buttons replace the static status row. Health chip
    is a bare dot wrapped in a tap target (44 px square); thinking text

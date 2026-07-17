@@ -184,6 +184,20 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
                 // Just redraw
             }
         }
+
+        // Out-of-band stop, consumed OUTSIDE the select! so the unary
+        // call doesn't contend with the expression-poll arm for `client`
+        // (two &mut client select arms would not compile). Set by the
+        // /stop intercept and by Esc-while-busy.
+        if app.stop_requested {
+            app.stop_requested = false;
+            let line = match client.stop_turn().await {
+                Ok(true) => "Stop requested — interrupting the current turn…".to_string(),
+                Ok(false) => "No turn in flight — nothing to stop.".to_string(),
+                Err(e) => format!("Stop failed: {}", e),
+            };
+            app.messages.push(DisplayMessage::system_with_tz(&line, &app.config_tz));
+        }
     }
 
     // Cleanup
@@ -533,6 +547,14 @@ async fn handle_key_event(
                             "Guardian: paste your Rust tool module (marker + GUARDIAN_* + fn run), then send with a lone '.' on its own line (serial) or paste-and-Enter (web). It will be validated and built in the background.",
                             &app.config_tz,
                         ));
+                    } else if cmd == "/stop" {
+                        // Not sent in-band: the brain's Converse loop is
+                        // parked inside the running turn, so a streamed
+                        // SlashCommand would queue behind it. The main
+                        // loop consumes this flag and fires the unary
+                        // StopTurn RPC out-of-band (get_expression
+                        // precedent — same channel, separate RPC).
+                        app.stop_requested = true;
                     } else if commands::is_local_command(cmd) {
                         if let Some(output) = commands::handle_local_command(cmd, args, &app.config_name) {
                             app.messages.push(DisplayMessage::system_with_tz(&output, &app.config_tz));
@@ -650,6 +672,16 @@ async fn handle_key_event(
             app.input_buffer.insert(byte_pos, c);
             app.cursor_pos += 1;
             app.scroll_offset = 0; // Auto-scroll to bottom on typing
+        }
+
+        // Esc = operator stop, only while a turn is busy (thinking or
+        // streaming) — an idle Esc stays a no-op so it can't grow
+        // surprising meanings. The main loop consumes the flag and fires
+        // the out-of-band StopTurn unary.
+        (KeyCode::Esc, _) => {
+            if app.thinking || app.streaming_text.is_some() {
+                app.stop_requested = true;
+            }
         }
 
         _ => {}
