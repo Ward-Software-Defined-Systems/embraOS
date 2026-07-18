@@ -1,0 +1,20 @@
+# Dependabot version updates — GitHub Actions ONLY, deliberately.
+#
+# Why actions-only: action pins rot on GitHub's schedule (the Node 20 → 24
+# runtime rotation flagged every v4-era action in the first CI runs), and CI
+# now validates bumps automatically. Cargo is deliberately NOT configured
+# here — the workspace's dependency posture is manual and deliberate (the
+# seven storage-critical pins are load-bearing for on-disk-format compat and
+# guarded by CI's pin check; a Dependabot cargo PR stream would mostly
+# generate red runs by design). Security ALERTS for cargo remain active
+# repo-wide regardless of this file.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    groups:
+      actions:
+        patterns:
+          - "*"

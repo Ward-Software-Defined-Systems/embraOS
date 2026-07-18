@@ -42,7 +42,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -59,7 +59,7 @@ jobs:
           trunk --version
       - name: trunk build --release
         run: cd crates/embra-web-ui && trunk build --release
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: embra-web-ui-dist
           path: crates/embra-web-ui/dist
@@ -71,7 +71,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Storage-critical lock pins match the vendored WardSONDB's tested set
         run: |
           # The seven pins carry on-disk-format compat with production DATA
@@ -110,12 +110,14 @@ jobs:
     needs: frontend
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Fetch embra-web-ui dist (rust-embed compile-time dependency)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: embra-web-ui-dist
           path: crates/embra-web-ui/dist
+      - name: dist landed where rust-embed looks (guards artifact-layout changes)
+        run: test -f crates/embra-web-ui/dist/index.html
       - name: System deps (protoc for tonic-build, libclang for bindgen)
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libclang-dev
       - uses: dtolnay/rust-toolchain@stable
@@ -140,12 +142,14 @@ jobs:
     needs: frontend
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Fetch embra-web-ui dist (rust-embed compile-time dependency)
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: embra-web-ui-dist
           path: crates/embra-web-ui/dist
+      - name: dist landed where rust-embed looks (guards artifact-layout changes)
+        run: test -f crates/embra-web-ui/dist/index.html
       - name: System deps (protoc for tonic-build, libclang for bindgen)
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libclang-dev
       - uses: dtolnay/rust-toolchain@stable
@@ -160,7 +164,7 @@ jobs:
           cache-on-failure: true
       - name: Cache Bootlin musl cross-toolchain
         id: musl-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/bootlin
           key: bootlin-x86-64-musl-stable-2025.08-1
