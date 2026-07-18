@@ -1,0 +1,135 @@
+# embraOS CI — Rust-level regression net (added 2026-07-18, William-directed).
+#
+# Deliberate scope: workspace tests, the musl static cross-build (the ship
+# path, minus Buildroot), and invariant guards. This complements — never
+# replaces — the local pipeline (build-image.sh → Buildroot → QEMU boot
+# against existing DATA), which remains the authority for image/runtime
+# validation.
+#
+# The toolchain is pinned HERE (workflow-only, matching the wsds-devops dev
+# host) so CI doesn't drift with the runner image; bump RUST_TOOLCHAIN
+# deliberately. An aarch64 job is queued until the x86_64 pipeline is proven.
+
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_TOOLCHAIN: "1.94.1"
+
+jobs:
+  guards:
+    name: Invariant guards (storage pins)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Storage-critical lock pins match the vendored WardSONDB's tested set
+        run: |
+          # The seven pins carry on-disk-format compat with production DATA
+          # (CLAUDE.md "vendored FORK" invariant; vendor commit 3dc3e29 landed
+          # them at exactly upstream's regression-tested lock). A Dependabot
+          # or casual `cargo update` bump must fail loudly here — changing
+          # one is a deliberate divergence decision, not routine maintenance.
+          set -euo pipefail
+          check() {
+            local name="$1" want="$2" n got
+            n=$(grep -c "^name = \"$name\"\$" Cargo.lock || true)
+            if [ "$n" != "1" ]; then
+              echo "::error::$name: expected exactly 1 lock entry, found $n"
+              return 1
+            fi
+            if ! grep -A1 "^name = \"$name\"\$" Cargo.lock | grep -q "^version = \"$want\"\$"; then
+              got=$(grep -A1 "^name = \"$name\"\$" Cargo.lock | grep '^version' || true)
+              echo "::error::$name pin drift: $got (expected \"$want\")"
+              return 1
+            fi
+            echo "ok: $name $want"
+          }
+          fail=0
+          check fjall               2.11.2         || fail=1
+          check lsm-tree            2.10.4         || fail=1
+          check value-log           1.9.0          || fail=1
+          check rust-rocksdb        0.46.0         || fail=1
+          check rust-librocksdb-sys 0.42.0+10.10.1 || fail=1
+          check roaring             0.10.12        || fail=1
+          check tikv-jemallocator   0.6.1          || fail=1
+          exit $fail
+
+  test:
+    name: Workspace tests + wardsondb lint ratchet
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: System deps (protoc for tonic-build, libclang for bindgen)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libclang-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: cargo test --workspace
+        run: cargo test --workspace --locked
+      - name: wardsondb stays clippy-clean (ratchet — zero warnings at vendor time)
+        run: cargo clippy -p wardsondb --all-targets --locked -- -D warnings
+
+  musl-cross:
+    name: musl static cross-build (ship path)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: System deps (protoc for tonic-build, libclang for bindgen)
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libclang-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: musl
+          cache-on-failure: true
+      - name: Cache musl.cc cross-toolchain
+        id: musl-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/musl-cross
+          key: musl-cc-x86_64-linux-musl-cross-v1
+      - name: Install musl.cc cross-toolchain
+        if: steps.musl-cache.outputs.cache-hit != 'true'
+        run: |
+          # Same toolchain family as the build hosts (musl.cc self-contained
+          # gcc+g++ — Ubuntu's musl-tools can't link C++ against musl, and
+          # RocksDB is C++). Cached because musl.cc is occasionally slow/down.
+          mkdir -p ~/musl-cross
+          curl -fsSL https://musl.cc/x86_64-linux-musl-cross.tgz | tar -xz -C ~/musl-cross
+      - name: Cross-build (mirrors build-image.sh Step 1 env)
+        run: |
+          export PATH="$HOME/musl-cross/x86_64-linux-musl-cross/bin:$PATH"
+          export CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc
+          export CXX_x86_64_unknown_linux_musl=x86_64-linux-musl-g++
+          export AR_x86_64_unknown_linux_musl=x86_64-linux-musl-ar
+          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
+          cargo build --release --target x86_64-unknown-linux-musl --locked
+      - name: All shipped binaries produced
+        run: |
+          set -euo pipefail
+          for bin in embra-init embrad embra-apid embra-trustd embra-brain embra-console embra-web wardsondb; do
+            p="target/x86_64-unknown-linux-musl/release/$bin"
+            test -x "$p" || { echo "::error::missing binary: $bin"; exit 1; }
+            file "$p"
+          done
