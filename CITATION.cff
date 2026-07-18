@@ -8,7 +8,7 @@ abstract: >-
   subsequent boot. Cross-session memory and named sessions persist in a single
   JSON document database (WardSONDB). There is no shell — interaction is through
   a serial TUI or an HTTPS web console. The runtime drives one of four pluggable
-  LLM backends through a fixed 94-tool surface, with a knowledge-graph memory
+  LLM backends through a fixed 95-tool surface, with a knowledge-graph memory
   layer and an operator-governed dynamic-tool substrate (embra-guardian). This
   release marks Phase 1 (Core OS), QEMU-bootable on x86_64 and aarch64.
 type: software
@@ -17,8 +17,8 @@ authors:
     given-names: William
     affiliation: "Ward Software Defined Systems LLC"
     orcid: "https://orcid.org/0009-0004-4966-6644"
-version: "0.7.0-phase1"
-date-released: 2026-07-05
+version: "0.8.0-phase1"
+date-released: 2026-07-18
 repository-code: "https://github.com/Ward-Software-Defined-Systems/embraOS"
 url: "https://wsds.io"
 identifiers:

@@ -25,7 +25,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.7.0-phase1"
+version = "0.8.0-phase1"
 edition = "2024"
 license-file = "LICENSE"
 repository = "https://github.com/Ward-Software-Defined-Systems/embraOS"
