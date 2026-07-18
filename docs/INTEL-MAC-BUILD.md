@@ -124,17 +124,13 @@ export BINDGEN_EXTRA_CLANG_ARGS_x86_64_unknown_linux_musl="--sysroot=${MUSL_SYSR
 
 ### 3. Clone & build the image
 
-Clone embraOS and WardSONDB (a required sibling repo; the build script builds and
-copies its binary), then build. The canonical build scripts ship committed
-in-tree.
+Clone embraOS and build. WardSONDB is vendored in-tree at `crates/wardsondb` —
+no sibling repo is needed. The canonical build scripts ship committed in-tree.
 
 ```bash
 # Clone into ~/projects (keeps source + build artifacts across reboots).
-# WardSONDB MUST be a sibling dir named WardSONDB — build-image.sh defaults
-# WARDSONDB_DIR to ../WardSONDB.
 mkdir -p ~/projects && cd ~/projects
 git clone https://github.com/Ward-Software-Defined-Systems/embraOS.git
-git clone https://github.com/Ward-Software-Defined-Systems/wardsondb.git WardSONDB
 cd ~/projects/embraOS
 
 # Steps 0.5–3.5 on macOS: Trunk/WASM → Rust cross-compile → initramfs → in-OS

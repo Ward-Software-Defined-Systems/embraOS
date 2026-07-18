@@ -20,8 +20,9 @@ Phase 1 builds a QEMU-bootable x86_64 disk image with an immutable SquashFS root
 
 ```bash
 # Install dependencies
-# clang + libclang-dev are required by bindgen (pulled in by WardSONDB's
-# rocksdb → zstd-sys dep chain) to parse C headers at build time.
+# clang + libclang-dev are required by bindgen (pulled in by the in-tree
+# wardsondb crate's rocksdb → zstd-sys dep chain) to parse C headers at
+# build time.
 # libcrypt-dev provides crypt.h for Buildroot's host-mkpasswd build —
 # Ubuntu 26.04 split crypt.h out of glibc into the standalone libxcrypt.
 # xz-utils unpacks the pinned in-OS Rust toolchain that build-image.sh
@@ -68,11 +69,6 @@ cat >> ~/.cargo/config.toml << 'EOF'
 [target.x86_64-unknown-linux-musl]
 linker = "x86_64-linux-musl-gcc"
 EOF
-
-# Clone WardSONDB (separate repo, required dependency — build-image.sh builds and copies it)
-cd ~/projects
-git clone https://github.com/Ward-Software-Defined-Systems/wardsondb.git WardSONDB
-cd ~/projects/embraOS
 ```
 
 ```bash

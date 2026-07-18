@@ -72,17 +72,14 @@ The `build-image-aarch64.sh` script auto-detects the `musl-cross` path and expor
 
 ### 2. Clone & build the image
 
-Clone embraOS and WardSONDB (a required sibling repo; the build script builds
-and copies its binary), then build. The aarch64 scripts ship committed in-tree,
-so there is nothing to place. Everything runs from the embraOS repo root.
+Clone embraOS and build. WardSONDB is vendored in-tree at `crates/wardsondb` —
+no sibling repo is needed. The aarch64 scripts ship committed in-tree, so there
+is nothing to place. Everything runs from the embraOS repo root.
 
 ```bash
 # Clone into ~/projects (keeps source + build artifacts across reboots).
-# WardSONDB MUST be a sibling dir named WardSONDB — build-image-aarch64.sh
-# defaults WARDSONDB_DIR to ../WardSONDB.
 mkdir -p ~/projects && cd ~/projects
 git clone https://github.com/Ward-Software-Defined-Systems/embraOS.git
-git clone https://github.com/Ward-Software-Defined-Systems/wardsondb.git WardSONDB
 cd ~/projects/embraOS
 
 # The aarch64 scripts (scripts/build-image-aarch64.sh, run-qemu-aarch64.sh,
@@ -228,9 +225,9 @@ command. The Docker `--buildroot-only` pass then runs Step 3.5 and Step 4.
   host-arch-agnostic — identical on x86_64 and aarch64 hosts. Aborts if `trunk` is
   missing. Runs only when not `--buildroot-only`.
 - **Step 1 — Rust binaries (aarch64 musl static).** `cargo build --release --target
-  aarch64-unknown-linux-musl`. ~30 minutes, mostly compilation.
-- **Step 2 — WardSONDB.** Built from the sibling `../WardSONDB` repo for the same
-  target; the binary is copied into embraOS's target dir.
+  aarch64-unknown-linux-musl`. ~30 minutes, mostly compilation. Builds all 12
+  workspace members including `wardsondb` (vendored at `crates/wardsondb` — no
+  sibling repo; the former Step 2 is gone).
 - **Step 3 — initramfs.** `create_initramfs.sh` (RUST_TARGET-aware) packs `embra-init`
   as `/init` into `initramfs.cpio.gz`.
 - **Step 3.5 — in-OS Rust toolchain.** See [In-OS Rust toolchain](#in-os-rust-toolchain-embra-guardian-v1)
@@ -275,20 +272,17 @@ export BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_musl="--sysroot=${MUSL_SYS
 export EMBRA_STORAGE_ENGINE=rocksdb   # or fjall
 
 cd embraOS
+# Builds every workspace member, including the vendored wardsondb —
+# target/aarch64-unknown-linux-musl/release/wardsondb lands here directly.
 cargo build --release --target aarch64-unknown-linux-musl --workspace
-
-cd ../WardSONDB
-cargo build --release --target aarch64-unknown-linux-musl
-cp target/aarch64-unknown-linux-musl/release/wardsondb \
-   ../embraOS/target/aarch64-unknown-linux-musl/release/wardsondb
-cd ../embraOS
 ```
 
-> **bindgen-based crates:** WardSONDB pulls in `zstd-sys` (and `rocksdb-sys` with the
-> RocksDB backend), both of which use `bindgen`. Without `BINDGEN_EXTRA_CLANG_ARGS`,
-> clang finds Xcode's SDK headers and can't resolve cross-compile references.
+> **bindgen-based crates:** the in-tree `wardsondb` crate pulls in `zstd-sys` (and
+> `rocksdb-sys` with the RocksDB backend), both of which use `bindgen`. Without
+> `BINDGEN_EXTRA_CLANG_ARGS`, clang finds Xcode's SDK headers and can't resolve
+> cross-compile references.
 
-> **WardSONDB's `aws-lc-sys` dependency:** has a C/assembly build step. `ToolNotFound`
+> **The `wardsondb` crate's `aws-lc-sys` dependency:** has a C/assembly build step. `ToolNotFound`
 > errors mentioning `aarch64-linux-musl-gcc` mean the musl-cross path isn't on `PATH`
 > or `CC_aarch64_unknown_linux_musl` isn't set. The build script handles both.
 
@@ -544,7 +538,8 @@ export CC_aarch64_unknown_linux_musl=aarch64-linux-musl-gcc
 
 #### `fatal error: 'stddef.h' file not found` (bindgen)
 
-**Symptom:** WardSONDB build fails during `zstd-sys` (or `rocksdb-sys`) with:
+**Symptom:** the workspace build fails during `zstd-sys` (or `rocksdb-sys`, both
+pulled in by the in-tree `wardsondb` crate) with:
 
 ```
 .../clang/21/include/stddef.h:39:15: fatal error: 'stddef.h' file not found
