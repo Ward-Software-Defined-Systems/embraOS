@@ -192,17 +192,12 @@ if [ "$BUILDROOT_ONLY" = false ]; then
     echo "=== Step 1: Build Rust binaries (aarch64 musl static) ==="
     rustup target add "$RUST_TARGET"
     cargo build --release --target "$RUST_TARGET"
-
-    echo "=== Step 2: Build WardSONDB (from separate repo) ==="
-    WARDSONDB_DIR="${WARDSONDB_DIR:-../WardSONDB}"
-    if [ -d "$WARDSONDB_DIR" ]; then
-        (cd "$WARDSONDB_DIR" && cargo build --release --target "$RUST_TARGET")
-        cp "$WARDSONDB_DIR/target/${RUST_TARGET}/release/wardsondb" \
-           "target/${RUST_TARGET}/release/wardsondb"
-    else
-        echo "WARNING: WardSONDB directory not found at $WARDSONDB_DIR"
-        echo "Set WARDSONDB_DIR to the WardSONDB repository path"
-    fi
+    # wardsondb is a workspace member (crates/wardsondb, vendored 2026-07-17)
+    # and builds in Step 1 with the other binaries. The former Step 2
+    # sibling-repo build/copy is gone; Buildroot's wardsondb.mk picks the
+    # binary up from target/${RUST_TARGET}/release/ as before.
+    # (Step numbering keeps the gap deliberately — Steps 3/3.5/4/5 are
+    # referenced by name across the build guides.)
 
     echo "=== Step 3: Create initramfs ==="
     # create_initramfs.sh respects RUST_TARGET env var (aarch64-aware version).
