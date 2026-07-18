@@ -1,0 +1,42 @@
+# Rust build output
+/target
+
+# Database data directory (runtime data, not source)
+/data
+/data-fjall
+/data-rocksdb
+# Log files
+*.log
+
+# TLS certificates (auto-generated or custom)
+*.pem
+*.key
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# API key files
+*.keys
+keys.txt
+
+# Internal working docs
+CLAUDE.md
+ARCHITECTURE.md
+PHASE3-INSTRUCTIONS.md
+PHASE3-PERF-INSTRUCTIONS.md
+SECURITY-FIX-INSTRUCTIONS.md
+COMPACTION-STATUS-INSTRUCTIONS.md
+PRE-PUSH-CLEANUP.md
+SCAN-ACCELERATOR-DESIGN.md
+SCAN-ACCELERATOR-INSTRUCTIONS.md
+COMPOUND-RANGE-INSTRUCTIONS.md
+DOCS-CLEANUP.md
+TASK-BITMAP-MEMORY-GOVERNANCE.md
+TASK-STORAGE-BACKEND-REWORK.md
+/WardSONDB-Performance-Optimization

@@ -3,6 +3,10 @@ resolver = "2"
 members = [
     "crates/embra-init",
     "crates/embrad",
+    # Vendored fork of Ward-Software-Defined-Systems/WardSONDB @ 42fea43
+    # (main, 2026-07-17) — upstream continues independently; this copy
+    # diverges from here.
+    "crates/wardsondb",
     "crates/embra-apid",
     "crates/embra-trustd",
     "crates/embra-brain",

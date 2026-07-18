@@ -1,0 +1,83 @@
+[package]
+name = "wardsondb"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# HTTP
+axum = "0.8"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "compression-gzip", "cors"] }
+
+# Storage
+fjall = "2"
+rust-rocksdb = { version = "0.46", features = ["multi-threaded-cf", "lz4", "zstd"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+# Document handling
+uuid = { version = "1", features = ["v7"] }
+
+# TLS — rustls is a direct dep so main.rs can install the CryptoProvider
+# explicitly (provider auto-selection breaks under dev-dep feature unification)
+rcgen = "0.13"
+rustls = "0.23"
+
+# Crypto
+subtle = "2"
+
+# Bitmap
+roaring = "0.10"
+
+# Concurrency
+parking_lot = "0.12"
+
+# Regex
+regex = "1"
+
+# System
+libc = "0.2"
+
+# Utilities
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+clap = { version = "4", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+# rustls-tls enables rustls/ring alongside axum-server's aws-lc-rs; that
+# dual-provider unification is harmless ONLY because main.rs installs the
+# server's CryptoProvider explicitly (reqwest passes its own). The
+# -no-provider variants are NOT a substitute: they require a process-level
+# default that test binaries never install ("No provider set" panics).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio-test = "0.4"
+tempfile = "3"
+rand = "0.8"
+
+[[bench]]
+name = "storage_bench"
+harness = false
+
+[[bench]]
+name = "bitmap_bench"
+harness = false
+
+[[bench]]
+name = "http_bench"
+harness = false
+
+# Allocator — Linux only. glibc's ptmalloc2 holds freed memory in per-thread
+# arenas under Tokio's multi-threaded runtime, causing RSS to climb without
+# an actual leak. jemalloc returns memory to the OS aggressively. macOS's
+# libmalloc already does this, so we don't need jemalloc there.
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator = "0.6"
