@@ -121,6 +121,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
@@ -151,40 +152,48 @@ jobs:
         with:
           key: musl
           cache-on-failure: true
-      - name: Cache musl.cc cross-toolchain
+      - name: Cache Bootlin musl cross-toolchain
         id: musl-cache
         uses: actions/cache@v4
         with:
-          path: ~/musl-cross
-          key: musl-cc-x86_64-linux-musl-cross-c5d410d9
-      - name: Install musl.cc cross-toolchain
+          path: ~/bootlin
+          key: bootlin-x86-64-musl-stable-2025.08-1
+      - name: Install Bootlin musl cross-toolchain
         if: steps.musl-cache.outputs.cache-hit != 'true'
         run: |
-          # Same toolchain family as the build hosts (musl.cc self-contained
-          # gcc+g++ — Ubuntu's musl-tools can't link C++ against musl, and
-          # RocksDB is C++). musl.cc throttles/drops CI datacenter IPs
-          # (run 1 died on connect), hence retries + the cache above. The
-          # sha256 pins the exact tarball verified against the dev host on
-          # 2026-07-18; a mismatch means musl.cc rotated its build — verify
-          # and bump the pin (and the cache key suffix) DELIBERATELY.
+          # CI uses Bootlin's Buildroot-built musl toolchain (gcc 14.3.0,
+          # CDN-hosted, reliable from runners) — NOT the musl.cc toolchain
+          # the image builds use: musl.cc drops connections from GitHub's IP
+          # space (runs 1-2 died on connect-timeout while the same URL serves
+          # fine elsewhere), so exact-parity CI would need an org-hosted
+          # mirror (open follow-up). This job validates the ship SHAPE —
+          # same triple, static-pie, musl-linked C++ (RocksDB) — with the
+          # exact toolchain parity remaining a local build-host property.
+          # sha256 pinned from a verified 2026-07-18 download; bump the pin
+          # AND the cache key together, deliberately.
           set -euo pipefail
-          want_sha=c5d410d9f82a4f24c549fe5d24f988f85b2679b452413a9f7e5f7b956f2fe7ea
-          for i in 1 2 3 4 5; do
-            curl -fSL --connect-timeout 20 --max-time 600 \
-              -o /tmp/musl-cross.tgz https://musl.cc/x86_64-linux-musl-cross.tgz && break
+          want_sha=09fca3aa89540f1b01b5f4210d488cbeb00f522044c53e9989b1dd8a38076912
+          url=https://toolchains.bootlin.com/downloads/releases/toolchains/x86-64/tarballs/x86-64--musl--stable-2025.08-1.tar.xz
+          for i in 1 2 3; do
+            curl -fSL --connect-timeout 20 --max-time 600 -o /tmp/bootlin-musl.tar.xz "$url" && break
+            [ "$i" = 3 ] && break
             echo "download attempt $i failed; retrying in $((i * 20))s"
             sleep $((i * 20))
           done
-          echo "$want_sha  /tmp/musl-cross.tgz" | sha256sum -c -
-          mkdir -p ~/musl-cross
-          tar -xzf /tmp/musl-cross.tgz -C ~/musl-cross
-      - name: Cross-build (mirrors build-image.sh Step 1 env)
+          echo "$want_sha  /tmp/bootlin-musl.tar.xz" | sha256sum -c -
+          mkdir -p ~/bootlin
+          tar -xJf /tmp/bootlin-musl.tar.xz -C ~/bootlin
+          # Buildroot SDKs bake their build path into the compiler wrappers;
+          # relocate-sdk.sh rewrites them for the extracted location (the
+          # cached copy keeps the relocated paths — runner HOME is stable).
+          ~/bootlin/x86-64--musl--stable-2025.08-1/relocate-sdk.sh
+      - name: Cross-build (build-image.sh Step 1 shape)
         run: |
-          export PATH="$HOME/musl-cross/x86_64-linux-musl-cross/bin:$PATH"
-          export CC_x86_64_unknown_linux_musl=x86_64-linux-musl-gcc
-          export CXX_x86_64_unknown_linux_musl=x86_64-linux-musl-g++
-          export AR_x86_64_unknown_linux_musl=x86_64-linux-musl-ar
-          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
+          export PATH="$HOME/bootlin/x86-64--musl--stable-2025.08-1/bin:$PATH"
+          export CC_x86_64_unknown_linux_musl=x86_64-buildroot-linux-musl-gcc
+          export CXX_x86_64_unknown_linux_musl=x86_64-buildroot-linux-musl-g++
+          export AR_x86_64_unknown_linux_musl=x86_64-buildroot-linux-musl-ar
+          export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-buildroot-linux-musl-gcc
           cargo build --release --target x86_64-unknown-linux-musl --locked
       - name: All shipped binaries produced
         run: |
