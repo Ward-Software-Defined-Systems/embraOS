@@ -124,6 +124,10 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
+          # key suffix rotates the cache: runs 1-2 saved partial caches under
+          # the base key (save happens only on primary-key miss), which would
+          # otherwise be restored forever until Cargo.lock changes.
+          key: warm-v1
           cache-on-failure: true
       - name: cargo test --workspace
         run: cargo test --workspace --locked
@@ -150,7 +154,9 @@ jobs:
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
         with:
-          key: musl
+          # warm-v1: run 2 saved a near-empty cache under the old key before
+          # the toolchain step failed; rotate so a real cache gets saved.
+          key: musl-warm-v1
           cache-on-failure: true
       - name: Cache Bootlin musl cross-toolchain
         id: musl-cache
