@@ -28,8 +28,44 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN: "1.94.1"
+  # Matches the wsds-devops install (cargo install trunk --locked); bump deliberately.
+  TRUNK_VERSION: "0.21.14"
 
 jobs:
+  # embra-web embeds crates/embra-web-ui/dist via rust-embed at COMPILE time,
+  # and dist/ is gitignored Trunk output — a fresh checkout cannot compile
+  # embra-web without it (build-image.sh Step 0.5 is what creates it locally).
+  # This job mirrors Step 0.5 and hands dist/ to the compile jobs, which also
+  # puts the WASM frontend build under CI for the first time.
+  frontend:
+    name: embra-web-ui (Trunk → WASM, Step 0.5)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/embra-web-ui
+          cache-on-failure: true
+      - name: Install trunk (pinned; ~/.cargo/bin rides the cache)
+        run: |
+          if ! trunk --version 2>/dev/null | grep -q "trunk ${TRUNK_VERSION}\$"; then
+            cargo install trunk --locked --version "${TRUNK_VERSION}" --force
+          fi
+          trunk --version
+      - name: trunk build --release
+        run: cd crates/embra-web-ui && trunk build --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: embra-web-ui-dist
+          path: crates/embra-web-ui/dist
+          if-no-files-found: error
+          retention-days: 1
+
   guards:
     name: Invariant guards (storage pins)
     runs-on: ubuntu-latest
@@ -71,9 +107,15 @@ jobs:
   test:
     name: Workspace tests + wardsondb lint ratchet
     runs-on: ubuntu-latest
+    needs: frontend
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch embra-web-ui dist (rust-embed compile-time dependency)
+        uses: actions/download-artifact@v4
+        with:
+          name: embra-web-ui-dist
+          path: crates/embra-web-ui/dist
       - name: System deps (protoc for tonic-build, libclang for bindgen)
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libclang-dev
       - uses: dtolnay/rust-toolchain@stable
@@ -90,9 +132,15 @@ jobs:
   musl-cross:
     name: musl static cross-build (ship path)
     runs-on: ubuntu-latest
+    needs: frontend
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch embra-web-ui dist (rust-embed compile-time dependency)
+        uses: actions/download-artifact@v4
+        with:
+          name: embra-web-ui-dist
+          path: crates/embra-web-ui/dist
       - name: System deps (protoc for tonic-build, libclang for bindgen)
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler libclang-dev
       - uses: dtolnay/rust-toolchain@stable
@@ -108,15 +156,28 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/musl-cross
-          key: musl-cc-x86_64-linux-musl-cross-v1
+          key: musl-cc-x86_64-linux-musl-cross-c5d410d9
       - name: Install musl.cc cross-toolchain
         if: steps.musl-cache.outputs.cache-hit != 'true'
         run: |
           # Same toolchain family as the build hosts (musl.cc self-contained
           # gcc+g++ — Ubuntu's musl-tools can't link C++ against musl, and
-          # RocksDB is C++). Cached because musl.cc is occasionally slow/down.
+          # RocksDB is C++). musl.cc throttles/drops CI datacenter IPs
+          # (run 1 died on connect), hence retries + the cache above. The
+          # sha256 pins the exact tarball verified against the dev host on
+          # 2026-07-18; a mismatch means musl.cc rotated its build — verify
+          # and bump the pin (and the cache key suffix) DELIBERATELY.
+          set -euo pipefail
+          want_sha=c5d410d9f82a4f24c549fe5d24f988f85b2679b452413a9f7e5f7b956f2fe7ea
+          for i in 1 2 3 4 5; do
+            curl -fSL --connect-timeout 20 --max-time 600 \
+              -o /tmp/musl-cross.tgz https://musl.cc/x86_64-linux-musl-cross.tgz && break
+            echo "download attempt $i failed; retrying in $((i * 20))s"
+            sleep $((i * 20))
+          done
+          echo "$want_sha  /tmp/musl-cross.tgz" | sha256sum -c -
           mkdir -p ~/musl-cross
-          curl -fsSL https://musl.cc/x86_64-linux-musl-cross.tgz | tar -xz -C ~/musl-cross
+          tar -xzf /tmp/musl-cross.tgz -C ~/musl-cross
       - name: Cross-build (mirrors build-image.sh Step 1 env)
         run: |
           export PATH="$HOME/musl-cross/x86_64-linux-musl-cross/bin:$PATH"
