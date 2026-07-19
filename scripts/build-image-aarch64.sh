@@ -306,7 +306,10 @@ echo "fd limits: soft $(ulimit -Sn) / hard $(ulimit -Hn); system-wide $(awk '{pr
 echo "Buildroot parallelism: -j${JOBS} (override: docker run -e JOBS=N ...)"
 
 BUILDROOT_DIR="${BUILDROOT_DIR:-buildroot-src}"
-if [ ! -d "$BUILDROOT_DIR" ]; then
+# Clone when missing OR empty: if BUILDROOT_DIR is a mountpoint (e.g. a Docker
+# named volume), the directory always exists — an empty one must still get the
+# clone (git clones into an existing empty dir).
+if [ ! -d "$BUILDROOT_DIR" ] || [ -z "$(ls -A "$BUILDROOT_DIR" 2>/dev/null)" ]; then
     git clone https://github.com/buildroot/buildroot.git "$BUILDROOT_DIR"
 fi
 # Ensure the clone is at the pinned version. Switching versions wipes
@@ -314,6 +317,11 @@ fi
 # the switch if the user has local changes in $BUILDROOT_DIR.
 (
     cd "$BUILDROOT_DIR"
+    if ! git rev-parse --git-dir >/dev/null 2>&1; then
+        echo "ERROR: $BUILDROOT_DIR exists but is not a git checkout (non-empty, no .git)." >&2
+        echo "       Remove or empty it so this script can clone Buildroot fresh." >&2
+        exit 1
+    fi
     current=$(git describe --tags --exact-match 2>/dev/null || echo "")
     if [ "$current" != "$BUILDROOT_VERSION" ]; then
         if ! git diff-index --quiet HEAD --; then
