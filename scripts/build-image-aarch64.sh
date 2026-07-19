@@ -285,6 +285,26 @@ if [ "$(uname)" = "Darwin" ]; then
     exit 1
 fi
 
+# fd preflight: raise the soft fd limit to the hard cap and report state.
+# Docker containers (OrbStack: soft 20480 / hard 1048576) default well below
+# what a full Buildroot build can demand. Per-process only — macOS-side
+# virtiofs-provider fd exhaustion (EMFILE on bind-mount paths) is outside
+# any in-container limit's reach.
+FD_SOFT="$(ulimit -Sn)"
+FD_HARD="$(ulimit -Hn)"
+if [ "$FD_SOFT" != "unlimited" ]; then
+    FD_RAISE="$FD_HARD"
+    if [ "$FD_RAISE" = "unlimited" ]; then
+        FD_RAISE=1048576
+    fi
+    if [ "$FD_SOFT" -lt "$FD_RAISE" ]; then
+        ulimit -n "$FD_RAISE" 2>/dev/null \
+            || echo "WARNING: could not raise fd soft limit (soft $FD_SOFT, hard $FD_HARD)" >&2
+    fi
+fi
+echo "fd limits: soft $(ulimit -Sn) / hard $(ulimit -Hn); system-wide $(awk '{print $1 "/" $3}' /proc/sys/fs/file-nr 2>/dev/null || echo 'n/a')"
+echo "Buildroot parallelism: -j${JOBS} (override: docker run -e JOBS=N ...)"
+
 BUILDROOT_DIR="${BUILDROOT_DIR:-buildroot-src}"
 if [ ! -d "$BUILDROOT_DIR" ]; then
     git clone https://github.com/buildroot/buildroot.git "$BUILDROOT_DIR"
