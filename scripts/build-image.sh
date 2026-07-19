@@ -15,10 +15,15 @@
 #       parallel build-image-aarch64.sh flow), use Docker:
 #
 #   ./scripts/build-image.sh --storage-engine rocksdb   # outer call bakes engine
-#   docker run --rm -v "$PWD":/work -w /work ubuntu:24.04 bash -c \
+#   docker run --rm -v "$PWD":/work -v embraos-br-x86_64:/work/buildroot-src \
+#     -w /work ubuntu:24.04 bash -c \
 #     "apt-get update && apt-get install -y build-essential gcc g++ \
 #      unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools libelf-dev && \
 #      FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image.sh --buildroot-only"
+#
+#   (The named volume keeps the Buildroot tree on the Docker VM's native
+#    filesystem: building it on the bind mount exhausts the macOS file
+#    provider's fd pool — "Too many open files".)
 #
 # libelf-dev is needed for the kernel's tools/objtool (ORC unwinder + stack
 # validation, mostly x86_64). A typical dev Ubuntu host has it system-wide,
@@ -191,10 +196,14 @@ if [ "$(uname)" = "Darwin" ]; then
     echo "Storage engine '${EMBRA_STORAGE_ENGINE:-<unset>}' was baked into the embrad binary."
     echo "To build the disk image, run Buildroot in Docker (no engine flag needed inside):"
     echo ""
-    echo "  docker run --rm -v \"\$PWD\":/work -w /work ubuntu:24.04 bash -c \\"
+    echo "  docker run --rm -v \"\$PWD\":/work -v embraos-br-x86_64:/work/buildroot-src \\"
+    echo "    -w /work ubuntu:24.04 bash -c \\"
     echo "    \"apt-get update && apt-get install -y build-essential gcc g++ \\"
     echo "     unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools libelf-dev && \\"
     echo "     FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image.sh --buildroot-only\""
+    echo ""
+    echo "(The named volume keeps the Buildroot tree on the Docker VM's filesystem:"
+    echo " building it on the bind mount exhausts macOS file-provider fds — EMFILE.)"
     echo ""
     echo "Or run this script on a Linux machine."
     exit 1

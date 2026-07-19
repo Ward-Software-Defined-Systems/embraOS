@@ -18,6 +18,12 @@
 > [End-to-End Validation](#end-to-end-validation) checklist after any
 > canonical-build bump and re-stamp this date.
 >
+> **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a
+> named volume over `buildroot-src`: bind-mount Buildroot trees exhaust the
+> Docker runtime's macOS-side file-provider fd pool (`Too many open files` —
+> observed and volume-fix-verified on the Apple-Silicon hosts; same mechanism
+> on Intel). Re-verify + re-stamp on the next Intel build.
+>
 > **Why a separate guide:** `scripts/build-image.sh` is shaped around a Linux
 > host (auto-detects musl.cc's `/opt/x86_64-linux-musl-cross`, expects `xz` and
 > `sha256sum` on PATH). On Intel Mac you stage equivalent toolchain bits from
@@ -138,8 +144,12 @@ cd ~/projects/embraOS
 # that's expected on macOS.
 ./scripts/build-image.sh --storage-engine rocksdb     # or: fjall
 
-# Step 4 (Buildroot) in Docker (linux/amd64 by default on Intel Mac)
-docker run --rm -v "$PWD":/work -w /work ubuntu:24.04 bash -c \
+# Step 4 (Buildroot) in Docker (linux/amd64 by default on Intel Mac). The
+# Buildroot tree lives in the named volume embraos-br-x86_64 — the Docker VM's
+# native filesystem. Building it on the bind mount instead exhausts the macOS
+# file provider's fd pool ("Too many open files") — see the note below.
+docker run --rm -v "$PWD":/work -v embraos-br-x86_64:/work/buildroot-src \
+  -w /work ubuntu:24.04 bash -c \
   "apt-get update && apt-get install -y build-essential gcc g++ \
    unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools libelf-dev && \
    FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image.sh --buildroot-only"
@@ -155,6 +165,17 @@ EMBRA_DB_VERBOSE=1 ./scripts/run-qemu.sh   # opt-in per-request WardSONDB log li
 
 Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, LLM
 provider + credentials, timezone), then Learning Mode forms and seals the soul.
+
+> **Upgrading from the pre-volume flow? Delete the stale Mac-side
+> `buildroot-src/`.** `run-qemu.sh` prefers `buildroot-src/output/images/` over
+> `output/images/` (where Step 5 copies the volume build's image + kernel), so
+> a leftover `buildroot-src/` from the old bind-mount flow shadows every
+> freshly built image with a stale one. Delete it — this also returns ~60 GB:
+> ```bash
+> rm -rf buildroot-src
+> ```
+> Fresh clones never have a Mac-side `buildroot-src/` (the tree lives in the
+> named volume), so this is one-time migration cleanup only.
 
 > **Storage engine:** `--storage-engine rocksdb` (battle-tested) or `fjall` (pure
 > Rust) is required and is baked into the `embrad` binary at build time.
@@ -179,13 +200,25 @@ provider + credentials, timezone), then Learning Mode forms and seals the soul.
 > headers (`<uapi/linux/sem.h>`) or in `fixdep`. All have the same fix — cap
 > parallelism with `JOBS` (passed into the container with `-e`):
 > ```bash
-> docker run --rm -e JOBS=2 -v "$PWD":/work -w /work ubuntu:24.04 bash -c \
+> docker run --rm -e JOBS=2 -v "$PWD":/work \
+>   -v embraos-br-x86_64:/work/buildroot-src -w /work ubuntu:24.04 bash -c \
 >   "apt-get update && apt-get install -y build-essential gcc g++ \
 >    unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools libelf-dev && \
 >    FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image.sh --buildroot-only"
 > ```
 > `JOBS` defaults to all cores (unchanged from canonical) — only set it when
 > memory-constrained.
+
+> **File-descriptor exhaustion (`Too many open files`):** bind-mount Buildroot
+> builds die with varying errors including EMFILE — the Docker runtime's
+> macOS-side file provider holds a file descriptor per accessed inode (one host
+> process, capped by `kern.maxfilesperproc` ≈ 138k), and a cold Buildroot tree
+> touches 300k+ inodes; no in-container `--ulimit` can prevent it. The named
+> volume in the commands above keeps the tree on the Docker VM's native
+> filesystem, bypassing the provider entirely. Mechanism + bind-mount stopgap
+> detailed in [AARCH64-BUILD.md](AARCH64-BUILD.md)'s Step-4 troubleshooting —
+> identical on Intel; observed and volume-fix-verified on the Apple-Silicon
+> hosts (2026-07-19).
 
 > **In-OS Rust toolchain (Step 3.5):** Downloads a SHA-256-verified
 > `rust-1.94.1-x86_64-unknown-linux-musl` (host triple = guest arch, not

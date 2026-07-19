@@ -24,13 +24,17 @@
 #   # (external.mk EMBRAOS_RUST_TARGET + genimage.cfg.in). The aarch64
 #   # defconfig (BR2_aarch64=y) drives both.
 #
-#   docker run --rm -v "$PWD":/work -w /work ubuntu:24.04 bash -c \
+#   docker run --rm -v "$PWD":/work -v embraos-br-aarch64:/work/buildroot-src \
+#     -w /work ubuntu:24.04 bash -c \
 #     "apt-get update && apt-get install -y build-essential gcc g++ \
 #      unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \
 #      FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image-aarch64.sh --buildroot-only"
 #
 #   (Docker defaults to linux/arm64 on Apple Silicon — host tools run natively,
-#    Buildroot cross-compiles the kernel and packages for aarch64.)
+#    Buildroot cross-compiles the kernel and packages for aarch64. The named
+#    volume keeps the Buildroot tree on the Docker VM's native filesystem:
+#    building it on the bind mount exhausts the macOS file provider's fd pool
+#    — "Too many open files".)
 
 set -euo pipefail
 
@@ -274,12 +278,15 @@ if [ "$(uname)" = "Darwin" ]; then
     echo "+ genimage.cfg.in) — no per-arch patching. Build the disk image in Docker"
     echo "(no engine flag needed inside):"
     echo ""
-    echo "  docker run --rm -v \"\$PWD\":/work -w /work ubuntu:24.04 bash -c \\"
+    echo "  docker run --rm -v \"\$PWD\":/work -v embraos-br-aarch64:/work/buildroot-src \\"
+    echo "    -w /work ubuntu:24.04 bash -c \\"
     echo "    \"apt-get update && apt-get install -y build-essential gcc g++ \\"
     echo "     unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \\"
     echo "     FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image-aarch64.sh --buildroot-only\""
     echo ""
-    echo "(Docker defaults to linux/arm64 on Apple Silicon — no Rosetta overhead.)"
+    echo "(Docker defaults to linux/arm64 on Apple Silicon — no Rosetta overhead."
+    echo " The named volume keeps the Buildroot tree on the Docker VM's filesystem:"
+    echo " building it on the bind mount exhausts macOS file-provider fds — EMFILE.)"
     echo ""
     echo "Or run this script on an ARM64 Linux machine."
     exit 1

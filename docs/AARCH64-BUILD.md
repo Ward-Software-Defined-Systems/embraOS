@@ -18,6 +18,13 @@
 > Validation](#end-to-end-validation) checklist after any canonical-build bump and
 > re-stamp this date.
 >
+> **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a named
+> volume over `buildroot-src`: building the Buildroot tree on the bind mount
+> exhausts the Docker runtime's macOS-side file provider (`Too many open files` —
+> see [Troubleshooting — Step 4](#troubleshooting--step-4-buildroot-in-docker)).
+> Build re-verified with the volume flow on the same M2; full checklist re-stamp
+> pending.
+>
 > **Single source of truth (2026-05-19):** the aarch64 scripts are committed
 > in-tree (`scripts/`, `buildroot/configs/`) and the arch-parameterized Buildroot
 > tree (commit `f6a684a`) is end-to-end QEMU-verified on **both** x86_64 and
@@ -93,8 +100,12 @@ cd ~/projects/embraOS
 # aarch64 defconfig (BR2_aarch64=y) drives the .mk paths + kernel name.
 ./scripts/build-image-aarch64.sh --storage-engine rocksdb
 
-# Step 3.5 (in-OS Rust toolchain) + Step 4 (Buildroot) in Docker (linux/arm64)
-docker run --rm -v "$PWD":/work -w /work ubuntu:24.04 bash -c \
+# Step 3.5 (in-OS Rust toolchain) + Step 4 (Buildroot) in Docker (linux/arm64).
+# The Buildroot tree lives in the named volume embraos-br-aarch64 — the Docker
+# VM's native filesystem. Building it on the bind mount instead exhausts the
+# macOS file provider's fd pool ("Too many open files") — see Troubleshooting.
+docker run --rm -v "$PWD":/work -v embraos-br-aarch64:/work/buildroot-src \
+  -w /work ubuntu:24.04 bash -c \
   "apt-get update && apt-get install -y build-essential gcc g++ \
    unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \
    FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image-aarch64.sh --buildroot-only"
@@ -110,6 +121,17 @@ EMBRA_DB_VERBOSE=1 ./scripts/run-qemu-aarch64.sh   # opt-in per-request WardSOND
 
 Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, LLM provider
 + credentials, timezone), then Learning Mode forms and seals the soul.
+
+> **Upgrading from the pre-volume flow? Delete the stale Mac-side `buildroot-src/`.**
+> `run-qemu-aarch64.sh` prefers `buildroot-src/output/images/` over `output/images/`
+> (where Step 5 copies the volume build's image + kernel), so a leftover
+> `buildroot-src/` from the old bind-mount flow shadows every freshly built image
+> with a stale one. Delete it — this also returns ~60 GB of disk:
+> ```bash
+> rm -rf buildroot-src
+> ```
+> Fresh clones never have a Mac-side `buildroot-src/` (the tree lives in the named
+> volume), so this is one-time migration cleanup only.
 
 > **Storage engine:** `--storage-engine rocksdb` (battle-tested) or `fjall` (pure
 > Rust) is required and is baked into the `embrad` binary at build time. WardSONDB
@@ -132,7 +154,8 @@ Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, LLM p
 > cores — unchanged from canonical; set it **only** when constrained), passed into the
 > container with `-e`:
 > ```bash
-> docker run --rm -e JOBS=2 -v "$PWD":/work -w /work ubuntu:24.04 bash -c \
+> docker run --rm -e JOBS=2 -v "$PWD":/work \
+>   -v embraos-br-aarch64:/work/buildroot-src -w /work ubuntu:24.04 bash -c \
 >   "apt-get update && apt-get install -y build-essential gcc g++ \
 >    unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \
 >    FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image-aarch64.sh --buildroot-only"
@@ -233,11 +256,15 @@ command. The Docker `--buildroot-only` pass then runs Step 3.5 and Step 4.
 - **Step 3.5 — in-OS Rust toolchain.** See [In-OS Rust toolchain](#in-os-rust-toolchain-embra-guardian-v1)
   below. Unconditional w.r.t. `--buildroot-only`; **skipped on macOS** and run in the
   Docker/Linux pass.
-- **Step 4 — Buildroot.** Linux-only. Clones Buildroot, ensures it is at
+- **Step 4 — Buildroot.** Linux-only. Clones Buildroot (into an existing-but-empty
+  `buildroot-src` too — the named-volume mountpoint case), ensures it is at
   `$BUILDROOT_VERSION` (default `2026.02.1`) via the safe-switch, dircleans the embraOS
   + upstream packages, configures `embraos_aarch64_defconfig`, and builds the kernel
-  (`Image`) + SquashFS rootfs + `embraos.img`.
-- **Step 5 — copy outputs.** `embraos.img` and `Image` → `output/images/`.
+  (`Image`) + SquashFS rootfs + `embraos.img`. On macOS the Docker pass mounts the
+  named volume `embraos-br-aarch64` at `buildroot-src`, keeping the tree and all build
+  output on the Docker VM's native filesystem instead of the bind mount.
+- **Step 5 — copy outputs.** `embraos.img` and `Image` → `output/images/` (copied out
+  of the volume onto the host tree).
 
 **Isolated cross-compilation validation (optional).** To validate Rust cross-compilation
 before wiring in the full pipeline, set the env vars the build script sets automatically
@@ -426,7 +453,8 @@ interchangeable.
 
 # 3. Rebuild the image (Docker pass re-runs Step 3.5 — a no-op if already staged)
 RUST_TARGET=aarch64-unknown-linux-musl ./scripts/create_initramfs.sh
-docker run --rm -v "$PWD":/work -w /work ubuntu:24.04 bash -c \
+docker run --rm -v "$PWD":/work -v embraos-br-aarch64:/work/buildroot-src \
+  -w /work ubuntu:24.04 bash -c \
   "apt-get update && apt-get install -y build-essential gcc g++ \
    unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \
    FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image-aarch64.sh --buildroot-only"
@@ -650,7 +678,8 @@ build that previously succeeded incrementally now OOMs.
 the half-written toolchain dir so it rebuilds cleanly on resume:
 
 ```bash
-docker run --rm -e JOBS=2 -v "$PWD":/work -w /work ubuntu:24.04 bash -c \
+docker run --rm -e JOBS=2 -v "$PWD":/work \
+  -v embraos-br-aarch64:/work/buildroot-src -w /work ubuntu:24.04 bash -c \
   "apt-get update && apt-get install -y build-essential gcc g++ \
    unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \
    (cd buildroot-src && make musl-dirclean) ; \
@@ -662,6 +691,30 @@ attempt. `-j2` is slow but completes unattended in 4 GB. Raising the VM instead
 (`orb config set memory_mib 6144 && orb restart`; revert with `4096`) starves macOS on
 an 8 GB Mac, so `JOBS` is the safer lever. `JOBS` defaults to all cores — only set it
 when memory-constrained.
+
+#### `Too many open files` (EMFILE) — Buildroot tree on the bind mount
+
+**Symptom:** the Buildroot pass dies with varying errors that include `Too many open
+files` — often mid-kernel-compile, at a different point on each run. Adding
+`--ulimit nofile=1048576:1048576` to `docker run` does not help.
+
+**Cause:** host-side, not container-side. When the Buildroot tree lives on the
+`-v "$PWD":/work` bind mount, every file it touches goes through the Docker runtime's
+macOS-side file provider, which holds a file descriptor per accessed inode in a single
+host process capped by macOS's `kern.maxfilesperproc` (~138k by default; measured on
+OrbStack — Docker Desktop's VirtioFS has the same per-inode behavior). A cold Buildroot
+build touches 300k+ inodes (the kernel source alone is ~87k files), so a single build
+exhausts the pool, and the resulting EMFILE propagates into the container through the
+file-sharing layer — no in-container `ulimit` can prevent it (the build script already
+raises the container-side soft limit automatically; that guards a different, guest-side
+failure mode).
+
+**Fix:** build in the named volume — the default flow above
+(`-v embraos-br-aarch64:/work/buildroot-src`) keeps the tree on the Docker VM's native
+filesystem, bypassing the file provider entirely. Operator-verified 2026-07-19 on an
+8 GB M2 that failed every bind-mount variant. Stopgap if you must build on the bind
+mount: raise the host caps and restart the Docker runtime first —
+`sudo sysctl kern.maxfiles=1048576 kern.maxfilesperproc=524288` (resets on Mac reboot).
 
 #### `git: command not found`
 
