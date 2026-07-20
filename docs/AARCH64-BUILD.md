@@ -5,9 +5,9 @@
 >
 > **Host:** macOS on Apple Silicon (M1/M2/M3/M4).
 >
-> ✅ **Status — re-verified end-to-end on Apple Silicon (2026-05-18).** Re-synced with
-> the canonical x86_64 build at commit `f8cad9c` and verified on a MacBook (Apple M2,
-> 8 GB) against Buildroot `2026.02.1`, storage engine `rocksdb`: the full build
+> ✅ **Status — re-verified end-to-end on Apple Silicon (2026-07-19).** Verified on a
+> MacBook (Apple M2, 8 GB) against Buildroot `2026.02.1` under the **named-volume
+> Docker Buildroot flow** (note below; build also green on an M1 Mac Mini): the full build
 > pipeline (Step 0.5 Trunk/WASM frontend → Rust cross-compile → initramfs → Step 3.5
 > in-OS Rust toolchain → Buildroot, including the new `embra-web` and
 > `embra-rust-toolchain` packages), HVF boot, soul formation, the serial TUI
@@ -22,8 +22,8 @@
 > volume over `buildroot-src`: building the Buildroot tree on the bind mount
 > exhausts the Docker runtime's macOS-side file provider (`Too many open files` —
 > see [Troubleshooting — Step 4](#troubleshooting--step-4-buildroot-in-docker)).
-> Build re-verified with the volume flow on the same M2; full checklist re-stamp
-> pending.
+> Operator-verified 2026-07-19: builds green on the M2, M1, and Intel-Mac hosts,
+> and the full E2E checklist re-passed — the banner date above reflects it.
 >
 > **Single source of truth (2026-05-19):** the aarch64 scripts are committed
 > in-tree (`scripts/`, `buildroot/configs/`) and the arch-parameterized Buildroot
