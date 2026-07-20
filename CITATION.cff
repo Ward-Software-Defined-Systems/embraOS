@@ -17,8 +17,8 @@ authors:
     given-names: William
     affiliation: "Ward Software Defined Systems LLC"
     orcid: "https://orcid.org/0009-0004-4966-6644"
-version: "0.8.0-phase1"
-date-released: 2026-07-18
+version: "0.9.0-phase1"
+date-released: 2026-07-19
 repository-code: "https://github.com/Ward-Software-Defined-Systems/embraOS"
 url: "https://wsds.io"
 identifiers:
