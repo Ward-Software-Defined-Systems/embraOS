@@ -211,10 +211,40 @@ pub async fn handle_phase_complete(
         }
         LearningPhase::SoulDefinition => {
             if let Some(soul) = doc {
+                // Kept FLAT in state for the Phase-5 confirmation display —
+                // it is what the operator co-authored.
                 state.soul = Some(soul.clone());
-                // Soul gets sealed — written and marked immutable (seal_soul sets _id: "soul")
-                super::seal_soul(db, &soul).await?;
-                tracing::info!("Soul sealed");
+                // Graph-era seal (kg-native-identity): the sealed inner
+                // value is the deterministic star graph transformed from
+                // the flat identity+soul documents. seal_soul itself is
+                // unchanged — it hashes whatever inner value it receives
+                // (to_string_pretty → SHA-256 → STATE hash file).
+                let identity = state
+                    .identity
+                    .clone()
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let graph = crate::identity_graph::transform::flat_to_graph(
+                    &identity, &soul, &config.name,
+                );
+                // Canonical display name = the validated config name (the
+                // Phase-2 sync already arbitrated it); the sealed doc and
+                // SystemConfig agree at seal time.
+                let canonical = graph.canonicalize(&config.name);
+                super::seal_soul(db, &canonical).await?;
+                tracing::info!(
+                    "Soul sealed (identity graph: {} nodes, {} edges)",
+                    graph.nodes.len(),
+                    graph.edges.len()
+                );
+                // KG projection + memory.user flat→graph transition.
+                // Best-effort AFTER the irreversible seal — every part is
+                // derivable and the boot reconcile heals partial writes.
+                crate::identity_graph::project::complete_graph_transition(
+                    db,
+                    &graph,
+                    crate::identity_graph::ORIGIN_LEARNED,
+                )
+                .await;
             }
             state.phase = LearningPhase::InitialToolset;
         }
@@ -251,6 +281,18 @@ async fn sync_name_from_identity(
     identity: &serde_json::Value,
 ) -> Option<String> {
     let proposed = identity.get("name").and_then(|v| v.as_str())?;
+    sync_name_to_config(db, config, proposed).await
+}
+
+/// Validate + persist a proposed display name into `config.system`.
+/// Shared by the Phase-2 identity sync above and the import flow (an
+/// imported graph's display name lands here). Failures are logged, never
+/// fatal — the current name stands.
+pub(crate) async fn sync_name_to_config(
+    db: &WardsonDbClient,
+    config: &SystemConfig,
+    proposed: &str,
+) -> Option<String> {
     let new_name = match crate::config::validate_intelligence_name(proposed) {
         Ok(n) => n,
         Err(e) => {
@@ -258,7 +300,7 @@ async fn sync_name_from_identity(
                 target: "learning",
                 proposed,
                 error = %e,
-                "Phase-2 identity name rejected; keeping the wizard name"
+                "proposed display name rejected; keeping the current name"
             );
             return None;
         }
@@ -282,7 +324,7 @@ async fn sync_name_from_identity(
         target: "learning",
         old = %config.name,
         new = %new_name,
-        "config name synced from the Phase-2 identity document"
+        "config display name synced"
     );
     Some(new_name)
 }
