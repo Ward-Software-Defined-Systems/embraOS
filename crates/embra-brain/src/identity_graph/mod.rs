@@ -12,6 +12,7 @@
 //! (`legacy_prompt_golden_tests` in brain/prompts.rs is the tripwire).
 
 pub mod format;
+pub mod transform;
 
 /// WardSONDB collection holding one doc per identity-graph node.
 pub const IDENTITY_COLLECTION: &str = "identity.graph";
