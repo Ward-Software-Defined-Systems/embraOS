@@ -744,7 +744,24 @@ async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
             }
         }
 
-        if focus.is_empty() || focus_lower == "soul" {
+        if crate::identity_graph::is_graph_soul(soul) {
+            // Graph mode: grouped prose for the full view; key-name
+            // filtering makes no sense over a graph value, so focused
+            // views get the render + an explanatory line.
+            if focus.is_empty() || focus_lower == "soul" {
+                output.push_str("=== SOUL (IMMUTABLE, IDENTITY GRAPH) ===\n");
+                output.push_str(&crate::brain::render_sealed_graph(soul));
+            } else {
+                output.push_str(&format!(
+                    "=== SOUL — {} ===\n(The sealed soul is an identity graph; focused key \
+                     filtering does not apply. Full graph below — traverse it with the \
+                     knowledge tools.)\n",
+                    focus
+                ));
+                output.push_str(&crate::brain::render_sealed_graph(soul));
+            }
+            output.push('\n');
+        } else if focus.is_empty() || focus_lower == "soul" {
             // No focus or "soul" → show full soul document
             output.push_str("=== SOUL (IMMUTABLE) ===\n");
             output.push_str(&serde_json::to_string_pretty(soul).unwrap_or_default());
@@ -771,6 +788,10 @@ async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
             output.push_str("\n=== IDENTITY ===\n");
             output.push_str(&serde_json::to_string_pretty(&doc).unwrap_or_default());
             output.push('\n');
+        } else if !output.is_empty() && output.contains("IDENTITY GRAPH") {
+            // Graph mode without a memory.identity doc (imported
+            // instances): identity lives in the sealed graph above.
+            output.push_str("\n=== IDENTITY ===\n(part of the sealed identity graph above)\n");
         }
     }
 
@@ -783,7 +804,13 @@ async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
         };
         if let Some(doc) = user_doc {
             output.push_str("\n=== USER PROFILE ===\n");
-            output.push_str(&serde_json::to_string_pretty(&doc).unwrap_or_default());
+            if crate::identity_graph::is_graph_soul(&doc) {
+                // Post-transition memory.user is graph-shaped — grouped
+                // operator prose instead of the raw graph JSON.
+                output.push_str(&crate::brain::render_user_graph(&doc));
+            } else {
+                output.push_str(&serde_json::to_string_pretty(&doc).unwrap_or_default());
+            }
             output.push('\n');
         }
     }

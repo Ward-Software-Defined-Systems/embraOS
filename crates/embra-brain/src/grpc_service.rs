@@ -2448,7 +2448,24 @@ async fn handle_slash_command(
         }
         "/soul" => {
             let output = match learning::load_soul(&**db).await {
-                Ok(Some(soul)) => serde_json::to_string_pretty(&soul).unwrap_or_default(),
+                Ok(Some(soul)) => {
+                    if crate::identity_graph::is_graph_soul(&soul) {
+                        // Graph mode: grouped prose + the seal header
+                        // (sealed_at / sha256 from the envelope) instead of
+                        // a ~46 KB raw JSON dump.
+                        let header = match db.read("soul.invariant", "soul").await {
+                            Ok(doc) => format!(
+                                "Sealed identity graph — sealed_at: {} — sha256: {}\n\n",
+                                doc.get("sealed_at").and_then(|v| v.as_str()).unwrap_or("?"),
+                                doc.get("sha256").and_then(|v| v.as_str()).unwrap_or("?"),
+                            ),
+                            Err(_) => String::new(),
+                        };
+                        format!("{header}{}", crate::brain::render_sealed_graph(&soul))
+                    } else {
+                        serde_json::to_string_pretty(&soul).unwrap_or_default()
+                    }
+                }
                 Ok(None) => "No soul sealed yet.".to_string(),
                 Err(e) => format!("Error loading soul: {}", e),
             };
@@ -2457,7 +2474,19 @@ async fn handle_slash_command(
         "/identity" => {
             let output = match db.read("memory.identity", "identity").await {
                 Ok(doc) => serde_json::to_string_pretty(&doc).unwrap_or_default(),
-                Err(_) => "No identity document found.".to_string(),
+                Err(_) => {
+                    // Graph mode (imported instances write no identity
+                    // doc): identity lives in the sealed graph.
+                    match learning::load_soul(&**db).await {
+                        Ok(Some(soul)) if crate::identity_graph::is_graph_soul(&soul) => {
+                            format!(
+                                "Identity is part of the sealed identity graph:\n\n{}",
+                                crate::brain::render_sealed_graph(&soul)
+                            )
+                        }
+                        _ => "No identity document found.".to_string(),
+                    }
+                }
             };
             send_msg(tx, output).await;
         }
