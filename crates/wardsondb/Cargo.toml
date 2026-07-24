@@ -12,8 +12,12 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "compression-gzip", "cors"] }
 
 # Storage
+# "jemalloc" compiles RocksDB with ROCKSDB_JEMALLOC and (via tikv-jemalloc-sys's
+# unprefixed_malloc_on_supported_platforms) makes jemalloc the process-wide C
+# malloc, so RocksDB's C++ allocations bypass glibc's arena retention — without
+# it RSS ratchets ~40 GB/day under sustained ingest+compaction (rig-2, 2026-07-19).
 fjall = "2"
-rust-rocksdb = { version = "0.46", features = ["multi-threaded-cf", "lz4", "zstd"] }
+rust-rocksdb = { version = "0.46", features = ["multi-threaded-cf", "lz4", "zstd", "jemalloc"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -79,5 +83,7 @@ harness = false
 # arenas under Tokio's multi-threaded runtime, causing RSS to climb without
 # an actual leak. jemalloc returns memory to the OS aggressively. macOS's
 # libmalloc already does this, so we don't need jemalloc there.
+# NOTE: #[global_allocator] only covers Rust allocations; the C-malloc side
+# (RocksDB) is covered by rust-rocksdb's "jemalloc" feature above.
 [target.'cfg(target_os = "linux")'.dependencies]
 tikv-jemallocator = "0.6"

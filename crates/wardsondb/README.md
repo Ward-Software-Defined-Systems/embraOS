@@ -57,7 +57,36 @@ larger dataset while the database ingests. Insert throughput here is end-to-end 
 including TLS and JSON envelopes, not raw storage throughput. Run `cargo bench` for
 reproducible synthetic storage-layer benchmarks.
 
-*A matching RocksDB-backend table will be added after its live-test rig run.*
+### RocksDB backend
+
+Measured 2026-07-19 on the same rig and methodology: 37.46 million documents in
+the database, queries targeting a completed **11.67-million-event** daily
+collection — HTTPS end-to-end, server-reported `meta.duration_ms`, **medians of 7
+runs, with live ingest (~150 docs/s) running in the background** throughout.
+Same hardware as above.
+
+| Query Type | Time | Matches | Strategy |
+|-----------|------|---------|----------|
+| Bitmap aggregate: count by event_type | **0.29ms** | 8 groups / 11.67M docs | bitmap_aggregate |
+| Bitmap count: unindexed field (severity=6) | **3.9ms** | 1.20M | bitmap |
+| Bitmap NOT: event_type ≠ firewall | **8.6ms** | 2.43M | bitmap |
+| Bitmap AND count: type + action | **7.5ms** | 8.91M | bitmap |
+| Compound range: type + time ≥ 6h (2.16M matches) | **254ms** | 2.16M | compound_range |
+| Compound range: action + time ≥ 6h (73K matches) | **12.8ms** | 73K | compound_range |
+| Compound range: 0 matches | **1.2ms** | 0 | compound_range |
+| Indexed equality + sort + limit 50 | **0.69ms** | top-50 of 8.91M | index_sorted |
+| Compound EQ windowed page: limit 50 of 8.91M | **940ms** | 8.91M | compound_eq (exact `total_count` = keys-only walk of all 8.91M index entries) |
+| Indexed count, non-bitmap field (6.3M matches) | **688ms** | 6.30M | index_eq (keys-only) |
+| Distinct values (indexed field, 11.67M keys) | **1.24s** | 2 values | index-only, `docs_scanned: 0` |
+| Get by ID (HTTPS round-trip) | **1.2ms** | — | primary |
+| Single insert (HTTPS, serial, one connection) | **~560/sec** (1.8ms/op) | — | — |
+| Bulk insert (HTTPS, 500/batch × 8 connections) | **~46,500 docs/sec** | — | — |
+
+The two backends are close across the board; differences within ~±30% on
+different-sized datasets (11.67M vs 13.16M target collection) should not be read
+as engine rankings. Notable honest gaps: RocksDB's serial single-insert path is
+slower (~560/sec vs ~780/sec), while its parallel bulk ingest is faster
+(~46,500 vs ~42,000 docs/sec).
 
 ## Quick Start
 

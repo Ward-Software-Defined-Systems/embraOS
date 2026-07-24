@@ -114,6 +114,16 @@ Behavior changes an existing client could observe, most significant first.
 
 ### Fixed
 
+- **RocksDB deployments no longer accumulate unbounded RSS on Linux.**
+  RocksDB's C++ allocations went through glibc malloc (the process-wide
+  jemalloc `#[global_allocator]` covers Rust allocations only), hitting
+  ptmalloc2's per-thread arena retention under sustained ingest +
+  compaction: a live soak ratcheted to 81 GB RSS (~40 GB/day) with ~10 GB
+  actually live. `rust-rocksdb` now builds with its `jemalloc` feature,
+  which exports jemalloc as the process-wide C allocator so RocksDB's
+  allocations release properly (RocksDB LOG header now reads
+  `Jemalloc supported: 1`). fjall deployments (pure Rust) were never
+  affected.
 - **Queries on a missing collection return `404 COLLECTION_NOT_FOUND` on
   every plan shape.** The existence check previously ran only on the
   full-scan path, so `/query`, `/aggregate`, and `/distinct` requests served
