@@ -153,6 +153,13 @@ pub fn render_user_profile(profile: &Value) -> String {
         None => return "(no operator profile)".to_string(),
     };
 
+    // Graph-era dispatch (kg-native-identity): after the graph transition
+    // memory.user is stored graph-shaped; render it as grouped operator
+    // prose. Unreachable for flat profiles — legacy output byte-identical.
+    if crate::identity_graph::is_graph_soul(cur) {
+        return crate::brain::render_user_graph(cur);
+    }
+
     match UserSchema::from_obj(obj) {
         Some((s, consumed)) => render_profile(&s, obj, &consumed),
         None => serde_json::to_string_pretty(cur).unwrap_or_else(|_| cur.to_string()),

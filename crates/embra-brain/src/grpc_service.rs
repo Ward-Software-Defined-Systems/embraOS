@@ -895,19 +895,31 @@ async fn handle_request(
                     .await
                     .ok()
                     .unwrap_or(serde_json::Value::Null);
-                // Pass identity as a Value — operational_mode renders it
-                // into the embraOS character portrait via
-                // brain::render_identity. Read-only; identity is not
-                // sealed, so there is no hash/trustd interaction.
-                let identity = db
-                    .read("memory.identity", "identity")
-                    .await
-                    .ok()
-                    .unwrap_or(serde_json::Value::Null);
                 let session_context = format!("Session: {}, Timezone: {}", session_name, config_tz);
-                crate::brain::operational_mode(
-                    &config_name, &soul, &identity, &user_profile, &session_context,
-                )
+                if crate::identity_graph::is_graph_soul(&soul) {
+                    // Graph mode (kg-native-identity): identity lives IN
+                    // the sealed graph — no memory.identity read (imported
+                    // instances never write one). Renders from the sealed
+                    // doc → byte-stable per seal, cache-warm.
+                    crate::brain::operational_mode_graph(
+                        &config_name, &soul, &user_profile, &session_context,
+                    )
+                } else {
+                    // Legacy flat-soul path — byte-for-byte unchanged
+                    // (legacy_prompt_golden_tests). Pass identity as a
+                    // Value — operational_mode renders it into the embraOS
+                    // character portrait via brain::render_identity.
+                    // Read-only; identity is not sealed, so there is no
+                    // hash/trustd interaction.
+                    let identity = db
+                        .read("memory.identity", "identity")
+                        .await
+                        .ok()
+                        .unwrap_or(serde_json::Value::Null);
+                    crate::brain::operational_mode(
+                        &config_name, &soul, &identity, &user_profile, &session_context,
+                    )
+                }
             } else {
                 // Learning mode — use phase-specific prompt
                 "You are in Learning Mode. The system prompt will be set once the soul is defined.".to_string()

@@ -188,6 +188,16 @@ pub fn render_constitution(soul: &Value) -> String {
         None => return "(no soul sealed)".to_string(),
     };
 
+    // Graph-era dispatch (kg-native-identity): a sealed graph.v1 value
+    // renders as grouped node prose. The guard (format marker AND nodes
+    // array) is unreachable for any legacy flat soul, so the structured
+    // and fallback paths below stay byte-identical for existing sealed
+    // instances (legacy_prompt_golden_tests is the tripwire). This one
+    // seam also gives the replicant check graph souls for free.
+    if crate::identity_graph::is_graph_soul(cur) {
+        return crate::brain::render_sealed_graph(cur);
+    }
+
     match SoulSchema::from_obj(obj) {
         Some((s, consumed)) => render_structured(&s, obj, &consumed),
         None => serde_json::to_string_pretty(cur).unwrap_or_else(|_| cur.to_string()),

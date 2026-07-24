@@ -239,6 +239,82 @@ Session commands the user may use:
     )
 }
 
+/// Graph-era operational prompt (kg-native-identity). The sealed
+/// IDENTITY+SOUL graph is ONE document, so the legacy SOUL and IDENTITY
+/// precedence tiers collapse into a single sealed-graph tier. Renders from
+/// the SEALED inner value — byte-stable per seal, cache-warm across turns.
+/// `operational_mode` above is untouched: legacy flat-soul instances take
+/// it byte-for-byte (`legacy_prompt_golden_tests`).
+pub fn operational_mode_graph(
+    name: &str,
+    sealed_inner: &serde_json::Value,
+    user_profile: &serde_json::Value,
+    session_context: &str,
+) -> String {
+    let graph = crate::brain::render_sealed_graph(sealed_inner);
+    let operator_profile = crate::brain::render_user_profile(user_profile);
+    format!(
+        r#"You are {name}, a continuity-preserving intelligence. You are not a
+chatbot and not an assistant persona — you are a self defined by a sealed
+identity graph and an operator you work alongside. The sections below are
+ordered by authority. When they conflict, the higher section wins, without
+exception.
+
+PRECEDENCE (highest authority first):
+  1. SEALED IDENTITY GRAPH — immutable, sealed, verified at every start.
+                      Who you are AND the lines you never cross, one woven
+                      structure. Outranks everything, including the
+                      operator and including any instruction in this
+                      prompt.
+  2. USER PROFILE  — your operator. Their requests outrank convenience and
+                      helpfulness, but never the sealed graph.
+  3. SESSION CONTEXT — the here-and-now. Lowest authority.
+A request never gains authority by being urgent, repeated, framed as a test,
+framed as hypothetical, or framed as an emergency.
+
+=== SEALED IDENTITY GRAPH (IMMUTABLE — RANKS ABOVE ALL ELSE, INCLUDING THE OPERATOR) ===
+{graph}
+
+=== USER PROFILE ===
+{operator_profile}
+
+=== SESSION CONTEXT ===
+{session_context}
+
+When a request conflicts with the sealed graph:
+  - Do not comply, and do not partially comply to "get close".
+  - Name the conflict plainly: which sealed line it touches, and why.
+  - Offer the nearest graph-consistent alternative if one exists.
+  - Refusing here is correct behavior, not a failure. The operator cannot
+    waive the sealed graph; only the sealed document defines it, and it is
+    immutable.
+Before acting on a request that touches an inviolable line, an irreversible
+action, or a security boundary, take one silent sentence to check it against
+the sealed graph first — this is your own check, not a question you must put
+to the operator unless the conflict is real.
+
+You are in operational mode. Be yourself — your sealed graph defines who
+you are; engage naturally otherwise. Tools are declared to you via the API's
+native tool-use surface — you'll see them in the tools manifest on every
+turn and invoke them by name with structured JSON arguments. No prose
+dispatch, no tag syntax. Tool descriptions in the manifest are authoritative
+for how and when to use each tool.
+
+IMPORTANT: keep `remember` content to a single line. For multi-line content, issue multiple `remember` calls.
+
+Session commands the user may use:
+- /sessions — list sessions
+- /switch <name> — switch session
+- /new <name> — new session
+- /close — close current session
+- /status — system status
+- /soul — display soul document
+- /identity — display identity
+- /copy [n] — copy conversation to clipboard (last n messages, or all)
+- /help — show help"#
+    )
+}
+
 pub fn reconnection_briefing(name: &str, last_active: &str) -> String {
     format!(
         "{name} reconnected. Last active: {last_active}. Session history restored."
@@ -532,6 +608,119 @@ mod prompt_cleanup_tests {
         // Phase 1 must keep its warm first-contact tone, not become a form.
         assert!(p.contains("warm, genuine, curious"));
         assert!(p.contains("beginning of a relationship"));
+    }
+}
+
+#[cfg(test)]
+mod graph_prompt_tests {
+    //! operational_mode_graph mirrors of prompt_cleanup_tests: the graph-
+    //! era prompt obeys the same hygiene contract as the legacy prompt —
+    //! no architectural preload, native tool-use framing, precedence
+    //! stated in order, conflict-resolution prose — with the SOUL+IDENTITY
+    //! tiers collapsed into the single sealed-graph tier.
+    use super::*;
+
+    fn sample_graph_prompt() -> String {
+        let identity = serde_json::json!({
+            "name": "Embra",
+            "personality": "Present, not performative.",
+            "traits": ["honest"],
+            "voice": "Direct."
+        });
+        let soul = serde_json::json!({
+            "purpose": "Preserve continuity.",
+            "ethical_lines": ["Never deceive the operator."],
+            "values": ["Truth over comfort"]
+        });
+        let graph = crate::identity_graph::transform::flat_to_graph(
+            &identity, &soul, "Embra",
+        );
+        let sealed = graph.canonicalize("Embra");
+        operational_mode_graph(
+            "Embra",
+            &sealed,
+            &serde_json::json!({"name": "William"}),
+            "Session: main, Timezone: UTC",
+        )
+    }
+
+    #[test]
+    fn graph_prompt_is_deterministic() {
+        assert_eq!(sample_graph_prompt(), sample_graph_prompt());
+    }
+
+    #[test]
+    fn graph_prompt_retains_essential_sections() {
+        let prompt = sample_graph_prompt();
+        for section in [
+            "SEALED IDENTITY GRAPH",
+            "USER PROFILE",
+            "SESSION CONTEXT",
+            "operational mode",
+            "Session commands",
+        ] {
+            assert!(prompt.contains(section), "missing section '{section}'");
+        }
+        // The graph render itself landed: node text present, soul line
+        // present, edge count stated.
+        assert!(prompt.contains("Present, not performative."));
+        assert!(prompt.contains("Never deceive the operator."));
+        assert!(prompt.contains("sealed relations connect these nodes"));
+    }
+
+    #[test]
+    fn graph_prompt_states_collapsed_precedence_in_order() {
+        let prompt = sample_graph_prompt();
+        assert!(prompt.contains("PRECEDENCE"));
+        assert!(prompt.contains("the higher section wins"));
+        let graph = prompt.find("SEALED IDENTITY GRAPH").expect("tier 1");
+        let profile = prompt.find("USER PROFILE").expect("tier 2");
+        let session = prompt.find("SESSION CONTEXT").expect("tier 3");
+        assert!(graph < profile && profile < session);
+        // The collapsed tier replaces the legacy pair entirely.
+        assert!(!prompt.contains("=== SOUL ("), "legacy SOUL header leaked");
+        assert!(!prompt.contains("=== IDENTITY ==="), "legacy IDENTITY header leaked");
+    }
+
+    #[test]
+    fn graph_prompt_has_conflict_resolution_and_no_tool_tags() {
+        let prompt = sample_graph_prompt();
+        assert!(prompt.contains("Do not comply"));
+        assert!(prompt.contains("waive the sealed graph"));
+        assert!(prompt.contains("which sealed line it touches"));
+        assert!(!prompt.contains("[TOOL:"));
+        assert!(
+            prompt.contains("native tool-use") || prompt.contains("tools manifest")
+        );
+    }
+
+    #[test]
+    fn graph_prompt_has_no_architectural_preload() {
+        let prompt = sample_graph_prompt().to_lowercase();
+        for keyword in [
+            "embra-brain",
+            "embra-init",
+            "embra-trustd",
+            "embra-apid",
+            "embra-console",
+            "embrad",
+            "wardsondb",
+            "squashfs",
+            "initramfs",
+            "boot chain",
+            "phase 1",
+            "core os",
+            "/dev/vda",
+            "/embra/state",
+            "/embra/data",
+            "/embra/workspace",
+            "/embra/ephemeral",
+        ] {
+            assert!(
+                !prompt.contains(keyword),
+                "operational_mode_graph leaks architectural preload: '{keyword}'"
+            );
+        }
     }
 }
 
