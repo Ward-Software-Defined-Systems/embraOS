@@ -28,6 +28,19 @@ echo "nameserver 10.0.2.3" > "${TARGET_DIR}/etc/resolv.conf"
 # Workspace mount point (embrad bind-mounts /embra/data/workspace here at boot)
 mkdir -p "${TARGET_DIR}/embra/workspace"
 
+# Importable intelligence graphs (kg-native-identity): bake the repo's
+# Imported_Intelligence/*.graph.json examples read-only into the rootfs so
+# every fresh boot can offer the Learning-Mode import with zero
+# provisioning. STATE's imported-intelligence/ wins filename collisions.
+# The folder's README.md is host-side authoring documentation — .graph.json
+# only, by construction.
+REPO_ROOT="${BOARD_DIR}/../../.."
+if ls "${REPO_ROOT}/Imported_Intelligence"/*.graph.json >/dev/null 2>&1; then
+    mkdir -p "${TARGET_DIR}/usr/share/embra/imported-intelligence"
+    cp "${REPO_ROOT}/Imported_Intelligence"/*.graph.json \
+       "${TARGET_DIR}/usr/share/embra/imported-intelligence/"
+fi
+
 # Defense-in-depth: lock the root account.
 # The Buildroot skeleton leaves /etc/shadow with an empty root password,
 # which means anyone with shell access can become root without credentials.

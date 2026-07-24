@@ -3,7 +3,12 @@
 # Copies existing Phase 0 data so the system boots directly to Operational mode
 # instead of going through Learning Mode.
 #
-# Usage: ./scripts/seed-state.sh [--phase0-data /path/to/phase0/data] [--soul-hash <hash>]
+# Usage: ./scripts/seed-state.sh [--phase0-data /path/to/phase0/data] [--soul-hash <hash>] [--import-dir /path/to/graphs]
+#
+# --import-dir copies *.graph.json intelligence files into STATE's
+# imported-intelligence/ directory so Learning Mode offers them for import
+# at first boot (they take precedence over the rootfs-baked examples on
+# filename collisions).
 #
 # NOTE: This script requires Linux (losetup). On macOS, use a Linux VM or Docker.
 
@@ -12,12 +17,14 @@ set -euo pipefail
 IMAGE="${1:-output/images/embraos.img}"
 PHASE0_DATA=""
 SOUL_HASH=""
+IMPORT_DIR=""
 
 shift || true
 while [ $# -gt 0 ]; do
     case "$1" in
         --phase0-data) PHASE0_DATA="$2"; shift 2 ;;
         --soul-hash) SOUL_HASH="$2"; shift 2 ;;
+        --import-dir) IMPORT_DIR="$2"; shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -70,6 +77,19 @@ if [ -n "$SOUL_HASH" ]; then
     echo "Done."
 else
     echo "No soul hash specified (--soul-hash). First boot will allow Learning Mode."
+fi
+
+# Seed importable intelligence graphs (kg-native-identity)
+if [ -n "$IMPORT_DIR" ]; then
+    if [ -d "$IMPORT_DIR" ] && ls "$IMPORT_DIR"/*.graph.json >/dev/null 2>&1; then
+        echo "Copying intelligence graphs into STATE imported-intelligence/..."
+        sudo mkdir -p "$MOUNT_STATE/imported-intelligence"
+        sudo cp "$IMPORT_DIR"/*.graph.json "$MOUNT_STATE/imported-intelligence/"
+        echo "Done: $(ls "$IMPORT_DIR"/*.graph.json | wc -l) file(s)."
+    else
+        echo "ERROR: --import-dir '$IMPORT_DIR' has no *.graph.json files"
+        exit 1
+    fi
 fi
 
 # Create PKI directory (embra-trustd will generate CA on first run)

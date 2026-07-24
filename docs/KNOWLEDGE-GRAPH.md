@@ -55,14 +55,17 @@ This is the design. Section **Why the density isn't bloat** below explains why i
 
 ## Data model
 
-Four WardSONDB collections, three node types and one edge layer. Indexed at migration v5 (`run_v5_knowledge_graph` in `crates/embra-brain/src/migrations/mod.rs`).
+Five WardSONDB collections, four node kinds and one edge layer. Memory collections indexed at migration v5 (`run_v5_knowledge_graph` in `crates/embra-brain/src/migrations/mod.rs`); the identity collection created at v13.
 
 | Collection | Struct | Created by | Promoted/auto |
 |---|---|---|---|
 | `memory.entries` | (DB-only — no Rust struct) | `remember` tool; conversation persistence | episodic |
 | `memory.semantic` | `SemanticNode` (`crates/embra-brain/src/knowledge/types.rs:38-52`) | `knowledge_promote` | one-way irreversible |
 | `memory.procedural` | `ProceduralNode` (`types.rs:68-84`) | `knowledge_promote` | one-way irreversible |
-| `memory.edges` | `KnowledgeEdge` (`types.rs:229-241`) | `derive_edges` + `knowledge_promote` + `knowledge_link` | mixed |
+| `identity.graph` | (DB-only — projection docs) | the identity-graph projection (seal/import + boot reconcile) | derived from the sealed doc — see [IDENTITY-GRAPH.md](IDENTITY-GRAPH.md) |
+| `memory.edges` | `KnowledgeEdge` (`types.rs:229-241`) | `derive_edges` + `knowledge_promote` + `knowledge_link` + the identity projection | mixed |
+
+Identity nodes (`_id` = graph node id, `content`/`node_type`/`origin` fields) are full graph citizens — traversable, dumpable, linkable from memories — but deliberately absent from enrichment's bulk prefetch (the sealed graph rides the system prompt) and untouchable by `knowledge_update`/`knowledge_unlink_node` (collection restriction). Their edges carry free-form per-intelligence relations via `EdgeType::Other` and provenance under `metadata.origin`; the every-boot reconcile restores any deleted projection doc from the sealed source.
 
 ### Node identity
 
@@ -107,7 +110,7 @@ pub struct KnowledgeEdge {
 
 ## Edge taxonomy (3-tier)
 
-Nine `EdgeType` variants (`types.rs:88-104`) split into three creation paths. The grouping is the load-bearing distinction, not the enum's `// Brain-created` source comment (which is misleading — `is_brain_created()` at `types.rs:137-146` is authoritative and excludes `derived_from`).
+Nine built-in `EdgeType` variants (`types.rs`) split into three creation paths, plus the `Other(String)` carry-through for free-form identity-projection relations (kg-native-identity: read paths parse via the total `parse_lossy`, so unknown relation strings traverse instead of being silently dropped; `from_str` stays strict as `knowledge_link`'s validation gate, so the intelligence cannot mint edge types — `Other` is neither brain-created nor symmetric). The grouping is the load-bearing distinction, not the enum's `// Brain-created` source comment (which is misleading — `is_brain_created()` is authoritative and excludes `derived_from`).
 
 ### Auto-derived at write time (3 types)
 
@@ -389,7 +392,7 @@ Ten `knowledge_*` tools registered via `#[embra_tool(...)]` macros at `crates/em
 
 **`knowledge_sweep_orphans`** — `dry_run: bool` (default `false`) + `limit: usize` (default `10_000`, clamp `[1, 1_000_000]`). Scans `memory.edges` in paginated 20k pages up to `limit`, batch-resolves endpoints per collection via `{"_id": {"$in": [...]}}` per page, identifies edges with a missing source or target, and deletes them in chunks of 100. Dry-run reports counts without deleting. Full-graph coverage = set `limit` ≥ the edge total from `knowledge_graph_stats`. Orphan detection is also called passively by `knowledge_graph_stats`, so the orphan count surfaces without an explicit sweep.
 
-**`knowledge_dump`** — JSONL export of the graph to `/embra/workspace/KG_DUMPS/kg-dump-<utc>.jsonl`. Line 1 is a `{"type":"meta",...}` header (generated_at, collections, edge filter, payload mode); node lines lift `type`/`_id`/`collection` top-level with the full stored doc under `data`; edge lines are the stored edge doc spread top-level plus `"type":"edge"`. `collections` restricts to a subset of `entries | semantic | procedural | edges` (canonical order regardless of input order); `edge_types` filters the edge pass server-side via `$in`; `include_payload=false` emits slim node lines for structural scanning. Each collection is tiled exhaustively in **unsorted key-order pages** (20k) — the same sanctioned no-sort exception as the orphan scan (exhaustive coverage, not a relevance window). Pagination is **cursor-adaptive** (since 2026-07-16): when the server offers `meta.next_cursor` (WardSONDB builds with cursor pagination emit it on no-sort full scans), later pages resume by token — O(n) total instead of offset tiling's O(n²) re-skips — and the scan ends exactly when the cursor is withheld; older builds keep byte-identical offset tiling (`offset`/`limit` apply after the filter in every executor path, so a constant filter tiles without skips or duplicates). Per-collection written-vs-`count_only` parity is reported (soft signal — a live instance can drift between scan and count). Any query/write failure removes the partial file: the format has a header but no trailer, so a partial dump would otherwise be indistinguishable from a complete one. Same-second re-runs reuse the filename (truncate). Dumps accumulate with no rotation — remove stale ones with `file_delete`. Consumer example: [GUARDIAN-KG-SCAN-EXAMPLE.md](GUARDIAN-KG-SCAN-EXAMPLE.md) (fed through `guardian_call`'s 2 MiB `data_file` bridge).
+**`knowledge_dump`** — JSONL export of the graph to `/embra/workspace/KG_DUMPS/kg-dump-<utc>.jsonl`. Line 1 is a `{"type":"meta",...}` header (generated_at, collections, edge filter, payload mode); node lines lift `type`/`_id`/`collection` top-level with the full stored doc under `data`; edge lines are the stored edge doc spread top-level plus `"type":"edge"`. `collections` restricts to a subset of `entries | semantic | procedural | identity | edges` (canonical order regardless of input order); `edge_types` filters the edge pass server-side via `$in` (any non-empty token — built-in types and free-form identity relations alike); `include_payload=false` emits slim node lines for structural scanning. Each collection is tiled exhaustively in **unsorted key-order pages** (20k) — the same sanctioned no-sort exception as the orphan scan (exhaustive coverage, not a relevance window). Pagination is **cursor-adaptive** (since 2026-07-16): when the server offers `meta.next_cursor` (WardSONDB builds with cursor pagination emit it on no-sort full scans), later pages resume by token — O(n) total instead of offset tiling's O(n²) re-skips — and the scan ends exactly when the cursor is withheld; older builds keep byte-identical offset tiling (`offset`/`limit` apply after the filter in every executor path, so a constant filter tiles without skips or duplicates). Per-collection written-vs-`count_only` parity is reported (soft signal — a live instance can drift between scan and count). Any query/write failure removes the partial file: the format has a header but no trailer, so a partial dump would otherwise be indistinguishable from a complete one. Same-second re-runs reuse the filename (truncate). Dumps accumulate with no rotation — remove stale ones with `file_delete`. Consumer example: [GUARDIAN-KG-SCAN-EXAMPLE.md](GUARDIAN-KG-SCAN-EXAMPLE.md) (fed through `guardian_call`'s 2 MiB `data_file` bridge).
 
 ---
 

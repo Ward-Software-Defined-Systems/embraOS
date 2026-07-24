@@ -14,8 +14,8 @@ Every slash command available in an embraOS session. See also [Keyboard Shortcut
 | `/sessions restore <name>` | Undo a soft delete during its grace period (the session returns Detached — `/switch` to attach) |
 | `/stop` | Stop a stuck in-flight turn (local models can loop in unbounded reasoning). Console: type it or press **Esc** while the turn streams; mobile: the ■ button that replaces Send while busy. The partial response is kept, marked `(response interrupted by operator stop)` |
 | `/close` | Close the current session |
-| `/soul` | Display the immutable soul document |
-| `/identity` | Display the intelligence's identity document |
+| `/soul` | Display the immutable soul document (graph-mode instances: grouped identity-graph prose + the seal header instead of raw JSON) |
+| `/identity` | Display the intelligence's identity document (graph-mode instances without one: renders the sealed identity graph it is part of) |
 | `/mode` | Show current operating mode and soul seal status |
 | `/github-token <token>` | Set GitHub token for API access (persists across reboots) |
 | `/ssh-keygen` | Generate ed25519 SSH key pair and display public key |
