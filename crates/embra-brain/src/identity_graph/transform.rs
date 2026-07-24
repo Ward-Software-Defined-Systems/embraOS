@@ -114,7 +114,7 @@ pub fn user_to_graph(user: &Value, link_to_operator_node: bool) -> Option<Identi
     let mut edges = Vec::new();
     let mut used: Vec<String> = vec!["user_operator".to_string()];
 
-    let mut push = |nodes: &mut Vec<GraphNode>,
+    let push = |nodes: &mut Vec<GraphNode>,
                     edges: &mut Vec<GraphEdge>,
                     used: &mut Vec<String>,
                     id: String,
@@ -291,14 +291,14 @@ fn slugify(text: &str) -> String {
 
 /// `_2`/`_3`… suffixes in input order; first occurrence keeps the bare id.
 fn dedupe_id(base: String, used: &mut Vec<String>) -> String {
-    if !used.iter().any(|u| *u == base) {
+    if !used.contains(&base) {
         used.push(base.clone());
         return base;
     }
     let mut n = 2usize;
     loop {
         let candidate = format!("{base}_{n}");
-        if !used.iter().any(|u| *u == candidate) {
+        if !used.contains(&candidate) {
             used.push(candidate.clone());
             return candidate;
         }

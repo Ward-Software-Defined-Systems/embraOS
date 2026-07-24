@@ -41,7 +41,6 @@ const IMPORT_FILE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 pub struct ImportCandidate {
     pub file_name: String,
-    pub path: PathBuf,
     pub graph: IdentityGraph,
 }
 
@@ -119,11 +118,7 @@ pub fn scan_import_dirs() -> (Vec<ImportCandidate>, Vec<String>) {
             }
         };
         match parse_import(&raw) {
-            Ok(graph) => candidates.push(ImportCandidate {
-                file_name,
-                path,
-                graph,
-            }),
+            Ok(graph) => candidates.push(ImportCandidate { file_name, graph }),
             Err(errors) => issues.push(format!(
                 "{file_name}: invalid — {}",
                 errors.join("; ")
@@ -428,7 +423,6 @@ mod import_flow_tests {
     fn candidate(name: Option<&str>, file: &str) -> ImportCandidate {
         ImportCandidate {
             file_name: file.to_string(),
-            path: PathBuf::from(file),
             graph: IdentityGraph {
                 name: name.map(|n| n.to_string()),
                 nodes: vec![GraphNode {

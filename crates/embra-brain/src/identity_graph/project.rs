@@ -62,9 +62,9 @@ pub async fn project_to_kg(
 ) {
     let now = chrono::Utc::now().to_rfc3339();
     if !db.collection_exists(IDENTITY_COLLECTION).await.unwrap_or(false) {
-        if let Err(e) = db.create_collection(IDENTITY_COLLECTION).await {
+        let _ = db.create_collection(IDENTITY_COLLECTION).await.map_err(|e| {
             warn!(target: "identity_graph", "projection: create_collection failed: {e} — boot reconcile will retry");
-        }
+        });
     }
 
     let node_docs: Vec<Value> = graph
@@ -103,11 +103,13 @@ pub async fn project_to_kg(
 }
 
 /// The complete post-seal transition, shared by the conversational path
-/// (Stage 6) and the import path (Stage 7):
-///   1. project the sealed IDENTITY+SOUL graph;
-///   2. rewrite `memory.user` from flat to graph shape (idempotent — a
-///      graph-shaped doc passes through unchanged);
-///   3. project the operator subgraph.
+/// and the import path:
+///
+/// 1. project the sealed IDENTITY+SOUL graph;
+/// 2. rewrite `memory.user` from flat to graph shape (idempotent — a
+///    graph-shaped doc passes through unchanged);
+/// 3. project the operator subgraph.
+///
 /// Best-effort throughout: the seal already happened (the irreversible
 /// step); everything here is derivable and boot-heals.
 pub async fn complete_graph_transition(
@@ -165,12 +167,14 @@ pub async fn ensure_identity_projection(db: &WardsonDbClient) {
 
     reconcile_graph(db, &sealed_graph, super::ORIGIN_IMPORT, EDGE_ORIGIN_IDENTITY, "sealed").await;
 
-    if let Ok(user_doc) = db.read("memory.user", "user").await {
-        if super::is_graph_soul(&user_doc) {
-            if let Some(user_graph) = super::format::parse_sealed(&user_doc) {
-                reconcile_graph(db, &user_graph, ORIGIN_USER, EDGE_ORIGIN_USER, "user").await;
-            }
-        }
+    let user_graph = db
+        .read("memory.user", "user")
+        .await
+        .ok()
+        .filter(super::is_graph_soul)
+        .and_then(|d| super::format::parse_sealed(&d));
+    if let Some(user_graph) = user_graph {
+        reconcile_graph(db, &user_graph, ORIGIN_USER, EDGE_ORIGIN_USER, "user").await;
     }
 }
 
