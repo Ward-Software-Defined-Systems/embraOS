@@ -4,7 +4,7 @@ use tracing::{error, info, warn};
 
 use crate::db::{WardsonDbClient, WardsonDbError};
 
-const CURRENT_SCHEMA_VERSION: u32 = 12;
+const CURRENT_SCHEMA_VERSION: u32 = 13;
 
 /// Run all pending migrations. Each migration is idempotent.
 pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
@@ -122,9 +122,22 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
         set_schema_version(db, 12).await?;
     }
 
+    if current_version < 13 {
+        // v13 (kg-native-identity): identity-graph projection collection.
+        // Harmless-empty on legacy instances — graph mode is detected by
+        // the sealed soul's format marker, never by collection existence.
+        run_v13_identity_graph(db).await?;
+        set_schema_version(db, 13).await?;
+    }
+
     // Hot-path index assertions ride EVERY boot, after the versioned ladder
     // (unversioned on purpose — see ensure_hot_path_indexes).
     ensure_hot_path_indexes(db).await;
+
+    // Identity-projection reconcile — also every boot, unversioned (the
+    // sealed doc is the source of truth forever; insert-missing-only, so a
+    // healthy boot costs two reads + a count). No-op on legacy flat souls.
+    crate::identity_graph::project::ensure_identity_projection(db).await;
 
     // Shadowed-duplicate healing runs BEFORE the reaped-session sweep so a
     // half-deleted duplicate pair (canonical stamped Deleted + shadowed
@@ -477,6 +490,21 @@ async fn run_v12_guardian(db: &WardsonDbClient) -> Result<()> {
         let _ = db.create_collection("guardian.tools").await;
     }
     info!("Migration v12: guardian.tools collection ensured");
+    Ok(())
+}
+
+/// Migration v13 (kg-native-identity): the identity-graph projection
+/// collection. Collection-create only — the projection DATA is derived
+/// from the sealed doc by `ensure_identity_projection` (every boot,
+/// unversioned), never by the versioned ladder. Idempotent, no data walk.
+async fn run_v13_identity_graph(db: &WardsonDbClient) -> Result<()> {
+    info!("Running migration v13: identity.graph collection");
+    let coll = crate::identity_graph::IDENTITY_COLLECTION;
+    if !db.collection_exists(coll).await.unwrap_or(false) {
+        info!("Creating collection: {coll}");
+        let _ = db.create_collection(coll).await;
+    }
+    info!("Migration v13: identity.graph collection ensured");
     Ok(())
 }
 
