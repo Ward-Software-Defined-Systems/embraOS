@@ -2111,7 +2111,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-5|fable-5>            Switch the Anthropic model (next message)\n  /effort                            Show the Anthropic effort level\n  /effort <low|medium|high|xhigh|max>  Set effort (default max, next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-5|opus-4.8|fable-5>   Switch the Anthropic model (next message)\n  /effort                            Show the Anthropic effort level\n  /effort <low|medium|high|xhigh|max>  Set effort (default max, next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -4164,7 +4164,7 @@ fn resolve_gemini_model_id_inner(env: Option<&str>, cfg_field: Option<&str>) -> 
 /// 3. The provider's [`DEFAULT_MODEL`](crate::provider::anthropic::DEFAULT_MODEL)
 ///    (`claude-opus-5`).
 /// The request shape is identical across supported Anthropic models
-/// (Opus 5, Fable 5 — and the legacy 4.7/4.8), so this only swaps the
+/// (Opus 5, Opus 4.8, Fable 5 — and the legacy 4.7), so this only swaps the
 /// `model` id + display
 /// name. Inner fn is pure for env-race-free tests.
 fn resolve_anthropic_model(cfg: &config::SystemConfig) -> (String, String) {
@@ -4192,16 +4192,20 @@ fn resolve_anthropic_model_inner(
 
 /// Map a SELECTABLE model alias to `(api_id, display)`. The `/model` command
 /// only accepts these (so a typo can't persist a bogus id that 400s every
-/// turn). The Anthropic line-up narrowed to Opus 5 + Fable 5 on 2026-07-24
-/// (4.7/4.8 retired from selection — William's call: two models is enough
-/// Anthropic coverage); previously-persisted 4.7/4.8 aliases keep resolving
-/// via [`canonicalize_legacy_anthropic_alias`], and the resolver additionally
+/// turn). Line-up as of 2026-07-24: Opus 5 (default) + Opus 4.8 + Fable 5
+/// (the same-day narrow-to-two was backtracked hours later at William's
+/// direction — 4.8 stays selectable; only 4.7 is retired from selection);
+/// the persisted 4.7 alias keeps resolving via
+/// [`canonicalize_legacy_anthropic_alias`], and the resolver additionally
 /// allows env/config passthrough for a model this build predates — see
 /// [`normalize_anthropic_model`].
 fn parse_anthropic_model_choice(s: &str) -> Option<(&'static str, &'static str)> {
     match s.trim().to_ascii_lowercase().as_str() {
         "opus-5" | "opus5" | "opus" | "5" | "claude-opus-5" => {
             Some(("claude-opus-5", "opus-5"))
+        }
+        "opus-4.8" | "4.8" | "opus4.8" | "claude-opus-4-8" => {
+            Some(("claude-opus-4-8", "opus-4.8"))
         }
         "fable-5" | "fable5" | "fable" | "claude-fable-5" => {
             Some(("claude-fable-5", "fable-5"))
@@ -4211,16 +4215,13 @@ fn parse_anthropic_model_choice(s: &str) -> Option<(&'static str, &'static str)>
 }
 
 /// LEGACY alias canonicalization — NOT selectable via `/model`, but a
-/// persisted `anthropic_model` of `"opus-4.8"`/`"opus-4.7"` (wizard-seeded
-/// before 2026-07-24, or the frozen v9 backfill) must keep resolving to its
-/// real API id forever: dropping these arms would send the bare alias as
-/// the model id and 400 every turn on an existing instance. The models stay
-/// served by the API; the operator moves off them explicitly via `/model`.
+/// persisted `anthropic_model` of `"opus-4.7"` (wizard-seeded before
+/// 2026-07-06, or the frozen v9 backfill) must keep resolving to its
+/// real API id forever: dropping this arm would send the bare alias as
+/// the model id and 400 every turn on an existing instance. The model stays
+/// served by the API; the operator moves off it explicitly via `/model`.
 fn canonicalize_legacy_anthropic_alias(s: &str) -> Option<(&'static str, &'static str)> {
     match s.trim().to_ascii_lowercase().as_str() {
-        "opus-4.8" | "4.8" | "opus4.8" | "claude-opus-4-8" => {
-            Some(("claude-opus-4-8", "opus-4.8"))
-        }
         "opus-4.7" | "4.7" | "opus4.7" | "claude-opus-4-7" => {
             Some(("claude-opus-4-7", "opus-4.7"))
         }
@@ -4273,7 +4274,7 @@ fn resolve_anthropic_effort_inner(env: Option<&str>, cfg_field: Option<&str>) ->
         .to_string()
 }
 
-/// `/model [<opus-5|fable-5>]` — show or switch the Anthropic
+/// `/model [<opus-5|opus-4.8|fable-5>]` — show or switch the Anthropic
 /// model. Persists `SystemConfig.anthropic_model`; the loop driver rebuilds
 /// the provider per-turn from config, so a switch takes effect on the next
 /// user message. Only meaningful for the Anthropic provider (Gemini /
@@ -4322,7 +4323,7 @@ async fn handle_model_command(
         let current = display_model_for(&active, &cfg);
         let msg = if active == "anthropic" {
             format!(
-                "Anthropic model: {current}. Options: opus-5, fable-5. \
+                "Anthropic model: {current}. Options: opus-5, opus-4.8, fable-5. \
                  Use `/model fable-5` to switch (takes effect on your next message)."
             )
         } else {
@@ -4348,18 +4349,18 @@ async fn handle_model_command(
     }
 
     let Some((_id, display)) = parse_anthropic_model_choice(trimmed) else {
-        // Legacy 4.7/4.8 aliases get a tailored message: they still RESOLVE
-        // (persisted configs keep working) but are no longer selectable.
+        // The legacy 4.7 alias gets a tailored message: it still RESOLVES
+        // (persisted configs keep working) but is no longer selectable.
         let msg = if canonicalize_legacy_anthropic_alias(trimmed).is_some() {
             format!(
-                "'{trimmed}' was retired from the selectable line-up on 2026-07-24 \
+                "'{trimmed}' was retired from the selectable line-up \
                  (an instance already persisted on it keeps working). Options: \
-                 opus-5, fable-5."
+                 opus-5, opus-4.8, fable-5."
             )
         } else {
             format!(
                 "'{trimmed}' is not a recognized Anthropic model. Options: opus-5, \
-                 fable-5."
+                 opus-4.8, fable-5."
             )
         };
         send(msg, SystemMessageType::Error).await;
@@ -6916,6 +6917,13 @@ mod anthropic_model_tests {
                 "input: {s}"
             );
         }
+        for s in ["opus-4.8", "4.8", "opus4.8", "claude-opus-4-8", "OPUS-4.8"] {
+            assert_eq!(
+                parse_anthropic_model_choice(s),
+                Some(("claude-opus-4-8", "opus-4.8")),
+                "input: {s}"
+            );
+        }
         for s in ["fable-5", "fable5", "fable", "claude-fable-5", "FABLE-5"] {
             assert_eq!(
                 parse_anthropic_model_choice(s),
@@ -6925,18 +6933,22 @@ mod anthropic_model_tests {
         }
     }
 
-    /// The 400-trap guard: persisted `"opus-4.8"`/`"opus-4.7"` aliases
-    /// (wizard-seeded pre-2026-07-24, or the frozen v9 backfill) are no
-    /// longer SELECTABLE but must keep RESOLVING to their real API ids —
-    /// a bare-alias passthrough would 400 every turn on an existing
-    /// instance.
+    #[test]
+    fn config_field_selects_opus_4_8() {
+        let (id, disp) = resolve_anthropic_model_inner(None, Some("opus-4.8"));
+        assert_eq!(id, "claude-opus-4-8");
+        assert_eq!(disp, "opus-4.8");
+    }
+
+    /// The 400-trap guard: the persisted `"opus-4.7"` alias (wizard-seeded
+    /// pre-2026-07-06, or the frozen v9 backfill) is no longer SELECTABLE
+    /// but must keep RESOLVING to its real API id — a bare-alias
+    /// passthrough would 400 every turn on an existing instance.
     #[test]
     fn legacy_aliases_resolve_but_are_not_selectable() {
         for (s, id, disp) in [
-            ("opus-4.8", "claude-opus-4-8", "opus-4.8"),
-            ("4.8", "claude-opus-4-8", "opus-4.8"),
-            ("claude-opus-4-8", "claude-opus-4-8", "opus-4.8"),
             ("opus-4.7", "claude-opus-4-7", "opus-4.7"),
+            ("4.7", "claude-opus-4-7", "opus-4.7"),
             ("claude-opus-4-7", "claude-opus-4-7", "opus-4.7"),
         ] {
             assert_eq!(parse_anthropic_model_choice(s), None, "selectable: {s}");
@@ -6949,9 +6961,9 @@ mod anthropic_model_tests {
             assert_eq!((rid.as_str(), rdisp.as_str()), (id, disp), "resolve: {s}");
         }
         // Full resolver path: a persisted legacy config keeps working.
-        let (id, disp) = resolve_anthropic_model_inner(None, Some("opus-4.8"));
-        assert_eq!(id, "claude-opus-4-8");
-        assert_eq!(disp, "opus-4.8");
+        let (id, disp) = resolve_anthropic_model_inner(None, Some("opus-4.7"));
+        assert_eq!(id, "claude-opus-4-7");
+        assert_eq!(disp, "opus-4.7");
     }
 
     #[test]

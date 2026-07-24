@@ -1,5 +1,5 @@
-//! Anthropic provider: `claude-opus-5` (default) or `claude-fable-5` via
-//! `/v1/messages` (legacy persisted `claude-opus-4-8`/`claude-opus-4-7`
+//! Anthropic provider: `claude-opus-5` (default), `claude-opus-4-8`, or
+//! `claude-fable-5` via `/v1/messages` (legacy persisted `claude-opus-4-7`
 //! instances keep resolving — see the grpc_service resolver). The model id
 //! is per-instance (`with_model`); the request shape — adaptive thinking,
 //! `effort` (default `max`), prompt-caching beta — is identical across
@@ -39,13 +39,13 @@ use crate::provider::{
 use crate::tools::registry::ToolDescriptor;
 
 /// Default Anthropic model when none is configured. `with_model` overrides
-/// it (e.g. `claude-fable-5`, or a legacy `claude-opus-4-8`); the resolver
+/// it (e.g. `claude-opus-4-8`, `claude-fable-5`); the resolver
 /// in `grpc_service.rs` picks the active id from env/config.
 pub const DEFAULT_MODEL: &str = "claude-opus-5";
 const MAX_TOKENS: u32 = 128_000;
 /// Default `output_config.effort`. Runtime-tunable via `/effort`
 /// (`with_effort`); the full `low..max` range is valid on every
-/// supported model (Opus 5, Fable 5 — and the legacy 4.7/4.8).
+/// supported model (Opus 5, Opus 4.8, Fable 5 — and the legacy 4.7).
 const DEFAULT_EFFORT: &str = "max";
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
@@ -131,7 +131,7 @@ impl AnthropicProvider {
 
     /// Build the `/v1/messages` request body. Pure (no I/O) so the exact
     /// shape is unit-testable per model — the shape is identical across
-    /// supported models (Opus 5, Fable 5; legacy 4.7/4.8 unchanged); only
+    /// supported models (Opus 5, Opus 4.8, Fable 5; legacy 4.7 unchanged); only
     /// `model` and the configured `effort` vary per instance.
     ///
     /// Request body matches the pre-refactor send_message_streaming_with_tools
