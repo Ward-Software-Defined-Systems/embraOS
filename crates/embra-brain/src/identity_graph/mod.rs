@@ -12,6 +12,7 @@
 //! (`legacy_prompt_golden_tests` in brain/prompts.rs is the tripwire).
 
 pub mod format;
+pub mod import_flow;
 pub mod project;
 pub mod transform;
 

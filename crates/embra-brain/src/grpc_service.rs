@@ -4720,9 +4720,84 @@ async fn run_learning_loop(
     // stays frozen on Learning after the driver completes onboarding.
     let mut stage_rx = onboarding_stage.subscribe();
 
+    // The import offer fires once per learning loop, at the entry to
+    // Phase 2 (identity formation). Deliberately loop-local and
+    // unpersisted: a disconnect mid-offer wrote nothing, so the next
+    // learning loop re-offers. Covers the fresh-boot path AND the
+    // production re-seal ceremony (whose resume-seed lands at
+    // IdentityFormation with memory.user intact).
+    let mut import_offered = false;
+
     loop {
         if state.phase == learning::LearningPhase::Complete {
             break;
+        }
+
+        if state.phase == learning::LearningPhase::IdentityFormation && !import_offered {
+            import_offered = true;
+            use crate::identity_graph::import_flow::{offer_import, ImportOutcome};
+            match offer_import(tx, incoming, &mut stage_rx, &**db, &config, &mut state).await? {
+                ImportOutcome::NoCandidates | ImportOutcome::Conversational => {
+                    // Fall through to the normal Phase-2 kickoff below.
+                }
+                ImportOutcome::SealedByOtherStream => {
+                    // Mirror the wait-block handling: announce Operational
+                    // on OUR stream and hand off.
+                    let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
+                    return Ok(());
+                }
+                ImportOutcome::Disconnected => {
+                    debug!("Client disconnected during import dialogue");
+                    return Ok(());
+                }
+                ImportOutcome::Imported { renamed_to, summary_line } => {
+                    if let Some(new_name) = renamed_to {
+                        // Same operator-facing pair as the Phase-2 name
+                        // sync: an Info line + a Learning→Learning
+                        // ModeChange so the console status bar picks up
+                        // the imported name mid-learning.
+                        let old_name = std::mem::replace(&mut config.name, new_name);
+                        let _ = tx.send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::System(
+                                SystemMessage {
+                                    content: format!(
+                                        "Name updated: {} → {} (from the imported \
+                                         identity graph; persisted to config).",
+                                        old_name, config.name
+                                    ),
+                                    msg_type: SystemMessageType::Info as i32,
+                                }
+                            )),
+                        })).await;
+                        let _ = tx.send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::ModeChange(
+                                ModeTransition {
+                                    from_mode: OperatingMode::Learning as i32,
+                                    to_mode: OperatingMode::Learning as i32,
+                                    message: format!(
+                                        "Learning Mode — Name: {} — Phase: {} — TZ: {} — Brain: {}",
+                                        config.name,
+                                        learning::phase_label(&state.phase),
+                                        config.timezone,
+                                        learning_model
+                                    ),
+                                }
+                            )),
+                        })).await;
+                    }
+                    let _ = tx.send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::System(
+                            SystemMessage {
+                                content: summary_line,
+                                msg_type: SystemMessageType::Info as i32,
+                            }
+                        )),
+                    })).await;
+                    // state.phase is InitialToolset — the Phase-4
+                    // special case runs on the next iteration.
+                    continue;
+                }
+            }
         }
 
         // Phase 4 is non-interactive: render a deterministic tool summary,
