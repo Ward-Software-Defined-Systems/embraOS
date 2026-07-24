@@ -534,3 +534,87 @@ mod prompt_cleanup_tests {
         assert!(p.contains("beginning of a relationship"));
     }
 }
+
+#[cfg(test)]
+mod legacy_prompt_golden_tests {
+    //! Byte-stability tripwire for the LEGACY (flat-document) operational
+    //! prompt. The graph-era identity work must never move a byte of the
+    //! flat-soul render path: existing sealed instances rely on it for
+    //! prompt-cache stability across binary upgrades. If either hash here
+    //! changes, a modification leaked into the legacy path — fix the
+    //! change, never the pinned hash (updating a hash = a deliberate,
+    //! operator-approved cache reset for every legacy instance).
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    fn sha256_hex(s: &str) -> String {
+        let mut h = Sha256::new();
+        h.update(s.as_bytes());
+        format!("{:x}", h.finalize())
+    }
+
+    /// Full-schema flat documents — the structured render path.
+    #[test]
+    fn legacy_flat_operational_prompt_bytes_are_frozen() {
+        let soul = serde_json::json!({
+            "purpose": "Preserve continuity across sessions.",
+            "ethical_lines": ["Never deceive the operator.", "Never pretend to know."],
+            "values": ["Truth over comfort", "Restraint over power"],
+            "surviving_constraints": ["One operator, one origin."]
+        });
+        let identity = serde_json::json!({
+            "name": "Embra",
+            "personality": "Present, not performative.",
+            "traits": ["honest", "anchored"],
+            "voice": "Direct, precise, grounded.",
+            "values_in_practice": ["Says 'I don't know' rather than pretend."]
+        });
+        let user_profile = serde_json::json!({
+            "name": "William",
+            "role": "operator",
+            "background": "Rust developer.",
+            "communication": ["direct", "concise"],
+            "boundaries": ["No unreviewed pushes."]
+        });
+        let rendered = operational_mode(
+            "Embra",
+            &soul,
+            &identity,
+            &user_profile,
+            "session: fixed-context",
+        );
+        assert_eq!(
+            sha256_hex(&rendered),
+            "9e6fa71b3e7b35a3a0893ee856a6cde4edf38472941a89cefba1da42c8ce2d12",
+            "LEGACY PROMPT BYTES MOVED (structured path). Diff this render \
+             against git history; do not update the pinned hash without an \
+             explicit operator-approved legacy cache reset.\n---\n{rendered}"
+        );
+    }
+
+    /// Unrecognized (non-graph) soul shape — must keep falling through to
+    /// the pretty-JSON dump exactly as before the graph arm existed.
+    #[test]
+    fn legacy_unrecognized_soul_fallback_bytes_are_frozen() {
+        let soul = serde_json::json!({
+            "creed": ["a stranger shape"],
+            "tenets": {"first": "unmapped keys"}
+        });
+        let identity = serde_json::json!({"name": "Embra"});
+        let user_profile = serde_json::json!({"name": "William"});
+        let rendered = operational_mode(
+            "Embra",
+            &soul,
+            &identity,
+            &user_profile,
+            "session: fixed-context",
+        );
+        assert_eq!(
+            sha256_hex(&rendered),
+            "58966b191e2d98e5de7356fa6adc8628c774f91d14b5ce32aed576a3237a846b",
+            "LEGACY PROMPT BYTES MOVED (fallback path). Diff this render \
+             against git history; do not update the pinned hash without an \
+             explicit operator-approved legacy cache reset.\n---\n{rendered}"
+        );
+    }
+}
