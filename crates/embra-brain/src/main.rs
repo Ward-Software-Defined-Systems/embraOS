@@ -20,6 +20,7 @@ mod migrations;
 mod config;
 mod learning;
 mod knowledge;
+mod identity_graph;
 mod grpc_service;
 mod provider;
 mod setup;
