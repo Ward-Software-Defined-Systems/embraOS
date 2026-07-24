@@ -326,7 +326,10 @@ fn neighbor_of<'a>(edge: &'a KnowledgeEdge, coll: &str, id: &str) -> (&'a str, &
 }
 
 fn parse_edge(v: &serde_json::Value) -> Option<KnowledgeEdge> {
-    let edge_type = EdgeType::from_str(v.get("edge_type")?.as_str()?)?;
+    // parse_lossy, not from_str: identity-graph projections store free-form
+    // per-intelligence relations, which must traverse — the old strict
+    // parse silently DROPPED any unknown edge_type from every walk.
+    let edge_type = EdgeType::parse_lossy(v.get("edge_type")?.as_str()?)?;
     Some(KnowledgeEdge {
         _id: v.get("_id").and_then(|x| x.as_str()).map(|s| s.to_string()),
         source_id: v.get("source_id")?.as_str()?.to_string(),
@@ -370,11 +373,44 @@ mod edge_query_body_tests {
     //! builder/pure-fn level).
     use super::super::types::{EdgeType, KnowledgeEdge};
     use super::{
-        edge_query_body, expand_node_edges, merge_arm_edges, neighbor_of, seed_level,
-        source_arm_filter, target_arm_filter,
+        edge_query_body, expand_node_edges, merge_arm_edges, neighbor_of, parse_edge,
+        seed_level, source_arm_filter, target_arm_filter,
     };
     use serde_json::json;
     use std::collections::HashSet;
+
+    #[test]
+    fn free_form_edge_types_survive_parse_and_merge() {
+        // The kg-native-identity gate-open: before parse_lossy, an unknown
+        // edge_type made parse_edge return None and the edge silently
+        // vanished from every traversal window.
+        let doc = json!({
+            "_id": "e1",
+            "source_id": "embra",
+            "source_collection": "identity.graph",
+            "target_id": "voice",
+            "target_collection": "identity.graph",
+            "edge_type": "has_trait",
+            "weight": 1.0,
+            "metadata": {"origin": "identity_import"},
+            "created_at": "2026-07-24T00:00:00Z"
+        });
+        let edge = parse_edge(&doc).expect("free-form relation parses");
+        assert_eq!(edge.edge_type, EdgeType::Other("has_trait".to_string()));
+        assert_eq!(edge.edge_type.as_str(), "has_trait");
+
+        let (merged, saturated) = merge_arm_edges(vec![doc], vec![], 500);
+        assert_eq!(merged.len(), 1, "Other edge admitted through the window");
+        assert!(!saturated);
+
+        // Empty edge_type is still dropped (degenerate doc).
+        let bad = json!({
+            "source_id": "a", "source_collection": "c",
+            "target_id": "b", "target_collection": "c",
+            "edge_type": "", "weight": 1.0, "created_at": ""
+        });
+        assert!(parse_edge(&bad).is_none());
+    }
 
     #[test]
     fn edge_body_ranked_weight_then_recency() {

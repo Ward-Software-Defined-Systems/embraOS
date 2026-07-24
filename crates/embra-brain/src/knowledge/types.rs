@@ -83,8 +83,7 @@ pub struct ProceduralNode {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq)]
 pub enum EdgeType {
     // Auto-derived at write time
     SameSession,
@@ -101,10 +100,18 @@ pub enum EdgeType {
     /// Still stored with a source → target direction; retrieval treats it as
     /// non-hierarchical.
     RelatedTo,
+    /// Free-form relation carried through from an identity-graph
+    /// projection (per-intelligence vocabularies — e.g. `has_trait`,
+    /// `navigates_for`). Never mintable via `knowledge_link` — `from_str`
+    /// stays strict, so the model cannot invent edge types; only the
+    /// identity projection bulk-writes these strings, and read paths
+    /// carry them through via `parse_lossy`. Directional, not
+    /// brain-created, not symmetric. Original casing preserved.
+    Other(String),
 }
 
 impl EdgeType {
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &str {
         match self {
             Self::SameSession => "same_session",
             Self::Temporal => "temporal",
@@ -115,9 +122,16 @@ impl EdgeType {
             Self::Refines => "refines",
             Self::DependsOn => "depends_on",
             Self::RelatedTo => "related_to",
+            Self::Other(s) => s,
         }
     }
 
+    /// STRICT parse: the nine built-in types only — anything else is
+    /// `None`, including free-form identity relations. This is the
+    /// input-validation gate for `knowledge_link` (and the write-side
+    /// vocabulary boundary generally); it must never learn to produce
+    /// `Other`. Read paths that must carry free-form relations use
+    /// `parse_lossy` instead.
     pub fn from_str(s: &str) -> Option<Self> {
         match s.trim().to_lowercase().as_str() {
             "same_session" => Some(Self::SameSession),
@@ -131,6 +145,24 @@ impl EdgeType {
             "related_to" => Some(Self::RelatedTo),
             _ => None,
         }
+    }
+
+    /// TOTAL parse for READ paths (stored edge docs, operator-supplied
+    /// traversal filters, dump filters): built-in tokens parse to their
+    /// variants; any other non-empty token carries through as
+    /// `Other` with its original (trimmed) casing so `as_str()`
+    /// round-trips byte-identically to the stored doc. `None` only for
+    /// empty/whitespace input. Before this existed, `parse_edge`
+    /// silently DROPPED unknown-type edges from every traversal.
+    pub fn parse_lossy(s: &str) -> Option<Self> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some(
+            Self::from_str(trimmed)
+                .unwrap_or_else(|| Self::Other(trimmed.to_string())),
+        )
     }
 
     /// Brain-created edge types (allowed in `knowledge_link` tool).
@@ -156,6 +188,25 @@ impl EdgeType {
             self,
             Self::SameSession | Self::Temporal | Self::TagOverlap | Self::RelatedTo
         )
+    }
+}
+
+// Manual serde: `Other(String)` under a derive would serialize as
+// `{"other": "..."}` — the wire format must stay a PLAIN STRING, byte-
+// identical to the old `#[serde(rename_all = "snake_case")]` derive for
+// the nine built-in variants (TraversalResult edges serialize into tool
+// output). Pinned by `edge_type_wire_format_tests`.
+impl Serialize for EdgeType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for EdgeType {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        EdgeType::parse_lossy(&raw)
+            .ok_or_else(|| serde::de::Error::custom("empty edge_type"))
     }
 }
 
@@ -224,6 +275,91 @@ mod edge_type_tests {
             assert!(t.is_symmetric(), "{:?} should be symmetric", t);
         }
     }
+
+    #[test]
+    fn other_round_trips_with_original_casing() {
+        let t = EdgeType::parse_lossy("  has_trait ").expect("non-empty");
+        assert_eq!(t, EdgeType::Other("has_trait".to_string()));
+        assert_eq!(t.as_str(), "has_trait");
+        // Casing preserved so as_str() matches the stored doc byte-for-byte.
+        let camel = EdgeType::parse_lossy("navigatesFor").expect("non-empty");
+        assert_eq!(camel.as_str(), "navigatesFor");
+    }
+
+    #[test]
+    fn parse_lossy_prefers_builtins_and_rejects_empty() {
+        assert_eq!(EdgeType::parse_lossy("enables"), Some(EdgeType::Enables));
+        assert_eq!(
+            EdgeType::parse_lossy(" Related_To "),
+            Some(EdgeType::RelatedTo)
+        );
+        assert_eq!(EdgeType::parse_lossy(""), None);
+        assert_eq!(EdgeType::parse_lossy("   "), None);
+    }
+
+    #[test]
+    fn from_str_stays_strict_on_free_form() {
+        // The knowledge_link validation gate: free-form relations must
+        // never parse strictly, or the model could mint arbitrary types.
+        assert_eq!(EdgeType::from_str("has_trait"), None);
+        assert_eq!(EdgeType::from_str("navigates_for"), None);
+    }
+
+    #[test]
+    fn other_is_neither_brain_created_nor_symmetric() {
+        let t = EdgeType::Other("holds_value".to_string());
+        assert!(!t.is_brain_created());
+        assert!(!t.is_symmetric());
+    }
+}
+
+#[cfg(test)]
+mod edge_type_wire_format_tests {
+    //! Pins the manual Serialize/Deserialize impls to the byte format the
+    //! old `#[serde(rename_all = "snake_case")]` derive produced: a PLAIN
+    //! string. TraversalResult edges serialize into tool output — a shape
+    //! change here would corrupt every consumer.
+    use super::EdgeType;
+
+    #[test]
+    fn all_builtin_variants_serialize_as_plain_snake_case_strings() {
+        for (t, expect) in [
+            (EdgeType::SameSession, "same_session"),
+            (EdgeType::Temporal, "temporal"),
+            (EdgeType::TagOverlap, "tag_overlap"),
+            (EdgeType::DerivedFrom, "derived_from"),
+            (EdgeType::Enables, "enables"),
+            (EdgeType::Contradicts, "contradicts"),
+            (EdgeType::Refines, "refines"),
+            (EdgeType::DependsOn, "depends_on"),
+            (EdgeType::RelatedTo, "related_to"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(&t).unwrap(),
+                serde_json::Value::String(expect.to_string())
+            );
+            let back: EdgeType =
+                serde_json::from_value(serde_json::json!(expect)).unwrap();
+            assert_eq!(back, t);
+        }
+    }
+
+    #[test]
+    fn other_serializes_as_its_plain_string() {
+        let t = EdgeType::Other("has_trait".to_string());
+        assert_eq!(
+            serde_json::to_value(&t).unwrap(),
+            serde_json::Value::String("has_trait".to_string())
+        );
+        let back: EdgeType =
+            serde_json::from_value(serde_json::json!("has_trait")).unwrap();
+        assert_eq!(back, t);
+    }
+
+    #[test]
+    fn empty_edge_type_fails_deserialization() {
+        assert!(serde_json::from_value::<EdgeType>(serde_json::json!("")).is_err());
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -245,6 +381,10 @@ pub enum NodeType {
     Episodic,
     Semantic { category: SemanticCategory },
     Procedural { title: String },
+    /// Identity-graph node (`identity.graph` collection). `node_type` is
+    /// the graph's free-form per-intelligence type string (e.g. `trait`,
+    /// `soul_line`, `craft_virtue`).
+    Identity { node_type: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

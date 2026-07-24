@@ -149,8 +149,11 @@ pub async fn knowledge_unlink_edge(params: &str, db: &WardsonDbClient) -> String
         let Some((src_coll, src_id)) = parts[0].split_once(':') else {
             return "Error: source must be <collection>:<id>".into();
         };
-        let Some(edge_type) = EdgeType::from_str(parts[1]) else {
-            return format!("Error: Invalid edge type '{}'. Valid types: same_session, temporal, tag_overlap, derived_from, enables, contradicts, refines, depends_on, related_to", parts[1]);
+        // parse_lossy: free-form identity relations are addressable for
+        // deletion (they are directional → forward doc only). A deleted
+        // identity-projection edge is restored by the next boot reconcile.
+        let Some(edge_type) = EdgeType::parse_lossy(parts[1]) else {
+            return format!("Error: Invalid edge type '{}'. Built-in types: same_session, temporal, tag_overlap, derived_from, enables, contradicts, refines, depends_on, related_to — or any stored free-form relation", parts[1]);
         };
         let Some((tgt_coll, tgt_id)) = parts[2].split_once(':') else {
             return "Error: target must be <collection>:<id>".into();
@@ -425,9 +428,11 @@ pub async fn knowledge_traverse(
         .and_then(|s| s.parse().ok())
         .unwrap_or(config.kg_max_traversal_depth);
 
+    // parse_lossy: operators can filter on free-form identity relations
+    // (e.g. `has_trait`) — the built-in nine still parse to their variants.
     let edge_types: Option<Vec<EdgeType>> = toks.next().and_then(|s| {
         let parsed: Vec<EdgeType> = s.split(',')
-            .filter_map(EdgeType::from_str)
+            .filter_map(EdgeType::parse_lossy)
             .collect();
         if parsed.is_empty() { None } else { Some(parsed) }
     });
@@ -451,6 +456,7 @@ pub async fn knowledge_traverse(
             NodeType::Episodic => "episodic".to_string(),
             NodeType::Semantic { category } => format!("semantic/{}", category.as_str()),
             NodeType::Procedural { title } => format!("procedural: {}", title),
+            NodeType::Identity { node_type } => format!("identity/{}", node_type),
         };
         out.push_str(&format!("Starting node: \"{}\" ({})\n\n", start_node.content_preview, kind));
     }
@@ -1075,12 +1081,13 @@ const KG_DUMPS_DIR: &str = "/embra/workspace/KG_DUMPS";
 const DUMP_SCAN_PAGE: usize = 20_000;
 
 /// The dumpable collections as `(short_name, wardsondb_collection)` in
-/// canonical dump order: nodes first (entries, semantic, procedural), then
-/// edges. Short names are the tool-facing vocabulary.
+/// canonical dump order: nodes first (entries, semantic, procedural,
+/// identity), then edges. Short names are the tool-facing vocabulary.
 const DUMP_COLLECTIONS: &[(&str, &str)] = &[
     ("entries", "memory.entries"),
     ("semantic", "memory.semantic"),
     ("procedural", "memory.procedural"),
+    ("identity", crate::identity_graph::IDENTITY_COLLECTION),
     ("edges", "memory.edges"),
 ];
 
@@ -1108,7 +1115,7 @@ fn resolve_dump_collections(requested: Option<&[String]>) -> Result<Vec<&'static
     };
     if requested.is_empty() {
         return Err(
-            "collections is empty — omit it for a full dump, or pick from: entries, semantic, procedural, edges"
+            "collections is empty — omit it for a full dump, or pick from: entries, semantic, procedural, identity, edges"
                 .into(),
         );
     }
@@ -1118,7 +1125,7 @@ fn resolve_dump_collections(requested: Option<&[String]>) -> Result<Vec<&'static
             .any(|(short, _)| *short == name.as_str())
         {
             return Err(format!(
-                "Unknown collection '{}'. Valid: entries, semantic, procedural, edges",
+                "Unknown collection '{}'. Valid: entries, semantic, procedural, identity, edges",
                 name
             ));
         }
@@ -1130,18 +1137,17 @@ fn resolve_dump_collections(requested: Option<&[String]>) -> Result<Vec<&'static
         .collect())
 }
 
-/// Reject unknown edge types up front (all 9 stored types are dumpable —
-/// auto-derived and brain-created alike); an empty list is an error.
+/// Validate the edge-type restriction. Any non-empty token is dumpable —
+/// the nine built-ins plus free-form identity-projection relations (the
+/// `$in` filter matches stored strings verbatim); an empty list or an
+/// empty/whitespace token is an error.
 fn validate_dump_edge_types(edge_types: &[String]) -> Result<(), String> {
     if edge_types.is_empty() {
         return Err("edge_types is empty — omit it to dump all edge types".into());
     }
     for t in edge_types {
-        if EdgeType::from_str(t).is_none() {
-            return Err(format!(
-                "Unknown edge type '{}'. Valid: same_session, temporal, tag_overlap, derived_from, enables, contradicts, refines, depends_on, related_to",
-                t
-            ));
+        if t.trim().is_empty() {
+            return Err("edge_types contains an empty entry".into());
         }
     }
     Ok(())
@@ -1421,14 +1427,15 @@ mod dump_shape_tests {
                 "memory.entries",
                 "memory.semantic",
                 "memory.procedural",
+                "identity.graph",
                 "memory.edges"
             ]
         );
         // Selections are re-ordered canonically (nodes before edges), not
         // echoed in input order.
-        let sel = vec!["edges".to_string(), "semantic".to_string()];
+        let sel = vec!["edges".to_string(), "identity".to_string(), "semantic".to_string()];
         let some = resolve_dump_collections(Some(&sel)).unwrap();
-        assert_eq!(some, vec!["memory.semantic", "memory.edges"]);
+        assert_eq!(some, vec!["memory.semantic", "identity.graph", "memory.edges"]);
     }
 
     #[test]
@@ -1441,13 +1448,17 @@ mod dump_shape_tests {
     }
 
     #[test]
-    fn dump_edge_types_reject_unknown() {
-        let bad = vec!["enables".to_string(), "nope".to_string()];
-        let err = validate_dump_edge_types(&bad).unwrap_err();
-        assert!(err.contains("related_to"), "should list valid types: {err}");
+    fn dump_edge_types_accept_free_form_reject_empty() {
+        // Free-form identity relations are dumpable (the $in filter
+        // matches stored strings verbatim) alongside the built-in nine.
+        let mixed = vec!["enables".to_string(), "has_trait".to_string()];
+        assert!(validate_dump_edge_types(&mixed).is_ok());
         let good = vec!["same_session".to_string(), "depends_on".to_string()];
         assert!(validate_dump_edge_types(&good).is_ok());
+        // Empty list and empty/whitespace tokens are still errors.
         assert!(validate_dump_edge_types(&[]).is_err());
+        let blank = vec!["enables".to_string(), "  ".to_string()];
+        assert!(validate_dump_edge_types(&blank).is_err());
     }
 
     #[test]

@@ -135,6 +135,14 @@ pub(crate) fn graph_node_from_doc(
             let desc = doc.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
             (desc, NodeType::Procedural { title })
         }
+        crate::identity_graph::IDENTITY_COLLECTION => {
+            let node_type = doc.get("node_type").and_then(|v| v.as_str())
+                .unwrap_or("").to_string();
+            (
+                doc.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                NodeType::Identity { node_type },
+            )
+        }
         _ => (String::new(), NodeType::Episodic),
     };
     GraphNode {
@@ -166,6 +174,27 @@ mod node_store_tests {
         assert!(store.get("memory.semantic", "42").is_none());
         // Same id in a different collection is a different node.
         assert!(store.get("memory.procedural", "a").is_none());
+    }
+
+    #[test]
+    fn graph_node_from_doc_classifies_identity_collection() {
+        let doc = json!({
+            "_id": "truth_over_comfort",
+            "content": "Truth over comfort.",
+            "node_type": "value",
+            "origin": "import"
+        });
+        let node = graph_node_from_doc(&doc, "identity.graph", "truth_over_comfort", 1);
+        assert_eq!(node.content_preview, "Truth over comfort.");
+        match node.node_type {
+            NodeType::Identity { ref node_type } => assert_eq!(node_type, "value"),
+            ref other => panic!("expected Identity node type, got {:?}", other),
+        }
+        // Genuinely unknown collections keep the empty-preview episodic
+        // degradation (unchanged behavior).
+        let unknown = graph_node_from_doc(&doc, "some.future", "x", 1);
+        assert_eq!(unknown.content_preview, "");
+        assert!(matches!(unknown.node_type, NodeType::Episodic));
     }
 
     #[test]

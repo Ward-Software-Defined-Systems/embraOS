@@ -240,6 +240,18 @@ fn insert_collected(
             let desc = doc.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
             (desc, NodeType::Procedural { title }, 1.0)
         }
+        crate::identity_graph::IDENTITY_COLLECTION => {
+            // Identity nodes reach here only via Step-4 graph expansion
+            // (they are deliberately absent from the bulk prefetch — the
+            // full sealed graph already rides the system prompt).
+            let node_type = doc.get("node_type").and_then(|v| v.as_str())
+                .unwrap_or("").to_string();
+            (
+                doc.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                NodeType::Identity { node_type },
+                1.0,
+            )
+        }
         _ => (
             doc.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             NodeType::Episodic,
