@@ -56,7 +56,7 @@ pub struct SessionMeta {
     /// every existing meta. Sprint 4 adds the field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
-    /// Display model name (e.g. `"opus-4.7"`, `"gemini-3.1-pro"`).
+    /// Display model name (e.g. `"opus-5"`, `"gemini-3.1-pro"`).
     /// Same defaulting rule as `provider`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -229,7 +229,7 @@ impl SessionManager {
                         .anthropic_model
                         .clone()
                         .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| "opus-4.8".to_string()),
+                        .unwrap_or_else(|| "opus-5".to_string()),
                 };
                 (Some(cfg.api_provider), Some(m))
             }

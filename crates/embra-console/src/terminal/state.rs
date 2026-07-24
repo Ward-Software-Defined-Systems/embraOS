@@ -166,9 +166,9 @@ pub struct AppState {
     pub config_name: String,
     pub config_version: String,
     pub config_tz: String,
-    /// Active LLM model display name (e.g. `"opus-4.8"`,
+    /// Active LLM model display name (e.g. `"opus-5"`,
     /// `"gemini-3.1-pro"`). Updated from the `Brain: …` token in
-    /// ModeTransition messages; defaults to opus-4.8 for first-paint
+    /// ModeTransition messages; defaults to opus-5 for first-paint
     /// before any transition arrives.
     pub provider_model: String,
     pub pasted_lines: Option<Vec<String>>,
@@ -232,7 +232,7 @@ impl AppState {
             config_name: "embraOS".to_string(),
             config_version: env!("CARGO_PKG_VERSION").to_string(),
             config_tz: "UTC".to_string(),
-            provider_model: "opus-4.8".to_string(),
+            provider_model: "opus-5".to_string(),
             pasted_lines: None,
             stop_requested: false,
             multiline_mode: false,

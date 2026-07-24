@@ -104,7 +104,7 @@ const SPECS: &[Spec] = &[
         note: "Switch the Anthropic model (next message), or show current.",
         join: " ", guided: false,
         fields: &[sel("Model",
-            &["(show current)", "opus-4.7", "opus-4.8", "fable-5"], false)] },
+            &["(show current)", "opus-5", "fable-5"], false)] },
     Spec { cmd: "/effort", title: "Anthropic effort",
         note: "Set output_config.effort (next message), or show current. Default max.",
         join: " ", guided: false,

@@ -1955,7 +1955,7 @@ async fn handle_request(
             let active_provider = cfg.as_ref().map(|c| c.api_provider.clone()).unwrap_or_else(|| "anthropic".to_string());
             let model = match cfg.as_ref() {
                 Some(c) => display_model_for(&active_provider, c),
-                None => "opus-4.8".to_string(),
+                None => crate::provider::anthropic::DEFAULT_DISPLAY_NAME.to_string(),
             };
             let _ = tx.send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::ModeChange(
@@ -2082,7 +2082,7 @@ async fn handle_slash_command(
         .unwrap_or_else(|| "anthropic".to_string());
     let model = match cfg_loaded.as_ref() {
         Some(c) => display_model_for(&active_provider, c),
-        None => "opus-4.8".to_string(),
+        None => crate::provider::anthropic::DEFAULT_DISPLAY_NAME.to_string(),
     };
     let send_session_update = {
         let config_name = config_name.clone();
@@ -2111,7 +2111,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-4.7|opus-4.8|fable-5> Switch the Anthropic model (next message)\n  /effort                            Show the Anthropic effort level\n  /effort <low|medium|high|xhigh|max>  Set effort (default max, next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-5|fable-5>            Switch the Anthropic model (next message)\n  /effort                            Show the Anthropic effort level\n  /effort <low|medium|high|xhigh|max>  Set effort (default max, next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -2823,7 +2823,7 @@ async fn handle_provider_command(
                 .unwrap_or_else(|| "anthropic".to_string());
             let model = match cfg.as_ref() {
                 Some(c) => display_model_for(&provider, c),
-                None => "opus-4.8".to_string(),
+                None => crate::provider::anthropic::DEFAULT_DISPLAY_NAME.to_string(),
             };
             let session = session_mgr
                 .read()
@@ -3511,7 +3511,7 @@ fn display_model_for(provider: &str, config: &config::SystemConfig) -> String {
                 config.openai_compat.lm_studio_model.clone()
             }
         }
-        _ => "opus-4.8".to_string(),
+        _ => crate::provider::anthropic::DEFAULT_DISPLAY_NAME.to_string(),
     }
 }
 
@@ -4162,9 +4162,10 @@ fn resolve_gemini_model_id_inner(env: Option<&str>, cfg_field: Option<&str>) -> 
 /// 1. `EMBRA_ANTHROPIC_MODEL` env var (boot/dev override).
 /// 2. `config.anthropic_model` (persistent, set via `/model`).
 /// 3. The provider's [`DEFAULT_MODEL`](crate::provider::anthropic::DEFAULT_MODEL)
-///    (`claude-opus-4-8`).
+///    (`claude-opus-5`).
 /// The request shape is identical across supported Anthropic models
-/// (Opus 4.7/4.8, Fable 5), so this only swaps the `model` id + display
+/// (Opus 5, Fable 5 — and the legacy 4.7/4.8), so this only swaps the
+/// `model` id + display
 /// name. Inner fn is pure for env-race-free tests.
 fn resolve_anthropic_model(cfg: &config::SystemConfig) -> (String, String) {
     let env_override = std::env::var("EMBRA_ANTHROPIC_MODEL").ok();
@@ -4189,17 +4190,18 @@ fn resolve_anthropic_model_inner(
     }
 }
 
-/// Map a known model alias to `(api_id, display)`. The `/model` command only
-/// accepts these (so a typo can't persist a bogus id that 400s every turn);
-/// the resolver additionally allows env/config passthrough for a model this
-/// build predates — see [`normalize_anthropic_model`].
+/// Map a SELECTABLE model alias to `(api_id, display)`. The `/model` command
+/// only accepts these (so a typo can't persist a bogus id that 400s every
+/// turn). The Anthropic line-up narrowed to Opus 5 + Fable 5 on 2026-07-24
+/// (4.7/4.8 retired from selection — William's call: two models is enough
+/// Anthropic coverage); previously-persisted 4.7/4.8 aliases keep resolving
+/// via [`canonicalize_legacy_anthropic_alias`], and the resolver additionally
+/// allows env/config passthrough for a model this build predates — see
+/// [`normalize_anthropic_model`].
 fn parse_anthropic_model_choice(s: &str) -> Option<(&'static str, &'static str)> {
     match s.trim().to_ascii_lowercase().as_str() {
-        "opus-4.8" | "4.8" | "opus4.8" | "claude-opus-4-8" => {
-            Some(("claude-opus-4-8", "opus-4.8"))
-        }
-        "opus-4.7" | "4.7" | "opus4.7" | "claude-opus-4-7" => {
-            Some(("claude-opus-4-7", "opus-4.7"))
+        "opus-5" | "opus5" | "opus" | "5" | "claude-opus-5" => {
+            Some(("claude-opus-5", "opus-5"))
         }
         "fable-5" | "fable5" | "fable" | "claude-fable-5" => {
             Some(("claude-fable-5", "fable-5"))
@@ -4208,11 +4210,30 @@ fn parse_anthropic_model_choice(s: &str) -> Option<(&'static str, &'static str)>
     }
 }
 
-/// Resolve a raw value to `(api_id, display)`. Known aliases canonicalize;
-/// anything else passes through unchanged (forward-compat — the operator
-/// owns the exact id via env/config when the build predates the model).
+/// LEGACY alias canonicalization — NOT selectable via `/model`, but a
+/// persisted `anthropic_model` of `"opus-4.8"`/`"opus-4.7"` (wizard-seeded
+/// before 2026-07-24, or the frozen v9 backfill) must keep resolving to its
+/// real API id forever: dropping these arms would send the bare alias as
+/// the model id and 400 every turn on an existing instance. The models stay
+/// served by the API; the operator moves off them explicitly via `/model`.
+fn canonicalize_legacy_anthropic_alias(s: &str) -> Option<(&'static str, &'static str)> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "opus-4.8" | "4.8" | "opus4.8" | "claude-opus-4-8" => {
+            Some(("claude-opus-4-8", "opus-4.8"))
+        }
+        "opus-4.7" | "4.7" | "opus4.7" | "claude-opus-4-7" => {
+            Some(("claude-opus-4-7", "opus-4.7"))
+        }
+        _ => None,
+    }
+}
+
+/// Resolve a raw value to `(api_id, display)`. Selectable aliases and legacy
+/// persisted aliases canonicalize; anything else passes through unchanged
+/// (forward-compat — the operator owns the exact id via env/config when the
+/// build predates the model).
 fn normalize_anthropic_model(s: &str) -> (String, String) {
-    match parse_anthropic_model_choice(s) {
+    match parse_anthropic_model_choice(s).or_else(|| canonicalize_legacy_anthropic_alias(s)) {
         Some((id, disp)) => (id.to_string(), disp.to_string()),
         None => (s.to_string(), s.to_string()),
     }
@@ -4252,7 +4273,7 @@ fn resolve_anthropic_effort_inner(env: Option<&str>, cfg_field: Option<&str>) ->
         .to_string()
 }
 
-/// `/model [<opus-4.7|opus-4.8|fable-5>]` — show or switch the Anthropic
+/// `/model [<opus-5|fable-5>]` — show or switch the Anthropic
 /// model. Persists `SystemConfig.anthropic_model`; the loop driver rebuilds
 /// the provider per-turn from config, so a switch takes effect on the next
 /// user message. Only meaningful for the Anthropic provider (Gemini /
@@ -4301,7 +4322,7 @@ async fn handle_model_command(
         let current = display_model_for(&active, &cfg);
         let msg = if active == "anthropic" {
             format!(
-                "Anthropic model: {current}. Options: opus-4.7, opus-4.8, fable-5. \
+                "Anthropic model: {current}. Options: opus-5, fable-5. \
                  Use `/model fable-5` to switch (takes effect on your next message)."
             )
         } else {
@@ -4327,14 +4348,21 @@ async fn handle_model_command(
     }
 
     let Some((_id, display)) = parse_anthropic_model_choice(trimmed) else {
-        send(
+        // Legacy 4.7/4.8 aliases get a tailored message: they still RESOLVE
+        // (persisted configs keep working) but are no longer selectable.
+        let msg = if canonicalize_legacy_anthropic_alias(trimmed).is_some() {
             format!(
-                "'{trimmed}' is not a recognized Anthropic model. Options: opus-4.7, \
-                 opus-4.8, fable-5."
-            ),
-            SystemMessageType::Error,
-        )
-        .await;
+                "'{trimmed}' was retired from the selectable line-up on 2026-07-24 \
+                 (an instance already persisted on it keeps working). Options: \
+                 opus-5, fable-5."
+            )
+        } else {
+            format!(
+                "'{trimmed}' is not a recognized Anthropic model. Options: opus-5, \
+                 fable-5."
+            )
+        };
+        send(msg, SystemMessageType::Error).await;
         return;
     };
 
@@ -4725,7 +4753,7 @@ async fn run_learning_loop(
 
     // Send mode transition. Sprint 4: include Brain: <model> so the
     // console status bar refreshes during learning (would otherwise
-    // sit on the default "opus-4.8" until next session-attach).
+    // sit on the default "opus-5" until next session-attach).
     let learning_model = display_model_for(&config.api_provider, &config);
     let _ = tx.send(Ok(ConversationResponse {
         response_type: Some(conversation_response::ResponseType::ModeChange(
@@ -5850,11 +5878,11 @@ mod native_loop_tests {
     #[test]
     fn display_model_maps_known_providers() {
         let cfg = empty_config();
-        assert_eq!(display_model_for("anthropic", &cfg), "opus-4.8");
+        assert_eq!(display_model_for("anthropic", &cfg), "opus-5");
         assert_eq!(display_model_for("gemini", &cfg), "gemini-3.1-pro");
         // Unknown defaults to anthropic display (defensive — never
         // shows an empty model name).
-        assert_eq!(display_model_for("unknown", &cfg), "opus-4.8");
+        assert_eq!(display_model_for("unknown", &cfg), "opus-5");
     }
 
     #[test]
@@ -6820,7 +6848,7 @@ mod soul_sealed_mode_change_tests {
         assert!(msg.contains("Name: Aria"), "got: {msg}");
         assert!(msg.contains("TZ: America/New_York"), "got: {msg}");
         // anthropic default display model
-        assert!(msg.contains("Brain: opus-4.8"), "got: {msg}");
+        assert!(msg.contains("Brain: opus-5"), "got: {msg}");
     }
 
     #[test]
@@ -6842,22 +6870,22 @@ mod anthropic_model_tests {
     //! the request body); the inner resolver is pure so the env var isn't
     //! mutated across the suite (same discipline as the Gemini resolver).
     use super::{
-        normalize_anthropic_model, parse_anthropic_model_choice, resolve_anthropic_model_inner,
+        canonicalize_legacy_anthropic_alias, normalize_anthropic_model,
+        parse_anthropic_model_choice, resolve_anthropic_model_inner,
     };
 
     #[test]
-    fn defaults_to_opus_4_8_when_unset() {
+    fn defaults_to_opus_5_when_unset() {
         let (id, disp) = resolve_anthropic_model_inner(None, None);
-        assert_eq!(id, "claude-opus-4-8");
-        assert_eq!(disp, "opus-4.8");
+        assert_eq!(id, "claude-opus-5");
+        assert_eq!(disp, "opus-5");
     }
 
     #[test]
-    fn config_field_selects_opus_4_7() {
-        // 4.7 is still selectable explicitly now that it's non-default.
-        let (id, disp) = resolve_anthropic_model_inner(None, Some("opus-4.7"));
-        assert_eq!(id, "claude-opus-4-7");
-        assert_eq!(disp, "opus-4.7");
+    fn config_field_selects_opus_5() {
+        let (id, disp) = resolve_anthropic_model_inner(None, Some("opus-5"));
+        assert_eq!(id, "claude-opus-5");
+        assert_eq!(disp, "opus-5");
     }
 
     #[test]
@@ -6869,29 +6897,22 @@ mod anthropic_model_tests {
 
     #[test]
     fn env_overrides_config() {
-        let (id, _) = resolve_anthropic_model_inner(Some("fable-5"), Some("opus-4.7"));
+        let (id, _) = resolve_anthropic_model_inner(Some("fable-5"), Some("opus-5"));
         assert_eq!(id, "claude-fable-5");
     }
 
     #[test]
     fn blank_values_fall_through_to_default() {
         let (id, _) = resolve_anthropic_model_inner(Some("  "), Some(""));
-        assert_eq!(id, "claude-opus-4-8");
+        assert_eq!(id, "claude-opus-5");
     }
 
     #[test]
     fn aliases_canonicalize() {
-        for s in ["opus-4.8", "4.8", "claude-opus-4-8", "OPUS-4.8"] {
+        for s in ["opus-5", "opus5", "opus", "5", "claude-opus-5", "OPUS-5"] {
             assert_eq!(
                 parse_anthropic_model_choice(s),
-                Some(("claude-opus-4-8", "opus-4.8")),
-                "input: {s}"
-            );
-        }
-        for s in ["opus-4.7", "4.7", "claude-opus-4-7"] {
-            assert_eq!(
-                parse_anthropic_model_choice(s),
-                Some(("claude-opus-4-7", "opus-4.7")),
+                Some(("claude-opus-5", "opus-5")),
                 "input: {s}"
             );
         }
@@ -6904,14 +6925,43 @@ mod anthropic_model_tests {
         }
     }
 
+    /// The 400-trap guard: persisted `"opus-4.8"`/`"opus-4.7"` aliases
+    /// (wizard-seeded pre-2026-07-24, or the frozen v9 backfill) are no
+    /// longer SELECTABLE but must keep RESOLVING to their real API ids —
+    /// a bare-alias passthrough would 400 every turn on an existing
+    /// instance.
+    #[test]
+    fn legacy_aliases_resolve_but_are_not_selectable() {
+        for (s, id, disp) in [
+            ("opus-4.8", "claude-opus-4-8", "opus-4.8"),
+            ("4.8", "claude-opus-4-8", "opus-4.8"),
+            ("claude-opus-4-8", "claude-opus-4-8", "opus-4.8"),
+            ("opus-4.7", "claude-opus-4-7", "opus-4.7"),
+            ("claude-opus-4-7", "claude-opus-4-7", "opus-4.7"),
+        ] {
+            assert_eq!(parse_anthropic_model_choice(s), None, "selectable: {s}");
+            assert_eq!(
+                canonicalize_legacy_anthropic_alias(s),
+                Some((id, disp)),
+                "legacy: {s}"
+            );
+            let (rid, rdisp) = normalize_anthropic_model(s);
+            assert_eq!((rid.as_str(), rdisp.as_str()), (id, disp), "resolve: {s}");
+        }
+        // Full resolver path: a persisted legacy config keeps working.
+        let (id, disp) = resolve_anthropic_model_inner(None, Some("opus-4.8"));
+        assert_eq!(id, "claude-opus-4-8");
+        assert_eq!(disp, "opus-4.8");
+    }
+
     #[test]
     fn unknown_choice_rejected_but_resolver_passes_through() {
         // `/model` rejects unknown choices…
         assert_eq!(parse_anthropic_model_choice("opus-9"), None);
         // …but env/config passthrough allows a future id this build predates.
-        let (id, disp) = normalize_anthropic_model("claude-opus-5-0");
-        assert_eq!(id, "claude-opus-5-0");
-        assert_eq!(disp, "claude-opus-5-0");
+        let (id, disp) = normalize_anthropic_model("claude-opus-6");
+        assert_eq!(id, "claude-opus-6");
+        assert_eq!(disp, "claude-opus-6");
     }
 }
 

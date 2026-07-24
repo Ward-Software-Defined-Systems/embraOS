@@ -55,9 +55,10 @@ pub struct SystemConfig {
     /// env var which takes precedence over this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gemini_model: Option<String>,
-    /// Active Anthropic model alias (e.g. `"opus-4.8"`, `"opus-4.7"`,
-    /// `"fable-5"`). `None` (additive default) means the provider's
-    /// `DEFAULT_MODEL` (`claude-opus-4-8`). The brain also honors the
+    /// Active Anthropic model alias (e.g. `"opus-5"`, `"fable-5"`; legacy
+    /// persisted values `"opus-4.8"`/`"opus-4.7"` keep resolving). `None`
+    /// (additive default) means the provider's
+    /// `DEFAULT_MODEL` (`claude-opus-5`). The brain also honors the
     /// `EMBRA_ANTHROPIC_MODEL` env var, which takes precedence. Settable
     /// at runtime via `/model`; the request shape (adaptive thinking,
     /// tunable `effort`) is identical across supported models, so this
@@ -205,8 +206,7 @@ fn default_kg_traversal_edge_limit() -> u32 { 500 }
 fn default_kg_traversal_node_budget() -> u32 { 1000 }
 fn default_api_provider() -> String { "anthropic".to_string() }
 
-const PROVIDER_ANTHROPIC_LABEL: &str = "Anthropic Claude Opus 4.7";
-const PROVIDER_ANTHROPIC_48_LABEL: &str = "Anthropic Claude Opus 4.8";
+const PROVIDER_ANTHROPIC_OPUS5_LABEL: &str = "Anthropic Claude Opus 5";
 const PROVIDER_ANTHROPIC_FABLE_LABEL: &str = "Anthropic Claude Fable 5";
 const PROVIDER_GEMINI_LABEL: &str = "Google Gemini 3.1 Pro";
 const PROVIDER_OLLAMA_LABEL: &str = "Ollama (OpenAI-compat)";
@@ -217,7 +217,7 @@ fn provider_from_label(label: &str) -> ProviderKind {
         PROVIDER_GEMINI_LABEL => ProviderKind::Gemini,
         PROVIDER_OLLAMA_LABEL => ProviderKind::Ollama,
         PROVIDER_LM_STUDIO_LABEL => ProviderKind::LmStudio,
-        // All Anthropic labels (Opus 4.7 / 4.8, Fable 5) map here; the
+        // All Anthropic labels (Opus 5, Fable 5) map here; the
         // chosen model is captured separately by `anthropic_model_from_label`.
         _ => ProviderKind::Anthropic,
     }
@@ -231,8 +231,7 @@ fn provider_from_label(label: &str) -> ProviderKind {
 /// `None`. Later switchable at runtime via `/model`.
 fn anthropic_model_from_label(label: &str) -> Option<String> {
     match label {
-        PROVIDER_ANTHROPIC_LABEL => Some("opus-4.7".to_string()),
-        PROVIDER_ANTHROPIC_48_LABEL => Some("opus-4.8".to_string()),
+        PROVIDER_ANTHROPIC_OPUS5_LABEL => Some("opus-5".to_string()),
         PROVIDER_ANTHROPIC_FABLE_LABEL => Some("fable-5".to_string()),
         _ => None,
     }
@@ -527,31 +526,31 @@ pub async fn run_config_wizard_grpc(
     };
     info!("Config wizard: name = {}", name);
 
-    // Step 2: Provider selection (Sprint 4 → Sprint 5 4-way, +Fable 5) —
-    // Selector UI. Default tracks the provider's DEFAULT_MODEL (Opus 4.8).
+    // Step 2: Provider selection (Sprint 4 → Sprint 5 4-way, then the
+    // Anthropic line-up: Opus 5 + Fable 5 since 2026-07-24) — Selector UI.
+    // Default tracks the provider's DEFAULT_MODEL (Opus 5).
     let _ = tx.send(Ok(ConversationResponse {
         response_type: Some(conversation_response::ResponseType::Setup(
             SetupPrompt {
                 field_type: SetupFieldType::Selector as i32,
                 prompt: "Which AI provider would you like to use?".to_string(),
                 options: vec![
-                    PROVIDER_ANTHROPIC_LABEL.to_string(),
-                    PROVIDER_ANTHROPIC_48_LABEL.to_string(),
+                    PROVIDER_ANTHROPIC_OPUS5_LABEL.to_string(),
                     PROVIDER_ANTHROPIC_FABLE_LABEL.to_string(),
                     PROVIDER_GEMINI_LABEL.to_string(),
                     PROVIDER_OLLAMA_LABEL.to_string(),
                     PROVIDER_LM_STUDIO_LABEL.to_string(),
                 ],
-                default_value: PROVIDER_ANTHROPIC_48_LABEL.to_string(),
+                default_value: PROVIDER_ANTHROPIC_OPUS5_LABEL.to_string(),
             }
         )),
     })).await;
     let provider_choice = match response_rx.recv().await {
         Some(input) if !input.is_empty() => input,
-        _ => PROVIDER_ANTHROPIC_48_LABEL.to_string(),
+        _ => PROVIDER_ANTHROPIC_OPUS5_LABEL.to_string(),
     };
     let provider_kind = provider_from_label(&provider_choice);
-    // Capture the chosen Anthropic model (Opus 4.7/4.8, Fable 5) for the
+    // Capture the chosen Anthropic model (Opus 5, Fable 5) for the
     // Anthropic path; persisted below as `SystemConfig.anthropic_model`.
     let anthropic_model = anthropic_model_from_label(&provider_choice);
     info!(
@@ -904,7 +903,7 @@ pub async fn run_config_wizard_grpc(
         OperatingMode::Learning
     };
     // Sprint 4: include the active model so the console status bar
-    // refreshes from its default ("opus-4.8") to whatever provider
+    // refreshes from its default ("opus-5") to whatever provider
     // the operator just selected. Inline match — display_model_for
     // lives in grpc_service.rs and we don't want a circular dep.
     // Sprint 5: OpenAI-compat presets show the operator-selected
@@ -934,7 +933,7 @@ pub async fn run_config_wizard_grpc(
             .anthropic_model
             .clone()
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "opus-4.8".to_string()),
+            .unwrap_or_else(|| "opus-5".to_string()),
     };
     let _ = tx.send(Ok(ConversationResponse {
         response_type: Some(conversation_response::ResponseType::ModeChange(
@@ -1170,22 +1169,21 @@ mod kg_traversal_config_tests {
 #[cfg(test)]
 mod provider_label_tests {
     //! Wizard provider-selection labels → (ProviderKind, anthropic_model).
-    //! All three Anthropic entries resolve to the Anthropic provider and
+    //! Both Anthropic entries resolve to the Anthropic provider and
     //! each seeds `anthropic_model` EXPLICITLY (a wizard choice must keep
     //! meaning what the operator picked even if `DEFAULT_MODEL` moves —
-    //! it did, 4.7 → 4.8). The selector itself is server-driven, so the
-    //! console and chat-mobile UIs render whichever labels appear here.
+    //! it did, 4.7 → 4.8 → 5). The selector itself is server-driven, so
+    //! the console and chat-mobile UIs render whichever labels appear here.
     use super::{
-        anthropic_model_from_label, provider_from_label, PROVIDER_ANTHROPIC_48_LABEL,
-        PROVIDER_ANTHROPIC_FABLE_LABEL, PROVIDER_ANTHROPIC_LABEL, PROVIDER_GEMINI_LABEL,
+        anthropic_model_from_label, provider_from_label,
+        PROVIDER_ANTHROPIC_FABLE_LABEL, PROVIDER_ANTHROPIC_OPUS5_LABEL, PROVIDER_GEMINI_LABEL,
     };
     use crate::provider::ProviderKind;
 
     #[test]
     fn all_anthropic_labels_map_to_anthropic() {
         for label in [
-            PROVIDER_ANTHROPIC_LABEL,
-            PROVIDER_ANTHROPIC_48_LABEL,
+            PROVIDER_ANTHROPIC_OPUS5_LABEL,
             PROVIDER_ANTHROPIC_FABLE_LABEL,
         ] {
             assert_eq!(provider_from_label(label), ProviderKind::Anthropic);
@@ -1195,12 +1193,8 @@ mod provider_label_tests {
     #[test]
     fn anthropic_labels_seed_expected_models() {
         assert_eq!(
-            anthropic_model_from_label(PROVIDER_ANTHROPIC_LABEL),
-            Some("opus-4.7".to_string())
-        );
-        assert_eq!(
-            anthropic_model_from_label(PROVIDER_ANTHROPIC_48_LABEL),
-            Some("opus-4.8".to_string())
+            anthropic_model_from_label(PROVIDER_ANTHROPIC_OPUS5_LABEL),
+            Some("opus-5".to_string())
         );
         assert_eq!(
             anthropic_model_from_label(PROVIDER_ANTHROPIC_FABLE_LABEL),

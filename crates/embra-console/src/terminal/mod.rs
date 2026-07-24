@@ -867,7 +867,7 @@ mod reasoning_tests {
             ConsoleEvent::ModeTransition {
                 from_mode: 3,
                 to_mode: 3,
-                message: "Operational — Name: Embra — Session: main — TZ: UTC — Brain: opus-4.8"
+                message: "Operational — Name: Embra — Session: main — TZ: UTC — Brain: opus-5"
                     .to_string(),
             },
             &mut app,

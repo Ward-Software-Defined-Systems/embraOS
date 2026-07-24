@@ -1,8 +1,12 @@
-//! Anthropic provider: `claude-opus-4-8` (default), `claude-opus-4-7`, or
-//! `claude-fable-5` via `/v1/messages`. The model id is per-instance
-//! (`with_model`); the request shape — adaptive thinking, `effort`
-//! (default `max`), prompt-caching beta — is identical across supported
-//! models, so switching models changes only the `model` field.
+//! Anthropic provider: `claude-opus-5` (default) or `claude-fable-5` via
+//! `/v1/messages` (legacy persisted `claude-opus-4-8`/`claude-opus-4-7`
+//! instances keep resolving — see the grpc_service resolver). The model id
+//! is per-instance (`with_model`); the request shape — adaptive thinking,
+//! `effort` (default `max`), prompt-caching beta — is identical across
+//! supported models, so switching models changes only the `model` field.
+//! (Opus 5 additions verified against the API reference: thinking is on by
+//! default there — our explicit `adaptive` is equivalent — and
+//! `thinking:disabled` is effort-capped, which we never send.)
 //!
 //! Implements `LlmProvider` over the `/v1/messages` streaming endpoint.
 //! Internal structure:
@@ -35,13 +39,13 @@ use crate::provider::{
 use crate::tools::registry::ToolDescriptor;
 
 /// Default Anthropic model when none is configured. `with_model` overrides
-/// it (e.g. `claude-opus-4-7` or `claude-fable-5`); the resolver in
-/// `grpc_service.rs` picks the active id from env/config.
-pub const DEFAULT_MODEL: &str = "claude-opus-4-8";
+/// it (e.g. `claude-fable-5`, or a legacy `claude-opus-4-8`); the resolver
+/// in `grpc_service.rs` picks the active id from env/config.
+pub const DEFAULT_MODEL: &str = "claude-opus-5";
 const MAX_TOKENS: u32 = 128_000;
 /// Default `output_config.effort`. Runtime-tunable via `/effort`
 /// (`with_effort`); the full `low..max` range is valid on every
-/// supported model (Opus 4.7/4.8, Fable 5).
+/// supported model (Opus 5, Fable 5 — and the legacy 4.7/4.8).
 const DEFAULT_EFFORT: &str = "max";
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const API_VERSION: &str = "2023-06-01";
@@ -65,13 +69,13 @@ const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// Gemini provider precedent.
 const RETRY_DELAYS_SECS: &[u64] = &[1, 2, 4, 8, 16, 32, 60];
 /// Display name paired with [`DEFAULT_MODEL`] for the status bar.
-pub const DEFAULT_DISPLAY_NAME: &str = "opus-4.8";
+pub const DEFAULT_DISPLAY_NAME: &str = "opus-5";
 
 pub struct AnthropicProvider {
     api_key: String,
-    /// API model id sent in the request body (e.g. `claude-opus-4-8`).
+    /// API model id sent in the request body (e.g. `claude-opus-5`).
     model: String,
-    /// Short display name (e.g. `opus-4.8`); backs the
+    /// Short display name (e.g. `opus-5`); backs the
     /// `LlmProvider::display_name` accessor, exercised in tests like the
     /// sibling Gemini / OpenAI-compat providers' equivalent field.
     display_name: String,
@@ -127,8 +131,8 @@ impl AnthropicProvider {
 
     /// Build the `/v1/messages` request body. Pure (no I/O) so the exact
     /// shape is unit-testable per model — the shape is identical across
-    /// supported models (Opus 4.7/4.8, Fable 5); only `model` and the
-    /// configured `effort` vary per instance.
+    /// supported models (Opus 5, Fable 5; legacy 4.7/4.8 unchanged); only
+    /// `model` and the configured `effort` vary per instance.
     ///
     /// Request body matches the pre-refactor send_message_streaming_with_tools
     /// exactly — same model id, max_tokens, thinking config,
@@ -543,15 +547,17 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
-    fn new_defaults_to_opus_4_8() {
+    fn new_defaults_to_opus_5() {
         let p = AnthropicProvider::new(String::new());
-        assert_eq!(p.model, "claude-opus-4-8");
-        assert_eq!(p.display_name(), "opus-4.8");
+        assert_eq!(p.model, "claude-opus-5");
+        assert_eq!(p.display_name(), "opus-5");
         assert_eq!(p.effort, "max");
     }
 
     #[test]
-    fn with_model_sets_opus_4_7() {
+    fn with_model_sets_legacy_opus_4_7() {
+        // Legacy persisted instances still construct providers with the
+        // retired ids — with_model must pass any id through untouched.
         let p = AnthropicProvider::with_model(
             String::new(),
             "claude-opus-4-7".to_string(),
@@ -781,8 +787,8 @@ mod tests {
         // Same shape as an Opus instance modulo the model id.
         let opus = AnthropicProvider::with_model(
             String::new(),
-            "claude-opus-4-8".to_string(),
-            "opus-4.8".to_string(),
+            "claude-opus-5".to_string(),
+            "opus-5".to_string(),
         );
         let mut opus_body =
             opus.request_body("sys", vec![json!({"role": "user"})], &tools, &opts);
