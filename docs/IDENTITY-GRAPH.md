@@ -138,9 +138,12 @@ loop-mounted partition.
    `LOOPDEV=$(sudo losetup --find --show --partscan embraos.img)` then
    mount partition 4 (DATA) somewhere writable.
 4. Run the vendored server against it:
-   `cargo run -p wardsondb -- --data-dir <mount>/wardsondb --port 8099`
-   (it honors the `.engine` marker; check `--help` for the exact flags of
-   your build).
+   `cargo run -p wardsondb -- --data-dir <mount>/wardsondb --port 8099 --storage-engine <fjall|rocksdb>`
+   — `--storage-engine` is REQUIRED (no default) and must match the
+   engine the instance was built with; the data dir's `.engine` marker
+   locks it and the server errors on a mismatch, so a wrong pick fails
+   loudly rather than corrupting anything. No `--api-key` → no auth
+   headers needed on the curl calls below.
 5. Delete the two learning anchors — note the asymmetry:
    - `curl -X DELETE http://127.0.0.1:8099/soul.invariant` — the whole
      **collection** (sealed-state gates check collection existence);
