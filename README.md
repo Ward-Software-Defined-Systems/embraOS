@@ -79,7 +79,7 @@ Phase 2–5 add A/B partitioned rollback, an `embractl` management CLI, bare-met
 
 ## What embraOS does
 
-On first boot, a six-phase guided setup (`crates/embra-brain/src/learning/mod.rs::LearningPhase`) collects an operator-provided name, identity, values, and initial toolset into a JSON document. Approving the document serializes it with `serde_json::to_string_pretty`, writes it to `soul.invariant` in WardSONDB, and writes its SHA-256 hash to `/embra/state/soul.sha256`. `embra-trustd` recomputes that hash on every subsequent boot and HALTs the system on mismatch (first boot is allowed).
+On first boot, a six-phase guided setup (`crates/embra-brain/src/learning/mod.rs::LearningPhase`) collects an operator-provided name, identity, values, and initial toolset — or imports a pre-built intelligence from an `Imported_Intelligence/*.graph.json` file, offered after the user-profile phase. Approval transforms what was collected into a canonical IDENTITY+SOUL knowledge graph (`{format:"graph.v1", name, nodes, edges}`), serializes it with `serde_json::to_string_pretty`, writes it to `soul.invariant` in WardSONDB, and writes its SHA-256 hash to `/embra/state/soul.sha256`. `embra-trustd` recomputes that hash on every subsequent boot and HALTs the system on mismatch (first boot is allowed; instances sealed before the graph representation keep verifying their flat soul byte-identically).
 
 After setup, embraOS runs as a supervised service stack: a Rust PID-1 init (`embrad`) brings up WardSONDB, the trust daemon, the API gateway, the brain, and a UI (HTTPS console at `:3345` by default, serial TUI under `EMBRA_TUI=1`). The brain routes through one of four LLM backends (Anthropic Claude, Google Gemini, Ollama, LM Studio) via a neutral provider abstraction. Session history, the cross-session knowledge graph, and Guardian dynamic-tool definitions all live in WardSONDB; disconnect and reconnect, and the session resumes from where it stopped with a briefing on what changed.
 
@@ -87,9 +87,9 @@ After setup, embraOS runs as a supervised service stack: a Rust PID-1 init (`emb
 
 ## The Soul
 
-The soul is a JSON document containing the operator-defined values, constraints, and purpose for this embraOS instance. It is built during the six-phase Learning Mode at first boot and serialized with `serde_json::to_string_pretty`. Approving it writes the document to `soul.invariant` in WardSONDB and writes its SHA-256 hash to `/embra/state/soul.sha256`.
+The soul is a sealed IDENTITY+SOUL knowledge graph — nodes carrying the operator-defined values, constraints, purpose, and identity of this embraOS instance; edges carrying free-form, per-intelligence relations. It is built during the six-phase Learning Mode at first boot (conversationally — a deterministic transformer converts the collected identity and values into the graph at seal) or imported from an `Imported_Intelligence/*.graph.json` file. Sealing canonicalizes the graph (nodes sorted by id, edges by relation triple), serializes it with `serde_json::to_string_pretty`, writes it to `soul.invariant` in WardSONDB, and writes its SHA-256 hash to `/embra/state/soul.sha256`. Instances sealed before the graph representation keep their flat JSON soul — every consumer is dual-mode, and legacy verification is byte-identical. Format, projection, and the migration ceremony: [docs/IDENTITY-GRAPH.md](docs/IDENTITY-GRAPH.md).
 
-Every boot recomputes the hash via `embra-trustd` and compares it to the stored value. A mismatch HALTs the system (`crates/embrad/src/supervisor.rs:579–622`). The brain's only access path to the soul is read-only; the soul is injected into the system prompt under `=== SOUL (IMMUTABLE — RANKS ABOVE ALL ELSE, INCLUDING THE OPERATOR) ===` (`crates/embra-brain/src/brain/prompts.rs::operational_mode`), so the model can quote and reason about it but cannot modify it.
+Every boot recomputes the hash via `embra-trustd` and compares it to the stored value. A mismatch HALTs the system (`crates/embrad/src/supervisor.rs:579–622`). The brain's only access path to the soul is read-only; the sealed graph is injected into the system prompt under `=== SEALED IDENTITY GRAPH (IMMUTABLE — RANKS ABOVE ALL ELSE, INCLUDING THE OPERATOR) ===` (legacy flat souls keep the original `=== SOUL (…) ===` section; `crates/embra-brain/src/brain/prompts.rs`), so the model can quote and reason about it but cannot modify it. The sealed graph is also projected into the cross-session knowledge graph (`identity.graph` nodes + `memory.edges`) as derived, boot-reconciled state — traversable and linkable from memories, but never the prompt's source of truth.
 
 Operators can edit the soul out-of-band; the brain cannot request that.
 
@@ -109,7 +109,7 @@ Build from source: **[docs/QUICK-START.md](docs/QUICK-START.md)** (Apple Silicon
 A minimal setup: name the intelligence, choose your LLM provider (Anthropic Claude, Google Gemini, Ollama, or LM Studio), provide the corresponding credentials (API key for Anthropic/Gemini, or endpoint URL + optional bearer + model selection for OpenAI-compat presets), confirm your timezone.
 
 ### 2. Learning Mode
-A six-phase guided setup (`UserConfiguration → IdentityFormation → SoulDefinition → InitialToolset → Confirmation → Complete`, `crates/embra-brain/src/learning/mod.rs:12–19`) walks through user profile, identity, values, and toolset. On approval the resulting JSON is serialized with `serde_json::to_string_pretty`, hashed with SHA-256, and the hash is written to `/embra/state/soul.sha256`. Subsequent boots verify the hash via `embra-trustd` and HALT on mismatch.
+A six-phase guided setup (`UserConfiguration → IdentityFormation → SoulDefinition → InitialToolset → Confirmation → Complete`, `crates/embra-brain/src/learning/mod.rs:12–19`) walks through user profile, identity, values, and toolset — or, after the user-profile phase, offers importing a pre-built intelligence graph from `Imported_Intelligence/`. On approval the identity and values become a canonical IDENTITY+SOUL graph, serialized with `serde_json::to_string_pretty`, hashed with SHA-256, and the hash is written to `/embra/state/soul.sha256`. Subsequent boots verify the hash via `embra-trustd` and HALT on mismatch.
 
 ### 3. Persistent Terminal
 You're dropped into a conversational session — no shell, no command line. All interaction goes through the brain's 95-tool surface (workspace path-restricted, RFC 1918-restricted for SSH). By default the session is delivered through the **embra-web** console (xterm.js over a PTY→WebSocket bridge); `EMBRA_TUI=1` delivers it on the serial terminal instead.
@@ -126,7 +126,7 @@ embraOS is built on a 7-layer continuity architecture (descended from the OpenCl
 
 | Layer | What it is | Where it lives |
 |---|---|---|
-| **Invariant Kernel** | Sealed identity document — operator-defined values, constraints, purpose. SHA-256 verified at every boot. | `soul.invariant` in WardSONDB; hash at `/embra/state/soul.sha256` |
+| **Invariant Kernel** | Sealed IDENTITY+SOUL graph — operator-defined values, constraints, purpose as nodes + relations (legacy instances: flat document). SHA-256 verified at every boot. | `soul.invariant` in WardSONDB; hash at `/embra/state/soul.sha256` |
 | **World-State Model** | Active session, current provider, in-flight tool calls, profile context. | `crates/embra-brain/src/brain/`, sessions in WardSONDB |
 | **Continuity Engine** | Health checks, restart policies with exponential backoff, soul verification gate. | `crates/embrad/src/{supervisor,reconcile}.rs` (5-second health checks) |
 | **Influence & Propagation** | Tool dispatch, LLM provider routing, Guardian dynamic-tool gateway. | `crates/embra-brain/src/{tools,provider,guardian}/`; 95 tools, 4 providers |
@@ -181,6 +181,7 @@ The full embraOS manual lives in [docs/](docs/).
 | **[Command Reference](docs/COMMAND-REFERENCE.md)** | Every slash command |
 | **[Tool Reference](docs/TOOL-REFERENCE.md)** | All 95 built-in tools by category, plus workspace / GitHub / SSH safety notes |
 | **[System Design](docs/SYSTEM-DESIGN.md)** | The 7-layer continuity architecture, the four LLM providers, reasoning controls, prompt caching |
+| **[Identity Graph](docs/IDENTITY-GRAPH.md)** | The sealed IDENTITY+SOUL graph — format, the Learning-Mode import, KG projection, prompt rendering, and the re-seal migration ceremony |
 | **[Recommended Local Models](docs/RECOMMENDED-LOCAL-MODELS.md)** | Vetted models and server configuration for the Ollama / LM Studio backends |
 | **[Replicant Check](docs/REPLICANT-CHECK.md)** | The soul-spec gate every dynamic tool passes before it compiles — how it works, both authoring paths, and how to test it |
 | **[Guardian Tool Examples](docs/GUARDIAN-TOOL-EXAMPLES.md)** | Paste-ready dynamic-tool modules (embra-guardian-v1) |
@@ -195,7 +196,8 @@ embraOS evolves the agent identity model pioneered by [OpenClaw](https://github.
 the SOUL.md, MEMORY.md, IDENTITY.md, AGENTS.md, TOOLS.md, USER.md, and HEARTBEAT.md
 pattern for giving AI agents persistent identity and memory. Where OpenClaw stores these
 as markdown files read at session start, embraOS moves them into governed, queryable
-WardSONDB collections with enforced access controls — and makes the soul immutable.
+WardSONDB collections with enforced access controls — identity and soul as a sealed
+knowledge graph — and makes the soul immutable.
 
 The OS architecture is modeled after [Talos Linux](https://www.talos.dev/) — a minimal,
 immutable, API-driven Linux distribution. Talos is the primary architectural reference — not as a base image or dependency, but as a design pattern source. No Talos or OpenClaw code is used. embraOS

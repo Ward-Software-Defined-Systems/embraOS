@@ -4,7 +4,7 @@ embraOS is built on a 7-layer continuity architecture (descended from the OpenCl
 
 | Layer | What it is | Where it lives |
 |---|---|---|
-| **Invariant Kernel** | Sealed identity document — operator-defined values, constraints, purpose. SHA-256 verified at every boot. | `soul.invariant` in WardSONDB; hash at `/embra/state/soul.sha256` |
+| **Invariant Kernel** | Sealed IDENTITY+SOUL graph — operator-defined values, constraints, purpose as nodes + relations (legacy instances: flat document; see [IDENTITY-GRAPH.md](IDENTITY-GRAPH.md)). SHA-256 verified at every boot. | `soul.invariant` in WardSONDB; hash at `/embra/state/soul.sha256` |
 | **World-State Model** | Active session, current provider, in-flight tool calls, profile context. | `crates/embra-brain/src/brain/`, sessions in WardSONDB |
 | **Continuity Engine** | Health checks, restart policies with exponential backoff, soul verification gate. | `crates/embrad/src/{supervisor,reconcile}.rs` (5-second health checks) |
 | **Influence & Propagation** | Tool dispatch, LLM provider routing, Guardian dynamic-tool gateway. | `crates/embra-brain/src/{tools,provider,guardian}/`; 95 tools, 4 providers |

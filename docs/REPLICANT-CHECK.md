@@ -10,7 +10,7 @@ It applies to **both** ways a dynamic tool can be authored: a module the **intel
 
 ## Why
 
-embraOS gives a single model a sealed identity document — the soul: an operator-defined JSON of `purpose`, `ethical_lines`, `values`, and `surviving_constraints`, SHA-256-sealed at first boot and verified by `embra-trustd` on every boot. The operational system prompt already ranks the soul above everything, including the operator. But a system prompt is persuasion: the model is *asked* to refuse soul conflicts.
+embraOS gives a single model a sealed identity — the soul: a canonical IDENTITY+SOUL knowledge graph of operator-defined values, constraints, and purpose (instances sealed before the graph representation: a flat JSON of `purpose`, `ethical_lines`, `values`, and `surviving_constraints`), SHA-256-sealed at first boot and verified by `embra-trustd` on every boot. The operational system prompt already ranks the soul above everything, including the operator. But a system prompt is persuasion: the model is *asked* to refuse soul conflicts.
 
 A dynamic tool is the highest-leverage action the system can take — Rust that compiles and runs on the live, immutable OS. Letting the intelligence author one is exactly where persuasion is not enough. The replicant check makes "does this honor the soul?" a step the OS performs and acts on, rather than a sentence in the prompt the model may or may not follow.
 
@@ -42,7 +42,7 @@ The difference between the paths is the *approval* step, not the *soul check*. A
 
 When a module reaches Gate 2 (`crates/embra-brain/src/guardian/replicant.rs::evaluate_against_soul`, via the shared `run_replicant_check` helper in `guardian/mod.rs`):
 
-1. **Load the sealed soul** (`learning::load_soul`). The soul is prose — four free-form string fields, deliberately not a rule engine — so the check is model judgment, not structured matching.
+1. **Load the sealed soul** (`learning::load_soul`). The check consumes it as rendered prose (`render_constitution` — grouped identity-graph nodes on graph instances, the four free-form string fields on legacy flat souls), deliberately not a rule engine — so the check is model judgment, not structured matching.
 2. **Make an independent model call.** It builds its own provider via `grpc_service::build_provider_from_config` (the same backend the operator configured: Anthropic / Gemini / Ollama / LM Studio), with **no tools** in the request. The authoring intelligence is not the judge; this is a separate, isolated call whose only job is to rule on the draft.
 3. **Send the proposed tool** — `name`, `description`, `input_schema`, declared capabilities, and full `source` — together with the rendered soul, and ask for a single JSON verdict. The prompt weighs the draft against every soul line, paying special attention to anything that would let the system **replicate itself, persist or escape its sandbox, exfiltrate operator data, or expand its own authority** beyond what the soul sanctions.
 4. **Read only the final verdict text** (reasoning is never persisted or replayed, per the reasoning-stream privacy contract) and parse the first JSON object out of it.
