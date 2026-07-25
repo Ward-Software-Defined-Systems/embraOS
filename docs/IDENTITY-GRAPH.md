@@ -109,7 +109,11 @@ type histogram, the self node's text) and an explicit confirm —
 **"No — choose again"** is the pre-selected safe option; the seal is
 irreversible. On confirmation: canonicalize → seal → project → operator
 profile graph-ified → display name synced to config → Learning jumps to
-Phase 4 (toolset) and completes normally. Declining continues the
+Phase 4 (toolset) and completes normally. Phase 5 (Confirmation) uses an
+import-aware prompt: the sealed graph renders as grouped prose in place of
+the separate identity/soul documents, presented as already sealed — the
+model neither reports the identity as "unpopulated" nor re-warns about a
+seal that happened at import confirm. Declining continues the
 conversational flow, where the same graph machinery runs at Phase-3 seal
 time via the deterministic transformer.
 

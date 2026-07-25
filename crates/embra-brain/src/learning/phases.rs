@@ -70,29 +70,50 @@ pub fn system_prompt_for_phase(state: &LearningState, config: &SystemConfig) -> 
                 .and_then(|v| v.get("name"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("User");
-            let identity = state
-                .identity
-                .as_ref()
-                .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
-                .unwrap_or_default();
-            let soul = state
-                .soul
-                .as_ref()
-                .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
-                .unwrap_or_default();
             let tools = state
                 .tools_config
                 .as_ref()
                 .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
                 .unwrap_or_default();
-            prompts::learning_confirmation(
-                &config.name,
-                user_name,
-                &user_profile,
-                &identity,
-                &soul,
-                &tools,
-            )
+            // Import path: `state.soul` is the already-sealed IDENTITY+SOUL
+            // graph and `state.identity` is deliberately None — the flat
+            // template would show an empty "Your identity:" section (the
+            // model then reports identity as unpopulated) and re-warn about
+            // a seal that already happened. Keyed on shape, not path: the
+            // conversational flow keeps `state.soul` FLAT for this display.
+            if let Some(graph) = state
+                .soul
+                .as_ref()
+                .filter(|v| crate::identity_graph::is_graph_soul(v))
+            {
+                let graph_prose = crate::brain::render_sealed_graph(graph);
+                prompts::learning_confirmation_graph(
+                    &config.name,
+                    user_name,
+                    &user_profile,
+                    &graph_prose,
+                    &tools,
+                )
+            } else {
+                let identity = state
+                    .identity
+                    .as_ref()
+                    .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+                    .unwrap_or_default();
+                let soul = state
+                    .soul
+                    .as_ref()
+                    .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+                    .unwrap_or_default();
+                prompts::learning_confirmation(
+                    &config.name,
+                    user_name,
+                    &user_profile,
+                    &identity,
+                    &soul,
+                    &tools,
+                )
+            }
         }
         LearningPhase::Complete => String::new(),
     }
@@ -418,5 +439,81 @@ mod tests {
             "CATEGORY_COUNTS (learning/phases.rs) drifted from the tool registry — \
              update the category counts alongside the tool change"
         );
+    }
+
+    // Deserialized, not a struct literal — SystemConfig has no Default and
+    // every literal is a maintenance site for new fields (see the
+    // 10-literal invariant); serde fills everything past the required
+    // strings.
+    fn test_config() -> SystemConfig {
+        serde_json::from_value(serde_json::json!({
+            "name": "Embra",
+            "api_key": "k",
+            "timezone": "UTC",
+            "deployment_mode": "phase1",
+            "created_at": "",
+            "version": "test"
+        }))
+        .expect("minimal config deserializes")
+    }
+
+    fn confirmation_state(soul: serde_json::Value) -> LearningState {
+        let mut state = LearningState::new();
+        state.phase = LearningPhase::Confirmation;
+        state.user_profile = Some(serde_json::json!({"name": "William"}));
+        state.soul = Some(soul);
+        state.tools_config = Some(serde_json::json!({"enabled": "all"}));
+        state
+    }
+
+    /// Import path: `state.soul` is the sealed graph and `state.identity`
+    /// is None. The confirmation prompt must present the graph as the
+    /// identity — not an empty "Your identity:" section the model reads
+    /// as "identity was never populated" — and must not re-warn about a
+    /// seal that already happened at import confirm.
+    #[test]
+    fn confirmation_prompt_graph_soul_names_the_import_no_empty_identity() {
+        let config = test_config();
+        let graph = serde_json::json!({
+            "format": "graph.v1",
+            "name": "Meridian",
+            "nodes": [{"id": "meridian", "type": "self", "text": "A lattice."}],
+            "edges": []
+        });
+        let prompt = system_prompt_for_phase(&confirmation_state(graph), &config);
+        assert!(prompt.contains("imported"), "must name the import");
+        assert!(
+            prompt.contains("ALREADY sealed"),
+            "must say the seal already happened"
+        );
+        assert!(
+            !prompt.contains("2. Your identity: \n"),
+            "empty identity section leaked"
+        );
+        assert!(
+            !prompt.contains("becomes immutable once confirmed"),
+            "flat-path seal warning leaked into the import path"
+        );
+        assert!(prompt.contains("A lattice."), "graph prose not rendered");
+    }
+
+    /// Conversational path keeps the flat template byte-for-byte: the
+    /// graph branch keys on soul SHAPE, and the conversational flow holds
+    /// the FLAT soul in state for this display.
+    #[test]
+    fn confirmation_prompt_flat_soul_takes_the_legacy_template() {
+        let config = test_config();
+        let mut state = confirmation_state(serde_json::json!({
+            "purpose": "continuity",
+            "ethical_lines": ["never lie"]
+        }));
+        state.identity = Some(serde_json::json!({"voice": "direct"}));
+        let prompt = system_prompt_for_phase(&state, &config);
+        assert!(prompt.contains("2. Your identity:"), "identity section present");
+        assert!(
+            prompt.contains("remind them this becomes immutable"),
+            "flat seal warning present"
+        );
+        assert!(!prompt.contains("imported"), "import wording leaked");
     }
 }
