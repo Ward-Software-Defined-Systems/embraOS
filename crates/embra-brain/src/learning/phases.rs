@@ -131,7 +131,7 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 }
 
 // Single source of truth for Phase 4 tool category counts.
-// (json_key, display_label, count). Sums to 97 — matches the descriptor count
+// (json_key, display_label, count). Sums to 98 — matches the descriptor count
 // in `tools::registry::REGISTRY` (guarded by
 // `category_counts_sum_matches_registry` below). Aliases (`memory_search`,
 // `search_memory`, `file_rename`, `rmdir`) are folded into their target's
@@ -150,10 +150,12 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 // graph to /embra/workspace/KG_DUMPS), then 10 → 12 with `knowledge_audit`
 // + `knowledge_merge` (read-only hygiene detection + node consolidation,
 // the 2026-07-30 KG hygiene wave).
+// System went 3 → 4 with `system_logs` (read-only service-log tail from
+// the ephemeral tmpfs — self-diagnostics, 2026-07-31).
 // Self-Awareness went 4 → 5 with `set_name` (intelligence-initiated,
 // operator-agreed display-name change; sealed soul untouched).
 const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
-    ("system", "System", 3),
+    ("system", "System", 4),
     ("memory_knowledge", "Memory & Knowledge", 7),
     ("self_awareness", "Self-Awareness", 5),
     ("time_context", "Time & Context", 3),

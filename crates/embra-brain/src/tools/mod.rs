@@ -1404,6 +1404,163 @@ impl SystemStatusArgs {
     }
 }
 
+// -- system_logs — read-only service-log tail (self-diagnostics) ----------
+
+/// The services whose logs embrad captures on the ephemeral tmpfs
+/// (`supervisor.rs` redirects every child's stdout/stderr to
+/// `/embra/ephemeral/<name>.log`; embrad's own post-UI redirect writes
+/// `embrad.log`). The tool validates against this list and NEVER takes a
+/// path, so the carve-out below cannot traverse.
+const SYSTEM_LOG_SERVICES: [&str; 7] = [
+    "embra-brain",
+    "embrad",
+    "wardsondb",
+    "embra-trustd",
+    "embra-apid",
+    "embra-web",
+    "embra-console",
+];
+
+/// Logs live OUTSIDE the workspace jail — a deliberate READ-ONLY carve-out
+/// for self-diagnostics, bounded to fixed filenames on the boot-wiped
+/// tmpfs. Do not generalize this into a path-taking file reader.
+const SYSTEM_LOG_DIR: &str = "/embra/ephemeral";
+
+/// Window read from the end of a log before line filtering — bounds memory
+/// on very large files while covering any sane tail request.
+const SYSTEM_LOG_TAIL_BYTES: u64 = 512 * 1024;
+
+const SYSTEM_LOG_DEFAULT_LINES: usize = 200;
+const SYSTEM_LOG_MAX_LINES: usize = 2000;
+
+/// Default service is the brain's own log — the one carrying the retrieval
+/// funnel, saturation, seed, and slow-query lines.
+fn resolve_log_service(service: Option<&str>) -> Result<&'static str, String> {
+    let requested = service
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("embra-brain");
+    SYSTEM_LOG_SERVICES
+        .iter()
+        .copied()
+        .find(|s| s.eq_ignore_ascii_case(requested))
+        .ok_or_else(|| {
+            format!(
+                "unknown service '{}' — pick from: {}",
+                requested,
+                SYSTEM_LOG_SERVICES.join(", ")
+            )
+        })
+}
+
+/// Pure tail-and-filter over a text window. `window_truncated` = the read
+/// started mid-file, so the first (partial) line is dropped. Returns the
+/// selected lines plus the total matching-line count in the window.
+fn tail_filter_lines<'a>(
+    buf: &'a str,
+    filter: Option<&str>,
+    lines: usize,
+    window_truncated: bool,
+) -> (Vec<&'a str>, usize) {
+    let mut all: Vec<&'a str> = buf.lines().collect();
+    if window_truncated && !all.is_empty() {
+        all.remove(0);
+    }
+    let filter_lower = filter.map(|f| f.to_lowercase()).filter(|f| !f.is_empty());
+    let matching: Vec<&'a str> = match &filter_lower {
+        Some(f) => all
+            .into_iter()
+            .filter(|l| l.to_lowercase().contains(f.as_str()))
+            .collect(),
+        None => all,
+    };
+    let total = matching.len();
+    let start = total.saturating_sub(lines);
+    (matching[start..].to_vec(), total)
+}
+
+async fn system_logs(service: Option<&str>, lines: Option<u32>, filter: Option<&str>) -> String {
+    let service = match resolve_log_service(service) {
+        Ok(s) => s,
+        Err(e) => return format!("Error: {}", e),
+    };
+    let lines = (lines.unwrap_or(SYSTEM_LOG_DEFAULT_LINES as u32) as usize)
+        .clamp(1, SYSTEM_LOG_MAX_LINES);
+    let path = format!("{}/{}.log", SYSTEM_LOG_DIR, service);
+
+    let path_for_read = path.clone();
+    let read = tokio::task::spawn_blocking(move || -> std::io::Result<(String, u64, bool)> {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = std::fs::File::open(&path_for_read)?;
+        let size = f.metadata()?.len();
+        let start = size.saturating_sub(SYSTEM_LOG_TAIL_BYTES);
+        if start > 0 {
+            f.seek(SeekFrom::Start(start))?;
+        }
+        let mut raw = Vec::with_capacity((size - start) as usize);
+        f.read_to_end(&mut raw)?;
+        Ok((String::from_utf8_lossy(&raw).into_owned(), size, start > 0))
+    })
+    .await;
+
+    let (buf, size, truncated) = match read {
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return format!(
+                "No log at {} — the service has not started on this boot (or this is dev mode without the ephemeral tmpfs). Logs reset at boot and at service restarts.",
+                path
+            );
+        }
+        Ok(Err(e)) => return format!("Error: reading {} failed: {}", path, e),
+        Err(e) => return format!("Error: log read task failed: {}", e),
+    };
+
+    let (selected, matching_total) = tail_filter_lines(&buf, filter, lines, truncated);
+    let mut out = format!(
+        "system_logs {} ({} bytes total{}): last {} of {} matching line(s){}\n\n",
+        service,
+        size,
+        if truncated { ", scanning the final 512 KiB window" } else { "" },
+        selected.len(),
+        matching_total,
+        filter
+            .map(|f| format!(" for filter \"{}\"", f))
+            .unwrap_or_default()
+    );
+    if selected.is_empty() {
+        out.push_str("(no matching lines)\n");
+    } else {
+        for l in selected {
+            out.push_str(l);
+            out.push('\n');
+        }
+    }
+    out
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "system_logs",
+    description = "Read the tail of a service's log from the ephemeral tmpfs (/embra/ephemeral/<service>.log) — the OS's own journals, for self-diagnostics. service: embra-brain (default) | embrad | wardsondb | embra-trustd | embra-apid | embra-web | embra-console. lines: tail count, default 200, max 2000. filter: case-insensitive substring applied per line before the tail cut. The brain log carries the auto-enrichment funnel lines (candidates_*), kg::traversal saturation lines, knowledge_seed heals, and wardsondb slow-query warns. Logs reset at boot and at service restarts; on very large files only the final 512 KiB window is scanned."
+)]
+pub struct SystemLogsArgs {
+    /// Service log to read. Default embra-brain.
+    #[serde(default)]
+    pub service: Option<String>,
+    /// Tail line count (default 200, clamped to [1, 2000]).
+    #[serde(default)]
+    pub lines: Option<u32>,
+    /// Case-insensitive substring filter applied per line before the tail.
+    #[serde(default)]
+    pub filter: Option<String>,
+}
+
+impl SystemLogsArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(system_logs(self.service.as_deref(), self.lines, self.filter.as_deref()).await)
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "check_update",
@@ -1933,5 +2090,75 @@ mod native_args_tests {
         assert!(names.contains(&"recall"), "recall registered");
         assert!(names.contains(&"memory_search"), "memory_search alias registered");
         assert!(names.contains(&"search_memory"), "search_memory alias registered");
+    }
+}
+
+#[cfg(test)]
+mod system_logs_tests {
+    use super::{
+        resolve_log_service, tail_filter_lines, SystemLogsArgs, SYSTEM_LOG_DEFAULT_LINES,
+        SYSTEM_LOG_MAX_LINES, SYSTEM_LOG_SERVICES,
+    };
+
+    #[test]
+    fn resolve_defaults_to_brain_case_insensitive_rejects_unknown() {
+        assert_eq!(resolve_log_service(None).unwrap(), "embra-brain");
+        assert_eq!(resolve_log_service(Some("  ")).unwrap(), "embra-brain");
+        assert_eq!(resolve_log_service(Some("WardsonDB")).unwrap(), "wardsondb");
+        assert_eq!(resolve_log_service(Some("embrad")).unwrap(), "embrad");
+        let err = resolve_log_service(Some("kernel")).unwrap_err();
+        assert!(err.contains("unknown service 'kernel'"));
+        assert!(err.contains("embra-brain"), "error lists the allowlist: {err}");
+        // The allowlist is names, never paths — the read carve-out depends
+        // on this staying enum-shaped.
+        assert!(SYSTEM_LOG_SERVICES.iter().all(|s| !s.contains('/')));
+    }
+
+    #[test]
+    fn tail_filter_cuts_tail_counts_matches_case_insensitive() {
+        let buf = "alpha one\nBETA two\nalpha three\nbeta FOUR\nalpha five";
+        let (sel, total) = tail_filter_lines(buf, Some("beta"), 1, false);
+        assert_eq!(total, 2, "case-insensitive matches counted pre-tail");
+        assert_eq!(sel, vec!["beta FOUR"], "tail keeps the newest match");
+        let (sel, total) = tail_filter_lines(buf, None, 3, false);
+        assert_eq!(total, 5);
+        assert_eq!(sel, vec!["alpha three", "beta FOUR", "alpha five"]);
+        // Empty filter behaves like no filter.
+        let (_, total) = tail_filter_lines(buf, Some(""), 10, false);
+        assert_eq!(total, 5);
+    }
+
+    #[test]
+    fn tail_filter_drops_partial_first_line_when_window_truncated() {
+        let buf = "rtial line\nfull one\nfull two";
+        let (sel, total) = tail_filter_lines(buf, None, 10, true);
+        assert_eq!(total, 2, "the seek-split first line is dropped");
+        assert_eq!(sel, vec!["full one", "full two"]);
+        // Untruncated windows keep every line.
+        let (_, total) = tail_filter_lines(buf, None, 10, false);
+        assert_eq!(total, 3);
+    }
+
+    #[test]
+    fn line_caps_pinned() {
+        assert_eq!(SYSTEM_LOG_DEFAULT_LINES, 200);
+        assert_eq!(SYSTEM_LOG_MAX_LINES, 2000);
+    }
+
+    #[test]
+    fn system_logs_registered_with_plain_object_schema() {
+        let names: Vec<&'static str> = inventory::iter::<crate::tools::registry::ToolDescriptor>()
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert!(names.contains(&"system_logs"), "system_logs registered");
+
+        // Anthropic rejects top-level oneOf/allOf/anyOf in input_schema.
+        let schema = schemars::schema_for!(SystemLogsArgs);
+        let v = serde_json::to_value(&schema).unwrap();
+        assert!(v.get("oneOf").is_none());
+        assert!(v.get("allOf").is_none());
+        assert!(v.get("anyOf").is_none());
+        assert_eq!(v.get("type").and_then(|t| t.as_str()), Some("object"));
     }
 }
