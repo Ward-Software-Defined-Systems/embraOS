@@ -55,7 +55,9 @@ pub struct ImportSummary {
 /// Mirror of WardSONDB's `validate_custom_id` (engine/document.rs): the
 /// projection uses graph node ids as document `_id`s, so anything the
 /// server would reject must fail validation here, before sealing.
-fn id_violation(id: &str) -> Option<String> {
+/// `pub(crate)`: the seed-knowledge validator (knowledge/seed.rs) reuses
+/// the same server mirror for pack node ids.
+pub(crate) fn id_violation(id: &str) -> Option<String> {
     if id.is_empty() {
         return Some("empty id".to_string());
     }

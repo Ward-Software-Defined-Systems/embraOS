@@ -648,11 +648,28 @@ pub async fn knowledge_graph_stats(db: &WardsonDbClient) -> String {
             .collect();
         out.push_str(&format!("  Categories: {}\n", cats.join(", ")));
     }
+    // Seeded-node counts render only when a pack is loaded — legacy output
+    // stays byte-stable.
+    let sem_seeded = db
+        .count_filtered("memory.semantic", &seeded_nodes_filter())
+        .await
+        .unwrap_or(0);
+    if sem_seeded > 0 {
+        out.push_str(&format!("  Seeded (knowledge_seed): {}\n", sem_seeded));
+    }
     out.push('\n');
 
     // Procedural count
     let proc_total = db.count("memory.procedural").await.unwrap_or(0);
-    out.push_str(&format!("memory.procedural: {} nodes\n\n", proc_total));
+    out.push_str(&format!("memory.procedural: {} nodes\n", proc_total));
+    let proc_seeded = db
+        .count_filtered("memory.procedural", &seeded_nodes_filter())
+        .await
+        .unwrap_or(0);
+    if proc_seeded > 0 {
+        out.push_str(&format!("  Seeded (knowledge_seed): {}\n", proc_seeded));
+    }
+    out.push('\n');
 
     // Identity nodes — the sealed-graph projection (schema v13). Counted so
     // the density denominator covers every node kind whose edges are in the
@@ -769,6 +786,12 @@ fn promoted_entries_filter() -> serde_json::Value {
     json!({ "promoted_to": { "$ne": null } })
 }
 
+/// Origin-only filter counting seed-pack nodes across all packs (the
+/// per-pack fast-paths in knowledge/seed.rs add the `pack` key).
+fn seeded_nodes_filter() -> serde_json::Value {
+    json!({ "origin": super::seed::ORIGIN_SEED })
+}
+
 /// Render the edge provenance split (KG review 2026-07-26, A4):
 /// identity-projection edges (`metadata.origin` = `identity_import` |
 /// `user_profile`) share type buckets with brain-authored `knowledge_link`
@@ -788,7 +811,10 @@ fn provenance_summary(
 ) -> String {
     let identity_import = origin_counts.get("identity_import").copied().unwrap_or(0);
     let user_profile = origin_counts.get("user_profile").copied().unwrap_or(0);
-    let labeled = identity_import + user_profile;
+    let knowledge_seed = origin_counts.get("knowledge_seed").copied().unwrap_or(0);
+    // Every origin-labeled bucket MUST join `labeled` — omitting one
+    // inflates `unlabeled` AND under-subtracts from the authored count.
+    let labeled = identity_import + user_profile + knowledge_seed;
 
     let mut builtin_brain_sum: u64 = 0;
     let mut other_sum: u64 = 0;
@@ -805,9 +831,10 @@ fn provenance_summary(
     let mut out = String::new();
     if labeled > 0 {
         out.push_str(&format!(
-            "  Provenance: identity_import={}, user_profile={}, unlabeled={}\n",
+            "  Provenance: identity_import={}, user_profile={}, knowledge_seed={}, unlabeled={}\n",
             identity_import,
             user_profile,
+            knowledge_seed,
             edge_total.saturating_sub(labeled)
         ));
     }
@@ -877,8 +904,35 @@ mod windowless_stats_tests {
         ]);
         let origins = counts(&[("identity_import", 354), ("user_profile", 7)]);
         let s = provenance_summary(&etypes, &origins, 285_161);
-        assert!(s.contains("Provenance: identity_import=354, user_profile=7, unlabeled=284800"));
+        assert!(s.contains(
+            "Provenance: identity_import=354, user_profile=7, knowledge_seed=0, unlabeled=284800"
+        ));
         assert!(s.contains("Brain-authored (knowledge_link): 430"));
+    }
+
+    #[test]
+    fn provenance_seed_bucket_keeps_authored_exact() {
+        // Seed edges may use built-in OR free-form relations; the exact
+        // brain-authored arithmetic holds either way BECAUSE the seed
+        // bucket joins `labeled`: built-in seed edges subtract out via
+        // projected_in_builtin, free-form ones land in other_sum.
+        let etypes = counts(&[
+            ("related_to", 5),   // 2 authored + 3 seed (built-in relation)
+            ("grounds", 4),      // seed free-form relation
+        ]);
+        let origins = counts(&[("knowledge_seed", 7)]);
+        let s = provenance_summary(&etypes, &origins, 9);
+        assert!(s.contains("knowledge_seed=7"));
+        assert!(s.contains("unlabeled=2"));
+        assert!(s.contains("Brain-authored (knowledge_link): 2"));
+    }
+
+    #[test]
+    fn seeded_filter_is_origin_only() {
+        assert_eq!(
+            super::seeded_nodes_filter(),
+            json!({ "origin": "knowledge_seed" })
+        );
     }
 
     #[test]
