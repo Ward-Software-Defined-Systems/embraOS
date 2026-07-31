@@ -568,13 +568,10 @@ pub async fn knowledge_query(
     // punctuation-trimmed, deduped, same as auto-enrichment's derivation.
     let query_tags: Vec<String> = super::text::query_tag_tokens(query_text);
 
-    // Funnel stats are enrichment's observability seam — the tool output
-    // stays byte-identical (its header already shows the returned-set
-    // source breakdown).
-    let mut results = match retrieve_relevant_knowledge(
+    let (mut results, stats) = match retrieve_relevant_knowledge(
         db, session_name, &query_tags, query_text, retrieve_n, config
     ).await {
-        Ok((r, _stats)) => r,
+        Ok(rs) => rs,
         Err(e) => return format!("Error: retrieval failed: {}", e),
     };
 
@@ -602,14 +599,27 @@ pub async fn knowledge_query(
         }
     }
 
+    // The pre-ranking funnel line makes "graph: 0" self-explaining: the
+    // header counts the RETURNED set, candidates_* what retrieval actually
+    // considered — expansion producing candidates that ranking outranks is
+    // by design, expansion producing zero is worth investigating.
+    let candidates_line = format!(
+        "Candidates considered: {} (direct {}, session {}, graph {} — pre-ranking)\n",
+        stats.candidates_total, stats.direct_query, stats.session_based, stats.graph_expansion
+    );
+
     if results.is_empty() {
-        return format!("Knowledge query: \"{}\" (0 results)", query_text);
+        return format!(
+            "Knowledge query: \"{}\" (0 results)\n{}",
+            query_text, candidates_line
+        );
     }
 
     let mut out = format!(
         "Knowledge query: \"{}\" ({} results — direct: {}, session: {}, graph: {})\n",
         query_text, results.len(), direct, session, graph
     );
+    out.push_str(&candidates_line);
     if direct == 0 {
         out.push_str("[No direct matches — showing graph-expanded results]\n");
     }
