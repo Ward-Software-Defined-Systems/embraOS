@@ -42,11 +42,10 @@ pub async fn build_turn_context(
         return user_message.to_string();
     }
 
-    let query_tags: Vec<String> = trimmed
-        .split_whitespace()
-        .map(|s| s.trim_start_matches('#').to_lowercase())
-        .filter(|s| s.len() > 2)
-        .collect();
+    // Shared rule (knowledge/text.rs): punctuation-trimmed, deduped —
+    // "graph," now matches the tag "graph", and the tag_count log field
+    // reports the deduped count.
+    let query_tags: Vec<String> = super::text::query_tag_tokens(trimmed);
 
     let results = match retrieve_relevant_knowledge(
         db,

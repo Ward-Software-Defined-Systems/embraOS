@@ -564,12 +564,9 @@ pub async fn knowledge_query(
         if cats.is_empty() { None } else { Some(cats) }
     });
 
-    // Derive tags from query text as naive space-split words
-    let query_tags: Vec<String> = query_text
-        .split_whitespace()
-        .map(|s| s.trim_start_matches('#').to_lowercase())
-        .filter(|s| !s.is_empty() && s.len() > 2)
-        .collect();
+    // Derive tags from the query text — shared rule (knowledge/text.rs):
+    // punctuation-trimmed, deduped, same as auto-enrichment's derivation.
+    let query_tags: Vec<String> = super::text::query_tag_tokens(query_text);
 
     let mut results = match retrieve_relevant_knowledge(
         db, session_name, &query_tags, query_text, retrieve_n, config

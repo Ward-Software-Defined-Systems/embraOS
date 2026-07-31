@@ -71,8 +71,6 @@ const CONTRADICTION_SCORE_FLOOR: f64 = 0.35;
 /// calibrates from this instance's own data instead of the defaults.
 const CONTRADICTION_CALIBRATION_MIN_PAIRS: usize = 5;
 const PSEUDO_TITLE_MAX_CHARS: usize = 80;
-/// Matches `knowledge_query`'s tag derivation (`len() > 2`).
-const MIN_TOKEN_LEN: usize = 3;
 const W_BODY: f64 = 0.5;
 const W_TITLE: f64 = 0.3;
 const W_TAGS: f64 = 0.2;
@@ -221,13 +219,11 @@ impl NodeMeta {
     }
 }
 
-/// Lowercase alphanumeric runs, minimum length 3.
+/// Lowercase alphanumeric runs, minimum length 3 — delegates to the shared
+/// rule (`knowledge/text.rs`) so audit similarity and retrieval content
+/// matching stay structurally identical, never coincidentally so.
 fn tokenize(s: &str) -> HashSet<String> {
-    s.to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| t.len() >= MIN_TOKEN_LEN)
-        .map(|t| t.to_string())
-        .collect()
+    super::text::content_tokens(s)
 }
 
 fn parse_ts(doc: &serde_json::Value, field: &str) -> Option<DateTime<Utc>> {

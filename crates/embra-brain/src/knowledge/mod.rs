@@ -15,6 +15,7 @@ pub mod merge;
 pub(crate) mod node_store;
 pub mod promotion;
 pub mod retrieval;
+pub(crate) mod text;
 pub mod tools;
 pub mod traversal;
 pub mod types;
