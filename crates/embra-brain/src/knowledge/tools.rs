@@ -606,7 +606,10 @@ pub async fn knowledge_query(
 /// exact at ANY collection size. (The old version pulled every document
 /// through fixed 10k/100k windows — ~91k full edge docs per call at
 /// production scale — and went silently partial once a collection outgrew
-/// its window.)
+/// its window.) Node counts include `identity.graph` (the sealed-graph
+/// projection) so density's denominator covers every node kind whose edges
+/// sit in the numerator, and the edge section carries a provenance split
+/// via a `metadata.origin` group (KG review 2026-07-26, A2 + A4).
 pub async fn knowledge_graph_stats(db: &WardsonDbClient) -> String {
     let mut out = String::from("Knowledge Graph Statistics:\n\n");
 
@@ -629,6 +632,16 @@ pub async fn knowledge_graph_stats(db: &WardsonDbClient) -> String {
     let proc_total = db.count("memory.procedural").await.unwrap_or(0);
     out.push_str(&format!("memory.procedural: {} nodes\n\n", proc_total));
 
+    // Identity nodes — the sealed-graph projection (schema v13). Counted so
+    // the density denominator covers every node kind whose edges are in the
+    // numerator; zero on legacy flat-soul instances (collection exists,
+    // projection doesn't run).
+    let ident_total = db
+        .count(crate::identity_graph::IDENTITY_COLLECTION)
+        .await
+        .unwrap_or(0);
+    out.push_str(&format!("identity.graph: {} nodes\n\n", ident_total));
+
     // Edge count + type distribution
     let edge_total = db.count("memory.edges").await.unwrap_or(0);
     out.push_str(&format!("memory.edges: {} edges\n", edge_total));
@@ -636,11 +649,18 @@ pub async fn knowledge_graph_stats(db: &WardsonDbClient) -> String {
         &db.aggregate("memory.edges", &group_by_pipeline("edge_type")).await.unwrap_or_default(),
     );
     if !etype_counts.is_empty() {
-        let mut pairs: Vec<(String, u64)> = etype_counts.into_iter().collect();
+        let mut pairs: Vec<(String, u64)> =
+            etype_counts.iter().map(|(t, c)| (t.clone(), *c)).collect();
         pairs.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
         let summary: Vec<String> = pairs.iter().map(|(t, c)| format!("{}={}", t, c)).collect();
         out.push_str(&format!("  Types: {}\n", summary.join(", ")));
     }
+    let origin_counts = group_counts(
+        &db.aggregate("memory.edges", &group_by_pipeline("metadata.origin"))
+            .await
+            .unwrap_or_default(),
+    );
+    out.push_str(&provenance_summary(&etype_counts, &origin_counts, edge_total));
     out.push('\n');
 
     // Entry promotion stats — promoted counted server-side via the filter
@@ -657,8 +677,8 @@ pub async fn knowledge_graph_stats(db: &WardsonDbClient) -> String {
         entries_total.saturating_sub(promoted)
     ));
 
-    // Graph density (rough)
-    let node_total = sem_total + proc_total + entries_total;
+    // Graph density
+    let node_total = sem_total + proc_total + ident_total + entries_total;
     if node_total > 0 {
         let density = edge_total as f64 / node_total as f64;
         out.push_str(&format!("Graph density: {:.1} edges/node\n", density));
@@ -698,9 +718,12 @@ pub async fn knowledge_graph_stats(db: &WardsonDbClient) -> String {
 /// stats call does; the sweep tool's own `limit` goes higher for full runs.
 const PASSIVE_ORPHAN_SCAN_LIMIT: usize = 100_000;
 
-/// Aggregate pipeline: count documents grouped by `field`. Output row count
-/// is bounded by the field's cardinality (edge_type ≤ 9, category = 5), so
-/// no result window is needed — the scan itself runs server-side.
+/// Aggregate pipeline: count documents grouped by `field` (dot-paths reach
+/// nested fields, e.g. `metadata.origin`). Output row count is bounded by
+/// the field's cardinality — category = 5, but edge_type is UNBOUNDED since
+/// `EdgeType::Other` carries free-form imported identity relations (19
+/// distinct types after the first production import). Fine today because
+/// the aggregate has no result window — revisit if one is ever added.
 fn group_by_pipeline(field: &str) -> serde_json::Value {
     json!([{ "$group": { "_id": field, "count": { "$count": {} } } }])
 }
@@ -724,6 +747,52 @@ fn promoted_entries_filter() -> serde_json::Value {
     json!({ "promoted_to": { "$ne": null } })
 }
 
+/// Render the edge provenance split (KG review 2026-07-26, A4):
+/// identity-projection edges (`metadata.origin` = `identity_import` |
+/// `user_profile`) share type buckets with brain-authored `knowledge_link`
+/// edges, so the type distribution alone cannot tell them apart. The
+/// brain-authored count is exact arithmetic, not an estimate: free-form
+/// (non-built-in) type names can only come from the projection
+/// (`knowledge_link`'s strict gate never mints them), so
+///   projected-in-builtin-buckets = origin-labeled − free-form-bucket sum
+///   authored = brain-created-bucket sum − projected-in-builtin-buckets.
+/// The origin line renders only when a projection exists (labeled > 0); a
+/// failed or empty origin aggregate degrades to authored = brain-created
+/// buckets, which is exactly right on legacy instances with no projection.
+fn provenance_summary(
+    etype_counts: &std::collections::HashMap<String, u64>,
+    origin_counts: &std::collections::HashMap<String, u64>,
+    edge_total: u64,
+) -> String {
+    let identity_import = origin_counts.get("identity_import").copied().unwrap_or(0);
+    let user_profile = origin_counts.get("user_profile").copied().unwrap_or(0);
+    let labeled = identity_import + user_profile;
+
+    let mut builtin_brain_sum: u64 = 0;
+    let mut other_sum: u64 = 0;
+    for (name, count) in etype_counts {
+        match EdgeType::from_str(name) {
+            Some(t) if t.is_brain_created() => builtin_brain_sum += count,
+            Some(_) => {} // auto-derived + derived_from: never authored, never mixed
+            None => other_sum += count, // free-form relation names — projection-only
+        }
+    }
+    let projected_in_builtin = labeled.saturating_sub(other_sum);
+    let authored = builtin_brain_sum.saturating_sub(projected_in_builtin);
+
+    let mut out = String::new();
+    if labeled > 0 {
+        out.push_str(&format!(
+            "  Provenance: identity_import={}, user_profile={}, unlabeled={}\n",
+            identity_import,
+            user_profile,
+            edge_total.saturating_sub(labeled)
+        ));
+    }
+    out.push_str(&format!("  Brain-authored (knowledge_link): {}\n", authored));
+    out
+}
+
 #[cfg(test)]
 mod windowless_stats_tests {
     //! Shape guards for the windowless graph_stats / paginated orphan scan
@@ -731,9 +800,10 @@ mod windowless_stats_tests {
     //! level, same pattern as the FIX-1..8 query-body tests).
     use super::{
         group_by_pipeline, group_counts, next_scan_page, orphan_page_query_body,
-        promoted_entries_filter, ScanPage,
+        promoted_entries_filter, provenance_summary, ScanPage,
     };
     use serde_json::json;
+    use std::collections::HashMap;
 
     #[test]
     fn group_pipeline_counts_by_field() {
@@ -742,6 +812,74 @@ mod windowless_stats_tests {
             p,
             json!([{ "$group": { "_id": "edge_type", "count": { "$count": {} } } }])
         );
+        // Dot-paths pass through verbatim — WardSONDB's extract_group_key
+        // resolves them (the A4 provenance split depends on this).
+        let p = group_by_pipeline("metadata.origin");
+        assert_eq!(
+            p,
+            json!([{ "$group": { "_id": "metadata.origin", "count": { "$count": {} } } }])
+        );
+    }
+
+    fn counts(pairs: &[(&str, u64)]) -> HashMap<String, u64> {
+        pairs.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    #[test]
+    fn provenance_review_numbers_yield_exact_authored_split() {
+        // The 2026-07-26 KG review's live distribution: 765 edges sit in
+        // built-in-name buckets, 26 in free-form identity buckets, 361
+        // projection edges total — so 335 projected edges hide in built-in
+        // buckets and exactly 430 are brain-authored (the review could only
+        // estimate this; the origin aggregate makes it a measurement).
+        let etypes = counts(&[
+            ("same_session", 154_172),
+            ("tag_overlap", 87_523),
+            ("temporal", 41_904),
+            ("derived_from", 771),
+            ("related_to", 329),
+            ("refines", 191),
+            ("enables", 164),
+            ("depends_on", 44),
+            ("contradicts", 37),
+            ("has_trait", 8),
+            ("holds_value", 7),
+            ("prefers", 3),
+            ("serves", 2),
+            ("bounded_by", 1),
+            ("derives_form_from", 1),
+            ("has_background", 1),
+            ("has_role", 1),
+            ("loyal_to", 1),
+            ("profiles", 1),
+        ]);
+        let origins = counts(&[("identity_import", 354), ("user_profile", 7)]);
+        let s = provenance_summary(&etypes, &origins, 285_161);
+        assert!(s.contains("Provenance: identity_import=354, user_profile=7, unlabeled=284800"));
+        assert!(s.contains("Brain-authored (knowledge_link): 430"));
+    }
+
+    #[test]
+    fn provenance_no_projection_hides_origin_line_authored_is_brain_buckets() {
+        // Legacy instance (or failed/empty origin aggregate): no origin
+        // labels means nothing projected — every built-in brain bucket is
+        // genuinely authored, and the origin line would be noise.
+        let etypes = counts(&[("same_session", 100), ("related_to", 5), ("enables", 2)]);
+        let s = provenance_summary(&etypes, &HashMap::new(), 107);
+        assert!(!s.contains("identity_import"));
+        assert!(s.contains("Brain-authored (knowledge_link): 7"));
+    }
+
+    #[test]
+    fn provenance_saturates_on_inconsistent_inputs() {
+        // More origin-labeled edges than any bucket accounts for (drifted
+        // live instance mid-scan): both subtractions saturate instead of
+        // wrapping.
+        let etypes = counts(&[("related_to", 3)]);
+        let origins = counts(&[("identity_import", 50)]);
+        let s = provenance_summary(&etypes, &origins, 10);
+        assert!(s.contains("unlabeled=0"));
+        assert!(s.contains("Brain-authored (knowledge_link): 0"));
     }
 
     #[test]
