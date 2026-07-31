@@ -15,7 +15,7 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 ## Reference
 
 - [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md) — Every slash command.
-- [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — All 97 built-in tools by category, plus workspace/GitHub/SSH safety notes.
+- [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — All 98 built-in tools by category, plus workspace/GitHub/SSH safety notes.
 - [RECOMMENDED-LOCAL-MODELS.md](RECOMMENDED-LOCAL-MODELS.md) — Vetted models and server configuration for the Ollama / LM Studio backends.
 
 ## Internals

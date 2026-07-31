@@ -83,6 +83,8 @@ EMBRA_TUI=1 ./scripts/run-qemu.sh                    # Boot in QEMU — serial T
 
 # Optional: per-request WardSONDB log lines (default: lifecycle/warn/error only)
 EMBRA_DB_VERBOSE=1 ./scripts/run-qemu.sh             # embra.dbverbose=1 → wardsondb --verbose
+EMBRA_LOG_LEVEL=info,kg::traversal=debug ./scripts/run-qemu.sh  # embra.loglevel=… → brain EMBRA_LOG
+                                                     # (read back in-session via system_logs; no spaces)
 ```
 
 > **Storage engine:** The `--storage-engine` flag is required and is baked into the embrad binary at build time. WardSONDB locks the choice into the DATA partition on first boot via a `.engine` marker file — switching engines later requires wiping DATA.

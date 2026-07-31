@@ -4,7 +4,7 @@ The embraOS knowledge graph (KG) is the cross-session memory layer. It lives in 
 
 This doc covers the write-side (auto-derived edges, promotion), the read-side (auto-enrichment, retrieval ranking, traversal), the twelve `knowledge_*` tools, and the design rationale behind a deliberately dense edge layer.
 
-The shorter inventory of KG tools (as part of the broader 97-tool catalog) lives in [TOOL-REFERENCE.md](TOOL-REFERENCE.md). The architectural placement (the 7-layer model's *Memory & Knowledge* row) is in [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md).
+The shorter inventory of KG tools (as part of the broader 98-tool catalog) lives in [TOOL-REFERENCE.md](TOOL-REFERENCE.md). The architectural placement (the 7-layer model's *Memory & Knowledge* row) is in [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md).
 
 > **How operators interact with the KG.** Every `knowledge_*` reference below is a *tool the intelligence calls during conversation*, not a command the operator types. The intelligence owns KG management — it decides when to `remember`, when to `knowledge_promote`, when to `knowledge_query` for context before answering, when to `knowledge_unlink_edge` after a tag rename. Operators participate by talking to the intelligence in natural language ("remember that the cert refresh works after manual generation", "promote that as a semantic observation", "what do we know about embra-web cert failures?", "looks like there are orphan edges — sweep them"). Tool names appear throughout this doc as references to the intelligence's capabilities, not as operator command syntax.
 
@@ -367,7 +367,7 @@ The tool-side renderer groups discovered nodes by depth and prints the edge-type
 
 ## Tool reference
 
-Twelve `knowledge_*` tools registered via `#[embra_tool(...)]` macros — ten in `crates/embra-brain/src/knowledge/tools.rs`, plus `knowledge_audit` (`knowledge/audit.rs`) and `knowledge_merge` (`knowledge/merge.rs`), added 2026-07-30. The full registration is verified by `knowledge_tools_register`. The intelligence chooses which to invoke as conversation requires; the args below are what the intelligence fills in, not what an operator types. For the broader tool catalog the intelligence draws from (all 97 tools), see [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — this section covers KG-specific contract details.
+Twelve `knowledge_*` tools registered via `#[embra_tool(...)]` macros — ten in `crates/embra-brain/src/knowledge/tools.rs`, plus `knowledge_audit` (`knowledge/audit.rs`) and `knowledge_merge` (`knowledge/merge.rs`), added 2026-07-30. The full registration is verified by `knowledge_tools_register`. The intelligence chooses which to invoke as conversation requires; the args below are what the intelligence fills in, not what an operator types. For the broader tool catalog the intelligence draws from (all 98 tools), see [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — this section covers KG-specific contract details.
 
 ### Read tools
 
@@ -485,7 +485,7 @@ Tuning notes:
 - **Raise `kg_temporal_window_secs`** to consider more remote edges in time. Linear decay still applies — an edge at the new window edge has weight approaching 0.
 - **Raise `kg_edge_candidate_limit`** to widen the candidate pool per query. Counterbalances slow density growth in long-running instances where the 50-doc top-N might miss older relevant docs. **This is the only change that reopens the D3 traversal values** — the structural degree ceiling (~450 outgoing docs/node) scales roughly linearly with it, so `kg_traversal_edge_limit` must stay above the new ceiling.
 - **Lower `kg_max_traversal_depth`** if traversal output is too verbose. The ceiling stays the upper bound; the default just sets what the brain reaches for when not specified.
-- **Saturation logging since the type partition (2026-07-31):** auto-window saturation is expected on dense hubs and logs at `debug` — it prunes only structural noise, and meaningful edges ride their own window. A `kg::traversal` **warn** now means the MEANINGFUL window (2000) filled — which should not happen below several thousand meaningful edges; if it fires, inspect that hub before touching anything. Raising `kg_traversal_edge_limit` is still **not** the default response to anything.
+- **Saturation logging since the type partition (2026-07-31):** auto-window saturation is expected on dense hubs and logs at `debug` — it prunes only structural noise, and meaningful edges ride their own window. A `kg::traversal` **warn** now means the MEANINGFUL window (2000) filled — which should not happen below several thousand meaningful edges; if it fires, inspect that hub before touching anything. Raising `kg_traversal_edge_limit` is still **not** the default response to anything. The debug tier sits below the brain's INFO log floor — boot with `EMBRA_LOG_LEVEL=info,kg::traversal=debug` (→ the `embra.loglevel=` kernel flag) to make it land in the log, then read it via `system_logs`.
 
 Schema lineage: v5 introduced the 3 KG collections + 7 indexes + the 4 original config fields (`run_v5_knowledge_graph` in `crates/embra-brain/src/migrations/mod.rs:490`, called from `:51`). v12 added `guardian.tools` for embra-guardian-v1; v13 (current) added the `identity.graph` projection collection (kg-native-identity); the memory collections' shapes have been stable since v5. Serde-additive fields can be added to the config struct without bumping the schema (precedent: `max_tool_iterations`, `show_reasoning`, and now the two `kg_traversal_*` knobs).
 
@@ -522,7 +522,9 @@ Everything below is a conversation with the intelligence — the operator types 
    `result_count > 0` confirms enrichment fired with a qualifying result; the
    `candidates_*` fields (2026-07-31) are PRE-threshold funnel counts — how
    much the retrieval actually considered before the top-5 cut, the
-   "was it comprehensive" answer.
+   "was it comprehensive" answer. These lines are readable from inside a
+   session via the `system_logs` tool (`service=embra-brain
+   filter=auto-enrichment`) — no server-side access needed.
 
 5. **Promote and inspect provenance.** Ask the intelligence to promote one of the entries — *"promote that first one as a semantic observation"* — then ask it to trace what's connected to the new node — *"now show me what's linked to that new semantic node, depth 2"*. The intelligence calls `knowledge_promote` then `knowledge_traverse`. The traversal output should include the `derived_from` edge back to the source entry plus the auto-derived edges to the second entry / any in-session adjacents.
 
@@ -536,7 +538,7 @@ If any step diverges from what the code claims here, the code is right and the d
 
 ## Related
 
-- [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — catalog of all 97 tools the intelligence draws from (the **Knowledge Graph** table covers these twelve).
+- [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — catalog of all 98 tools the intelligence draws from (the **Knowledge Graph** table covers these twelve).
 - [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md) — the 7-layer architecture (KG is the **Memory & Knowledge** row).
 - [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md) — slash commands; the KG layer is reached via brain tools, not slash commands.
 - `ARCHITECTURE.md` (local) — historical Sprint 2 narrative with commit SHAs and the fix-wave for `knowledge_unlink_node` cascade, the `derived_from` cleanup, and orphan-sweep introduction.
