@@ -3,12 +3,17 @@
 # Copies existing Phase 0 data so the system boots directly to Operational mode
 # instead of going through Learning Mode.
 #
-# Usage: ./scripts/seed-state.sh [--phase0-data /path/to/phase0/data] [--soul-hash <hash>] [--import-dir /path/to/graphs]
+# Usage: ./scripts/seed-state.sh [--phase0-data /path/to/phase0/data] [--soul-hash <hash>] [--import-dir /path/to/graphs] [--seed-dir /path/to/packs]
 #
 # --import-dir copies *.graph.json intelligence files into STATE's
 # imported-intelligence/ directory so Learning Mode offers them for import
 # at first boot (they take precedence over the rootfs-baked examples on
 # filename collisions).
+#
+# --seed-dir copies *.knowledge.json seed packs into STATE's
+# seed-knowledge/ directory; the brain's boot reconcile loads them into the
+# knowledge graph (STATE wins filename collisions with the rootfs-baked
+# packs).
 #
 # NOTE: This script requires Linux (losetup). On macOS, use a Linux VM or Docker.
 
@@ -18,6 +23,7 @@ IMAGE="${1:-output/images/embraos.img}"
 PHASE0_DATA=""
 SOUL_HASH=""
 IMPORT_DIR=""
+SEED_DIR=""
 
 shift || true
 while [ $# -gt 0 ]; do
@@ -25,6 +31,7 @@ while [ $# -gt 0 ]; do
         --phase0-data) PHASE0_DATA="$2"; shift 2 ;;
         --soul-hash) SOUL_HASH="$2"; shift 2 ;;
         --import-dir) IMPORT_DIR="$2"; shift 2 ;;
+        --seed-dir) SEED_DIR="$2"; shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -88,6 +95,19 @@ if [ -n "$IMPORT_DIR" ]; then
         echo "Done: $(ls "$IMPORT_DIR"/*.graph.json | wc -l) file(s)."
     else
         echo "ERROR: --import-dir '$IMPORT_DIR' has no *.graph.json files"
+        exit 1
+    fi
+fi
+
+# Seed knowledge packs (knowledge.v1)
+if [ -n "$SEED_DIR" ]; then
+    if [ -d "$SEED_DIR" ] && ls "$SEED_DIR"/*.knowledge.json >/dev/null 2>&1; then
+        echo "Copying seed knowledge packs into STATE seed-knowledge/..."
+        sudo mkdir -p "$MOUNT_STATE/seed-knowledge"
+        sudo cp "$SEED_DIR"/*.knowledge.json "$MOUNT_STATE/seed-knowledge/"
+        echo "Done: $(ls "$SEED_DIR"/*.knowledge.json | wc -l) file(s)."
+    else
+        echo "ERROR: --seed-dir '$SEED_DIR' has no *.knowledge.json files"
         exit 1
     fi
 fi

@@ -1012,6 +1012,35 @@ mod tests {
     }
 
     #[test]
+    fn committed_seed_packs_validate() {
+        // Every pack committed under Seed_Knowledge/ must parse clean —
+        // this is what stops an invalid pack from shipping in an image
+        // (doc_examples_validate precedent). The default pack must exist
+        // and keep its stable name.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Seed_Knowledge");
+        let mut names: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&dir).expect("Seed_Knowledge/ exists") {
+            let path = entry.expect("readable dir entry").path();
+            let Some(fname) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            if !fname.ends_with(SEED_FILE_SUFFIX) {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&path).expect("readable pack");
+            match parse_pack(&raw) {
+                Ok(pack) => {
+                    assert!(!pack.nodes.is_empty(), "{fname}: a committed pack must carry nodes");
+                    names.push(pack.name);
+                }
+                Err(errs) => panic!("{fname} is invalid:\n  {}", errs.join("\n  ")),
+            }
+        }
+        assert!(
+            names.iter().any(|n| n == "embraos-kg"),
+            "the default embraos-kg pack must be present (found: {names:?})"
+        );
+    }
+
+    #[test]
     fn nodes_fast_path_requires_both_counts_and_probe() {
         assert!(nodes_fast_path_ok(5, 2, 5, 2, true));
         assert!(nodes_fast_path_ok(6, 2, 5, 2, true), ">= — operator additions never trigger walks");

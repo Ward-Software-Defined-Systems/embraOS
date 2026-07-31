@@ -1,0 +1,233 @@
+{
+  "format": "knowledge.v1",
+  "name": "embraos-kg",
+  "description": "Baseline operational knowledge about the embraOS knowledge graph itself — how memory is stored, retrieved, tagged, and curated. Distilled from docs/KNOWLEDGE-GRAPH.md; loaded at every boot so the intelligence can answer questions about its own memory without the document in the system prompt.",
+  "nodes": [
+    { "_comment": "── architecture ──────────────────────────────────────" },
+    {
+      "id": "seed_kg_overview",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "The knowledge graph is the cross-session memory: memory.entries records raw episodic turns, memory.semantic holds promoted facts, preferences, decisions, observations, and patterns, memory.procedural holds structured how-to procedures, memory.edges holds typed weighted edges between all of them, and identity.graph is the read-only projection of the sealed identity.",
+      "tags": ["memory", "knowledge-graph", "embraos", "architecture"]
+    },
+    {
+      "id": "seed_kg_promotion",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Promotion consolidates an episodic entry into lasting knowledge: knowledge_promote turns an entry into a semantic node with a category, or a procedural node with structured steps, stamps the entry's promoted_to pointer, and writes a derived_from provenance edge. Promotion is one-way; unlinking the node reverses it.",
+      "tags": ["memory", "promotion", "knowledge-graph"]
+    },
+    {
+      "id": "seed_kg_density",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Edge density is the design, not bloat: every memory insert auto-derives same_session, temporal, and tag_overlap edges, and that dense structural layer is the substrate graph expansion walks. Never delete auto-derived edges to clean up — nothing re-derives them for existing documents, and read paths are ranked and windowed anyway.",
+      "tags": ["knowledge-graph", "edges", "density", "curation"]
+    },
+    {
+      "id": "seed_kg_edge_types",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Edge vocabulary: same_session, temporal, and tag_overlap are auto-derived at write time; derived_from is promotion provenance; enables, contradicts, refines, depends_on, and related_to are created deliberately via knowledge_link; free-form relation names exist only in the identity projection and in seed knowledge packs.",
+      "tags": ["knowledge-graph", "edges"]
+    },
+    {
+      "id": "seed_kg_identity_projection",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "identity.graph nodes project the sealed identity into the knowledge graph so identity is traversable and linkable from memories. They are untouchable by the curation tools and restored on every boot; the sealed graph itself always rides the system prompt and is the source of truth.",
+      "tags": ["identity", "knowledge-graph"]
+    },
+    {
+      "id": "seed_kg_sessions_edges",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Entries in the same session interlink automatically through same_session edges, which is how session context resurfaces in retrieval — long-running sessions build dense neighborhoods by design.",
+      "tags": ["sessions", "edges", "knowledge-graph"]
+    },
+    { "_comment": "── retrieval behavior ────────────────────────────────" },
+    {
+      "id": "seed_kg_enrichment",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Every substantive operator message automatically retrieves the most relevant memories (the top five above a score threshold) and injects them as background context before the model call — no tool invocation needed. Very short or filler messages skip retrieval.",
+      "tags": ["retrieval", "enrichment", "memory"]
+    },
+    {
+      "id": "seed_kg_retrieval_funnel",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Retrieval collects candidates four ways — exact tag match, content-token match over memories and entries, current-session adjacency, and depth-2 graph expansion seeded from the top-scored candidates — then ranks by relevance, recency, access frequency, and confidence.",
+      "tags": ["retrieval", "knowledge-graph", "memory"]
+    },
+    {
+      "id": "seed_kg_tag_discipline",
+      "kind": "semantic",
+      "category": "pattern",
+      "content": "Tags are matched exactly and lowercase. A consistent, lowercase, single-word tag vocabulary — reusing established tags instead of inventing synonyms — is what keeps memories findable months later.",
+      "tags": ["tags", "retrieval", "curation", "memory"]
+    },
+    {
+      "id": "seed_kg_windows_observable",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Every retrieval window is bounded and observable: system_status flags search_window_saturated when a memory collection outgrows the ten-thousand-document window, and traversal logs when a hub's edge window prunes.",
+      "tags": ["retrieval", "observability", "memory"]
+    },
+    { "_comment": "── curation practice ─────────────────────────────────" },
+    {
+      "id": "seed_kg_correction",
+      "kind": "semantic",
+      "category": "pattern",
+      "content": "When recorded knowledge turns out wrong, correct it in place with knowledge_update — edges and provenance survive. Reserve a contradicts edge for when both claims should stand, and knowledge_merge for true duplicates.",
+      "tags": ["curation", "hygiene", "knowledge-graph"]
+    },
+    {
+      "id": "seed_kg_hygiene_procedure",
+      "kind": "procedural",
+      "title": "Knowledge hygiene round",
+      "description": "Audit the knowledge graph, review the findings with the operator, and consolidate agreed duplicates safely.",
+      "steps": [
+        "Run knowledge_audit over semantic and procedural memory",
+        "Review the dedup, orphan, rot, and contradiction findings with the operator",
+        "For each agreed duplicate pair, run knowledge_merge with dry_run=true and check the preview",
+        "Run the real merge, then re-run knowledge_audit to confirm the issues resolved"
+      ],
+      "outcomes": {
+        "success": "Duplicates consolidated with their edges redirected; the re-audit comes back quiet.",
+        "failure": "A merge abort reports exactly what completed — re-running the same merge converges."
+      },
+      "tags": ["curation", "hygiene", "audit", "merge"]
+    },
+    {
+      "id": "seed_kg_category_discipline",
+      "kind": "semantic",
+      "category": "pattern",
+      "content": "How the operator likes to work belongs in category preference, not observation. Observation is the default bucket, and preferences recorded there drown among hundreds of observations, making preference recall unreliable.",
+      "tags": ["promotion", "curation", "categories"]
+    },
+    {
+      "id": "seed_kg_orphan_sweep",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "knowledge_sweep_orphans only removes edges whose endpoints no longer resolve — cleanup for dangling references after deletions, never density management.",
+      "tags": ["curation", "edges", "maintenance"]
+    },
+    {
+      "id": "seed_kg_superseded_marker",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "For a preserved learning trail, patch a superseded_by field onto an outdated node with knowledge_update. It is a documented marker for readers, not a mechanism — retrieval does not down-rank nodes that carry it.",
+      "tags": ["curation", "hygiene"]
+    },
+    {
+      "id": "seed_kg_seed_semantics",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Nodes and edges loaded from seed knowledge packs are restored at boot if deleted, while edits made with knowledge_update stick. Permanently changing seeded content means revising the pack file, not deleting the node.",
+      "tags": ["seed-knowledge", "curation", "embraos"]
+    },
+    { "_comment": "── the knowledge tools ───────────────────────────────" },
+    {
+      "id": "seed_kg_query_tool",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "knowledge_query is deliberate retrieval: multi-signal ranked search with a source breakdown of direct, session, and graph hits — the way to check what the graph knows before answering from working memory alone.",
+      "tags": ["tools", "retrieval", "knowledge-graph"]
+    },
+    {
+      "id": "seed_kg_traverse_tool",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "knowledge_traverse walks the graph outward from any node, undirected, with edge-type and minimum-weight filters — the way to see what a memory connects to, including identity nodes.",
+      "tags": ["tools", "knowledge-graph", "traversal"]
+    },
+    {
+      "id": "seed_kg_stats_tool",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "knowledge_graph_stats reports exact node and edge counts, category and edge-type distributions, an edge provenance split (identity projection, seed packs, brain-authored), graph density, and passive orphan detection — exact at any graph size.",
+      "tags": ["tools", "knowledge-graph", "observability"]
+    },
+    {
+      "id": "seed_kg_audit_tool",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "knowledge_audit is read-only hygiene detection: near-duplicate pairs, orphaned nodes with no meaningful edges, superseded (rot) candidates with their newer witnesses, and unacknowledged contradictions. Its dedup findings feed knowledge_merge directly.",
+      "tags": ["tools", "curation", "audit"]
+    },
+    {
+      "id": "seed_kg_link_tool",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "knowledge_link records deliberate relationships — enables, contradicts, refines, depends_on, related_to — between any two nodes. These rare, meaningful edges are what make graph expansion useful, so create one whenever a real relationship is established in conversation.",
+      "tags": ["tools", "edges", "curation", "knowledge-graph"]
+    },
+    {
+      "id": "seed_kg_dump_tool",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "knowledge_dump exports the whole graph as JSONL under /embra/workspace/KG_DUMPS for external analysis, and guardian dynamic tools can consume a dump through guardian_call's data_file bridge.",
+      "tags": ["tools", "knowledge-graph", "export"]
+    },
+    {
+      "id": "seed_kg_remember_recall",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "remember writes an episodic entry with tags; recall searches past entries and memories; recall with unpromoted_only=true lists the promotion backlog, newest first — the worklist for consolidating episodic memory into the graph.",
+      "tags": ["tools", "memory", "promotion"]
+    },
+    {
+      "id": "seed_kg_forget",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "forget deletes an episodic entry and cascades its edges; knowledge_unlink_node does the same for semantic and procedural nodes and clears the source entry's promotion pointer.",
+      "tags": ["tools", "memory", "curation"]
+    },
+    { "_comment": "── operations ────────────────────────────────────────" },
+    {
+      "id": "seed_kg_backup",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "The DATA partition carries the entire knowledge graph and all sessions; the backup script archives STATE and DATA, so restoring DATA restores every memory.",
+      "tags": ["backup", "operations", "memory"]
+    },
+    {
+      "id": "seed_kg_seed_packs",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Seed knowledge packs (*.knowledge.json) load at every boot from the OS image and from /embra/state/seed-knowledge, letting operators add baseline knowledge without conversation. This very knowledge arrived through one.",
+      "tags": ["seed-knowledge", "embraos", "memory"]
+    }
+  ],
+  "edges": [
+    { "_comment": "architecture spine" },
+    { "src": "seed_kg_promotion", "dst": "seed_kg_overview", "relation": "related_to" },
+    { "src": "seed_kg_density", "dst": "seed_kg_overview", "relation": "related_to" },
+    { "src": "seed_kg_edge_types", "dst": "seed_kg_density", "relation": "related_to" },
+    { "src": "seed_kg_identity_projection", "dst": "seed_kg_overview", "relation": "related_to" },
+    { "src": "seed_kg_sessions_edges", "dst": "seed_kg_density", "relation": "related_to" },
+    { "_comment": "retrieval" },
+    { "src": "seed_kg_enrichment", "dst": "seed_kg_retrieval_funnel", "relation": "depends_on" },
+    { "src": "seed_kg_retrieval_funnel", "dst": "seed_kg_overview", "relation": "related_to" },
+    { "src": "seed_kg_tag_discipline", "dst": "seed_kg_retrieval_funnel", "relation": "enables", "weight": 0.9 },
+    { "src": "seed_kg_windows_observable", "dst": "seed_kg_retrieval_funnel", "relation": "related_to" },
+    { "src": "seed_kg_link_tool", "dst": "seed_kg_retrieval_funnel", "relation": "enables", "weight": 0.9 },
+    { "_comment": "curation" },
+    { "src": "seed_kg_hygiene_procedure", "dst": "seed_kg_audit_tool", "relation": "depends_on" },
+    { "src": "seed_kg_correction", "dst": "seed_kg_hygiene_procedure", "relation": "related_to" },
+    { "src": "seed_kg_superseded_marker", "dst": "seed_kg_correction", "relation": "refines" },
+    { "src": "seed_kg_category_discipline", "dst": "seed_kg_promotion", "relation": "refines" },
+    { "src": "seed_kg_orphan_sweep", "dst": "seed_kg_density", "relation": "related_to" },
+    { "src": "seed_kg_seed_semantics", "dst": "seed_kg_seed_packs", "relation": "refines" },
+    { "_comment": "tools" },
+    { "src": "seed_kg_query_tool", "dst": "seed_kg_retrieval_funnel", "relation": "related_to" },
+    { "src": "seed_kg_traverse_tool", "dst": "seed_kg_link_tool", "relation": "related_to" },
+    { "src": "seed_kg_stats_tool", "dst": "seed_kg_windows_observable", "relation": "related_to" },
+    { "src": "seed_kg_dump_tool", "dst": "seed_kg_stats_tool", "relation": "related_to" },
+    { "src": "seed_kg_remember_recall", "dst": "seed_kg_promotion", "relation": "related_to" },
+    { "src": "seed_kg_forget", "dst": "seed_kg_remember_recall", "relation": "related_to" },
+    { "src": "seed_kg_backup", "dst": "seed_kg_overview", "relation": "related_to" }
+  ]
+}
