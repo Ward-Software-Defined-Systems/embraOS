@@ -5,7 +5,7 @@ use chrono::Utc;
 use futures::stream::{self, StreamExt};
 use serde_json::json;
 use std::collections::HashSet;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::config::SystemConfig;
 use crate::db::WardsonDbClient;
@@ -17,6 +17,20 @@ use super::types::{EdgeType, KnowledgeEdge, TraversalResult};
 /// SystemConfig field — it tunes HTTP pipelining against the local DB, not
 /// retrieval semantics.
 const HOP_CONCURRENCY: usize = 8;
+
+/// Wire names of the auto-derived partition — kept in lockstep with
+/// `EdgeType::is_auto_derived` (pinned by
+/// `auto_edge_type_names_match_is_auto_derived`).
+pub(crate) const AUTO_EDGE_TYPE_NAMES: [&str; 3] = ["same_session", "temporal", "tag_overlap"];
+
+/// Meaningful-partition window (locked D3 escalation, landed 2026-07-31):
+/// the non-auto types — brain-created, `derived_from`, free-form identity
+/// relations — ride their own per-hop window so weight-1.0 `same_session`
+/// floods can never prune them. Module const, NOT SystemConfig: 2000 is
+/// more than 2× ALL meaningful edge docs in the production graph (856), so
+/// saturation here is real signal (warn) rather than working-as-designed
+/// pruning (the auto window's debug).
+const MEANINGFUL_EDGE_LIMIT: u32 = 2000;
 
 /// Multi-source, level-synchronous, breadth-first traversal.
 ///
@@ -35,6 +49,17 @@ const HOP_CONCURRENCY: usize = 8;
 ///   2026-07-03 undirected fix: brain-created edges stored as one directed
 ///   doc are followed from either endpoint; result edges keep their true
 ///   stored direction; the visited-check dedupes auto-derived twin docs.
+/// - **Type-partitioned hop (locked D3 escalation, landed 2026-07-31):**
+///   each arm pair is fetched TWICE — the auto partition (`edge_type $in`
+///   the three write-time types) under the ranked `kg_traversal_edge_limit`
+///   window, and the meaningful partition (everything else: brain-created,
+///   `derived_from`, free-form identity relations) under its own
+///   `MEANINGFUL_EDGE_LIMIT` window — so `same_session` floods can never
+///   prune the globally-rare meaningful edges at a dense hub. Partitions
+///   concat MEANINGFUL-FIRST (disjoint type sets, no `_id` overlap), so the
+///   visited-check records meaningful witness edges in preference to auto
+///   twins. A caller-supplied `edge_type_filter` is split across the
+///   partitions (`partition_edge_types`) — explicit lists always ride `$in`.
 /// - **Multi-source:** `starts` seeds one shared BFS (depth 0 = every seed).
 ///   With N>1 seeds, edges BETWEEN seeds are not recorded in `edges` (both
 ///   endpoints are pre-visited) — callers that need a spanning edge set pass
@@ -73,22 +98,62 @@ pub async fn traverse_multi(
         }
     }
 
+    // Partition the caller's type filter once — loop-invariant.
+    let (auto_types, meaningful_types) = partition_edge_types(edge_type_filter.as_deref());
+
     let mut depth = 0u32;
     while !level.is_empty() && depth < max_depth && !truncated {
-        // Fetch both arms for every node in this level, bounded fan-out.
-        // `buffered` preserves input order, so processing is deterministic.
-        let fetches: Vec<_> = stream::iter(level.iter().cloned().map(|(coll, id)| {
-            let etf = edge_type_filter.as_deref();
+        // Fetch the partitioned arms for every node in this level, bounded
+        // fan-out. `buffered` preserves input order, so processing is
+        // deterministic. A skipped partition costs nothing (run_arm None).
+        // Take ownership of the level (it is rebuilt as next_level below) —
+        // avoids cloning every key into the fetch closures.
+        let fetches: Vec<_> = stream::iter(std::mem::take(&mut level).into_iter().map(|(coll, id)| {
+            let auto = auto_types.as_deref();
+            let meaningful = &meaningful_types;
             async move {
-                let src_body =
-                    edge_query_body(source_arm_filter(&coll, &id, etf, min_weight), edge_limit);
-                let tgt_body =
-                    edge_query_body(target_arm_filter(&coll, &id, etf, min_weight), edge_limit);
-                let (src, tgt) = tokio::join!(
-                    db.query("memory.edges", &src_body),
-                    db.query("memory.edges", &tgt_body)
+                let auto_bodies = auto.map(|types| {
+                    (
+                        edge_query_body(
+                            source_arm_filter(&coll, &id, Some(types), min_weight),
+                            edge_limit,
+                        ),
+                        edge_query_body(
+                            target_arm_filter(&coll, &id, Some(types), min_weight),
+                            edge_limit,
+                        ),
+                    )
+                });
+                let mean_bodies = match meaningful {
+                    MeaningfulTypes::NinAuto => Some((
+                        edge_query_body(
+                            source_arm_filter_nin_auto(&coll, &id, min_weight),
+                            MEANINGFUL_EDGE_LIMIT,
+                        ),
+                        edge_query_body(
+                            target_arm_filter_nin_auto(&coll, &id, min_weight),
+                            MEANINGFUL_EDGE_LIMIT,
+                        ),
+                    )),
+                    MeaningfulTypes::In(types) => Some((
+                        edge_query_body(
+                            source_arm_filter(&coll, &id, Some(types.as_slice()), min_weight),
+                            MEANINGFUL_EDGE_LIMIT,
+                        ),
+                        edge_query_body(
+                            target_arm_filter(&coll, &id, Some(types.as_slice()), min_weight),
+                            MEANINGFUL_EDGE_LIMIT,
+                        ),
+                    )),
+                    MeaningfulTypes::Skip => None,
+                };
+                let (a_src, a_tgt, m_src, m_tgt) = tokio::join!(
+                    run_arm(db, auto_bodies.as_ref().map(|(s, _)| s)),
+                    run_arm(db, auto_bodies.as_ref().map(|(_, t)| t)),
+                    run_arm(db, mean_bodies.as_ref().map(|(s, _)| s)),
+                    run_arm(db, mean_bodies.as_ref().map(|(_, t)| t)),
                 );
-                (coll, id, src, tgt)
+                (coll, id, a_src, a_tgt, m_src, m_tgt)
             }
         }))
         .buffered(HOP_CONCURRENCY)
@@ -96,27 +161,52 @@ pub async fn traverse_multi(
         .await;
 
         let mut next_level: Vec<(String, String)> = Vec::new();
-        for (coll, id, src_res, tgt_res) in fetches {
-            let (src_docs, tgt_docs) = match (src_res, tgt_res) {
-                (Ok(a), Ok(b)) => (a, b),
-                (Err(e), _) | (_, Err(e)) => {
+        for (coll, id, a_src, a_tgt, m_src, m_tgt) in fetches {
+            let (a_src, a_tgt, m_src, m_tgt) = match (a_src, a_tgt, m_src, m_tgt) {
+                (Ok(a), Ok(b), Ok(c), Ok(d)) => (a, b, c, d),
+                (Err(e), _, _, _)
+                | (_, Err(e), _, _)
+                | (_, _, Err(e), _)
+                | (_, _, _, Err(e)) => {
                     warn!("traversal arm query failed: {}", e);
                     continue;
                 }
             };
-            // Ranked window (FIX-7): saturation prunes the weakest/oldest
-            // edges for this hub. Per locked D3 the escalation on a real
-            // saturation is a type-partitioned fetch, NOT raising the cap.
-            let (edges, saturated) = merge_arm_edges(src_docs, tgt_docs, edge_limit as usize);
-            if saturated {
+            // Locked D3 escalation LANDED (2026-07-31): the meaningful
+            // partition rides its own window, so meaningful edges can no
+            // longer be pruned by weight-1.0 auto floods. Saturation here
+            // should not happen at current graph scale — real signal.
+            let (mean_edges, mean_saturated) =
+                merge_arm_edges(m_src, m_tgt, MEANINGFUL_EDGE_LIMIT as usize);
+            if mean_saturated {
                 warn!(
                     target: "kg::traversal",
                     node_id = %id,
                     collection = %coll,
-                    limit = edge_limit,
-                    "per-hop edge window saturated — lowest-ranked edges pruned for this hub"
+                    limit = MEANINGFUL_EDGE_LIMIT,
+                    "meaningful-edge window saturated — meaningful edges pruned for this hub; unexpected at current graph scale, investigate"
                 );
             }
+            // Auto-partition saturation is working-as-designed ranked
+            // pruning of structural noise (dense hubs saturate on nearly
+            // every hop) — debug since the partition landed, not warn.
+            let (auto_edges, auto_saturated) =
+                merge_arm_edges(a_src, a_tgt, edge_limit as usize);
+            if auto_saturated {
+                debug!(
+                    target: "kg::traversal",
+                    node_id = %id,
+                    collection = %coll,
+                    limit = edge_limit,
+                    "auto-edge window saturated (expected on dense hubs) — lowest-ranked auto edges pruned; meaningful edges ride their own window"
+                );
+            }
+            // Concat MEANINGFUL-FIRST: type sets are disjoint (no `_id`
+            // overlap), and expand_node_edges keeps the FIRST edge doc that
+            // reaches a neighbor — result edges prefer meaningful witnesses
+            // over same_session twins.
+            let edges: Vec<KnowledgeEdge> =
+                mean_edges.into_iter().chain(auto_edges).collect();
 
             // Node budget (FIX-7, locked D3): bounds dense-graph BFS cost
             // below the depth ceiling; overshoot within the final expansion
@@ -233,6 +323,100 @@ fn append_common_constraints(
     }
     if let Some(w) = min_weight {
         filter.insert("weight".into(), json!({ "$gte": w }));
+    }
+}
+
+/// Meaningful-partition type selection for one traversal call.
+pub(crate) enum MeaningfulTypes {
+    /// No caller filter: everything except the auto types (`$nin`).
+    NinAuto,
+    /// Caller filter minus the auto types — explicit `$in`; NEVER `$nin`
+    /// when the caller named types.
+    In(Vec<EdgeType>),
+    /// The caller's filter contained no meaningful types — skip the
+    /// partition entirely.
+    Skip,
+}
+
+/// Split a caller's edge-type filter across the two hop partitions.
+/// `None` → auto `$in` ALL-AUTO + meaningful `$nin` AUTO. `Some(list)` →
+/// auto = list ∩ AUTO (`$in`, `None` when empty), meaningful = list − AUTO
+/// (explicit `$in`, `Skip` when empty). Splits on `is_auto_derived`, so
+/// free-form `Other` relations always route meaningful.
+pub(crate) fn partition_edge_types(
+    filter: Option<&[EdgeType]>,
+) -> (Option<Vec<EdgeType>>, MeaningfulTypes) {
+    match filter {
+        None => (
+            Some(vec![EdgeType::SameSession, EdgeType::Temporal, EdgeType::TagOverlap]),
+            MeaningfulTypes::NinAuto,
+        ),
+        Some(list) => {
+            let auto: Vec<EdgeType> =
+                list.iter().filter(|t| t.is_auto_derived()).cloned().collect();
+            let meaningful: Vec<EdgeType> =
+                list.iter().filter(|t| !t.is_auto_derived()).cloned().collect();
+            (
+                (!auto.is_empty()).then_some(auto),
+                if meaningful.is_empty() {
+                    MeaningfulTypes::Skip
+                } else {
+                    MeaningfulTypes::In(meaningful)
+                },
+            )
+        }
+    }
+}
+
+/// Meaningful source arm (locked D3 partition): the SAME top-level eq pair
+/// — the planner serves it from `idx_edge_source_id` with every sibling as
+/// post-filter — plus `edge_type $nin` the auto types. `$nin` is parsed by
+/// WardSONDB but never index-served, so it always rides as a post-filter
+/// over this arm's index bucket, and `limit` applies AFTER post-filtering:
+/// the window is a true matched top-K of meaningful edges. Every edge doc
+/// carries `edge_type`, so the server's missing-field-never-matches `$nin`
+/// quirk cannot bite here. NEVER wrap arms in `$or` (full scan — module
+/// doc).
+pub(crate) fn source_arm_filter_nin_auto(
+    coll: &str,
+    id: &str,
+    min_weight: Option<f64>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut filter = serde_json::Map::new();
+    filter.insert("source_id".into(), json!(id));
+    filter.insert("source_collection".into(), json!(coll));
+    filter.insert("edge_type".into(), json!({ "$nin": AUTO_EDGE_TYPE_NAMES }));
+    if let Some(w) = min_weight {
+        filter.insert("weight".into(), json!({ "$gte": w }));
+    }
+    filter
+}
+
+/// Target-arm twin of `source_arm_filter_nin_auto` (rides `idx_edge_target`).
+pub(crate) fn target_arm_filter_nin_auto(
+    coll: &str,
+    id: &str,
+    min_weight: Option<f64>,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut filter = serde_json::Map::new();
+    filter.insert("target_id".into(), json!(id));
+    filter.insert("target_collection".into(), json!(coll));
+    filter.insert("edge_type".into(), json!({ "$nin": AUTO_EDGE_TYPE_NAMES }));
+    if let Some(w) = min_weight {
+        filter.insert("weight".into(), json!({ "$gte": w }));
+    }
+    filter
+}
+
+/// One optional arm query — `None` (a skipped partition) is an empty `Ok`,
+/// so the 4-way join stays shape-stable.
+async fn run_arm(
+    db: &WardsonDbClient,
+    body: Option<&serde_json::Value>,
+) -> Result<Vec<serde_json::Value>> {
+    match body {
+        Some(b) => db.query("memory.edges", b).await,
+        None => Ok(Vec::new()),
     }
 }
 
@@ -374,7 +558,9 @@ mod edge_query_body_tests {
     use super::super::types::{EdgeType, KnowledgeEdge};
     use super::{
         edge_query_body, expand_node_edges, merge_arm_edges, neighbor_of, parse_edge,
-        seed_level, source_arm_filter, target_arm_filter,
+        partition_edge_types, seed_level, source_arm_filter, source_arm_filter_nin_auto,
+        target_arm_filter, target_arm_filter_nin_auto, MeaningfulTypes, AUTO_EDGE_TYPE_NAMES,
+        MEANINGFUL_EDGE_LIMIT,
     };
     use serde_json::json;
     use std::collections::HashSet;
@@ -489,6 +675,128 @@ mod edge_query_body_tests {
         assert_eq!(src["sort"], tgt["sort"]);
         assert_eq!(src["sort"], json!([{"weight": "desc"}, {"created_at": "desc"}]));
         assert_eq!(src["limit"], tgt["limit"]);
+    }
+
+    #[test]
+    fn nin_arm_filters_are_eq_pair_plus_exact_auto_nin() {
+        let src = source_arm_filter_nin_auto("memory.semantic", "n", Some(0.1));
+        assert_eq!(src["source_id"], json!("n"));
+        assert_eq!(src["source_collection"], json!("memory.semantic"));
+        assert_eq!(src["edge_type"], json!({"$nin": ["same_session", "temporal", "tag_overlap"]}));
+        assert_eq!(src["weight"], json!({"$gte": 0.1}));
+        assert_eq!(src.len(), 4);
+
+        let tgt = target_arm_filter_nin_auto("memory.semantic", "n", None);
+        assert_eq!(tgt["target_id"], json!("n"));
+        assert_eq!(tgt["target_collection"], json!("memory.semantic"));
+        assert_eq!(tgt["edge_type"], json!({"$nin": ["same_session", "temporal", "tag_overlap"]}));
+        assert_eq!(tgt.len(), 3, "weight omitted when absent: {tgt:?}");
+    }
+
+    #[test]
+    fn nin_bodies_never_contain_or_and_pin_the_meaningful_window() {
+        assert_eq!(MEANINGFUL_EDGE_LIMIT, 2000);
+        for f in [
+            source_arm_filter_nin_auto("memory.semantic", "n", Some(0.1)),
+            target_arm_filter_nin_auto("memory.semantic", "n", Some(0.1)),
+        ] {
+            let body = edge_query_body(f, MEANINGFUL_EDGE_LIMIT);
+            let s = serde_json::to_string(&body).unwrap();
+            assert!(!s.contains("\"$or\""), "hot-path body contains $or: {s}");
+            assert_eq!(body["sort"], json!([{"weight": "desc"}, {"created_at": "desc"}]));
+            assert_eq!(body["limit"], json!(2000));
+        }
+    }
+
+    #[test]
+    fn auto_edge_type_names_match_is_auto_derived() {
+        // Const/method lockstep: the $in/$nin wire list and the enum
+        // predicate must describe the same three types.
+        for name in AUTO_EDGE_TYPE_NAMES {
+            let t = EdgeType::parse_lossy(name).expect("auto name parses");
+            assert!(t.is_auto_derived(), "{name} must be auto-derived");
+            assert!(!matches!(t, EdgeType::Other(_)), "{name} must be a built-in");
+        }
+        let autos = [EdgeType::SameSession, EdgeType::Temporal, EdgeType::TagOverlap];
+        assert_eq!(AUTO_EDGE_TYPE_NAMES.len(), autos.len());
+        for t in autos {
+            assert!(AUTO_EDGE_TYPE_NAMES.contains(&t.as_str()));
+        }
+        // And nothing else qualifies.
+        for t in [
+            EdgeType::DerivedFrom,
+            EdgeType::Enables,
+            EdgeType::Contradicts,
+            EdgeType::Refines,
+            EdgeType::DependsOn,
+            EdgeType::RelatedTo,
+            EdgeType::Other("navigatesFor".into()),
+        ] {
+            assert!(!t.is_auto_derived(), "{:?} must not be auto-derived", t);
+        }
+    }
+
+    #[test]
+    fn partition_edge_types_none_gives_full_auto_in_and_nin_auto() {
+        let (auto, meaningful) = partition_edge_types(None);
+        let auto = auto.expect("auto partition present");
+        assert_eq!(auto.len(), 3);
+        assert!(auto.iter().all(|t| t.is_auto_derived()));
+        assert!(matches!(meaningful, MeaningfulTypes::NinAuto));
+    }
+
+    #[test]
+    fn partition_edge_types_splits_user_list_never_nin() {
+        // Mixed list: intersection rides auto, remainder rides an EXPLICIT
+        // $in (never $nin when the caller named types).
+        let list = [EdgeType::SameSession, EdgeType::Refines, EdgeType::Other("has_trait".into())];
+        let (auto, meaningful) = partition_edge_types(Some(&list));
+        assert_eq!(auto.as_deref(), Some(&[EdgeType::SameSession][..]));
+        match meaningful {
+            MeaningfulTypes::In(types) => {
+                assert_eq!(types.len(), 2);
+                assert!(types.contains(&EdgeType::Refines));
+                assert!(types.contains(&EdgeType::Other("has_trait".into())));
+            }
+            _ => panic!("expected explicit In partition"),
+        }
+
+        // Pure-auto list: meaningful partition skipped entirely.
+        let (auto, meaningful) = partition_edge_types(Some(&[EdgeType::Temporal]));
+        assert_eq!(auto.as_deref(), Some(&[EdgeType::Temporal][..]));
+        assert!(matches!(meaningful, MeaningfulTypes::Skip));
+
+        // Pure-meaningful list: auto partition skipped entirely.
+        let (auto, meaningful) = partition_edge_types(Some(&[EdgeType::DerivedFrom]));
+        assert!(auto.is_none());
+        assert!(matches!(meaningful, MeaningfulTypes::In(ref t) if t == &[EdgeType::DerivedFrom]));
+    }
+
+    #[test]
+    fn meaningful_witness_edge_wins_neighbor_dedupe() {
+        // The hop concats meaningful-first; expand_node_edges keeps the
+        // FIRST edge doc reaching a neighbor, so the recorded witness edge
+        // prefers the meaningful label over a same_session twin.
+        let mk = |id: &str, etype: EdgeType| KnowledgeEdge {
+            _id: Some(id.into()),
+            source_id: "n".into(),
+            source_collection: "memory.semantic".into(),
+            target_id: "x".into(),
+            target_collection: "memory.semantic".into(),
+            edge_type: etype,
+            weight: 1.0,
+            metadata: serde_json::Value::Null,
+            created_at: "2026-07-01T00:00:00Z".into(),
+        };
+        let edges = vec![mk("m1", EdgeType::Refines), mk("a1", EdgeType::SameSession)];
+        let mut visited: HashSet<(String, String)> =
+            [("memory.semantic".to_string(), "n".to_string())].into_iter().collect();
+        let (admitted, budget_hit) =
+            expand_node_edges("memory.semantic", "n", edges, &mut visited, 1000);
+        assert!(!budget_hit);
+        assert_eq!(admitted.len(), 1, "one neighbor, one witness edge");
+        assert_eq!(admitted[0].0.edge_type, EdgeType::Refines);
+        assert_eq!(admitted[0].1, ("memory.semantic".to_string(), "x".to_string()));
     }
 
     fn edge_doc(id: &str, weight: f64, created: &str) -> serde_json::Value {

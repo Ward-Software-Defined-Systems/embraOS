@@ -177,6 +177,15 @@ impl EdgeType {
         )
     }
 
+    /// The three write-time auto-derived types (`derive_edges`) — the flood
+    /// class the type-partitioned hop windows separately (locked D3
+    /// escalation, landed 2026-07-31). Deliberately NOT `is_symmetric()`
+    /// (that includes `related_to`) and NOT `!is_brain_created()` (that
+    /// includes `derived_from` and free-form `Other`).
+    pub fn is_auto_derived(&self) -> bool {
+        matches!(self, Self::SameSession | Self::Temporal | Self::TagOverlap)
+    }
+
     /// Symmetric edge types — auto-derived edges are inserted
     /// bidirectionally (see `knowledge::edges::push_bidirectional`), and
     /// `related_to` is documented as same-scope/non-hierarchical. The

@@ -290,6 +290,15 @@ async fn doc_present(db: &WardsonDbClient, collection: &str) -> bool {
 /// full memory.edges scan. The target arm already rides the single-field
 /// `idx_edge_target` (v5).
 fn hot_path_index_specs() -> Vec<(&'static str, serde_json::Value)> {
+    // NEVER add a single-field `edge_type` index here (or anywhere).
+    // WardSONDB's And-planner tries filter children in ALPHABETICAL key
+    // order and `edge_type` sorts before source_id/target_id — with such an
+    // index, the partitioned hop arms' `edge_type $in/$nin` would plan as
+    // IndexIn over WHOLE type buckets (same_session ≈ 150k+ docs at
+    // production scale) with the node id demoted to post-filter, replanning
+    // every traversal hop into a bucket scan. The arms only get their
+    // indexed id lookup + type post-filter today because no such index
+    // exists. Tripwire: `no_single_field_edge_type_index_on_memory_edges`.
     vec![(
         "memory.edges",
         serde_json::json!({"name": "idx_edge_source_id", "field": "source_id"}),
@@ -385,6 +394,30 @@ mod hot_path_index_tests {
             body.get("fields").is_none(),
             "must stay single-field — compound form regresses the arm to full scan"
         );
+    }
+
+    /// The alphabetical-planner tripwire (see the comment on
+    /// `hot_path_index_specs`): a single-field edge_type index would make
+    /// WardSONDB serve every partitioned hop arm from WHOLE type buckets
+    /// instead of the node-id index.
+    #[test]
+    fn no_single_field_edge_type_index_on_memory_edges() {
+        for (collection, body) in hot_path_index_specs() {
+            if collection != "memory.edges" {
+                continue;
+            }
+            assert_ne!(
+                body.get("field").and_then(|v| v.as_str()),
+                Some("edge_type"),
+                "single-field edge_type index would replan every hop into a type-bucket scan"
+            );
+            if let Some(fields) = body.get("fields").and_then(|v| v.as_array()) {
+                assert!(
+                    !(fields.len() == 1 && fields[0] == "edge_type"),
+                    "single-field edge_type index (compound form) is equally forbidden"
+                );
+            }
+        }
     }
 }
 
