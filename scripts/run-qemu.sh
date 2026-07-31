@@ -72,7 +72,7 @@ fi
 # WardSONDB request-log verbosity — per-request lines are opt-in server-side
 # (--verbose). EMBRA_DB_VERBOSE=1 sets embra.dbverbose=1 on the kernel
 # cmdline; embrad then appends --verbose to the wardsondb args. Default off:
-# the log lives on the 256M boot-wiped tmpfs. Requires a WardSONDB build
+# the log lives on the 512M boot-wiped tmpfs. Requires a WardSONDB build
 # that knows --verbose (older builds reject the flag and won't start).
 if [ "${EMBRA_DB_VERBOSE:-}" = "1" ]; then
     DBLOG_CMDLINE="embra.dbverbose=1"

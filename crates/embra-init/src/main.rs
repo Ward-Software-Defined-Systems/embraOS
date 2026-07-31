@@ -97,7 +97,11 @@ fn boot() -> Result<(), Box<dyn std::error::Error>> {
         None::<&str>,
     )?;
 
-    // Step 5: Mount EPHEMERAL (tmpfs)
+    // Step 5: Mount EPHEMERAL (tmpfs). size= is a CAP, not a reservation —
+    // pages allocate only on write. 512M (was 256M, 2026-07-31) gives the
+    // service logs headroom for their self-diagnostics role (system_logs)
+    // on months-long uptimes, while staying at 12.5% of the 4G reference
+    // VM; the one realistic fill scenario is a long-lived debug log spec.
     let eph_path = format!("{}/embra/ephemeral", NEWROOT);
     std::fs::create_dir_all(&eph_path)?;
     mount(
@@ -105,7 +109,7 @@ fn boot() -> Result<(), Box<dyn std::error::Error>> {
         eph_path.as_str(),
         Some("tmpfs"),
         MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
-        Some("size=256M"),
+        Some("size=512M"),
     )?;
 
     // Step 6: Move mount points into new root
