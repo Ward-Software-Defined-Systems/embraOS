@@ -67,7 +67,10 @@ Phase 2–5 add A/B partitioned rollback, an `embractl` management CLI, bare-met
 > graph — it has the `remember` and `knowledge_*` tools and will write the entries
 > itself. Graph hygiene is tool-assisted: `knowledge_audit` (read-only
 > duplicate/orphan/rot/contradiction detection) feeds `knowledge_merge`
-> (dry-run-first node consolidation with edge redirect).
+> (dry-run-first node consolidation with edge redirect). Baseline knowledge
+> ships as **seed packs** (`Seed_Knowledge/*.knowledge.json`) loaded into
+> the graph at every boot — the default pack teaches an instance how its
+> own memory works, and operators can drop their own packs into STATE.
 > Separately, **`/feedback-loop`** (**experimental**) runs a full
 > self-realignment against the intelligence's identity and soul — a different
 > concern, not a memory-promotion sweep. Memory search and graph retrieval read
