@@ -48,6 +48,19 @@ fn web_mode_enabled() -> bool {
 /// per-request lines for debugging. Only valid on WardSONDB builds with the
 /// opt-in flag — an older build rejects the unknown flag and will not
 /// start. Same parsing style as `web_mode_enabled`.
+/// Brain log filtering: `embra.loglevel=<spec>` on the kernel cmdline (set
+/// by run-qemu.sh via EMBRA_LOG_LEVEL). Forwarded to the brain child as
+/// its `EMBRA_LOG` env — an env-filter-style Targets spec, e.g.
+/// "info,kg::traversal=debug". No spaces (kernel args are space-split);
+/// commas are fine. Absent → the brain's INFO default.
+fn brain_log_spec() -> Option<String> {
+    std::fs::read_to_string("/proc/cmdline")
+        .unwrap_or_default()
+        .split_whitespace()
+        .find_map(|p| p.strip_prefix("embra.loglevel=").map(|s| s.to_string()))
+        .filter(|s| !s.is_empty())
+}
+
 fn db_verbose_enabled() -> bool {
     std::fs::read_to_string("/proc/cmdline")
         .unwrap_or_default()
@@ -281,6 +294,10 @@ impl Supervisor {
             .to_string();
         if !lm_studio_bearer.is_empty() {
             brain_env.push(("EMBRA_LM_STUDIO_BEARER".to_string(), lm_studio_bearer));
+        }
+        if let Some(spec) = brain_log_spec() {
+            info!("Brain log filter from cmdline (embra.loglevel): {}", spec);
+            brain_env.push(("EMBRA_LOG".to_string(), spec));
         }
 
         self.add_service(ServiceDef {

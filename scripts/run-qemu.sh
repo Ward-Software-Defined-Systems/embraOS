@@ -81,6 +81,18 @@ else
     DBLOG_CMDLINE=""
 fi
 
+# Brain log filtering — EMBRA_LOG_LEVEL sets embra.loglevel=<spec> on the
+# kernel cmdline; embrad forwards it to embra-brain as EMBRA_LOG
+# (env-filter-style Targets spec, e.g. "info,kg::traversal=debug"; no
+# spaces — kernel args are space-split). Default unset = INFO. Read the
+# result from inside a session via the system_logs tool.
+if [ -n "${EMBRA_LOG_LEVEL:-}" ]; then
+    LOGLEVEL_CMDLINE="embra.loglevel=${EMBRA_LOG_LEVEL}"
+    echo "  Brain log filter: ${EMBRA_LOG_LEVEL} (EMBRA_LOG_LEVEL)"
+else
+    LOGLEVEL_CMDLINE=""
+fi
+
 echo "  Serial console: this terminal"
 if [ -n "$WEB_CMDLINE" ]; then
     echo "  UI mode: web console (default) — set EMBRA_TUI=1 for the serial TUI"
@@ -107,7 +119,7 @@ qemu-system-x86_64 \
     -drive file="$IMAGE",format=raw,if=virtio \
     -kernel "$KERNEL" \
     -initrd "$INITRD" \
-    -append "console=ttyS0 root=/dev/vda2 ro quiet embra.cols=$HOST_COLS embra.rows=$HOST_ROWS $WEB_CMDLINE $DBLOG_CMDLINE" \
+    -append "console=ttyS0 root=/dev/vda2 ro quiet embra.cols=$HOST_COLS embra.rows=$HOST_ROWS $WEB_CMDLINE $DBLOG_CMDLINE $LOGLEVEL_CMDLINE" \
     -nographic \
     -serial mon:stdio \
     -nic user,hostfwd=tcp::50000-:50000,hostfwd=tcp::8443-:8443,hostfwd=tcp::3345-:3345 \

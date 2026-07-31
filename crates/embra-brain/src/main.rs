@@ -32,9 +32,41 @@ use embra_common::proto::brain::brain_service_server::BrainServiceServer;
 use tonic::transport::Server;
 use tracing::{info, warn, debug, error};
 
+/// Log filtering via `EMBRA_LOG` (2026-07-31): env-filter-style Targets
+/// specs — "info", "debug", "info,kg::traversal=debug". Parsed with
+/// `filter::Targets` (in tracing-subscriber's DEFAULT features — do not
+/// enable the env-filter crate feature for this; it drags in new deps and
+/// rotates the lockfile). Absent/invalid → the historical INFO floor,
+/// byte-identical default behavior. A spec with only per-target entries
+/// gets an INFO default added so it never silences the rest of the crate.
+/// Appliance surface: the `embra.loglevel=` kernel flag → embrad forwards
+/// it as this env on the brain child; readable back via `system_logs`.
+fn init_tracing() {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    use tracing_subscriber::Layer;
+
+    let spec = std::env::var("EMBRA_LOG").unwrap_or_default();
+    let mut targets = match spec.trim() {
+        "" => tracing_subscriber::filter::Targets::new()
+            .with_default(tracing::level_filters::LevelFilter::INFO),
+        s => s.parse().unwrap_or_else(|e| {
+            eprintln!("[embra-brain] invalid EMBRA_LOG '{s}' ({e}); falling back to info");
+            tracing_subscriber::filter::Targets::new()
+                .with_default(tracing::level_filters::LevelFilter::INFO)
+        }),
+    };
+    if targets.default_level().is_none() {
+        targets = targets.with_default(tracing::level_filters::LevelFilter::INFO);
+    }
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer().with_filter(targets))
+        .init();
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt::init();
+    init_tracing();
 
     // Parse service args
     let args: Vec<String> = std::env::args().collect();
