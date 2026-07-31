@@ -47,7 +47,7 @@ pub async fn build_turn_context(
     // reports the deduped count.
     let query_tags: Vec<String> = super::text::query_tag_tokens(trimmed);
 
-    let results = match retrieve_relevant_knowledge(
+    let (results, stats) = match retrieve_relevant_knowledge(
         db,
         session_name,
         &query_tags,
@@ -70,9 +70,17 @@ pub async fn build_turn_context(
         .take(MAX_INJECTED)
         .collect();
 
+    // Funnel observability (2026-07-31): the candidates_* fields are
+    // PRE-threshold counts across the whole retrieval funnel — the journal
+    // can now answer "was retrieval comprehensive", not just show the
+    // surviving top-5.
     tracing::info!(
         session = session_name,
         tag_count = query_tags.len(),
+        candidates_total = stats.candidates_total,
+        candidates_direct = stats.direct_query,
+        candidates_session = stats.session_based,
+        candidates_graph = stats.graph_expansion,
         result_count = qualifying.len(),
         top_score = qualifying.first().map(|r| r.score).unwrap_or(0.0),
         "auto-enrichment"

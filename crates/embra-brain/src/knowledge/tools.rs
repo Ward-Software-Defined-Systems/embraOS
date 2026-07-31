@@ -568,10 +568,13 @@ pub async fn knowledge_query(
     // punctuation-trimmed, deduped, same as auto-enrichment's derivation.
     let query_tags: Vec<String> = super::text::query_tag_tokens(query_text);
 
+    // Funnel stats are enrichment's observability seam — the tool output
+    // stays byte-identical (its header already shows the returned-set
+    // source breakdown).
     let mut results = match retrieve_relevant_knowledge(
         db, session_name, &query_tags, query_text, retrieve_n, config
     ).await {
-        Ok(r) => r,
+        Ok((r, _stats)) => r,
         Err(e) => return format!("Error: retrieval failed: {}", e),
     };
 

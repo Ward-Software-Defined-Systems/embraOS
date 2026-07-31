@@ -11,19 +11,44 @@
 
 use anyhow::Result;
 use chrono::DateTime;
+use futures::stream::{self, StreamExt};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::config::SystemConfig;
 use crate::db::WardsonDbClient;
 
 use super::node_store::{doc_tag_contains, sort_created_desc, NodeStore};
+use super::text::content_tokens;
 use super::traversal::{spawn_access_touches, traverse_multi};
 use super::types::{content_preview, GraphNode, NodeType, RankedNode, SemanticCategory};
 
-/// Step-1 window: newest matches admitted per tag per collection — mirrors
-/// the old per-tag server query's `sort: created_at desc, limit: 20`.
-const STEP1_PER_TAG_CAP: usize = 20;
+/// Step-1 window: newest matches admitted per tag per collection. Raised
+/// 20 → 100 (2026-07-31): 20 was the old per-tag SERVER query's window;
+/// matching has been in-memory since 2026-07-04, so the cap only bounds
+/// candidate-set growth — scoring ranks and truncates regardless.
+const STEP1_PER_TAG_CAP: usize = 100;
+
+/// Step-2 walk width: how many of the newest session entries get their
+/// same_session edge windows walked. Raised take(20) → the full
+/// `session_entries_query_body` window (pinned together by
+/// `step2_walk_cap_matches_entry_window_limit`).
+const STEP2_ENTRY_WALK: usize = 50;
+
+/// Bounded fan-out for the Step-2 edge-window fetches — HTTP pipelining
+/// against the local DB, same rationale as traversal's `HOP_CONCURRENCY`.
+const STEP2_WALK_CONCURRENCY: usize = 8;
+
+/// Step-3 content-match admissions per collection, ordered
+/// (match count desc, created_at desc, _id asc) — bounds candidate-set
+/// growth; scoring ranks the survivors.
+const STEP3_PER_COLLECTION_CAP: usize = 100;
+
+/// Relevance-denominator cap (2026-07-31 scoring fix): tag_relevance and
+/// content-match strength divide by `min(deduped query tokens, THIS)` — a
+/// 25-word message no longer dilutes a 2-tag hit to ~0.04 of the 0.4
+/// relevance budget.
+const RELEVANCE_DENOM_CAP: usize = 8;
 
 /// Graph-expansion fan-out: the top-scored candidates seeding Step 4's
 /// single multi-source traversal (was: 10 seeds in HashMap iteration order,
@@ -42,6 +67,20 @@ struct Collected {
     confidence: f64,
     node_type: NodeType,
     source: String,
+    /// Step-3 content-match strength in [0,1] (0.0 = no content match).
+    /// Feeds the relevance signal as `max(tag_relevance, content_strength)`.
+    content_strength: f64,
+}
+
+/// Pre-threshold, pre-truncation funnel counts — the observability seam
+/// (2026-07-31): enrichment logs these so production journals can answer
+/// "was retrieval comprehensive", not just show the surviving top-5.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RetrievalStats {
+    pub candidates_total: usize,
+    pub direct_query: usize,
+    pub session_based: usize,
+    pub graph_expansion: usize,
 }
 
 pub async fn retrieve_relevant_knowledge(
@@ -51,8 +90,9 @@ pub async fn retrieve_relevant_knowledge(
     query_text: &str,
     max_results: usize,
     config: &SystemConfig,
-) -> Result<Vec<RankedNode>> {
+) -> Result<(Vec<RankedNode>, RetrievalStats)> {
     let mut collected: HashMap<(String, String), Collected> = HashMap::new();
+    let query_tokens = content_tokens(query_text);
 
     // Prefetch the promoted-node collections once; every later lookup joins
     // in memory (2026-07-04 — replaces hundreds of sequential point reads).
@@ -79,7 +119,21 @@ pub async fn retrieve_relevant_knowledge(
         if tag.is_empty() { continue; }
         for (coll, docs) in &prefetched {
             for doc in step1_tag_hits(docs, tag) {
-                insert_collected(&mut collected, doc, coll, "direct_query");
+                insert_collected(&mut collected, doc, coll, "direct_query", 0.0);
+            }
+        }
+    }
+
+    // Step 3a: content-token match over the SAME prefetched promoted-node
+    // slices (2026-07-31 — before this, semantic/procedural CONTENT was
+    // unsearchable anywhere: a promoted fact whose tags don't match was
+    // invisible to direct retrieval). In-memory, so effectively free.
+    if !query_tokens.is_empty() {
+        for (coll, docs) in &prefetched {
+            for (doc, strength) in
+                step3_content_hits(docs, coll, &query_tokens, STEP3_PER_COLLECTION_CAP)
+            {
+                insert_collected(&mut collected, doc, coll, "direct_query", strength);
             }
         }
     }
@@ -88,41 +142,53 @@ pub async fn retrieve_relevant_knowledge(
     }
 
     // Step 2: Session-based — find edges from current-session entries.
+    // Edge windows fetch with bounded concurrency (2026-07-31: the walk
+    // widened take(20) → the full 50-entry window; 50 serial round trips
+    // would cost real per-turn latency), then join the store sequentially
+    // (it needs &mut).
     if let Ok(entries) = db.query("memory.entries", &session_entries_query_body(session_name)).await {
-        let session_ids: Vec<String> = entries
+        let walk_ids: Vec<String> = entries
             .iter()
             .filter_map(|d| d.get("_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
+            .take(STEP2_ENTRY_WALK)
             .collect();
-        for entry_id in session_ids.iter().take(20) {
-            if let Ok(edges) = db.query("memory.edges", &session_edge_query_body(entry_id)).await {
-                for edge in edges {
-                    let Some(target_coll) = edge.get("target_collection").and_then(|v| v.as_str()) else { continue; };
-                    let Some(target_id) = edge.get("target_id").and_then(|v| v.as_str()) else { continue; };
-                    if target_coll == "memory.entries" { continue; }
-                    if let Some(doc) = store.get_or_fetch(db, target_coll, target_id).await {
-                        insert_collected(&mut collected, &doc, target_coll, "session_based");
-                    }
-                }
+        let edge_windows: Vec<Vec<serde_json::Value>> = stream::iter(walk_ids)
+            .map(|entry_id| async move {
+                db.query("memory.edges", &session_edge_query_body(&entry_id))
+                    .await
+                    .unwrap_or_default()
+            })
+            .buffered(STEP2_WALK_CONCURRENCY)
+            .collect()
+            .await;
+        for edge in edge_windows.into_iter().flatten() {
+            let Some(target_coll) = edge.get("target_collection").and_then(|v| v.as_str()) else { continue; };
+            let Some(target_id) = edge.get("target_id").and_then(|v| v.as_str()) else { continue; };
+            if target_coll == "memory.entries" { continue; }
+            if let Some(doc) = store.get_or_fetch(db, target_coll, target_id).await {
+                insert_collected(&mut collected, &doc, target_coll, "session_based", 0.0);
             }
         }
     }
 
-    // Step 3: Content-based substring match on memory.entries. Recency
-    // window via fetch_recent (FIX-4) — the old `limit: 500` with no sort
-    // was a second latent freeze at entry #500 in key (oldest-first) order.
-    if !query_text.is_empty() {
-        let q_lower = query_text.to_lowercase();
+    // Step 3b: content-token match on memory.entries (2026-07-31 — replaces
+    // the whole-message substring, which required the ENTIRE user message to
+    // appear verbatim inside an entry and so never fired on natural
+    // messages). Recency window via fetch_recent (FIX-4).
+    if !query_tokens.is_empty() {
         let all_entries = db
             .fetch_recent("memory.entries", crate::db::MEMORY_FETCH_WINDOW)
             .await
             .unwrap_or_default();
-        for doc in &all_entries {
-            let content = doc.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            if !content.to_lowercase().contains(&q_lower) { continue; }
+        for (doc, strength) in
+            step3_content_hits(&all_entries, "memory.entries", &query_tokens, STEP3_PER_COLLECTION_CAP)
+        {
+            // The promoted target's content derives from the matched entry,
+            // so the match strength rides the redirect.
             if let Some((pdoc, pcoll)) = redirect_if_promoted(&mut store, db, doc, "memory.entries").await {
-                insert_collected(&mut collected, &pdoc, &pcoll, "direct_query");
+                insert_collected(&mut collected, &pdoc, &pcoll, "direct_query", strength);
             } else {
-                insert_collected(&mut collected, doc, "memory.entries", "direct_query");
+                insert_collected(&mut collected, doc, "memory.entries", "direct_query", strength);
             }
         }
         // The window becomes the entries slice of the store, so Step 4's
@@ -146,14 +212,17 @@ pub async fn retrieve_relevant_knowledge(
                     if let Some((pdoc, pcoll)) = redirect_if_promoted(&mut store, db, &doc, &node.collection).await {
                         let redir_key = (pcoll.clone(), pdoc.get("_id").and_then(|v| v.as_str()).unwrap_or_default().to_string());
                         if collected.contains_key(&redir_key) { continue; }
-                        insert_collected(&mut collected, &pdoc, &pcoll, "graph_expansion");
+                        insert_collected(&mut collected, &pdoc, &pcoll, "graph_expansion", 0.0);
                     } else {
-                        insert_collected(&mut collected, &doc, &node.collection, "graph_expansion");
+                        insert_collected(&mut collected, &doc, &node.collection, "graph_expansion", 0.0);
                     }
                 }
             }
         }
     }
+
+    // Funnel stats — pre-threshold, pre-truncation (the observability seam).
+    let stats = funnel_stats(&collected);
 
     // Step 5: Score and rank; access-touch ONLY what is returned (the
     // 2026-07-04 semantics change: access_count = retrieval hits, not BFS
@@ -163,7 +232,23 @@ pub async fn retrieve_relevant_knowledge(
         db.clone(),
         ranked.iter().map(|r| (r.node.collection.clone(), r.node.id.clone())).collect(),
     );
-    Ok(ranked)
+    Ok((ranked, stats))
+}
+
+/// One pass over the candidate map, counting by source label.
+fn funnel_stats(collected: &HashMap<(String, String), Collected>) -> RetrievalStats {
+    let mut stats = RetrievalStats {
+        candidates_total: collected.len(),
+        ..Default::default()
+    };
+    for c in collected.values() {
+        match c.source.as_str() {
+            "direct_query" => stats.direct_query += 1,
+            "session_based" => stats.session_based += 1,
+            _ => stats.graph_expansion += 1,
+        }
+    }
+    stats
 }
 
 // --- Step query bodies (FIX-4) ---------------------------------------------
@@ -184,6 +269,71 @@ fn step1_tag_hits<'a>(sorted_docs: &'a [serde_json::Value], tag: &str) -> Vec<&'
         .filter(|d| doc_tag_contains(d, tag))
         .take(STEP1_PER_TAG_CAP)
         .collect()
+}
+
+/// Step-3 admission rule (pure): a doc matches when it shares ≥ 2 distinct
+/// content tokens with the query — or ≥ 1 when the query itself has ≤ 2
+/// tokens. Strength = `matched / min(query_token_count, RELEVANCE_DENOM_CAP)`
+/// clamped to [0,1]; it feeds the relevance signal via
+/// `max(tag_relevance, content_strength)`.
+fn content_match(
+    doc_tokens: &HashSet<String>,
+    query_tokens: &HashSet<String>,
+) -> Option<(usize, f64)> {
+    if query_tokens.is_empty() {
+        return None;
+    }
+    let matched = query_tokens.iter().filter(|t| doc_tokens.contains(*t)).count();
+    let required = if query_tokens.len() <= 2 { 1 } else { 2 };
+    if matched < required {
+        return None;
+    }
+    let denom = query_tokens.len().clamp(1, RELEVANCE_DENOM_CAP) as f64;
+    Some((matched, (matched as f64 / denom).clamp(0.0, 1.0)))
+}
+
+/// The matchable text per collection: semantic/entries use `content`;
+/// procedural nodes match on `title` + `description`.
+fn doc_match_text(doc: &serde_json::Value, collection: &str) -> String {
+    if collection == "memory.procedural" {
+        let title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let desc = doc.get("description").and_then(|v| v.as_str()).unwrap_or("");
+        format!("{title}\n{desc}")
+    } else {
+        doc.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string()
+    }
+}
+
+/// Top `cap` content-matching docs of one collection, ordered
+/// (match count desc, created_at desc, _id asc) — deterministic regardless
+/// of input order. Returns each doc with its match strength.
+fn step3_content_hits<'a>(
+    docs: &'a [serde_json::Value],
+    collection: &str,
+    query_tokens: &HashSet<String>,
+    cap: usize,
+) -> Vec<(&'a serde_json::Value, f64)> {
+    let mut hits: Vec<(usize, &str, &str, &'a serde_json::Value, f64)> = docs
+        .iter()
+        .filter_map(|doc| {
+            let (matched, strength) =
+                content_match(&content_tokens(&doc_match_text(doc, collection)), query_tokens)?;
+            Some((
+                matched,
+                doc.get("created_at").and_then(|v| v.as_str()).unwrap_or(""),
+                doc.get("_id").and_then(|v| v.as_str()).unwrap_or(""),
+                doc,
+                strength,
+            ))
+        })
+        .collect();
+    hits.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| b.1.cmp(a.1))
+            .then_with(|| a.2.cmp(b.2))
+    });
+    hits.truncate(cap);
+    hits.into_iter().map(|(_, _, _, doc, strength)| (doc, strength)).collect()
 }
 
 /// Step 2a: current-session entries — newest 50.
@@ -218,10 +368,19 @@ fn insert_collected(
     doc: &serde_json::Value,
     collection: &str,
     source: &str,
+    content_strength: f64,
 ) {
     let Some(id) = doc.get("_id").and_then(|v| v.as_str()).map(|s| s.to_string()) else { return; };
     let key = (collection.to_string(), id.clone());
-    if out.contains_key(&key) { return; }
+    if let Some(existing) = out.get_mut(&key) {
+        // First-write-wins for everything EXCEPT the content-match
+        // strength, which max-merges: a Step-1 tag hit later re-matched by
+        // content keeps its source/fields but gains the strength signal.
+        if content_strength > existing.content_strength {
+            existing.content_strength = content_strength;
+        }
+        return;
+    }
 
     let (content, node_type, confidence) = match collection {
         "memory.semantic" => {
@@ -275,6 +434,7 @@ fn insert_collected(
         confidence,
         node_type,
         source: source.to_string(),
+        content_strength: content_strength.clamp(0.0, 1.0),
     });
 }
 
@@ -304,9 +464,16 @@ async fn redirect_if_promoted(
 
 /// Set-normalization context for the multi-signal score.
 struct ScoreCtx {
-    input_tag_count: f64,
+    /// Relevance denominator: `min(deduped query tokens, RELEVANCE_DENOM_CAP)`
+    /// (2026-07-31 fix — was the raw, non-deduped, stopword-inclusive token
+    /// count, which diluted a 2-tag hit on a 25-word message to ~0.04 of
+    /// the 0.4 relevance budget).
+    tag_denom: f64,
     ts_min: i64,
     ts_range: f64,
+    /// <2 distinct parseable timestamps in the candidate set — min-max
+    /// normalization carries no ordering information.
+    degenerate_recency: bool,
     max_access: f64,
 }
 
@@ -316,14 +483,16 @@ fn build_score_ctx(items: &[&Collected], input_tags: &[String]) -> ScoreCtx {
         .filter_map(|c| DateTime::parse_from_rfc3339(&c.created_at).ok())
         .map(|d| d.timestamp())
         .collect();
-    let (ts_min, ts_max) = match (timestamps.iter().min().copied(), timestamps.iter().max().copied()) {
-        (Some(a), Some(b)) if a != b => (a, b),
-        _ => (0, 1),
-    };
+    let (ts_min, ts_max, degenerate_recency) =
+        match (timestamps.iter().min().copied(), timestamps.iter().max().copied()) {
+            (Some(a), Some(b)) if a != b => (a, b, false),
+            _ => (0, 1, true),
+        };
     ScoreCtx {
-        input_tag_count: input_tags.len().max(1) as f64,
+        tag_denom: input_tags.len().clamp(1, RELEVANCE_DENOM_CAP) as f64,
         ts_min,
         ts_range: (ts_max - ts_min).max(1) as f64,
+        degenerate_recency,
         max_access: items.iter().map(|c| c.access_count).max().unwrap_or(1).max(1) as f64,
     }
 }
@@ -332,15 +501,29 @@ fn score_one(c: &Collected, ctx: &ScoreCtx, input_tags: &[String]) -> f64 {
     let matching_tags = c.tags.iter()
         .filter(|t| input_tags.iter().any(|it| it.eq_ignore_ascii_case(t)))
         .count() as f64;
-    let tag_relevance = (matching_tags / ctx.input_tag_count).min(1.0);
+    let tag_relevance = (matching_tags / ctx.tag_denom).min(1.0);
+    // Relevance = the stronger of the two direct-match signals (2026-07-31):
+    // untagged-but-relevant content becomes scoreable above the enrichment
+    // threshold instead of riding on recency alone.
+    let relevance = tag_relevance.max(c.content_strength.clamp(0.0, 1.0));
 
-    let recency = DateTime::parse_from_rfc3339(&c.created_at).ok()
-        .map(|d| (d.timestamp() - ctx.ts_min) as f64 / ctx.ts_range)
-        .unwrap_or(0.0);
+    // Degenerate sets (2026-07-31 fix): with <2 distinct timestamps the
+    // signal carries no ordering — neutral 0.5 keeps absolute comparisons
+    // against the enrichment threshold consistent (the old fallback fed the
+    // RAW epoch seconds through, ~1.8e9, destroying the score scale — and a
+    // freshly-seeded instance is exactly the all-one-timestamp case).
+    // Missing/unparseable created_at stays 0.0: absent data is not neutral.
+    let recency = match DateTime::parse_from_rfc3339(&c.created_at) {
+        Ok(d) if !ctx.degenerate_recency => {
+            (((d.timestamp() - ctx.ts_min) as f64) / ctx.ts_range).clamp(0.0, 1.0)
+        }
+        Ok(_) => 0.5,
+        Err(_) => 0.0,
+    };
 
     let access_frequency = (c.access_count as f64) / ctx.max_access;
 
-    let base = tag_relevance * 0.4 + recency * 0.3 + access_frequency * 0.2 + c.confidence * 0.1;
+    let base = relevance * 0.4 + recency * 0.3 + access_frequency * 0.2 + c.confidence * 0.1;
     // Source-quality multiplier separates direct matches from graph-expansion noise.
     let source_mult = match c.source.as_str() {
         "direct_query" => 1.0,
@@ -430,6 +613,14 @@ mod step_query_body_tests {
     }
 
     #[test]
+    fn step2_walk_cap_matches_entry_window_limit() {
+        // The walk width and the entries window are one number now — a
+        // drifted raise of either alone silently narrows or wastes the walk.
+        let body = session_entries_query_body("main");
+        assert_eq!(body["limit"], json!(super::STEP2_ENTRY_WALK));
+    }
+
+    #[test]
     fn edge_body_excludes_entry_targets_server_side() {
         let body = session_edge_query_body("entry-1");
         assert_eq!(
@@ -458,23 +649,24 @@ mod step1_tag_tests {
     use serde_json::json;
 
     #[test]
-    fn step1_in_memory_selects_newest_20_matching_per_tag() {
-        // 25 tagged docs (+1 untagged decoy) — the newest 20 must win, in
-        // recency order, mirroring the old `created_at desc, limit 20` body.
-        let mut docs: Vec<serde_json::Value> = (0..25)
+    fn step1_in_memory_selects_newest_100_matching_per_tag() {
+        // 105 tagged docs (+1 untagged decoy) — the newest 100 must win, in
+        // recency order (cap raised 20 → 100 in the 2026-07-31 scale wave;
+        // matching is in-memory, the cap only bounds candidate growth).
+        let mut docs: Vec<serde_json::Value> = (0..105)
             .map(|i| json!({
-                "_id": format!("d{i:02}"),
+                "_id": format!("d{i:03}"),
                 "tags": ["kg"],
-                "created_at": format!("2026-06-{:02}T00:00:00Z", i + 1),
+                "created_at": format!("2026-06-01T{:02}:{:02}:00Z", i / 60, i % 60),
             }))
             .collect();
-        docs.push(json!({"_id": "decoy", "tags": ["other"], "created_at": "2026-06-30T00:00:00Z"}));
+        docs.push(json!({"_id": "decoy", "tags": ["other"], "created_at": "2026-06-02T00:00:00Z"}));
         sort_created_desc(&mut docs);
 
         let hits = step1_tag_hits(&docs, "kg");
         assert_eq!(hits.len(), STEP1_PER_TAG_CAP);
-        assert_eq!(hits[0]["_id"], json!("d24"), "newest first");
-        assert_eq!(hits[19]["_id"], json!("d05"), "oldest 5 pruned by the cap");
+        assert_eq!(hits[0]["_id"], json!("d104"), "newest first");
+        assert_eq!(hits[99]["_id"], json!("d005"), "oldest 5 pruned by the cap");
         assert!(hits.iter().all(|d| d["_id"] != json!("decoy")));
     }
 }
@@ -503,6 +695,7 @@ mod scoring_tests {
             confidence,
             node_type: NodeType::Semantic { category: SemanticCategory::Fact },
             source: source.into(),
+            content_strength: 0.0,
         }
     }
 
@@ -557,5 +750,168 @@ mod scoring_tests {
         let seeds = seed_keys(&collected, &["kg".to_string()], 3);
         let ids: Vec<&str> = seeds.iter().map(|(_, id)| id.as_str()).collect();
         assert_eq!(ids, vec!["aa", "mm", "zz"], "exact ties order by key, not hash");
+    }
+
+    #[test]
+    fn relevance_takes_max_of_tag_and_content_strength() {
+        let input_tags = vec!["kg".to_string()];
+        // No tag match, but a strong content match: relevance = 0.75, not 0.
+        let mut c = item("c", &[], "2026-07-04T00:00:00Z", 0, 0.0, "direct_query");
+        c.content_strength = 0.75;
+        let plain = item("p", &[], "2026-07-01T00:00:00Z", 0, 0.0, "direct_query");
+        let refs = vec![&c, &plain];
+        let ctx = build_score_ctx(&refs, &input_tags);
+        // c: relevance 0.75*0.4 + recency 1.0*0.3 + 0 + 0 = 0.6 (direct ×1.0)
+        assert!((score_one(&c, &ctx, &input_tags) - 0.6).abs() < 1e-9);
+        // A tag match stronger than the content strength wins the max.
+        let mut t = item("t", &["kg"], "2026-07-04T00:00:00Z", 0, 0.0, "direct_query");
+        t.content_strength = 0.25;
+        let refs = vec![&t, &plain];
+        let ctx = build_score_ctx(&refs, &input_tags);
+        // tag_relevance 1/1 = 1.0 > 0.25 → relevance 1.0.
+        assert!((score_one(&t, &ctx, &input_tags) - (0.4 + 0.3)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn tag_denominator_is_deduped_count_capped_at_8() {
+        // 12 (already-deduped) query tokens: denominator caps at 8, so a
+        // 4-tag hit scores 0.5 of the relevance budget — not 4/12.
+        let input_tags: Vec<String> = (0..12).map(|i| format!("tag{i}")).collect();
+        let a = item("a", &["tag0", "tag1", "tag2", "tag3"], "2026-07-04T00:00:00Z", 0, 0.0, "direct_query");
+        let old = item("o", &[], "2026-07-01T00:00:00Z", 0, 0.0, "direct_query");
+        let refs = vec![&a, &old];
+        let ctx = build_score_ctx(&refs, &input_tags);
+        // relevance (4/8)*0.4 = 0.2 + recency 0.3 = 0.5
+        assert!((score_one(&a, &ctx, &input_tags) - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn degenerate_recency_is_neutral_half_unparseable_zero() {
+        let input_tags: Vec<String> = vec![];
+        // All candidates share one timestamp — the old code fed RAW epoch
+        // seconds (~1.8e9) through; now recency is a neutral 0.5.
+        let a = item("a", &[], "2026-07-04T00:00:00Z", 0, 0.0, "direct_query");
+        let b = item("b", &[], "2026-07-04T00:00:00Z", 0, 0.0, "direct_query");
+        let refs = vec![&a, &b];
+        let ctx = build_score_ctx(&refs, &input_tags);
+        // 0 + 0.5*0.3 + 0 + 0 = 0.15 — sane against the 0.3 threshold scale.
+        assert!((score_one(&a, &ctx, &input_tags) - 0.15).abs() < 1e-9);
+
+        // Unparseable created_at is NOT neutral — missing data scores 0.
+        let bad = item("bad", &[], "not-a-date", 0, 0.0, "direct_query");
+        let refs = vec![&bad, &a];
+        let ctx = build_score_ctx(&refs, &input_tags);
+        assert!((score_one(&bad, &ctx, &input_tags) - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn retrieval_stats_count_sources_pre_truncation() {
+        let mut collected = HashMap::new();
+        for (id, source) in [
+            ("d1", "direct_query"),
+            ("d2", "direct_query"),
+            ("s1", "session_based"),
+            ("g1", "graph_expansion"),
+        ] {
+            let c = item(id, &[], "2026-07-04T00:00:00Z", 0, 0.9, source);
+            collected.insert((c.collection.clone(), c.id.clone()), c.clone());
+        }
+        let stats = funnel_stats(&collected);
+        assert_eq!(stats.candidates_total, 4);
+        assert_eq!(stats.direct_query, 2);
+        assert_eq!(stats.session_based, 1);
+        assert_eq!(stats.graph_expansion, 1);
+    }
+}
+
+#[cfg(test)]
+mod content_match_tests {
+    use super::super::text::content_tokens;
+    use super::*;
+
+    #[test]
+    fn content_match_requires_two_tokens_or_one_for_short_queries() {
+        let doc = content_tokens("the cert refresh works after manual generation");
+        // 3+-token query: one shared token is not enough…
+        let q3 = content_tokens("cert broken tomorrow");
+        assert!(content_match(&doc, &q3).is_none());
+        // …two are.
+        let q3b = content_tokens("cert refresh broken");
+        assert!(content_match(&doc, &q3b).is_some());
+        // ≤2-token query: a single shared token admits.
+        let q1 = content_tokens("cert");
+        assert!(content_match(&doc, &q1).is_some());
+        // Empty query never matches.
+        assert!(content_match(&doc, &content_tokens("")).is_none());
+    }
+
+    #[test]
+    fn content_match_strength_is_matched_over_min_qcount_8_clamped() {
+        let doc = content_tokens("alpha beta gamma delta epsilon zeta eta theta iota kappa");
+        // 4-token query, 3 matched → 3/4.
+        let q = content_tokens("alpha beta gamma missing");
+        let (matched, strength) = content_match(&doc, &q).unwrap();
+        assert_eq!(matched, 3);
+        assert!((strength - 0.75).abs() < 1e-9);
+        // 10-token query, 9 matched → denominator caps at 8 → clamped to 1.0.
+        let q10 = content_tokens("alpha beta gamma delta epsilon zeta eta theta iota missing");
+        let (matched, strength) = content_match(&doc, &q10).unwrap();
+        assert_eq!(matched, 9);
+        assert!((strength - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn step3_hits_capped_ordered_matchcount_recency_id() {
+        let query = content_tokens("cert refresh trustd");
+        let mk = |id: &str, content: &str, created: &str| {
+            serde_json::json!({"_id": id, "content": content, "created_at": created})
+        };
+        let docs = vec![
+            mk("weak-old", "cert refresh notes", "2026-06-01T00:00:00Z"),
+            mk("strong", "cert refresh trustd pipeline", "2026-06-02T00:00:00Z"),
+            mk("weak-new", "cert refresh other", "2026-06-03T00:00:00Z"),
+            mk("miss", "unrelated content entirely", "2026-06-04T00:00:00Z"),
+        ];
+        let hits = step3_content_hits(&docs, "memory.semantic", &query, 2);
+        let ids: Vec<&str> = hits.iter().map(|(d, _)| d["_id"].as_str().unwrap()).collect();
+        // match-count desc first (strong=3), then recency desc among the
+        // 2-token matches (weak-new beats weak-old), capped at 2.
+        assert_eq!(ids, vec!["strong", "weak-new"]);
+        assert!((hits[0].1 - 1.0).abs() < 1e-9, "3/3 matched");
+    }
+
+    #[test]
+    fn step3_procedural_matches_title_and_description() {
+        let query = content_tokens("cert refresh procedure");
+        let doc = serde_json::json!({
+            "_id": "p1",
+            "title": "Cert refresh procedure",
+            "description": "regenerate via trustd then restart embra-web",
+            "created_at": "2026-06-01T00:00:00Z",
+        });
+        let docs = vec![doc];
+        let hits = step3_content_hits(&docs, "memory.procedural", &query, 10);
+        assert_eq!(hits.len(), 1, "title text must be matchable for procedural nodes");
+        // Same doc under memory.semantic matches nothing — no `content` field.
+        let hits = step3_content_hits(&docs, "memory.semantic", &query, 10);
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn insert_collected_max_merges_strength_keeps_first_source() {
+        let mut out = HashMap::new();
+        let doc = serde_json::json!({
+            "_id": "n1", "content": "x", "category": "fact",
+            "tags": ["kg"], "created_at": "2026-06-01T00:00:00Z",
+        });
+        insert_collected(&mut out, &doc, "memory.semantic", "direct_query", 0.0);
+        insert_collected(&mut out, &doc, "memory.semantic", "graph_expansion", 0.8);
+        let key = ("memory.semantic".to_string(), "n1".to_string());
+        let c = &out[&key];
+        assert_eq!(c.source, "direct_query", "first write wins the source");
+        assert!((c.content_strength - 0.8).abs() < 1e-9, "strength max-merges");
+        // A weaker later strength never downgrades.
+        insert_collected(&mut out, &doc, "memory.semantic", "session_based", 0.2);
+        assert!((out[&key].content_strength - 0.8).abs() < 1e-9);
     }
 }
