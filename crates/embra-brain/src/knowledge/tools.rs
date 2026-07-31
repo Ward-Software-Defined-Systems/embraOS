@@ -1007,14 +1007,14 @@ const ORPHAN_SCAN_PAGE: usize = 20_000;
 /// Position of one exhaustive-scan page: classic offset tiling, or a server
 /// resume cursor. Page 1 is always `Offset(0)`; the mode for every later
 /// page is decided by the server per `next_scan_page`.
-enum ScanPage {
+pub(crate) enum ScanPage {
     Offset(usize),
     Cursor(String),
 }
 
 impl ScanPage {
     /// Human label for error messages ("failed at ...").
-    fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         match self {
             ScanPage::Offset(offset) => format!("offset {}", offset),
             ScanPage::Cursor(_) => "cursor page".to_string(),
@@ -1035,7 +1035,7 @@ impl ScanPage {
 /// `meta.next_cursor` token instead (O(n) total); the server rejects
 /// `cursor` combined with `offset`, so the two are mutually exclusive here
 /// by construction.
-fn scan_page_query_body(
+pub(crate) fn scan_page_query_body(
     filter: &serde_json::Value,
     page_limit: usize,
     page: &ScanPage,
@@ -1058,7 +1058,7 @@ fn scan_page_query_body(
 /// - No cursor, offset mode → pre-cursor server (or an index-served plan,
 ///   which never bootstraps a no-sort cursor): keep tiling offsets until a
 ///   partial page, byte-identical to the legacy behavior.
-fn next_scan_page(
+pub(crate) fn next_scan_page(
     meta: &serde_json::Value,
     prev: &ScanPage,
     page_len: usize,
@@ -2121,6 +2121,8 @@ mod native_args_tests {
             "knowledge_graph_stats",
             "knowledge_sweep_orphans",
             "knowledge_dump",
+            "knowledge_audit",
+            "knowledge_merge",
         ] {
             assert!(names.contains(&expected), "{} not registered", expected);
         }

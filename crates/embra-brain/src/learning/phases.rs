@@ -131,7 +131,7 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 }
 
 // Single source of truth for Phase 4 tool category counts.
-// (json_key, display_label, count). Sums to 95 — matches the descriptor count
+// (json_key, display_label, count). Sums to 97 — matches the descriptor count
 // in `tools::registry::REGISTRY` (guarded by
 // `category_counts_sum_matches_registry` below). Aliases (`memory_search`,
 // `search_memory`, `file_rename`, `rmdir`) are folded into their target's
@@ -147,7 +147,9 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 // gated): the static meta-tools are now list/call/propose; intelligence-
 // authored *dynamic* tools are still never added to the snapshot.
 // Knowledge Graph went 9 → 10 with `knowledge_dump` (JSONL export of the
-// graph to /embra/workspace/KG_DUMPS).
+// graph to /embra/workspace/KG_DUMPS), then 10 → 12 with `knowledge_audit`
+// + `knowledge_merge` (read-only hygiene detection + node consolidation,
+// the 2026-07-30 KG hygiene wave).
 // Self-Awareness went 4 → 5 with `set_name` (intelligence-initiated,
 // operator-agreed display-name change; sealed soul untouched).
 const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
@@ -161,7 +163,7 @@ const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
     ("filesystem", "Filesystem", 10),
     ("scheduling", "Scheduling", 3),
     ("sessions", "Sessions", 10),
-    ("knowledge_graph", "Knowledge Graph", 10),
+    ("knowledge_graph", "Knowledge Graph", 12),
     ("guardian", "Guardian (dynamic tools)", 3),
 ];
 

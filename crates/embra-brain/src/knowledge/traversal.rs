@@ -174,7 +174,7 @@ fn seed_level(starts: &[(String, String)]) -> (HashSet<(String, String)>, Vec<(S
 /// Per-hop edge query body (FIX-7): explicit ranked window. Sort keys are doc
 /// fields (`weight`, `created_at`), one per array element, matching the
 /// edge-derivation reference pattern in `edges.rs`.
-fn edge_query_body(filter: serde_json::Map<String, serde_json::Value>, limit: u32) -> serde_json::Value {
+pub(crate) fn edge_query_body(filter: serde_json::Map<String, serde_json::Value>, limit: u32) -> serde_json::Value {
     json!({
         "filter": filter,
         "sort": [{"weight": "desc"}, {"created_at": "desc"}],
@@ -193,7 +193,7 @@ fn edge_query_body(filter: serde_json::Map<String, serde_json::Value>, limit: u3
 /// full collection scan, which is the 5–8 min production latency this split
 /// removed (2026-07-04). Optional type/weight constraints ride as siblings;
 /// the planner applies them as a post-filter over the index matches.
-fn source_arm_filter(
+pub(crate) fn source_arm_filter(
     coll: &str,
     id: &str,
     edge_type_filter: Option<&[EdgeType]>,
@@ -209,7 +209,7 @@ fn source_arm_filter(
 /// Target arm of the undirected hop: edges ARRIVING at `(coll, id)` — the
 /// reachability the outgoing-only hop lacked (2026-07-03). Same top-level
 /// sibling-equality contract as `source_arm_filter` (rides `idx_edge_target`).
-fn target_arm_filter(
+pub(crate) fn target_arm_filter(
     coll: &str,
     id: &str,
     edge_type_filter: Option<&[EdgeType]>,
@@ -325,7 +325,7 @@ fn neighbor_of<'a>(edge: &'a KnowledgeEdge, coll: &str, id: &str) -> (&'a str, &
     }
 }
 
-fn parse_edge(v: &serde_json::Value) -> Option<KnowledgeEdge> {
+pub(crate) fn parse_edge(v: &serde_json::Value) -> Option<KnowledgeEdge> {
     // parse_lossy, not from_str: identity-graph projections store free-form
     // per-intelligence relations, which must traverse — the old strict
     // parse silently DROPPED any unknown edge_type from every walk.

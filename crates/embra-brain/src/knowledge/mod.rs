@@ -8,8 +8,10 @@
 //! The knowledge graph is purely application-layer; all storage and queries
 //! go through the existing `WardsonDbClient`.
 
+pub mod audit;
 pub mod edges;
 pub mod enrichment;
+pub mod merge;
 pub(crate) mod node_store;
 pub mod promotion;
 pub mod retrieval;
