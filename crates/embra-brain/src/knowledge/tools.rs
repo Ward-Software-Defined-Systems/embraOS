@@ -127,16 +127,35 @@ pub async fn knowledge_link(params: &str, db: &WardsonDbClient) -> String {
     }
 }
 
+/// Triple-form endpoint: `<collection>:<id>` → (collection, id); a bare
+/// `<id>` (or `:<id>`) → ("", id). The collection half is display-only —
+/// the delete filter has always matched by id + edge_type, so an omitted
+/// collection means "any" (ids are unique across collections in practice:
+/// server-issued UUIDv7 for memories, slugs for identity nodes).
+fn split_endpoint(token: &str) -> (&str, &str) {
+    match token.split_once(':') {
+        Some((coll, id)) => (coll.trim(), id.trim()),
+        None => ("", token),
+    }
+}
+
+/// Render an endpoint collection for messages; empty (omitted) → "any".
+fn display_coll(coll: &str) -> &str {
+    if coll.is_empty() { "any" } else { coll }
+}
+
 /// `knowledge_unlink_edge <edge_id>` — delete a single edge by ID
-/// `knowledge_unlink_edge <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>` —
-/// delete matching edges. Symmetric edge types
-/// (`same_session`/`temporal`/`tag_overlap`/`related_to`) are removed
+/// `knowledge_unlink_edge <src>:<id> | <edge_type> | <tgt>:<id>` —
+/// delete matching edges; endpoint collections are optional (a bare `<id>`
+/// matches any collection — the filter keys on id + type). Symmetric edge
+/// types (`same_session`/`temporal`/`tag_overlap`/`related_to`) are removed
 /// bidirectionally; directional types (`enables`/`contradicts`/`refines`/
-/// `depends_on`/`derived_from`) only remove the forward direction.
+/// `depends_on`/`derived_from` and free-form identity relations) only
+/// remove the forward direction.
 pub async fn knowledge_unlink_edge(params: &str, db: &WardsonDbClient) -> String {
     let trimmed = params.trim();
     if trimmed.is_empty() {
-        return "Error: usage knowledge_unlink_edge <edge_id> or knowledge_unlink_edge <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>".into();
+        return "Error: usage knowledge_unlink_edge <edge_id> or knowledge_unlink_edge <src_id> | <edge_type> | <tgt_id> (ids may be prefixed <collection>:)".into();
     }
 
     if trimmed.contains('|') {
@@ -144,20 +163,23 @@ pub async fn knowledge_unlink_edge(params: &str, db: &WardsonDbClient) -> String
         // types (Embra_Debug #63 — was unconditionally bidirectional).
         let parts: Vec<&str> = trimmed.splitn(3, '|').map(|s| s.trim()).collect();
         if parts.len() < 3 {
-            return "Error: usage knowledge_unlink_edge <src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>".into();
+            return "Error: usage knowledge_unlink_edge <src_id> | <edge_type> | <tgt_id> (ids may be prefixed <collection>:)".into();
         }
-        let Some((src_coll, src_id)) = parts[0].split_once(':') else {
-            return "Error: source must be <collection>:<id>".into();
-        };
+        let (src_coll, src_id) = split_endpoint(parts[0]);
+        if src_id.is_empty() {
+            return "Error: source must be <collection>:<id> or a bare <id>".into();
+        }
         // parse_lossy: free-form identity relations are addressable for
         // deletion (they are directional → forward doc only). A deleted
         // identity-projection edge is restored by the next boot reconcile.
         let Some(edge_type) = EdgeType::parse_lossy(parts[1]) else {
             return format!("Error: Invalid edge type '{}'. Built-in types: same_session, temporal, tag_overlap, derived_from, enables, contradicts, refines, depends_on, related_to — or any stored free-form relation", parts[1]);
         };
-        let Some((tgt_coll, tgt_id)) = parts[2].split_once(':') else {
-            return "Error: target must be <collection>:<id>".into();
-        };
+        let (tgt_coll, tgt_id) = split_endpoint(parts[2]);
+        if tgt_id.is_empty() {
+            return "Error: target must be <collection>:<id> or a bare <id>".into();
+        }
+        let (src_coll, tgt_coll) = (display_coll(src_coll), display_coll(tgt_coll));
 
         let etype = edge_type.as_str();
         let symmetric = edge_type.is_symmetric();
@@ -1245,7 +1267,7 @@ fn dump_edge_type_filter(edge_types: &[String]) -> serde_json::Value {
 }
 
 /// Map tool-facing short names to `memory.*` collections in canonical dump
-/// order regardless of input order. `None` selects all four; unknown names
+/// order regardless of input order. `None` selects all five; unknown names
 /// and an empty selection are errors.
 fn resolve_dump_collections(requested: Option<&[String]>) -> Result<Vec<&'static str>, String> {
     let Some(requested) = requested else {
@@ -1732,14 +1754,14 @@ impl KnowledgeLinkArgs {
 #[embra_tool(
     name = "knowledge_unlink_edge",
     is_side_effectful = true,
-    description = "Delete edges. Provide either edge_id (removes one edge by its document id) OR the full triple — source_collection + source_id + edge_type + target_collection + target_id. Symmetric edge types (same_session, temporal, tag_overlap, related_to) are removed bidirectionally; directional types (enables, contradicts, refines, depends_on, derived_from) remove only the forward direction. edge_id takes precedence when both are provided."
+    description = "Delete edges. Provide either edge_id (removes one edge by its document id) OR the triple — source_id + edge_type + target_id; source_collection/target_collection are optional (matching is by id and type). Symmetric edge types (same_session, temporal, tag_overlap, related_to) are removed bidirectionally; directional types (enables, contradicts, refines, depends_on, derived_from — and free-form identity relations) remove only the forward direction. edge_id takes precedence when both are provided."
 )]
 pub struct KnowledgeUnlinkEdgeArgs {
     /// Specific edge document id. When set, the triple fields are ignored.
     #[serde(default)]
     pub edge_id: Option<String>,
-    /// Triple form: source collection. Required together with the other
-    /// four triple fields when edge_id is absent.
+    /// Triple form: source collection. Optional — when omitted, the edge
+    /// matches by source_id + edge_type + target_id alone.
     #[serde(default)]
     pub source_collection: Option<String>,
     #[serde(default)]
@@ -1755,30 +1777,36 @@ pub struct KnowledgeUnlinkEdgeArgs {
 impl KnowledgeUnlinkEdgeArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
         // Legacy impl takes either "<edge_id>" OR
-        // "<src_coll>:<src_id> | <edge_type> | <tgt_coll>:<tgt_id>".
+        // "<src>:<id> | <edge_type> | <tgt>:<id>" (bare ids allowed —
+        // collections are optional, the filter keys on id + type).
         // Reconstruct whichever form the caller provided.
+        fn endpoint(coll: Option<&str>, id: &str) -> String {
+            match coll.map(str::trim).filter(|c| !c.is_empty()) {
+                Some(c) => format!("{}:{}", c, id),
+                None => id.to_string(),
+            }
+        }
         let param = if let Some(eid) = self.edge_id.filter(|s| !s.is_empty()) {
             eid
         } else {
             match (
-                self.source_collection.as_deref(),
                 self.source_id.as_deref(),
                 self.edge_type.as_deref(),
-                self.target_collection.as_deref(),
                 self.target_id.as_deref(),
             ) {
-                (Some(sc), Some(si), Some(et), Some(tc), Some(ti))
-                    if !sc.is_empty()
-                        && !si.is_empty()
-                        && !et.is_empty()
-                        && !tc.is_empty()
-                        && !ti.is_empty() =>
+                (Some(si), Some(et), Some(ti))
+                    if !si.is_empty() && !et.is_empty() && !ti.is_empty() =>
                 {
-                    format!("{}:{} | {} | {}:{}", sc, si, et, tc, ti)
+                    format!(
+                        "{} | {} | {}",
+                        endpoint(self.source_collection.as_deref(), si),
+                        et,
+                        endpoint(self.target_collection.as_deref(), ti)
+                    )
                 }
                 _ => {
                     return Ok(
-                        "knowledge_unlink_edge rejected (missing arguments). Provide edge_id OR the full triple: source_collection, source_id, edge_type, target_collection, target_id."
+                        "knowledge_unlink_edge rejected (missing arguments). Provide edge_id OR the triple: source_id + edge_type + target_id (collections optional — matching is by id and type)."
                             .into(),
                     );
                 }
@@ -1938,16 +1966,17 @@ impl KnowledgeSweepOrphansArgs {
 #[embra_tool(
     name = "knowledge_dump",
     is_side_effectful = true,
-    description = "Export the knowledge graph as a JSONL dump file under /embra/workspace/KG_DUMPS (first line: meta header; then node lines from memory.entries/semantic/procedural and edge lines from memory.edges). collections optionally restricts to: entries, semantic, procedural, edges (default all four). edge_types optionally filters the edge pass by type. include_payload=false omits node payloads — slim dumps for structural scanning, sized for guardian_call's 2 MiB data_file bridge. Returns the file path plus per-collection written-vs-counted parity, byte total, and elapsed time."
+    description = "Export the knowledge graph as a JSONL dump file under /embra/workspace/KG_DUMPS (first line: meta header; then node lines from memory.entries/semantic/procedural/identity.graph and edge lines from memory.edges). collections optionally restricts to: entries, semantic, procedural, identity, edges (default all five). edge_types optionally filters the edge pass by type. include_payload=false omits node payloads — slim dumps for structural scanning, sized for guardian_call's 2 MiB data_file bridge. Returns the file path plus per-collection written-vs-counted parity, byte total, and elapsed time."
 )]
 pub struct KnowledgeDumpArgs {
-    /// Short collection names: entries | semantic | procedural | edges.
-    /// Omit for all four.
+    /// Short collection names: entries | semantic | procedural | identity |
+    /// edges. Omit for all five.
     #[serde(default)]
     pub collections: Option<Vec<String>>,
     /// Edge types to include (same_session, temporal, tag_overlap,
-    /// derived_from, enables, contradicts, refines, depends_on, related_to).
-    /// Omit for all. Requires 'edges' among the dumped collections.
+    /// derived_from, enables, contradicts, refines, depends_on, related_to —
+    /// or any stored free-form identity relation). Omit for all. Requires
+    /// 'edges' among the dumped collections.
     #[serde(default)]
     pub edge_types: Option<Vec<String>>,
     /// When false, node lines omit the `data` payload (slim structural dump).
@@ -2007,6 +2036,36 @@ mod native_args_tests {
         assert!(a.edge_id.is_none());
         assert_eq!(a.source_id.as_deref(), Some("a"));
         assert_eq!(a.target_id.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn knowledge_unlink_edge_accepts_triple_without_collections() {
+        // The 3-field triple: collections are optional and display-only —
+        // the delete filter has always matched by id + type. Requiring them
+        // produced spurious "missing arguments" rejections.
+        let a: KnowledgeUnlinkEdgeArgs = serde_json::from_value(serde_json::json!({
+            "source_id": "a",
+            "edge_type": "refines",
+            "target_id": "b"
+        }))
+        .unwrap();
+        assert!(a.edge_id.is_none());
+        assert!(a.source_collection.is_none());
+        assert!(a.target_collection.is_none());
+        assert_eq!(a.source_id.as_deref(), Some("a"));
+        assert_eq!(a.edge_type.as_deref(), Some("refines"));
+        assert_eq!(a.target_id.as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn unlink_endpoint_split_and_display() {
+        use super::{display_coll, split_endpoint};
+        assert_eq!(split_endpoint("memory.semantic:abc"), ("memory.semantic", "abc"));
+        assert_eq!(split_endpoint("abc"), ("", "abc"));
+        assert_eq!(split_endpoint(":abc"), ("", "abc"));
+        assert_eq!(split_endpoint(""), ("", ""));
+        assert_eq!(display_coll(""), "any");
+        assert_eq!(display_coll("memory.semantic"), "memory.semantic");
     }
 
     #[test]

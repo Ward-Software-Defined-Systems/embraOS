@@ -231,7 +231,7 @@ fn entry_is_promoted(doc: &serde_json::Value) -> bool {
 /// sorted). The unpromoted worklist mode shows more because its purpose is
 /// enumerating what still needs promotion, not answering a lookup.
 const RECALL_DISPLAY_CAP: usize = 10;
-const RECALL_UNPROMOTED_DISPLAY_CAP: usize = 50;
+const RECALL_UNPROMOTED_DISPLAY_CAP: usize = 200;
 
 async fn recall(db: &WardsonDbClient, query: &str, unpromoted_only: bool) -> String {
     ensure_collection(db, "memory.entries").await;
@@ -1480,7 +1480,7 @@ impl SessionSummaryArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "recall",
-    description = "Search past conversations and saved memories. Free-text query; unquoted terms AND-match (all must appear); hashtags supported; empty query lists recent entries. Set unpromoted_only=true for a worklist of memory.entries not yet promoted to the knowledge graph (up to 50 shown, newest first; query still narrows it)."
+    description = "Search past conversations and saved memories. Free-text query; unquoted terms AND-match (all must appear); hashtags supported; empty query lists recent entries. Set unpromoted_only=true for a worklist of memory.entries not yet promoted to the knowledge graph (up to 200 shown, newest first; query still narrows it)."
 )]
 pub struct RecallArgs {
     /// Search query. Free-text; hashtags supported; empty to list all.
