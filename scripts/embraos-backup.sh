@@ -224,7 +224,8 @@ do_backup() {
         log_info "PKI: ${pki_files} files"
     fi
 
-    # --- Backup DATA ---
+    # --- Backup DATA (includes workspace/ — /embra/workspace is a bind
+    # mount of /embra/data/workspace, so data/ is the one canonical copy) ---
     log_step "Backing up DATA partition..."
     rsync -a --info=progress2 "${MOUNT_DATA}/" "${backup_path}/data/"
 
@@ -244,17 +245,6 @@ do_backup() {
         fi
     else
         log_warn "No WardSONDB data directory found"
-    fi
-
-    # --- Backup workspace (if it exists on DATA) ---
-    if [ -d "${MOUNT_DATA}/workspace" ] || [ -d "${MOUNT_DATA}/../embra/workspace" ]; then
-        local ws_path="${MOUNT_DATA}/workspace"
-        if [ -d "$ws_path" ]; then
-            mkdir -p "${backup_path}/workspace"
-            rsync -a --info=progress2 "${ws_path}/" "${backup_path}/workspace/"
-            local ws_size=$(du -sh "${backup_path}/workspace" | cut -f1)
-            log_info "Workspace: ${ws_size}"
-        fi
     fi
 
     # --- Metadata ---
@@ -376,15 +366,6 @@ do_restore() {
         log_info "DATA restored: ${data_files} files"
     else
         log_warn "No DATA in backup — skipping"
-    fi
-
-    # --- Restore workspace ---
-    if [ -d "${backup_path}/workspace" ]; then
-        log_step "Restoring workspace..."
-        local ws_target="${MOUNT_DATA}/workspace"
-        mkdir -p "$ws_target"
-        rsync -a --info=progress2 "${backup_path}/workspace/" "${ws_target}/"
-        log_info "Workspace restored"
     fi
 
     # Sync to disk
