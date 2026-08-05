@@ -8,7 +8,10 @@ use super::ensure_collection;
 // ── Helpers ──
 
 /// Truncate a string to at most `max_bytes`, snapping to a char boundary.
-fn truncate_str(s: &str, max_bytes: usize) -> &str {
+/// The canonical boundary-safe truncation helper for the tools layer —
+/// reach for this instead of raw byte slicing (`&s[..n]` panics when a
+/// multi-byte char straddles the boundary).
+pub(crate) fn truncate_str(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
     }
@@ -18,6 +21,25 @@ fn truncate_str(s: &str, max_bytes: usize) -> &str {
     }
     &s[..end]
 }
+
+/// Per-call output budget for the transcript readers (`session_read` /
+/// `session_delta`), applied at WHOLE-TURN granularity: emission stops
+/// before the turn that would push the rendered output past this many
+/// bytes, and an explicit continuation line names the exact remaining
+/// range. The first turn of a call always renders even when it alone
+/// exceeds the budget (soft budget); the dispatcher's 2 MiB
+/// `MAX_TOOL_RESULT_SIZE` (tools/registry.rs) stays the hard backstop.
+/// 64 KiB ≈ 16k tokens — comfortably above the old worst case
+/// (30 turns × 500 B ≈ 15 KiB) without letting one tool result dominate
+/// the model's context.
+const SESSION_READ_OUTPUT_BUDGET: usize = 64 * 1024;
+
+/// Per-turn byte cap for the summarize/extract corpus builders. Those
+/// stay capped — they build a corpus for a downstream summarization /
+/// extraction request, not a transcript view — but the historical 500
+/// clipped most substantive turns mid-thought; 2000 keeps decisions
+/// intact.
+const SESSION_CORPUS_TURN_CAP: usize = 2000;
 
 /// Get all session collection prefixes (including learning session).
 async fn session_names(db: &WardsonDbClient) -> Vec<String> {
@@ -69,8 +91,12 @@ async fn fetch_turns(db: &WardsonDbClient, name: &str) -> (Vec<serde_json::Value
     (Vec::new(), 0)
 }
 
-/// Format a single turn for output. Truncates content to `max_chars`.
-fn format_turn(index: usize, turn: &serde_json::Value, max_chars: usize) -> String {
+/// Format a single turn for output. `max_bytes = None` renders the full
+/// content; `Some(n)` caps content at `n` bytes (char-boundary safe) with
+/// a trailing `...` — used only by the summarize/extract corpus builders.
+/// (The cap was historically misnamed `max_chars`; it has always been
+/// bytes.)
+fn format_turn(index: usize, turn: &serde_json::Value, max_bytes: Option<usize>) -> String {
     let role = turn
         .get("role")
         .and_then(|r| r.as_str())
@@ -79,13 +105,12 @@ fn format_turn(index: usize, turn: &serde_json::Value, max_chars: usize) -> Stri
         .get("content")
         .and_then(|c| c.as_str())
         .unwrap_or("");
-    let preview = if content.len() > max_chars {
-        format!("{}...", truncate_str(content, max_chars))
-    } else {
-        content.to_string()
+    let rendered = match max_bytes {
+        Some(cap) if content.len() > cap => format!("{}...", truncate_str(content, cap)),
+        _ => content.to_string(),
     };
     // 1-indexed for user display
-    format!("[{}] [{}]: {}", index + 1, role, preview)
+    format!("[{}] [{}]: {}", index + 1, role, rendered)
 }
 
 /// Parse a turn range string like "1-20", "80-", "5", or "" into
@@ -137,6 +162,187 @@ fn parse_range(range_str: &str, total: usize) -> Result<(usize, usize), String> 
             return Err(format!("turn {} out of range 1..={}", n, total));
         }
         Ok((n - 1, n))
+    }
+}
+
+/// Render turns `[start, end)` (0-indexed, end-exclusive) into `output`
+/// under `SESSION_READ_OUTPUT_BUDGET` (the budget covers the whole
+/// rendered output, header included). The first turn is always rendered
+/// so a single oversized turn can still be read. Returns `Some(n)` when
+/// emission stopped early — `n` is the 1-indexed number of the first
+/// UNRENDERED turn.
+fn render_turns_within_budget(
+    output: &mut String,
+    turns: &[serde_json::Value],
+    start: usize,
+    end: usize,
+) -> Option<usize> {
+    for (offset, turn) in turns[start..end].iter().enumerate() {
+        let line = format_turn(start + offset, turn, None);
+        // +1 for the trailing newline.
+        if offset > 0 && output.len() + line.len() + 1 > SESSION_READ_OUTPUT_BUDGET {
+            return Some(start + offset + 1);
+        }
+        output.push_str(&line);
+        output.push('\n');
+    }
+    None
+}
+
+/// Continuation line for `session_read`. `next`/`end` are 1-indexed;
+/// `next - 1` is the last rendered turn.
+fn session_read_budget_notice(next: usize, end: usize) -> String {
+    format!(
+        "[output budget reached at turn {} of {} — call session_read with range \"{}-{}\" for the rest]",
+        next - 1,
+        end,
+        next,
+        end
+    )
+}
+
+/// Continuation line for `session_delta` (its paging lever is `since_turn`).
+fn session_delta_budget_notice(next: usize, total: usize) -> String {
+    format!(
+        "[output budget reached at turn {} of {} — call session_delta with since_turn {} for the rest]",
+        next - 1,
+        total,
+        next
+    )
+}
+
+#[cfg(test)]
+mod format_turn_tests {
+    use super::{format_turn, truncate_str, SESSION_CORPUS_TURN_CAP};
+
+    fn turn(role: &str, content: &str) -> serde_json::Value {
+        serde_json::json!({"role": role, "content": content})
+    }
+
+    #[test]
+    fn full_content_when_uncapped() {
+        let content = "x".repeat(10_000);
+        let line = format_turn(0, &turn("user", &content), None);
+        assert!(line.starts_with("[1] [user]: "));
+        assert!(line.contains(&content));
+        assert!(!line.ends_with("..."));
+    }
+
+    #[test]
+    fn caps_at_byte_budget_on_char_boundary_with_ellipsis() {
+        // '€' is 3 bytes; SESSION_CORPUS_TURN_CAP % 3 != 0 forces a
+        // mid-char boundary the truncation must snap back from.
+        let content = "€".repeat(1000); // 3000 bytes
+        let line = format_turn(4, &turn("assistant", &content), Some(SESSION_CORPUS_TURN_CAP));
+        assert!(line.starts_with("[5] [assistant]: "));
+        assert!(line.ends_with("..."));
+        let body = &line["[5] [assistant]: ".len()..line.len() - 3];
+        assert!(body.len() <= SESSION_CORPUS_TURN_CAP);
+        assert_eq!(body.len() % 3, 0); // whole '€'s only
+    }
+
+    #[test]
+    fn corpus_cap_constant_is_2000() {
+        // Guards a silent revert to the historical 500-byte cap.
+        assert_eq!(SESSION_CORPUS_TURN_CAP, 2000);
+        let content = "a".repeat(2500);
+        let line = format_turn(0, &turn("user", &content), Some(SESSION_CORPUS_TURN_CAP));
+        let body = &line["[1] [user]: ".len()..line.len() - 3];
+        assert_eq!(body.len(), SESSION_CORPUS_TURN_CAP);
+    }
+
+    #[test]
+    fn truncate_str_snaps_to_char_boundary() {
+        let s = "aé"; // 'a' 1 byte + 'é' 2 bytes
+        assert_eq!(truncate_str(s, 2), "a"); // byte 2 is mid-'é'
+        assert_eq!(truncate_str(s, 3), s); // fits — identity passthrough
+    }
+}
+
+#[cfg(test)]
+mod budget_paging_tests {
+    use super::{
+        render_turns_within_budget, session_delta_budget_notice, session_read_budget_notice,
+        SESSION_READ_OUTPUT_BUDGET,
+    };
+
+    fn turns(sizes: &[usize]) -> Vec<serde_json::Value> {
+        sizes
+            .iter()
+            .map(|n| serde_json::json!({"role": "user", "content": "x".repeat(*n)}))
+            .collect()
+    }
+
+    #[test]
+    fn all_turns_render_when_under_budget() {
+        let ts = turns(&[100; 30]);
+        let mut out = String::new();
+        assert_eq!(render_turns_within_budget(&mut out, &ts, 0, 30), None);
+        assert_eq!(out.lines().count(), 30);
+    }
+
+    #[test]
+    fn stops_at_whole_turn_boundary_and_names_first_unrendered() {
+        // ~6 KB turns: the 64 KiB budget stops emission mid-list.
+        let ts = turns(&[6 * 1024; 30]);
+        let mut out = String::new();
+        let next = render_turns_within_budget(&mut out, &ts, 0, 30).expect("budget must stop");
+        let rendered = out.lines().count();
+        assert!(rendered > 0 && rendered < 30);
+        assert_eq!(next, rendered + 1); // 1-indexed first unrendered turn
+        assert!(out.len() <= SESSION_READ_OUTPUT_BUDGET);
+    }
+
+    #[test]
+    fn offset_start_names_absolute_turn_numbers() {
+        let ts = turns(&[6 * 1024; 40]);
+        let mut out = String::new();
+        let next = render_turns_within_budget(&mut out, &ts, 10, 40).expect("budget must stop");
+        let rendered = out.lines().count();
+        assert_eq!(next, 10 + rendered + 1);
+        // First rendered line is absolute turn 11.
+        assert!(out.starts_with("[11] [user]: "));
+    }
+
+    #[test]
+    fn single_oversized_turn_always_renders() {
+        let ts = turns(&[100 * 1024, 100]);
+        let mut out = String::new();
+        let next = render_turns_within_budget(&mut out, &ts, 0, 2);
+        assert_eq!(next, Some(2)); // turn 1 rendered whole, turn 2 unrendered
+        assert!(out.len() > SESSION_READ_OUTPUT_BUDGET); // soft budget
+        assert!(out.lines().next().unwrap().len() > 100 * 1024);
+    }
+
+    #[test]
+    fn exact_boundary_fit_renders_without_notice() {
+        // Two turns crafted so the second line lands the output EXACTLY on
+        // the budget (guards the `>` vs `>=` off-by-one).
+        let first = 1000usize;
+        let header = "[1] [user]: ".len();
+        let header2 = "[2] [user]: ".len();
+        let after_first = header + first + 1; // +1 newline
+        let second = SESSION_READ_OUTPUT_BUDGET - after_first - header2 - 1;
+        let ts = turns(&[first, second]);
+        let mut out = String::new();
+        assert_eq!(render_turns_within_budget(&mut out, &ts, 0, 2), None);
+        assert_eq!(out.len(), SESSION_READ_OUTPUT_BUDGET);
+    }
+
+    #[test]
+    fn read_notice_names_exact_remaining_range() {
+        assert_eq!(
+            session_read_budget_notice(13, 30),
+            "[output budget reached at turn 12 of 30 — call session_read with range \"13-30\" for the rest]"
+        );
+    }
+
+    #[test]
+    fn delta_notice_names_since_turn() {
+        assert_eq!(
+            session_delta_budget_notice(13, 30),
+            "[output budget reached at turn 12 of 30 — call session_delta with since_turn 13 for the rest]"
+        );
     }
 }
 
@@ -316,8 +522,8 @@ pub async fn session_read(db: &WardsonDbClient, param: &str) -> String {
         total
     );
 
-    for (i, turn) in turns[start..end].iter().enumerate() {
-        output.push_str(&format_turn(start + i, turn, 500));
+    if let Some(next) = render_turns_within_budget(&mut output, &turns, start, end) {
+        output.push_str(&session_read_budget_notice(next, end));
         output.push('\n');
     }
 
@@ -636,8 +842,8 @@ pub async fn session_delta(db: &WardsonDbClient, param: &str) -> String {
         name, display_since, new_turns
     );
 
-    for (i, turn) in turns[start_0..].iter().enumerate() {
-        output.push_str(&format_turn(start_0 + i, turn, 500));
+    if let Some(next) = render_turns_within_budget(&mut output, &turns, start_0, total) {
+        output.push_str(&session_delta_budget_notice(next, total));
         output.push('\n');
     }
 
@@ -1199,7 +1405,7 @@ pub async fn session_summarize(db: &WardsonDbClient, param: &str) -> String {
 
     let mut formatted = String::new();
     for (i, turn) in &selected_turns {
-        formatted.push_str(&format_turn(*i, turn, 500));
+        formatted.push_str(&format_turn(*i, turn, Some(SESSION_CORPUS_TURN_CAP)));
         formatted.push('\n');
     }
 
@@ -1378,7 +1584,7 @@ pub async fn session_extract(db: &WardsonDbClient, param: &str) -> String {
 
     let mut formatted = String::new();
     for (i, turn) in &selected {
-        formatted.push_str(&format_turn(*i, turn, 500));
+        formatted.push_str(&format_turn(*i, turn, Some(SESSION_CORPUS_TURN_CAP)));
         formatted.push('\n');
     }
 
@@ -1427,7 +1633,7 @@ impl SessionListArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "session_read",
-    description = "Read session transcript. range is an optional turn range like \"1-20\", \"1-\", or \"5\"; when absent, the last 30 turns are returned."
+    description = "Read session transcript with full message content. range is an optional turn range like \"1-20\", \"1-\", or \"5\"; when absent, the last 30 turns are returned. Output is budgeted (~64 KB per call, whole-turn granularity); when the budget stops emission early, a continuation line names the exact remaining range to request next."
 )]
 pub struct SessionReadArgs {
     pub name: String,
@@ -1493,7 +1699,7 @@ impl SessionMetaArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "session_delta",
-    description = "Return turns added to a session since a given turn number (inclusive: since_turn=N returns turns ≥ N). Use 0 or 1 to return the full session."
+    description = "Return turns added to a session since a given turn number (inclusive: since_turn=N returns turns ≥ N), with full message content. Use 0 or 1 to return the full session. Output is budgeted (~64 KB per call); when it stops early, a continuation line names the since_turn to resume from."
 )]
 pub struct SessionDeltaArgs {
     pub name: String,

@@ -1020,10 +1020,28 @@ pub async fn check_reminders(db: &WardsonDbClient) -> Vec<String> {
     fired
 }
 
+/// Byte cap for `session_summary` transcript-line previews. Boundary-safe:
+/// the previous raw `&content[..200]` slice panicked when a multi-byte char
+/// straddled the boundary. 500 (up from 200) is a modest raise; the 20-turn
+/// window stays — it is pinned by the tool's description ("last 20 turns"),
+/// and widening it would spend a description-string prompt-cache event.
+const SESSION_SUMMARY_PREVIEW_MAX: usize = 500;
+
+fn summary_preview(content: &str) -> String {
+    if content.len() > SESSION_SUMMARY_PREVIEW_MAX {
+        format!(
+            "{}...",
+            sessions::truncate_str(content, SESSION_SUMMARY_PREVIEW_MAX)
+        )
+    } else {
+        content.to_string()
+    }
+}
+
 async fn session_summary(db: &WardsonDbClient, session_name: &str) -> String {
     let collection = format!("sessions.{}.history", session_name);
     let results = db
-        .query(&collection, &serde_json::json!({}))
+        .query(&collection, &crate::sessions::history_query_body())
         .await
         .unwrap_or_default();
 
@@ -1048,13 +1066,7 @@ async fn session_summary(db: &WardsonDbClient, session_name: &str) -> String {
             for turn in recent {
                 let role = turn.get("role").and_then(|r| r.as_str()).unwrap_or("?");
                 let content = turn.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                // Truncate long messages
-                let preview = if content.len() > 200 {
-                    format!("{}...", &content[..200])
-                } else {
-                    content.to_string()
-                };
-                output.push_str(&format!("[{}]: {}\n", role, preview));
+                output.push_str(&format!("[{}]: {}\n", role, summary_preview(content)));
             }
 
             return output;
@@ -1062,6 +1074,28 @@ async fn session_summary(db: &WardsonDbClient, session_name: &str) -> String {
     }
 
     format!("No conversation history found for session '{}'.", session_name)
+}
+
+#[cfg(test)]
+mod session_summary_preview_tests {
+    use super::{summary_preview, SESSION_SUMMARY_PREVIEW_MAX};
+
+    #[test]
+    fn boundary_safe_on_multibyte() {
+        // '€' is 3 bytes: byte 500 lands mid-char (500 % 3 == 2) — the raw
+        // `&content[..N]` slice this replaced panicked exactly here.
+        let content = "€".repeat(200); // 600 bytes
+        let preview = summary_preview(&content);
+        assert!(preview.ends_with("..."));
+        assert!(preview.len() <= SESSION_SUMMARY_PREVIEW_MAX + 3);
+        assert!(preview.strip_suffix("...").unwrap().len() % 3 == 0);
+    }
+
+    #[test]
+    fn short_content_untouched() {
+        let content = "short and sweet";
+        assert_eq!(summary_preview(content), content);
+    }
 }
 
 // ── Utility Tools ──
