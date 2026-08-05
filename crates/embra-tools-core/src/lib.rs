@@ -34,8 +34,9 @@ pub enum DispatchError {
 
 /// One tool invocation recorded in the current turn's trace.
 ///
-/// `input_preview` and `result_preview` are bounded (≤200 chars in the
-/// embra-brain populator) so the trace stays small even for chatty tools.
+/// `input_preview` and `result_preview` are bounded (≤2 KiB, byte-capped
+/// char-boundary-safe, in the embra-brain populator) so the trace stays
+/// small even for chatty tools.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TraceEntry {
     pub tool_name: String,

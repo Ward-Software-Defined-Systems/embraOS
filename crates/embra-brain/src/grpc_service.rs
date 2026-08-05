@@ -1477,8 +1477,8 @@ async fn handle_request(
                             // introspection is available to the model.
                             let input_json =
                                 serde_json::to_string(args).unwrap_or_default();
-                            let input_preview = preview_str(&input_json, 200);
-                            let result_preview = preview_str(&content, 200);
+                            let input_preview = preview_str(&input_json, TURN_TRACE_PREVIEW_MAX);
+                            let result_preview = preview_str(&content, TURN_TRACE_PREVIEW_MAX);
                             let entry = embra_tools_core::TraceEntry {
                                 tool_name: name.clone(),
                                 tool_use_id: id.clone(),
@@ -5357,6 +5357,14 @@ fn legacy_message_to_api(m: &Message) -> ApiMessage {
     }
 }
 
+/// Byte cap for `tools.turn_trace` input/result previews. Historically 200,
+/// which clipped most tool args/results below usefulness for cross-turn
+/// introspection (reviewing exact tool parameters after a turn). 2 KiB keeps
+/// the worst-case trace doc ~4.3 KB (one doc per tool call) while
+/// `turn_trace`'s max read (100 entries) stays ~430 KB, well under the 2 MiB
+/// tool-result backstop.
+const TURN_TRACE_PREVIEW_MAX: usize = 2048;
+
 /// Truncate `s` to at most `max` bytes on a UTF-8 char boundary, appending an
 /// ellipsis when truncation occurred. Used to bound trace-entry previews.
 fn preview_str(s: &str, max: usize) -> String {
@@ -5720,6 +5728,28 @@ mod transcript_segments_tests {
         // iteration's text — the narration segment is the regression.
         assert_eq!(last_response_text, answer);
         assert!(persisted.contains(narration));
+    }
+}
+
+#[cfg(test)]
+mod turn_trace_preview_tests {
+    use super::{preview_str, TURN_TRACE_PREVIEW_MAX};
+
+    #[test]
+    fn trace_preview_cap_is_2048_and_truncates_boundary_safe() {
+        // Guards a silent revert to the historical 200-byte previews.
+        assert_eq!(TURN_TRACE_PREVIEW_MAX, 2048);
+        // '€' is 3 bytes; 2048 % 3 != 0 forces a mid-char boundary the
+        // truncation must snap back from.
+        let big = "€".repeat(1000); // 3000 bytes
+        let preview = preview_str(&big, TURN_TRACE_PREVIEW_MAX);
+        assert!(preview.ends_with('…'));
+        let body = preview.strip_suffix('…').unwrap();
+        assert!(body.len() <= TURN_TRACE_PREVIEW_MAX);
+        assert_eq!(body.len() % 3, 0); // whole '€'s only
+        // ≤-cap input passes through untouched.
+        let small = "x".repeat(TURN_TRACE_PREVIEW_MAX);
+        assert_eq!(preview_str(&small, TURN_TRACE_PREVIEW_MAX), small);
     }
 }
 
