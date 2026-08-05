@@ -1056,6 +1056,11 @@ async fn handle_request(
                 .clamp(1, 1000);
             let mut tool_iter: usize = 0;
             let mut last_response_text = String::new();
+            // Transcript accumulator — every iteration's operator-visible
+            // text, not just the last (multi-tool turns previously
+            // persisted only the final segment; narration the operator
+            // watched live never reached history).
+            let mut persisted_segments = TranscriptSegments::default();
             // Embra_Debug #70: collect tool names dispatched across the
             // full user-turn loop (deduped, first-seen order). Used to
             // synthesize a placeholder when the assistant's last
@@ -1097,6 +1102,7 @@ async fn handle_request(
             };
             // Track text from the most recent turn for persistence fallback.
             last_response_text = turn_text(&current_turn);
+            persisted_segments.push(&last_response_text);
             api_messages.push(ApiMessage::assistant_blocks(current_turn.content.clone()));
 
             loop {
@@ -1155,6 +1161,7 @@ async fn handle_request(
                                     }))
                                     .await;
                                 last_response_text = diagnostic;
+                                persisted_segments.push(&last_response_text);
                                 warn!(
                                     target: "dispatch",
                                     session = %session_name,
@@ -1186,6 +1193,7 @@ async fn handle_request(
                         };
                         current_turn = resp;
                         last_response_text = turn_text(&current_turn);
+                        persisted_segments.push(&last_response_text);
                         api_messages.push(ApiMessage::assistant_blocks(
                             current_turn.content.clone(),
                         ));
@@ -1252,6 +1260,7 @@ async fn handle_request(
                                         api_messages.push(ApiMessage::assistant_blocks(
                                             final_turn.content,
                                         ));
+                                        persisted_segments.push(&final_text);
                                         if !final_text.is_empty() {
                                             last_response_text = final_text;
                                         } else {
@@ -1274,6 +1283,7 @@ async fn handle_request(
                                                     ),
                                                 }))
                                                 .await;
+                                            persisted_segments.push(&fallback);
                                             last_response_text = fallback;
                                         }
                                     } else {
@@ -1291,6 +1301,13 @@ async fn handle_request(
                                                 ),
                                             }))
                                             .await;
+                                        // The fallback token was streamed
+                                        // unconditionally above — record it
+                                        // in the transcript unconditionally
+                                        // too (the guarded single-slot
+                                        // assignment predates the
+                                        // accumulator).
+                                        persisted_segments.push(&fallback);
                                         if last_response_text.is_empty() {
                                             last_response_text = fallback;
                                         }
@@ -1317,10 +1334,16 @@ async fn handle_request(
                                             ),
                                         }))
                                         .await;
+                                    let marker = format!(
+                                        "(tool iteration cap of {max_tool_iterations} reached; final summary call errored)"
+                                    );
+                                    // Recorded next to the Error frame the
+                                    // operator saw; unconditional — the
+                                    // guarded assignment predates the
+                                    // accumulator.
+                                    persisted_segments.push(&marker);
                                     if last_response_text.is_empty() {
-                                        last_response_text = format!(
-                                            "(tool iteration cap of {max_tool_iterations} reached; final summary call errored)"
-                                        );
+                                        last_response_text = marker;
                                     }
                                 }
                             }
@@ -1567,6 +1590,7 @@ async fn handle_request(
                         };
                         current_turn = resp;
                         last_response_text = turn_text(&current_turn);
+                        persisted_segments.push(&last_response_text);
                         api_messages.push(ApiMessage::assistant_blocks(
                             current_turn.content.clone(),
                         ));
@@ -1693,7 +1717,7 @@ async fn handle_request(
                     return Ok(());
                 }
                 let final_text = final_assistant_text(
-                    &last_response_text,
+                    &persisted_segments.joined(),
                     &tool_names_in_turn,
                     current_turn.outcome,
                 );
@@ -5360,6 +5384,39 @@ fn turn_text(turn: &AssistantTurn) -> String {
         .join("")
 }
 
+/// Operator-visible assistant text accumulated across the tool-loop
+/// iterations of ONE user turn, for session-transcript persistence.
+/// Before this existed only the final iteration's text survived to
+/// history while every iteration streamed live (`collect_response`
+/// emits a Done frame per iteration) — narration emitted before or
+/// between tool calls was lost from the recorded transcript.
+///
+/// REASONING-STREAM-01: fed exclusively from `turn_text` output
+/// (`Block::Text` only) and the synthetic operator-visible markers the
+/// loop already streams — never from `ReasoningDelta`.
+/// `last_response_text` keeps its final-segment semantics for the
+/// operator-stop Done frame, Gemini telemetry, and
+/// `delete_flow_verdict`.
+#[derive(Default)]
+struct TranscriptSegments(Vec<String>);
+
+impl TranscriptSegments {
+    /// Append a segment; empty/whitespace-only text is skipped so
+    /// text-less tool iterations don't inject blank paragraphs.
+    fn push(&mut self, segment: &str) {
+        if !segment.trim().is_empty() {
+            self.0.push(segment.to_string());
+        }
+    }
+
+    /// Join with a blank line — the per-iteration boundary the operator
+    /// watched live. Single-segment turns join byte-identically to the
+    /// segment itself.
+    fn joined(&self) -> String {
+        self.0.join("\n\n")
+    }
+}
+
 /// Render the placeholder persisted to the session transcript when an
 /// assistant turn fired tool calls but produced no text in its terminal
 /// iteration. Embra_Debug #70: previously persisted as `(no response)`,
@@ -5431,27 +5488,29 @@ fn terminal_outcome_notice(
 }
 
 /// Final assistant text persisted to session history for a terminal turn.
-/// Extracted from the inline persistence chain so refusal honesty is
-/// unit-testable: a refused turn must never persist as a bare normal
-/// message. Empty refusals persist an explicit marker (instead of
+/// `transcript_text` is the joined `TranscriptSegments` accumulator (every
+/// iteration's text, blank-line separated), so outcome suffixes land once
+/// at the very end of the full transcript. Extracted from the inline
+/// persistence chain so refusal honesty is unit-testable: a refused turn
+/// must never persist as a bare normal message. Empty refusals persist an explicit marker (instead of
 /// `(no response)`, and taking precedence over the tool placeholder —
 /// the refusal frame and `turn_trace` carry the tool detail); refused
 /// partials carry an interruption suffix so both the operator on session
 /// reload and the model on the next turn see that the reply was cut.
 fn final_assistant_text(
-    last_response_text: &str,
+    transcript_text: &str,
     tool_names: &[String],
     outcome: TurnOutcome,
 ) -> String {
     let refused = matches!(outcome, TurnOutcome::EarlyStop(EarlyStopReason::Refusal));
     let stopped = matches!(outcome, TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop));
-    if !last_response_text.trim().is_empty() {
+    if !transcript_text.trim().is_empty() {
         if refused {
-            format!("{last_response_text}\n\n(response interrupted by provider refusal)")
+            format!("{transcript_text}\n\n(response interrupted by provider refusal)")
         } else if stopped {
-            format!("{last_response_text}\n\n(response interrupted by operator stop)")
+            format!("{transcript_text}\n\n(response interrupted by operator stop)")
         } else {
-            last_response_text.to_string()
+            transcript_text.to_string()
         }
     } else if refused {
         "(request declined by provider: refusal)".to_string()
@@ -5527,6 +5586,140 @@ mod tool_only_placeholder_tests {
         let names: Vec<String> = (0..8).map(|i| format!("t{}", i)).collect();
         let out = render_tool_only_placeholder(&names);
         assert!(!out.contains("…"));
+    }
+}
+
+#[cfg(test)]
+mod transcript_segments_tests {
+    use super::{final_assistant_text, turn_text, TranscriptSegments};
+    use crate::provider::{AssistantTurn, Block, EarlyStopReason, StreamEvent, TurnOutcome};
+    use futures::stream;
+    use tokio::sync::mpsc;
+
+    #[test]
+    fn single_segment_joined_is_byte_identical() {
+        // No-tool turns must persist exactly as they did pre-accumulator.
+        let mut segs = TranscriptSegments::default();
+        let text = "A single plain answer.\n\nWith its own paragraphs.";
+        segs.push(text);
+        assert_eq!(segs.joined(), text);
+    }
+
+    #[test]
+    fn segments_join_with_blank_line_separator() {
+        let mut segs = TranscriptSegments::default();
+        segs.push("a");
+        segs.push("b");
+        segs.push("c");
+        assert_eq!(segs.joined(), "a\n\nb\n\nc");
+    }
+
+    #[test]
+    fn whitespace_only_segments_are_skipped() {
+        let mut segs = TranscriptSegments::default();
+        segs.push("");
+        segs.push("  \n");
+        // Empty accumulator joins to "" so final_assistant_text's
+        // placeholder chain still fires for text-less turns.
+        assert_eq!(segs.joined(), "");
+        let names = vec!["file_read".to_string()];
+        assert_eq!(
+            final_assistant_text(&segs.joined(), &names, TurnOutcome::EndTurn),
+            "[tool calls: file_read]"
+        );
+    }
+
+    #[test]
+    fn final_assistant_text_over_joined_segments_suffixes_once() {
+        let mut segs = TranscriptSegments::default();
+        segs.push("Let me check the logs first.");
+        segs.push("Here is the answer.");
+        let stopped = final_assistant_text(
+            &segs.joined(),
+            &[],
+            TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop),
+        );
+        assert_eq!(
+            stopped,
+            "Let me check the logs first.\n\nHere is the answer.\n\n(response interrupted by operator stop)"
+        );
+        assert_eq!(stopped.matches("(response interrupted").count(), 1);
+        let refused = final_assistant_text(
+            &segs.joined(),
+            &[],
+            TurnOutcome::EarlyStop(EarlyStopReason::Refusal),
+        );
+        assert!(refused.ends_with("(response interrupted by provider refusal)"));
+        assert_eq!(refused.matches("(response interrupted").count(), 1);
+    }
+
+    #[test]
+    fn diagnostic_segment_appends_after_real_segments() {
+        let mut segs = TranscriptSegments::default();
+        segs.push("Ran the sweep.");
+        segs.push("(model ended turn silently after 2 side-effectful tool calls; see `turn_trace` for details)");
+        let joined = segs.joined();
+        assert!(joined.starts_with("Ran the sweep.\n\n(model ended turn silently"));
+    }
+
+    /// The write-side bug regression: drive `collect_response` once per
+    /// tool-loop iteration (the exact collect → turn_text → push seam the
+    /// loop driver uses) and assert BOTH segments reach the persisted
+    /// text, where the old single-slot `last_response_text` kept only the
+    /// final iteration's.
+    #[tokio::test]
+    async fn multi_iteration_collect_response_feeds_all_segments() {
+        let narration = "Let me check the logs first.";
+        let answer = "Here is the answer.";
+        let iterations: Vec<Vec<StreamEvent>> = vec![
+            vec![
+                StreamEvent::TextDelta(narration.to_string()),
+                StreamEvent::Complete(AssistantTurn {
+                    content: vec![
+                        Block::Text(narration.to_string()),
+                        Block::ToolCall {
+                            id: "t1".to_string(),
+                            name: "system_logs".to_string(),
+                            args: serde_json::json!({}),
+                            provider_opaque: None,
+                        },
+                    ],
+                    outcome: TurnOutcome::ToolUse,
+                    usage: None,
+                    stop_details: None,
+                }),
+            ],
+            vec![
+                StreamEvent::TextDelta(answer.to_string()),
+                StreamEvent::Complete(AssistantTurn {
+                    content: vec![Block::Text(answer.to_string())],
+                    outcome: TurnOutcome::EndTurn,
+                    usage: None,
+                    stop_details: None,
+                }),
+            ],
+        ];
+
+        let mut segs = TranscriptSegments::default();
+        let mut last_response_text = String::new();
+        for events in iterations {
+            let (tx, mut rx) = mpsc::channel(64);
+            let turn = super::collect_response(Box::pin(stream::iter(events)), &tx, "Embra", None)
+                .await
+                .expect("collect_response ok")
+                .expect("got Complete turn");
+            drop(tx);
+            while rx.recv().await.is_some() {}
+            last_response_text = turn_text(&turn);
+            segs.push(&last_response_text);
+        }
+
+        let persisted = final_assistant_text(&segs.joined(), &[], TurnOutcome::EndTurn);
+        assert_eq!(persisted, format!("{narration}\n\n{answer}"));
+        // The old single-slot shape would have persisted only the final
+        // iteration's text — the narration segment is the regression.
+        assert_eq!(last_response_text, answer);
+        assert!(persisted.contains(narration));
     }
 }
 
