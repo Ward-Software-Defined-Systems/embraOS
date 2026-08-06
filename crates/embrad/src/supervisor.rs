@@ -152,6 +152,9 @@ impl Supervisor {
             unsafe { std::env::set_var("TZ", &tz); }
             tracing::info!("System timezone set: TZ={}", tz);
         }
+        // Merge operator CA certs (STATE drop-in) with the stock bundle and
+        // export GIT_SSL_CAINFO/SSL_CERT_FILE for all child processes.
+        crate::ca_bundle::setup_operator_ca_trust();
         // Storage engine baked at build time via scripts/build-image.sh --storage-engine.
         // Falls back to rocksdb for dev builds (`cargo check`/`cargo run`) that bypass
         // the build script. See crates/embrad/build.rs.

@@ -3,7 +3,7 @@
 # Copies existing Phase 0 data so the system boots directly to Operational mode
 # instead of going through Learning Mode.
 #
-# Usage: ./scripts/seed-state.sh [--phase0-data /path/to/phase0/data] [--soul-hash <hash>] [--import-dir /path/to/graphs] [--seed-dir /path/to/packs]
+# Usage: ./scripts/seed-state.sh [--phase0-data /path/to/phase0/data] [--soul-hash <hash>] [--import-dir /path/to/graphs] [--seed-dir /path/to/packs] [--ca-dir /path/to/certs]
 #
 # --import-dir copies *.graph.json intelligence files into STATE's
 # imported-intelligence/ directory so Learning Mode offers them for import
@@ -15,6 +15,11 @@
 # knowledge graph (STATE wins filename collisions with the rootfs-baked
 # packs).
 #
+# --ca-dir copies *.pem / *.crt root CA certificates into STATE's
+# ca-certificates/ directory; embrad merges them with the stock CA bundle
+# at boot and exports GIT_SSL_CAINFO/SSL_CERT_FILE so the git tools trust
+# self-hosted git servers (e.g. GitLab behind an mkcert CA).
+#
 # NOTE: This script requires Linux (losetup). On macOS, use a Linux VM or Docker.
 
 set -euo pipefail
@@ -24,6 +29,7 @@ PHASE0_DATA=""
 SOUL_HASH=""
 IMPORT_DIR=""
 SEED_DIR=""
+CA_DIR=""
 
 shift || true
 while [ $# -gt 0 ]; do
@@ -32,6 +38,7 @@ while [ $# -gt 0 ]; do
         --soul-hash) SOUL_HASH="$2"; shift 2 ;;
         --import-dir) IMPORT_DIR="$2"; shift 2 ;;
         --seed-dir) SEED_DIR="$2"; shift 2 ;;
+        --ca-dir) CA_DIR="$2"; shift 2 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
     esac
 done
@@ -108,6 +115,20 @@ if [ -n "$SEED_DIR" ]; then
         echo "Done: $(ls "$SEED_DIR"/*.knowledge.json | wc -l) file(s)."
     else
         echo "ERROR: --seed-dir '$SEED_DIR' has no *.knowledge.json files"
+        exit 1
+    fi
+fi
+
+# Seed operator root CA certificates (git/OpenSSL trust for self-hosted servers)
+if [ -n "$CA_DIR" ]; then
+    if [ -d "$CA_DIR" ] && { ls "$CA_DIR"/*.pem >/dev/null 2>&1 || ls "$CA_DIR"/*.crt >/dev/null 2>&1; }; then
+        echo "Copying operator CA certificates into STATE ca-certificates/..."
+        sudo mkdir -p "$MOUNT_STATE/ca-certificates"
+        sudo cp "$CA_DIR"/*.pem "$MOUNT_STATE/ca-certificates/" 2>/dev/null || true
+        sudo cp "$CA_DIR"/*.crt "$MOUNT_STATE/ca-certificates/" 2>/dev/null || true
+        echo "Done: $(ls "$CA_DIR"/*.pem "$CA_DIR"/*.crt 2>/dev/null | wc -l) file(s)."
+    else
+        echo "ERROR: --ca-dir '$CA_DIR' has no *.pem or *.crt files"
         exit 1
     fi
 fi

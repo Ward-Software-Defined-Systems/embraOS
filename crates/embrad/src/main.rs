@@ -8,6 +8,7 @@
 //! 5. Verify soul (HALT on failure)
 //! 6. Enter reconciliation loop
 
+mod ca_bundle;
 mod config;
 mod mount;
 mod reconcile;
