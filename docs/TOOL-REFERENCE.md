@@ -1,6 +1,6 @@
 # Tool Reference
 
-Phase 1 includes 98 internal tools the intelligence invokes during conversation. All 98 work identically across all four LLM providers (Anthropic, Gemini, Ollama, LM Studio) via per-provider tool-schema translators that share a common JSON Schema cleanup pipeline (`provider/schema_util.rs::inline_refs`). They are organized below by category.
+Phase 1 includes 102 internal tools the intelligence invokes during conversation. All 102 work identically across all four LLM providers (Anthropic, Gemini, Ollama, LM Studio) via per-provider tool-schema translators that share a common JSON Schema cleanup pipeline (`provider/schema_util.rs::inline_refs`). They are organized below by category.
 
 > **⚠️ Testing Notice:** The default tools and slash commands are actively being tested. If you encounter bugs or unexpected behavior, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
@@ -121,6 +121,10 @@ For the data model, edge taxonomy, density rationale, promotion path, auto-enric
 | **gh_pr_comment** | Post a comment on a GitHub pull request — `<owner/repo> <number> | <body>` |
 | **gh_project_list** | List GitHub projects for a user or org |
 | **gh_project_view** | View a GitHub project board |
+| **gl_issues** | List open issues on a self-hosted GitLab instance — `host` + full `group/repo` project path; auth = the per-host token from `/git-token`, sent as `PRIVATE-TOKEN`; the HTTP client trusts operator CA drop-ins (`/embra/state/ca-certificates/`) so private-CA instances verify |
+| **gl_mrs** | List open merge requests on a self-hosted GitLab instance (GitLab's pull requests) — shows `!iid`, title, author, `source → target` branches |
+| **gl_issue_create** | Create an issue on a self-hosted GitLab instance (title + optional Markdown description) |
+| **gl_mr_create** | Create a merge request on a self-hosted GitLab instance (`source_branch` → `target_branch`) |
 | **plan** | Create or list project plans (stored in WardSONDB `plans` collection) |
 | **plan_delete** | Delete a plan by id (irreversible). `cascade_tasks=true` also removes tasks whose `plan_id` matches; default `false` leaves them orphaned |
 | **tasks** | List tasks, optionally filtered by plan (stored in WardSONDB `tasks` collection) |

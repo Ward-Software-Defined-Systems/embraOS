@@ -147,7 +147,7 @@ To let the git tools reach a self-hosted GitLab/Gitea whose HTTPS certificate ch
 ./scripts/seed-state.sh output/images/embraos.img --ca-dir /path/to/dir-with-rootCA.pem
 ```
 
-At the next boot, embrad merges the drop-ins with the stock CA bundle (public hosts like github.com keep working) and exports `GIT_SSL_CAINFO`/`SSL_CERT_FILE` for every service, so `git_clone`/`git_push`/`git_pull` trust the server. The boot log line (readable in-session via the `system_logs` tool, service `embrad`) names each accepted cert file. Scope: this covers the git/OpenSSL path only — the Rust-side HTTP clients (providers, guardian `http_get`) keep their compiled-in public roots. For private repos, set a per-host token with `/git-token <host> <token>` after boot.
+At the next boot, embrad merges the drop-ins with the stock CA bundle (public hosts like github.com keep working) and exports `GIT_SSL_CAINFO`/`SSL_CERT_FILE` for every service, so `git_clone`/`git_push`/`git_pull` trust the server. The boot log line (readable in-session via the `system_logs` tool, service `embrad`) names each accepted cert file. Scope: this covers the git/OpenSSL path plus the `gl_*` GitLab API tools (whose HTTP client adds the same drop-ins as trust anchors) — the other Rust-side HTTP clients (providers, guardian `http_get`) keep their compiled-in public roots. For private repos, set a per-host token with `/git-token <host> <token>` after boot; the same token authenticates the `gl_*` issue/merge-request tools.
 
 ---
 
