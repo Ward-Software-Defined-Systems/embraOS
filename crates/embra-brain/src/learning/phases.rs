@@ -154,6 +154,9 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 // the ephemeral tmpfs — self-diagnostics, 2026-07-31).
 // Self-Awareness went 4 → 5 with `set_name` (intelligence-initiated,
 // operator-agreed display-name change; sealed soul untouched).
+// Engineering went 33 → 37 with the gl_* GitLab set (2026-08-06:
+// gl_issues/gl_mrs/gl_issue_create/gl_mr_create — self-hosted instances,
+// per-host /git-token auth, operator-CA-aware client).
 const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
     ("system", "System", 4),
     ("memory_knowledge", "Memory & Knowledge", 7),
@@ -161,7 +164,7 @@ const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
     ("time_context", "Time & Context", 3),
     ("utility", "Utility", 2),
     ("security", "Security", 6),
-    ("engineering", "Engineering", 33),
+    ("engineering", "Engineering", 37),
     ("filesystem", "Filesystem", 10),
     ("scheduling", "Scheduling", 3),
     ("sessions", "Sessions", 10),

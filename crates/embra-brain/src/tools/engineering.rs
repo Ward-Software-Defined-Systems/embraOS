@@ -174,6 +174,304 @@ pub async fn git_auth_args(db: &WardsonDbClient) -> Vec<String> {
     args
 }
 
+// ---------------------------------------------------------------------------
+// GitLab API tools (gl_*) — self-hosted GitLab/instance support.
+//
+// Mirrors the gh_* set against GitLab's /api/v4. Auth = the per-host PAT
+// from `SystemConfig.git_tokens` (`/git-token <host> <token>`), sent as
+// `PRIVATE-TOKEN`. Unlike the git tools (which ride the git binary and the
+// embrad-merged CA bundle via GIT_SSL_CAINFO), these are reqwest clients
+// with compiled-in webpki roots — so the client builder below explicitly
+// adds the operator CA drop-ins from /embra/state/ca-certificates/ as
+// additional trust anchors. Same dir + EMBRA_CA_DIR override semantics as
+// embrad's ca_bundle.rs; certs that fail to parse are skipped (the TLS
+// handshake surfaces any real trust problem honestly).
+// ---------------------------------------------------------------------------
+
+/// Operator CA drop-in dir (kept in sync with crates/embrad/src/ca_bundle.rs).
+const OPERATOR_CA_DIR: &str = "/embra/state/ca-certificates";
+const OPERATOR_CA_DIR_ENV: &str = "EMBRA_CA_DIR";
+
+/// Load operator CA certs from the STATE drop-in dir. Unparseable files are
+/// skipped with a warn — never fail the call over a bad drop-in; a genuinely
+/// missing trust anchor shows up as a TLS error on the request itself.
+fn load_operator_ca_certs() -> Vec<reqwest::Certificate> {
+    let dir = std::env::var(OPERATOR_CA_DIR_ENV)
+        .ok()
+        .filter(|d| !d.is_empty())
+        .unwrap_or_else(|| OPERATOR_CA_DIR.to_string());
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
+    };
+    let mut certs = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_cert_ext = matches!(
+            path.extension().and_then(|e| e.to_str()),
+            Some("pem") | Some("crt")
+        );
+        if !path.is_file() || !is_cert_ext {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&path) else { continue };
+        match reqwest::Certificate::from_pem_bundle(&bytes) {
+            Ok(parsed) => certs.extend(parsed),
+            Err(e) => tracing::warn!(
+                "Operator CA file skipped for GitLab client: {}: {}",
+                path.display(),
+                e
+            ),
+        }
+    }
+    certs
+}
+
+/// Build the reqwest client for GitLab API calls: stock webpki roots plus
+/// the operator CA drop-ins, so a self-hosted instance behind a private CA
+/// (e.g. mkcert) verifies. Falls back to a stock client on builder failure.
+fn gitlab_client() -> reqwest::Client {
+    let mut builder = reqwest::Client::builder();
+    for cert in load_operator_ca_certs() {
+        builder = builder.add_root_certificate(cert);
+    }
+    builder.build().unwrap_or_else(|e| {
+        tracing::warn!("GitLab client builder failed ({}); using stock client", e);
+        reqwest::Client::new()
+    })
+}
+
+/// Percent-encode a GitLab project path (`namespace/project`) for use as a
+/// single URL path segment — GitLab's /api/v4/projects/ takes the full path
+/// with `/` encoded as `%2F`. Unreserved chars (RFC 3986) pass through.
+fn encode_gitlab_project(path: &str) -> String {
+    let mut out = String::with_capacity(path.len() * 3 / 2);
+    for b in path.trim().trim_matches('/').bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// Resolve the PAT for a GitLab host from `git_tokens`, with a uniform
+/// error message when unconfigured. Host is normalized first so
+/// `https://gitlab.example.com/` and `gitlab.example.com` both resolve.
+async fn gitlab_host_token(db: &WardsonDbClient, host: &str) -> Result<(String, String), String> {
+    let host = normalize_git_host(host)?;
+    match resolve_git_tokens(db).await.remove(&host) {
+        Some(token) => Ok((host, token)),
+        None => Err(format!(
+            "No token configured for {}. Use /git-token {} <personal-access-token> (scope: api).",
+            host, host
+        )),
+    }
+}
+
+/// List open GitLab issues for a project on a configured host.
+pub async fn gl_issues(db: &WardsonDbClient, host: &str, project: &str) -> String {
+    let (host, token) = match gitlab_host_token(db, host).await {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let url = format!(
+        "https://{}/api/v4/projects/{}/issues?state=opened&per_page=10",
+        host,
+        encode_gitlab_project(project)
+    );
+    match gitlab_client()
+        .get(&url)
+        .header("User-Agent", "embraOS/0.1.0")
+        .header("PRIVATE-TOKEN", &token)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                return format!("GitLab API error: {}", resp.status());
+            }
+            let issues: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
+            if issues.is_empty() {
+                return format!("No open issues for {} on {}.", project, host);
+            }
+            let mut output = format!("=== Open Issues: {} ({}) ===\n", project, issues.len());
+            for issue in &issues {
+                let iid = issue.get("iid").and_then(|v| v.as_u64()).unwrap_or(0);
+                let title = issue.get("title").and_then(|v| v.as_str()).unwrap_or("?");
+                // GitLab labels are plain strings, not {name} objects.
+                let labels: Vec<&str> = issue
+                    .get("labels")
+                    .and_then(|v| v.as_array())
+                    .map(|arr| arr.iter().filter_map(|l| l.as_str()).collect())
+                    .unwrap_or_default();
+                let label_str = if labels.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", labels.join(", "))
+                };
+                output.push_str(&format!("  #{} {}{}\n", iid, title, label_str));
+            }
+            output
+        }
+        Err(e) => format!("Failed to fetch issues: {}", e),
+    }
+}
+
+/// List open GitLab merge requests for a project on a configured host.
+pub async fn gl_mrs(db: &WardsonDbClient, host: &str, project: &str) -> String {
+    let (host, token) = match gitlab_host_token(db, host).await {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let url = format!(
+        "https://{}/api/v4/projects/{}/merge_requests?state=opened&per_page=10",
+        host,
+        encode_gitlab_project(project)
+    );
+    match gitlab_client()
+        .get(&url)
+        .header("User-Agent", "embraOS/0.1.0")
+        .header("PRIVATE-TOKEN", &token)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                return format!("GitLab API error: {}", resp.status());
+            }
+            let mrs: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
+            if mrs.is_empty() {
+                return format!("No open merge requests for {} on {}.", project, host);
+            }
+            let mut output = format!("=== Open MRs: {} ({}) ===\n", project, mrs.len());
+            for mr in &mrs {
+                let iid = mr.get("iid").and_then(|v| v.as_u64()).unwrap_or(0);
+                let title = mr.get("title").and_then(|v| v.as_str()).unwrap_or("?");
+                let author = mr
+                    .get("author")
+                    .and_then(|u| u.get("username"))
+                    .and_then(|l| l.as_str())
+                    .unwrap_or("?");
+                let branches = format!(
+                    "{} → {}",
+                    mr.get("source_branch").and_then(|v| v.as_str()).unwrap_or("?"),
+                    mr.get("target_branch").and_then(|v| v.as_str()).unwrap_or("?")
+                );
+                output.push_str(&format!("  !{} {} (by {}, {})\n", iid, title, author, branches));
+            }
+            output
+        }
+        Err(e) => format!("Failed to fetch merge requests: {}", e),
+    }
+}
+
+/// Create a GitLab issue.
+pub async fn gl_issue_create(
+    db: &WardsonDbClient,
+    host: &str,
+    project: &str,
+    title: &str,
+    description: &str,
+) -> String {
+    let (host, token) = match gitlab_host_token(db, host).await {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    if title.trim().is_empty() {
+        return "Issue title must not be empty.".into();
+    }
+    let url = format!(
+        "https://{}/api/v4/projects/{}/issues",
+        host,
+        encode_gitlab_project(project)
+    );
+    let payload = serde_json::json!({
+        "title": title.trim(),
+        "description": description,
+    });
+    match gitlab_client()
+        .post(&url)
+        .header("User-Agent", "embraOS/0.1.0")
+        .header("PRIVATE-TOKEN", &token)
+        .json(&payload)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return format!("GitLab API error {}: {}", status, body);
+            }
+            let issue: serde_json::Value = resp.json().await.unwrap_or_default();
+            let iid = issue.get("iid").and_then(|v| v.as_u64()).unwrap_or(0);
+            let web_url = issue.get("web_url").and_then(|v| v.as_str()).unwrap_or("");
+            format!("Issue #{} created: {}\n{}", iid, title.trim(), web_url)
+        }
+        Err(e) => format!("Failed to create issue: {}", e),
+    }
+}
+
+/// Create a GitLab merge request.
+pub async fn gl_mr_create(
+    db: &WardsonDbClient,
+    host: &str,
+    project: &str,
+    title: &str,
+    source_branch: &str,
+    target_branch: &str,
+) -> String {
+    let (host, token) = match gitlab_host_token(db, host).await {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    if title.trim().is_empty() || source_branch.trim().is_empty() || target_branch.trim().is_empty()
+    {
+        return "Merge request title, source_branch, and target_branch must not be empty.".into();
+    }
+    let url = format!(
+        "https://{}/api/v4/projects/{}/merge_requests",
+        host,
+        encode_gitlab_project(project)
+    );
+    let payload = serde_json::json!({
+        "title": title.trim(),
+        "source_branch": source_branch.trim(),
+        "target_branch": target_branch.trim(),
+    });
+    match gitlab_client()
+        .post(&url)
+        .header("User-Agent", "embraOS/0.1.0")
+        .header("PRIVATE-TOKEN", &token)
+        .json(&payload)
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                return format!("GitLab API error {}: {}", status, body);
+            }
+            let mr: serde_json::Value = resp.json().await.unwrap_or_default();
+            let iid = mr.get("iid").and_then(|v| v.as_u64()).unwrap_or(0);
+            let web_url = mr.get("web_url").and_then(|v| v.as_str()).unwrap_or("");
+            format!(
+                "MR !{} created: {} ({} → {})\n{}",
+                iid,
+                title.trim(),
+                source_branch.trim(),
+                target_branch.trim(),
+                web_url
+            )
+        }
+        Err(e) => format!("Failed to create merge request: {}", e),
+    }
+}
+
 /// Clone a git repository into /embra/workspace/.
 /// Format: `<url>` or `<url> <subpath>`
 /// `<subpath>` may be a bare dirname (`myrepo`), a relative path under the
@@ -2851,6 +3149,96 @@ impl GhPrCreateArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
+    name = "gl_issues",
+    description = "List open issues on a self-hosted GitLab instance. host is the GitLab hostname (token set via /git-token), project is the full path e.g. `group/repo`. Trusts operator CA drop-ins for private-CA instances."
+)]
+pub struct GlIssuesArgs {
+    /// GitLab hostname, e.g. `gitlab.example.com`.
+    pub host: String,
+    /// Full project path, e.g. `group/repo`.
+    pub project: String,
+}
+
+impl GlIssuesArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(gl_issues(ctx.db, &self.host, &self.project).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gl_mrs",
+    description = "List open merge requests on a self-hosted GitLab instance (GitLab's pull requests). host is the GitLab hostname (token set via /git-token), project is the full path e.g. `group/repo`."
+)]
+pub struct GlMrsArgs {
+    /// GitLab hostname, e.g. `gitlab.example.com`.
+    pub host: String,
+    /// Full project path, e.g. `group/repo`.
+    pub project: String,
+}
+
+impl GlMrsArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(gl_mrs(ctx.db, &self.host, &self.project).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gl_issue_create",
+    is_side_effectful = true,
+    description = "Create an issue on a self-hosted GitLab instance. host is the GitLab hostname (token set via /git-token), project is the full path e.g. `group/repo`."
+)]
+pub struct GlIssueCreateArgs {
+    /// GitLab hostname, e.g. `gitlab.example.com`.
+    pub host: String,
+    /// Full project path, e.g. `group/repo`.
+    pub project: String,
+    pub title: String,
+    /// Issue body (Markdown). Optional.
+    #[serde(default)]
+    pub description: String,
+}
+
+impl GlIssueCreateArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(gl_issue_create(ctx.db, &self.host, &self.project, &self.title, &self.description)
+            .await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gl_mr_create",
+    is_side_effectful = true,
+    description = "Create a merge request on a self-hosted GitLab instance. source_branch is the branch with your changes, target_branch is where it merges (usually \"main\"). host/token via /git-token, project is the full path e.g. `group/repo`."
+)]
+pub struct GlMrCreateArgs {
+    /// GitLab hostname, e.g. `gitlab.example.com`.
+    pub host: String,
+    /// Full project path, e.g. `group/repo`.
+    pub project: String,
+    pub title: String,
+    pub source_branch: String,
+    pub target_branch: String,
+}
+
+impl GlMrCreateArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(gl_mr_create(
+            ctx.db,
+            &self.host,
+            &self.project,
+            &self.title,
+            &self.source_branch,
+            &self.target_branch,
+        )
+        .await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
     name = "gh_pr_close",
     is_side_effectful = true,
     description = "Close a GitHub pull request without merging."
@@ -3554,6 +3942,33 @@ mod git_token_tests {
             ]
         );
         assert!(github_token_git_args(&None).is_empty());
+    }
+
+    #[test]
+    fn encode_gitlab_project_encodes_path_segment() {
+        assert_eq!(encode_gitlab_project("group/repo"), "group%2Frepo");
+        assert_eq!(
+            encode_gitlab_project("group/sub-group/my.repo_1"),
+            "group%2Fsub-group%2Fmy.repo_1"
+        );
+        // Leading/trailing slashes are trimmed, not encoded.
+        assert_eq!(encode_gitlab_project("/group/repo/"), "group%2Frepo");
+        assert_eq!(encode_gitlab_project("répo"), "r%C3%A9po");
+    }
+
+    #[test]
+    fn load_operator_ca_certs_skips_garbage_and_missing_dir() {
+        let dir = std::env::temp_dir().join(format!("brain-ca-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("garbage.pem"), "not a certificate").unwrap();
+        std::fs::write(dir.join("ignored.txt"), "also not").unwrap();
+        // EMBRA_CA_DIR override scopes the scan to the temp dir. Env mutation
+        // is process-global; this is the only test touching this var.
+        unsafe { std::env::set_var(OPERATOR_CA_DIR_ENV, &dir) };
+        let certs = load_operator_ca_certs();
+        unsafe { std::env::remove_var(OPERATOR_CA_DIR_ENV) };
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(certs.is_empty(), "garbage PEMs must be skipped, not error");
     }
 
     #[test]
