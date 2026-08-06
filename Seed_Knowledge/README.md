@@ -2,7 +2,11 @@
 
 Curated packs of knowledge-graph nodes and edges that the brain loads into
 the **live** knowledge collections (`memory.semantic` / `memory.procedural`
-+ `memory.edges`) on every boot. Three packs ship committed: `embraos-kg`
++ `memory.edges`) on every boot. Four packs ship committed: `embraos-core` is
+the OS knowing itself (boot chain, services, storage model, trust/soul
+mechanics, the constraint surface, and a layered answer-questions-about-
+yourself procedure — stable architecture only, volatile counters
+deliberately excluded in favor of live-source pointers), `embraos-kg`
 teaches an instance how its own memory works, `embraos-guardian` is
 the Guardian tool-authoring reference (the sandbox contract, the vendored
 guest APIs, and the pitfalls where general Rust training conflicts with

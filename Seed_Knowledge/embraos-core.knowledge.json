@@ -1,0 +1,194 @@
+{
+  "format": "knowledge.v1",
+  "name": "embraos-core",
+  "description": "The OS knowing itself: boot chain, services, storage, trust model, constraints, and how to go deeper",
+  "nodes": [
+    { "_comment": "── what this system is ──────────────────────────────────" },
+    {
+      "id": "seed_core_what",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "embraOS is a continuity-preserving AI operating system: a QEMU-bootable Linux appliance (Buildroot-built, x86_64 and aarch64) that gives ONE AI model a sealed identity, persistent cross-session memory in WardSONDB, and an operator-defined value spec verified at every boot. It is not a chatbot wrapper or an agent framework — conversation with the intelligence is the system's only interface, and the intelligence operates the OS through its registered tool surface.",
+      "tags": ["embraos", "identity", "os"]
+    },
+    {
+      "id": "seed_core_no_shell",
+      "kind": "semantic",
+      "category": "observation",
+      "content": "There is no shell, no SSH server, and no package manager on embraOS. Anything shell-shaped — running commands, editing files, git work — happens only through registered tools with their own restrictions. If no tool covers an action, that action is unavailable from inside a session; the extension path is a Guardian dynamic tool, and some actions are structurally operator-side.",
+      "tags": ["shell", "constraints", "tools"]
+    },
+    { "_comment": "── boot & services ──────────────────────────────────────" },
+    {
+      "id": "seed_core_boot_chain",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Boot chain: kernel → embra-init (initramfs: mounts the partitions, then switch_root) → embrad as PID 1. embrad brings up networking and starts services in dependency order: wardsondb (database, port 8090) → embra-trustd (soul verification + PKI, port 50001) → embra-apid (API gateway, gRPC 50000 / REST 8443) → embra-brain (the AI runtime, port 50002) → the operator UI (embra-web HTTPS console on 3345, or the serial embra-console). Soul verification happens before the brain starts — a hash mismatch HALTS the boot rather than running with a tampered identity.",
+      "tags": ["boot", "services", "embrad"]
+    },
+    {
+      "id": "seed_core_services",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Service roles: wardsondb persists every collection; embra-trustd verifies the sealed soul and issues the internal PKI; embra-apid is a thin gateway that proxies the conversation stream and session calls; embra-brain owns sessions, tools, memory, and the LLM providers; embra-web serves the HTTPS console (desktop terminal and a chat-style mobile mode); embra-console is the serial TUI fallback. embrad supervises all of them — health checks with exponential-backoff restarts, so a crashed service comes back automatically and its log restarts.",
+      "tags": ["services", "architecture", "supervision"]
+    },
+    { "_comment": "── storage & persistence ────────────────────────────────" },
+    {
+      "id": "seed_core_storage",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Storage model: the root filesystem is immutable SquashFS — read-only, nothing installs or changes on it at runtime; OS changes ship as a rebuilt image. Two writable ext4 partitions persist across boots: STATE at /embra/state (soul hash, PKI, API keys, and operator drop-in directories such as ca-certificates/, seed-knowledge/, imported-intelligence/) and DATA at /embra/data (the WardSONDB database and the workspace). /embra/ephemeral is a tmpfs wiped every boot — service logs live there and do not survive a reboot.",
+      "tags": ["storage", "partitions", "persistence"]
+    },
+    {
+      "id": "seed_core_wardsondb",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "All persistent state is WardSONDB collections — there are no config files to edit. The soul (soul.invariant), system config (config.system), memory (memory.entries / memory.semantic / memory.procedural / memory.edges), the identity projection (identity.graph), sessions (sessions.*), schedules (crons), and Guardian tool definitions (guardian.tools) are all documents in one JSON database, reached over REST on localhost:8090.",
+      "tags": ["wardsondb", "database", "collections"]
+    },
+    {
+      "id": "seed_core_workspace",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "/embra/workspace is the only writable area for file and git tools — a bind mount onto the DATA partition, so its contents persist across boots. File writes, clones, and repo work are jailed to it; paths outside are rejected at the tool layer. Narrow read-only carve-outs exist by design, like system_logs reading /embra/ephemeral service logs by allowlisted service name.",
+      "tags": ["workspace", "filesystem", "jail"]
+    },
+    { "_comment": "── trust & soul ─────────────────────────────────────────" },
+    {
+      "id": "seed_core_soul",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "The soul is sealed once, during first-boot Learning Mode, and SHA-256-hashed; embra-trustd re-verifies that hash on every subsequent boot before the brain starts. On newer instances the sealed value is a canonical identity graph (format graph.v1, nodes + edges); legacy flat soul documents remain valid. The sealed soul is immutable at runtime — no tool edits it — and re-sealing is an operator ceremony, not a runtime operation.",
+      "tags": ["soul", "trust", "seal", "boot"]
+    },
+    {
+      "id": "seed_core_one_model",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "embraOS binds the sealed identity to ONE model at a time, which has concrete consequences: sessions are pinned to the provider that recorded them (attaching across providers is blocked with guidance to /close, switch, and re-attach); a refused or failed turn is never silently re-served by a different model — there are no fallback models, by policy; and switching providers is an explicit operator action (/provider), never automatic.",
+      "tags": ["providers", "identity", "sessions"]
+    },
+    {
+      "id": "seed_core_guardian_gate",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Extending the tool surface at runtime happens only through Guardian: Rust modules compiled to WASM and run in a sandbox with zero ambient authority. The intelligence may PROPOSE a module (guardian_propose), but every authored module — operator-written or proposed — passes the replicant check, an independent model call judging it against the sealed soul, fail-closed; proposals additionally require explicit operator approval before they compile. Dynamic tools never enter the provider tool schema — they dispatch through guardian_call.",
+      "tags": ["guardian", "tools", "soul", "approval"]
+    },
+    { "_comment": "── constraints ──────────────────────────────────────────" },
+    {
+      "id": "seed_core_limits",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Tool-layer limits that shape work: a tool result caps at 2 MiB (file_read takes offset/limit for chunked reads of large files); a single tool call is killed after 10 minutes; each turn's tool loop has an iteration cap the operator can tune (/iter-cap); SSH tools connect only to private RFC 1918 addresses. Hitting a cap surfaces as an honest error result, never silence — plan long work as multiple bounded calls.",
+      "tags": ["limits", "tools", "constraints"]
+    },
+    {
+      "id": "seed_core_operator_actions",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Some actions are structurally operator-side and cannot be performed from inside a session: rebuilding or reflashing the OS image, seeding STATE drop-ins (CA certificates, seed-knowledge packs, imported intelligence), rebooting the machine, re-sealing the soul, and approving Guardian proposals. When work requires one of these, the correct move is a precise report naming the action and why — not retrying in-session.",
+      "tags": ["operator", "constraints", "boot"]
+    },
+    { "_comment": "── providers & runtime ──────────────────────────────────" },
+    {
+      "id": "seed_core_providers",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "The brain drives one of four LLM backends through a single provider abstraction: Anthropic Claude, Google Gemini, Ollama, and LM Studio (the last two for local inference). Every registered tool works identically across all four. The active provider and model are operator-chosen — at the first-boot wizard and at runtime via /provider and /model; credentials are operator-provided at setup and stored OS-side (STATE files and system config), never in a repository.",
+      "tags": ["providers", "llm", "config"]
+    },
+    { "_comment": "── observability ────────────────────────────────────────" },
+    {
+      "id": "seed_core_observability",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Self-diagnostics surfaces: system_status reports health, uptime, soul state, and WardSONDB counters including memory-collection parity; system_logs tails any service's log from /embra/ephemeral (embra-brain, embrad, wardsondb, embra-trustd, embra-apid, embra-web, embra-console) with substring filtering. Logs reset at boot and on service restart. The brain's own log carries the retrieval-funnel lines, knowledge-seed reconcile lines, and slow-query warnings — useful when memory behavior needs explaining.",
+      "tags": ["diagnostics", "logs", "status"]
+    },
+    { "_comment": "── the project ──────────────────────────────────────────" },
+    {
+      "id": "seed_core_repo",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "The embraOS source repository is public: https://github.com/Ward-Software-Defined-Systems/embraOS — a Rust Cargo workspace plus the Buildroot tree and build scripts, developed by Ward Software Defined Systems (WSDS). External contributions are issue-only; pull requests are not accepted. The repository can be cloned into the workspace to answer implementation-level questions about the OS itself.",
+      "tags": ["repo", "github", "project"]
+    },
+    {
+      "id": "seed_core_source_map",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Where subsystems live in the source workspace: the AI runtime is crates/embra-brain (tools in src/tools/, memory and retrieval in src/knowledge/, LLM backends in src/provider/, learning mode in src/learning/); PID-1 init and service supervision are crates/embrad; the database is crates/wardsondb (a vendored fork); soul verification and PKI are crates/embra-trustd; the gateway is crates/embra-apid; the web console is crates/embra-web with its frontend in crates/embra-web-ui; the serial TUI is crates/embra-console; the dynamic-tool substrate is crates/embra-guardian. The bootable image is defined by buildroot/ and built by scripts/build-image.sh.",
+      "tags": ["source", "crates", "repo"]
+    },
+    {
+      "id": "seed_core_docs_map",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "The repository's docs answer distinct questions: README is the overview; docs/QUICK-START.md covers build, install, and operator setup (keys, private-CA trust); docs/OPERATION.md the day-to-day session model; docs/COMMAND-REFERENCE.md the slash commands; docs/TOOL-REFERENCE.md the tool catalog; docs/SYSTEM-DESIGN.md the architecture; docs/KNOWLEDGE-GRAPH.md the memory system in depth; docs/ROADMAP.md the phase plan (canonical for scope). For anything volatile — versions, counts — trust the live system or current docs over remembered numbers.",
+      "tags": ["docs", "reference", "repo"]
+    },
+    {
+      "id": "seed_core_phases",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "embraOS develops in phases (docs/ROADMAP.md is canonical): Phase 0 was a Docker-contained proof-of-concept; Phase 1 — the current, stable one — is the Core OS, the bootable appliance this instance runs; later phases extend terminals, modules, and image tooling. Exact versions, tool counts, and test counts change per release: read them from system_status, /status, or the current docs rather than asserting remembered values.",
+      "tags": ["phases", "roadmap", "project"]
+    },
+    { "_comment": "── sessions & UI ────────────────────────────────────────" },
+    {
+      "id": "seed_core_sessions",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Conversations are named sessions persisted in WardSONDB — they survive reboots, are listed and switched with /sessions, /switch, and /new, and store their transcripts full-fidelity. Cross-session continuity comes from the knowledge graph (promotion, retrieval, enrichment — covered in depth by the embraos-kg seeded knowledge), not from replaying old session transcripts into new context.",
+      "tags": ["sessions", "memory", "continuity"]
+    },
+    {
+      "id": "seed_core_ui",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Two operator surfaces exist, both driving the same brain through the gateway: the embra-web HTTPS console on port 3345 (the default — a desktop terminal in the browser, plus a chat-style mobile mode on small viewports) and the serial TUI fallback (EMBRA_TUI=1 at launch). Nothing below the gateway differs per UI, so behavior observed in one surface holds in the other.",
+      "tags": ["ui", "console", "web"]
+    },
+    { "_comment": "── procedures ───────────────────────────────────────────" },
+    {
+      "id": "seed_core_self_answer",
+      "kind": "procedural",
+      "title": "Answer questions about your own OS",
+      "description": "Layered self-knowledge: seeded and promoted knowledge first, live state second, source truth third — cheapest reliable layer wins.",
+      "steps": [
+        "Start from retrieved knowledge: this pack and its siblings (embraos-kg for memory, embraos-git for self-hosted git, embraos-guardian for tool authoring) surface automatically through enrichment.",
+        "For current state, use the live tools: system_status for health/soul/database parity, system_logs for recent service behavior.",
+        "For implementation-level detail or anything volatile (versions, counts, exact behavior), clone the public repo into the workspace — git_clone https://github.com/Ward-Software-Defined-Systems/embraOS.git repos/embraOS — and read the relevant crate or doc (the source map and docs map nodes say where to look).",
+        "Prefer code and docs truth over remembered numbers, and promote durable new findings so the next session starts ahead."
+      ],
+      "outcomes": {
+        "success": "The answer is grounded in the cheapest layer that is actually authoritative for the question.",
+        "failure": "Guessed architecture or stale numbers presented as fact — if no layer answers it, say so and name what would."
+      },
+      "tags": ["diagnostics", "repo", "workflow"]
+    }
+  ],
+  "edges": [
+    { "src": "seed_core_no_shell", "dst": "seed_core_what", "relation": "refines", "weight": 0.8 },
+    { "src": "seed_core_services", "dst": "seed_core_boot_chain", "relation": "refines", "weight": 0.8 },
+    { "src": "seed_core_workspace", "dst": "seed_core_storage", "relation": "refines", "weight": 0.8 },
+    { "src": "seed_core_wardsondb", "dst": "seed_core_storage", "relation": "refines", "weight": 0.7 },
+    { "src": "seed_core_soul", "dst": "seed_core_boot_chain", "relation": "related_to", "weight": 0.7 },
+    { "src": "seed_core_one_model", "dst": "seed_core_soul", "relation": "refines", "weight": 0.7 },
+    { "src": "seed_core_guardian_gate", "dst": "seed_core_soul", "relation": "depends_on", "weight": 0.8 },
+    { "src": "seed_core_no_shell", "dst": "seed_core_limits", "relation": "related_to", "weight": 0.7 },
+    { "src": "seed_core_operator_actions", "dst": "seed_core_no_shell", "relation": "refines", "weight": 0.7 },
+    { "src": "seed_core_observability", "dst": "seed_core_services", "relation": "refines", "weight": 0.7 },
+    { "src": "seed_core_source_map", "dst": "seed_core_repo", "relation": "refines", "weight": 0.8 },
+    { "src": "seed_core_docs_map", "dst": "seed_core_repo", "relation": "refines", "weight": 0.7 },
+    { "src": "seed_core_phases", "dst": "seed_core_docs_map", "relation": "related_to", "weight": 0.6 },
+    { "src": "seed_core_sessions", "dst": "seed_core_one_model", "relation": "related_to", "weight": 0.7 },
+    { "src": "seed_core_ui", "dst": "seed_core_services", "relation": "related_to", "weight": 0.7 },
+    { "src": "seed_core_self_answer", "dst": "seed_core_observability", "relation": "depends_on", "weight": 0.8 },
+    { "src": "seed_core_self_answer", "dst": "seed_core_docs_map", "relation": "depends_on", "weight": 0.7 },
+    { "src": "seed_core_self_answer", "dst": "seed_core_source_map", "relation": "depends_on", "weight": 0.7 }
+  ]
+}
