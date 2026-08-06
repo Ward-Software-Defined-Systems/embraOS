@@ -1,0 +1,109 @@
+{
+  "format": "knowledge.v1",
+  "name": "embraos-git",
+  "description": "Self-hosted git servers: private-CA trust, per-host tokens, and the gl_* GitLab tools",
+  "nodes": [
+    { "_comment": "── trust: how a private CA becomes trusted ──────────────" },
+    {
+      "id": "seed_git_private_ca",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Operator root CA certificates (*.pem / *.crt files) placed in /embra/state/ca-certificates/ are merged with the stock public CA bundle at boot and exported to every service via GIT_SSL_CAINFO and SSL_CERT_FILE — so git_clone, git_push, and git_pull trust self-hosted git servers behind a private CA (for example an mkcert development CA) while github.com and other public hosts keep working. Changes take effect at the NEXT BOOT: the environment is snapshotted when services start, so a newly dropped CA file does nothing until the operator reboots.",
+      "tags": ["git", "tls", "ca", "selfhosted", "boot"]
+    },
+    {
+      "id": "seed_git_ca_error",
+      "kind": "semantic",
+      "category": "observation",
+      "content": "A git tool failing with 'SSL certificate problem: unable to get local issuer certificate' against a self-hosted server means that server's CA is not in the trust bundle — either no certificate was dropped into /embra/state/ca-certificates/, or it landed after the last boot. The fix is operator-side: seed the CA file (scripts/seed-state.sh --ca-dir against the image, or copy into STATE) and reboot. The boot log line 'Operator CA trust: merged …' (read via system_logs with service=embrad) names each accepted certificate file; its absence means no operator CA is active.",
+      "tags": ["git", "tls", "error", "diagnostics"]
+    },
+    {
+      "id": "seed_git_trust_paths",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "embraOS has two separate TLS trust paths. The git binary and other OpenSSL child processes honor the boot-merged CA bundle (GIT_SSL_CAINFO / SSL_CERT_FILE), so they trust operator CAs. The Rust-side HTTP clients — the LLM providers, guardian http_get, and the gh_* GitHub tools — use compiled-in public roots and do NOT trust operator CAs; the gl_* GitLab client is the one deliberate exception (it adds the same CA drop-ins itself). A private-CA URL that works in git_clone can therefore still fail in guardian http_get — that is by design, not a bug.",
+      "tags": ["tls", "ca", "architecture"]
+    },
+    { "_comment": "── auth: per-host tokens ────────────────────────────────" },
+    {
+      "id": "seed_git_token",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "/git-token <host> <token> stores a per-host personal access token for self-hosted git servers. git_clone, git_push, and git_pull then authenticate to that host automatically (the token is injected as an oauth2 URL rewrite — clone URLs stay clean of credentials). /git-token with no arguments lists configured hosts without revealing token values; /git-token <host> remove deletes one. github.com is handled separately by /github-token — the two are not interchangeable.",
+      "tags": ["git", "token", "auth", "gitlab"]
+    },
+    { "_comment": "── the gl_* GitLab API tools ────────────────────────────" },
+    {
+      "id": "seed_git_gl_tools",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "The gl_* tools — gl_issues, gl_mrs, gl_issue_create, gl_mr_create — talk to a self-hosted GitLab instance's REST API. Each takes the GitLab hostname plus the FULL project path (group/repo, not just the repo name). Authentication is the /git-token personal access token for that host, which needs GitLab's 'api' scope. Their HTTP client trusts the operator CA drop-ins, so a private-CA instance verifies. Merge requests are GitLab's pull requests: gl_mrs lists them as !iid with source → target branches, and gl_mr_create opens one from an already-pushed branch.",
+      "tags": ["gitlab", "tools", "api", "selfhosted"]
+    },
+    {
+      "id": "seed_git_gh_vs_gl",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "The gh_* tools are GitHub-only — they call api.github.com and can never reach a self-hosted GitLab, whose API is incompatible (different endpoints, auth, and a merge-request rather than pull-request model). For a GitLab server, use the ordinary git tools for repository work (git_clone/git_push/git_pull work against any trusted host) and the gl_* set for issues and merge requests.",
+      "tags": ["github", "gitlab", "tools"]
+    },
+    { "_comment": "── environment quirk ────────────────────────────────────" },
+    {
+      "id": "seed_git_dns",
+      "kind": "semantic",
+      "category": "observation",
+      "content": "Under QEMU, hostname resolution goes through real DNS via the SLIRP gateway — entries in the host machine's /etc/hosts are invisible inside embraOS. A self-hosted server's hostname must resolve from inside the VM; otherwise the operator needs an IP-address URL, which only verifies if the server certificate carries an IP subject-alternative-name.",
+      "tags": ["qemu", "dns", "network"]
+    },
+    { "_comment": "── procedures ───────────────────────────────────────────" },
+    {
+      "id": "seed_git_gitlab_workflow",
+      "kind": "procedural",
+      "title": "Work with a self-hosted GitLab repository",
+      "description": "End-to-end flow from trust to merge request against a self-hosted GitLab instance.",
+      "steps": [
+        "Confirm the server's CA is trusted: the operator must have seeded /embra/state/ca-certificates/ before the last boot — check system_logs (service=embrad) for the 'Operator CA trust: merged' line.",
+        "Confirm auth: /git-token should list the host; if not, ask the operator for a personal access token with the 'api' scope and store it with /git-token <host> <token>.",
+        "git_clone https://<host>/<group>/<repo>.git into the workspace.",
+        "Branch, edit, commit, and git_push with the normal git tools — the stored token authenticates automatically.",
+        "Open the merge request with gl_mr_create (host, group/repo project path, title, source_branch, target_branch); track it later with gl_mrs."
+      ],
+      "outcomes": {
+        "success": "The clone, push, and merge-request cycle completes against the self-hosted instance with no credentials in URLs.",
+        "failure": "A TLS, auth, or DNS error — separate the cause with the 'Diagnose a failing self-hosted git connection' procedure instead of retrying blindly."
+      },
+      "tags": ["gitlab", "git", "workflow", "selfhosted"]
+    },
+    {
+      "id": "seed_git_diagnose",
+      "kind": "procedural",
+      "title": "Diagnose a failing self-hosted git connection",
+      "description": "Separate TLS, auth, and DNS causes before involving the operator — each has a distinct signature and a different fix.",
+      "steps": [
+        "Read the exact error: 'unable to get local issuer certificate' is TLS trust; HTTP 401/403 is the token; 'Could not resolve host' is DNS.",
+        "TLS: check system_logs (service=embrad) for the 'Operator CA trust: merged' line — absent or missing the server's CA file means the drop-in never reached STATE before the last boot; the fix (seed + reboot) is an operator action.",
+        "Auth: /git-token to list configured hosts; if the host is missing or the token expired, ask the operator to re-store it (gl_* tools additionally need the 'api' scope).",
+        "DNS: the hostname must resolve inside the VM — the host machine's /etc/hosts does not apply; an IP URL works only when the certificate has an IP subject-alternative-name.",
+        "Report the identified cause to the operator — CA seeding and reboots cannot be done from inside a session."
+      ],
+      "outcomes": {
+        "success": "The failing layer is identified and either fixed in-session (token) or reported precisely (CA seed, reboot, DNS).",
+        "failure": "The error does not match any signature — capture the full tool error and the embrad log tail for the operator."
+      },
+      "tags": ["git", "diagnostics", "tls", "auth"]
+    }
+  ],
+  "edges": [
+    { "src": "seed_git_private_ca", "dst": "seed_git_gitlab_workflow", "relation": "enables", "weight": 0.9 },
+    { "src": "seed_git_token", "dst": "seed_git_gitlab_workflow", "relation": "enables", "weight": 0.9 },
+    { "src": "seed_git_gl_tools", "dst": "seed_git_token", "relation": "depends_on", "weight": 0.9 },
+    { "src": "seed_git_gl_tools", "dst": "seed_git_private_ca", "relation": "depends_on", "weight": 0.8 },
+    { "src": "seed_git_ca_error", "dst": "seed_git_private_ca", "relation": "refines", "weight": 0.8 },
+    { "src": "seed_git_trust_paths", "dst": "seed_git_private_ca", "relation": "refines", "weight": 0.8 },
+    { "src": "seed_git_gh_vs_gl", "dst": "seed_git_gl_tools", "relation": "related_to", "weight": 0.8 },
+    { "src": "seed_git_diagnose", "dst": "seed_git_ca_error", "relation": "depends_on", "weight": 0.7 },
+    { "src": "seed_git_dns", "dst": "seed_git_diagnose", "relation": "related_to", "weight": 0.8 },
+    { "src": "seed_git_gitlab_workflow", "dst": "seed_git_diagnose", "relation": "related_to", "weight": 0.7 }
+  ]
+}
