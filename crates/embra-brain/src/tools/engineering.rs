@@ -113,6 +113,67 @@ fn github_token_git_args(token: &Option<String>) -> Vec<String> {
     }
 }
 
+/// Resolve per-host git tokens from WardSONDB `config.system.git_tokens`
+/// (set via `/git-token <host> <token>`). Empty map when unconfigured.
+pub async fn resolve_git_tokens(
+    db: &WardsonDbClient,
+) -> std::collections::BTreeMap<String, String> {
+    if let Ok(doc) = db.read("config.system", "config").await
+        && let Some(map) = doc.get("git_tokens").and_then(|v| v.as_object())
+    {
+        return map
+            .iter()
+            .filter_map(|(host, v)| {
+                v.as_str()
+                    .filter(|t| !t.is_empty())
+                    .map(|t| (host.clone(), t.to_string()))
+            })
+            .collect();
+    }
+    std::collections::BTreeMap::new()
+}
+
+/// Normalize an operator-supplied git host for `git_tokens` storage:
+/// strip an `https://` scheme, any path, and trailing slashes; lowercase.
+/// Rejects empty results, embedded whitespace, and credential/port junk
+/// that would corrupt the insteadOf rewrite.
+pub fn normalize_git_host(input: &str) -> Result<String, String> {
+    let s = input.trim().to_lowercase();
+    let s = s.strip_prefix("https://").or_else(|| s.strip_prefix("http://")).unwrap_or(&s);
+    let s = s.split('/').next().unwrap_or("");
+    if s.is_empty() {
+        return Err("host is empty after normalization".to_string());
+    }
+    if s.chars().any(|c| c.is_whitespace()) || s.contains('@') {
+        return Err(format!("'{}' is not a valid host", s));
+    }
+    Ok(s.to_string())
+}
+
+/// Build git `-c` insteadOf rewrites for per-host tokens. GitLab's PAT
+/// username over HTTPS is `oauth2` (also accepted by Gitea).
+fn host_token_git_args(tokens: &std::collections::BTreeMap<String, String>) -> Vec<String> {
+    let mut args = Vec::with_capacity(tokens.len() * 2);
+    for (host, token) in tokens {
+        args.push("-c".to_string());
+        args.push(format!(
+            "url.https://oauth2:{}@{}/.insteadOf=https://{}/",
+            token, host, host
+        ));
+    }
+    args
+}
+
+/// Combined git auth args for network operations (clone/push/pull):
+/// the github.com token rewrite plus one rewrite per configured host.
+/// BTreeMap iteration keeps host order deterministic.
+pub async fn git_auth_args(db: &WardsonDbClient) -> Vec<String> {
+    let token = resolve_github_token(db).await;
+    let mut args = github_token_git_args(&token);
+    args.extend(host_token_git_args(&resolve_git_tokens(db).await));
+    args
+}
+
 /// Clone a git repository into /embra/workspace/.
 /// Format: `<url>` or `<url> <subpath>`
 /// `<subpath>` may be a bare dirname (`myrepo`), a relative path under the
@@ -160,11 +221,8 @@ pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    // Inject GITHUB_TOKEN via git -c url rewriting (no token in URLs or config files)
-    let token = resolve_github_token(db).await;
-    let token_args = github_token_git_args(&token);
-
-    let mut args = token_args;
+    // Inject tokens via git -c url rewriting (no token in URLs or config files)
+    let mut args = git_auth_args(db).await;
     args.extend(["clone".to_string(), url.to_string(), dest.clone()]);
 
     match tokio::time::timeout(
@@ -839,8 +897,7 @@ pub async fn git_push(db: &WardsonDbClient, param: &str) -> String {
         Err(e) => return e,
     };
 
-    let token = resolve_github_token(db).await;
-    let mut args = github_token_git_args(&token);
+    let mut args = git_auth_args(db).await;
     args.extend(["-C".to_string(), dir.clone(), "push".to_string()]);
 
     match tokio::process::Command::new("git")
@@ -873,8 +930,7 @@ pub async fn git_pull(db: &WardsonDbClient, param: &str) -> String {
         Err(e) => return e,
     };
 
-    let token = resolve_github_token(db).await;
-    let mut args = github_token_git_args(&token);
+    let mut args = git_auth_args(db).await;
     args.extend(["-C".to_string(), dir.clone(), "pull".to_string()]);
 
     match tokio::process::Command::new("git")
@@ -3450,5 +3506,73 @@ mod native_args_tests {
                 expected
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod git_token_tests {
+    use super::*;
+
+    #[test]
+    fn normalize_git_host_strips_scheme_path_and_case() {
+        assert_eq!(
+            normalize_git_host("https://GitLab.Example.com/"),
+            Ok("gitlab.example.com".to_string())
+        );
+        assert_eq!(
+            normalize_git_host("https://gitlab.example.com/group/repo.git"),
+            Ok("gitlab.example.com".to_string())
+        );
+        assert_eq!(
+            normalize_git_host("gitlab.example.com"),
+            Ok("gitlab.example.com".to_string())
+        );
+        assert_eq!(
+            normalize_git_host("http://gitea.local:3000"),
+            Ok("gitea.local:3000".to_string())
+        );
+    }
+
+    #[test]
+    fn normalize_git_host_rejects_junk() {
+        assert!(normalize_git_host("").is_err());
+        assert!(normalize_git_host("https://").is_err());
+        assert!(normalize_git_host("/just/a/path").is_err());
+        assert!(normalize_git_host("user@host.com").is_err());
+    }
+
+    #[test]
+    fn github_rewrite_shape_unchanged() {
+        // The pre-existing github.com flow must stay byte-identical.
+        let args = github_token_git_args(&Some("ghp_abc".to_string()));
+        assert_eq!(
+            args,
+            vec![
+                "-c".to_string(),
+                "url.https://x-access-token:ghp_abc@github.com/.insteadOf=https://github.com/"
+                    .to_string()
+            ]
+        );
+        assert!(github_token_git_args(&None).is_empty());
+    }
+
+    #[test]
+    fn host_token_args_use_oauth2_and_deterministic_order() {
+        let mut tokens = std::collections::BTreeMap::new();
+        tokens.insert("gitlab.b.com".to_string(), "tok-b".to_string());
+        tokens.insert("gitlab.a.com".to_string(), "tok-a".to_string());
+        let args = host_token_git_args(&tokens);
+        assert_eq!(
+            args,
+            vec![
+                "-c".to_string(),
+                "url.https://oauth2:tok-a@gitlab.a.com/.insteadOf=https://gitlab.a.com/"
+                    .to_string(),
+                "-c".to_string(),
+                "url.https://oauth2:tok-b@gitlab.b.com/.insteadOf=https://gitlab.b.com/"
+                    .to_string(),
+            ]
+        );
+        assert!(host_token_git_args(&std::collections::BTreeMap::new()).is_empty());
     }
 }

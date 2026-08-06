@@ -75,6 +75,16 @@ pub struct SystemConfig {
     /// no schema bump.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anthropic_effort: Option<String>,
+    /// Per-host git tokens (host → PAT) for self-hosted git servers
+    /// (GitLab/Gitea over HTTPS). Injected by the git tools as
+    /// `url.https://oauth2:<token>@<host>/.insteadOf` rewrites — the
+    /// github.com flow stays on `github_token` above. Set via
+    /// `/git-token <host> <token>`. WardSONDB-only (no STATE file /
+    /// env fallback: resolution happens at tool time when the DB is
+    /// always up). `BTreeMap` for deterministic injection order.
+    /// Serde-additive `Option` — no schema bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_tokens: Option<std::collections::BTreeMap<String, String>>,
     /// Per-provider API keys (Sprint 4 schema v10, spec D2). The
     /// legacy `api_key` field above mirrors whichever of these is
     /// active so existing read paths keep working; new writes
@@ -292,6 +302,7 @@ pub async fn run_config_wizard() -> Result<SystemConfig> {
         gemini_model: None,
         anthropic_model: None,
         anthropic_effort: None,
+        git_tokens: None,
         anthropic_api_key: None,
         gemini_api_key: None,
         max_tool_iterations: None,
@@ -804,6 +815,7 @@ pub async fn run_config_wizard_grpc(
         gemini_model: None,
         anthropic_model,
         anthropic_effort: None,
+        git_tokens: None,
         anthropic_api_key,
         gemini_api_key,
         max_tool_iterations: None,
@@ -977,6 +989,7 @@ mod key_lookup_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            git_tokens: None,
             anthropic_api_key: anth.map(str::to_string),
             gemini_api_key: gem.map(str::to_string),
             max_tool_iterations: None,
@@ -1067,6 +1080,7 @@ mod max_tool_iterations_serde_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            git_tokens: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
@@ -1288,5 +1302,42 @@ mod anthropic_effort_serde_tests {
         let json = serde_json::to_value(&cfg).unwrap();
         let back: SystemConfig = serde_json::from_value(json).unwrap();
         assert_eq!(back.anthropic_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn git_tokens_serde_additive_round_trip() {
+        // `/git-token` config field: same additive-Option pattern.
+        let doc = json!({
+            "name": "Embra",
+            "api_key": "k",
+            "timezone": "UTC",
+            "deployment_mode": "phase1",
+            "created_at": "",
+            "version": "test",
+            "kg_temporal_window_secs": 1800,
+            "kg_max_traversal_depth": 3,
+            "kg_traversal_depth_ceiling": 5,
+            "kg_edge_candidate_limit": 50,
+            "api_provider": "anthropic",
+        });
+        let cfg: SystemConfig = serde_json::from_value(doc).unwrap();
+        assert!(cfg.git_tokens.is_none());
+
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert!(
+            json.get("git_tokens").is_none(),
+            "None should serialize as absent (skip_serializing_if): {json:?}"
+        );
+
+        let mut cfg = cfg;
+        let mut tokens = std::collections::BTreeMap::new();
+        tokens.insert("gitlab.example.com".to_string(), "glpat-x".to_string());
+        cfg.git_tokens = Some(tokens);
+        let json = serde_json::to_value(&cfg).unwrap();
+        let back: SystemConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            back.git_tokens.unwrap().get("gitlab.example.com").map(|s| s.as_str()),
+            Some("glpat-x")
+        );
     }
 }

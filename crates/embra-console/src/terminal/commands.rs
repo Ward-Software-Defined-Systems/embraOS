@@ -56,6 +56,7 @@ Reasoning panel:
 
 Setup:
   /github-token <token>          Set GitHub token
+  /git-token <host> <token>      Set a token for a self-hosted git server (remove: /git-token <host> remove)
   /ssh-keygen                    Generate SSH key pair
   /ssh-copy-id <user@host>       Copy SSH key to host
   /git-setup <name> | <email>    Set git user config

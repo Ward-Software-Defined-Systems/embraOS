@@ -416,6 +416,7 @@ impl BrainService for BrainGrpcService {
                     gemini_model: None,
                     anthropic_model: None,
                     anthropic_effort: None,
+                    git_tokens: None,
                     anthropic_api_key: None,
                     gemini_api_key: None,
                     max_tool_iterations: None,
@@ -826,6 +827,7 @@ async fn handle_request(
                 gemini_model: None,
                 anthropic_model: None,
                 anthropic_effort: None,
+                git_tokens: None,
                 anthropic_api_key: None,
                 gemini_api_key: None,
                 max_tool_iterations: None,
@@ -2135,7 +2137,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-5|opus-4.8|fable-5>   Switch the Anthropic model (next message)\n  /effort                            Show the Anthropic effort level\n  /effort <low|medium|high|xhigh|max>  Set effort (default max, next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /github-token <token>              Set GitHub token\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-5|opus-4.8|fable-5>   Switch the Anthropic model (next message)\n  /effort                            Show the Anthropic effort level\n  /effort <low|medium|high|xhigh|max>  Set effort (default max, next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -2555,6 +2557,64 @@ async fn handle_slash_command(
                 // SAFETY: single-threaded access to env at this point in the slash command handler
                 unsafe { std::env::set_var("GITHUB_TOKEN", &token); }
                 send_msg(tx, "GitHub token saved. GitHub tools (gh_issues, gh_prs, git_clone, etc.) are now active.".to_string()).await;
+            }
+        }
+        "/git-token" => {
+            let parts: Vec<&str> = args.split_whitespace().collect();
+            match parts.as_slice() {
+                [] => {
+                    let tokens = tools::engineering::resolve_git_tokens(db).await;
+                    if tokens.is_empty() {
+                        send_msg(tx, "No per-host git tokens configured.\nUsage: /git-token <host> <token>   (e.g. /git-token gitlab.example.com glpat-...)\n       /git-token <host> remove\nFor github.com use /github-token.".to_string()).await;
+                    } else {
+                        let hosts: Vec<&str> = tokens.keys().map(|h| h.as_str()).collect();
+                        send_msg(tx, format!(
+                            "Per-host git tokens configured for: {}\nUse /git-token <host> <token> to update, /git-token <host> remove to delete.",
+                            hosts.join(", ")
+                        )).await;
+                    }
+                }
+                [host, token_or_remove] => {
+                    let host = match tools::engineering::normalize_git_host(host) {
+                        Ok(h) => h,
+                        Err(e) => {
+                            send_msg(tx, format!("Invalid host: {}", e)).await;
+                            return None;
+                        }
+                    };
+                    if host == "github.com" {
+                        send_msg(tx, "Use /github-token for github.com (it uses GitHub's x-access-token convention).".to_string()).await;
+                        return None;
+                    }
+                    let remove = *token_or_remove == "remove";
+                    match config::load_config(db).await {
+                        Ok(mut cfg) => {
+                            let mut tokens = cfg.git_tokens.take().unwrap_or_default();
+                            let msg = if remove {
+                                if tokens.remove(&host).is_some() {
+                                    format!("Git token for {} removed.", host)
+                                } else {
+                                    format!("No git token configured for {}.", host)
+                                }
+                            } else {
+                                tokens.insert(host.clone(), token_or_remove.to_string());
+                                format!("Git token for {} saved. git_clone/git_push/git_pull now authenticate to it (oauth2 over HTTPS).", host)
+                            };
+                            cfg.git_tokens = if tokens.is_empty() { None } else { Some(tokens) };
+                            if let Err(e) = config::save_config(db, &cfg).await {
+                                send_msg(tx, format!("Failed to save token: {}", e)).await;
+                                return None;
+                            }
+                            send_msg(tx, msg).await;
+                        }
+                        Err(_) => {
+                            send_msg(tx, "No system config found. Run config wizard first.".to_string()).await;
+                        }
+                    }
+                }
+                _ => {
+                    send_msg(tx, "Usage: /git-token <host> <token>  or  /git-token <host> remove".to_string()).await;
+                }
             }
         }
         "/ssh-keygen" => {
@@ -6146,6 +6206,7 @@ mod native_loop_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            git_tokens: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
@@ -6986,6 +7047,7 @@ mod reasoning_delta_privacy_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            git_tokens: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
@@ -7041,6 +7103,7 @@ mod soul_sealed_mode_change_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            git_tokens: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
