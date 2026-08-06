@@ -18,6 +18,7 @@ Every slash command available in an embraOS session. See also [Keyboard Shortcut
 | `/identity` | Display the intelligence's identity — the sealed identity graph it is part of (legacy instances: the separate identity document) |
 | `/mode` | Show current operating mode and soul seal status |
 | `/github-token <token>` | Set GitHub token for API access (persists across reboots) |
+| `/git-token <host> <token>` | Set a token for a self-hosted git server (GitLab/Gitea over HTTPS; injected as an `oauth2` rewrite for `git_clone`/`git_push`/`git_pull`). No args lists configured hosts; `/git-token <host> remove` deletes. github.com stays on `/github-token` |
 | `/ssh-keygen` | Generate ed25519 SSH key pair and display public key |
 | `/ssh-copy-id <user@host>` | Copy SSH public key to remote host (RFC 1918 only) |
 | `/git-setup <name> \| <email>` | Set git user.name and user.email |

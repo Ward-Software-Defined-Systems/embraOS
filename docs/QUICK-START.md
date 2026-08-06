@@ -139,4 +139,16 @@ The following apply once the image is built. They are not part of the build pipe
 
 ---
 
-The day-to-day session model, slash commands, and keyboard shortcuts live in [OPERATION.md](OPERATION.md) and [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md). GitHub and SSH setup are slash commands run from the conversational TUI after boot — see [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md) (`/github-token`, `/ssh-keygen`, `/ssh-copy-id`, `/git-setup`).
+## Self-hosted git servers (private CA)
+
+To let the git tools reach a self-hosted GitLab/Gitea whose HTTPS certificate chains to a private root CA (e.g. an mkcert development CA), drop the CA's `*.pem`/`*.crt` file(s) into `/embra/state/ca-certificates/` — on a disk image, via:
+
+```bash
+./scripts/seed-state.sh output/images/embraos.img --ca-dir /path/to/dir-with-rootCA.pem
+```
+
+At the next boot, embrad merges the drop-ins with the stock CA bundle (public hosts like github.com keep working) and exports `GIT_SSL_CAINFO`/`SSL_CERT_FILE` for every service, so `git_clone`/`git_push`/`git_pull` trust the server. The boot log line (readable in-session via the `system_logs` tool, service `embrad`) names each accepted cert file. Scope: this covers the git/OpenSSL path only — the Rust-side HTTP clients (providers, guardian `http_get`) keep their compiled-in public roots. For private repos, set a per-host token with `/git-token <host> <token>` after boot.
+
+---
+
+The day-to-day session model, slash commands, and keyboard shortcuts live in [OPERATION.md](OPERATION.md) and [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md). GitHub and SSH setup are slash commands run from the conversational TUI after boot — see [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md) (`/github-token`, `/git-token`, `/ssh-keygen`, `/ssh-copy-id`, `/git-setup`).
