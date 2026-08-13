@@ -144,8 +144,15 @@ The following apply once the image is built. They are not part of the build pipe
 To let the git tools reach a self-hosted GitLab/Gitea whose HTTPS certificate chains to a private root CA (e.g. an mkcert development CA), drop the CA's `*.pem`/`*.crt` file(s) into `/embra/state/ca-certificates/` — on a disk image, via:
 
 ```bash
-./scripts/seed-state.sh output/images/embraos.img --ca-dir /path/to/dir-with-rootCA.pem
+./scripts/seed-state.sh --ca-dir /path/to/dir-with-rootCA.pem
+# macOS (no losetup/ext4 — runs the same script in a privileged container):
+./scripts/seed-state-mac.sh --ca-dir /path/to/dir-with-rootCA.pem
 ```
+
+With no image argument, `seed-state.sh` resolves the same one `run-qemu.sh` boots
+(`buildroot-src/output/images/` first, then `output/images/`), so you cannot seed one
+image and boot another. Pass a path or set `EMBRAOS_IMAGE` to override. The VM must be
+stopped — seeding an image QEMU has open corrupts it, and the script refuses.
 
 At the next boot, embrad merges the drop-ins with the stock CA bundle (public hosts like github.com keep working) and exports `GIT_SSL_CAINFO`/`SSL_CERT_FILE` for every service, so `git_clone`/`git_push`/`git_pull` trust the server. The boot log line (readable in-session via the `system_logs` tool, service `embrad`) names each accepted cert file. Scope: this covers the git/OpenSSL path plus the `gl_*` GitLab API tools (whose HTTP client adds the same drop-ins as trust anchors) — the other Rust-side HTTP clients (providers, guardian `http_get`) keep their compiled-in public roots. For private repos, set a per-host token with `/git-token <host> <token>` after boot; the same token authenticates the `gl_*` issue/merge-request tools.
 

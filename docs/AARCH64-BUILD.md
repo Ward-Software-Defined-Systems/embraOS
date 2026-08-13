@@ -352,6 +352,7 @@ runs them in a `wasmtime` sandbox. Step 3.5 stages that toolchain.
 | `scripts/build-image-aarch64.sh` | Full build pipeline for aarch64 |
 | `scripts/run-qemu-aarch64.sh` | QEMU launch with HVF acceleration |
 | `scripts/embraos-backup-mac.sh` | macOS wrapper for backup/restore via Docker |
+| `scripts/seed-state-mac.sh` | macOS wrapper for STATE/DATA pre-seeding via Docker |
 
 #### Modified files (backward-compatible — x86_64 build unchanged)
 
@@ -465,6 +466,73 @@ docker run --rm -v "$PWD":/work -v embraos-br-aarch64:/work/buildroot-src \
 # 5. Boot and verify
 ./scripts/run-qemu-aarch64.sh
 # In TUI: /status, /sessions, memory_scan
+```
+
+### Pre-seeding STATE and DATA
+
+`seed-state.sh` writes operator-provided files into a built image's STATE/DATA partitions
+before first boot — root CA certificates, knowledge packs, importable intelligence graphs,
+a soul hash. It loop-mounts ext4, which macOS cannot do, so `seed-state-mac.sh` wraps it in
+a privileged Docker container the same way `embraos-backup-mac.sh` does.
+
+The seeding logic itself is arch-neutral (partition layout comes from the one
+`genimage.cfg.in` that builds both arches), so this wrapper is equally correct for x86_64
+images — it is a macOS-host tool, not an ARM tool.
+
+#### Setup
+
+`seed-state-mac.sh` ships committed in `scripts/` alongside `seed-state.sh` — nothing to set up.
+
+#### Usage
+
+Same options as `seed-state.sh`:
+
+```bash
+./scripts/seed-state-mac.sh --ca-dir /path/to/dir-with-rootCA.pem
+./scripts/seed-state-mac.sh --seed-dir Seed_Knowledge --import-dir Imported_Intelligence
+./scripts/seed-state-mac.sh --dry-run --ca-dir ~/certs    # print the command, run nothing
+```
+
+#### How it works
+
+| Container path | Host path | Purpose |
+|---|---|---|
+| `/work` | Project root | Disk image + scripts (read/write) |
+| `/mnt/image` | Image's directory | Only when the image lives outside the project root |
+| `/mnt/{phase0,import,seed,ca}` | The matching `--*-dir` | Only for directories outside the project root (read-only) |
+
+Host paths are translated automatically: anything inside the project root becomes a
+`/work/...` path, anything outside gets its own bind mount. The mapping is printed before
+the container starts — worth reading, because Docker Desktop's file-sharing allowlist fails
+*silently*, presenting an empty directory rather than an error (OrbStack has no allowlist).
+
+Unlike the backup wrapper, this one installs **no apt packages**: partition geometry comes
+from `partx` and mounting from `mount`, both in `ubuntu:24.04`'s base image. It runs offline.
+
+The QEMU-running check happens on the host side before Docker starts, since the container
+can't see host processes. It compares the running VM's disk image against the one being
+seeded, so a VM running a *different* image doesn't block the seed.
+
+#### Workflow
+
+Order matters — **seed after the build, not before**. Every Buildroot pass regenerates empty
+`state.ext4`/`data.ext4` and overwrites `output/images/embraos.img`, so a seed applied before
+a rebuild is silently discarded.
+
+```bash
+# 1. Build (Docker pass), which copies embraos.img out to output/images/
+docker run --rm -v "$PWD":/work -v embraos-br-aarch64:/work/buildroot-src \
+  -w /work ubuntu:24.04 bash -c \
+  "apt-get update && apt-get install -y build-essential gcc g++ \
+   unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \
+   FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image-aarch64.sh --buildroot-only"
+
+# 2. Seed the freshly built image
+./scripts/seed-state-mac.sh --ca-dir /path/to/dir-with-rootCA.pem
+
+# 3. Boot
+./scripts/run-qemu-aarch64.sh
+# Confirm in-session: system_logs service=embrad   → names each accepted cert file
 ```
 
 ### Troubleshooting — Step 0.5 / Step 3.5

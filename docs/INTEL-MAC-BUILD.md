@@ -248,6 +248,17 @@ provider + credentials, timezone), then Learning Mode forms and seals the soul.
 > Backups live in `~/embraOS_BACKUPS/` (override `EMBRAOS_BACKUP_DIR`) and are
 > interchangeable with Ubuntu and Apple-Silicon backups.
 
+> **Pre-seeding STATE/DATA:** same constraint, same shape — `seed-state-mac.sh`
+> runs `seed-state.sh` inside a privileged Docker container (also arch-agnostic).
+> Host paths are translated to container paths automatically; the mapping is
+> printed before the container starts. Seed **after** the build — a Buildroot
+> pass regenerates empty STATE/DATA and discards an earlier seed.
+> ```bash
+> ./scripts/seed-state-mac.sh --ca-dir /path/to/dir-with-rootCA.pem
+> ./scripts/seed-state-mac.sh --dry-run --seed-dir Seed_Knowledge   # print only
+> ```
+> Unlike the backup wrapper this installs no apt packages, so it works offline.
+
 ---
 
 ## End-to-End Validation

@@ -134,9 +134,15 @@ loop-mounted partition.
 
 1. **Back up** (`scripts/embraos-backup.sh` or a raw image copy).
 2. Stop the instance.
-3. Loop-mount the disk (seed-state.sh pattern):
-   `LOOPDEV=$(sudo losetup --find --show --partscan embraos.img)` then
-   mount partition 4 (DATA) somewhere writable.
+3. Loop-mount the disk by byte offset (seed-state.sh pattern — the image's GPT
+   starts at sector 34, which `losetup --partscan` mishandles):
+   ```bash
+   read -r start sectors < <(partx -g -o START,SECTORS --nr 4 embraos.img)
+   sudo mount -o loop,offset=$((start * 512)),sizelimit=$((sectors * 512)) \
+        embraos.img /mnt/embra-data
+   ```
+   Partition 4 is DATA. On macOS, do this inside a privileged container —
+   `./scripts/seed-state-mac.sh` shows the pattern.
 4. Run the vendored server against it:
    `cargo run -p wardsondb -- --data-dir <mount>/wardsondb --port 8099 --storage-engine <fjall|rocksdb>`
    — `--storage-engine` is REQUIRED (no default) and must match the
