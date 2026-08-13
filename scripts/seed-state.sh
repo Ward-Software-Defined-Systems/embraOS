@@ -3,7 +3,9 @@
 # Copies existing Phase 0 data so the system boots directly to Operational mode
 # instead of going through Learning Mode.
 #
-# Usage: ./scripts/seed-state.sh [--phase0-data /path/to/phase0/data] [--soul-hash <hash>] [--import-dir /path/to/graphs] [--seed-dir /path/to/packs] [--ca-dir /path/to/certs]
+# Usage: ./scripts/seed-state.sh [<image>] [--image <path>] [--phase0-data <dir>]
+#                                [--soul-hash <hash>] [--import-dir <dir>]
+#                                [--seed-dir <dir>] [--ca-dir <dir>]
 #
 # --import-dir copies *.graph.json intelligence files into STATE's
 # imported-intelligence/ directory so Learning Mode offers them for import
@@ -20,55 +22,228 @@
 # at boot and exports GIT_SSL_CAINFO/SSL_CERT_FILE so the git tools trust
 # self-hosted git servers (e.g. GitLab behind an mkcert CA).
 #
-# NOTE: This script requires Linux (losetup). On macOS, use a Linux VM or Docker.
+# Image resolution (same precedence as run-qemu.sh and embraos-backup.sh, so
+# you always seed the image QEMU will actually boot):
+#   explicit arg / --image  →  $EMBRAOS_IMAGE  →  buildroot-src/output/images/
+#   →  output/images/
+#
+# Privileges: loop-mounting needs root. Run it plainly (sudo is invoked per
+# command) or under sudo — both work.
+#
+# NOTE: This script requires Linux. On macOS use ./scripts/seed-state-mac.sh,
+# which runs this same script inside a privileged Docker container.
 
 set -euo pipefail
 
-IMAGE="${1:-output/images/embraos.img}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+EMBRAOS_ROOT="${EMBRAOS_ROOT:-$(dirname "$SCRIPT_DIR")}"
+
+# Partition numbers from buildroot/board/embraos/genimage.cfg.in — one template
+# builds both arches, so this layout is identical on x86_64 and aarch64.
+# 1 = boot (vfat), 2 = rootfs (SquashFS), 3 = STATE, 4 = DATA
+STATE_PART_NUM=3
+DATA_PART_NUM=4
+SECTOR_SIZE=512
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+usage() {
+    cat <<'EOF'
+seed-state.sh — pre-seed STATE and DATA partitions of an embraOS disk image
+
+Usage:
+  ./scripts/seed-state.sh [<image>] [options]
+
+Options:
+  --image <path>          Disk image to seed (same as the positional argument)
+  --phase0-data <dir>     Copy <dir>/wardsondb/ into DATA
+  --soul-hash <hash>      Write <hash> to STATE/soul.sha256
+  --import-dir <dir>      Copy *.graph.json into STATE/imported-intelligence/
+  --seed-dir <dir>        Copy *.knowledge.json into STATE/seed-knowledge/
+  --ca-dir <dir>          Copy *.pem / *.crt into STATE/ca-certificates/
+  -h, --help              Show this help
+
+Environment:
+  EMBRAOS_IMAGE   Disk image path (overridden by the argument/--image)
+  EMBRAOS_ROOT    Project root (default: parent of scripts/)
+
+Image is searched in this order — matching run-qemu.sh, so you seed what boots:
+  argument/--image, $EMBRAOS_IMAGE,
+  buildroot-src/output/images/embraos.img, output/images/embraos.img
+
+On macOS use ./scripts/seed-state-mac.sh (same options).
+EOF
+}
+
+# --- Argument parsing ---------------------------------------------------
+# The image is an optional positional accepted anywhere, or --image. Both the
+# documented form (`seed-state.sh <image> --ca-dir <dir>`) and a bare
+# `seed-state.sh --ca-dir <dir>` work; the old code treated $1 as the image
+# unconditionally, so the latter died with "Unknown option: <dir>".
+
+IMAGE_ARG=""
 PHASE0_DATA=""
 SOUL_HASH=""
 IMPORT_DIR=""
 SEED_DIR=""
 CA_DIR=""
 
-shift || true
+need() { [ "$1" -ge 2 ] || die "$2 requires a value"; }
+
 while [ $# -gt 0 ]; do
     case "$1" in
-        --phase0-data) PHASE0_DATA="$2"; shift 2 ;;
-        --soul-hash) SOUL_HASH="$2"; shift 2 ;;
-        --import-dir) IMPORT_DIR="$2"; shift 2 ;;
-        --seed-dir) SEED_DIR="$2"; shift 2 ;;
-        --ca-dir) CA_DIR="$2"; shift 2 ;;
-        *) echo "Unknown option: $1"; exit 1 ;;
+        --image)       need $# --image;       IMAGE_ARG="$2";   shift 2 ;;
+        --phase0-data) need $# --phase0-data; PHASE0_DATA="$2"; shift 2 ;;
+        --soul-hash)   need $# --soul-hash;   SOUL_HASH="$2";   shift 2 ;;
+        --import-dir)  need $# --import-dir;  IMPORT_DIR="$2";  shift 2 ;;
+        --seed-dir)    need $# --seed-dir;    SEED_DIR="$2";    shift 2 ;;
+        --ca-dir)      need $# --ca-dir;      CA_DIR="$2";      shift 2 ;;
+        -h|--help)     usage; exit 0 ;;
+        -*)            echo "Unknown option: $1" >&2; echo >&2; usage >&2; exit 1 ;;
+        *)             [ -z "$IMAGE_ARG" ] || die "unexpected extra argument: $1"
+                       IMAGE_ARG="$1"; shift ;;
     esac
 done
 
-if [ ! -f "$IMAGE" ]; then
-    echo "ERROR: Image not found: $IMAGE"
+# --- Image resolution ---------------------------------------------------
+# Same precedence as run-qemu.sh / run-qemu-aarch64.sh / embraos-backup.sh.
+# An explicitly-passed relative path stays relative to the CWD; the defaults
+# are anchored on EMBRAOS_ROOT so the script works from any directory.
+
+if [ -n "$IMAGE_ARG" ]; then
+    IMAGE="$IMAGE_ARG"; IMAGE_SOURCE="argument"
+elif [ -n "${EMBRAOS_IMAGE:-}" ]; then
+    IMAGE="$EMBRAOS_IMAGE"; IMAGE_SOURCE="\$EMBRAOS_IMAGE"
+elif [ -f "${EMBRAOS_ROOT}/buildroot-src/output/images/embraos.img" ]; then
+    IMAGE="${EMBRAOS_ROOT}/buildroot-src/output/images/embraos.img"; IMAGE_SOURCE="buildroot-src (freshest build)"
+elif [ -f "${EMBRAOS_ROOT}/output/images/embraos.img" ]; then
+    IMAGE="${EMBRAOS_ROOT}/output/images/embraos.img"; IMAGE_SOURCE="output/images"
+else
+    echo "ERROR: No disk image found." >&2
+    echo "  Searched: ${EMBRAOS_ROOT}/buildroot-src/output/images/embraos.img" >&2
+    echo "            ${EMBRAOS_ROOT}/output/images/embraos.img" >&2
+    echo "  Pass one explicitly or set EMBRAOS_IMAGE. Build with ./scripts/build-image.sh" >&2
     exit 1
 fi
 
+[ -f "$IMAGE" ] || die "Image not found: $IMAGE"
+
 echo "Seeding disk image: $IMAGE"
+echo "  (resolved from: $IMAGE_SOURCE)"
 
-# Set up loop device with partition scanning
-LOOPDEV=$(sudo losetup --find --show --partscan "$IMAGE")
-echo "Loop device: $LOOPDEV"
+# --- Safety: refuse to seed an image a running VM has open ---------------
+# Seeding an image QEMU has open corrupts it. Unlike embraos-backup.sh's bare
+# pgrep, this compares each running QEMU's `-drive file=` against the resolved
+# target, so a VM running a DIFFERENT image does not block seeding this one —
+# with multiple builds around, a coarse check blocks legitimate work. It stays
+# fail-closed: a QEMU whose image cannot be determined refuses the seed.
+#
+# Inside the Docker wrapper this is a no-op (a container cannot see host
+# processes) — seed-state-mac.sh runs its own copy of the check on the host.
 
-# Create temporary mount points
-MOUNT_STATE=$(mktemp -d)
-MOUNT_DATA=$(mktemp -d)
+resolve_path() {
+    readlink -f "$1" 2>/dev/null || echo "$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")"
+}
+
+check_no_vm_using_image() {
+    local target pid cmd tok path unknown=0
+    pgrep -f "qemu.*embraos" >/dev/null 2>&1 || return 0
+    target=$(resolve_path "$IMAGE")
+
+    for pid in $(pgrep -f "qemu.*embraos" 2>/dev/null); do
+        cmd=$(ps -o args= -p "$pid" 2>/dev/null || true)
+        tok=""
+        [ -n "$cmd" ] && tok=$(echo "$cmd" | tr ' ,' '\n\n' | grep '^file=' | head -1 || true)
+        if [ -z "$tok" ]; then unknown=1; continue; fi
+
+        path="${tok#file=}"
+        # run-qemu.sh passes a repo-relative path; anchor it the same way.
+        case "$path" in /*) ;; *) path="${EMBRAOS_ROOT}/${path}" ;; esac
+
+        if [ "$(resolve_path "$path")" = "$target" ]; then
+            echo "ERROR: QEMU (pid $pid) is running with this image" >&2
+            echo "  $target" >&2
+            echo "  Stop the VM before seeding to avoid corrupting it" >&2
+            echo "  Run: Ctrl-A X in the QEMU console, or kill the QEMU process" >&2
+            exit 1
+        fi
+    done
+
+    if [ "$unknown" -eq 1 ]; then
+        echo "ERROR: a QEMU process is running but its disk image could not be determined" >&2
+        echo "  Refusing to seed rather than risk corrupting a live image" >&2
+        exit 1
+    fi
+}
+
+check_no_vm_using_image
+
+# --- Privileges ---------------------------------------------------------
+# Empty when already root (the Docker wrapper's container, or `sudo seed-state.sh`);
+# ubuntu:24.04 ships no sudo binary at all.
+if [ "$(id -u)" -eq 0 ]; then
+    SUDO=""
+elif command -v sudo >/dev/null 2>&1; then
+    SUDO="sudo"
+else
+    die "not root and sudo not found (loop-mounting needs root)"
+fi
+
+# --- Partition geometry + mounting --------------------------------------
+# Read the GPT directly and mount by byte offset rather than using
+# `losetup --partscan` + ${LOOPDEV}pN. Two reasons: this image's GPT starts at
+# sector 34 rather than 2048, which partscan mishandles (see the same note in
+# embraos-backup.sh), and inside a container the /dev/loopNpM partition nodes
+# depend on udev and are unreliable.
+#
+# Geometry comes from partx, not fdisk as in embraos-backup.sh — deliberate,
+# don't "fix" one into the other. partx prints bare numbers with no device
+# column (immune to spaces in the image path) and lives in util-linux, which is
+# Priority:required, so the Docker wrapper installs no packages at all. fdisk
+# is a separate Ubuntu package.
+
+get_partition_geometry() {
+    local part_num=$1 line start_sector sectors
+
+    # partx exits 0 with empty output for a missing partition — test the value.
+    line=$(partx -g -o START,SECTORS --nr "$part_num" "$IMAGE" 2>/dev/null || true)
+    [ -n "$line" ] || die "could not read partition $part_num from $IMAGE (not an embraOS image?)"
+
+    read -r start_sector sectors <<< "$line" || true
+    [ -n "$start_sector" ] && [ -n "$sectors" ] || die "malformed geometry for partition $part_num: $line"
+
+    PART_OFFSET=$((start_sector * SECTOR_SIZE))
+    PART_SIZE=$((sectors * SECTOR_SIZE))
+}
+
+mount_partition() {
+    local part_num=$1 mount_point=$2
+    get_partition_geometry "$part_num"
+    # mount(8) allocates the loop device itself with autoclear, so umount detaches it.
+    $SUDO mount -o loop,offset=${PART_OFFSET},sizelimit=${PART_SIZE} "$IMAGE" "$mount_point"
+    echo "Mounted partition ${part_num} → ${mount_point} (offset=${PART_OFFSET} size=${PART_SIZE})"
+}
+
+MOUNT_STATE=""
+MOUNT_DATA=""
 
 cleanup() {
-    sudo umount "$MOUNT_STATE" 2>/dev/null || true
-    sudo umount "$MOUNT_DATA" 2>/dev/null || true
-    rmdir "$MOUNT_STATE" "$MOUNT_DATA" 2>/dev/null || true
-    sudo losetup -d "$LOOPDEV" 2>/dev/null || true
+    sync 2>/dev/null || true
+    local mp
+    for mp in "${MOUNT_STATE:-}" "${MOUNT_DATA:-}"; do
+        if [ -n "$mp" ] && mountpoint -q "$mp" 2>/dev/null; then
+            $SUDO umount "$mp" || true
+        fi
+    done
+    rmdir "${MOUNT_STATE:-/nonexistent}" "${MOUNT_DATA:-/nonexistent}" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-# Mount STATE (partition 3) and DATA (partition 4)
-sudo mount "${LOOPDEV}p3" "$MOUNT_STATE"
-sudo mount "${LOOPDEV}p4" "$MOUNT_DATA"
+MOUNT_STATE=$(mktemp -d)
+MOUNT_DATA=$(mktemp -d)
+
+mount_partition "$STATE_PART_NUM" "$MOUNT_STATE"
+mount_partition "$DATA_PART_NUM" "$MOUNT_DATA"
 
 echo "STATE mounted at $MOUNT_STATE"
 echo "DATA mounted at $MOUNT_DATA"
@@ -76,8 +251,8 @@ echo "DATA mounted at $MOUNT_DATA"
 # Seed WardSONDB data from Phase 0
 if [ -n "$PHASE0_DATA" ] && [ -d "$PHASE0_DATA" ]; then
     echo "Copying Phase 0 WardSONDB data..."
-    sudo mkdir -p "$MOUNT_DATA/wardsondb"
-    sudo cp -r "$PHASE0_DATA"/wardsondb/* "$MOUNT_DATA/wardsondb/" 2>/dev/null || true
+    $SUDO mkdir -p "$MOUNT_DATA/wardsondb"
+    $SUDO cp -r "$PHASE0_DATA"/wardsondb/* "$MOUNT_DATA/wardsondb/" 2>/dev/null || true
     echo "Done."
 else
     echo "No Phase 0 data specified (--phase0-data). Skipping WardSONDB seed."
@@ -87,7 +262,7 @@ fi
 # Seed soul hash
 if [ -n "$SOUL_HASH" ]; then
     echo "Writing soul hash to STATE..."
-    echo "$SOUL_HASH" | sudo tee "$MOUNT_STATE/soul.sha256" > /dev/null
+    echo "$SOUL_HASH" | $SUDO tee "$MOUNT_STATE/soul.sha256" > /dev/null
     echo "Done."
 else
     echo "No soul hash specified (--soul-hash). First boot will allow Learning Mode."
@@ -97,8 +272,8 @@ fi
 if [ -n "$IMPORT_DIR" ]; then
     if [ -d "$IMPORT_DIR" ] && ls "$IMPORT_DIR"/*.graph.json >/dev/null 2>&1; then
         echo "Copying intelligence graphs into STATE imported-intelligence/..."
-        sudo mkdir -p "$MOUNT_STATE/imported-intelligence"
-        sudo cp "$IMPORT_DIR"/*.graph.json "$MOUNT_STATE/imported-intelligence/"
+        $SUDO mkdir -p "$MOUNT_STATE/imported-intelligence"
+        $SUDO cp "$IMPORT_DIR"/*.graph.json "$MOUNT_STATE/imported-intelligence/"
         echo "Done: $(ls "$IMPORT_DIR"/*.graph.json | wc -l) file(s)."
     else
         echo "ERROR: --import-dir '$IMPORT_DIR' has no *.graph.json files"
@@ -110,8 +285,8 @@ fi
 if [ -n "$SEED_DIR" ]; then
     if [ -d "$SEED_DIR" ] && ls "$SEED_DIR"/*.knowledge.json >/dev/null 2>&1; then
         echo "Copying seed knowledge packs into STATE seed-knowledge/..."
-        sudo mkdir -p "$MOUNT_STATE/seed-knowledge"
-        sudo cp "$SEED_DIR"/*.knowledge.json "$MOUNT_STATE/seed-knowledge/"
+        $SUDO mkdir -p "$MOUNT_STATE/seed-knowledge"
+        $SUDO cp "$SEED_DIR"/*.knowledge.json "$MOUNT_STATE/seed-knowledge/"
         echo "Done: $(ls "$SEED_DIR"/*.knowledge.json | wc -l) file(s)."
     else
         echo "ERROR: --seed-dir '$SEED_DIR' has no *.knowledge.json files"
@@ -123,9 +298,9 @@ fi
 if [ -n "$CA_DIR" ]; then
     if [ -d "$CA_DIR" ] && { ls "$CA_DIR"/*.pem >/dev/null 2>&1 || ls "$CA_DIR"/*.crt >/dev/null 2>&1; }; then
         echo "Copying operator CA certificates into STATE ca-certificates/..."
-        sudo mkdir -p "$MOUNT_STATE/ca-certificates"
-        sudo cp "$CA_DIR"/*.pem "$MOUNT_STATE/ca-certificates/" 2>/dev/null || true
-        sudo cp "$CA_DIR"/*.crt "$MOUNT_STATE/ca-certificates/" 2>/dev/null || true
+        $SUDO mkdir -p "$MOUNT_STATE/ca-certificates"
+        $SUDO cp "$CA_DIR"/*.pem "$MOUNT_STATE/ca-certificates/" 2>/dev/null || true
+        $SUDO cp "$CA_DIR"/*.crt "$MOUNT_STATE/ca-certificates/" 2>/dev/null || true
         echo "Done: $(ls "$CA_DIR"/*.pem "$CA_DIR"/*.crt 2>/dev/null | wc -l) file(s)."
     else
         echo "ERROR: --ca-dir '$CA_DIR' has no *.pem or *.crt files"
@@ -134,7 +309,9 @@ if [ -n "$CA_DIR" ]; then
 fi
 
 # Create PKI directory (embra-trustd will generate CA on first run)
-sudo mkdir -p "$MOUNT_STATE/pki"
+$SUDO mkdir -p "$MOUNT_STATE/pki"
+
+sync
 
 echo ""
 echo "Seed complete. Partitions will be unmounted on exit."
