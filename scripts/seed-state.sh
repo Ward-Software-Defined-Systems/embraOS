@@ -249,11 +249,59 @@ echo "STATE mounted at $MOUNT_STATE"
 echo "DATA mounted at $MOUNT_DATA"
 
 # Seed WardSONDB data from Phase 0
-if [ -n "$PHASE0_DATA" ] && [ -d "$PHASE0_DATA" ]; then
-    echo "Copying Phase 0 WardSONDB data..."
+if [ -n "$PHASE0_DATA" ]; then
+    # A bad path used to fall through to the "skipping" branch below, so a typo
+    # produced a seemingly-successful run. Hard-fail like the other dir flags.
+    [ -d "$PHASE0_DATA" ] || die "--phase0-data '$PHASE0_DATA' is not a directory"
+    SRC_DB="$PHASE0_DATA/wardsondb"
+    [ -d "$SRC_DB" ] || die "--phase0-data '$PHASE0_DATA' has no wardsondb/ subdirectory"
+
+    # Pre-flight the size. DATA is a fixed 2 GiB (genimage.cfg.in) and a real
+    # WardSONDB directory can exceed it — fail before writing anything rather
+    # than leaving a half-copied database behind. Coarse by design: du/df
+    # blocks, no filesystem-overhead margin; it catches the gross case.
+    need_kb=""; free_kb=""
+    if out=$($SUDO du -sk "$SRC_DB" 2>/dev/null); then read -r need_kb _ <<< "$out"; fi
+    # df -P guarantees one unwrapped line: Filesystem Blocks Used Avail Cap Mount
+    if out=$($SUDO df -Pk "$MOUNT_DATA" 2>/dev/null | tail -1); then
+        read -r _ _ _ free_kb _ <<< "$out"
+    fi
+    if [ -n "$need_kb" ] && [ -n "$free_kb" ] && [ "$need_kb" -gt "$free_kb" ]; then
+        die "Phase 0 WardSONDB data does not fit on DATA
+  need $((need_kb / 1024)) MiB, available $((free_kb / 1024)) MiB
+  Grow DATA in buildroot/board/embraos/genimage.cfg.in and rebuild, or seed less data."
+    fi
+
+    if [ -n "$need_kb" ]; then
+        echo "Copying Phase 0 WardSONDB data ($((need_kb / 1024)) MiB)..."
+    else
+        echo "Copying Phase 0 WardSONDB data..."
+    fi
     $SUDO mkdir -p "$MOUNT_DATA/wardsondb"
-    $SUDO cp -r "$PHASE0_DATA"/wardsondb/* "$MOUNT_DATA/wardsondb/" 2>/dev/null || true
-    echo "Done."
+
+    # "$SRC_DB/." — NOT "$SRC_DB"/*. The glob silently skips dotfiles, and
+    # WardSONDB's `.engine` marker is one, written at data_dir/.engine (embrad
+    # passes --data-dir /embra/data/wardsondb, so it lands inside this very
+    # directory). Losing it defeats the engine-mismatch guard: check_engine_marker
+    # returns Ok when the marker is absent, so the image stamps its own engine
+    # over data written by the other one instead of refusing to start.
+    #
+    # No `2>/dev/null || true` either — that swallowed ENOSPC and reported
+    # success, leaving a truncated database that reads as a healthy seed.
+    if ! $SUDO cp -r "$SRC_DB/." "$MOUNT_DATA/wardsondb/"; then
+        die "copy failed — DATA now holds a PARTIAL WardSONDB directory.
+  Do not boot this image. Wipe DATA (or rebuild) and re-seed."
+    fi
+
+    if [ -f "$MOUNT_DATA/wardsondb/.engine" ]; then
+        echo "Done. Seeded data engine: $($SUDO cat "$MOUNT_DATA/wardsondb/.engine")"
+        echo "  Must match the image's --storage-engine or WardSONDB refuses to start."
+    else
+        echo "Done."
+        echo "WARNING: no .engine marker in the seeded data — the image will stamp its own"
+        echo "  engine on first boot with no mismatch check. Confirm this data was written"
+        echo "  by the same engine the image was built with."
+    fi
 else
     echo "No Phase 0 data specified (--phase0-data). Skipping WardSONDB seed."
     echo "First boot will enter Learning Mode."
