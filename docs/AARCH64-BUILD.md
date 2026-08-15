@@ -852,6 +852,36 @@ ERROR: vfat(boot.vfat): failed to generate boot.vfat
 **Fix:** Ensure `dosfstools` is in the `apt-get install` list (already in the Quick
 Start command).
 
+### Troubleshooting — backup & seeding (loop mounts in Docker)
+
+#### `mount: … failed to setup loop device` / `device is busy` on a later run
+
+**Symptom:** `seed-state-mac.sh` or `embraos-backup-mac.sh` fails to mount a partition,
+or reports the image busy, after an earlier run was killed rather than exiting normally.
+
+**Cause:** both wrappers mount with `mount -o loop`, which allocates the loop device with
+autoclear — so it detaches on `umount`, and normal *and* failed exits are clean. A
+`docker kill`, a Docker Desktop restart, or an OOM-kill is not: the loop device survives
+in the Docker VM's kernel still pinning the image file. The container is gone, so nothing
+on the Mac shows the leak.
+
+**Fix:** list the VM's loop devices from a throwaway container and detach the specific
+one holding your image.
+
+```bash
+docker run --rm --privileged ubuntu:24.04 losetup -a
+docker run --rm --privileged ubuntu:24.04 losetup -d /dev/loopN   # the one from above
+```
+
+Do **not** use `losetup -D`. It detaches *every* loop device in the Docker VM, including
+ones other containers are using — the VM's kernel is shared across all of them.
+
+A leak is only ever a nuisance if you notice it. The failure mode worth avoiding is the
+silent one: a second offset mount of the same byte range can *succeed*, giving two
+independent ext4 mounts of one partition, which corrupts deterministically. That is also
+why both wrappers refuse to run while a QEMU has the image open, and why the VM must be
+stopped before seeding or restoring.
+
 ### Serial console (ttyAMA0) — no action needed
 
 ARM64's `-machine virt` uses the PL011 UART (`/dev/ttyAMA0`), not 8250

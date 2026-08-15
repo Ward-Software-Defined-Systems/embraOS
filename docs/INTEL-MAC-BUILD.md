@@ -258,6 +258,9 @@ provider + credentials, timezone), then Learning Mode forms and seals the soul.
 > ./scripts/seed-state-mac.sh --dry-run --seed-dir Seed_Knowledge   # print only
 > ```
 > Unlike the backup wrapper this installs no apt packages, so it works offline.
+> If either wrapper is ever killed mid-run (`docker kill`, Docker restart, OOM) a loop
+> device can survive in the Docker VM pinning the image — see "Troubleshooting — backup
+> & seeding" in [AARCH64-BUILD.md](AARCH64-BUILD.md) for the detach recipe.
 
 ---
 
