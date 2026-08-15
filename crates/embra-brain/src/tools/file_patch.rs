@@ -543,7 +543,12 @@ async fn apply_atomic_inner(target: &Path, bytes: &[u8], fail_before_rename: boo
 // ---------------------------------------------------------------------------
 
 /// One edit in the batch form.
+///
+/// `deny_unknown_fields` (shakedown D-1): a misspelled or misplaced field —
+/// `expect_kount`, or a per-edit `raw` (spec §6: raw is per-call, mixed modes
+/// are an error) — must refuse loudly, never silently void a guardrail.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct PatchEdit {
     /// Exact text to find in the file. Must be non-empty, and must match
     /// exactly once unless replace_all is true.
@@ -562,8 +567,9 @@ pub struct PatchEdit {
 #[embra_tool(
     name = "file_patch",
     is_side_effectful = true,
-    description = "Edit an EXISTING file in place by exact string replacement — the surgical alternative to a full file_write rewrite. The file's contents never enter the conversation, so a small edit to a large file costs only the edit itself (no size ceiling on the target). Each edit's old_string must match the file exactly and uniquely (unless replace_all: true; expect_count asserts the match count; new_string empty = deletion). Multiple edits in the edits array form ONE transaction: every edit is validated against the original file, then all apply in a single atomic temp-file-and-rename write — or nothing is written. A single edit may instead be given flat as old_string/new_string/replace_all. Never creates files — use file_write for that. Like file_write, \\n and \\t in old_string/new_string are expanded before use; set raw: true when the file contains literal backslash sequences (e.g. source code with \"\\n\" inside string literals). dry_run: true validates and reports without writing. Failed matches return near-match and divergence diagnostics. path may be absolute (/embra/workspace/...) or workspace-relative; workspace restricted."
+    description = "Edit an EXISTING file in place by exact string replacement — the surgical alternative to a full file_write rewrite. The file's contents never enter the conversation, so a small edit to a large file costs only the edit itself (targets up to a 64 MiB backstop). Each edit's old_string must match the file exactly and uniquely (unless replace_all: true; expect_count asserts the match count; new_string empty = deletion). Multiple edits in the edits array form ONE transaction: every edit is validated against the original file, then all apply in a single atomic temp-file-and-rename write — or nothing is written. A single edit may instead be given flat as old_string/new_string/replace_all/expect_count. Unknown or misplaced fields are rejected, never ignored. Never creates files — use file_write for that. Like file_write, \\n and \\t in old_string/new_string are expanded before use; set raw: true (top-level — it applies to every edit) when the file contains literal backslash sequences (e.g. source code with \"\\n\" inside string literals). dry_run: true validates and reports without writing. Failed matches return near-match and divergence diagnostics. path may be absolute (/embra/workspace/...) or workspace-relative; workspace restricted."
 )]
+#[serde(deny_unknown_fields)]
 pub struct FilePatchArgs {
     /// File to edit. Must already exist — file_patch never creates files.
     pub path: String,
@@ -580,6 +586,9 @@ pub struct FilePatchArgs {
     /// Single-edit shorthand for the per-edit replace_all.
     #[serde(default)]
     pub replace_all: Option<bool>,
+    /// Single-edit shorthand for the per-edit expect_count.
+    #[serde(default)]
+    pub expect_count: Option<u64>,
     /// Validate and report without writing anything.
     #[serde(default)]
     pub dry_run: bool,
@@ -592,9 +601,16 @@ pub struct FilePatchArgs {
 /// Resolve the flat-vs-batch forms and apply escape handling symmetrically
 /// to both fields of every edit (spec §6). The opposite-mode needle is kept
 /// for diagnostics when it differs.
+///
+/// Field-parity rule (shakedown, shared root cause of D-1/D-2/D-3): every
+/// per-edit field is available in the flat shorthand, `raw`/`dry_run` are
+/// per-call for both forms, and anything unrecognized is a deserialization
+/// error — the two forms must never differ in what they can express.
 fn effective_edits(args: &FilePatchArgs) -> Result<Vec<Edit>, String> {
-    let flat_given =
-        args.old_string.is_some() || args.new_string.is_some() || args.replace_all.is_some();
+    let flat_given = args.old_string.is_some()
+        || args.new_string.is_some()
+        || args.replace_all.is_some()
+        || args.expect_count.is_some();
 
     let raw_edits: Vec<PatchEdit> = match (&args.edits, flat_given) {
         (Some(_), true) => {
@@ -622,7 +638,7 @@ fn effective_edits(args: &FilePatchArgs) -> Result<Vec<Edit>, String> {
                 old_string: old,
                 new_string: new,
                 replace_all: args.replace_all.unwrap_or(false),
-                expect_count: None,
+                expect_count: args.expect_count,
             }]
         }
     };
@@ -952,6 +968,7 @@ mod file_patch_tests {
             old_string: Some(old.into()),
             new_string: Some(new.into()),
             replace_all: None,
+            expect_count: None,
             dry_run: false,
             raw,
         }
@@ -1014,6 +1031,7 @@ mod file_patch_tests {
             old_string: None,
             new_string: None,
             replace_all: None,
+            expect_count: None,
             dry_run: false,
             raw: false,
         };
@@ -1029,6 +1047,7 @@ mod file_patch_tests {
             old_string: None,
             new_string: None,
             replace_all: None,
+            expect_count: None,
             dry_run: false,
             raw: false,
         };
@@ -1205,6 +1224,98 @@ mod file_patch_tests {
         assert!(v.get("anyOf").is_none());
         assert_eq!(v.get("type").and_then(|t| t.as_str()), Some("object"));
         assert!(v.get("properties").is_some());
+    }
+
+    // -- Shakedown v1 regressions (D-1 / D-2 / D-3) -------------------------
+
+    #[test]
+    fn d1_unknown_top_level_field_rejected() {
+        // A misspelled guardrail must refuse loudly, never silently void it.
+        let err = serde_json::from_value::<FilePatchArgs>(serde_json::json!({
+            "path": "f", "old_string": "a", "new_string": "b",
+            "replace_all": true, "expect_kount": 3
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("expect_kount"), "{err}");
+    }
+
+    #[test]
+    fn d1_unknown_per_edit_field_rejected() {
+        // raw is per-call (spec §6) — inside an edit it must error, not vanish.
+        let err = serde_json::from_value::<FilePatchArgs>(serde_json::json!({
+            "path": "f",
+            "edits": [{"old_string": "a", "new_string": "b", "raw": true}]
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("raw"), "{err}");
+    }
+
+    #[test]
+    fn d2_flat_expect_count_honored() {
+        let mut args = args_flat("a", "b", false);
+        args.replace_all = Some(true);
+        args.expect_count = Some(3);
+        let edits = effective_edits(&args).unwrap();
+        let err = apply(b"a a", &edits).unwrap_err();
+        assert!(err.contains("expect_count is 3 but old_string matches 2"), "{err}");
+    }
+
+    #[test]
+    fn d2_flat_expect_count_counts_as_flat_form() {
+        let args = FilePatchArgs {
+            path: "f".into(),
+            edits: Some(vec![PatchEdit {
+                old_string: "a".into(),
+                new_string: "b".into(),
+                replace_all: false,
+                expect_count: None,
+            }]),
+            old_string: None,
+            new_string: None,
+            replace_all: None,
+            expect_count: Some(1),
+            dry_run: false,
+            raw: false,
+        };
+        let err = effective_edits(&args).unwrap_err();
+        assert!(err.contains("not both"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn d3_batch_and_flat_raw_parity_end_to_end() {
+        // Same decoded input through both forms with raw: true must produce
+        // byte-identical files — pins that top-level raw reaches every edit
+        // in the batch form (the shakedown's D-3 concern).
+        let dir = TempDir::new("d3parity");
+        let fa = dir.0.join("a.txt");
+        let fb = dir.0.join("b.txt");
+        std::fs::write(&fa, "alpha omega tail").unwrap();
+        std::fs::write(&fb, "alpha omega tail").unwrap();
+
+        let batch: FilePatchArgs = serde_json::from_value(serde_json::json!({
+            "path": "x", "raw": true,
+            "edits": [{"old_string": "omega", "new_string": "omega\\nEND"}]
+        }))
+        .unwrap();
+        let flat: FilePatchArgs = serde_json::from_value(serde_json::json!({
+            "path": "x", "raw": true,
+            "old_string": "omega", "new_string": "omega\\nEND"
+        }))
+        .unwrap();
+
+        let out_a = patch_at(&fa, effective_edits(&batch).unwrap(), false).await;
+        let out_b = patch_at(&fb, effective_edits(&flat).unwrap(), false).await;
+        assert!(out_a.starts_with("Patched"), "{out_a}");
+        assert!(out_b.starts_with("Patched"), "{out_b}");
+
+        let a = std::fs::read(&fa).unwrap();
+        let b = std::fs::read(&fb).unwrap();
+        assert_eq!(a, b, "batch and flat diverged under raw: true");
+        // raw preserved the literal backslash-n (two chars), not a real LF
+        assert_eq!(a, b"alpha omega\\nEND tail".to_vec());
+        assert!(!a.contains(&b'\n'));
     }
 }
 
