@@ -110,11 +110,20 @@ The following apply once the image is built. They are not part of the build pipe
 
 > **Clean First Boot:** To reset and trigger the Config Wizard again (e.g., to change API key):
 > ```bash
-> LOOPDEV=$(sudo losetup --find --show --partscan buildroot-src/output/images/embraos.img)
-> sudo mkfs.ext4 -L STATE "${LOOPDEV}p3"
-> sudo mkfs.ext4 -L DATA "${LOOPDEV}p4"
-> sudo losetup -d "$LOOPDEV"
+> ./scripts/seed-state.sh --wipe state,data       # macOS: ./scripts/seed-state-mac.sh
 > ```
+> Reformats the named partitions in place as ext4 with their original labels, after a
+> typed confirmation. Wiping STATE destroys the soul hash, PKI and API keys; wiping DATA
+> destroys WardSONDB — all memory, sessions and the workspace. Neither is reversible, and
+> the VM must be stopped.
+>
+> Use `--wipe state` or `--wipe data` to reset just one, `--yes` to skip the prompt, and
+> combine with the seeding flags to reset and re-seed in a single pass:
+> ```bash
+> ./scripts/seed-state.sh --wipe state,data --ca-dir /path/to/dir-with-rootCA.pem
+> ```
+> Partition geometry is read from the GPT at run time, so this stays correct as partitions
+> shift between builds.
 
 > **Port Forwarding:** QEMU forwards 50000 (gRPC) and 8443 (REST); in the default web-console mode it also forwards 3345 (HTTPS web console — https://localhost:3345/embraOS). Test with:
 > ```bash

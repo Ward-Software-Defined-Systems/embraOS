@@ -54,8 +54,18 @@ Options:
   --import-dir <dir>      Copy *.graph.json into STATE/imported-intelligence/
   --seed-dir <dir>        Copy *.knowledge.json into STATE/seed-knowledge/
   --ca-dir <dir>          Copy *.pem / *.crt into STATE/ca-certificates/
+  --wipe <targets>        Reformat before seeding: state | data | state,data | all
+  --yes                   Skip the wipe confirmation (for non-interactive use)
   --dry-run               Print the docker command and exit (no Docker needed)
   -h, --help              Show this help
+
+--wipe gives a clean first boot without leaving macOS:
+
+  ./scripts/seed-state-mac.sh --wipe state,data                # back to Config Wizard
+  ./scripts/seed-state-mac.sh --wipe state,data --ca-dir <dir> # reset, then seed
+
+Wiping STATE destroys the soul hash, PKI and API keys; wiping DATA destroys
+WardSONDB — all memory, sessions and the workspace. Both are irreversible.
 
 Environment:
   EMBRAOS_IMAGE   Disk image path (overridden by the argument/--image)
@@ -74,6 +84,8 @@ IMPORT_DIR=""
 SEED_DIR=""
 CA_DIR=""
 DRY_RUN=0
+WIPE=""
+ASSUME_YES=0
 
 need() { [ "$1" -ge 2 ] || die "$2 requires a value"; }
 
@@ -85,6 +97,8 @@ while [ $# -gt 0 ]; do
         --import-dir)  need $# --import-dir;  IMPORT_DIR="$2";  shift 2 ;;
         --seed-dir)    need $# --seed-dir;    SEED_DIR="$2";    shift 2 ;;
         --ca-dir)      need $# --ca-dir;      CA_DIR="$2";      shift 2 ;;
+        --wipe)        need $# --wipe;        WIPE="$2";        shift 2 ;;
+        --yes|-y)      ASSUME_YES=1; shift ;;
         --dry-run)     DRY_RUN=1; shift ;;
         -h|--help)     usage; exit 0 ;;
         -*)            echo "Unknown option: $1" >&2; echo >&2; usage >&2; exit 1 ;;
@@ -122,6 +136,11 @@ fi
 # which does not work inside a container. Fail with a message that says so.
 INNER_SCRIPT="${EMBRAOS_ROOT}/scripts/seed-state.sh"
 [ -f "$INNER_SCRIPT" ] || die "not found: $INNER_SCRIPT"
+if [ -n "$WIPE" ] && ! grep -q -- '--wipe)' "$INNER_SCRIPT" 2>/dev/null; then
+    die "scripts/seed-state.sh on this host has no --wipe support.
+  Copy the current scripts/seed-state.sh to this host and retry —
+  both files must come from the same revision."
+fi
 if ! grep -q -- '--image)' "$INNER_SCRIPT" 2>/dev/null ||
    ! grep -q 'partx -g -o START,SECTORS' "$INNER_SCRIPT" 2>/dev/null; then
     die "scripts/seed-state.sh on this host predates the container-safe rewrite.
@@ -193,9 +212,12 @@ no_colon() {
 no_colon "$EMBRAOS_ROOT"
 
 DOCKER_ARGS=(run --rm --privileged)
-# Full if, not `[ -t 0 ] && DOCKER_ARGS+=(-it)`: as a bare statement that
-# returns non-zero when stdin is not a TTY and set -e would kill the script —
-# exactly the piped/CI case the check exists to handle.
+# -t 1 as well as -t 0: docker -t on a non-terminal stdout mangles output for
+# pipes and CI. Written as a full `if` rather than `[ -t 0 ] && DOCKER_ARGS+=(-it)`
+# for clarity — a trailing `&&` list leaks its non-zero status when it is the
+# last statement in a script or function, which is easy to reintroduce by
+# accident during an edit. (Mid-script it is harmless: set -e exempts every
+# command of an AND-OR list except the final one.)
 if [ -t 0 ] && [ -t 1 ]; then
     DOCKER_ARGS+=(-it)
 fi
@@ -256,6 +278,21 @@ add_dir --ca-dir      "$CA_DIR"      ca
 # A literal, not a path — no translation.
 if [ -n "$SOUL_HASH" ]; then
     SEED_ARGS+=(--soul-hash "$SOUL_HASH")
+fi
+
+# Literals too — the wipe targets are names, not paths.
+if [ -n "$WIPE" ]; then
+    SEED_ARGS+=(--wipe "$WIPE")
+    # The confirmation prompt needs a TTY inside the container; without one the
+    # inner script refuses and asks for --yes. Say so here rather than after a
+    # container spin-up.
+    if [ "$DRY_RUN" -eq 0 ] && [ "$ASSUME_YES" -eq 0 ] && { [ ! -t 0 ] || [ ! -t 1 ]; }; then
+        die "--wipe needs a terminal for its confirmation prompt (docker -t is only
+  attached when stdin and stdout are both TTYs). Re-run interactively, or pass --yes."
+    fi
+fi
+if [ "$ASSUME_YES" -eq 1 ]; then
+    SEED_ARGS+=(--yes)
 fi
 
 # Printed before running because Docker Desktop's file-sharing allowlist fails

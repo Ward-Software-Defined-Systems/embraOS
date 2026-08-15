@@ -56,12 +56,23 @@ Usage:
 
 Options:
   --image <path>          Disk image to seed (same as the positional argument)
+  --wipe <targets>        Reformat before seeding: state | data | state,data | all
+  --yes                   Skip the wipe confirmation (for non-interactive use)
   --phase0-data <dir>     Copy <dir>/wardsondb/ into DATA
   --soul-hash <hash>      Write <hash> to STATE/soul.sha256
   --import-dir <dir>      Copy *.graph.json into STATE/imported-intelligence/
   --seed-dir <dir>        Copy *.knowledge.json into STATE/seed-knowledge/
   --ca-dir <dir>          Copy *.pem / *.crt into STATE/ca-certificates/
   -h, --help              Show this help
+
+--wipe reformats the named partitions (ext4, original labels) before any
+seeding, so a clean first boot and a fresh seed are one command:
+
+  ./scripts/seed-state.sh --wipe state,data                # back to Config Wizard
+  ./scripts/seed-state.sh --wipe state,data --ca-dir <dir> # reset, then seed
+
+Wiping STATE destroys the soul hash, PKI and API keys; wiping DATA destroys
+WardSONDB — all memory, sessions and the workspace. Both are irreversible.
 
 Environment:
   EMBRAOS_IMAGE   Disk image path (overridden by the argument/--image)
@@ -87,12 +98,16 @@ SOUL_HASH=""
 IMPORT_DIR=""
 SEED_DIR=""
 CA_DIR=""
+WIPE=""
+ASSUME_YES=0
 
 need() { [ "$1" -ge 2 ] || die "$2 requires a value"; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --image)       need $# --image;       IMAGE_ARG="$2";   shift 2 ;;
+        --wipe)        need $# --wipe;        WIPE="$2";        shift 2 ;;
+        --yes|-y)      ASSUME_YES=1; shift ;;
         --phase0-data) need $# --phase0-data; PHASE0_DATA="$2"; shift 2 ;;
         --soul-hash)   need $# --soul-hash;   SOUL_HASH="$2";   shift 2 ;;
         --import-dir)  need $# --import-dir;  IMPORT_DIR="$2";  shift 2 ;;
@@ -223,6 +238,52 @@ mount_partition() {
     $SUDO mount -o loop,offset=${PART_OFFSET},sizelimit=${PART_SIZE} "$IMAGE" "$mount_point"
     echo "Mounted partition ${part_num} → ${mount_point} (offset=${PART_OFFSET} size=${PART_SIZE})"
 }
+
+# --- Optional wipe ------------------------------------------------------
+# Runs BEFORE anything is mounted — reformatting a mounted filesystem would
+# corrupt it. Replaces the old hand-run QUICK-START recipe, which used
+# `losetup --partscan` + `${LOOPDEV}p3` and so was both fragile on this
+# sector-34 GPT and impossible on macOS.
+
+wipe_partition() {   # wipe_partition <part_num> <label>
+    local part_num=$1 label=$2
+    get_partition_geometry "$part_num"
+    # `mke2fs -E offset=` writes ONLY within [offset, offset+size) — no loop
+    # device at all, so this behaves identically on a Linux host and inside the
+    # Docker wrapper, and cannot leak a loop device. e2fsprogs is Priority:
+    # required, so the wrapper's container still installs nothing.
+    $SUDO mkfs.ext4 -q -F -E offset="${PART_OFFSET}" -L "$label" \
+        "$IMAGE" "$((PART_SIZE / 1024))k"
+    echo "  wiped $label (p${part_num}, $((PART_SIZE / 1048576)) MiB)"
+}
+
+if [ -n "$WIPE" ]; then
+    unknown=$(echo "$WIPE" | tr ',' '\n' | grep -vxE 'state|data|all|' || true)
+    [ -z "$unknown" ] || die "--wipe: unknown target(s): $(echo $unknown | tr '\n' ' ')
+  valid targets: state, data, all (comma-separated)"
+
+    wipe_state=0; wipe_data=0
+    case ",$WIPE," in *,state,*|*,all,*) wipe_state=1 ;; esac
+    case ",$WIPE," in *,data,*|*,all,*)  wipe_data=1 ;; esac
+    [ "$wipe_state" -eq 1 ] || [ "$wipe_data" -eq 1 ] || die "--wipe: no targets given"
+
+    echo ""
+    echo "WIPE — reformats these partitions in $IMAGE:"
+    [ "$wipe_state" -eq 1 ] && echo "  STATE (p3) — soul hash, PKI, API keys, config"
+    [ "$wipe_data" -eq 1 ]  && echo "  DATA  (p4) — WardSONDB: all memory, sessions, workspace"
+    echo "Everything on the listed partition(s) is destroyed. This cannot be undone."
+
+    if [ "$ASSUME_YES" -eq 0 ]; then
+        [ -t 0 ] || die "--wipe needs confirmation but stdin is not a terminal — pass --yes"
+        printf "Type 'wipe' to confirm: "
+        read -r confirm || confirm=""
+        [ "$confirm" = "wipe" ] || die "aborted — nothing was written"
+    fi
+
+    [ "$wipe_state" -eq 1 ] && wipe_partition "$STATE_PART_NUM" STATE
+    [ "$wipe_data" -eq 1 ]  && wipe_partition "$DATA_PART_NUM" DATA
+    echo ""
+fi
 
 MOUNT_STATE=""
 MOUNT_DATA=""
