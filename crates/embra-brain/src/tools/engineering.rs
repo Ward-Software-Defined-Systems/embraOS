@@ -2,7 +2,9 @@ use chrono::Utc;
 
 use crate::db::WardsonDbClient;
 
-const WORKSPACE_ROOT: &str = "/embra/workspace";
+// `pub(crate)`: file_patch re-verifies its canonicalized (symlink-resolved)
+// target against this root.
+pub(crate) const WORKSPACE_ROOT: &str = "/embra/workspace";
 
 /// Resolve a workspace-scoped tool path. Accepts either an absolute path
 /// under `/embra/workspace/` or a path relative to `/embra/workspace/`
@@ -2154,7 +2156,9 @@ pub async fn file_read(params: &str) -> String {
 }
 
 /// Expand escape sequences in tool content: `\\n` → newline, `\\t` → tab, `\\\\` → backslash.
-fn expand_escapes(s: &str) -> String {
+/// `pub(crate)` so file_patch applies the identical expansion to old_string/
+/// new_string (symmetric with file_write's content handling; spec §6).
+pub(crate) fn expand_escapes(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(ch) = chars.next() {

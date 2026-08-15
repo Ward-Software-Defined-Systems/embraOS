@@ -131,7 +131,7 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 }
 
 // Single source of truth for Phase 4 tool category counts.
-// (json_key, display_label, count). Sums to 98 — matches the descriptor count
+// (json_key, display_label, count). Sums to 103 — matches the descriptor count
 // in `tools::registry::REGISTRY` (guarded by
 // `category_counts_sum_matches_registry` below). Aliases (`memory_search`,
 // `search_memory`, `file_rename`, `rmdir`) are folded into their target's
@@ -157,6 +157,10 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 // Engineering went 33 → 37 with the gl_* GitLab set (2026-08-06:
 // gl_issues/gl_mrs/gl_issue_create/gl_mr_create — self-hosted instances,
 // per-host /git-token auth, operator-CA-aware client).
+// Filesystem went 10 → 11 with `file_patch` (exact-string batch in-place
+// editing — atomic all-or-nothing transaction; the surgical alternative to
+// full file_write rewrites, from the Intelligence's own consumer spec,
+// 2026-08-14).
 const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
     ("system", "System", 4),
     ("memory_knowledge", "Memory & Knowledge", 7),
@@ -165,7 +169,7 @@ const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
     ("utility", "Utility", 2),
     ("security", "Security", 6),
     ("engineering", "Engineering", 37),
-    ("filesystem", "Filesystem", 10),
+    ("filesystem", "Filesystem", 11),
     ("scheduling", "Scheduling", 3),
     ("sessions", "Sessions", 10),
     ("knowledge_graph", "Knowledge Graph", 12),
