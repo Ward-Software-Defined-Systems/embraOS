@@ -1,6 +1,6 @@
 # Tool Reference
 
-Phase 1 includes 102 internal tools the intelligence invokes during conversation. All 102 work identically across all four LLM providers (Anthropic, Gemini, Ollama, LM Studio) via per-provider tool-schema translators that share a common JSON Schema cleanup pipeline (`provider/schema_util.rs::inline_refs`). They are organized below by category.
+Phase 1 includes 103 internal tools the intelligence invokes during conversation. All 103 work identically across all four LLM providers (Anthropic, Gemini, Ollama, LM Studio) via per-provider tool-schema translators that share a common JSON Schema cleanup pipeline (`provider/schema_util.rs::inline_refs`). They are organized below by category.
 
 > **⚠️ Testing Notice:** The default tools and slash commands are actively being tested. If you encounter bugs or unexpected behavior, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
@@ -84,6 +84,7 @@ For the data model, edge taxonomy, density rationale, promotion path, auto-enric
 | **file_read** | Read file contents or list directory entries (up to 200). Supports chunked reads via optional `offset` and `limit` fields (JSON args) with a 2 MiB per-call ceiling and a continuation trailer so the model can fetch the next slice. Unrestricted path. Handles binary files gracefully |
 | **file_write** | Write content to a file with escape support (`\n`, `\t`, `\\`), creating parent directories automatically (workspace restricted to `/embra/workspace/`) |
 | **file_append** | Append content to a file with escape support. Creates the file and parent directories if they don't exist (workspace restricted) |
+| **file_patch** | Edit an existing file in place by exact-string replacement — the surgical alternative to a full `file_write` rewrite. Each edit's `old_string` must match uniquely unless `replace_all`; `expect_count` asserts the match count; empty `new_string` deletes. Multiple edits validate together against the original file and apply as ONE atomic all-or-nothing write (temp file + fsync + rename; symlinks resolved, never replaced). `dry_run` reports without writing; `raw` disables `\n`/`\t` expansion to match literal backslash sequences. Never creates files; no size ceiling on the target — contents never enter the conversation. Zero-match failures return near-match and prefix-divergence diagnostics (workspace restricted) |
 | **file_delete** | Delete a file (workspace restricted, files only — not directories) |
 | **file_move** / **file_rename** | Move or rename a file or directory. Both source and destination must be under workspace (workspace restricted) |
 | **dir_delete** / **rmdir** | Remove a directory — empty by default, `--force` to remove with contents (workspace restricted) |

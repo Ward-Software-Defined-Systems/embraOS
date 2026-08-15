@@ -4,7 +4,7 @@ The embraOS knowledge graph (KG) is the cross-session memory layer. It lives in 
 
 This doc covers the write-side (auto-derived edges, promotion), the read-side (auto-enrichment, retrieval ranking, traversal), the twelve `knowledge_*` tools, and the design rationale behind a deliberately dense edge layer.
 
-The shorter inventory of KG tools (as part of the broader 102-tool catalog) lives in [TOOL-REFERENCE.md](TOOL-REFERENCE.md). The architectural placement (the 7-layer model's *Memory & Knowledge* row) is in [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md).
+The shorter inventory of KG tools (as part of the broader 103-tool catalog) lives in [TOOL-REFERENCE.md](TOOL-REFERENCE.md). The architectural placement (the 7-layer model's *Memory & Knowledge* row) is in [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md).
 
 > **How operators interact with the KG.** Every `knowledge_*` reference below is a *tool the intelligence calls during conversation*, not a command the operator types. The intelligence owns KG management — it decides when to `remember`, when to `knowledge_promote`, when to `knowledge_query` for context before answering, when to `knowledge_unlink_edge` after a tag rename. Operators participate by talking to the intelligence in natural language ("remember that the cert refresh works after manual generation", "promote that as a semantic observation", "what do we know about embra-web cert failures?", "looks like there are orphan edges — sweep them"). Tool names appear throughout this doc as references to the intelligence's capabilities, not as operator command syntax.
 
@@ -367,7 +367,7 @@ The tool-side renderer groups discovered nodes by depth and prints the edge-type
 
 ## Tool reference
 
-Twelve `knowledge_*` tools registered via `#[embra_tool(...)]` macros — ten in `crates/embra-brain/src/knowledge/tools.rs`, plus `knowledge_audit` (`knowledge/audit.rs`) and `knowledge_merge` (`knowledge/merge.rs`), added 2026-07-30. The full registration is verified by `knowledge_tools_register`. The intelligence chooses which to invoke as conversation requires; the args below are what the intelligence fills in, not what an operator types. For the broader tool catalog the intelligence draws from (all 102 tools), see [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — this section covers KG-specific contract details.
+Twelve `knowledge_*` tools registered via `#[embra_tool(...)]` macros — ten in `crates/embra-brain/src/knowledge/tools.rs`, plus `knowledge_audit` (`knowledge/audit.rs`) and `knowledge_merge` (`knowledge/merge.rs`), added 2026-07-30. The full registration is verified by `knowledge_tools_register`. The intelligence chooses which to invoke as conversation requires; the args below are what the intelligence fills in, not what an operator types. For the broader tool catalog the intelligence draws from (all 103 tools), see [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — this section covers KG-specific contract details.
 
 ### Read tools
 
@@ -538,7 +538,7 @@ If any step diverges from what the code claims here, the code is right and the d
 
 ## Related
 
-- [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — catalog of all 102 tools the intelligence draws from (the **Knowledge Graph** table covers these twelve).
+- [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — catalog of all 103 tools the intelligence draws from (the **Knowledge Graph** table covers these twelve).
 - [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md) — the 7-layer architecture (KG is the **Memory & Knowledge** row).
 - [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md) — slash commands; the KG layer is reached via brain tools, not slash commands.
 - `ARCHITECTURE.md` (local) — historical Sprint 2 narrative with commit SHAs and the fix-wave for `knowledge_unlink_node` cascade, the `derived_from` cleanup, and orphan-sweep introduction.
