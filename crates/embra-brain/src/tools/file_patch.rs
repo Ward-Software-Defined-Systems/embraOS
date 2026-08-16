@@ -31,7 +31,7 @@ use embra_tools_core::DispatchError;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::engineering::{expand_escapes, resolve_workspace_path, WORKSPACE_ROOT};
+use super::engineering::{resolve_workspace_path, WORKSPACE_ROOT};
 use super::sessions::truncate_str;
 use crate::tools::registry::DispatchContext;
 
@@ -65,6 +65,11 @@ pub(crate) struct Edit {
     pub(crate) alt_old: Option<(Vec<u8>, bool)>,
     pub(crate) replace_all: bool,
     pub(crate) expect_count: Option<u64>,
+    /// Advisory line appended to this edit's success report — e.g. the
+    /// replacement carries a literal backslash sequence (shakedown D-5/D-6:
+    /// the silent side of an escape mixup is the success line, so the
+    /// success line is where the visibility must live).
+    pub(crate) note: Option<String>,
 }
 
 impl Edit {
@@ -76,6 +81,7 @@ impl Edit {
             alt_old: None,
             replace_all: false,
             expect_count: None,
+            note: None,
         }
     }
 }
@@ -86,6 +92,7 @@ pub(crate) struct EditReport {
     spans: Vec<usize>,
     old_len: usize,
     new_len: usize,
+    note: Option<String>,
 }
 
 pub(crate) struct PatchPlan {
@@ -230,6 +237,7 @@ pub(crate) fn plan_patch(buffer: &[u8], edits: &[Edit]) -> Result<PatchPlan, Str
             spans: spans.clone(),
             old_len: edits[idx].old.len(),
             new_len: edits[idx].new.len(),
+            note: edits[idx].note.clone(),
         })
         .collect();
 
@@ -445,6 +453,9 @@ fn render_report(path: &str, plan: &PatchPlan, buffer: &[u8], before: usize, dry
                 shown.join(", ")
             ));
         }
+        if let Some(note) = &rep.note {
+            out.push_str(&format!("    note: {note}\n"));
+        }
     }
     let delta = after as i64 - before as i64;
     out.push_str(&format!(
@@ -547,14 +558,22 @@ async fn apply_atomic_inner(target: &Path, bytes: &[u8], fail_before_rename: boo
 /// `deny_unknown_fields` (shakedown D-1): a misspelled or misplaced field —
 /// `expect_kount`, or a per-edit `raw` (spec §6: raw is per-call, mixed modes
 /// are an error) — must refuse loudly, never silently void a guardrail.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
+/// old_string/new_string are serde-`Option` but schemars-`required`: the
+/// SCHEMA still demands both, while a missing field becomes an INDEXED
+/// validation error ("edits[2].old_string is missing") instead of serde's
+/// bare `missing field` — which, on a truncated 14 KB batch, sent the
+/// consumer auditing well-formed JSON for a field that was present in every
+/// element it wrote (shakedown D-4).
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PatchEdit {
     /// Exact text to find in the file. Must be non-empty, and must match
     /// exactly once unless replace_all is true.
-    pub old_string: String,
+    #[serde(default)]
+    pub old_string: Option<String>,
     /// Replacement text. An empty string deletes the match.
-    pub new_string: String,
+    #[serde(default)]
+    pub new_string: Option<String>,
     /// Replace every occurrence instead of requiring a unique match.
     #[serde(default)]
     pub replace_all: bool,
@@ -563,11 +582,44 @@ pub struct PatchEdit {
     pub expect_count: Option<u64>,
 }
 
+/// Wire-schema shadow of [`PatchEdit`]. schemars 0.8 ignores
+/// `#[schemars(required)]` on `Option` + `serde(default)` fields, so the
+/// schema is derived from this struct — whose field set, doc comments, and
+/// serde attributes MUST mirror `PatchEdit` exactly (old/new required here
+/// is the point: the model must never learn it may omit them; the serde-side
+/// `Option` exists only so a truncated batch yields an indexed error).
+#[derive(JsonSchema)]
+#[serde(deny_unknown_fields)]
+#[schemars(rename = "PatchEdit")]
+#[allow(dead_code)]
+struct PatchEditSchema {
+    /// Exact text to find in the file. Must be non-empty, and must match
+    /// exactly once unless replace_all is true.
+    old_string: String,
+    /// Replacement text. An empty string deletes the match.
+    new_string: String,
+    /// Replace every occurrence instead of requiring a unique match.
+    #[serde(default)]
+    replace_all: bool,
+    /// Optional assertion: the call fails unless the match count equals this.
+    #[serde(default)]
+    expect_count: Option<u64>,
+}
+
+impl JsonSchema for PatchEdit {
+    fn schema_name() -> String {
+        PatchEditSchema::schema_name()
+    }
+    fn json_schema(generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        PatchEditSchema::json_schema(generator)
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "file_patch",
     is_side_effectful = true,
-    description = "Edit an EXISTING file in place by exact string replacement — the surgical alternative to a full file_write rewrite. The file's contents never enter the conversation, so a small edit to a large file costs only the edit itself (targets up to a 64 MiB backstop). Each edit's old_string must match the file exactly and uniquely (unless replace_all: true; expect_count asserts the match count; new_string empty = deletion). Multiple edits in the edits array form ONE transaction: every edit is validated against the original file, then all apply in a single atomic temp-file-and-rename write — or nothing is written. A single edit may instead be given flat as old_string/new_string/replace_all/expect_count. Unknown or misplaced fields are rejected, never ignored. Never creates files — use file_write for that. Like file_write, \\n and \\t in old_string/new_string are expanded before use; set raw: true (top-level — it applies to every edit) when the file contains literal backslash sequences (e.g. source code with \"\\n\" inside string literals). dry_run: true validates and reports without writing. Failed matches return near-match and divergence diagnostics. path may be absolute (/embra/workspace/...) or workspace-relative; workspace restricted."
+    description = "Edit an EXISTING file in place by exact string replacement — the surgical alternative to a full file_write rewrite. The file's contents never enter the conversation, so a small edit to a large file costs only the edit itself (targets up to a 64 MiB backstop). Each edit's old_string must match the file exactly and uniquely (unless replace_all: true; expect_count asserts the match count; new_string empty = deletion). Multiple edits in the edits array form ONE transaction: every edit is validated against the original file, then all apply in a single atomic temp-file-and-rename write — or nothing is written. A single edit may instead be given flat as old_string/new_string/replace_all/expect_count. Unknown or misplaced fields are rejected, never ignored. Never creates files — use file_write for that. JSON-style escapes in old_string/new_string are expanded before use — \\n, \\t, \\\\ and \\uXXXX (so a double-escaped em-dash still becomes an em-dash), identically in both fields and both forms; set raw: true (top-level — it applies to every edit) when the file contains literal backslash sequences (e.g. source code with \"\\n\" inside string literals). dry_run: true validates and reports without writing. Failed matches return near-match and divergence diagnostics. path may be absolute (/embra/workspace/...) or workspace-relative; workspace restricted."
 )]
 #[serde(deny_unknown_fields)]
 pub struct FilePatchArgs {
@@ -626,17 +678,15 @@ fn effective_edits(args: &FilePatchArgs) -> Result<Vec<Edit>, String> {
             list.clone()
         }
         (None, _) => {
-            let old = args
-                .old_string
-                .clone()
-                .ok_or_else(|| "old_string is required (or supply the edits array)".to_string())?;
-            let new = args
-                .new_string
-                .clone()
-                .ok_or_else(|| "new_string is required (empty string = deletion)".to_string())?;
+            if args.old_string.is_none() {
+                return Err("old_string is required (or supply the edits array)".to_string());
+            }
+            if args.new_string.is_none() {
+                return Err("new_string is required (empty string = deletion)".to_string());
+            }
             vec![PatchEdit {
-                old_string: old,
-                new_string: new,
+                old_string: args.old_string.clone(),
+                new_string: args.new_string.clone(),
                 replace_all: args.replace_all.unwrap_or(false),
                 expect_count: args.expect_count,
             }]
@@ -645,21 +695,43 @@ fn effective_edits(args: &FilePatchArgs) -> Result<Vec<Edit>, String> {
 
     let mut out = Vec::with_capacity(raw_edits.len());
     for (idx, e) in raw_edits.iter().enumerate() {
-        if e.old_string.is_empty() {
+        // Indexed presence errors (shakedown D-4): a truncated batch names
+        // the edit, never a bare serde `missing field`.
+        let old_str = e.old_string.as_deref().ok_or_else(|| {
+            format!(
+                "edits[{idx}].old_string is missing — if this batch was emitted truncated upstream, resend it (smaller batches survive long generations better)"
+            )
+        })?;
+        let new_str = e
+            .new_string
+            .as_deref()
+            .ok_or_else(|| format!("edits[{idx}].new_string is missing (empty string = deletion)"))?;
+        if old_str.is_empty() {
             return Err(format!(
                 "edits[{idx}].old_string is empty — empty match anchors are meaningless"
             ));
         }
-        let expanded_old = expand_escapes(&e.old_string);
-        let expanded_new = expand_escapes(&e.new_string);
+        let expanded_old = expand_escapes_json(old_str);
+        let expanded_new = expand_escapes_json(new_str);
         let (old, new, alt_old) = if args.raw {
-            let alt = (expanded_old != e.old_string)
-                .then(|| (expanded_old.into_bytes(), false));
-            (e.old_string.clone().into_bytes(), e.new_string.clone().into_bytes(), alt)
+            let alt = (expanded_old != old_str).then(|| (expanded_old.into_bytes(), false));
+            (old_str.as_bytes().to_vec(), new_str.as_bytes().to_vec(), alt)
         } else {
-            let alt = (expanded_old != e.old_string)
-                .then(|| (e.old_string.clone().into_bytes(), true));
+            let alt = (expanded_old != old_str).then(|| (old_str.as_bytes().to_vec(), true));
             (expanded_old.into_bytes(), expanded_new.into_bytes(), alt)
+        };
+        // Escape-looking text surviving into the replacement is the one
+        // silent side of a mixup — surface it in the success report
+        // (shakedown D-5/D-6: the corruption printed a success line).
+        let note = {
+            let written = String::from_utf8_lossy(&new);
+            let lingering = lingering_escapes(&written);
+            (!lingering.is_empty()).then(|| {
+                format!(
+                    "writes literal backslash sequence(s) ({}) — decoded escapes arrive as real characters; if literal text is the intent this is fine (raw: true silences this note)",
+                    lingering.join(", ")
+                )
+            })
         };
         out.push(Edit {
             old,
@@ -667,9 +739,138 @@ fn effective_edits(args: &FilePatchArgs) -> Result<Vec<Edit>, String> {
             alt_old,
             replace_all: e.replace_all,
             expect_count: e.expect_count,
+            note,
         });
     }
     Ok(out)
+}
+
+/// Single-pass JSON-style escape expansion for old_string/new_string.
+///
+/// Handles `\n`, `\t`, `\\`, and `\uXXXX` (including UTF-16 surrogate
+/// pairs); any other backslash sequence passes through unchanged. This is a
+/// SUPERSET of file_write's `\n`/`\t`/`\\` expansion, added for shakedown
+/// D-5: models that double-escape tool-call strings (the file_write habit)
+/// deliver a literal `—` to the tool, and an expansion layer that
+/// understands `\n` but silently passes `—` writes six junk characters
+/// into the file while reporting success. Single-pass on purpose — a
+/// two-pass expand would wrongly decode the `\u` produced by collapsing a
+/// `\\u`.
+fn expand_escapes_json(s: &str) -> String {
+    fn hex4(chars: &[char]) -> Option<u32> {
+        if chars.len() < 4 {
+            return None;
+        }
+        let mut v: u32 = 0;
+        for &c in &chars[..4] {
+            v = (v << 4) | c.to_digit(16)?;
+        }
+        Some(v)
+    }
+
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0usize;
+    while i < chars.len() {
+        if chars[i] != '\\' || i + 1 >= chars.len() {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        match chars[i + 1] {
+            'n' => {
+                out.push('\n');
+                i += 2;
+            }
+            't' => {
+                out.push('\t');
+                i += 2;
+            }
+            '\\' => {
+                out.push('\\');
+                i += 2;
+            }
+            'u' => {
+                match hex4(&chars[i + 2..]) {
+                    Some(hi @ 0xD800..=0xDBFF) => {
+                        // High surrogate: valid only as the first half of a
+                        // \uHHHH\uLLLL pair. Combine when the pair is there;
+                        // otherwise pass the sequence through literally.
+                        let rest = &chars[i + 6..];
+                        let low = (rest.len() >= 6 && rest[0] == '\\' && rest[1] == 'u')
+                            .then(|| hex4(&rest[2..]))
+                            .flatten()
+                            .filter(|l| (0xDC00..=0xDFFF).contains(l));
+                        if let Some(lo) = low {
+                            let cp = 0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00);
+                            match char::from_u32(cp) {
+                                Some(c) => {
+                                    out.push(c);
+                                    i += 12;
+                                }
+                                None => {
+                                    out.push('\\');
+                                    i += 1;
+                                }
+                            }
+                        } else {
+                            out.push('\\');
+                            i += 1;
+                        }
+                    }
+                    Some(cp) if !(0xDC00..=0xDFFF).contains(&cp) => {
+                        match char::from_u32(cp) {
+                            Some(c) => {
+                                out.push(c);
+                                i += 6;
+                            }
+                            None => {
+                                out.push('\\');
+                                i += 1;
+                            }
+                        }
+                    }
+                    // Lone low surrogate or malformed hex: literal passthrough.
+                    _ => {
+                        out.push('\\');
+                        i += 1;
+                    }
+                }
+            }
+            other => {
+                out.push('\\');
+                out.push(other);
+                i += 2;
+            }
+        }
+    }
+    out
+}
+
+/// Escape-looking sequences left in a replacement AFTER expansion (or under
+/// raw). These write literal backslash text into the file — sometimes
+/// intended, and the one silent side of an escape mixup — so the success
+/// report names them instead of trusting silence (shakedown D-5/D-6).
+fn lingering_escapes(s: &str) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0usize;
+    while i + 1 < chars.len() {
+        if chars[i] == '\\' && matches!(chars[i + 1], 'n' | 't' | 'r' | 'u' | '\\') {
+            let end = (i + 6).min(chars.len());
+            let sample: String = chars[i..end].iter().collect();
+            if !found.contains(&sample) {
+                found.push(sample);
+            }
+            if found.len() == 3 {
+                break;
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    found
 }
 
 fn not_found_msg(path: &str) -> String {
@@ -1014,8 +1215,8 @@ mod file_patch_tests {
     fn flat_and_edits_together_is_error() {
         let mut args = args_flat("a", "b", false);
         args.edits = Some(vec![PatchEdit {
-            old_string: "a".into(),
-            new_string: "b".into(),
+            old_string: Some("a".into()),
+            new_string: Some("b".into()),
             replace_all: false,
             expect_count: None,
         }]);
@@ -1267,8 +1468,8 @@ mod file_patch_tests {
         let args = FilePatchArgs {
             path: "f".into(),
             edits: Some(vec![PatchEdit {
-                old_string: "a".into(),
-                new_string: "b".into(),
+                old_string: Some("a".into()),
+                new_string: Some("b".into()),
                 replace_all: false,
                 expect_count: None,
             }]),
@@ -1281,6 +1482,130 @@ mod file_patch_tests {
         };
         let err = effective_edits(&args).unwrap_err();
         assert!(err.contains("not both"), "{err}");
+    }
+
+    #[test]
+    fn t22_u_escape_decodes_in_both_fields_and_forms() {
+        // Shakedown D-5: a double-escaped em-dash reaching the tool as the
+        // literal six characters \u2014 must decode, identically everywhere.
+        assert_eq!(expand_escapes_json("a\\u2014b"), "a\u{2014}b");
+
+        // flat form
+        let edits = effective_edits(&args_flat("x", "a \\u2014 b", false)).unwrap();
+        assert_eq!(edits[0].new, "a \u{2014} b".as_bytes());
+        // batch form — same decoded input, same bytes
+        let batch: FilePatchArgs = serde_json::from_value(serde_json::json!({
+            "path": "f",
+            "edits": [{"old_string": "x", "new_string": "a \\u2014 b"}]
+        }))
+        .unwrap();
+        let bedits = effective_edits(&batch).unwrap();
+        assert_eq!(bedits[0].new, edits[0].new);
+        // and old_string decodes by the same rule (T25 symmetry)
+        let sym = effective_edits(&args_flat("\\u0022", "\\u0022", false)).unwrap();
+        assert_eq!(sym[0].old, sym[0].new, "old/new escape handling asymmetric");
+        assert_eq!(sym[0].old, b"\"");
+    }
+
+    #[test]
+    fn t22_surrogate_pairs_and_malformed_u_sequences() {
+        assert_eq!(expand_escapes_json("\\ud83d\\ude00"), "\u{1F600}");
+        // malformed or lone-surrogate sequences pass through literally
+        assert_eq!(expand_escapes_json("\\uZZZZ"), "\\uZZZZ");
+        assert_eq!(expand_escapes_json("\\ud83d x"), "\\ud83d x");
+        assert_eq!(expand_escapes_json("\\ude00"), "\\ude00");
+        // the double-escape collapse stays literal — single-pass on purpose
+        assert_eq!(expand_escapes_json("\\\\u2014"), "\\u2014");
+        // trailing backslash survives
+        assert_eq!(expand_escapes_json("x\\"), "x\\");
+    }
+
+    #[tokio::test]
+    async fn t23_flat_and_one_element_batch_byte_identical_with_escapes() {
+        // The general form of the round-2 family: the same edit expressed
+        // flat and as edits:[{...}] must produce byte-identical files,
+        // escapes included, in the default (non-raw) mode.
+        let dir = TempDir::new("t23");
+        let fa = dir.0.join("a.md");
+        let fb = dir.0.join("b.md");
+        std::fs::write(&fa, "alpha MARK omega").unwrap();
+        std::fs::write(&fb, "alpha MARK omega").unwrap();
+
+        let flat: FilePatchArgs = serde_json::from_value(serde_json::json!({
+            "path": "x", "old_string": "MARK", "new_string": "one\\u2014two\\nthree"
+        }))
+        .unwrap();
+        let batch: FilePatchArgs = serde_json::from_value(serde_json::json!({
+            "path": "x",
+            "edits": [{"old_string": "MARK", "new_string": "one\\u2014two\\nthree"}]
+        }))
+        .unwrap();
+
+        patch_at(&fa, effective_edits(&flat).unwrap(), false).await;
+        patch_at(&fb, effective_edits(&batch).unwrap(), false).await;
+        let a = std::fs::read(&fa).unwrap();
+        assert_eq!(a, std::fs::read(&fb).unwrap(), "forms diverged");
+        assert_eq!(a, "alpha one\u{2014}two\nthree omega".as_bytes());
+    }
+
+    #[test]
+    fn t24_missing_per_edit_field_is_indexed_not_bare_serde() {
+        // Shakedown D-4: a truncated batch previously surfaced serde's bare
+        // `missing field old_string` with no index — on a 14 KB batch the
+        // consumer audited well-formed JSON for a field every element had.
+        let args: FilePatchArgs = serde_json::from_value(serde_json::json!({
+            "path": "f",
+            "edits": [
+                {"old_string": "a", "new_string": "b"},
+                {"new_string": "tail-of-truncated-batch"}
+            ]
+        }))
+        .unwrap();
+        let err = effective_edits(&args).unwrap_err();
+        assert!(err.contains("edits[1].old_string is missing"), "{err}");
+        assert!(err.contains("truncated"), "{err}");
+    }
+
+    #[test]
+    fn patch_edit_schema_still_requires_old_and_new() {
+        // The serde softening must not leak into the schema: the model must
+        // still see old_string/new_string as required.
+        let schema = schemars::schema_for!(PatchEdit);
+        let v = serde_json::to_value(&schema).unwrap();
+        let req: Vec<&str> = v
+            .get("required")
+            .and_then(|r| r.as_array())
+            .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+            .unwrap_or_default();
+        assert!(req.contains(&"old_string"), "required = {req:?}");
+        assert!(req.contains(&"new_string"), "required = {req:?}");
+    }
+
+    #[tokio::test]
+    async fn lingering_escape_note_appears_in_success_report() {
+        // The silent side of an escape mixup is the success line (D-5/D-6):
+        // a replacement writing literal backslash text says so.
+        let dir = TempDir::new("note");
+        let f = dir.0.join("f.md");
+        std::fs::write(&f, "alpha MARK omega").unwrap();
+        // \\u2014 double-escaped at the JSON layer arrives as \u2014 literal
+        // two-plus-four chars after our single-pass decode keeps it literal.
+        let args: FilePatchArgs = serde_json::from_value(serde_json::json!({
+            "path": "x", "old_string": "MARK", "new_string": "x\\\\u2014y"
+        }))
+        .unwrap();
+        let out = patch_at(&f, effective_edits(&args).unwrap(), false).await;
+        assert!(out.starts_with("Patched"), "{out}");
+        assert!(out.contains("note:"), "{out}");
+        assert!(out.contains("backslash sequence"), "{out}");
+        // and a clean replacement carries no note
+        std::fs::write(&f, "alpha MARK omega").unwrap();
+        let clean: FilePatchArgs = serde_json::from_value(serde_json::json!({
+            "path": "x", "old_string": "MARK", "new_string": "plain"
+        }))
+        .unwrap();
+        let out2 = patch_at(&f, effective_edits(&clean).unwrap(), false).await;
+        assert!(!out2.contains("note:"), "{out2}");
     }
 
     #[tokio::test]
