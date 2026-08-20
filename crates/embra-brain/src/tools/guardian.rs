@@ -50,10 +50,12 @@ pub struct GuardianCallArgs {
     pub data_file: Option<String>,
 }
 
-/// Byte ceiling for `data_file` reads (matches engineering's FILE_READ_MAX).
-/// The binding constraint guest-side is the 8 MiB bump arena with a no-op
-/// dealloc — parse-heavy tools should stay near 1 MiB of bridged data; this
-/// gate keeps the host side of the bridge sane.
+/// Byte ceiling for `data_file` reads — 2 MiB, deliberately independent of
+/// engineering's FILE_READ_MAX (which is derived from the dispatcher cap
+/// minus framing headroom since sprint-6): this gate's binding constraint is
+/// the guest arena, not the context window. Guest-side that's the 8 MiB bump
+/// arena with a no-op dealloc — parse-heavy tools should stay near 1 MiB of
+/// bridged data; this gate keeps the host side of the bridge sane.
 const GUARDIAN_DATA_FILE_MAX: u64 = 2 * 1024 * 1024;
 
 /// Pure gate for a data_file request: only action="invoke" may carry one,

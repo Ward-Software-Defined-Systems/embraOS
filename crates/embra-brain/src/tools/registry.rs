@@ -79,7 +79,33 @@ pub fn all_descriptors() -> impl Iterator<Item = &'static ToolDescriptor> {
     REGISTRY.values().copied()
 }
 
-const MAX_TOOL_RESULT_SIZE: usize = 2_097_152;
+/// Hard byte ceiling applied to every Ok tool result by [`dispatch`] via
+/// [`apply_max_size`]. Truncation is silent — `is_error` stays false and a
+/// generic `[truncated: N bytes total]` marker replaces the tail — so any
+/// tool that emits its own framing (headers, continuation trailers) must
+/// keep content + framing under this cap or the framing is exactly what
+/// gets cut. [`TOOL_RESULT_ENVELOPE`] is the headroom reserved for that
+/// framing; per-tool ceilings (file_read's `FILE_READ_MAX`) derive from
+/// the difference.
+pub(crate) const MAX_TOOL_RESULT_SIZE: usize = 2_097_152;
+
+/// Headroom reserved under [`MAX_TOOL_RESULT_SIZE`] for per-tool result
+/// framing. file_read's worst case is ~250 fixed bytes plus twice the path
+/// length (the path appears in both header and trailer); 4096 covers paths
+/// up to ~1.9 KB. Pathological longer paths degrade to the generic
+/// truncation marker — the pre-fix behavior, never worse. Sprint-6 fix:
+/// FILE_READ_MAX used to EQUAL the cap, so a full-ceiling read of a larger
+/// file overflowed on its own framing and [`apply_max_size`] amputated the
+/// continuation trailer — the model lost the "continue at offset" contract
+/// on exactly the files that need it.
+pub(crate) const TOOL_RESULT_ENVELOPE: usize = 4096;
+
+// Compile-time pins: the envelope must leave real room under the cap (a
+// zero or near-zero reserve re-creates the trailer-amputation defect) while
+// staying a small fraction of it.
+const _: () = assert!(TOOL_RESULT_ENVELOPE >= 512);
+const _: () = assert!(TOOL_RESULT_ENVELOPE < MAX_TOOL_RESULT_SIZE / 100);
+
 /// Global wall-clock ceiling for any single tool dispatch. The mirror of
 /// [`MAX_TOOL_RESULT_SIZE`] for execution time: it bounds runaway tools
 /// uniformly instead of relying on each handler to wrap itself. Tools that
@@ -170,6 +196,48 @@ mod timeout_tests {
             Err(DispatchError::Timeout { tool, .. })
                 if tool == "fake_tool"
         ));
+    }
+}
+
+#[cfg(test)]
+mod result_cap_tests {
+    use super::*;
+
+    #[test]
+    fn caps_pinned() {
+        // Style of tools/mod.rs::line_caps_pinned — a deliberate literal pin
+        // so a casual cap change fails loudly and gets its docs sweep.
+        assert_eq!(MAX_TOOL_RESULT_SIZE, 2_097_152);
+        assert_eq!(TOOL_RESULT_ENVELOPE, 4096);
+    }
+
+    #[test]
+    fn apply_max_size_at_cap_untouched() {
+        let s = "x".repeat(MAX_TOOL_RESULT_SIZE);
+        let out = apply_max_size(s.clone());
+        assert_eq!(out, s);
+    }
+
+    #[test]
+    fn apply_max_size_over_cap_truncates_on_char_boundary() {
+        // Multi-byte char straddling the boundary: 'é' is 2 bytes; start one
+        // ASCII byte before the cap so the 2-byte char spans it.
+        let total = MAX_TOOL_RESULT_SIZE + 10;
+        let mut s = "a".repeat(MAX_TOOL_RESULT_SIZE - 1);
+        while s.len() < total {
+            s.push('é');
+        }
+        let original_len = s.len();
+        let out = apply_max_size(s);
+        assert!(out.len() <= MAX_TOOL_RESULT_SIZE + 64, "marker overhead only");
+        // Valid UTF-8 is guaranteed by construction (String), but the cut
+        // must not have landed inside the multi-byte char: the kept payload
+        // ends at or below the cap on a boundary.
+        let marker = format!("...\n[truncated: {} bytes total]", original_len);
+        assert!(out.ends_with(&marker), "marker must report the ORIGINAL length: {}", &out[out.len() - 64..]);
+        let payload_len = out.len() - marker.len();
+        assert!(payload_len <= MAX_TOOL_RESULT_SIZE);
+        assert!(payload_len >= MAX_TOOL_RESULT_SIZE - 4, "cut should back up at most a few bytes");
     }
 }
 

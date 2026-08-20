@@ -45,7 +45,7 @@ const DEFAULT_MAX_TOOL_ITERATIONS: usize = 100;
 /// completed briefing persists its turns and thereby bumps `last_active`,
 /// so the gate is self-limiting. `/switch` briefs unconditionally (explicit
 /// user action). Module const, not SystemConfig — SystemConfig has no
-/// Default and 17 construction literals.
+/// Default and 10 construction literals.
 const RESUME_BRIEFING_MIN_IDLE_SECS: i64 = 30 * 60;
 
 /// Minimum spacing between briefing STARTS per session. Covers the

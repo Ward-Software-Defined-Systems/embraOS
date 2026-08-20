@@ -475,10 +475,26 @@ fn render_report(path: &str, plan: &PatchPlan, buffer: &[u8], before: usize, dry
 /// leaves the target byte-identical. Rename is last, so the target is never
 /// observable half-written — the failure the tool exists to prevent.
 pub(crate) async fn apply_atomic(target: &Path, bytes: &[u8]) -> Result<(), String> {
-    apply_atomic_inner(target, bytes, false).await
+    apply_atomic_inner(target, bytes, false, true).await
 }
 
-async fn apply_atomic_inner(target: &Path, bytes: &[u8], fail_before_rename: bool) -> Result<(), String> {
+/// Create-capable variant for file_write (sprint-6): the same
+/// temp+fsync+rename discipline, but a missing target is created instead of
+/// erroring — fresh files keep `File::create`'s default mode, exactly what
+/// the plain `tokio::fs::write` this replaces produced. file_patch itself
+/// stays on [`apply_atomic`]: `require_existing` preserves its
+/// never-creates-files guarantee even in the stat-to-write race window
+/// after `patch_at`'s own pre-stat.
+pub(crate) async fn write_atomic_create(target: &Path, bytes: &[u8]) -> Result<(), String> {
+    apply_atomic_inner(target, bytes, false, false).await
+}
+
+async fn apply_atomic_inner(
+    target: &Path,
+    bytes: &[u8],
+    fail_before_rename: bool,
+    require_existing: bool,
+) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
 
     let dir = target
@@ -497,9 +513,13 @@ async fn apply_atomic_inner(target: &Path, bytes: &[u8], fail_before_rename: boo
     ));
 
     let result: Result<(), String> = async {
-        let meta = tokio::fs::metadata(target)
-            .await
-            .map_err(|e| format!("failed to stat target: {e}"))?;
+        // `None` = target legitimately absent on the create-capable path;
+        // there is no metadata to restore and the rename creates the file.
+        let meta = match tokio::fs::metadata(target).await {
+            Ok(m) => Some(m),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !require_existing => None,
+            Err(e) => return Err(format!("failed to stat target: {e}")),
+        };
 
         let mut f = tokio::fs::File::create(&tmp)
             .await
@@ -514,14 +534,17 @@ async fn apply_atomic_inner(target: &Path, bytes: &[u8], fail_before_rename: boo
 
         // Restore mode + ownership on the temp BEFORE the rename, so the
         // replacement lands with its metadata already correct (spec §5.6).
-        tokio::fs::set_permissions(&tmp, meta.permissions())
-            .await
-            .map_err(|e| format!("failed to set permissions: {e}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            std::os::unix::fs::chown(&tmp, Some(meta.uid()), Some(meta.gid()))
-                .map_err(|e| format!("failed to set ownership: {e}"))?;
+        // Skipped for a freshly-created target — there is nothing to restore.
+        if let Some(meta) = &meta {
+            tokio::fs::set_permissions(&tmp, meta.permissions())
+                .await
+                .map_err(|e| format!("failed to set permissions: {e}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                std::os::unix::fs::chown(&tmp, Some(meta.uid()), Some(meta.gid()))
+                    .map_err(|e| format!("failed to set ownership: {e}"))?;
+            }
         }
 
         if fail_before_rename {
@@ -1343,7 +1366,7 @@ mod file_patch_tests {
         let target = dir.0.join("f.md");
         std::fs::write(&target, "precious bytes").unwrap();
 
-        let err = apply_atomic_inner(&target, b"new bytes", true).await.unwrap_err();
+        let err = apply_atomic_inner(&target, b"new bytes", true, true).await.unwrap_err();
         assert!(err.contains("injected failure"), "{err}");
         assert_eq!(std::fs::read(&target).unwrap(), b"precious bytes");
         let leftovers: Vec<_> = std::fs::read_dir(&dir.0)
@@ -1366,6 +1389,54 @@ mod file_patch_tests {
         assert!(out.starts_with("Patched"), "{out}");
         let mode = std::fs::metadata(&target).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+    }
+
+    #[tokio::test]
+    async fn write_atomic_create_creates_missing_target() {
+        // The create-capable variant (sprint-6, for file_write): a missing
+        // target is created via the same temp+rename path, no temp left over.
+        let dir = TempDir::new("wac-create");
+        let target = dir.0.join("fresh.md");
+        assert!(!target.exists());
+
+        write_atomic_create(&target, b"brand new").await.unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"brand new");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir.0)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains("embra-patch"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp file leaked: {leftovers:?}");
+    }
+
+    #[tokio::test]
+    async fn write_atomic_create_failure_leaves_no_file_and_no_temp() {
+        // t21's mirror for the create path: an injected pre-rename failure on
+        // a nonexistent target must create nothing at all.
+        let dir = TempDir::new("wac-fail");
+        let target = dir.0.join("never.md");
+
+        let err = apply_atomic_inner(&target, b"bytes", true, false).await.unwrap_err();
+        assert!(err.contains("injected failure"), "{err}");
+        assert!(!target.exists(), "failed create-write must not leave a target");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir.0)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(leftovers.is_empty(), "nothing should remain: {leftovers:?}");
+    }
+
+    #[tokio::test]
+    async fn apply_atomic_still_requires_existing() {
+        // file_patch's never-creates guarantee holds even at the writer
+        // layer: the strict entry point errors on a missing target instead of
+        // silently creating one (covers the stat-to-write race window).
+        let dir = TempDir::new("wac-strict");
+        let target = dir.0.join("absent.md");
+
+        let err = apply_atomic(&target, b"bytes").await.unwrap_err();
+        assert!(err.contains("failed to stat target"), "{err}");
+        assert!(!target.exists());
     }
 
     #[tokio::test]

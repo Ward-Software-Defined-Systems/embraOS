@@ -2022,10 +2022,22 @@ pub async fn gh_project_view(db: &WardsonDbClient, param: &str) -> String {
     }
 }
 
-/// Maximum bytes a single file_read call can return. Matches the global
-/// MAX_TOOL_RESULT_SIZE in tools/mod.rs so there is no disparity between the
-/// tool's internal limit and the wrapper's truncation.
-const FILE_READ_MAX: usize = 2_097_152; // 2 MiB
+/// Ceiling (and default) for a single file_read call: the dispatcher cap in
+/// tools/registry.rs minus TOOL_RESULT_ENVELOPE, so header + content +
+/// continuation trailer always fit under MAX_TOOL_RESULT_SIZE. Derived, not
+/// duplicated — the two were EQUAL before the sprint-6 fix, so a
+/// full-ceiling read of a larger file overflowed on its own framing and
+/// apply_max_size amputated the continuation trailer (replacing it with the
+/// generic `[truncated: N bytes total]` marker, whose N is the result
+/// length, not the file size — actively misleading on big files).
+const FILE_READ_MAX: usize =
+    crate::tools::registry::MAX_TOOL_RESULT_SIZE - crate::tools::registry::TOOL_RESULT_ENVELOPE;
+
+/// Entry cap for file_read's directory-listing branch. Raised from the
+/// original inline 200 (sprint-6): ~1000 entries is ≈40 KB of listing, far
+/// under the result cap. The truncation message renders this const so the
+/// message and the value cannot drift.
+const DIR_LIST_MAX: u32 = 1000;
 
 /// Read a file's contents. Reads are unrestricted — absolute paths can reach
 /// anywhere on the system (/etc, /proc, /var/log, etc.). Relative paths
@@ -2087,8 +2099,8 @@ pub async fn file_read(params: &str) -> String {
                     let suffix = if is_dir { "/" } else { "" };
                     listing.push_str(&format!("  {}{}\n", name, suffix));
                     count += 1;
-                    if count >= 200 {
-                        listing.push_str("  ... (truncated at 200 entries)\n");
+                    if count >= DIR_LIST_MAX {
+                        listing.push_str(&format!("  ... (truncated at {} entries)\n", DIR_LIST_MAX));
                         break;
                     }
                 }
@@ -2138,13 +2150,22 @@ pub async fn file_read(params: &str) -> String {
 
     let content = String::from_utf8_lossy(&buf);
     let more = if read_end < size {
+        // Speak the JSON-arg vocabulary the model actually calls with (the
+        // old trailer taught the legacy pipe syntax). Omitting `limit` in the
+        // suggested continuation is deliberate: the default is the full
+        // per-call ceiling, so resumed reads take maximum-size chunks. When
+        // the caller chose a smaller explicit limit, nudge once per result —
+        // small-chunk habits burn turns and can hit the tool-iteration cap.
+        let tip = if limit < FILE_READ_MAX {
+            " (tip: omit limit to read up to the full per-call ceiling in one call)"
+        } else {
+            ""
+        };
         format!(
-            "\n[... {} more bytes at offset {}. Continue with file_read {}|{}|{} ]",
+            "\n[... {} more bytes. Continue with offset={}{} ]",
             size - read_end,
             read_end,
-            path,
-            read_end,
-            limit
+            tip
         )
     } else {
         String::new()
@@ -2218,16 +2239,32 @@ pub async fn file_write(param: &str) -> String {
         Err(e) => return e,
     };
 
-    if let Err(e) = ensure_parent_dirs(&path).await {
+    write_at(&path, &content).await
+}
+
+/// Post-jail core of [`file_write`]: parent-dir creation + atomic
+/// write-and-rename + report. Split out (mirroring file_patch's `patch_at`)
+/// so positive-path tests can exercise real writes outside the workspace
+/// jail. The atomic writer (file_patch's temp+fsync+rename discipline in its
+/// create-capable form) closes the F-19 failure class: a failed write can no
+/// longer leave a partial file — the target is either fully replaced or
+/// byte-identical to before the call.
+pub(crate) async fn write_at(path: &str, content: &str) -> String {
+    if let Err(e) = ensure_parent_dirs(path).await {
         return e;
     }
 
-    match tokio::fs::write(&path, &content).await {
+    match crate::tools::file_patch::write_atomic_create(
+        std::path::Path::new(path),
+        content.as_bytes(),
+    )
+    .await
+    {
         Ok(()) => {
             let line_count = content.lines().count();
             format!("Written {} bytes ({} lines) to {}", content.len(), line_count, path)
         }
-        Err(e) => format!("Failed to write file: {}", e),
+        Err(e) => format!("Failed to write file: {} — target left unchanged", e),
     }
 }
 
@@ -3352,7 +3389,7 @@ impl GhProjectViewArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "file_read",
-    description = "Read a file or list a directory. path may be absolute (reads are unrestricted — `/etc`, `/proc`, `/var/log` all work) or workspace-relative (resolves under /embra/workspace/, matching file_write / mkdir / etc.). offset starts the read at a byte position; limit caps the number of bytes returned."
+    description = "Read a file or list a directory. path may be absolute (reads are unrestricted — `/etc`, `/proc`, `/var/log` all work) or workspace-relative (resolves under /embra/workspace/, matching file_write / mkdir / etc.). Read files WHOLE by default: omit offset and limit — one call returns up to the per-call ceiling (~2 MiB), and a larger file ends with a continuation trailer naming the exact offset to resume from. Pass offset (byte position) and limit (byte count) only when resuming from that trailer or when you deliberately need a specific slice — reading in small chunks wastes turns."
 )]
 pub struct FileReadArgs {
     pub path: String,
@@ -3898,6 +3935,182 @@ mod native_args_tests {
                 expected
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod file_io_caps_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    // Same TempDir guard as file_patch's test mod (positive paths can't
+    // touch /embra/workspace on dev hosts; no tempfile crate in the
+    // workspace).
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let d = std::env::temp_dir().join(format!(
+                "embra-file-io-caps-test-{}-{}-{}",
+                tag,
+                std::process::id(),
+                SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&d).unwrap();
+            TempDir(d)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Newline-free deterministic ASCII so content can be sliced out of the
+    /// framed result by line position.
+    fn ascii_bytes(len: usize) -> Vec<u8> {
+        (0..len).map(|i| b'a' + (i % 26) as u8).collect()
+    }
+
+    #[test]
+    fn file_read_ceiling_leaves_envelope_headroom() {
+        // The sprint-6 defect was equality between the two caps; the ceiling
+        // is now DERIVED from the dispatcher cap minus the framing reserve,
+        // so this is exact by construction — the test pins the relationship
+        // against a future re-hardcode.
+        assert_eq!(
+            FILE_READ_MAX + crate::tools::registry::TOOL_RESULT_ENVELOPE,
+            crate::tools::registry::MAX_TOOL_RESULT_SIZE
+        );
+    }
+
+    #[tokio::test]
+    async fn full_ceiling_read_trailer_survives() {
+        // The end-to-end contract the sprint-6 fix restores: a default
+        // (no-limit) read of a larger-than-ceiling file returns a framed
+        // result that fits under the dispatcher cap — so apply_max_size
+        // leaves it alone — with the continuation trailer intact, and the
+        // trailer's suggested continuation reproduces the rest of the file.
+        let dir = TempDir::new("trailer");
+        let target = dir.0.join("big.txt");
+        let total = FILE_READ_MAX + 100_000;
+        let data = ascii_bytes(total);
+        std::fs::write(&target, &data).unwrap();
+        let path = target.to_str().unwrap().to_string();
+
+        let out = file_read(&path).await;
+        assert!(
+            out.len() <= crate::tools::registry::MAX_TOOL_RESULT_SIZE,
+            "framed result must fit under the dispatcher cap ({} > {})",
+            out.len(),
+            crate::tools::registry::MAX_TOOL_RESULT_SIZE
+        );
+        assert!(!out.contains("[truncated:"), "dispatcher-style marker must not appear");
+        assert!(
+            out.contains(&format!("Continue with offset={} ", FILE_READ_MAX)),
+            "trailer must name the resume offset, got tail: {}",
+            &out[out.len().saturating_sub(160)..]
+        );
+        // Default read = full ceiling = no small-chunk tip.
+        assert!(!out.contains("tip: omit limit"), "no tip on a default read");
+
+        // Content slice is byte-exact: header is line 1, content is line 2
+        // (newline-free by construction), trailer starts at the next newline.
+        let body = &out[out.find('\n').unwrap() + 1..];
+        let content_end = body.find('\n').unwrap_or(body.len());
+        assert_eq!(&body.as_bytes()[..content_end], &data[..FILE_READ_MAX]);
+
+        // Follow the trailer verbatim: offset continuation returns the rest.
+        let cont = file_read(&format!("{}|{}", path, FILE_READ_MAX)).await;
+        assert!(!cont.contains("[... "), "final chunk must end clean, got: {}", &cont[cont.len().saturating_sub(160)..]);
+        let cont_body = &cont[cont.find('\n').unwrap() + 1..];
+        assert_eq!(cont_body.as_bytes(), &data[FILE_READ_MAX..]);
+    }
+
+    #[tokio::test]
+    async fn full_read_just_under_cap_no_trailer_no_truncation() {
+        // The band that silently corrupted before the fix: a file of exactly
+        // the old ceiling overflowed the dispatcher cap on its header alone.
+        let dir = TempDir::new("underband");
+        let target = dir.0.join("edge.txt");
+        let data = ascii_bytes(FILE_READ_MAX);
+        std::fs::write(&target, &data).unwrap();
+
+        let out = file_read(target.to_str().unwrap()).await;
+        assert!(out.len() <= crate::tools::registry::MAX_TOOL_RESULT_SIZE);
+        assert!(!out.contains("[truncated:"));
+        assert!(!out.contains("[... "), "complete read must carry no trailer");
+        let body = &out[out.find('\n').unwrap() + 1..];
+        assert_eq!(body.as_bytes(), &data[..]);
+    }
+
+    #[tokio::test]
+    async fn small_limit_read_gets_omit_limit_tip() {
+        // The anti-chunking nudge fires exactly when the habit occurs: an
+        // explicit limit below the ceiling that doesn't reach EOF.
+        let dir = TempDir::new("tip");
+        let target = dir.0.join("chunky.txt");
+        std::fs::write(&target, ascii_bytes(10_000)).unwrap();
+        let path = target.to_str().unwrap();
+
+        let out = file_read(&format!("{}|0|1000", path)).await;
+        assert!(out.contains("Continue with offset=1000"), "{out}");
+        assert!(out.contains("tip: omit limit"), "{out}");
+
+        // A complete small read carries neither trailer nor tip.
+        let full = file_read(path).await;
+        assert!(!full.contains("[... "), "{full}");
+        assert!(!full.contains("tip:"), "{full}");
+    }
+
+    #[tokio::test]
+    async fn dir_listing_caps_at_const() {
+        let dir = TempDir::new("dircap");
+        for i in 0..(DIR_LIST_MAX + 5) {
+            std::fs::write(dir.0.join(format!("f{:05}", i)), b"x").unwrap();
+        }
+        let out = file_read(dir.0.to_str().unwrap()).await;
+        assert!(
+            out.contains(&format!("truncated at {} entries", DIR_LIST_MAX)),
+            "truncation line must render the const, got tail: {}",
+            &out[out.len().saturating_sub(120)..]
+        );
+    }
+
+    #[test]
+    fn file_read_description_steers_whole_reads() {
+        // Guard for the sprint-6 anti-chunking steer (precedent: guardian's
+        // propose_description_embeds_the_validated_template) — the model must
+        // keep being told to read whole and to chunk only from the trailer.
+        let desc = crate::tools::registry::all_descriptors()
+            .find(|d| d.name == "file_read")
+            .expect("file_read registered")
+            .description;
+        assert!(desc.contains("Read files WHOLE by default"), "{desc}");
+        assert!(desc.contains("continuation trailer"), "{desc}");
+    }
+
+    #[tokio::test]
+    async fn write_at_reports_bytes_and_lines() {
+        let dir = TempDir::new("writeat");
+        let target = dir.0.join("nested").join("notes.txt");
+        let path = target.to_str().unwrap();
+
+        let out = write_at(path, "line 1\nline 2").await;
+        assert_eq!(out, format!("Written 13 bytes (2 lines) to {}", path));
+        assert_eq!(std::fs::read(&target).unwrap(), b"line 1\nline 2");
+    }
+
+    #[tokio::test]
+    async fn write_at_overwrite_replaces_content() {
+        let dir = TempDir::new("overwrite");
+        let target = dir.0.join("f.txt");
+        std::fs::write(&target, "the old content is much longer than the new").unwrap();
+        let path = target.to_str().unwrap();
+
+        let out = write_at(path, "short").await;
+        assert!(out.starts_with("Written 5 bytes"), "{out}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"short");
     }
 }
 
