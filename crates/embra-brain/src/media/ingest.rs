@@ -138,6 +138,26 @@ fn decode_limits() -> Limits {
     limits
 }
 
+/// Header dimensions only (no pixel decode) — used to register a
+/// generated image at FULL resolution in the store while the model gets
+/// the normalized copy. Same limits/bomb guard as [`normalize_blocking`].
+pub fn probe_dimensions(bytes: &[u8]) -> Result<(ImageKind, u32, u32), IngestError> {
+    if bytes.len() > MEDIA_UPLOAD_MAX {
+        return Err(IngestError::TooLarge(bytes.len(), MEDIA_UPLOAD_MAX));
+    }
+    let kind = sniff(bytes).ok_or(IngestError::NotAnImage)?;
+    let mut reader = ImageReader::with_format(Cursor::new(bytes), kind.format());
+    reader.limits(decode_limits());
+    let decoder = reader
+        .into_decoder()
+        .map_err(|e| IngestError::Decode(e.to_string()))?;
+    let (w, h) = decoder.dimensions();
+    if w > MEDIA_DECODE_DIM_MAX || h > MEDIA_DECODE_DIM_MAX {
+        return Err(IngestError::DimensionLimit(w, h, MEDIA_DECODE_DIM_MAX));
+    }
+    Ok((kind, w, h))
+}
+
 /// Synchronous core of [`normalize`] (unit-tested directly).
 pub fn normalize_blocking(bytes: Vec<u8>) -> Result<Normalized, IngestError> {
     if bytes.len() > MEDIA_UPLOAD_MAX {
@@ -370,6 +390,13 @@ pub(crate) mod tests {
             Err(IngestError::Decode(_)) => {} // CRC mismatch rejects it even earlier — also fine
             other => panic!("expected a refusal, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn probe_dimensions_reads_header_without_decoding() {
+        let (kind, w, h) = probe_dimensions(&png_fixture(7, 5)).unwrap();
+        assert_eq!((kind, w, h), (ImageKind::Png, 7, 5));
+        assert!(matches!(probe_dimensions(b"<svg/>"), Err(IngestError::NotAnImage)));
     }
 
     #[test]

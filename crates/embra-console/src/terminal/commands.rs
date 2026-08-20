@@ -57,6 +57,10 @@ Reasoning panel:
   /attach list | clear           Show or drop the staged images
   /media                         Show the last image in the media pane (console-local)
   /media off | <id>              Hide the pane, or fetch a specific media id
+  /image-provider                Show the image-generation backend, model, key status
+  /image-provider gemini         Use Gemini image models for image_generate
+  /image-provider model <id>     gemini-3-pro-image (default) | gemini-3.1-flash-image | …
+  /image-provider key <token>    Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it
 
 Setup:
   /github-token <token>          Set GitHub token

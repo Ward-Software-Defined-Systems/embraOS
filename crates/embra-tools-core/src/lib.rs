@@ -45,6 +45,12 @@ pub enum DispatchError {
 pub struct ToolOutput {
     pub text: String,
     pub images: Vec<ToolImage>,
+    /// Display-only references: images the tool put in the MEDIA store
+    /// that the OPERATOR should see (the loop emits a `MediaRef` frame per
+    /// entry) but that are NOT handed to the model (e.g. `image_generate`
+    /// with `return_image=false`). Images in `images` with a `media_ref`
+    /// are announced the same way — don't list them here too.
+    pub media_refs: Vec<MediaRefMeta>,
 }
 
 impl ToolOutput {
@@ -52,11 +58,17 @@ impl ToolOutput {
         ToolOutput {
             text: text.into(),
             images: Vec::new(),
+            media_refs: Vec::new(),
         }
     }
 
     pub fn with_image(mut self, image: ToolImage) -> Self {
         self.images.push(image);
+        self
+    }
+
+    pub fn with_media_ref(mut self, media_ref: MediaRefMeta) -> Self {
+        self.media_refs.push(media_ref);
         self
     }
 }

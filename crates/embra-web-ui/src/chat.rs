@@ -505,6 +505,7 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/iter-cap", "show / set tool iteration cap"),
         ("/show-reasoning", "toggle reasoning panel"),
         ("/attach", "attach a workspace image to your next message (needs id or path)"),
+        ("/image-provider", "image-generation backend / model / key (needs args)"),
     ]),
     ("Setup", &[
         ("/git-setup", "show git identity"),

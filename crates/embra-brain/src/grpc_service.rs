@@ -417,6 +417,8 @@ impl BrainService for BrainGrpcService {
                     gemini_model: None,
                     anthropic_model: None,
                     anthropic_effort: None,
+                    image_provider: None,
+                    image_model: None,
                     git_tokens: None,
                     anthropic_api_key: None,
                     gemini_api_key: None,
@@ -875,6 +877,8 @@ async fn handle_request(
                 gemini_model: None,
                 anthropic_model: None,
                 anthropic_effort: None,
+                image_provider: None,
+                image_model: None,
                 git_tokens: None,
                 anthropic_api_key: None,
                 gemini_api_key: None,
@@ -1586,8 +1590,8 @@ async fn handle_request(
                                 )),
                             })).await;
                             let elapsed_ms = started.elapsed().as_millis() as u64;
-                            let (content, tool_images, is_error) = match outcome {
-                                Ok(out) => (out.text, out.images, false),
+                            let (content, tool_images, tool_media_refs, is_error) = match outcome {
+                                Ok(out) => (out.text, out.images, out.media_refs, false),
                                 Err(err) => {
                                     let msg = match err {
                                         embra_tools_core::DispatchError::Unknown(n) => format!(
@@ -1607,7 +1611,7 @@ async fn handle_request(
                                             tool, limit_secs
                                         ),
                                     };
-                                    (msg, Vec::new(), true)
+                                    (msg, Vec::new(), Vec::new(), true)
                                 }
                             };
                             info!(
@@ -1702,15 +1706,17 @@ async fn handle_request(
                             // the loop-side companion, like set_name's
                             // ModeChange). Emitted after the ToolExecution
                             // frame so clients render the card under it.
-                            for img in &tool_images {
-                                if let Some(m) = &img.media_ref {
-                                    let _ = tx.send(Ok(ConversationResponse {
-                                        response_type: Some(conversation_response::ResponseType::Media(
-                                            media::media_ref_from_tool(m, id),
-                                        )),
-                                    })).await;
-                                    turn_assistant_refs.push(media::attachment_ref_from_tool(m));
-                                }
+                            let announce = tool_images
+                                .iter()
+                                .filter_map(|img| img.media_ref.as_ref())
+                                .chain(tool_media_refs.iter());
+                            for m in announce {
+                                let _ = tx.send(Ok(ConversationResponse {
+                                    response_type: Some(conversation_response::ResponseType::Media(
+                                        media::media_ref_from_tool(m, id),
+                                    )),
+                                })).await;
+                                turn_assistant_refs.push(media::attachment_ref_from_tool(m));
                             }
                             // Images ride the structured ToolResult (never the
                             // text — the byte cap would cut base64 silently);
@@ -2320,7 +2326,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-5|opus-4.8|fable-5>   Switch the Anthropic model (next message)\n  /effort                            Show the Anthropic effort level\n  /effort <low|medium|high|xhigh|max>  Set effort (default max, next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image (uploaded id or a workspace path) to your next message\n  /attach list | clear               Show or drop the staged images\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-5|opus-4.8|fable-5>   Switch the Anthropic model (next message)\n  /effort                            Show the Anthropic effort level\n  /effort <low|medium|high|xhigh|max>  Set effort (default max, next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image (uploaded id or a workspace path) to your next message\n  /attach list | clear               Show or drop the staged images\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-3-pro-image (default) | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -2343,6 +2349,9 @@ async fn handle_slash_command(
         }
         "/attach" => {
             handle_attach_command(args, tx, db, session_mgr).await;
+        }
+        "/image-provider" => {
+            handle_image_provider_command(args, tx, db).await;
         }
         "/guardian" => {
             // Operator affordance (define/list/status/show/delete/key).
@@ -4794,6 +4803,140 @@ async fn handle_attach_command(
     }
 }
 
+/// `/image-provider` — the image_generate backend. Status (no args),
+/// `gemini`, `model <id>`, `key [<token>|remove]`, `clear`. Modeled on
+/// `/effort` (config load → validate → save) and `/guardian key brave`
+/// (STATE-only secret via `write_credential_state`, never echoed).
+async fn handle_image_provider_command(
+    args: &str,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    db: &Arc<WardsonDbClient>,
+) {
+    use crate::provider::image::{
+        resolve_image_choice, ImageProviderKind, IMAGE_KEY_ENV, IMAGE_KEY_PATH_GEMINI,
+    };
+    let send = |content: String, kind: SystemMessageType| {
+        let tx = tx.clone();
+        async move {
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage { content, msg_type: kind as i32 },
+                    )),
+                }))
+                .await;
+        }
+    };
+    let mut cfg = match config::load_config(db).await {
+        Ok(c) => c,
+        Err(e) => {
+            send(format!("/image-provider: failed to load config: {e}"), SystemMessageType::Error).await;
+            return;
+        }
+    };
+    let parts: Vec<&str> = args.split_whitespace().collect();
+    let usage = "Usage: /image-provider | /image-provider gemini | /image-provider model <id> | /image-provider key <token> | /image-provider key remove | /image-provider clear";
+    match parts.as_slice() {
+        [] => {
+            let status = match resolve_image_choice(&cfg) {
+                Ok(c) => {
+                    let key = match c.key_source {
+                        Some("env") => format!("SET ({IMAGE_KEY_ENV})"),
+                        Some("state") => "SET (dedicated image key on STATE)".to_string(),
+                        Some("gemini-llm-key") => "SET (falling back to the Gemini LLM key)".to_string(),
+                        _ => "NOT set — /image-provider key <token> (or configure Gemini as the LLM provider)".to_string(),
+                    };
+                    format!(
+                        "Image generation: provider {} ({}), model {}, key {}.\nModels: {}\n{}",
+                        c.kind.as_str(),
+                        if cfg.image_provider.is_some() { "explicit" } else { "default" },
+                        c.model,
+                        key,
+                        c.kind.models().join(" | "),
+                        usage
+                    )
+                }
+                Err(e) => format!("Image generation: misconfigured — {e}\n{usage}"),
+            };
+            send(status, SystemMessageType::Info).await;
+        }
+        ["gemini"] => {
+            cfg.image_provider = Some("gemini".to_string());
+            match config::save_config(db, &cfg).await {
+                Ok(()) => send(
+                    format!(
+                        "Image provider set to gemini (model {}). image_generate uses it on its next call.",
+                        cfg.image_model.clone().unwrap_or_else(|| ImageProviderKind::Gemini.default_model().to_string())
+                    ),
+                    SystemMessageType::Info,
+                )
+                .await,
+                Err(e) => send(format!("/image-provider: failed to save config: {e}"), SystemMessageType::Error).await,
+            }
+        }
+        ["model", id] => {
+            let kind = cfg
+                .image_provider
+                .as_deref()
+                .and_then(ImageProviderKind::parse)
+                .unwrap_or(ImageProviderKind::Gemini);
+            if !kind.models().contains(id) {
+                send(
+                    format!("Unknown image model '{}'. Options: {}", id, kind.models().join(" | ")),
+                    SystemMessageType::Error,
+                )
+                .await;
+                return;
+            }
+            cfg.image_model = Some((*id).to_string());
+            match config::save_config(db, &cfg).await {
+                Ok(()) => send(format!("Image model set to {id}. Takes effect on the next image_generate call."), SystemMessageType::Info).await,
+                Err(e) => send(format!("/image-provider: failed to save config: {e}"), SystemMessageType::Error).await,
+            }
+        }
+        ["key"] => {
+            let set = std::fs::read_to_string(IMAGE_KEY_PATH_GEMINI)
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            send(
+                format!(
+                    "Dedicated image-generation key: {}. Set with /image-provider key <token>; remove with /image-provider key remove. Without it image_generate falls back to the Gemini LLM key when one is configured.",
+                    if set { "SET" } else { "NOT set" }
+                ),
+                SystemMessageType::Info,
+            )
+            .await;
+        }
+        ["key", "remove"] => {
+            match std::fs::remove_file(IMAGE_KEY_PATH_GEMINI) {
+                Ok(()) => send("Dedicated image-generation key removed.".to_string(), SystemMessageType::Info).await,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    send("No dedicated image-generation key was set.".to_string(), SystemMessageType::Info).await
+                }
+                Err(e) => send(format!("/image-provider: failed to remove the key: {e}"), SystemMessageType::Error).await,
+            }
+        }
+        ["key", token] => {
+            match config::write_credential_state(IMAGE_KEY_PATH_GEMINI, token.trim()) {
+                Ok(()) => {
+                    info!(target: "media", "image-generation key saved to STATE");
+                    send("Image-generation key saved (STATE, 0600). It is never echoed; image_generate uses it on its next call.".to_string(), SystemMessageType::Info).await
+                }
+                Err(e) => send(format!("/image-provider: failed to save the key: {e}"), SystemMessageType::Error).await,
+            }
+        }
+        ["clear"] => {
+            cfg.image_provider = None;
+            cfg.image_model = None;
+            match config::save_config(db, &cfg).await {
+                Ok(()) => send("Image provider settings cleared (back to the defaults: gemini / gemini-3-pro-image; the key file is untouched).".to_string(), SystemMessageType::Info).await,
+                Err(e) => send(format!("/image-provider: failed to save config: {e}"), SystemMessageType::Error).await,
+            }
+        }
+        _ => send(usage.to_string(), SystemMessageType::Error).await,
+    }
+}
+
 async fn handle_effort_command(
     args: &str,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
@@ -6524,6 +6667,8 @@ mod native_loop_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            image_provider: None,
+            image_model: None,
             git_tokens: None,
             anthropic_api_key: None,
             gemini_api_key: None,
@@ -7365,6 +7510,8 @@ mod reasoning_delta_privacy_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            image_provider: None,
+            image_model: None,
             git_tokens: None,
             anthropic_api_key: None,
             gemini_api_key: None,
@@ -7421,6 +7568,8 @@ mod soul_sealed_mode_change_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            image_provider: None,
+            image_model: None,
             git_tokens: None,
             anthropic_api_key: None,
             gemini_api_key: None,

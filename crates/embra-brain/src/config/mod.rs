@@ -75,6 +75,20 @@ pub struct SystemConfig {
     /// no schema bump.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anthropic_effort: Option<String>,
+    /// Image-generation backend for the `image_generate` tool (media wave
+    /// part 2). `None` (additive default) = Gemini when a Gemini key is
+    /// resolvable, else unconfigured. Only `"gemini"` is valid today —
+    /// deliberately a string + a small enum in `provider::image`, NOT an
+    /// arm on `ProviderKind` (that enum drives LLM construction and
+    /// session-compat checks). Set via `/image-provider gemini`.
+    /// Serde-additive `Option` — no schema bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_provider: Option<String>,
+    /// Image-generation model id. `None` = the backend's default
+    /// (`gemini-3-pro-image`). Allowlisted in `provider::image`; set via
+    /// `/image-provider model <id>`. Serde-additive `Option`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_model: Option<String>,
     /// Per-host git tokens (host → PAT) for self-hosted git servers
     /// (GitLab/Gitea over HTTPS). Injected by the git tools as
     /// `url.https://oauth2:<token>@<host>/.insteadOf` rewrites — the
@@ -302,6 +316,8 @@ pub async fn run_config_wizard() -> Result<SystemConfig> {
         gemini_model: None,
         anthropic_model: None,
         anthropic_effort: None,
+        image_provider: None,
+        image_model: None,
         git_tokens: None,
         anthropic_api_key: None,
         gemini_api_key: None,
@@ -815,6 +831,8 @@ pub async fn run_config_wizard_grpc(
         gemini_model: None,
         anthropic_model,
         anthropic_effort: None,
+        image_provider: None,
+        image_model: None,
         git_tokens: None,
         anthropic_api_key,
         gemini_api_key,
@@ -989,6 +1007,8 @@ mod key_lookup_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            image_provider: None,
+            image_model: None,
             git_tokens: None,
             anthropic_api_key: anth.map(str::to_string),
             gemini_api_key: gem.map(str::to_string),
@@ -1056,6 +1076,43 @@ fn detect_timezone() -> String {
     "UTC".into()
 }
 
+/// Test-only construction helper shared across the crate (every literal
+/// must name every field — `SystemConfig` has no `Default`).
+#[cfg(test)]
+pub(crate) mod tests_support {
+    use super::SystemConfig;
+
+    pub(crate) fn minimal_cfg() -> SystemConfig {
+        SystemConfig {
+            name: "Embra".into(),
+            api_key: "k".into(),
+            timezone: "UTC".into(),
+            deployment_mode: "phase1".into(),
+            created_at: String::new(),
+            version: "test".into(),
+            github_token: None,
+            kg_temporal_window_secs: 1800,
+            kg_max_traversal_depth: 3,
+            kg_traversal_depth_ceiling: 5,
+            kg_edge_candidate_limit: 50,
+            kg_traversal_edge_limit: 500,
+            kg_traversal_node_budget: 1000,
+            api_provider: "anthropic".into(),
+            gemini_model: None,
+            anthropic_model: None,
+            anthropic_effort: None,
+            image_provider: None,
+            image_model: None,
+            git_tokens: None,
+            anthropic_api_key: None,
+            gemini_api_key: None,
+            max_tool_iterations: None,
+            show_reasoning: None,
+            openai_compat: crate::config::OpenAiCompatConfig::default(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod max_tool_iterations_serde_tests {
     use super::SystemConfig;
@@ -1080,6 +1137,8 @@ mod max_tool_iterations_serde_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            image_provider: None,
+            image_model: None,
             git_tokens: None,
             anthropic_api_key: None,
             gemini_api_key: None,
@@ -1127,6 +1186,23 @@ mod max_tool_iterations_serde_tests {
         });
         let cfg: SystemConfig = serde_json::from_value(doc).unwrap();
         assert!(cfg.max_tool_iterations.is_none());
+    }
+
+    #[test]
+    fn image_config_fields_are_serde_additive() {
+        // Media wave part 2: absent on the wire when None (pre-wave config
+        // docs byte-identical), round-trip when set, absent → None.
+        let cfg = minimal_cfg();
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert!(json.get("image_provider").is_none());
+        assert!(json.get("image_model").is_none());
+        let mut cfg = minimal_cfg();
+        cfg.image_provider = Some("gemini".into());
+        cfg.image_model = Some("gemini-3-pro-image".into());
+        let json = serde_json::to_value(&cfg).unwrap();
+        let back: SystemConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(back.image_provider.as_deref(), Some("gemini"));
+        assert_eq!(back.image_model.as_deref(), Some("gemini-3-pro-image"));
     }
 
     #[test]
