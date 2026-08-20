@@ -5,7 +5,7 @@
 
 /// Returns true if this command is handled locally (not sent to brain)
 pub fn is_local_command(cmd: &str) -> bool {
-    matches!(cmd, "/help" | "/copy" | "/ml")
+    matches!(cmd, "/help" | "/copy" | "/ml" | "/media")
 }
 
 /// Handle a local command, returning the output string
@@ -53,6 +53,10 @@ Reasoning panel:
   /show-reasoning                Show whether reasoning streams to the panel
   /show-reasoning <on|off>       Toggle live reasoning in the expression panel (default on)
   /show-reasoning reset          Restore default (on)
+  /attach <id|path>              Attach an image (uploaded id or workspace path) to your next message
+  /attach list | clear           Show or drop the staged images
+  /media                         Show the last image in the media pane (console-local)
+  /media off | <id>              Hide the pane, or fetch a specific media id
 
 Setup:
   /github-token <token>          Set GitHub token

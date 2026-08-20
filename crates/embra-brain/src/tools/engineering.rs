@@ -2145,7 +2145,10 @@ pub async fn file_read(params: &str) -> String {
     // 1KB strongly suggests non-text content.
     let head = &buf[..buf.len().min(1024)];
     if head.contains(&0u8) {
-        return format!("{} is a binary file ({} bytes)", path, size);
+        return format!(
+            "{} is a binary file ({} bytes); for images use image_view",
+            path, size
+        );
     }
 
     let content = String::from_utf8_lossy(&buf);

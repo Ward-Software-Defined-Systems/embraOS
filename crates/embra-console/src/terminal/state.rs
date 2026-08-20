@@ -121,6 +121,28 @@ impl DisplayMessage {
         Self::new_with_tz("tool", format!("[{}] {}", name, result), tz_str)
     }
 
+    /// Media card: the text row every surface gets for a `MediaRef`
+    /// (the pixel pane is additive on top of it). Timeline row:
+    /// `[image generated] poster.png (1024×1024, 812 KB) — /embra/workspace/MEDIA/gen-….png — web: /api/media/gen-…`
+    pub fn media_with_tz(m: &embra_common::proto::brain::MediaRef, tz_str: &str) -> Self {
+        let replay = if m.replay { " (history)" } else { "" };
+        Self::new_with_tz(
+            "system",
+            format!(
+                "[image {}]{} {} ({}×{}, {} KB) — {} — web: /api/media/{}",
+                m.origin,
+                replay,
+                m.name,
+                m.width,
+                m.height,
+                m.byte_size / 1024,
+                m.path,
+                m.id
+            ),
+            tz_str,
+        )
+    }
+
     /// Native-tool-use render (NATIVE-TOOLS-01 Stage 7). Includes the
     /// typed input JSON inline when non-empty and flags errors with an
     /// explicit "ERR" marker. Timeline row:
@@ -143,6 +165,21 @@ impl DisplayMessage {
 /// Full application state for the TUI
 pub struct AppState {
     pub mode: AppMode,
+    /// Media wave: the in-TUI image pane (ratatui-image). `media` is
+    /// the last fetched image; `media_visible` is the operator toggle
+    /// (`/media` / `/media off`); `last_media_id` remembers the newest
+    /// id seen (incl. history replays) so `/media` can fetch on demand.
+    pub media: Option<super::graphics::MediaPane>,
+    pub media_visible: bool,
+    pub last_media_id: Option<String>,
+    /// In-flight fetch/decode for the pane (id) — prevents a pile-up of
+    /// decodes when several MediaRef frames arrive in one turn.
+    pub media_loading: Option<String>,
+    /// Set by the event handler (non-replay MediaRef) or `/media <id>`;
+    /// the main loop picks it up and spawns the fetch+decode task (the
+    /// handler has no client access by design — same seam as
+    /// `stop_requested`).
+    pub pending_media_fetch: Option<embra_common::proto::brain::MediaRef>,
     pub messages: Vec<DisplayMessage>,
     pub input_buffer: String,
     pub cursor_pos: usize,
@@ -216,6 +253,11 @@ impl AppState {
         Self {
             // Start in Learning mode — brain sends ModeTransition with correct mode
             mode: AppMode::Learning,
+            media: None,
+            media_visible: false,
+            last_media_id: None,
+            media_loading: None,
+            pending_media_fetch: None,
             messages: Vec::new(),
             input_buffer: String::new(),
             cursor_pos: 0,
@@ -262,6 +304,15 @@ impl AppState {
     /// Shift-scroll chords should mutate `expression_scroll`).
     pub fn expression_panel_visible(&self) -> bool {
         self.viewport_cols >= 80 && self.viewport_rows >= 20
+    }
+
+    /// Media band shows when there is an image, the operator hasn't
+    /// hidden it, and the terminal is tall enough to keep the
+    /// conversation usable (mirror of `expression_panel_visible`).
+    pub fn media_pane_visible(&self) -> bool {
+        self.media_visible
+            && self.media.is_some()
+            && self.viewport_rows >= super::graphics::MEDIA_PANE_MIN_ROWS
     }
 
     /// Infer setup step from a SetupPrompt prompt string. Order

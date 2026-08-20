@@ -11,6 +11,7 @@ pub mod engineering;
 pub mod express;
 pub mod file_patch;
 pub mod guardian;
+pub mod media;
 pub mod registry;
 pub mod security;
 pub mod sessions;

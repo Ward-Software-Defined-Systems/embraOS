@@ -93,7 +93,7 @@ pub enum OpenAIMessage {
         content: String,
     },
     User {
-        content: String,
+        content: UserContent,
     },
     Assistant {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -114,6 +114,36 @@ pub enum OpenAIMessage {
         tool_call_id: String,
         content: String,
     },
+}
+
+/// `user.content`: a bare string (every text-only turn — byte-identical
+/// to the pre-media wire) or the parts array the vision models take.
+/// Untagged: a `String` serializes as a JSON string, `Parts` as an array.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum UserContent {
+    Text(String),
+    Parts(Vec<UserPart>),
+}
+
+impl From<String> for UserContent {
+    fn from(s: String) -> Self {
+        UserContent::Text(s)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum UserPart {
+    Text { text: String },
+    ImageUrl { image_url: ImageUrlRef },
+}
+
+/// `image_url.url` carries a `data:<mime>;base64,…` URL — embraOS never
+/// sends remote URLs to a local model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ImageUrlRef {
+    pub url: String,
 }
 
 // ============================================================

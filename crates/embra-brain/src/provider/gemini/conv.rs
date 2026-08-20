@@ -13,9 +13,116 @@
 
 use std::collections::HashMap;
 
-use crate::provider::ir::{ApiMessage, Block};
+use crate::provider::ir::{ApiMessage, Block, ImageData};
 
-use super::wire::{GeminiContent, GeminiFunctionCall, GeminiFunctionResponse, GeminiPart};
+use super::wire::{
+    GeminiBlob, GeminiContent, GeminiFunctionCall, GeminiFunctionResponse,
+    GeminiFunctionResponsePart, GeminiPart,
+};
+
+/// Where a media tool's images go on the Gemini wire. The three candidate
+/// placements are all implemented; the const selects one so the live
+/// probe against a real Gemini 3 model is a one-line switch. Unit test
+/// `tool_result_images_placement_is_locked` pins whichever is selected.
+///
+/// - `FunctionResponseParts`: `functionResponse.parts[].inlineData` — the
+///   documented multimodal-function-response form (default).
+/// - `SiblingInlineData`: `inlineData` parts in the same user content,
+///   right after the `functionResponse` part.
+/// - `TrailingUserContent`: a separate trailing `user` content with a
+///   text label + `inlineData` parts (handled in `ir_messages_to_wire`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // the non-selected placements are the probe's alternatives, kept compiled
+pub(crate) enum ToolResultImagePlacement {
+    FunctionResponseParts,
+    SiblingInlineData,
+    TrailingUserContent,
+}
+
+pub(crate) const TOOL_RESULT_IMAGE_PLACEMENT: ToolResultImagePlacement =
+    ToolResultImagePlacement::FunctionResponseParts;
+
+fn blob(img: &ImageData) -> GeminiBlob {
+    GeminiBlob {
+        mime_type: img.media_type.clone(),
+        data: img.data_b64.to_string(),
+    }
+}
+
+fn inline_part(img: &ImageData) -> GeminiPart {
+    GeminiPart {
+        inline_data: Some(blob(img)),
+        ..GeminiPart::default()
+    }
+}
+
+/// Build the part(s) for one tool result. Text-only results produce the
+/// single historical `functionResponse` part, byte-identical. With
+/// images, the placement const decides; `TrailingUserContent` returns
+/// the extra parts separately so the caller can mint a new content.
+pub(crate) fn tool_result_parts(
+    call_id: &str,
+    name: &str,
+    content: &str,
+    is_error: bool,
+    images: &[ImageData],
+) -> (GeminiPart, Vec<GeminiPart>) {
+    let response = if is_error {
+        serde_json::json!({"error": content})
+    } else {
+        serde_json::json!({"result": content})
+    };
+    let mut func = GeminiFunctionResponse {
+        id: call_id.to_string(),
+        name: name.to_string(),
+        response,
+        parts: None,
+    };
+    if images.is_empty() {
+        return (
+            GeminiPart {
+                function_response: Some(func),
+                ..GeminiPart::default()
+            },
+            Vec::new(),
+        );
+    }
+    match TOOL_RESULT_IMAGE_PLACEMENT {
+        ToolResultImagePlacement::FunctionResponseParts => {
+            func.parts = Some(
+                images
+                    .iter()
+                    .map(|img| GeminiFunctionResponsePart { inline_data: blob(img) })
+                    .collect(),
+            );
+            (
+                GeminiPart {
+                    function_response: Some(func),
+                    ..GeminiPart::default()
+                },
+                Vec::new(),
+            )
+        }
+        ToolResultImagePlacement::SiblingInlineData
+        | ToolResultImagePlacement::TrailingUserContent => (
+            GeminiPart {
+                function_response: Some(func),
+                ..GeminiPart::default()
+            },
+            {
+                let mut extra = Vec::with_capacity(images.len() + 1);
+                if TOOL_RESULT_IMAGE_PLACEMENT == ToolResultImagePlacement::TrailingUserContent {
+                    extra.push(GeminiPart {
+                        text: Some(format!("Image output of tool call {call_id}:")),
+                        ..GeminiPart::default()
+                    });
+                }
+                extra.extend(images.iter().map(inline_part));
+                extra
+            },
+        ),
+    }
+}
 
 /// Convert neutral IR messages into the Gemini wire shape.
 ///
@@ -37,26 +144,38 @@ pub fn ir_messages_to_wire(messages: &[ApiMessage]) -> Vec<GeminiContent> {
         }
     }
 
-    messages
-        .iter()
-        .map(|msg| {
-            let (role, blocks) = match msg {
-                ApiMessage::User { content } => ("user", content.as_slice()),
-                ApiMessage::Assistant { content } => ("model", content.as_slice()),
-            };
-            GeminiContent {
-                role: role.to_string(),
-                parts: ir_blocks_to_parts(blocks, &call_names),
-            }
-        })
-        .collect()
+    let mut out = Vec::with_capacity(messages.len());
+    for msg in messages {
+        let (role, blocks) = match msg {
+            ApiMessage::User { content } => ("user", content.as_slice()),
+            ApiMessage::Assistant { content } => ("model", content.as_slice()),
+        };
+        let (parts, trailing) = ir_blocks_to_parts(blocks, &call_names);
+        out.push(GeminiContent {
+            role: role.to_string(),
+            parts,
+        });
+        if !trailing.is_empty() {
+            // `TrailingUserContent` placement: the media tool's images
+            // ride a separate user content after the function responses.
+            out.push(GeminiContent {
+                role: "user".to_string(),
+                parts: trailing,
+            });
+        }
+    }
+    out
 }
 
+/// Returns the content's parts plus any trailing parts that must become a
+/// separate user content (only non-empty under the
+/// `TrailingUserContent` placement).
 fn ir_blocks_to_parts(
     blocks: &[Block],
     call_names: &HashMap<String, String>,
-) -> Vec<GeminiPart> {
+) -> (Vec<GeminiPart>, Vec<GeminiPart>) {
     let mut parts = Vec::with_capacity(blocks.len());
+    let mut trailing = Vec::new();
     for block in blocks {
         match block {
             Block::Text(s) => {
@@ -65,6 +184,7 @@ fn ir_blocks_to_parts(
                     ..GeminiPart::default()
                 });
             }
+            Block::Image(img) => parts.push(inline_part(img)),
             Block::ToolCall { id, name, args, provider_opaque } => {
                 let signature = provider_opaque
                     .as_ref()
@@ -81,21 +201,15 @@ fn ir_blocks_to_parts(
                     ..GeminiPart::default()
                 });
             }
-            Block::ToolResult { call_id, content, is_error } => {
+            Block::ToolResult { call_id, content, is_error, images } => {
                 let resolved_name = call_names.get(call_id).cloned().unwrap_or_default();
-                let response = if *is_error {
-                    serde_json::json!({"error": content})
-                } else {
-                    serde_json::json!({"result": content})
-                };
-                parts.push(GeminiPart {
-                    function_response: Some(GeminiFunctionResponse {
-                        id: call_id.clone(),
-                        name: resolved_name,
-                        response,
-                    }),
-                    ..GeminiPart::default()
-                });
+                let (part, extra) =
+                    tool_result_parts(call_id, &resolved_name, content, *is_error, images);
+                parts.push(part);
+                match TOOL_RESULT_IMAGE_PLACEMENT {
+                    ToolResultImagePlacement::SiblingInlineData => parts.extend(extra),
+                    _ => trailing.extend(extra),
+                }
             }
             Block::ProviderOpaque(json) => {
                 // Mint a part from whatever the parser stashed.
@@ -120,7 +234,7 @@ fn ir_blocks_to_parts(
             }
         }
     }
-    parts
+    (parts, trailing)
 }
 
 #[cfg(test)]
@@ -196,6 +310,7 @@ mod tests {
                 call_id: "fc1".into(),
                 content: "{\"healthy\": true}".into(),
                 is_error: false,
+                images: Vec::new(),
             }]),
         ];
         let wire = ir_messages_to_wire(&msgs);
@@ -223,6 +338,7 @@ mod tests {
                 call_id: "fc1".into(),
                 content: "boom".into(),
                 is_error: true,
+                images: Vec::new(),
             }]),
         ];
         let wire = ir_messages_to_wire(&msgs);
@@ -243,5 +359,83 @@ mod tests {
         assert_eq!(part.thought_signature.as_deref(), Some("late-sig"));
         assert!(part.text.is_none());
         assert!(part.function_call.is_none());
+    }
+
+    fn img(name: &str) -> ImageData {
+        ImageData {
+            media_type: "image/jpeg".into(),
+            data_b64: std::sync::Arc::from("/9j/"),
+            width: 4,
+            height: 4,
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn image_block_becomes_inline_data_part() {
+        let msgs = vec![ApiMessage::user_with_images(vec![img("a.jpg")], "what is this")];
+        let wire = ir_messages_to_wire(&msgs);
+        assert_eq!(wire.len(), 1);
+        let v = serde_json::to_value(&wire[0]).unwrap();
+        assert_eq!(v["parts"][0]["inlineData"]["mimeType"], "image/jpeg");
+        assert_eq!(v["parts"][0]["inlineData"]["data"], "/9j/");
+        assert_eq!(v["parts"][1]["text"], "what is this");
+    }
+
+    #[test]
+    fn tool_result_without_images_is_byte_identical() {
+        let (part, extra) = tool_result_parts("fc1", "system_status", "ok", false, &[]);
+        assert!(extra.is_empty());
+        assert_eq!(
+            serde_json::to_string(&part).unwrap(),
+            r#"{"functionResponse":{"id":"fc1","name":"system_status","response":{"result":"ok"}}}"#
+        );
+    }
+
+    #[test]
+    fn tool_result_images_placement_is_locked() {
+        // Pins the SELECTED placement (see TOOL_RESULT_IMAGE_PLACEMENT).
+        let msgs = vec![
+            ApiMessage::Assistant {
+                content: vec![Block::ToolCall {
+                    id: "fc1".into(),
+                    name: "image_view".into(),
+                    args: json!({}),
+                    provider_opaque: None,
+                }],
+            },
+            ApiMessage::user_tool_results(vec![Block::ToolResult {
+                call_id: "fc1".into(),
+                content: "=== image a.jpg ===".into(),
+                is_error: false,
+                images: vec![img("a.jpg")],
+            }]),
+        ];
+        let wire = ir_messages_to_wire(&msgs);
+        match TOOL_RESULT_IMAGE_PLACEMENT {
+            ToolResultImagePlacement::FunctionResponseParts => {
+                assert_eq!(wire.len(), 2);
+                let v = serde_json::to_value(&wire[1]).unwrap();
+                assert_eq!(v["parts"].as_array().unwrap().len(), 1);
+                let fr = &v["parts"][0]["functionResponse"];
+                assert_eq!(fr["response"]["result"], "=== image a.jpg ===");
+                assert_eq!(fr["parts"][0]["inlineData"]["mimeType"], "image/jpeg");
+                assert_eq!(fr["parts"][0]["inlineData"]["data"], "/9j/");
+            }
+            ToolResultImagePlacement::SiblingInlineData => {
+                assert_eq!(wire.len(), 2);
+                let v = serde_json::to_value(&wire[1]).unwrap();
+                assert_eq!(v["parts"].as_array().unwrap().len(), 2);
+                assert!(v["parts"][0].get("functionResponse").is_some());
+                assert_eq!(v["parts"][1]["inlineData"]["mimeType"], "image/jpeg");
+            }
+            ToolResultImagePlacement::TrailingUserContent => {
+                assert_eq!(wire.len(), 3);
+                assert_eq!(wire[2].role, "user");
+                let v = serde_json::to_value(&wire[2]).unwrap();
+                assert_eq!(v["parts"][0]["text"], "Image output of tool call fc1:");
+                assert_eq!(v["parts"][1]["inlineData"]["mimeType"], "image/jpeg");
+            }
+        }
     }
 }

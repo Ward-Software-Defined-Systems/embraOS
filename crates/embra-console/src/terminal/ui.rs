@@ -11,7 +11,7 @@ use ratatui::{
 use super::render::{self, StyledLine, StyledSegment};
 use super::state::{AppMode, AppState, SetupStep};
 
-pub fn draw(f: &mut Frame, app: &AppState) {
+pub fn draw(f: &mut Frame, app: &mut AppState) {
     let available_width = f.area().width.saturating_sub(2) as usize; // minus borders
     // Input height from the same char-wrap packing that renders the text and
     // places the cursor (input_layout) — the three can't disagree. Cap at 10
@@ -28,12 +28,18 @@ pub fn draw(f: &mut Frame, app: &AppState) {
     // Hidden on small terminals so the conversation keeps enough rows.
     let show_panel = app.expression_panel_visible();
     let panel_height: u16 = if show_panel { 8 } else { 0 };
+    // Media wave: optional image band below the expression panel. Same
+    // shape as EXPR-01 — a fixed-height horizontal band, collapsed to 0
+    // rows when hidden so the conversation reclaims the space.
+    let show_media = app.media_pane_visible();
+    let media_height: u16 = if show_media { super::graphics::MEDIA_PANE_ROWS } else { 0 };
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(1),            // Header
             Constraint::Length(panel_height), // Expression panel (EXPR-01)
+            Constraint::Length(media_height), // Media pane (in-TUI image)
             Constraint::Min(5),               // Conversation
             Constraint::Length(input_height), // Input (dynamic)
             Constraint::Length(1),            // Status bar
@@ -44,9 +50,46 @@ pub fn draw(f: &mut Frame, app: &AppState) {
     if show_panel {
         draw_expression_panel(f, chunks[1], app);
     }
-    draw_conversation(f, chunks[2], app);
-    draw_input(f, chunks[3], app);
-    draw_status_bar(f, chunks[4], app);
+    if show_media {
+        draw_media_pane(f, chunks[2], app);
+    }
+    draw_conversation(f, chunks[3], app);
+    draw_input(f, chunks[4], app);
+    draw_status_bar(f, chunks[5], app);
+}
+
+/// The in-TUI image band. ratatui-image marks the cells it paints as
+/// skip, so the 200 ms repaint never clobbers a pixel protocol; when the
+/// band collapses, the conversation's cells overwrite the area (addon-
+/// image / terminals clear image tiles on cell overwrite; halfblocks are
+/// plain cells). The title carries the card metadata + the hide hint.
+fn draw_media_pane(f: &mut Frame, area: Rect, app: &mut AppState) {
+    let Some(pane) = app.media.as_mut() else { return };
+    let title = format!(
+        " {} · {}×{} · {} KB · {}  [/media off] ",
+        pane.meta.name,
+        pane.meta.width,
+        pane.meta.height,
+        pane.meta.byte_size / 1024,
+        pane.meta.origin
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .style(Style::default().fg(Color::Gray));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let widget = ratatui_image::StatefulImage::<ratatui_image::protocol::StatefulProtocol>::new()
+        .resize(ratatui_image::Resize::Fit(Some(ratatui_image::FilterType::Triangle)));
+    f.render_stateful_widget(widget, inner, &mut pane.protocol);
+    if let Some(Err(e)) = pane.protocol.last_encoding_result() {
+        let msg = Paragraph::new(format!("image encode failed: {e}"))
+            .style(Style::default().fg(Color::Red));
+        f.render_widget(msg, inner);
+    }
 }
 
 fn draw_expression_panel(f: &mut Frame, area: Rect, app: &AppState) {

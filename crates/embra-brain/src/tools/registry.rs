@@ -10,7 +10,7 @@
 //! legacy string dispatcher at `tools/mod.rs`. Stage 3 removes the legacy
 //! dispatcher and makes [`dispatch`] the single entry point.
 
-use embra_tools_core::{BoxFut, DispatchError, JsonValue, TurnTraceHandle};
+use embra_tools_core::{BoxFut, DispatchError, JsonValue, ToolOutput, TurnTraceHandle};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 
@@ -54,7 +54,7 @@ pub struct ToolDescriptor {
     pub is_side_effectful: bool,
     pub input_schema: fn() -> serde_json::Value,
     pub handler: for<'a> fn(JsonValue, DispatchContext<'a>)
-        -> BoxFut<'a, Result<String, DispatchError>>,
+        -> BoxFut<'a, Result<ToolOutput, DispatchError>>,
 }
 
 inventory::collect!(ToolDescriptor);
@@ -106,6 +106,13 @@ pub(crate) const TOOL_RESULT_ENVELOPE: usize = 4096;
 const _: () = assert!(TOOL_RESULT_ENVELOPE >= 512);
 const _: () = assert!(TOOL_RESULT_ENVELOPE < MAX_TOOL_RESULT_SIZE / 100);
 
+/// Ceiling on the number of images one tool result may hand the model.
+/// Images bypass [`apply_max_size`] (byte-truncating an encoded image would
+/// corrupt it silently, `is_error:false`), so they are bounded by COUNT
+/// here and by per-image size at ingest (`media::MEDIA_INLINE_MAX`). Extra
+/// images are dropped with a note appended to the text so the model knows.
+pub(crate) const MAX_TOOL_RESULT_IMAGES: usize = 4;
+
 /// Global wall-clock ceiling for any single tool dispatch. The mirror of
 /// [`MAX_TOOL_RESULT_SIZE`] for execution time: it bounds runaway tools
 /// uniformly instead of relying on each handler to wrap itself. Tools that
@@ -125,16 +132,32 @@ fn apply_max_size(s: String) -> String {
     format!("{}...\n[truncated: {} bytes total]", &s[..end], s.len())
 }
 
+/// Apply the dispatcher caps to a structured result: the text cap on
+/// `text`, the COUNT cap on `images` (never a byte cut — see
+/// [`MAX_TOOL_RESULT_IMAGES`]).
+fn apply_caps(mut out: ToolOutput) -> ToolOutput {
+    if out.images.len() > MAX_TOOL_RESULT_IMAGES {
+        let dropped = out.images.len() - MAX_TOOL_RESULT_IMAGES;
+        out.images.truncate(MAX_TOOL_RESULT_IMAGES);
+        out.text.push_str(&format!(
+            "\n[{} image(s) dropped: at most {} images per tool result]",
+            dropped, MAX_TOOL_RESULT_IMAGES
+        ));
+    }
+    out.text = apply_max_size(out.text);
+    out
+}
+
 /// Wraps a handler future in a wall-time ceiling. Lifted out of
 /// [`dispatch`] so the timeout behavior is unit-testable without standing
 /// up a full `DispatchContext` against the live `REGISTRY`.
-pub(crate) async fn enforce_timeout<F>(
+pub(crate) async fn enforce_timeout<T, F>(
     fut: F,
     tool: &str,
     timeout: std::time::Duration,
-) -> Result<String, DispatchError>
+) -> Result<T, DispatchError>
 where
-    F: std::future::Future<Output = Result<String, DispatchError>>,
+    F: std::future::Future<Output = Result<T, DispatchError>>,
 {
     match tokio::time::timeout(timeout, fut).await {
         Ok(result) => result,
@@ -149,17 +172,18 @@ where
 ///
 /// Looks up `name` in [`REGISTRY`], runs the handler with the typed
 /// context under the [`MAX_TOOL_DURATION`] ceiling, and applies the
-/// 2 MiB result cap. Stage 3 wires this into the gRPC dispatch loop.
+/// 2 MiB text cap + the image COUNT cap. Stage 3 wires this into the gRPC
+/// dispatch loop; `tools/cron.rs` consumes `.text` only.
 pub async fn dispatch(
     name: &str,
     input: JsonValue,
     ctx: DispatchContext<'_>,
-) -> Result<String, DispatchError> {
+) -> Result<ToolOutput, DispatchError> {
     let Some(desc) = REGISTRY.get(name) else {
         return Err(DispatchError::Unknown(name.into()));
     };
     let raw = enforce_timeout((desc.handler)(input, ctx), name, MAX_TOOL_DURATION).await?;
-    Ok(apply_max_size(raw))
+    Ok(apply_caps(raw))
 }
 
 #[cfg(test)]
@@ -209,6 +233,47 @@ mod result_cap_tests {
         // so a casual cap change fails loudly and gets its docs sweep.
         assert_eq!(MAX_TOOL_RESULT_SIZE, 2_097_152);
         assert_eq!(TOOL_RESULT_ENVELOPE, 4096);
+        assert_eq!(MAX_TOOL_RESULT_IMAGES, 4);
+    }
+
+    fn px(name: &str) -> embra_tools_core::ToolImage {
+        embra_tools_core::ToolImage {
+            media_type: "image/png".into(),
+            data: vec![0x89, b'P', b'N', b'G', 0, 0, 0, 0],
+            width: 1,
+            height: 1,
+            name: name.into(),
+            media_ref: None,
+        }
+    }
+
+    #[test]
+    fn dispatch_caps_text_but_not_images() {
+        // Oversized text is cut; the image bytes ride through untouched —
+        // a byte cut on an encoded image would be silent corruption.
+        let out = apply_caps(ToolOutput {
+            text: "x".repeat(MAX_TOOL_RESULT_SIZE + 10),
+            images: vec![px("a.png")],
+        });
+        assert!(out.text.contains("[truncated:"));
+        assert_eq!(out.images.len(), 1);
+        assert_eq!(out.images[0].data.len(), 8);
+    }
+
+    #[test]
+    fn dispatch_drops_images_beyond_max_with_note() {
+        let out = apply_caps(ToolOutput {
+            text: "six".into(),
+            images: (0..6).map(|i| px(&format!("{i}.png"))).collect(),
+        });
+        assert_eq!(out.images.len(), MAX_TOOL_RESULT_IMAGES);
+        assert!(out.text.ends_with("[2 image(s) dropped: at most 4 images per tool result]"), "{}", out.text);
+        // Within the cap: text untouched, no note.
+        let out = apply_caps(ToolOutput {
+            text: "ok".into(),
+            images: vec![px("a.png")],
+        });
+        assert_eq!(out.text, "ok");
     }
 
     #[test]

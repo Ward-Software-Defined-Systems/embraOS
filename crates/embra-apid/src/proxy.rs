@@ -41,7 +41,10 @@ impl BackendConnections {
             .await
             .map_err(|e| tonic::Status::unavailable(format!("Brain service unavailable: {}", e)))?;
 
-        let client = BrainServiceClient::new(channel);
+        // GetMedia responses carry stored image bytes (≤ MEDIA_UPLOAD_MAX);
+        // tonic's 4 MiB default would reject them at this hop.
+        let client = BrainServiceClient::new(channel)
+            .max_decoding_message_size(embra_common::GRPC_MAX_MESSAGE_BYTES);
         *self.brain.write().await = Some(client.clone());
         info!("Connected to embra-brain at {}", self.brain_addr);
         Ok(client)

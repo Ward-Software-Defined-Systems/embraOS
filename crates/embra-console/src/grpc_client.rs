@@ -35,6 +35,11 @@ pub enum ConsoleEvent {
     /// buffer or persisted. Cleared on user submit, ResponseDone,
     /// SystemMessage::Error, and ModeTransition.
     ReasoningDelta(String),
+    /// An image became visible: operator-attached (`/attach`), produced
+    /// or viewed by a tool, or replayed from history on attach
+    /// (`replay == true`). The frame carries only the reference — bytes
+    /// come from `BrainClient::get_media` when the pane renders.
+    Media(brain::MediaRef),
 }
 
 impl BrainClient {
@@ -44,8 +49,18 @@ impl BrainClient {
             .await?;
         info!("Connected to embra-apid at {}", addr);
         Ok(Self {
-            client: EmbraApiClient::new(channel),
+            // GetMedia responses carry stored image bytes (≤ 12 MiB);
+            // tonic's 4 MiB default would reject them at this hop.
+            client: EmbraApiClient::new(channel)
+                .max_decoding_message_size(embra_common::GRPC_MAX_MESSAGE_BYTES),
         })
+    }
+
+    /// A detached handle for background fetches (tonic clients are
+    /// cheap clones over the shared channel), so the main loop never
+    /// holds `&mut self` across a download + decode.
+    pub fn media_client(&self) -> EmbraApiClient<Channel> {
+        self.client.clone()
     }
 
     /// Open a bidirectional conversation stream.
@@ -138,6 +153,9 @@ impl BrainClient {
                                     brain::conversation_response::ResponseType::ReasoningDelta(r) => {
                                         ConsoleEvent::ReasoningDelta(r.text)
                                     }
+                                    brain::conversation_response::ResponseType::Media(m) => {
+                                        ConsoleEvent::Media(m)
+                                    }
                                 };
                                 if out_tx.send(event).await.is_err() {
                                     break; // Console closed
@@ -177,4 +195,20 @@ impl BrainClient {
         let inner = embra_common::proto::brain::StopTurnResponse::decode(&payload[..])?;
         Ok(inner.was_in_turn)
     }
+}
+
+/// Unary `GetMedia` through apid, decoded from the opaque payload.
+pub async fn fetch_media(
+    mut client: EmbraApiClient<Channel>,
+    id: &str,
+) -> anyhow::Result<(brain::MediaRef, Vec<u8>)> {
+    let resp = client
+        .get_media(GetMediaRequest { id: id.to_string() })
+        .await?
+        .into_inner();
+    let decoded = brain::GetMediaResponse::decode(resp.payload.as_slice())?;
+    let meta = decoded
+        .media
+        .ok_or_else(|| anyhow::anyhow!("GetMedia response without meta"))?;
+    Ok((meta, decoded.data))
 }

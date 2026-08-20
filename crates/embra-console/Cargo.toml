@@ -14,6 +14,11 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+# Media wave: in-TUI image pane. 8.1.x is the last line on ratatui 0.29;
+# defaults OFF — `chafa-dyn` would dlopen libchafa (not on the static
+# musl rootfs). Pure-Rust sixel/halfblocks/kitty/iTerm2 encoders only.
+ratatui-image = { version = "8.1", default-features = false, features = ["crossterm"] }
+image = { workspace = true }
 chrono = { workspace = true }
 chrono-tz = { workspace = true }
 unicode-width = "0.2"

@@ -17,5 +17,5 @@ pub use graph_render::{render_sealed_graph, render_user_graph};
 pub use identity_render::render_identity;
 pub use prompts::*;
 pub use soul_render::render_constitution;
-pub use types::Message;
+pub use types::{AttachmentRef, Message};
 pub use user_render::render_user_profile;

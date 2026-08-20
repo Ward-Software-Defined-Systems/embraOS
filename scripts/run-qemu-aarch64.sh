@@ -90,6 +90,15 @@ else
     LOGLEVEL_CMDLINE=""
 fi
 
+# Serial-console graphics (EMBRA_GRAPHICS → embra.graphics=<mode>) — see
+# run-qemu.sh for the mode list; only the serial TUI is affected.
+if [ -n "${EMBRA_GRAPHICS:-}" ]; then
+    GRAPHICS_CMDLINE="embra.graphics=${EMBRA_GRAPHICS}"
+    echo "  Serial graphics: ${EMBRA_GRAPHICS} (EMBRA_GRAPHICS)"
+else
+    GRAPHICS_CMDLINE=""
+fi
+
 echo "Starting embraOS in QEMU (aarch64)..."
 echo "  Image: $IMAGE"
 echo "  Kernel: $KERNEL"
@@ -127,7 +136,7 @@ qemu-system-aarch64 \
     -drive file="$IMAGE",format=raw,if=virtio \
     -kernel "$KERNEL" \
     -initrd "$INITRD" \
-    -append "console=ttyAMA0 root=/dev/vda2 ro quiet embra.cols=$HOST_COLS embra.rows=$HOST_ROWS $WEB_CMDLINE $DBLOG_CMDLINE $LOGLEVEL_CMDLINE" \
+    -append "console=ttyAMA0 root=/dev/vda2 ro quiet embra.cols=$HOST_COLS embra.rows=$HOST_ROWS $WEB_CMDLINE $DBLOG_CMDLINE $LOGLEVEL_CMDLINE $GRAPHICS_CMDLINE" \
     -nographic \
     -serial mon:stdio \
     -nic user,hostfwd=tcp::50000-:50000,hostfwd=tcp::8443-:8443,hostfwd=tcp::3345-:3345 \

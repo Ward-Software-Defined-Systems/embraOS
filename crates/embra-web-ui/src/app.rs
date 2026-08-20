@@ -25,6 +25,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
     ("Provider", &[
         ("/provider", "switch"), ("/model", "model"), ("/effort", "effort"),
         ("/iter-cap", "tool cap"), ("/show-reasoning", "reasoning"),
+        ("/attach", "attach image"), ("/media", "media pane"),
     ]),
     ("Setup", &[
         ("/git-setup", "git"), ("/github-token", "gh token"),
@@ -111,6 +112,14 @@ const SPECS: &[Spec] = &[
         join: " ", guided: false,
         fields: &[sel("Model",
             &["(show current)", "opus-5", "opus-4.8", "fable-5"], false)] },
+    Spec { cmd: "/attach", title: "Attach an image",
+        note: "Stage an image for your next message: an uploaded media id (📎 / drop / paste does this for you) or a workspace path. Blank = list staged; 'clear' = drop them.",
+        join: " ", guided: false,
+        fields: &[t("Id or path", "att-… | /embra/workspace/repos/x/shot.png | list | clear", false)] },
+    Spec { cmd: "/media", title: "Media pane",
+        note: "Console-local: show the last image in the TUI media pane, or hide it.",
+        join: " ", guided: false,
+        fields: &[sel("Action", &["(show last)", "off"], false)] },
     Spec { cmd: "/effort", title: "Anthropic effort",
         note: "Set output_config.effort (next message), or show current. Default max.",
         join: " ", guided: false,
@@ -279,6 +288,8 @@ pub fn App() -> impl IntoView {
     let status = use_status();
     let role = RwSignal::new(("observer".to_string(), "none".to_string()));
     let palette_open = RwSignal::new(false);
+    // Hidden file input behind the 📎 topbar button (media wave).
+    let attach_input = NodeRef::<leptos::html::Input>::new();
     let filter = RwSignal::new(String::new());
     // Parameter modal: Some(spec index) when open.
     let modal = RwSignal::new(None::<usize>);
@@ -454,6 +465,29 @@ pub fn App() -> impl IntoView {
                         on:click=move |_| palette_open.update(|b| *b = !*b)>
                         "⌘ Commands"
                     </button>
+                    // Media wave: pick an image → upload → `/attach <id>`
+                    // typed into the console. Drop/paste on the terminal
+                    // do the same (embra-term.js).
+                    <button class="btn ghost"
+                        title="Attach an image (or drop / paste one on the terminal)"
+                        on:click=move |_| {
+                            if let Some(el) = attach_input.get() {
+                                el.click();
+                            }
+                        }>
+                        "📎 Attach"
+                    </button>
+                    <input node_ref=attach_input type="file" accept="image/*" multiple
+                        style="display:none"
+                        on:change=move |_| {
+                            if let Some(el) = attach_input.get() {
+                                let input_el: &web_sys::HtmlInputElement = &el;
+                                if let Some(files) = input_el.files() {
+                                    term::upload_files(&files);
+                                }
+                                input_el.set_value("");
+                            }
+                        } />
                     <button class="btn ghost mobile-toggle"
                         title="Switch to mobile chat view"
                         on:click=move |_| {

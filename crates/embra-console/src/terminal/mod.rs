@@ -5,6 +5,7 @@
 //! thinking indicator, multi-line input, selectors, and mode transitions.
 
 mod commands;
+pub mod graphics;
 mod input;
 mod input_layout;
 mod render;
@@ -42,16 +43,32 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
     let rows = override_rows.unwrap_or(if detected_rows > 0 { detected_rows } else { 24 });
     println!("[TUI] size: {}x{} (detected: {}x{})", cols, rows, detected_cols, detected_rows);
 
-    // Initialize ratatui terminal
-    // Skip EnterAlternateScreen — doesn't work over QEMU serial (-nographic)
-    enable_raw_mode()?;
-
     // Serial console: TIOCGWINSZ is unreliable over QEMU -nographic, so the
     // viewport is pinned to the cmdline-provided size (Viewport::Fixed).
     // Web/PTY console (EMBRA_WEB_PTY=1 — spawned by embra-web with no
     // columns/rows override): the PTY has a real, dynamic winsize driven by
     // xterm.js, so use the size-tracking backend that reflows on resize.
     let web_pty = std::env::var("EMBRA_WEB_PTY").is_ok();
+
+    // Media wave: in-TUI image pane protocol. Resolved BEFORE raw mode
+    // and before the event-reader thread because `auto` writes/reads
+    // stdin (1 s query). PTY default sixel (geometry from the winsize
+    // pixels embra-web plumbs), serial default halfblocks (no query, no
+    // escape protocol on the line).
+    let graphics_env = std::env::var("EMBRA_TUI_GRAPHICS").ok();
+    let graphics_mode = graphics::GraphicsMode::resolve(graphics_env.as_deref(), web_pty);
+    let mut gfx = graphics::Graphics::init(graphics_mode);
+    println!(
+        "[TUI] graphics: {} (active: {}, font {:?})",
+        graphics_mode.as_str(),
+        gfx.active_protocol(),
+        gfx.font_size()
+    );
+
+    // Initialize ratatui terminal
+    // Skip EnterAlternateScreen — doesn't work over QEMU serial (-nographic)
+    enable_raw_mode()?;
+
     if web_pty {
         // Web/PTY only: lets crossterm coalesce the embra-web /ml editor's
         // `\x1b[200~ … \x1b[201~` blob into a single Event::Paste. The
@@ -114,9 +131,15 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
     // Consume the immediate first tick so the first poll happens after 3s.
     expression_tick.tick().await;
 
+    // Media pane fetch results: (id, Ok((meta, decoded image)) | Err).
+    let (media_tx, mut media_rx) = mpsc::channel::<(
+        String,
+        Result<(embra_common::proto::brain::MediaRef, image::DynamicImage), String>,
+    )>(4);
+
     // Main event loop
     loop {
-        terminal_tui.draw(|f| ui::draw(f, &app))?;
+        terminal_tui.draw(|f| ui::draw(f, &mut app))?;
 
         if app.should_quit {
             break;
@@ -148,6 +171,15 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
                     Event::Resize(c, r) => {
                         app.viewport_cols = c;
                         app.viewport_rows = r;
+                        // Winsize pixels may have arrived/changed (browser
+                        // attach, zoom): re-derive the cell size and rebuild
+                        // the pane's encoder for the new geometry.
+                        if gfx.refresh_geometry()
+                            && let Some(pane) = app.media.as_mut()
+                            && let Some(proto) = gfx.make_protocol(pane.image.clone())
+                        {
+                            pane.protocol = proto;
+                        }
                     }
                     // Web/PTY: a bracketed-paste blob (the embra-web /ml
                     // editor injects `\x1b[200~ … \x1b[201~`). Stage it
@@ -179,9 +211,61 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
                 }
             }
 
+            // Media pane: a fetched + decoded image is ready (or failed).
+            Some((id, result)) = media_rx.recv() => {
+                if app.media_loading.as_deref() == Some(id.as_str()) {
+                    app.media_loading = None;
+                }
+                match result {
+                    Ok((meta, image)) => {
+                        if let Some(protocol) = gfx.make_protocol(image.clone()) {
+                            app.media = Some(graphics::MediaPane { meta, image, protocol });
+                            app.media_visible = true;
+                            app.scroll_offset = 0;
+                        }
+                    }
+                    Err(e) => {
+                        app.messages.push(DisplayMessage::system_with_tz(
+                            format!("media pane: {} — {}", id, e),
+                            &app.config_tz,
+                        ));
+                    }
+                }
+            }
+
             // Tick for animations (thinking dots)
             _ = tokio::time::sleep(Duration::from_millis(200)) => {
                 // Just redraw
+            }
+        }
+
+        // Media pane fetch, spawned OUTSIDE the select! (same seam as the
+        // stop unary): the event handler only records the request. One
+        // fetch in flight at a time — a burst of MediaRef frames in one
+        // turn shows the newest that finishes, not a pile-up of decodes.
+        if let Some(m) = app.pending_media_fetch.take()
+            && gfx.enabled()
+            && app.media_loading.is_none()
+        {
+            {
+                let id = m.id.clone();
+                app.media_loading = Some(id.clone());
+                let client = client.media_client();
+                let tx = media_tx.clone();
+                let target = graphics::pane_target_px(app.viewport_cols, gfx.font_size());
+                tokio::spawn(async move {
+                    let result = match crate::grpc_client::fetch_media(client, &id).await {
+                        Ok((meta, bytes)) => {
+                            match tokio::task::spawn_blocking(move || graphics::decode_for_pane(&bytes, target)).await {
+                                Ok(Ok(img)) => Ok((meta, img)),
+                                Ok(Err(e)) => Err(e),
+                                Err(e) => Err(format!("decode task failed: {e}")),
+                            }
+                        }
+                        Err(e) => Err(e.to_string()),
+                    };
+                    let _ = tx.send((id, result)).await;
+                });
             }
         }
 
@@ -350,6 +434,17 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
         ConsoleEvent::ReasoningDelta(text) => {
             append_live_reasoning(&mut app.live_reasoning, &text);
         }
+        ConsoleEvent::Media(m) => {
+            // Text card on every surface; the graphics pane layers on top
+            // of it for live frames. History replays only arm `/media`
+            // (no auto-open on every reconnect).
+            app.messages.push(DisplayMessage::media_with_tz(&m, &app.config_tz));
+            app.scroll_offset = 0;
+            app.last_media_id = Some(m.id.clone());
+            if !m.replay {
+                app.pending_media_fetch = Some(m);
+            }
+        }
     }
 }
 
@@ -423,7 +518,7 @@ async fn handle_key_event(
                 app.clear_live_reasoning();
                 let _ = in_tx.send(ConversationRequest {
                     request_type: Some(conversation_request::RequestType::UserMessage(
-                        UserMessage { content: choice }
+                        UserMessage { content: choice, attachment_ids: Vec::new() }
                     )),
                 }).await;
             } else if let Some(pasted) = app.pasted_lines.take() {
@@ -446,7 +541,7 @@ async fn handle_key_event(
                     app.clear_live_reasoning();
                     let _ = in_tx.send(ConversationRequest {
                         request_type: Some(conversation_request::RequestType::UserMessage(
-                            UserMessage { content }
+                            UserMessage { content, attachment_ids: Vec::new() }
                         )),
                     }).await;
                 }
@@ -492,7 +587,7 @@ async fn handle_key_event(
                             app.clear_live_reasoning();
                             let _ = in_tx.send(ConversationRequest {
                                 request_type: Some(conversation_request::RequestType::UserMessage(
-                                    UserMessage { content: input }
+                                    UserMessage { content: input, attachment_ids: Vec::new() }
                                 )),
                             }).await;
                         }
@@ -555,6 +650,38 @@ async fn handle_key_event(
                         // StopTurn RPC out-of-band (get_expression
                         // precedent — same channel, separate RPC).
                         app.stop_requested = true;
+                    } else if cmd == "/media" {
+                        // Console-local pane control (needs app state).
+                        let note = match args.trim() {
+                            "off" | "hide" => {
+                                app.media_visible = false;
+                                "Media pane hidden. /media shows the last image again.".to_string()
+                            }
+                            "" | "show" | "last" => {
+                                if app.media.is_some() {
+                                    app.media_visible = true;
+                                    String::new()
+                                } else if let Some(id) = app.last_media_id.clone() {
+                                    app.pending_media_fetch = Some(embra_common::proto::brain::MediaRef {
+                                        id,
+                                        ..Default::default()
+                                    });
+                                    "Fetching the last image…".to_string()
+                                } else {
+                                    "No image yet — attach one (/attach) or ask for image_view.".to_string()
+                                }
+                            }
+                            id => {
+                                app.pending_media_fetch = Some(embra_common::proto::brain::MediaRef {
+                                    id: id.to_string(),
+                                    ..Default::default()
+                                });
+                                format!("Fetching {}…", id)
+                            }
+                        };
+                        if !note.is_empty() {
+                            app.messages.push(DisplayMessage::system_with_tz(&note, &app.config_tz));
+                        }
                     } else if commands::is_local_command(cmd) {
                         if let Some(output) = commands::handle_local_command(cmd, args, &app.config_name) {
                             app.messages.push(DisplayMessage::system_with_tz(&output, &app.config_tz));
@@ -574,7 +701,7 @@ async fn handle_key_event(
                     app.clear_live_reasoning();
                     let _ = in_tx.send(ConversationRequest {
                         request_type: Some(conversation_request::RequestType::UserMessage(
-                            UserMessage { content: input }
+                            UserMessage { content: input, attachment_ids: Vec::new() }
                         )),
                     }).await;
                 }

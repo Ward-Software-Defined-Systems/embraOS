@@ -131,7 +131,7 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 }
 
 // Single source of truth for Phase 4 tool category counts.
-// (json_key, display_label, count). Sums to 103 — matches the descriptor count
+// (json_key, display_label, count). Sums to 104 — matches the descriptor count
 // in `tools::registry::REGISTRY` (guarded by
 // `category_counts_sum_matches_registry` below). Aliases (`memory_search`,
 // `search_memory`, `file_rename`, `rmdir`) are folded into their target's
@@ -161,6 +161,9 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 // editing — atomic all-or-nothing transaction; the surgical alternative to
 // full file_write rewrites, from the Intelligence's own consumer spec,
 // 2026-08-14).
+// Media & Vision is new with `image_view` (2026-08-20, the media wave:
+// the image itself returned to the model as an image block — the first
+// tool whose result is not text). `image_generate` joins it in Wave 2.
 const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
     ("system", "System", 4),
     ("memory_knowledge", "Memory & Knowledge", 7),
@@ -174,6 +177,7 @@ const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
     ("sessions", "Sessions", 10),
     ("knowledge_graph", "Knowledge Graph", 12),
     ("guardian", "Guardian (dynamic tools)", 3),
+    ("media", "Media & Vision", 1),
 ];
 
 pub fn default_tools_registry_doc() -> serde_json::Value {

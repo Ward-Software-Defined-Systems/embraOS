@@ -93,6 +93,20 @@ else
     LOGLEVEL_CMDLINE=""
 fi
 
+# Serial-console graphics — EMBRA_GRAPHICS sets embra.graphics=<mode> on
+# the kernel cmdline; embrad forwards it to the serial embra-console as
+# EMBRA_TUI_GRAPHICS (the protocol its in-TUI media pane renders with):
+# halfblocks (default: plain cells, any terminal), sixel / kitty / iterm2
+# (opt in when THIS terminal supports the protocol — iTerm2, WezTerm,
+# kitty, foot), auto (query the terminal; 1 s timeout), off. Only the
+# serial TUI (EMBRA_TUI=1) is affected — the web console's PTY is sixel.
+if [ -n "${EMBRA_GRAPHICS:-}" ]; then
+    GRAPHICS_CMDLINE="embra.graphics=${EMBRA_GRAPHICS}"
+    echo "  Serial graphics: ${EMBRA_GRAPHICS} (EMBRA_GRAPHICS)"
+else
+    GRAPHICS_CMDLINE=""
+fi
+
 echo "  Serial console: this terminal"
 if [ -n "$WEB_CMDLINE" ]; then
     echo "  UI mode: web console (default) — set EMBRA_TUI=1 for the serial TUI"
@@ -119,7 +133,7 @@ qemu-system-x86_64 \
     -drive file="$IMAGE",format=raw,if=virtio \
     -kernel "$KERNEL" \
     -initrd "$INITRD" \
-    -append "console=ttyS0 root=/dev/vda2 ro quiet embra.cols=$HOST_COLS embra.rows=$HOST_ROWS $WEB_CMDLINE $DBLOG_CMDLINE $LOGLEVEL_CMDLINE" \
+    -append "console=ttyS0 root=/dev/vda2 ro quiet embra.cols=$HOST_COLS embra.rows=$HOST_ROWS $WEB_CMDLINE $DBLOG_CMDLINE $LOGLEVEL_CMDLINE $GRAPHICS_CMDLINE" \
     -nographic \
     -serial mon:stdio \
     -nic user,hostfwd=tcp::50000-:50000,hostfwd=tcp::8443-:8443,hostfwd=tcp::3345-:3345 \

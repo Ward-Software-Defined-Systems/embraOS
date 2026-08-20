@@ -12,6 +12,7 @@
 mod arbiter;
 mod assets;
 mod chat_bridge;
+mod media;
 mod config;
 mod metrics;
 mod pty_bridge;

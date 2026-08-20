@@ -101,9 +101,10 @@ impl BlockAccumulator {
                 acc.name = Some(name);
                 acc.input_json = serde_json::to_string(&input).unwrap_or_default();
             }
-            MessageBlock::ToolResult { .. } => {
-                // Tool results are client-originated; should never
-                // appear in an assistant stream. Fall back to Text.
+            MessageBlock::ToolResult { .. } | MessageBlock::Image { .. } => {
+                // Tool results and images are client-originated; they
+                // should never appear in an assistant stream. Fall back
+                // to Text.
                 acc.kind = BlockKind::Text;
             }
         }

@@ -38,7 +38,9 @@ use crate::status::{StatusData, use_status};
 #[derive(Debug, Serialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 enum ClientMsg {
-    Msg { text: String },
+    /// `attachment_ids` = media ids from `PUT /api/media` (empty for a
+    /// plain text turn; the bridge defaults it, so older bridges parse).
+    Msg { text: String, attachment_ids: Vec<String> },
     Slash { command: String, args: String },
     Attach { session: String },
 }
@@ -92,15 +94,179 @@ enum ServerMsg {
         #[serde(default)]
         text: String,
     },
+    /// An image became visible (attached / tool-produced / replayed).
+    /// `url` is the serving route — the frame never carries bytes.
+    Media {
+        id: String,
+        #[serde(default)]
+        media_type: String,
+        #[serde(default)]
+        width: u32,
+        #[serde(default)]
+        height: u32,
+        #[serde(default)]
+        byte_size: u64,
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        origin: String,
+        #[serde(default)]
+        caption: String,
+        #[serde(default)]
+        replay: bool,
+        url: String,
+    },
     Error { message: String },
 }
 
 // ── UI model ─────────────────────────────────────────────────────────
 
+/// One displayable image (a stored media item, by URL).
+#[derive(Debug, Clone, PartialEq)]
+struct MediaCard {
+    id: String,
+    url: String,
+    name: String,
+    width: u32,
+    height: u32,
+    byte_size: u64,
+    origin: String,
+    caption: String,
+}
+
+/// `PUT /api/media` response shape.
+#[derive(Debug, Deserialize)]
+struct UploadResponse {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    width: u32,
+    #[serde(default)]
+    height: u32,
+    #[serde(default)]
+    bytes: u64,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    error: String,
+}
+
+/// An image picked/pasted/dropped into the composer, awaiting send.
+/// `preview` is an object URL (revoked when the strip clears); `media`
+/// is set once the upload returns; `error` keeps a failed pick visible
+/// (the operator removes it explicitly).
+#[derive(Debug, Clone, PartialEq)]
+struct PendingAttachment {
+    local_id: u32,
+    name: String,
+    preview: String,
+    media: Option<MediaCard>,
+    error: Option<String>,
+}
+
+/// Upload one picked file to the store. Raw body (the browser streams the
+/// Blob), type + name + session as headers — see embra-web `media.rs`.
+async fn upload_file(file: web_sys::File, session: String) -> Result<MediaCard, String> {
+    let name = file.name();
+    let encoded = js_sys::encode_uri_component(&name)
+        .as_string()
+        .unwrap_or_default();
+    let mime = if file.type_().is_empty() {
+        "application/octet-stream".to_string()
+    } else {
+        file.type_()
+    };
+    let body: wasm_bindgen::JsValue = file.into();
+    let resp = gloo_net::http::Request::put("/api/media")
+        .header("Content-Type", &mime)
+        .header("X-Embra-Name", &encoded)
+        .header("X-Embra-Session", &session)
+        .body(body)
+        .map_err(|e| format!("upload request: {e}"))?
+        .send()
+        .await
+        .map_err(|e| format!("upload failed: {e}"))?;
+    let status = resp.status();
+    let parsed: UploadResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("upload response ({status}): {e}"))?;
+    if status >= 400 || parsed.id.is_empty() {
+        let msg = if parsed.error.is_empty() {
+            format!("upload rejected ({status})")
+        } else {
+            parsed.error
+        };
+        return Err(msg);
+    }
+    Ok(MediaCard {
+        url: if parsed.url.is_empty() { format!("/api/media/{}", parsed.id) } else { parsed.url },
+        id: parsed.id,
+        name: if parsed.name.is_empty() { name } else { parsed.name },
+        width: parsed.width,
+        height: parsed.height,
+        byte_size: parsed.bytes,
+        origin: "attached".into(),
+        caption: String::new(),
+    })
+}
+
+/// Queue every image in `files` for upload: preview immediately, swap in
+/// the stored card when the upload returns.
+fn queue_files(
+    files: Option<web_sys::FileList>,
+    pending: RwSignal<Vec<PendingAttachment>>,
+    session_name: RwSignal<String>,
+    next_local_id: RwSignal<u32>,
+) {
+    let Some(files) = files else { return };
+    for i in 0..files.length() {
+        let Some(file) = files.get(i) else { continue };
+        if !file.type_().starts_with("image/") && !file.type_().is_empty() {
+            continue;
+        }
+        let local_id = next_local_id.get_untracked();
+        next_local_id.set(local_id + 1);
+        let preview = web_sys::Url::create_object_url_with_blob(&file).unwrap_or_default();
+        pending.update(|p| {
+            p.push(PendingAttachment {
+                local_id,
+                name: file.name(),
+                preview,
+                media: None,
+                error: None,
+            })
+        });
+        let session = session_name.get_untracked();
+        spawn_local(async move {
+            let result = upload_file(file, session).await;
+            pending.update(|p| {
+                if let Some(item) = p.iter_mut().find(|a| a.local_id == local_id) {
+                    match result {
+                        Ok(card) => item.media = Some(card),
+                        Err(e) => item.error = Some(e),
+                    }
+                }
+            });
+        });
+    }
+}
+
+fn revoke_previews(items: &[PendingAttachment]) {
+    for a in items {
+        let _ = web_sys::Url::revoke_object_url(&a.preview);
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Bubble {
-    User(String),
+    /// Operator turn: text plus the images sent with it (thumbnails).
+    User { text: String, images: Vec<MediaCard> },
     Assistant(String),
+    /// An image that became visible mid-conversation — produced or viewed
+    /// by a tool, attached via `/attach`, or replayed from history.
+    Media(MediaCard),
     /// `kind` ∈ info / warning / error / notification / reconnection /
     /// unspecified — colored accordingly. Mode transitions land here too.
     System { content: String, kind: String },
@@ -338,6 +504,7 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/effort", "show / set Anthropic effort"),
         ("/iter-cap", "show / set tool iteration cap"),
         ("/show-reasoning", "toggle reasoning panel"),
+        ("/attach", "attach a workspace image to your next message (needs id or path)"),
     ]),
     ("Setup", &[
         ("/git-setup", "show git identity"),
@@ -444,6 +611,13 @@ pub fn ChatApp() -> impl IntoView {
     let current_setup = RwSignal::new(None::<SetupData>);
     // Service-health snapshot (5 s poll loop shared with the desktop UI).
     let status = use_status();
+    // Media wave: images picked/pasted/dropped into the composer, and
+    // the full-screen viewer. The lightbox signal rides Leptos context so
+    // media bubbles deep in the keyed list can open it.
+    let pending = RwSignal::new(Vec::<PendingAttachment>::new());
+    let next_local_id = RwSignal::new(0u32);
+    let lightbox = RwSignal::new(None::<MediaCard>);
+    provide_context(lightbox);
 
     // Outbound sender — replaced on each WS reconnect cycle. A signal
     // (rather than Rc<RefCell<...>>) so the `send_msg` closure stays
@@ -468,29 +642,44 @@ pub fn ChatApp() -> impl IntoView {
     let send_msg = move || {
         let text = input.get();
         let trimmed = text.trim();
-        if trimmed.is_empty() {
+        // Uploaded (stored) images ride with this message; a failed or
+        // still-uploading pick blocks the send until removed/finished.
+        let ready: Vec<MediaCard> = pending.with_untracked(|p| {
+            p.iter().filter_map(|a| a.media.clone()).collect()
+        });
+        let blocked = pending.with_untracked(|p| p.iter().any(|a| a.media.is_none()));
+        if blocked || (trimmed.is_empty() && ready.is_empty()) {
             return;
         }
+        let is_slash = trimmed.starts_with('/');
+        let sent_images: Vec<MediaCard> = if is_slash { Vec::new() } else { ready };
         let msg = if let Some(rest) = trimmed.strip_prefix('/') {
             let (cmd, args) = parse_slash(&format!("/{rest}"));
             ClientMsg::Slash { command: cmd, args }
         } else {
             ClientMsg::Msg {
                 text: trimmed.to_string(),
+                attachment_ids: sent_images.iter().map(|c| c.id.clone()).collect(),
             }
         };
+        if !is_slash {
+            pending.update(|p| {
+                revoke_previews(p);
+                p.clear();
+            });
+        }
         // Local echo for user text + slashes — server doesn't reflect
         // the user turn back on the Converse stream, so the timeline
         // would otherwise skip what the operator typed.
-        if let ClientMsg::Msg { text } = &msg {
-            messages.update(|m| m.push(Bubble::User(text.clone())));
+        if let ClientMsg::Msg { text, .. } = &msg {
+            messages.update(|m| m.push(Bubble::User { text: text.clone(), images: sent_images.clone() }));
         } else if let ClientMsg::Slash { command, args } = &msg {
             let display = if args.is_empty() {
                 command.clone()
             } else {
                 format!("{command} {args}")
             };
-            messages.update(|m| m.push(Bubble::User(display)));
+            messages.update(|m| m.push(Bubble::User { text: display, images: Vec::new() }));
         }
         if let Some(tx) = outbound.get_untracked() {
             let _ = tx.unbounded_send(msg);
@@ -510,7 +699,7 @@ pub fn ChatApp() -> impl IntoView {
         } else {
             format!("{command} {args}")
         };
-        messages.update(|m| m.push(Bubble::User(display)));
+        messages.update(|m| m.push(Bubble::User { text: display, images: Vec::new() }));
         if let Some(tx) = outbound.get_untracked() {
             let _ = tx.unbounded_send(ClientMsg::Slash { command, args });
         }
@@ -525,15 +714,24 @@ pub fn ChatApp() -> impl IntoView {
         if text.is_empty() {
             return;
         }
-        messages.update(|m| m.push(Bubble::User(text.clone())));
+        messages.update(|m| m.push(Bubble::User { text: text.clone(), images: Vec::new() }));
         if let Some(tx) = outbound.get_untracked() {
-            let _ = tx.unbounded_send(ClientMsg::Msg { text });
+            let _ = tx.unbounded_send(ClientMsg::Msg { text, attachment_ids: Vec::new() });
         }
         reasoning.set(String::new());
     };
 
+    let on_dragover = move |e: leptos::ev::DragEvent| {
+        e.prevent_default();
+    };
+    let on_drop = move |e: leptos::ev::DragEvent| {
+        e.prevent_default();
+        let files = e.data_transfer().and_then(|dt| dt.files());
+        queue_files(files, pending, session_name, next_local_id);
+    };
+
     view! {
-        <div class="chat-app">
+        <div class="chat-app" on:dragover=on_dragover on:drop=on_drop>
             <ChatTopBar
                 connected
                 thinking
@@ -547,9 +745,21 @@ pub fn ChatApp() -> impl IntoView {
             />
             <ChatScroll messages streaming />
             <SetupOverlay current_setup on_submit=send_text />
-            <ChatInput input connected slashes_open
+            <ChatInput input connected slashes_open pending next_local_id session_name
                 busy=Signal::derive(move || !streaming.with(|s| s.is_empty()) || thinking.get())
                 on_send=send_msg />
+
+            // ── Lightbox (full-size image viewer) ─────────────────
+            {move || lightbox.get().map(|card| {
+                let url = card.url.clone();
+                let caption = format!("{} · {}×{} · {} KB", card.name, card.width, card.height, card.byte_size / 1024);
+                view! {
+                    <div class="lightbox" on:click=move |_| lightbox.set(None)>
+                        <img class="lightbox-img" src=url alt=card.name.clone() />
+                        <div class="lightbox-cap">{caption}" — tap to close"</div>
+                    </div>
+                }
+            })}
 
             // ── Sessions sheet ─────────────────────────────────────
             {move || sessions_open.get().then(|| {
@@ -1063,6 +1273,18 @@ fn handle_server_msg(
         ServerMsg::Reasoning { text } => {
             reasoning.update(|s| s.push_str(&text));
         }
+        ServerMsg::Media { id, width, height, byte_size, name, origin, caption, replay, url, .. } => {
+            // History replays (`replay:true`) follow the same rule as the
+            // reconnection briefing: shown on a cold open, suppressed when
+            // the timeline is already populated (a WS flap would otherwise
+            // re-dump every card).
+            if replay && had_content_at_connect {
+                return;
+            }
+            messages.update(|m| {
+                m.push(Bubble::Media(MediaCard { id, url, name, width, height, byte_size, origin, caption }));
+            });
+        }
         ServerMsg::Error { message } => {
             messages.update(|m| {
                 m.push(Bubble::System {
@@ -1213,8 +1435,48 @@ fn ChatScroll(
 #[component]
 fn BubbleView(idx: usize, bubble: Bubble) -> impl IntoView {
     let _ = idx;
+    let lightbox = use_context::<RwSignal<Option<MediaCard>>>();
     match bubble {
-        Bubble::User(t) => view! { <div class="bubble user">{t}</div> }.into_any(),
+        Bubble::User { text, images } => {
+            if images.is_empty() {
+                view! { <div class="bubble user">{text}</div> }.into_any()
+            } else {
+                let thumbs = images
+                    .into_iter()
+                    .map(|card| {
+                        let open = card.clone();
+                        view! {
+                            <img class="user-thumb" src=card.url.clone() alt=card.name.clone()
+                                on:click=move |_| { if let Some(lb) = lightbox { lb.set(Some(open.clone())); } } />
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                view! {
+                    <div class="bubble user has-images">
+                        <div class="user-images">{thumbs}</div>
+                        {(!text.is_empty()).then(|| view! { <div class="user-text">{text}</div> })}
+                    </div>
+                }
+                .into_any()
+            }
+        }
+        Bubble::Media(card) => {
+            let open = card.clone();
+            let meta = format!("{} · {}×{} · {} KB", card.origin, card.width, card.height, card.byte_size / 1024);
+            let caption = card.caption.clone();
+            view! {
+                <div class="bubble media">
+                    <img class="media-img" src=card.url.clone() alt=card.name.clone() loading="lazy"
+                        on:click=move |_| { if let Some(lb) = lightbox { lb.set(Some(open.clone())); } } />
+                    <div class="media-cap">
+                        <span class="m-name">{card.name.clone()}</span>
+                        <span class="m-meta">{meta}</span>
+                    </div>
+                    {(!caption.is_empty()).then(|| view! { <div class="media-caption">{caption}</div> })}
+                </div>
+            }
+            .into_any()
+        }
         Bubble::Assistant(t) => view! { <div class="bubble assistant">{t}</div> }.into_any(),
         Bubble::System { content, kind } => {
             let cls = format!("bubble system {kind}");
@@ -1364,6 +1626,9 @@ fn ChatInput<F>(
     input: RwSignal<String>,
     connected: RwSignal<bool>,
     slashes_open: RwSignal<bool>,
+    pending: RwSignal<Vec<PendingAttachment>>,
+    next_local_id: RwSignal<u32>,
+    session_name: RwSignal<String>,
     busy: Signal<bool>,
     on_send: F,
 ) -> impl IntoView
@@ -1374,8 +1639,48 @@ where
     textarea_ref.on_load(|el| {
         let _ = el.focus();
     });
+    let file_ref = NodeRef::<leptos::html::Input>::new();
 
     let send_click = move |_: MouseEvent| on_send();
+
+    // 📎 → the hidden file input (iOS offers camera / photo library).
+    let open_picker = move |_: MouseEvent| {
+        if let Some(el) = file_ref.get() {
+            el.click();
+        }
+    };
+    let on_files = move |_| {
+        if let Some(el) = file_ref.get() {
+            let input_el: &web_sys::HtmlInputElement = &el;
+            queue_files(input_el.files(), pending, session_name, next_local_id);
+            input_el.set_value("");
+        }
+    };
+    // Paste with image data (screenshots) attaches instead of inserting
+    // text; plain-text pastes fall through to the textarea.
+    let on_paste = move |e: web_sys::Event| {
+        // leptos types `paste` as a plain Event; narrow to the clipboard
+        // event to reach the pasted files.
+        let Some(ce) = e.dyn_ref::<web_sys::ClipboardEvent>() else { return };
+        if let Some(dt) = ce.clipboard_data() {
+            if let Some(files) = dt.files() {
+                if files.length() > 0 {
+                    e.prevent_default();
+                    queue_files(Some(files), pending, session_name, next_local_id);
+                }
+            }
+        }
+    };
+    let remove_pending = move |local_id: u32| {
+        pending.update(|p| {
+            if let Some(pos) = p.iter().position(|a| a.local_id == local_id) {
+                let _ = web_sys::Url::revoke_object_url(&p[pos].preview);
+                p.remove(pos);
+            }
+        });
+    };
+    let has_ready = move || pending.with(|p| p.iter().any(|a| a.media.is_some()));
+    let has_blocking = move || pending.with(|p| p.iter().any(|a| a.media.is_none()));
 
     let keydown = move |e: KeyboardEvent| {
         // On mobile, Enter = newline (soft keyboard convention); Send
@@ -1406,10 +1711,41 @@ where
     };
 
     view! {
+        <div class="chat-input-wrap">
+            // Pending-attachment strip: thumbnail + state per pick.
+            {move || {
+                let items = pending.get();
+                if items.is_empty() {
+                    view! { <span></span> }.into_any()
+                } else {
+                    let thumbs = items.into_iter().map(|a| {
+                        let id = a.local_id;
+                        let state_cls = if a.error.is_some() { "failed" } else if a.media.is_some() { "ready" } else { "uploading" };
+                        let title = match (&a.error, &a.media) {
+                            (Some(e), _) => format!("{}: {}", a.name, e),
+                            (None, Some(m)) => format!("{} · {}×{} · {} KB", m.name, m.width, m.height, m.byte_size / 1024),
+                            _ => format!("{} · uploading…", a.name),
+                        };
+                        view! {
+                            <div class=format!("pending-thumb {state_cls}") title=title.clone()>
+                                <img src=a.preview.clone() alt=a.name.clone() />
+                                <button class="pt-remove" title="Remove" on:click=move |_| remove_pending(id)>"×"</button>
+                                {a.error.map(|e| view! { <div class="pt-err">{e}</div> })}
+                            </div>
+                        }
+                    }).collect::<Vec<_>>();
+                    view! { <div class="pending-strip">{thumbs}</div> }.into_any()
+                }
+            }}
         <div class="chat-input-bar">
             <button class="ci-slash"
                 title="Slash commands"
                 on:click=move |_| slashes_open.set(true)>"/"</button>
+            <button class="ci-attach"
+                title="Attach an image"
+                disabled=move || !connected.get()
+                on:click=open_picker>"📎"</button>
+            <input node_ref=file_ref type="file" accept="image/*" multiple class="ci-file" on:change=on_files />
             <textarea
                 node_ref=textarea_ref
                 class="ci-textarea"
@@ -1417,6 +1753,7 @@ where
                 prop:value=move || input.get()
                 on:input=move |e| input.set(event_target_value(&e))
                 on:keydown=keydown
+                on:paste=on_paste
                 on:focus=on_focus
                 rows="1" />
             // Dual-role button: ▶ send when idle, ■ stop while a turn is
@@ -1428,7 +1765,10 @@ where
                 class:ci-stop=move || busy.get()
                 title=move || if busy.get() { "Stop the current turn" } else { "Send" }
                 disabled=move || {
-                    !busy.get() && (!connected.get() || input.with(|s| s.trim().is_empty()))
+                    !busy.get()
+                        && (!connected.get()
+                            || has_blocking()
+                            || (input.with(|s| s.trim().is_empty()) && !has_ready()))
                 }
                 on:click=move |e| {
                     if busy.get_untracked() {
@@ -1441,6 +1781,7 @@ where
                 }>
                 {move || if busy.get() { "■" } else { "▶" }}
             </button>
+        </div>
         </div>
     }
 }

@@ -27,7 +27,13 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum ClientMsg {
     /// User text turn — becomes a `UserMessage` on the Converse stream.
-    Msg { text: String },
+    /// `attachment_ids` are media ids from `PUT /api/media` (default
+    /// empty, so pre-media clients keep parsing).
+    Msg {
+        text: String,
+        #[serde(default)]
+        attachment_ids: Vec<String>,
+    },
     /// Slash command — becomes a `SlashCommand`. The brain parses the
     /// command name + args server-side; `args` may be empty.
     Slash {
@@ -89,6 +95,23 @@ pub enum ServerMsg {
     /// Live reasoning shard — **display-only, never persist** per
     /// REASONING-STREAM-01.
     Reasoning { text: String },
+    /// An image became visible — attached by the operator, produced or
+    /// viewed by a tool, or replayed from history on attach. `url` is the
+    /// embra-web route that serves the bytes (`/api/media/<id>`).
+    Media {
+        id: String,
+        media_type: String,
+        width: u32,
+        height: u32,
+        byte_size: u64,
+        name: String,
+        origin: String,
+        path: String,
+        caption: String,
+        tool_use_id: String,
+        replay: bool,
+        url: String,
+    },
     /// Transport / decode error originating from this bridge.
     Error { message: String },
 }
@@ -100,8 +123,11 @@ impl ClientMsg {
     pub fn into_proto(self) -> apid::ConversationRequest {
         use conversation_request::RequestType;
         let request_type = match self {
-            ClientMsg::Msg { text } => {
-                RequestType::UserMessage(apid::UserMessage { content: text })
+            ClientMsg::Msg { text, attachment_ids } => {
+                RequestType::UserMessage(apid::UserMessage {
+                    content: text,
+                    attachment_ids,
+                })
             }
             ClientMsg::Slash { command, args } => {
                 RequestType::SlashCommand(apid::SlashCommand { command, args })
@@ -188,5 +214,79 @@ pub fn brain_to_server_msg(resp: brain::ConversationResponse) -> Option<ServerMs
             default_value: s.default_value,
         },
         ResponseType::ReasoningDelta(r) => ServerMsg::Reasoning { text: r.text },
+        ResponseType::Media(m) => media_server_msg(m),
     })
+}
+
+/// `MediaRef` → `ServerMsg::Media` with the serving URL filled in.
+pub fn media_server_msg(m: brain::MediaRef) -> ServerMsg {
+    ServerMsg::Media {
+        url: format!("/api/media/{}", m.id),
+        id: m.id,
+        media_type: m.media_type,
+        width: m.width,
+        height: m.height,
+        byte_size: m.byte_size,
+        name: m.name,
+        origin: m.origin,
+        path: m.path,
+        caption: m.caption,
+        tool_use_id: m.tool_use_id,
+        replay: m.replay,
+    }
+}
+
+#[cfg(test)]
+mod media_bridge_tests {
+    use super::*;
+
+    #[test]
+    fn client_msg_msg_without_attachment_ids_still_parses() {
+        // Pre-media clients send `{"t":"msg","text":...}` — must keep parsing.
+        let m: ClientMsg = serde_json::from_str(r#"{"t":"msg","text":"hi"}"#).unwrap();
+        match m {
+            ClientMsg::Msg { text, attachment_ids } => {
+                assert_eq!(text, "hi");
+                assert!(attachment_ids.is_empty());
+            }
+            other => panic!("expected Msg, got {other:?}"),
+        }
+        let m: ClientMsg = serde_json::from_str(
+            r#"{"t":"msg","text":"","attachment_ids":["att-20260820T153012Z-1a2b3c4d"]}"#,
+        )
+        .unwrap();
+        let req = m.into_proto();
+        match req.request_type {
+            Some(conversation_request::RequestType::UserMessage(um)) => {
+                assert_eq!(um.attachment_ids, vec!["att-20260820T153012Z-1a2b3c4d"]);
+            }
+            other => panic!("expected UserMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn media_ref_maps_to_server_msg_with_url() {
+        let resp = brain::ConversationResponse {
+            response_type: Some(brain::conversation_response::ResponseType::Media(brain::MediaRef {
+                id: "gen-20260820T153012Z-deadbeef".into(),
+                media_type: "image/png".into(),
+                width: 1024,
+                height: 768,
+                byte_size: 4096,
+                name: "poster.png".into(),
+                origin: "generated".into(),
+                path: "/embra/workspace/MEDIA/gen-20260820T153012Z-deadbeef.png".into(),
+                caption: String::new(),
+                tool_use_id: "toolu_1".into(),
+                replay: false,
+            })),
+        };
+        let msg = brain_to_server_msg(resp).unwrap();
+        let v = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["t"], "media");
+        assert_eq!(v["url"], "/api/media/gen-20260820T153012Z-deadbeef");
+        assert_eq!(v["origin"], "generated");
+        assert_eq!(v["width"], 1024);
+        assert_eq!(v["replay"], false);
+    }
 }

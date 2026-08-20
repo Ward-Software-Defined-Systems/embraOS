@@ -18,9 +18,31 @@
     return `${proto}://${location.host}/ws/terminal`;
   }
 
+  // Screen pixel size for the PTY winsize (media wave): the console
+  // derives its cell size from xpixel/cols and ypixel/rows to size sixel
+  // images. `.xterm-screen` is laid out at exactly cols×cellW by
+  // rows×cellH, so its box is the cleanest public-API source; the private
+  // render-service dimensions are the fallback. 0 = unknown → the console
+  // falls back to halfblocks rather than guessing a cell size.
+  function screenPixels() {
+    try {
+      const el = term && term.element && term.element.querySelector(".xterm-screen");
+      if (el) {
+        const r = el.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) return [Math.round(r.width), Math.round(r.height)];
+      }
+      const d = term && term._core && term._core._renderService && term._core._renderService.dimensions;
+      if (d && d.css && d.css.cell) {
+        return [Math.round(d.css.cell.width * term.cols), Math.round(d.css.cell.height * term.rows)];
+      }
+    } catch (e) {}
+    return [0, 0];
+  }
+
   function sendResize() {
     if (writable && ws && ws.readyState === 1 && term) {
-      ws.send(JSON.stringify({ t: "resize", cols: term.cols, rows: term.rows }));
+      const [xpixel, ypixel] = screenPixels();
+      ws.send(JSON.stringify({ t: "resize", cols: term.cols, rows: term.rows, xpixel, ypixel }));
     }
   }
 
@@ -82,6 +104,24 @@
     });
     fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
+    // Media wave: in-terminal images. embra-console (EMBRA_TUI_GRAPHICS=
+    // sixel on this PTY) renders its media pane as sixel through
+    // ratatui-image; this addon paints it. Cell geometry travels in the
+    // resize frames (screenPixels), not via the addon's size reports.
+    // Loaded BEFORE open() (addon README order), try/catch so a missing/
+    // incompatible addon degrades to "text card only" rather than a
+    // blank terminal.
+    try {
+      term.loadAddon(new ImageAddon.ImageAddon({
+        enableSizeReports: true,
+        sixelSupport: true,
+        sixelScrolling: true,
+        sixelPaletteLimit: 4096,
+        iipSupport: true,
+        storageLimit: 32,
+        showPlaceholder: false,
+      }));
+    } catch (e) { console.warn("embra-web: image addon unavailable", e); }
     term.open(document.getElementById(elId));
     // Grid-locked glyph rendering. xterm's default DOM renderer places
     // glyphs by their natural font advance, so on long/wrapped rows the
@@ -99,7 +139,54 @@
     const ro = new ResizeObserver(() => { try { fit.fit(); } catch (e) {} sendResize(); });
     ro.observe(document.getElementById(elId));
     window.addEventListener("resize", () => { try { fit.fit(); } catch (e) {} sendResize(); });
+    // Media wave: drop an image on the terminal, or paste image data,
+    // to attach it — upload to the store, then type `/attach <id>` into
+    // the console for the operator (the brain stages it for the next
+    // message). Plain-text pastes are left to xterm.
+    const host = document.getElementById(elId);
+    host.addEventListener("dragover", (e) => { e.preventDefault(); });
+    host.addEventListener("drop", (e) => {
+      e.preventDefault();
+      const files = e.dataTransfer && e.dataTransfer.files;
+      if (files && files.length) window.embraUploadFiles(files);
+    });
+    document.addEventListener("paste", (e) => {
+      const files = e.clipboardData && e.clipboardData.files;
+      if (files && files.length && [...files].some((f) => f.type.startsWith("image/"))) {
+        e.preventDefault();
+        window.embraUploadFiles(files);
+      }
+    });
     connect();
+  };
+
+  // Upload one or more images to the MEDIA store and inject `/attach <id>`
+  // per success. Errors surface as a terminal line (bracketed, dim) so the
+  // operator sees them where they are looking.
+  window.embraUploadFiles = async function (files) {
+    for (const f of Array.from(files)) {
+      if (!f.type.startsWith("image/") && f.type !== "") continue;
+      try {
+        const resp = await fetch("/api/media", {
+          method: "PUT",
+          headers: {
+            "Content-Type": f.type || "application/octet-stream",
+            "X-Embra-Name": encodeURIComponent(f.name),
+          },
+          body: f,
+        });
+        const body = await resp.json().catch(() => ({}));
+        if (!resp.ok || !body.id) {
+          const msg = body.error || ("upload rejected (" + resp.status + ")");
+          if (term) term.write("\r\n\x1b[2m[embra-web] attach failed: " + msg + "\x1b[0m\r\n");
+          continue;
+        }
+        if (writable) window.embraTermInject("/attach " + body.id + "\r");
+        else if (term) term.write("\r\n\x1b[2m[embra-web] uploaded " + body.id + " — take control to attach it\x1b[0m\r\n");
+      } catch (err) {
+        if (term) term.write("\r\n\x1b[2m[embra-web] attach failed: " + err + "\x1b[0m\r\n");
+      }
+    }
   };
 
   window.embraTermInject = function (text) {

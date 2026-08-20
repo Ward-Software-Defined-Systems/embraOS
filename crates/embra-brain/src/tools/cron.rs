@@ -284,7 +284,9 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
         )
         .await
         {
-            Ok(s) => s,
+            // Cron consumes the text only — a cron-fired media tool's images
+            // have no operator stream to land on.
+            Ok(out) => out.text,
             Err(e) => format!("cron dispatch failed: {e}"),
         };
         results.push(format!("embraCRON [{}]: {}", command, result_text));

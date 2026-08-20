@@ -32,7 +32,11 @@ async fn main() -> anyhow::Result<()> {
     let grpc_handle = tokio::spawn(async move {
         info!("gRPC server listening on {}", grpc_addr);
         TonicServer::builder()
-            .add_service(EmbraApiServer::new(grpc_service))
+            .add_service(
+                // PutMedia requests from embra-web carry raw image bytes.
+                EmbraApiServer::new(grpc_service)
+                    .max_decoding_message_size(embra_common::GRPC_MAX_MESSAGE_BYTES),
+            )
             .serve(grpc_addr)
             .await
             .expect("gRPC server failed");

@@ -9,9 +9,18 @@
 //!   on `Vec<Block>` survive round-trips because every IR variant maps
 //!   1-to-1 (or 1-to-2 for the fold case) onto wire blocks.
 
-use crate::provider::ir::{ApiMessage, Block, EarlyStopReason, TurnOutcome};
+use crate::provider::ir::{ApiMessage, Block, EarlyStopReason, ImageData, TurnOutcome};
 
-use super::wire::{AnthropicWireMessage, MessageBlock, StopReason};
+use super::wire::{AnthropicWireMessage, ImageSource, MessageBlock, StopReason, ToolResultContent};
+
+fn image_block(img: &ImageData) -> MessageBlock {
+    MessageBlock::Image {
+        source: ImageSource::Base64 {
+            media_type: img.media_type.clone(),
+            data: img.data_b64.to_string(),
+        },
+    }
+}
 
 /// Convert neutral IR messages into the Anthropic wire shape.
 pub fn ir_messages_to_wire(messages: &[ApiMessage]) -> Vec<AnthropicWireMessage> {
@@ -52,10 +61,24 @@ pub fn ir_blocks_to_wire(blocks: &[Block]) -> Vec<MessageBlock> {
                     input: args.clone(),
                 });
             }
-            Block::ToolResult { call_id, content, is_error } => {
+            Block::Image(img) => out.push(image_block(img)),
+            Block::ToolResult { call_id, content, is_error, images } => {
+                // Text-only results keep the bare-string form (byte-identical
+                // to the pre-media wire); images switch to the array form —
+                // text first, then each image block.
+                let wire_content = if images.is_empty() {
+                    ToolResultContent::Text(content.clone())
+                } else {
+                    let mut blocks = Vec::with_capacity(images.len() + 1);
+                    if !content.is_empty() {
+                        blocks.push(MessageBlock::Text { text: content.clone() });
+                    }
+                    blocks.extend(images.iter().map(image_block));
+                    ToolResultContent::Blocks(blocks)
+                };
                 out.push(MessageBlock::ToolResult {
                     tool_use_id: call_id.clone(),
-                    content: content.clone(),
+                    content: wire_content,
                     is_error: *is_error,
                 });
             }
@@ -103,11 +126,20 @@ pub fn wire_blocks_to_ir(blocks: Vec<MessageBlock>) -> Vec<Block> {
                 provider_opaque: None,
             }),
             MessageBlock::ToolResult { tool_use_id, content, is_error } => {
+                // Wire → IR only ever runs on assistant output, which never
+                // carries tool_result images; flatten defensively.
                 out.push(Block::ToolResult {
                     call_id: tool_use_id,
-                    content,
+                    content: content.text(),
                     is_error,
+                    images: Vec::new(),
                 });
+            }
+            MessageBlock::Image { .. } => {
+                // The API never emits image blocks in assistant content;
+                // if one ever arrives, dropping it is safer than replaying
+                // it on an assistant turn (which the API rejects).
+                tracing::warn!(target: "provider::anthropic", "dropped unexpected image block in assistant content");
             }
         }
     }
@@ -246,16 +278,85 @@ mod tests {
             call_id: "t1".into(),
             content: "ok".into(),
             is_error: false,
+            images: Vec::new(),
         }];
         let wire = ir_blocks_to_wire(&ir);
         match &wire[0] {
             MessageBlock::ToolResult { tool_use_id, content, is_error } => {
                 assert_eq!(tool_use_id, "t1");
-                assert_eq!(content, "ok");
+                assert_eq!(content.text(), "ok");
                 assert!(!is_error);
             }
             other => panic!("expected ToolResult, got {other:?}"),
         }
+    }
+
+    fn img(name: &str) -> ImageData {
+        ImageData {
+            media_type: "image/png".into(),
+            data_b64: std::sync::Arc::from("iVBOR"),
+            width: 2,
+            height: 2,
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn tool_result_without_images_serializes_as_bare_string() {
+        // Byte lock: the pre-media wire form. A text-only tool result must
+        // never pick up the array form (prompt-cache + API parity).
+        let wire = ir_blocks_to_wire(&[Block::ToolResult {
+            call_id: "t1".into(),
+            content: "ok".into(),
+            is_error: false,
+            images: Vec::new(),
+        }]);
+        assert_eq!(
+            serde_json::to_string(&wire[0]).unwrap(),
+            r#"{"type":"tool_result","tool_use_id":"t1","content":"ok"}"#
+        );
+    }
+
+    #[test]
+    fn tool_result_with_images_serializes_content_array_text_first() {
+        let wire = ir_blocks_to_wire(&[Block::ToolResult {
+            call_id: "t1".into(),
+            content: "=== image a.png ===".into(),
+            is_error: false,
+            images: vec![img("a.png")],
+        }]);
+        let v = serde_json::to_value(&wire[0]).unwrap();
+        assert_eq!(v["type"], "tool_result");
+        let content = v["content"].as_array().expect("array form with images");
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "=== image a.png ===");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/png");
+        assert_eq!(content[1]["source"]["data"], "iVBOR");
+    }
+
+    #[test]
+    fn image_block_serializes_base64_source() {
+        let wire = ir_blocks_to_wire(&[Block::Image(img("a.png")), Block::Text("what is it".into())]);
+        assert_eq!(
+            serde_json::to_string(&wire[0]).unwrap(),
+            r#"{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBOR"}}"#
+        );
+        assert!(matches!(&wire[1], MessageBlock::Text { text } if text == "what is it"));
+    }
+
+    #[test]
+    fn assistant_image_block_is_dropped_on_wire_to_ir() {
+        let ir = wire_blocks_to_ir(vec![
+            MessageBlock::Image {
+                source: ImageSource::Base64 { media_type: "image/png".into(), data: "x".into() },
+            },
+            MessageBlock::Text { text: "hi".into() },
+        ]);
+        assert_eq!(ir.len(), 1);
+        assert!(matches!(&ir[0], Block::Text(t) if t == "hi"));
     }
 
     #[test]

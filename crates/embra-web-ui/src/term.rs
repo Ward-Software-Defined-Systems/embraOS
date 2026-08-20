@@ -24,6 +24,12 @@ extern "C" {
 
     #[wasm_bindgen(js_name = embraTermSetRoleCb)]
     fn embra_term_set_role_cb(cb: &Closure<dyn FnMut(String, String)>);
+
+    /// Media wave: upload picked files to the MEDIA store and inject
+    /// `/attach <id>` into the console per success (JS owns the fetch so
+    /// the desktop shell needs no File/Blob plumbing in Rust).
+    #[wasm_bindgen(js_name = embraUploadFiles)]
+    pub fn upload_files(files: &web_sys::FileList);
 }
 
 /// Boot xterm + the WebSocket against `el_id`.

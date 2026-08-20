@@ -153,6 +153,11 @@ pub struct SessionManager {
     /// Suppressed attempts do NOT re-stamp — the semantics are "at most
     /// one briefing start per session per cooldown window".
     briefing_attempts: std::collections::HashMap<String, std::time::Instant>,
+    /// Media staged by `/attach` per session, consumed (drained) by the
+    /// next REAL operator turn — never by the resume-briefing or
+    /// delete-flow synthetic turns. Runtime only; a brain restart drops
+    /// the staging (the files stay in the MEDIA store).
+    pending_media: std::collections::HashMap<String, Vec<crate::media::MediaMeta>>,
 }
 
 impl SessionManager {
@@ -162,7 +167,26 @@ impl SessionManager {
             active_session: None,
             pending_resume_briefing: false,
             briefing_attempts: std::collections::HashMap::new(),
+            pending_media: std::collections::HashMap::new(),
         }
+    }
+
+    /// Stage an image for `session`'s next operator turn. Returns the new
+    /// staged count.
+    pub fn stage_media(&mut self, session: &str, meta: crate::media::MediaMeta) -> usize {
+        let v = self.pending_media.entry(session.to_string()).or_default();
+        v.retain(|m| m.id != meta.id);
+        v.push(meta);
+        v.len()
+    }
+
+    pub fn staged_media(&self, session: &str) -> &[crate::media::MediaMeta] {
+        self.pending_media.get(session).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Drain the staging for `session`.
+    pub fn take_staged_media(&mut self, session: &str) -> Vec<crate::media::MediaMeta> {
+        self.pending_media.remove(session).unwrap_or_default()
     }
 
     /// True when a resume briefing was started for `name` less than
@@ -980,5 +1004,46 @@ mod soft_delete_tests {
         // The get_most_recent_active filter shape: Deleted is neither
         // Active nor Detached.
         assert!(back.state != SessionState::Active && back.state != SessionState::Detached);
+    }
+}
+
+#[cfg(test)]
+mod staged_media_tests {
+    use super::*;
+    use crate::media::{MediaMeta, MediaOrigin};
+
+    fn meta(id: &str) -> MediaMeta {
+        MediaMeta {
+            id: id.into(),
+            file: format!("{id}.png"),
+            media_type: "image/png".into(),
+            width: 2,
+            height: 2,
+            byte_size: 70,
+            name: "a.png".into(),
+            origin: MediaOrigin::Attached,
+            session: "s".into(),
+            created_at: String::new(),
+            sha256: String::new(),
+        }
+    }
+
+    #[test]
+    fn staged_media_is_per_session_deduped_and_drained_once() {
+        let mut mgr = SessionManager::new(WardsonDbClient::new(1));
+        assert_eq!(mgr.stage_media("alpha", meta("att-20260820T153012Z-00000001")), 1);
+        assert_eq!(mgr.stage_media("alpha", meta("att-20260820T153012Z-00000002")), 2);
+        // Re-staging the same id replaces, never duplicates.
+        assert_eq!(mgr.stage_media("alpha", meta("att-20260820T153012Z-00000001")), 2);
+        assert_eq!(mgr.stage_media("beta", meta("att-20260820T153012Z-00000003")), 1);
+        assert_eq!(mgr.staged_media("alpha").len(), 2);
+        assert_eq!(mgr.staged_media("beta").len(), 1);
+        assert!(mgr.staged_media("gamma").is_empty());
+        // Switching sessions keeps the staging keyed to its own session.
+        let taken = mgr.take_staged_media("alpha");
+        assert_eq!(taken.len(), 2);
+        assert!(mgr.staged_media("alpha").is_empty());
+        assert_eq!(mgr.staged_media("beta").len(), 1);
+        assert!(mgr.take_staged_media("alpha").is_empty(), "drained once");
     }
 }

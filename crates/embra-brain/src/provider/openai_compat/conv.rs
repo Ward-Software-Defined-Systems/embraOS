@@ -18,11 +18,20 @@
 
 use serde_json::Value as JsonValue;
 
-use crate::provider::ir::{ApiMessage, Block};
+use crate::provider::ir::{ApiMessage, Block, ImageData};
 use crate::provider::openai_compat::sanitize::sanitize_harmony_tokens;
 use crate::provider::openai_compat::wire::{
-    OpenAIMessage, OpenAIMessageOut, OpenAIToolCall, OpenAIToolCallFunction,
+    ImageUrlRef, OpenAIMessage, OpenAIMessageOut, OpenAIToolCall, OpenAIToolCallFunction,
+    UserContent, UserPart,
 };
+
+fn image_part(img: &ImageData) -> UserPart {
+    UserPart::ImageUrl {
+        image_url: ImageUrlRef {
+            url: img.to_data_url(),
+        },
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConvError {
@@ -57,24 +66,61 @@ pub fn ir_messages_to_wire(messages: &[ApiMessage]) -> Result<Vec<OpenAIMessage>
 }
 
 fn user_blocks_to_wire(blocks: &[Block], out: &mut Vec<OpenAIMessage>) -> Result<(), ConvError> {
-    let has_text = blocks.iter().any(|b| matches!(b, Block::Text(_)));
+    let has_text = blocks
+        .iter()
+        .any(|b| matches!(b, Block::Text(_) | Block::Image(_)));
     let has_tool_result = blocks.iter().any(|b| matches!(b, Block::ToolResult { .. }));
     if has_text && has_tool_result {
         return Err(ConvError::MixedUserBlocks);
     }
     if has_tool_result {
         // One role:"tool" message per ToolResult, correlated by tool_call_id.
+        // The `tool` role cannot carry images, so a media tool's images
+        // ride ONE synthetic user message pushed right after the tool
+        // messages (tool messages still directly follow the assistant's
+        // tool_calls, as the format requires).
+        let mut image_parts: Vec<UserPart> = Vec::new();
         for block in blocks {
             if let Block::ToolResult {
-                call_id, content, ..
+                call_id,
+                content,
+                images,
+                ..
             } = block
             {
                 out.push(OpenAIMessage::Tool {
                     tool_call_id: call_id.clone(),
                     content: content.clone(),
                 });
+                if !images.is_empty() {
+                    image_parts.push(UserPart::Text {
+                        text: format!("Image output of tool call {call_id}:"),
+                    });
+                    image_parts.extend(images.iter().map(image_part));
+                }
             }
         }
+        if !image_parts.is_empty() {
+            out.push(OpenAIMessage::User {
+                content: UserContent::Parts(image_parts),
+            });
+        }
+        return Ok(());
+    }
+    let has_image = blocks.iter().any(|b| matches!(b, Block::Image(_)));
+    if has_image {
+        // Vision turn: parts array in IR order (images precede the text).
+        let parts: Vec<UserPart> = blocks
+            .iter()
+            .filter_map(|b| match b {
+                Block::Text(s) if !s.is_empty() => Some(UserPart::Text { text: s.clone() }),
+                Block::Image(img) => Some(image_part(img)),
+                _ => None,
+            })
+            .collect();
+        out.push(OpenAIMessage::User {
+            content: UserContent::Parts(parts),
+        });
         return Ok(());
     }
     // Pure text path. Concatenate all Text blocks (typical: one block).
@@ -87,7 +133,9 @@ fn user_blocks_to_wire(blocks: &[Block], out: &mut Vec<OpenAIMessage>) -> Result
         .collect::<Vec<_>>()
         .join("");
     if !text.is_empty() {
-        out.push(OpenAIMessage::User { content: text });
+        out.push(OpenAIMessage::User {
+            content: UserContent::Text(text),
+        });
     }
     Ok(())
 }
@@ -118,6 +166,10 @@ fn assistant_blocks_to_wire(blocks: &[Block]) -> Result<OpenAIMessage, ConvError
             }
             Block::ToolResult { .. } => {
                 return Err(ConvError::AssistantHasToolResult);
+            }
+            Block::Image(_) => {
+                // Never produced on assistant turns; skip rather than
+                // invent an unsupported assistant content shape.
             }
             Block::ProviderOpaque(v) => {
                 // Extract reasoning content if this opaque is our
@@ -245,10 +297,74 @@ mod tests {
         let messages = vec![ApiMessage::user_text("hello")];
         let wire = ir_messages_to_wire(&messages).unwrap();
         assert_eq!(wire.len(), 1);
-        let OpenAIMessage::User { content } = &wire[0] else {
-            panic!("expected User variant");
+        let OpenAIMessage::User { content: UserContent::Text(text) } = &wire[0] else {
+            panic!("expected User variant with bare-string content");
         };
-        assert_eq!(content, "hello");
+        assert_eq!(text, "hello");
+    }
+
+    #[test]
+    fn user_text_only_serializes_as_bare_string() {
+        // Byte lock on the pre-media wire: text-only turns stay a plain
+        // JSON string, never the parts array.
+        let wire = ir_messages_to_wire(&[ApiMessage::user_text("hello")]).unwrap();
+        assert_eq!(
+            serde_json::to_string(&wire[0]).unwrap(),
+            r#"{"role":"user","content":"hello"}"#
+        );
+    }
+
+    fn img(name: &str) -> ImageData {
+        ImageData {
+            media_type: "image/png".into(),
+            data_b64: std::sync::Arc::from("AAAA"),
+            width: 1,
+            height: 1,
+            name: name.into(),
+        }
+    }
+
+    #[test]
+    fn user_image_blocks_become_content_parts_with_data_url() {
+        let wire =
+            ir_messages_to_wire(&[ApiMessage::user_with_images(vec![img("a.png")], "what")])
+                .unwrap();
+        let v = serde_json::to_value(&wire[0]).unwrap();
+        assert_eq!(v["role"], "user");
+        let parts = v["content"].as_array().expect("parts array");
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0]["type"], "image_url");
+        assert_eq!(parts[0]["image_url"]["url"], "data:image/png;base64,AAAA");
+        assert_eq!(parts[1]["type"], "text");
+        assert_eq!(parts[1]["text"], "what");
+    }
+
+    #[test]
+    fn tool_result_images_emit_trailing_user_parts_after_tool_messages() {
+        let wire = ir_messages_to_wire(&[ApiMessage::user_tool_results(vec![
+            Block::ToolResult {
+                call_id: "call_1".into(),
+                content: "=== image a.png ===".into(),
+                is_error: false,
+                images: vec![img("a.png")],
+            },
+            Block::ToolResult {
+                call_id: "call_2".into(),
+                content: "plain".into(),
+                is_error: false,
+                images: Vec::new(),
+            },
+        ])])
+        .unwrap();
+        // tool, tool, then ONE synthetic user parts message.
+        assert_eq!(wire.len(), 3);
+        assert!(matches!(&wire[0], OpenAIMessage::Tool { tool_call_id, content } if tool_call_id == "call_1" && content == "=== image a.png ==="));
+        assert!(matches!(&wire[1], OpenAIMessage::Tool { tool_call_id, .. } if tool_call_id == "call_2"));
+        let v = serde_json::to_value(&wire[2]).unwrap();
+        assert_eq!(v["role"], "user");
+        let parts = v["content"].as_array().unwrap();
+        assert_eq!(parts[0]["text"], "Image output of tool call call_1:");
+        assert_eq!(parts[1]["type"], "image_url");
     }
 
     #[test]
@@ -258,11 +374,13 @@ mod tests {
                 call_id: "call_1".to_string(),
                 content: "result one".to_string(),
                 is_error: false,
+                images: Vec::new(),
             },
             Block::ToolResult {
                 call_id: "call_2".to_string(),
                 content: "result two".to_string(),
                 is_error: false,
+                images: Vec::new(),
             },
         ])];
         let wire = ir_messages_to_wire(&messages).unwrap();
@@ -527,6 +645,7 @@ mod tests {
                     call_id: "call_x".to_string(),
                     content: "r".to_string(),
                     is_error: false,
+                    images: Vec::new(),
                 },
             ],
         };
@@ -566,6 +685,7 @@ mod tests {
             call_id: "call_1".to_string(),
             content: "On branch main".to_string(),
             is_error: false,
+            images: Vec::new(),
         }]);
         let messages = vec![
             ApiMessage::user_text("status?"),
@@ -645,6 +765,7 @@ mod tests {
                 call_id: "call_1".to_string(),
                 content: "clean".to_string(),
                 is_error: false,
+                images: Vec::new(),
             }]),
             ApiMessage::Assistant {
                 content: vec![

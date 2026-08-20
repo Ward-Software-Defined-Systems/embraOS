@@ -28,7 +28,7 @@ use tokio::sync::{broadcast, mpsc};
 pub struct PtyBridge {
     output_tx: broadcast::Sender<Bytes>,
     input_tx: mpsc::UnboundedSender<Vec<u8>>,
-    resize_tx: mpsc::UnboundedSender<(u16, u16)>,
+    resize_tx: mpsc::UnboundedSender<(u16, u16, u16, u16)>,
 }
 
 impl PtyBridge {
@@ -39,7 +39,7 @@ impl PtyBridge {
         // just continues (the console repaints every ~200 ms anyway).
         let (output_tx, _) = broadcast::channel::<Bytes>(2048);
         let (input_tx, input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (resize_tx, resize_rx) = mpsc::unbounded_channel::<(u16, u16)>();
+        let (resize_tx, resize_rx) = mpsc::unbounded_channel::<(u16, u16, u16, u16)>();
 
         let bridge = PtyBridge {
             output_tx: output_tx.clone(),
@@ -69,8 +69,10 @@ impl PtyBridge {
     }
 
     /// Request a PTY winsize change (cols, rows).
-    pub fn resize(&self, cols: u16, rows: u16) {
-        let _ = self.resize_tx.send((cols, rows));
+    /// `xpixel`/`ypixel` = screen pixel size (0 = unknown); lands in the
+    /// PTY winsize so the console can derive its cell size for sixel.
+    pub fn resize(&self, cols: u16, rows: u16, xpixel: u16, ypixel: u16) {
+        let _ = self.resize_tx.send((cols, rows, xpixel, ypixel));
     }
 }
 
@@ -80,7 +82,7 @@ fn session_manager(
     apid_addr: String,
     output_tx: broadcast::Sender<Bytes>,
     mut input_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    mut resize_rx: mpsc::UnboundedReceiver<(u16, u16)>,
+    mut resize_rx: mpsc::UnboundedReceiver<(u16, u16, u16, u16)>,
 ) {
     // Last requested size, so a restart reopens at the operator's size.
     let mut last_size = PtySize::default();
@@ -114,7 +116,7 @@ fn run_one_session(
     apid_addr: &str,
     output_tx: &broadcast::Sender<Bytes>,
     input_rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
-    resize_rx: &mut mpsc::UnboundedReceiver<(u16, u16)>,
+    resize_rx: &mut mpsc::UnboundedReceiver<(u16, u16, u16, u16)>,
     last_size: &mut PtySize,
 ) -> anyhow::Result<()> {
     let pair = native_pty_system().openpty(*last_size)?;
@@ -123,6 +125,13 @@ fn run_one_session(
     cmd.arg("--apid-addr");
     cmd.arg(apid_addr);
     cmd.env("EMBRA_WEB_PTY", "1");
+    // Media wave: the console's in-TUI media pane renders sixel on this
+    // PTY — xterm.js paints it via the vendored @xterm/addon-image. Cell
+    // geometry reaches the console through the PTY winsize pixel fields
+    // (the browser's resize frames carry xpixel/ypixel), not a stdin
+    // query — the console starts before any browser is attached. The
+    // serial console never gets this env (its default is halfblocks).
+    cmd.env("EMBRA_TUI_GRAPHICS", "sixel");
     cmd.env("TERM", "xterm-256color");
 
     // Spawn on the slave, then drop our slave handle so the master read
@@ -169,9 +178,11 @@ fn run_one_session(
         }
 
         let mut resized = false;
-        while let Ok((cols, rows)) = resize_rx.try_recv() {
+        while let Ok((cols, rows, xpixel, ypixel)) = resize_rx.try_recv() {
             last_size.cols = cols;
             last_size.rows = rows;
+            last_size.pixel_width = xpixel;
+            last_size.pixel_height = ypixel;
             resized = true;
         }
         if resized {

@@ -6,6 +6,7 @@ use crate::brain::Message;
 use crate::config;
 use crate::db::WardsonDbClient;
 use crate::learning;
+use crate::media;
 use crate::proactive::Notification;
 use crate::provider::anthropic::AnthropicProvider;
 use crate::provider::gemini::GeminiProvider;
@@ -544,6 +545,53 @@ impl BrainService for BrainGrpcService {
         Ok(Response::new(StopTurnResponse { was_in_turn }))
     }
 
+    // --- Media store ---
+
+    async fn put_media(&self, request: Request<PutMediaRequest>) -> Result<Response<PutMediaResponse>, Status> {
+        let req = request.into_inner();
+        if req.data.len() > media::MEDIA_UPLOAD_MAX {
+            return Err(Status::resource_exhausted(format!(
+                "image is {} bytes; the limit is {} bytes",
+                req.data.len(),
+                media::MEDIA_UPLOAD_MAX
+            )));
+        }
+        let store = media::MediaStore::default_store();
+        let normalized = media::ingest::normalize(req.data)
+            .await
+            .map_err(|e| media_status(e.into()))?;
+        let transformed = normalized.transformed;
+        let name = if req.name.trim().is_empty() { "image" } else { req.name.as_str() };
+        let meta = store
+            .put(media::MediaOrigin::Attached, name, &req.session_name, normalized)
+            .await
+            .map_err(media_status)?;
+        info!(
+            target: "media",
+            id = %meta.id,
+            session = %req.session_name,
+            bytes = meta.byte_size,
+            width = meta.width,
+            height = meta.height,
+            media_type = %meta.media_type,
+            transformed,
+            "media stored"
+        );
+        Ok(Response::new(PutMediaResponse {
+            media: Some(media::media_ref_frame(&meta, store.dir(), false, "", "")),
+        }))
+    }
+
+    async fn get_media(&self, request: Request<GetMediaRequest>) -> Result<Response<GetMediaResponse>, Status> {
+        let id = request.into_inner().id;
+        let store = media::MediaStore::default_store();
+        let (meta, data) = store.get(&id).await.map_err(media_status)?;
+        Ok(Response::new(GetMediaResponse {
+            media: Some(media::media_ref_frame(&meta, store.dir(), false, "", "")),
+            data,
+        }))
+    }
+
     async fn create_session(&self, request: Request<CreateSessionRequest>) -> Result<Response<CreateSessionResponse>, Status> {
         let name = request.into_inner().name;
         let mut mgr = self.session_manager.write().await;
@@ -1009,6 +1057,97 @@ async fn handle_request(
             // system prompt is left untouched so Anthropic prompt caching stays
             // warm. History persistence below saves `msg.content` (raw), so the
             // wrapper never leaks into subsequent turns.
+            // Media on this turn: the client's explicit `attachment_ids` ∪
+            // whatever `/attach` staged for the session. Synthetic turns
+            // (resume briefing, delete-flow memorize) never consume the
+            // staging. An unknown id aborts the turn with an Error frame
+            // and persists nothing; the staging is drained only on success.
+            let media_store = media::MediaStore::default_store();
+            let synthetic_turn = pending_briefing || delete_exec.is_some();
+            let mut turn_media: Vec<media::MediaMeta> = Vec::new();
+            if !synthetic_turn {
+                let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                for id in &msg.attachment_ids {
+                    match media_store.meta(id).await {
+                        Ok(meta) => {
+                            if seen.insert(meta.id.clone()) {
+                                turn_media.push(meta);
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx.send(Ok(ConversationResponse {
+                                response_type: Some(conversation_response::ResponseType::System(
+                                    SystemMessage {
+                                        content: format!("Attachment '{}' is not available: {}. Nothing was sent.", id, e),
+                                        msg_type: SystemMessageType::Error as i32,
+                                    }
+                                )),
+                            })).await;
+                            return Ok(());
+                        }
+                    }
+                }
+                let staged = session_mgr.read().await.staged_media(&session_name).to_vec();
+                for meta in staged {
+                    if seen.insert(meta.id.clone()) {
+                        turn_media.push(meta);
+                    }
+                }
+                if turn_media.len() > media::MEDIA_MAX_PER_MESSAGE {
+                    let _ = tx.send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::System(
+                            SystemMessage {
+                                content: format!(
+                                    "{} images on one message; the limit is {}. Use `/attach clear` and send fewer. Nothing was sent.",
+                                    turn_media.len(),
+                                    media::MEDIA_MAX_PER_MESSAGE
+                                ),
+                                msg_type: SystemMessageType::Error as i32,
+                            }
+                        )),
+                    })).await;
+                    return Ok(());
+                }
+                if !turn_media.is_empty() {
+                    let _ = session_mgr.write().await.take_staged_media(&session_name);
+                }
+            }
+            let mut turn_images: Vec<crate::provider::ir::ImageData> = Vec::with_capacity(turn_media.len());
+            let mut turn_refs: Vec<crate::brain::AttachmentRef> = Vec::with_capacity(turn_media.len());
+            for meta in &turn_media {
+                match media_store.get(&meta.id).await {
+                    Ok((m, data)) => {
+                        turn_images.push(media::store::to_image_data(&m, &data));
+                        turn_refs.push(media::store::to_attachment_ref(&m, media_store.dir()));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::System(
+                                SystemMessage {
+                                    content: format!("Attachment '{}' could not be read: {}. Nothing was sent.", meta.id, e),
+                                    msg_type: SystemMessageType::Error as i32,
+                                }
+                            )),
+                        })).await;
+                        return Ok(());
+                    }
+                }
+            }
+            if !turn_images.is_empty() {
+                let dims: Vec<String> = turn_images
+                    .iter()
+                    .map(|i| format!("{}×{}", i.width, i.height))
+                    .collect();
+                info!(
+                    target: "media",
+                    session = %session_name,
+                    images = turn_images.len(),
+                    bytes = turn_refs.iter().map(|r| r.bytes).sum::<u64>(),
+                    dims = %dims.join(","),
+                    "attachments on user turn"
+                );
+            }
+
             let enriched = if let Some(ref del) = delete_exec {
                 // Delete-flow reason turn: the brain-facing message is the
                 // memorize prompt; the raw persisted content stays the
@@ -1016,6 +1155,11 @@ async fn handle_request(
                 build_delete_memorize_prompt(&del.name, &msg.content)
             } else if pending_briefing {
                 crate::knowledge::enrichment::build_resumption_context()
+            } else if msg.content.trim().is_empty() && !turn_images.is_empty() {
+                // Image-only message: every provider path assumes a text
+                // block exists (cache breakpoints, parts arrays), and the
+                // enrichment gate would skip an empty message anyway.
+                media::replay::IMAGE_ONLY_PLACEHOLDER.to_string()
             } else {
                 crate::knowledge::enrichment::build_turn_context(
                     db.as_ref(),
@@ -1026,18 +1170,22 @@ async fn handle_request(
                 .await
             };
 
-            // Build neutral-IR message history. Legacy persistence shape
-            // (role+String) maps to text-only `Block::Text`; thinking
-            // signatures were never persisted so cross-turn replay is
-            // out of scope. Within a single turn, the loop pushes the
-            // assistant turn's full content (including any
-            // ProviderOpaque thinking blocks) verbatim between
-            // iterations — the API requires this.
-            let mut api_messages: Vec<ApiMessage> = history
-                .iter()
-                .map(legacy_message_to_api)
-                .collect();
-            api_messages.push(ApiMessage::user_text(&enriched));
+            // Build neutral-IR message history. Persistence is role+String
+            // (+ optional attachment refs): text maps to `Block::Text`,
+            // user-turn attachments reload from the MEDIA store under the
+            // inline-replay ceiling (`media::replay`). Thinking signatures
+            // were never persisted so cross-turn replay is out of scope.
+            // Within a single turn, the loop pushes the assistant turn's
+            // full content (including any ProviderOpaque thinking blocks)
+            // verbatim between iterations — the API requires this.
+            let mut api_messages: Vec<ApiMessage> =
+                media::replay::history_to_api(&media_store, &history).await;
+            api_messages.push(if turn_images.is_empty() {
+                ApiMessage::user_text(&enriched)
+            } else {
+                // Images first, then the (possibly enriched) text.
+                ApiMessage::user_with_images(turn_images, &enriched)
+            });
 
             // Send thinking indicator.
             let _ = tx.send(Ok(ConversationResponse {
@@ -1069,6 +1217,11 @@ async fn handle_request(
             // iteration has no Text blocks — `(no response)` is the
             // historical fallback and is misleading when real work fired.
             let mut tool_names_in_turn: Vec<String> = Vec::new();
+            // Images the turn's tools produced/viewed — persisted on the
+            // assistant message for transcript + history-replay display
+            // (never replayed to the model: assistant turns can't carry
+            // image blocks).
+            let mut turn_assistant_refs: Vec<crate::brain::AttachmentRef> = Vec::new();
 
             // Per-request turn trace. Interior mutability via Arc<Mutex>
             // avoids &mut propagation through the `fn` ToolDescriptor
@@ -1433,36 +1586,29 @@ async fn handle_request(
                                 )),
                             })).await;
                             let elapsed_ms = started.elapsed().as_millis() as u64;
-                            let (content, is_error) = match outcome {
-                                Ok(s) => (s, false),
-                                Err(embra_tools_core::DispatchError::Unknown(n)) => (
-                                    format!(
-                                        "Unknown tool: '{}'. Check the tool manifest for the correct name.",
-                                        n
-                                    ),
-                                    true,
-                                ),
-                                Err(embra_tools_core::DispatchError::BadInput {
-                                    tool,
-                                    source,
-                                }) => (
-                                    format!(
-                                        "Input schema mismatch for '{}': {}",
-                                        tool, source
-                                    ),
-                                    true,
-                                ),
-                                Err(embra_tools_core::DispatchError::Handler(msg)) => (msg, true),
-                                Err(embra_tools_core::DispatchError::Timeout { tool, limit_secs }) => (
-                                    format!(
-                                        "Tool '{}' exceeded the {}s global execution timeout. \
-                                         The command may still be running on the remote/host but \
-                                         its result will not be visible to you. Consider breaking \
-                                         the work into smaller chunks or backgrounding it.",
-                                        tool, limit_secs
-                                    ),
-                                    true,
-                                ),
+                            let (content, tool_images, is_error) = match outcome {
+                                Ok(out) => (out.text, out.images, false),
+                                Err(err) => {
+                                    let msg = match err {
+                                        embra_tools_core::DispatchError::Unknown(n) => format!(
+                                            "Unknown tool: '{}'. Check the tool manifest for the correct name.",
+                                            n
+                                        ),
+                                        embra_tools_core::DispatchError::BadInput { tool, source } => format!(
+                                            "Input schema mismatch for '{}': {}",
+                                            tool, source
+                                        ),
+                                        embra_tools_core::DispatchError::Handler(msg) => msg,
+                                        embra_tools_core::DispatchError::Timeout { tool, limit_secs } => format!(
+                                            "Tool '{}' exceeded the {}s global execution timeout. \
+                                             The command may still be running on the remote/host but \
+                                             its result will not be visible to you. Consider breaking \
+                                             the work into smaller chunks or backgrounding it.",
+                                            tool, limit_secs
+                                        ),
+                                    };
+                                    (msg, Vec::new(), true)
+                                }
                             };
                             info!(
                                 target: "dispatch",
@@ -1551,10 +1697,29 @@ async fn handle_request(
                                 }
                             }
 
+                            // Operator-facing frames for images the tool put
+                            // in the MEDIA store (tools carry no tx — this is
+                            // the loop-side companion, like set_name's
+                            // ModeChange). Emitted after the ToolExecution
+                            // frame so clients render the card under it.
+                            for img in &tool_images {
+                                if let Some(m) = &img.media_ref {
+                                    let _ = tx.send(Ok(ConversationResponse {
+                                        response_type: Some(conversation_response::ResponseType::Media(
+                                            media::media_ref_from_tool(m, id),
+                                        )),
+                                    })).await;
+                                    turn_assistant_refs.push(media::attachment_ref_from_tool(m));
+                                }
+                            }
+                            // Images ride the structured ToolResult (never the
+                            // text — the byte cap would cut base64 silently);
+                            // each provider's conv places them on its wire.
                             result_blocks.push(Block::ToolResult {
                                 call_id: id.clone(),
                                 content,
                                 is_error,
+                                images: media::tool_images_to_ir(tool_images),
                             });
                         }
 
@@ -1695,7 +1860,10 @@ async fn handle_request(
             {
                 let mgr = session_mgr.read().await;
                 let append_outcome = mgr
-                    .append_message(&session_name, &Message::user(&msg.content))
+                    .append_message(
+                        &session_name,
+                        &Message::user_with_attachments(&msg.content, turn_refs.clone()),
+                    )
                     .await;
                 if let Err(crate::sessions::SessionError::LegacyReadOnly(ref sess)) =
                     append_outcome
@@ -1724,7 +1892,10 @@ async fn handle_request(
                     current_turn.outcome,
                 );
                 let _ = mgr
-                    .append_message(&session_name, &Message::assistant(&final_text))
+                    .append_message(
+                        &session_name,
+                        &Message::assistant_with_attachments(&final_text, turn_assistant_refs.clone()),
+                    )
                     .await;
             }
 
@@ -1844,7 +2015,7 @@ async fn handle_request(
                 // Slash command requested a synthetic user turn — feed it through the Brain.
                 let synthetic = ConversationRequest {
                     request_type: Some(conversation_request::RequestType::UserMessage(
-                        UserMessage { content: synthetic_prompt, timestamp: None }
+                        UserMessage { content: synthetic_prompt, timestamp: None, attachment_ids: Vec::new() }
                     )),
                 };
                 Box::pin(handle_request(
@@ -1956,6 +2127,17 @@ async fn handle_request(
                                     }
                                 )),
                             })).await;
+                            // Persisted image refs replay as `replay:true`
+                            // frames right under their turn, so the client
+                            // can re-render cards (and apply its
+                            // reconnection-replay suppression uniformly).
+                            for r in msg.attachment_refs() {
+                                let _ = tx.send(Ok(ConversationResponse {
+                                    response_type: Some(conversation_response::ResponseType::Media(
+                                        media::media_ref_from_attachment(r),
+                                    )),
+                                })).await;
+                            }
                         }
                         history.len()
                     }
@@ -2040,6 +2222,7 @@ async fn handle_request(
                             UserMessage {
                                 content: "[Session resumed]".to_string(),
                                 timestamp: None,
+                                attachment_ids: Vec::new(),
                             }
                         )),
                     };
@@ -2137,7 +2320,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-5|opus-4.8|fable-5>   Switch the Anthropic model (next message)\n  /effort                            Show the Anthropic effort level\n  /effort <low|medium|high|xhigh|max>  Set effort (default max, next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-5|opus-4.8|fable-5>   Switch the Anthropic model (next message)\n  /effort                            Show the Anthropic effort level\n  /effort <low|medium|high|xhigh|max>  Set effort (default max, next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image (uploaded id or a workspace path) to your next message\n  /attach list | clear               Show or drop the staged images\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -2157,6 +2340,9 @@ async fn handle_slash_command(
         }
         "/effort" => {
             handle_effort_command(args, tx, db).await;
+        }
+        "/attach" => {
+            handle_attach_command(args, tx, db, session_mgr).await;
         }
         "/guardian" => {
             // Operator affordance (define/list/status/show/delete/key).
@@ -4498,6 +4684,116 @@ async fn handle_model_command(
 /// takes effect on the next user message. Mirrors `handle_model_command`
 /// minus the ModeChange emit — the status pill shows the model display
 /// name, which effort doesn't change.
+/// `/attach <id|path>` — stage an image for the session's next message;
+/// `/attach` / `/attach list` — show the staging + store usage;
+/// `/attach clear` — drop the staging. Refused pre-seal (learning mode
+/// dispatches no tools and runs its own loop). Uploaded ids come from
+/// PutMedia (embra-web's PUT /api/media); paths import through the store
+/// (`file_read`'s unjailed read policy, then normalize + copy into MEDIA).
+async fn handle_attach_command(
+    args: &str,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    db: &Arc<WardsonDbClient>,
+    session_mgr: &Arc<RwLock<SessionManager>>,
+) {
+    let send = |content: String, kind: SystemMessageType| {
+        let tx = tx.clone();
+        async move {
+            let _ = tx.send(Ok(ConversationResponse {
+                response_type: Some(conversation_response::ResponseType::System(
+                    SystemMessage { content, msg_type: kind as i32 }
+                )),
+            })).await;
+        }
+    };
+    if !matches!(learning::is_soul_sealed(db).await, Ok(true)) {
+        send(
+            "Attachments are available once Learning Mode completes (the soul is not sealed yet).".to_string(),
+            SystemMessageType::Warning,
+        )
+        .await;
+        return;
+    }
+    let session = match session_mgr.read().await.active_session.clone() {
+        Some(s) => s,
+        None => {
+            send("No active session — /new <name> or /switch <name> first.".to_string(), SystemMessageType::Error).await;
+            return;
+        }
+    };
+    let store = media::MediaStore::default_store();
+    let trimmed = args.trim();
+    match trimmed {
+        "" | "list" => {
+            let mgr = session_mgr.read().await;
+            let staged = mgr.staged_media(&session);
+            let (files, bytes) = store.usage().await.unwrap_or((0, 0));
+            let mut out = if staged.is_empty() {
+                format!("No images staged for session '{}'.", session)
+            } else {
+                let mut lines = vec![format!(
+                    "{} image(s) staged for session '{}' (sent with your next message):",
+                    staged.len(),
+                    session
+                )];
+                for m in staged {
+                    lines.push(format!("  {}  {} ({}×{}, {} KB)", m.id, m.name, m.width, m.height, m.byte_size / 1024));
+                }
+                lines.join("\n")
+            };
+            out.push_str(&format!(
+                "\nMEDIA store: {} file(s), {:.1} MB at {}\nUsage: /attach <id|path> · /attach clear",
+                files,
+                bytes as f64 / 1_048_576.0,
+                store.dir().display()
+            ));
+            send(out, SystemMessageType::Info).await;
+        }
+        "clear" => {
+            let dropped = session_mgr.write().await.take_staged_media(&session).len();
+            send(format!("Dropped {} staged image(s) for session '{}'.", dropped, session), SystemMessageType::Info).await;
+        }
+        arg => {
+            let result = if media::store::parse_media_id(arg).is_ok() {
+                store.meta(arg).await
+            } else {
+                store.import_path(arg, &session).await
+            };
+            match result {
+                Ok(meta) => {
+                    let count = session_mgr.write().await.stage_media(&session, meta.clone());
+                    let _ = tx.send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::Media(
+                            media::media_ref_frame(&meta, store.dir(), false, "", ""),
+                        )),
+                    })).await;
+                    let mut note = format!(
+                        "Attached {} ({}×{}, {} KB) — {} image(s) will be sent with your next message. /attach list · /attach clear",
+                        meta.name,
+                        meta.width,
+                        meta.height,
+                        meta.byte_size / 1024,
+                        count
+                    );
+                    if let Ok(cfg) = config::load_config(db).await
+                        && matches!(cfg.api_provider.as_str(), "ollama" | "lm_studio")
+                    {
+                        note.push_str(&format!(
+                            "\nNote: the active provider is {} — image input works only if the loaded model is vision-capable.",
+                            cfg.api_provider
+                        ));
+                    }
+                    info!(target: "media", session = %session, id = %meta.id, staged = count, "media staged via /attach");
+                    send(note, SystemMessageType::Info).await;
+                }
+                Err(e) => {
+                    send(format!("attach failed: {}", e), SystemMessageType::Error).await;
+                }
+            }
+        }
+    }
+}
+
 async fn handle_effort_command(
     args: &str,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
@@ -5406,15 +5702,9 @@ fn prompt_fingerprint(text: &str) -> String {
 /// so every historical turn becomes a text-only block. Migration-era
 /// shim; future schema bump introduces typed-block persistence.
 fn legacy_message_to_api(m: &Message) -> ApiMessage {
-    let block = Block::Text(m.content.clone());
-    match m.role.as_str() {
-        "user" => ApiMessage::User {
-            content: vec![block],
-        },
-        _ => ApiMessage::Assistant {
-            content: vec![block],
-        },
-    }
+    // Text-only fast path; the attachment-aware conversion is
+    // `media::replay::history_to_api`.
+    media::replay::legacy_message_to_api(m)
 }
 
 /// Byte cap for `tools.turn_trace` input/result previews. Historically 200,
@@ -5603,6 +5893,19 @@ fn final_assistant_text(
 /// instructing the model to summarize and stop. Non-`ToolCall` blocks in
 /// `blocks` are ignored. An empty input yields an empty output — callers
 /// must skip pushing a degenerate `user_tool_results(vec![])`.
+/// gRPC status mapping for the media RPCs.
+fn media_status(e: media::store::MediaError) -> Status {
+    use media::ingest::IngestError;
+    use media::store::MediaError;
+    match e {
+        MediaError::Ingest(IngestError::TooLarge(..)) => Status::resource_exhausted(e.to_string()),
+        MediaError::Ingest(_) => Status::invalid_argument(e.to_string()),
+        MediaError::BadId(_) => Status::invalid_argument(e.to_string()),
+        MediaError::NotFound(_) => Status::not_found(e.to_string()),
+        MediaError::Corrupt(..) | MediaError::Io(_) => Status::internal(e.to_string()),
+    }
+}
+
 fn synthesize_cap_results(blocks: &[Block], cap_msg: &str) -> Vec<Block> {
     blocks
         .iter()
@@ -5611,6 +5914,7 @@ fn synthesize_cap_results(blocks: &[Block], cap_msg: &str) -> Vec<Block> {
                 call_id: id.clone(),
                 content: cap_msg.to_string(),
                 is_error: true,
+                images: Vec::new(),
             }),
             _ => None,
         })
@@ -5842,6 +6146,20 @@ mod cap_results_tests {
         ];
         let out = synthesize_cap_results(&blocks, "cap reached");
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn synthesize_cap_results_tool_results_have_no_images() {
+        // Cap-synthesized results are text-only error results; an image
+        // here would be replayed to the API as if a tool had produced it.
+        let out = synthesize_cap_results(&[tool_call("call_a", "image_view")], "cap");
+        match &out[0] {
+            Block::ToolResult { images, is_error, .. } => {
+                assert!(images.is_empty());
+                assert!(is_error);
+            }
+            other => panic!("expected ToolResult, got {other:?}"),
+        }
     }
 
     #[test]

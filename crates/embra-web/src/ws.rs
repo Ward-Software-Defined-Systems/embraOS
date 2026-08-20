@@ -20,7 +20,17 @@ use crate::state::AppState;
 #[derive(Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 enum ClientControl {
-    Resize { cols: u16, rows: u16 },
+    /// `xpixel`/`ypixel` (media wave): the screen's pixel size, so the
+    /// PTY winsize carries real cell geometry for the console's in-TUI
+    /// image pane (TIOCGWINSZ ws_xpixel/ws_ypixel). Default 0 = unknown.
+    Resize {
+        cols: u16,
+        rows: u16,
+        #[serde(default)]
+        xpixel: u16,
+        #[serde(default)]
+        ypixel: u16,
+    },
     Input { data: String },
     Key { code: String },
     Takeover,
@@ -101,9 +111,9 @@ async fn handle_socket(socket: WebSocket, st: AppState) {
                     };
                     match ctrl {
                         ClientControl::Takeover => arbiter.takeover(id),
-                        ClientControl::Resize { cols, rows } => {
+                        ClientControl::Resize { cols, rows, xpixel, ypixel } => {
                             if arbiter.is_writer(id) {
-                                bridge.resize(cols, rows);
+                                bridge.resize(cols, rows, xpixel, ypixel);
                             }
                         }
                         ClientControl::Input { data } => {

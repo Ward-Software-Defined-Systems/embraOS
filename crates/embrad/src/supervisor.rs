@@ -61,6 +61,22 @@ fn brain_log_spec() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Serial-console graphics: `embra.graphics=<auto|sixel|kitty|iterm2|
+/// halfblocks|off>` on the kernel cmdline (set by run-qemu.sh via
+/// EMBRA_GRAPHICS). Forwarded to the serial embra-console as its
+/// `EMBRA_TUI_GRAPHICS` env — the protocol its in-TUI media pane renders
+/// with. Absent → the console's serial default (halfblocks: plain cells,
+/// works in any terminal, no escape protocol on the serial line). The
+/// web PTY console is NOT governed by this — embra-web sets `sixel` on
+/// its own child.
+fn console_graphics_mode() -> Option<String> {
+    std::fs::read_to_string("/proc/cmdline")
+        .unwrap_or_default()
+        .split_whitespace()
+        .find_map(|p| p.strip_prefix("embra.graphics=").map(|s| s.to_string()))
+        .filter(|s| !s.is_empty())
+}
+
 fn db_verbose_enabled() -> bool {
     std::fs::read_to_string("/proc/cmdline")
         .unwrap_or_default()
@@ -350,6 +366,11 @@ impl Supervisor {
             // Read terminal size from kernel cmdline (set by run-qemu.sh
             // from the host terminal).
             let (term_cols, term_rows) = read_terminal_size_from_cmdline();
+            let mut console_env: Vec<(String, String)> = Vec::new();
+            if let Some(mode) = console_graphics_mode() {
+                info!("Serial console graphics from cmdline (embra.graphics): {}", mode);
+                console_env.push(("EMBRA_TUI_GRAPHICS".to_string(), mode));
+            }
             self.add_service(ServiceDef {
                 name: "embra-console".to_string(),
                 binary: "/usr/bin/embra-console".to_string(),
@@ -359,7 +380,7 @@ impl Supervisor {
                     "--columns".to_string(), term_cols.to_string(),
                     "--rows".to_string(), term_rows.to_string(),
                 ],
-                env: vec![],
+                env: console_env,
                 health_check: HealthCheck::ProcessAlive,
                 depends_on: vec!["embra-brain".to_string()],
                 restart_policy: RestartPolicy::default(),

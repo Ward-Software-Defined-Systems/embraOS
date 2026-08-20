@@ -9,7 +9,8 @@ use std::io;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::extract::DefaultBodyLimit;
+use axum::routing::{get, post, put};
 use rustls::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
@@ -17,6 +18,7 @@ use tokio_rustls::server::TlsStream;
 
 use crate::assets::static_handler;
 use crate::config::WebConfig;
+use crate::media::{MEDIA_BODY_LIMIT, api_media_get, api_media_put};
 use crate::sessions::api_sessions_list;
 use crate::stop::api_stop;
 use crate::state::AppState;
@@ -70,6 +72,15 @@ pub async fn serve(
         .route("/api/status", get(api_status))
         .route("/api/sessions", get(api_sessions_list))
         .route("/api/stop", post(api_stop))
+        // Media store door. Registered explicitly — the SPA fallback
+        // below answers any unknown path with index.html/200. The body
+        // limit overrides axum's 2 MiB default so the brain's own size
+        // cap is what an oversize upload hits (with a clear message).
+        .route(
+            "/api/media",
+            put(api_media_put).layer(DefaultBodyLimit::max(MEDIA_BODY_LIMIT)),
+        )
+        .route("/api/media/{id}", get(api_media_get))
         .fallback(static_handler)
         .with_state(state);
 

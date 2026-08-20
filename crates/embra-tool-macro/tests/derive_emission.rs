@@ -6,11 +6,11 @@
 //! handler round-trip behavior.
 
 use embra_tool_macro::embra_tool;
-use embra_tools_core::{BoxFut, DispatchError, JsonValue};
+use embra_tools_core::{BoxFut, DispatchError, JsonValue, ToolOutput};
 
 mod tools {
     pub mod registry {
-        use embra_tools_core::{BoxFut, DispatchError, JsonValue};
+        use embra_tools_core::{BoxFut, DispatchError, JsonValue, ToolOutput};
 
         pub struct ToolDescriptor {
             pub name: &'static str,
@@ -18,7 +18,7 @@ mod tools {
             pub is_side_effectful: bool,
             pub input_schema: fn() -> serde_json::Value,
             pub handler: for<'a> fn(JsonValue, DispatchContext<'a>)
-                -> BoxFut<'a, Result<String, DispatchError>>,
+                -> BoxFut<'a, Result<ToolOutput, DispatchError>>,
         }
 
         inventory::collect!(ToolDescriptor);
@@ -66,6 +66,25 @@ impl TestWriterArgs {
     }
 }
 
+/// Fixture for the structured return form: `run` yields `ToolOutput`
+/// directly (identity `Into`), the path the media tools use.
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+#[embra_tool(name = "test_media", description = "Structured-output fixture")]
+pub struct TestMediaArgs {}
+
+impl TestMediaArgs {
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<ToolOutput, DispatchError> {
+        Ok(ToolOutput::text("structured").with_image(embra_tools_core::ToolImage {
+            media_type: "image/png".into(),
+            data: vec![0x89, b'P', b'N', b'G'],
+            width: 1,
+            height: 1,
+            name: "px.png".into(),
+            media_ref: None,
+        }))
+    }
+}
+
 fn find_test_descriptor() -> &'static ToolDescriptor {
     inventory::iter::<ToolDescriptor>()
         .into_iter()
@@ -101,7 +120,30 @@ async fn handler_round_trips_valid_input() {
         ctx,
     )
     .await;
-    assert_eq!(result.unwrap(), "ok:hello:3");
+    let out = result.unwrap();
+    assert_eq!(out.text, "ok:hello:3");
+    assert!(out.images.is_empty(), "String-returning tools carry no images");
+}
+
+#[tokio::test]
+async fn handler_passes_structured_output_through() {
+    let d = inventory::iter::<ToolDescriptor>()
+        .into_iter()
+        .find(|d| d.name == "test_media")
+        .expect("test_media descriptor should be registered");
+    let out = (d.handler)(serde_json::json!({}), DispatchContext { token: "x" })
+        .await
+        .unwrap();
+    assert_eq!(out.text, "structured");
+    assert_eq!(out.images.len(), 1);
+    assert_eq!(out.images[0].media_type, "image/png");
+}
+
+#[test]
+fn tool_output_from_string_has_no_images() {
+    let out: ToolOutput = String::from("plain").into();
+    assert_eq!(out.text, "plain");
+    assert!(out.images.is_empty());
 }
 
 #[tokio::test]

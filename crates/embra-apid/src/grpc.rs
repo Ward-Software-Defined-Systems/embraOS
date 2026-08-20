@@ -53,6 +53,7 @@ impl EmbraApi for EmbraApiImpl {
                                     embra_common::proto::brain::UserMessage {
                                         content: um.content,
                                         timestamp: None,
+                                        attachment_ids: um.attachment_ids,
                                     }
                                 )
                             }
@@ -114,6 +115,33 @@ impl EmbraApi for EmbraApiImpl {
         let resp = brain.stop_turn(embra_common::proto::brain::StopTurnRequest {}).await?;
         let payload = resp.into_inner().encode_to_vec();
         Ok(Response::new(StopTurnResponse { payload }))
+    }
+
+    // --- Media store pass-through ---
+
+    async fn put_media(&self, request: Request<PutMediaRequest>) -> Result<Response<PutMediaResponse>, Status> {
+        let req = request.into_inner();
+        let mut brain = self.backends.brain_client().await?;
+        let resp = brain
+            .put_media(embra_common::proto::brain::PutMediaRequest {
+                session_name: req.session_name,
+                name: req.name,
+                media_type_hint: req.media_type_hint,
+                data: req.data,
+            })
+            .await?;
+        let payload = resp.into_inner().encode_to_vec();
+        Ok(Response::new(PutMediaResponse { payload }))
+    }
+
+    async fn get_media(&self, request: Request<GetMediaRequest>) -> Result<Response<GetMediaResponse>, Status> {
+        let req = request.into_inner();
+        let mut brain = self.backends.brain_client().await?;
+        let resp = brain
+            .get_media(embra_common::proto::brain::GetMediaRequest { id: req.id })
+            .await?;
+        let payload = resp.into_inner().encode_to_vec();
+        Ok(Response::new(GetMediaResponse { payload }))
     }
 
     async fn create_session(&self, request: Request<CreateSessionRequest>) -> Result<Response<CreateSessionResponse>, Status> {

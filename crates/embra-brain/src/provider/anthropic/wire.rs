@@ -35,12 +35,51 @@ pub enum MessageBlock {
         input: JsonValue,
     },
     /// Tool-result block sent back on a user turn, correlated by id.
+    /// `content` is the bare string for text-only results (the historical
+    /// wire form, byte-identical) and a block array only when a media tool
+    /// returned images.
     ToolResult {
         tool_use_id: String,
-        content: String,
+        content: ToolResultContent,
         #[serde(default, skip_serializing_if = "is_false")]
         is_error: bool,
     },
+    /// Image block on a user turn (operator attachment) or inside a
+    /// `tool_result` content array. Only the base64 source is modeled —
+    /// embraOS never sends `url`/`file` sources.
+    Image { source: ImageSource },
+}
+
+/// `tool_result.content`: string OR array of `text`/`image` blocks.
+/// Untagged so the text form serializes as a plain JSON string.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ToolResultContent {
+    Text(String),
+    Blocks(Vec<MessageBlock>),
+}
+
+impl ToolResultContent {
+    /// The text portion regardless of form (images are dropped).
+    pub fn text(&self) -> String {
+        match self {
+            ToolResultContent::Text(s) => s.clone(),
+            ToolResultContent::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    MessageBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ImageSource {
+    Base64 { media_type: String, data: String },
 }
 
 fn is_false(b: &bool) -> bool {

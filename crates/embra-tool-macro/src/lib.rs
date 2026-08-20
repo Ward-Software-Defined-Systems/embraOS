@@ -5,7 +5,11 @@
 //! emits an `inventory::submit!` block that constructs a `ToolDescriptor` at
 //! path `crate::tools::registry::ToolDescriptor` in the consuming crate, and
 //! wires up a handler that deserializes the input and calls the args struct's
-//! inherent `run(self, ctx) -> Result<String, DispatchError>` method.
+//! inherent `run(self, ctx)` method. `run` may return
+//! `Result<String, DispatchError>` (text-only tools — mapped through
+//! `From<String> for ToolOutput`) or `Result<ToolOutput, DispatchError>`
+//! (tools that also hand the model images); the emitted handler always
+//! yields `Result<embra_tools_core::ToolOutput, DispatchError>`.
 //!
 //! The consuming crate must have `inventory`, `schemars`, `serde_json`, and
 //! `embra-tools-core` in its dependency tree.
@@ -45,7 +49,9 @@ pub fn embra_tool(attr: TokenStream, item: TokenStream) -> TokenStream {
                                 tool: ::std::string::String::from(#name),
                                 source: e,
                             })?;
-                        args.run(ctx).await
+                        args.run(ctx)
+                            .await
+                            .map(::core::convert::Into::<::embra_tools_core::ToolOutput>::into)
                     }),
                 }
             }

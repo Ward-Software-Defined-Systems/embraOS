@@ -105,10 +105,22 @@ fn format_turn(index: usize, turn: &serde_json::Value, max_bytes: Option<usize>)
         .get("content")
         .and_then(|c| c.as_str())
         .unwrap_or("");
-    let rendered = match max_bytes {
+    let mut rendered = match max_bytes {
         Some(cap) if content.len() > cap => format!("{}...", truncate_str(content, cap)),
         _ => content.to_string(),
     };
+    // Attachment refs (media wave): one line per image so transcripts and
+    // corpora show what the turn carried. Always rendered in full — they
+    // are short and the content cap above applies to the text only.
+    if let Some(refs) = turn.get("attachments").and_then(|a| a.as_array()) {
+        for r in refs {
+            let name = r.get("name").and_then(|v| v.as_str()).unwrap_or("image");
+            let w = r.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
+            let h = r.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+            let path = r.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            rendered.push_str(&format!("\n    [image: {} ({}×{}) → {}]", name, w, h, path));
+        }
+    }
     // 1-indexed for user display
     format!("[{}] [{}]: {}", index + 1, role, rendered)
 }
@@ -249,6 +261,29 @@ mod format_turn_tests {
         let line = format_turn(0, &turn("user", &content), Some(SESSION_CORPUS_TURN_CAP));
         let body = &line["[1] [user]: ".len()..line.len() - 3];
         assert_eq!(body.len(), SESSION_CORPUS_TURN_CAP);
+    }
+
+    #[test]
+    fn format_turn_appends_image_lines_from_attachments() {
+        let turn = serde_json::json!({
+            "role": "user",
+            "content": "look at these",
+            "attachments": [
+                {"id": "att-20260820T153012Z-1a2b3c4d", "name": "a.png", "media_type": "image/png",
+                 "width": 640, "height": 480, "bytes": 1234, "path": "/embra/workspace/MEDIA/att-20260820T153012Z-1a2b3c4d.png"},
+                {"id": "att-20260820T153013Z-1a2b3c4e", "name": "b.jpg", "media_type": "image/jpeg",
+                 "width": 2576, "height": 1932, "bytes": 99, "path": "/embra/workspace/MEDIA/att-20260820T153013Z-1a2b3c4e.jpg"}
+            ]
+        });
+        let line = format_turn(0, &turn, None);
+        assert!(line.starts_with("[1] [user]: look at these\n    [image: a.png (640×480) → /embra/workspace/MEDIA/att-20260820T153012Z-1a2b3c4d.png]"), "{line}");
+        assert!(line.ends_with("[image: b.jpg (2576×1932) → /embra/workspace/MEDIA/att-20260820T153013Z-1a2b3c4e.jpg]"));
+        // Capped corpus rendering keeps the image lines intact.
+        let capped = format_turn(0, &turn, Some(4));
+        assert!(capped.contains("look...\n    [image: a.png"), "{capped}");
+        // No attachments → byte-identical to the pre-media form.
+        let plain = serde_json::json!({"role": "assistant", "content": "ok"});
+        assert_eq!(format_turn(3, &plain, None), "[4] [assistant]: ok");
     }
 
     #[test]

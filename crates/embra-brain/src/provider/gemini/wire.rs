@@ -41,6 +41,27 @@ pub struct GeminiPart {
     /// (filtered from user-visible text).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thought: Option<bool>,
+    /// Inline media (operator-attached image on a user turn, or a media
+    /// tool's image when the placement is a sibling part). Never emitted
+    /// by the LLM models embraOS drives; ignored on the response side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inline_data: Option<GeminiBlob>,
+}
+
+/// `inlineData` / `FunctionResponseBlob` payload: raw base64 + MIME type.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiBlob {
+    pub mime_type: String,
+    pub data: String,
+}
+
+/// One entry of `functionResponse.parts[]` — the multimodal function
+/// response form ("function response parts", Gemini 3 series).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GeminiFunctionResponsePart {
+    pub inline_data: GeminiBlob,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,11 +74,16 @@ pub struct GeminiFunctionCall {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GeminiFunctionResponse {
     /// Must match the originating `functionCall.id`.
     pub id: String,
     pub name: String,
     pub response: JsonValue,
+    /// Multimodal function-response parts (images a media tool returned).
+    /// Absent for every text-only result — the wire stays byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parts: Option<Vec<GeminiFunctionResponsePart>>,
 }
 
 #[derive(Debug, Clone, Serialize)]

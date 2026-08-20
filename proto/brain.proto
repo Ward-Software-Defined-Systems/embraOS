@@ -31,6 +31,14 @@ service BrainService {
   // anything sent on the stream parks behind the running turn.
   rpc StopTurn(StopTurnRequest) returns (StopTurnResponse);
 
+  // Media — operator-attached / tool-produced images in the MEDIA store.
+  // Unary on purpose (bytes never ride the Converse stream): an upload
+  // normalizes + stores and returns the ref; a download serves the stored
+  // bytes for the chat-mobile <img> and the console's in-TUI renderer.
+  // Both sides raise tonic's decode limit to GRPC_MAX_MESSAGE_BYTES.
+  rpc PutMedia(PutMediaRequest) returns (PutMediaResponse);
+  rpc GetMedia(GetMediaRequest) returns (GetMediaResponse);
+
   // Health
   rpc HealthCheck(embra.common.HealthCheckRequest) returns (embra.common.HealthCheckResponse);
 }
@@ -48,6 +56,10 @@ message ConversationRequest {
 message UserMessage {
   string content = 1;
   embra.common.Timestamp timestamp = 2;
+  // Media ids (from PutMedia) attached to this message. The brain unions
+  // them with anything staged by `/attach` for the session; unknown ids
+  // abort the turn with an Error frame (nothing persisted).
+  repeated string attachment_ids = 3;
 }
 
 message SlashCommand {
@@ -69,7 +81,44 @@ message ConversationResponse {
     ModeTransition mode_change = 6;  // Learning → Operational transition
     SetupPrompt setup = 7;           // Config wizard prompt (first run)
     ReasoningDelta reasoning_delta = 8;  // Live reasoning/CoT shard for the expression panel
+    MediaRef media = 9;              // An image became visible (attached / tool-produced / replayed)
   }
+}
+
+// Reference to an image in the MEDIA store (`/embra/workspace/MEDIA/`).
+// Clients fetch the bytes via GetMedia (or embra-web's /api/media/<id>);
+// the frame itself never carries image data.
+message MediaRef {
+  string id = 1;            // e.g. att-20260820T153012Z-1a2b3c4d
+  string media_type = 2;    // image/png | image/jpeg | image/gif | image/webp
+  uint32 width = 3;
+  uint32 height = 4;
+  uint64 byte_size = 5;
+  string name = 6;          // operator-facing name (original filename or id)
+  string origin = 7;        // attached | generated | viewed
+  string path = 8;          // absolute path inside the workspace
+  string caption = 9;       // optional one-liner (tool-provided)
+  string tool_use_id = 10;  // set when a tool produced/viewed it
+  bool replay = 11;         // true when re-emitted from session history on attach
+}
+
+// --- Media store ---
+
+message PutMediaRequest {
+  string session_name = 1;     // staging owner; empty = unassociated
+  string name = 2;             // original filename (operator-facing)
+  string media_type_hint = 3;  // client-declared type; the brain sniffs bytes regardless
+  bytes data = 4;              // raw image file bytes (≤ MEDIA_UPLOAD_MAX)
+}
+message PutMediaResponse {
+  MediaRef media = 1;
+}
+message GetMediaRequest {
+  string id = 1;
+}
+message GetMediaResponse {
+  MediaRef media = 1;
+  bytes data = 2;  // stored (normalized) bytes, re-sniffed before serving
 }
 
 message StreamToken {

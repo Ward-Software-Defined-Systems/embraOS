@@ -210,6 +210,7 @@ impl ParserState {
                     function_response: None,
                     thought_signature: incoming.thought_signature,
                     thought: incoming.thought,
+                    inline_data: None,
                 });
             }
             // Only user-visible text fires TextDelta; chain-of-
@@ -236,6 +237,7 @@ impl ParserState {
                 function_response: None,
                 thought_signature: incoming.thought_signature,
                 thought: incoming.thought,
+                inline_data: None,
             });
             return;
         }
@@ -249,6 +251,7 @@ impl ParserState {
                 function_response: incoming.function_response,
                 thought_signature: incoming.thought_signature,
                 thought: incoming.thought,
+                inline_data: None,
             });
         }
     }
@@ -274,6 +277,7 @@ impl ParserState {
                     function_response: None,
                     thought_signature: Some(sig),
                     thought: None,
+                    inline_data: None,
                 });
             }
         }
@@ -342,6 +346,9 @@ fn part_to_blocks(part: GeminiPart) -> Vec<Block> {
         function_response,
         thought_signature,
         thought,
+        // LLM models never emit inline media on the response side; a
+        // stray blob is dropped rather than replayed on a model turn.
+        inline_data: _,
     } = part;
     let is_thought = thought.unwrap_or(false);
     let mut out = Vec::new();
@@ -371,6 +378,7 @@ fn part_to_blocks(part: GeminiPart) -> Vec<Block> {
             call_id: resp.id,
             content: payload,
             is_error: false,
+            images: Vec::new(),
         });
         return out;
     }

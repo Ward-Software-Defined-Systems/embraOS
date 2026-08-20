@@ -25,6 +25,7 @@ mod grpc_service;
 mod provider;
 mod setup;
 mod guardian;
+mod media;
 
 use grpc_service::BrainGrpcService;
 
@@ -167,6 +168,18 @@ async fn main() -> anyhow::Result<()> {
         Err(e) => error!("Failed to write tools.registry snapshot: {e}"),
     }
 
+    // Media wave: the attachment/image store lives in the workspace
+    // (bind-mounted from DATA). Created at boot so `/attach list` and the
+    // store's usage line are meaningful before the first upload; every
+    // write path also ensures it (dev runs without the mount).
+    {
+        let store = media::MediaStore::default_store();
+        match store.ensure_dir().await {
+            Ok(()) => info!("Media store ready at {}", store.dir().display()),
+            Err(e) => warn!("Media store directory unavailable ({e}); uploads will retry on first use"),
+        }
+    }
+
     // embra-guardian-v1: init the dynamic-tool runtime overlay and load
     // previously-built artifacts (DATA persists). Ready tools whose
     // toolchain matches are recompiled into the sandbox; missing/stale
@@ -226,7 +239,11 @@ async fn main() -> anyhow::Result<()> {
     info!("embra-brain listening on {}", addr);
 
     Server::builder()
-        .add_service(BrainServiceServer::new(service))
+        .add_service(
+            // PutMedia requests carry raw image bytes (≤ MEDIA_UPLOAD_MAX).
+            BrainServiceServer::new(service)
+                .max_decoding_message_size(embra_common::GRPC_MAX_MESSAGE_BYTES),
+        )
         .serve(addr)
         .await?;
 

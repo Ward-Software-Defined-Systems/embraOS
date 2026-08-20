@@ -52,6 +52,9 @@ rcgen = "0.13"
 rustls = "0.23"
 rustls-pemfile = "2"
 sha2 = "0.10"
+# Pure-Rust image decode/encode (png, zune-jpeg, gif, image-webp) — static-musl safe.
+# Shared pin: embra-brain normalizes at ingest, embra-console decodes for the in-TUI pane.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 hex = "0.4"
 
 # Logging
