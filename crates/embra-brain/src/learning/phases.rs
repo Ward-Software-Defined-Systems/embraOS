@@ -131,7 +131,7 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 }
 
 // Single source of truth for Phase 4 tool category counts.
-// (json_key, display_label, count). Sums to 105 — matches the descriptor count
+// (json_key, display_label, count). Sums to 106 — matches the descriptor count
 // in `tools::registry::REGISTRY` (guarded by
 // `category_counts_sum_matches_registry` below). Aliases (`memory_search`,
 // `search_memory`, `file_rename`, `rmdir`) are folded into their target's
@@ -161,6 +161,10 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 // editing — atomic all-or-nothing transaction; the surgical alternative to
 // full file_write rewrites, from the Intelligence's own consumer spec,
 // 2026-08-14).
+// Filesystem went 11 → 12 with `file_copy` (host-side file/tree copying —
+// atomic per file, all-or-nothing per tree, source unrestricted like
+// file_read, destination jailed; the only way a generated image in MEDIA
+// reaches a repo without passing through the conversation, 2026-08-21).
 // Media & Vision is new with `image_view` (2026-08-20, the media wave:
 // the image itself returned to the model as an image block — the first
 // tool whose result is not text), then 1 → 2 with `image_generate` (Wave 2,
@@ -175,7 +179,7 @@ const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
     ("utility", "Utility", 2),
     ("security", "Security", 6),
     ("engineering", "Engineering", 37),
-    ("filesystem", "Filesystem", 11),
+    ("filesystem", "Filesystem", 12),
     ("scheduling", "Scheduling", 3),
     ("sessions", "Sessions", 10),
     ("knowledge_graph", "Knowledge Graph", 12),

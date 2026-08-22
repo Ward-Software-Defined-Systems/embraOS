@@ -3657,6 +3657,13 @@ mod native_args_tests {
             file_symlink("/embra/workspace/a|../etc/foo").await,
             mkdir("../etc").await,
             dir_delete("../etc").await,
+            crate::tools::file_copy::file_copy_impl(
+                serde_json::from_value(serde_json::json!({
+                    "source": "x", "destination": "../etc/evil"
+                }))
+                .unwrap(),
+            )
+            .await,
         ];
         for msg in rejections.iter() {
             assert!(
@@ -3930,7 +3937,7 @@ mod native_args_tests {
             "gh_project_list", "gh_project_view",
             "file_read", "file_write", "file_append", "file_delete",
             "file_move", "file_rename", "file_symlink",
-            "dir_delete", "rmdir", "mkdir",
+            "dir_delete", "rmdir", "mkdir", "file_patch", "file_copy",
         ] {
             assert!(
                 names.contains(&expected),

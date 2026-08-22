@@ -489,14 +489,13 @@ pub(crate) async fn write_atomic_create(target: &Path, bytes: &[u8]) -> Result<(
     apply_atomic_inner(target, bytes, false, false).await
 }
 
-async fn apply_atomic_inner(
-    target: &Path,
-    bytes: &[u8],
-    fail_before_rename: bool,
-    require_existing: bool,
-) -> Result<(), String> {
-    use tokio::io::AsyncWriteExt;
-
+/// Same-directory temp path for an atomic write: `.{fname}.{tag}.{pid}.{seq}.tmp`.
+/// `tag` names the writing tool (`embra-patch` for file_patch / file_write /
+/// the media store, `embra-copy` for file_copy) so a leaked temp is
+/// attributable; the sequence counter is process-global, so two tools
+/// staging the same target never collide. A hidden dotfile, so a half-staged
+/// temp never reads as content.
+pub(crate) fn temp_path_for(target: &Path, tag: &str) -> Result<std::path::PathBuf, String> {
     let dir = target
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -506,13 +505,78 @@ async fn apply_atomic_inner(
         .and_then(|f| f.to_str())
         .ok_or_else(|| "target has no file name".to_string())?;
     static TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let tmp = dir.join(format!(
-        ".{fname}.embra-patch.{}.{}.tmp",
+    Ok(dir.join(format!(
+        ".{fname}.{tag}.{}.{}.tmp",
         std::process::id(),
         TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
+    )))
+}
 
+/// Shared commit tail of every atomic writer in the family (file_patch,
+/// file_write via [`write_atomic_create`], the media store, file_copy).
+/// `tmp` must already hold the complete, fsynced bytes. Restores `prior`'s
+/// mode + ownership onto the temp BEFORE the rename so the replacement lands
+/// with its metadata already correct (spec §5.6) — skipped when `prior` is
+/// `None`, a freshly created target has nothing to restore — then renames the
+/// temp over the target and fsyncs the directory. Any failure before the
+/// rename removes the temp and leaves the target byte-identical.
+pub(crate) async fn commit_temp(
+    tmp: &Path,
+    target: &Path,
+    prior: Option<&std::fs::Metadata>,
+    fail_before_rename: bool,
+) -> Result<(), String> {
     let result: Result<(), String> = async {
+        if let Some(meta) = prior {
+            tokio::fs::set_permissions(tmp, meta.permissions())
+                .await
+                .map_err(|e| format!("failed to set permissions: {e}"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                std::os::unix::fs::chown(tmp, Some(meta.uid()), Some(meta.gid()))
+                    .map_err(|e| format!("failed to set ownership: {e}"))?;
+            }
+        }
+
+        if fail_before_rename {
+            return Err("injected failure (test)".to_string());
+        }
+
+        tokio::fs::rename(tmp, target)
+            .await
+            .map_err(|e| format!("failed to rename temp over target: {e}"))?;
+        Ok(())
+    }
+    .await;
+
+    if result.is_err() {
+        let _ = tokio::fs::remove_file(tmp).await;
+        return result;
+    }
+
+    // Directory fsync makes the rename durable. Best-effort by design: the
+    // rename has already happened, so reporting failure here would claim
+    // "File unchanged." about a file that changed.
+    if let Some(dir) = target.parent().filter(|p| !p.as_os_str().is_empty())
+        && let Ok(d) = std::fs::File::open(dir)
+    {
+        let _ = d.sync_all();
+    }
+    Ok(())
+}
+
+async fn apply_atomic_inner(
+    target: &Path,
+    bytes: &[u8],
+    fail_before_rename: bool,
+    require_existing: bool,
+) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+
+    let tmp = temp_path_for(target, "embra-patch")?;
+
+    let staged: Result<Option<std::fs::Metadata>, String> = async {
         // `None` = target legitimately absent on the create-capable path;
         // there is no metadata to restore and the rename creates the file.
         let meta = match tokio::fs::metadata(target).await {
@@ -531,45 +595,17 @@ async fn apply_atomic_inner(
             .await
             .map_err(|e| format!("failed to fsync temp file: {e}"))?;
         drop(f);
-
-        // Restore mode + ownership on the temp BEFORE the rename, so the
-        // replacement lands with its metadata already correct (spec §5.6).
-        // Skipped for a freshly-created target — there is nothing to restore.
-        if let Some(meta) = &meta {
-            tokio::fs::set_permissions(&tmp, meta.permissions())
-                .await
-                .map_err(|e| format!("failed to set permissions: {e}"))?;
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::MetadataExt;
-                std::os::unix::fs::chown(&tmp, Some(meta.uid()), Some(meta.gid()))
-                    .map_err(|e| format!("failed to set ownership: {e}"))?;
-            }
-        }
-
-        if fail_before_rename {
-            return Err("injected failure (test)".to_string());
-        }
-
-        tokio::fs::rename(&tmp, target)
-            .await
-            .map_err(|e| format!("failed to rename temp over target: {e}"))?;
-        Ok(())
+        Ok(meta)
     }
     .await;
 
-    if result.is_err() {
-        let _ = tokio::fs::remove_file(&tmp).await;
-        return result;
+    match staged {
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            Err(e)
+        }
+        Ok(meta) => commit_temp(&tmp, target, meta.as_ref(), fail_before_rename).await,
     }
-
-    // Directory fsync makes the rename durable. Best-effort by design: the
-    // rename has already happened, so reporting failure here would claim
-    // "File unchanged." about a file that changed.
-    if let Ok(d) = std::fs::File::open(dir) {
-        let _ = d.sync_all();
-    }
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
