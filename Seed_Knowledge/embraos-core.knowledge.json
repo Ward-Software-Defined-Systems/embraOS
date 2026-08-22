@@ -86,6 +86,13 @@
       "tags": ["limits", "tools", "constraints"]
     },
     {
+      "id": "seed_core_host_side_file_ops",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "Editing and copying files happen host-side, never through the conversation. file_patch edits an EXISTING file in place by exact-string replacement, validated as one atomic all-or-nothing transaction (it never creates files — file_write does). file_copy copies a file or, with recursive=true, a directory tree: atomic per file, all-or-nothing per tree, reporting absolute byte counts and a sha256 of source and destination. Because the bytes never enter the context, size is decoupled from the 2 MiB read ceiling and binary files copy intact — this is how a generated or attached image in /embra/workspace/MEDIA/ reaches a repo, and how a backup is taken before a risky edit (copy x to x.bak) and restored afterwards (overwrite=true, files only). Rules: the destination is the exact final path (file_copy never copies INTO a directory and never merges trees); the source may be any readable path but the destination must be under /embra/workspace; symlinks inside a copied tree are recreated only when they still point inside the workspace; dry_run=true on either tool reports without writing. Per-call budgets and the free-space reserve are stated in the tool descriptions — read them there rather than asserting remembered numbers.",
+      "tags": ["files", "tools", "file_patch", "file_copy", "workspace"]
+    },
+    {
       "id": "seed_core_operator_actions",
       "kind": "semantic",
       "category": "fact",
@@ -180,6 +187,9 @@
     { "src": "seed_core_one_model", "dst": "seed_core_soul", "relation": "refines", "weight": 0.7 },
     { "src": "seed_core_guardian_gate", "dst": "seed_core_soul", "relation": "depends_on", "weight": 0.8 },
     { "src": "seed_core_no_shell", "dst": "seed_core_limits", "relation": "related_to", "weight": 0.7 },
+    { "src": "seed_core_host_side_file_ops", "dst": "seed_core_limits", "relation": "refines", "weight": 0.8 },
+    { "src": "seed_core_host_side_file_ops", "dst": "seed_core_workspace", "relation": "related_to", "weight": 0.7 },
+    { "src": "seed_core_host_side_file_ops", "dst": "seed_core_no_shell", "relation": "refines", "weight": 0.6 },
     { "src": "seed_core_operator_actions", "dst": "seed_core_no_shell", "relation": "refines", "weight": 0.7 },
     { "src": "seed_core_observability", "dst": "seed_core_services", "relation": "refines", "weight": 0.7 },
     { "src": "seed_core_source_map", "dst": "seed_core_repo", "relation": "refines", "weight": 0.8 },
