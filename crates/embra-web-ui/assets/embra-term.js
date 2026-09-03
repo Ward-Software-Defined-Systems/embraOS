@@ -91,9 +91,10 @@
     term = new Terminal({
       fontFamily: "'JetBrains Mono','Fira Code',ui-monospace,monospace",
       // scrollback: 0 — the TUI is full-screen ratatui drawn on the
-      // normal buffer (no alt-screen, for QEMU serial parity), so it
-      // repaints the whole screen every ~200ms. Any scrollback would
-      // just be stale snapshots the user could wheel away into.
+      // normal buffer (no alt-screen, for QEMU serial parity) and owns
+      // every cell: it re-diffs every ~200ms and repaints in full on
+      // attach and resize. Any scrollback would just be stale snapshots
+      // the user could wheel away into.
       fontSize: termFs, cursorBlink: true, scrollback: 0,
       // Warm brand bg + amber (flame) cursor to blend with the shell.
       // The 16 ANSI colors are intentionally left at xterm defaults so

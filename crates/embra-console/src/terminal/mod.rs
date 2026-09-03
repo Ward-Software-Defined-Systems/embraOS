@@ -83,9 +83,10 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
     let backend = CrosstermBackend::new(stdout());
     let mut terminal_tui = if web_pty {
         // ratatui's full-screen Terminal re-reads the backend size on every
-        // draw() (autoresize), so it reflows automatically once the PTY
-        // winsize changes and crossterm delivers Event::Resize (handled
-        // in the event loop below).
+        // draw() (autoresize), so it reflows automatically on a size CHANGE
+        // once crossterm delivers Event::Resize. A same-size SIGWINCH —
+        // embra-web's fresh-attach repaint — changes nothing there, so the
+        // Resize arm in the event loop below clears explicitly.
         Terminal::new(backend)?
     } else {
         Terminal::with_options(
@@ -164,11 +165,22 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
                 match ev {
                     Event::Key(key) => handle_key_event(key, &mut app, &in_tx).await?,
                     // PTY/web mode: xterm.js → embra-web → TIOCSWINSZ →
-                    // crossterm Event::Resize. The size-tracking backend
-                    // reflows on the next draw(); we only refresh the
-                    // viewport dims the renderer's manual wrapping reads.
-                    // (Serial/Fixed mode never emits Resize — no-op there.)
+                    // crossterm Event::Resize, OR a bare SIGWINCH from
+                    // embra-web on every browser attach (a same-size
+                    // TIOCSWINSZ never produces one — the kernel memcmp's
+                    // the winsize). The size-tracking backend reflows on
+                    // the next draw() only when the size CHANGED, and a
+                    // fresh xterm has no screen while ratatui only emits
+                    // diffs — so clear() here: ESC[2J + back-buffer reset,
+                    // the next draw() repaints every cell, the media pane's
+                    // cached sixel included. A real change clears once more
+                    // via autoresize() on that draw (two ESC[2J in one
+                    // burst, no visible cost). Serial/Fixed mode never
+                    // emits Resize; gated anyway so it stays byte-identical.
                     Event::Resize(c, r) => {
+                        if web_pty {
+                            terminal_tui.clear()?;
+                        }
                         app.viewport_cols = c;
                         app.viewport_rows = r;
                         // Winsize pixels may have arrived/changed (browser

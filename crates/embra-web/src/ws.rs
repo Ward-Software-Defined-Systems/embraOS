@@ -8,6 +8,11 @@
 //! Write-arbitration is enforced **here**: input/key/resize are dropped
 //! unless the connection currently holds the writer token. `takeover` is
 //! allowed from any connection (it's the explicit handoff request).
+//!
+//! Every attach also requests a full console repaint (`PtyBridge::repaint`,
+//! see the contract in `pty_bridge.rs`): a fresh xterm has no screen and
+//! the TUI only emits diffs, so a new tab would otherwise stay blank until
+//! a real window resize.
 
 use axum::extract::State;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -67,6 +72,15 @@ async fn handle_socket(socket: WebSocket, st: AppState) {
     let (mut sender, mut receiver) = socket.split();
     let mut output = st.bridge.subscribe();
     let (id, mut ctrl_rx) = st.arbiter.connect();
+    // Fresh-attach repaint — for EVERY role: observers never send resize
+    // frames (the client gates them on `writable`, and this handler drops
+    // non-writer resizes below), and a writer's same-size resize is a
+    // kernel no-op anyway. Must stay AFTER `subscribe()`: a broadcast
+    // receiver only sees bytes sent after it was created, and the repaint
+    // is exactly those bytes. If the new tab's grid differs from the PTY's,
+    // this frame arrives at the old size and the browser's own resize
+    // repaints once more at the right one.
+    st.bridge.repaint();
 
     // To-client: one task owns the WS sink, multiplexing PTY output
     // (binary, all roles) and arbiter role frames (text).

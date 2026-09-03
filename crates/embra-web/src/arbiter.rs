@@ -115,3 +115,117 @@ fn broadcast_roles(inner: &Inner) {
         let _ = handle.tx.send(frame);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    //! The write-arbitration contract: first connection = writer, later
+    //! ones = observers, explicit takeover, writer disconnect frees the
+    //! token with NO auto-handoff. Every state change broadcasts a role
+    //! frame to EVERY client, so assertions drain to the LAST frame.
+    use super::*;
+    use tokio::sync::mpsc::error::TryRecvError;
+
+    fn last_frame(rx: &mut mpsc::UnboundedReceiver<String>) -> Option<String> {
+        let mut last = None;
+        while let Ok(f) = rx.try_recv() {
+            last = Some(f);
+        }
+        last
+    }
+
+    /// `(role, owner)` of a role frame, asserting the `t` tag.
+    fn role_of(frame: &str) -> (String, String) {
+        let v: serde_json::Value = serde_json::from_str(frame).expect("role frame is JSON");
+        assert_eq!(v["t"], "role");
+        (
+            v["role"].as_str().expect("role").to_string(),
+            v["owner"].as_str().expect("owner").to_string(),
+        )
+    }
+
+    #[test]
+    fn first_connect_is_writer_second_is_observer() {
+        let arb = Arbiter::new();
+        let (a, mut rx_a) = arb.connect();
+        let (b, mut rx_b) = arb.connect();
+        assert!(arb.is_writer(a));
+        assert!(!arb.is_writer(b));
+        assert_eq!(role_of(&last_frame(&mut rx_a).unwrap()), ("writer".into(), a.to_string()));
+        assert_eq!(role_of(&last_frame(&mut rx_b).unwrap()), ("observer".into(), a.to_string()));
+    }
+
+    #[test]
+    fn role_frame_json_shape() {
+        let arb = Arbiter::new();
+        let (a, mut rx_a) = arb.connect();
+        let frame = last_frame(&mut rx_a).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        let obj = v.as_object().expect("object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["owner", "role", "t"]);
+        assert_eq!(v["t"], "role");
+        assert_eq!(v["role"], "writer");
+        assert_eq!(v["owner"], a.to_string());
+    }
+
+    #[test]
+    fn writer_disconnect_frees_token_no_auto_handoff() {
+        let arb = Arbiter::new();
+        let (a, _rx_a) = arb.connect();
+        let (b, mut rx_b) = arb.connect();
+        arb.disconnect(a);
+        // v1 policy: the remaining observer must take control explicitly.
+        assert!(!arb.is_writer(b));
+        assert_eq!(role_of(&last_frame(&mut rx_b).unwrap()), ("observer".into(), "none".into()));
+        // A fresh connection finds the token free and becomes the writer.
+        let (c, mut rx_c) = arb.connect();
+        assert!(arb.is_writer(c));
+        assert_eq!(role_of(&last_frame(&mut rx_c).unwrap()), ("writer".into(), c.to_string()));
+        assert_eq!(role_of(&last_frame(&mut rx_b).unwrap()), ("observer".into(), c.to_string()));
+    }
+
+    #[test]
+    fn takeover_demotes_previous_writer() {
+        let arb = Arbiter::new();
+        let (a, mut rx_a) = arb.connect();
+        let (b, mut rx_b) = arb.connect();
+        arb.takeover(b);
+        assert!(!arb.is_writer(a));
+        assert!(arb.is_writer(b));
+        assert_eq!(role_of(&last_frame(&mut rx_a).unwrap()), ("observer".into(), b.to_string()));
+        assert_eq!(role_of(&last_frame(&mut rx_b).unwrap()), ("writer".into(), b.to_string()));
+    }
+
+    #[test]
+    fn takeover_by_unknown_id_is_noop() {
+        let arb = Arbiter::new();
+        let (a, mut rx_a) = arb.connect();
+        let _ = last_frame(&mut rx_a);
+        arb.takeover(a + 1000);
+        assert!(arb.is_writer(a));
+        assert!(matches!(rx_a.try_recv(), Err(TryRecvError::Empty)));
+    }
+
+    #[test]
+    fn observer_disconnect_keeps_writer() {
+        let arb = Arbiter::new();
+        let (a, mut rx_a) = arb.connect();
+        let (b, _rx_b) = arb.connect();
+        arb.disconnect(b);
+        assert!(arb.is_writer(a));
+        assert_eq!(role_of(&last_frame(&mut rx_a).unwrap()), ("writer".into(), a.to_string()));
+    }
+
+    #[test]
+    fn dropped_receiver_does_not_panic() {
+        let arb = Arbiter::new();
+        let (a, rx_a) = arb.connect();
+        drop(rx_a); // the WS task tore down without disconnecting yet
+        let (b, mut rx_b) = arb.connect();
+        assert!(arb.is_writer(a));
+        assert_eq!(role_of(&last_frame(&mut rx_b).unwrap()), ("observer".into(), a.to_string()));
+        arb.disconnect(a);
+        assert!(!arb.is_writer(b));
+    }
+}

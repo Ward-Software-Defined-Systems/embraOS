@@ -13,11 +13,28 @@
 //! also makes console restart trivial: the whole session is rebuilt at the
 //! top of the outer loop while the public channels persist, so connected
 //! WebSocket clients survive a console crash.
+//!
+//! Fresh-attach repaint contract. A browser that (re)loads the page starts
+//! with an EMPTY xterm, and the console only ever writes diffs (ratatui
+//! re-diffs every ~200 ms but emits changed cells only — an idle screen
+//! sends nothing). Nothing is replayed to a new subscriber, so without
+//! help the new tab stays blank until something on screen changes. Nor
+//! does the client's own resize frame help: same window → same cols/rows
+//! → the TIOCSWINSZ is a kernel no-op (`tty_do_resize` memcmp's the
+//! winsize and sends no SIGWINCH). So `/ws/terminal` calls
+//! [`PtyBridge::repaint`] on every attach and the pump thread sends the
+//! console child a bare SIGWINCH; crossterm turns it into
+//! `Event::Resize`, which the web-pty console answers with `clear()` + a
+//! full redraw (`embra-console/src/terminal/mod.rs`, the Resize arm). A
+//! full repaint is sufficient: no terminal MODE needs replaying — the
+//! console's bracketed-paste enable is sent once, but the /ml editor
+//! wraps its paste itself and crossterm parses `ESC[200~` regardless;
+//! cursor visibility is re-emitted per draw; no alt-screen, no mouse.
 
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -29,28 +46,43 @@ pub struct PtyBridge {
     output_tx: broadcast::Sender<Bytes>,
     input_tx: mpsc::UnboundedSender<Vec<u8>>,
     resize_tx: mpsc::UnboundedSender<(u16, u16, u16, u16)>,
+    /// Set by [`PtyBridge::repaint`], consumed (coalesced) by the pump
+    /// thread — see the module doc.
+    repaint: Arc<AtomicBool>,
 }
+
+/// Minimum spacing between two console repaints. Requests inside the
+/// window are DEFERRED (the flag stays set), never dropped: a flapping
+/// tab reconnects every 2 s, and a client looping on `/ws/terminal`
+/// must not turn into a full-screen repaint for every client per tick.
+const REPAINT_COOLDOWN: Duration = Duration::from_millis(250);
 
 impl PtyBridge {
     /// Spawn the PTY session manager thread and return a shared handle.
     pub fn spawn(console_bin: String, apid_addr: String) -> Self {
         // Capacity large enough that a briefly-slow xterm.js client doesn't
-        // lag out during a full-screen repaint; on Lagged the WS handler
-        // just continues (the console repaints every ~200 ms anyway).
+        // lag out during a full-screen repaint. On Lagged the WS handler
+        // just continues and the gap is NOT healed — the console re-diffs
+        // every ~200 ms but only emits changed cells, so an idle screen
+        // sends nothing. (Wiring `repaint()` into the Lagged arm is a
+        // deliberate non-goal: a chronically slow client would loop
+        // lag → repaint → lag; a VT snapshot replay is the real answer.)
         let (output_tx, _) = broadcast::channel::<Bytes>(2048);
         let (input_tx, input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let (resize_tx, resize_rx) = mpsc::unbounded_channel::<(u16, u16, u16, u16)>();
+        let repaint = Arc::new(AtomicBool::new(false));
 
         let bridge = PtyBridge {
             output_tx: output_tx.clone(),
             input_tx,
             resize_tx,
+            repaint: repaint.clone(),
         };
 
         std::thread::Builder::new()
             .name("embra-web-pty".into())
             .spawn(move || {
-                session_manager(console_bin, apid_addr, output_tx, input_rx, resize_rx)
+                session_manager(console_bin, apid_addr, output_tx, input_rx, resize_rx, repaint)
             })
             .expect("spawn pty session manager thread");
 
@@ -74,6 +106,13 @@ impl PtyBridge {
     pub fn resize(&self, cols: u16, rows: u16, xpixel: u16, ypixel: u16) {
         let _ = self.resize_tx.send((cols, rows, xpixel, ypixel));
     }
+
+    /// Ask the console for a full-screen repaint (the fresh-attach
+    /// contract in the module doc). Coalesced per pump tick, spaced by
+    /// `REPAINT_COOLDOWN`, delivered as SIGWINCH to the console child.
+    pub fn repaint(&self) {
+        self.repaint.store(true, Ordering::SeqCst);
+    }
 }
 
 /// Outer loop: (re)build the PTY + console child for the process lifetime.
@@ -83,6 +122,7 @@ fn session_manager(
     output_tx: broadcast::Sender<Bytes>,
     mut input_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     mut resize_rx: mpsc::UnboundedReceiver<(u16, u16, u16, u16)>,
+    repaint: Arc<AtomicBool>,
 ) {
     // Last requested size, so a restart reopens at the operator's size.
     let mut last_size = PtySize::default();
@@ -95,6 +135,7 @@ fn session_manager(
             &mut input_rx,
             &mut resize_rx,
             &mut last_size,
+            &repaint,
         ) {
             Ok(()) => {
                 tracing::warn!("embra-console exited; restarting in 1s");
@@ -118,6 +159,7 @@ fn run_one_session(
     input_rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
     resize_rx: &mut mpsc::UnboundedReceiver<(u16, u16, u16, u16)>,
     last_size: &mut PtySize,
+    repaint: &AtomicBool,
 ) -> anyhow::Result<()> {
     let pair = native_pty_system().openpty(*last_size)?;
 
@@ -166,9 +208,10 @@ fn run_one_session(
             })?;
     }
 
-    // Pump loop: drain input/resize, watch for child exit. The 15 ms tick
-    // is imperceptible for a TUI (its own event poll is 50 ms, redraw
-    // 200 ms) and avoids juggling three blocking sources.
+    // Pump loop: drain input/resize/repaint, watch for child exit. The
+    // 15 ms tick is imperceptible for a TUI (its own event poll is 50 ms,
+    // re-diff 200 ms) and avoids juggling three blocking sources.
+    let mut last_repaint: Option<Instant> = None;
     loop {
         while let Ok(data) = input_rx.try_recv() {
             if writer.write_all(&data).is_err() {
@@ -187,6 +230,27 @@ fn run_one_session(
         }
         if resized {
             let _ = master.resize(*last_size);
+        }
+
+        // Fresh-attach repaint (module doc): a same-size TIOCSWINSZ above
+        // is a kernel no-op, so signal the console directly. AFTER the
+        // resize block so a same-tick resize lands first; the cooldown
+        // defers rather than drops.
+        if repaint.load(Ordering::SeqCst)
+            && last_repaint.is_none_or(|t| t.elapsed() >= REPAINT_COOLDOWN)
+        {
+            repaint.store(false, Ordering::SeqCst);
+            last_repaint = Some(Instant::now());
+            if let Some(pid) = child.process_id() {
+                // The child is reaped only by try_wait()/wait() below (a
+                // `Some` returns before the next iteration), so the pid is
+                // never stale here; ESRCH would be ignored anyway.
+                // SAFETY: kill(2) on a pid this thread owns, with a signal
+                // whose default disposition is "ignore".
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGWINCH);
+                }
+            }
         }
 
         if child.try_wait()?.is_some() {
