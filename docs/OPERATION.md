@@ -37,6 +37,8 @@ All sessions share the same intelligence — same memory, same identity, same so
 
 *In the web console's `/ml` editor modal: Enter = newline, Ctrl/⌘+Enter or Send = submit, Esc/Cancel = discard.*
 
+*Web console sidebar: type in the filter box above the command groups to narrow them to matching commands (Esc clears); click a group title to collapse or expand it — collapsed groups are remembered per browser.*
+
 **QEMU** — host-level (`run-qemu.sh` uses `-serial mon:stdio`, so `Ctrl+A` is the escape prefix):
 
 | Key | Action |
