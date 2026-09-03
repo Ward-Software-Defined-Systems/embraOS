@@ -59,8 +59,11 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
     ]),
 ];
 
-/// localStorage key: the collapsed sidebar groups, comma-joined titles.
-const NAV_COLLAPSED_KEY: &str = "embra-nav-collapsed";
+/// localStorage key: the EXPANDED sidebar groups, comma-joined titles.
+/// Groups start collapsed (William's call after the wave's E2E); the
+/// operator expands what they use and the browser remembers it — so a
+/// group added later also starts collapsed instead of springing open.
+const NAV_OPEN_KEY: &str = "embra-nav-open";
 
 /// A field in a command's parameter modal.
 struct Field {
@@ -246,13 +249,13 @@ fn cmd_matches(f_lc: &str, group: &str, cmd: &str, hint: &str) -> bool {
         || group.to_lowercase().contains(f_lc)
 }
 
-/// Collapsed sidebar groups remembered per browser. Unknown names (a
-/// renamed or removed group) are dropped; blocked storage (a private
-/// window) reads as "all open" with no error.
-fn load_collapsed() -> Vec<&'static str> {
+/// Expanded sidebar groups remembered per browser. Unknown names (a
+/// renamed or removed group) are dropped; a first visit or blocked
+/// storage (a private window) reads as "all collapsed" with no error.
+fn load_expanded() -> Vec<&'static str> {
     let Some(raw) = web_sys::window()
         .and_then(|w| w.local_storage().ok().flatten())
-        .and_then(|ls| ls.get_item(NAV_COLLAPSED_KEY).ok().flatten())
+        .and_then(|ls| ls.get_item(NAV_OPEN_KEY).ok().flatten())
     else {
         return Vec::new();
     };
@@ -261,9 +264,9 @@ fn load_collapsed() -> Vec<&'static str> {
         .collect()
 }
 
-fn save_collapsed(collapsed: &[&'static str]) {
+fn save_expanded(expanded: &[&'static str]) {
     if let Some(ls) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
-        let _ = ls.set_item(NAV_COLLAPSED_KEY, &collapsed.join(","));
+        let _ = ls.set_item(NAV_OPEN_KEY, &expanded.join(","));
     }
 }
 
@@ -375,8 +378,9 @@ pub fn App() -> impl IntoView {
     // an in-app sheet (centred modal on desktop; mobile work picks up
     // the bottom-sheet variant in the chat UI branch).
     let takeover_open = RwSignal::new(false);
-    // Sidebar: collapsed groups (remembered per browser) + the filter box.
-    let collapsed = RwSignal::new(load_collapsed());
+    // Sidebar: expanded groups (remembered per browser; everything starts
+    // collapsed) + the filter box.
+    let expanded = RwSignal::new(load_expanded());
     let nav_filter = RwSignal::new(String::new());
 
     let open_modal = move |i: usize| {
@@ -581,9 +585,10 @@ pub fn App() -> impl IntoView {
                     on:keydown=move |e: leptos::ev::KeyboardEvent| {
                         if e.key() == "Escape" { nav_filter.set(String::new()); }
                     } />
-                // Groups in curated order. Each is a native <details>; its
-                // `open` FOLLOWS the signal (a filter force-opens every group
-                // that has a match without touching the remembered state)
+                // Groups in curated order, collapsed by default. Each is a
+                // native <details>; its `open` FOLLOWS the signal (a filter
+                // force-opens every group that has a match without touching
+                // the remembered state)
                 // and the summary click is intercepted below — no `toggle`
                 // listener, because `toggle` also fires for script-driven
                 // `open` changes and would clobber what the operator chose.
@@ -597,20 +602,20 @@ pub fn App() -> impl IntoView {
                             .collect();
                         (!rows.is_empty()).then(|| view! {
                             <details class="nav-group"
-                                open=move || filtering || !collapsed.with(|v| v.contains(&title))>
+                                open=move || filtering || expanded.with(|v| v.contains(&title))>
                                 <summary on:click=move |ev: leptos::ev::MouseEvent| {
                                     ev.prevent_default(); // cancel the native toggle
                                     if filtering {
                                         return;
                                     }
-                                    collapsed.update(|v| {
+                                    expanded.update(|v| {
                                         if let Some(i) = v.iter().position(|t| *t == title) {
                                             v.remove(i);
                                         } else {
                                             v.push(title);
                                         }
                                     });
-                                    save_collapsed(&collapsed.get_untracked());
+                                    save_expanded(&expanded.get_untracked());
                                 }>{title}</summary>
                                 {rows.into_iter().map(|(c, d)| view! {
                                     <button class="cmd" on:click=move |_| dispatch(c)>
