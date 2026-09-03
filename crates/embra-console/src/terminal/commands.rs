@@ -14,26 +14,25 @@ pub fn handle_local_command(cmd: &str, _args: &str, name: &str) -> Option<String
         "/help" => Some(format!(
             r#"=== {} Help ===
 
-Commands:
-  /help                          Show this help message
-  /ml                            Toggle multi-line mode (. on own line to send)
-  /guardian-define               Define a dynamic tool (paste a Rust module)
-  /guardian list|status <n>|show <n>|delete <n>   Manage dynamic tools
-  /guardian approve <n>|reject <n>   Approve/reject a tool the intelligence proposed
-  /guardian key brave <token>    Set the Brave Search API key (web_search tools)
-  /status                        System status
-  /stop                          Stop a stuck in-flight turn (or press Esc while it streams)
+Session:
   /sessions                      List all sessions
-  /sessions delete <name>        Guided delete: summary + reason + memories, then 7-day-grace soft delete
-  /sessions restore <name>       Undo a soft delete during its grace period
   /new <name>                    Create a new session
   /switch <name>                 Switch to a session
   /close                         Close current session
-  /soul                          Display the soul document
-  /identity                      Display identity document
-  /mode                          Show operating mode
+  /sessions delete <name>        Guided delete: summary + reason + memories, then 7-day-grace soft delete
+  /sessions restore <name>       Undo a soft delete during its grace period
 
-Provider:
+Turn:
+  /ml                            Toggle multi-line mode (. on own line to send)
+  /stop                          Stop a stuck in-flight turn (or press Esc while it streams)
+  /iter-cap                      Show the per-turn tool iteration cap
+  /iter-cap <N>                  Set the cap (1..=1000, default 100)
+  /iter-cap reset                Restore the default cap
+  /show-reasoning                Show whether reasoning streams to the panel
+  /show-reasoning <on|off>       Toggle live reasoning in the expression panel (default on)
+  /show-reasoning reset          Restore default (on)
+
+Model:
   /provider                              Show active provider, model, session
   /provider <anthropic|gemini|ollama|lm_studio>
                                          Switch provider for future turns
@@ -44,15 +43,7 @@ Provider:
   /effort                                Show the Anthropic effort level
   /effort <low|medium|high|xhigh|max>    Set effort (default max, next message)
 
-Tool loop:
-  /iter-cap                      Show the per-turn tool iteration cap
-  /iter-cap <N>                  Set the cap (1..=1000, default 100)
-  /iter-cap reset                Restore the default cap
-
-Reasoning panel:
-  /show-reasoning                Show whether reasoning streams to the panel
-  /show-reasoning <on|off>       Toggle live reasoning in the expression panel (default on)
-  /show-reasoning reset          Restore default (on)
+Media:
   /attach <id|path>              Attach an image (uploaded id or workspace path) to your next message
   /attach list | clear           Show or drop the staged images
   /media                         Show the last image in the media pane (console-local)
@@ -62,15 +53,28 @@ Reasoning panel:
   /image-provider model <id>     gemini-3-pro-image (default) | gemini-3.1-flash-image | …
   /image-provider key <token>    Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it
 
-Setup:
+Git & SSH:
+  /git-setup <name> | <email>    Set git user config
   /github-token <token>          Set GitHub token
   /git-token <host> <token>      Set a token for a self-hosted git server (remove: /git-token <host> remove)
   /ssh-keygen                    Generate SSH key pair
   /ssh-copy-id <user@host>       Copy SSH key to host
-  /git-setup <name> | <email>    Set git user config
 
-Experimental:
-  /feedback-loop                 Trigger Phase 3 Continuity Engine self-evaluation
+Guardian:
+  /guardian-define               Define a dynamic tool (paste a Rust module)
+  /guardian list|status <n>|show <n>|delete <n>   Manage dynamic tools
+  /guardian approve <n>|reject <n>   Approve/reject a tool the intelligence proposed
+  /guardian key brave <token>    Set the Brave Search API key (web_search tools)
+
+Identity:
+  /soul                          Display the soul document
+  /identity                      Display identity document
+  /mode                          Show operating mode
+
+System:
+  /help                          Show this help message
+  /status                        System status
+  /feedback-loop                 Trigger Phase 3 Continuity Engine self-evaluation (experimental)
 
 Keyboard:
   Enter              Send message (or newline in /ml mode)

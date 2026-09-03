@@ -13,27 +13,36 @@ use wasm_bindgen::prelude::*;
 use crate::status::use_status;
 use crate::term;
 
-/// Sidebar command groups (label, command, hint).
+/// Sidebar command groups: (title, [(command, hint)]) in CURATED order —
+/// rendered as-is (no re-sort), so each group leads with its entry point
+/// (`/guardian-define`; `/provider --setup` beside `/provider`). The
+/// chat-mobile picker (`chat.rs::SLASH_GROUPS`), the console `/help`
+/// headers and `docs/COMMAND-REFERENCE.md` mirror these titles — a change
+/// here is a change there. Every command is a `SPECS` key, one of the two
+/// editor strings, or a plain injection (see `dispatch`).
 const GROUPS: &[(&str, &[(&str, &str)])] = &[
     ("Session", &[
-        ("/status", "overview"), ("/sessions", "list"), ("/new", "new"),
-        ("/switch", "switch"), ("/close", "close"), ("/stop", "stop turn"),
-        ("/sessions delete", "delete"), ("/sessions restore", "restore"),
-        ("/mode", "mode"),
+        ("/sessions", "list"), ("/new", "new"), ("/switch", "switch"),
+        ("/close", "close"), ("/sessions delete", "delete"),
+        ("/sessions restore", "restore"),
     ]),
-    ("Identity", &[("/soul", "soul"), ("/identity", "identity")]),
-    ("Provider", &[
-        ("/provider", "switch"), ("/model", "model"), ("/effort", "effort"),
+    ("Turn", &[
+        ("/ml", "multiline"), ("/stop", "stop turn"),
         ("/iter-cap", "tool cap"), ("/show-reasoning", "reasoning"),
+    ]),
+    ("Model", &[
+        ("/provider", "switch"), ("/provider --setup", "guided setup"),
+        ("/model", "model"), ("/effort", "effort"),
+    ]),
+    ("Media", &[
         ("/attach", "attach image"), ("/media", "media pane"),
         ("/image-provider", "image gen"), ("/image-provider model", "image model"),
         ("/image-provider key", "image key"),
     ]),
-    ("Setup", &[
+    ("Git & SSH", &[
         ("/git-setup", "git"), ("/github-token", "gh token"),
-        ("/git-token", "host token"),
-        ("/ssh-keygen", "ssh key"), ("/ssh-copy-id", "ssh copy"),
-        ("/feedback-loop", "feedback"),
+        ("/git-token", "host token"), ("/ssh-keygen", "ssh key"),
+        ("/ssh-copy-id", "ssh copy"),
     ]),
     ("Guardian", &[
         ("/guardian-define", "define"), ("/guardian list", "list"),
@@ -41,8 +50,17 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/guardian approve", "approve"), ("/guardian reject", "reject"),
         ("/guardian delete", "delete"), ("/guardian key brave", "brave key"),
     ]),
-    ("Help", &[("/help", "help"), ("/ml", "multiline")]),
+    ("Identity", &[
+        ("/soul", "soul"), ("/identity", "identity"), ("/mode", "mode + seal"),
+    ]),
+    ("System", &[
+        ("/status", "overview"), ("/help", "help"),
+        ("/feedback-loop", "experimental"),
+    ]),
 ];
+
+/// localStorage key: the collapsed sidebar groups, comma-joined titles.
+const NAV_COLLAPSED_KEY: &str = "embra-nav-collapsed";
 
 /// A field in a command's parameter modal.
 struct Field {
@@ -207,11 +225,46 @@ fn build(spec: &Spec, vals: &[String]) -> Option<String> {
     })
 }
 
-fn flat() -> Vec<(&'static str, &'static str)> {
-    let mut v: Vec<(&'static str, &'static str)> =
-        GROUPS.iter().flat_map(|(_, cs)| cs.iter().copied()).collect();
-    v.sort_by_key(|(c, _)| *c);
+/// Every command as (group, command, hint), globally sorted by command —
+/// the ⌘K palette's list.
+fn flat() -> Vec<(&'static str, &'static str, &'static str)> {
+    let mut v: Vec<(&'static str, &'static str, &'static str)> = GROUPS
+        .iter()
+        .flat_map(|(g, cs)| cs.iter().map(move |(c, d)| (*g, *c, *d)))
+        .collect();
+    v.sort_by_key(|(_, c, _)| *c);
     v
+}
+
+/// Shared sidebar + palette match rule. `f_lc` is the filter, trimmed and
+/// lowercased: empty matches everything, otherwise a case-insensitive
+/// substring of the command, its hint, or its group title.
+fn cmd_matches(f_lc: &str, group: &str, cmd: &str, hint: &str) -> bool {
+    f_lc.is_empty()
+        || cmd.to_lowercase().contains(f_lc)
+        || hint.to_lowercase().contains(f_lc)
+        || group.to_lowercase().contains(f_lc)
+}
+
+/// Collapsed sidebar groups remembered per browser. Unknown names (a
+/// renamed or removed group) are dropped; blocked storage (a private
+/// window) reads as "all open" with no error.
+fn load_collapsed() -> Vec<&'static str> {
+    let Some(raw) = web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .and_then(|ls| ls.get_item(NAV_COLLAPSED_KEY).ok().flatten())
+    else {
+        return Vec::new();
+    };
+    raw.split(',')
+        .filter_map(|name| GROUPS.iter().map(|(t, _)| *t).find(|t| *t == name.trim()))
+        .collect()
+}
+
+fn save_collapsed(collapsed: &[&'static str]) {
+    if let Some(ls) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let _ = ls.set_item(NAV_COLLAPSED_KEY, &collapsed.join(","));
+    }
 }
 
 /// Severity-color class for a 0..100 utilization percent.
@@ -322,6 +375,9 @@ pub fn App() -> impl IntoView {
     // an in-app sheet (centred modal on desktop; mobile work picks up
     // the bottom-sheet variant in the chat UI branch).
     let takeover_open = RwSignal::new(false);
+    // Sidebar: collapsed groups (remembered per browser) + the filter box.
+    let collapsed = RwSignal::new(load_collapsed());
+    let nav_filter = RwSignal::new(String::new());
 
     let open_modal = move |i: usize| {
         vals.set(defaults(&SPECS[i]));
@@ -519,20 +575,52 @@ pub fn App() -> impl IntoView {
             </div>
 
             <div class="nav">
-                {GROUPS.iter().map(|(title, cmds)| {
-                    let mut sorted: Vec<(&'static str, &'static str)> = cmds.to_vec();
-                    sorted.sort_by_key(|(c, _)| *c);
-                    view! {
-                        <>
-                            <h4>{*title}</h4>
-                            {sorted.into_iter().map(|(c, d)| view! {
-                                <button class="cmd" on:click=move |_| dispatch(c)>
-                                    {c}" "<code>{d}</code>
-                                </button>
-                            }).collect_view()}
-                        </>
-                    }
-                }).collect_view()}
+                <input class="nav-filter" type="text" placeholder="Filter commands…"
+                    prop:value=move || nav_filter.get()
+                    on:input=move |e| nav_filter.set(event_target_value(&e))
+                    on:keydown=move |e: leptos::ev::KeyboardEvent| {
+                        if e.key() == "Escape" { nav_filter.set(String::new()); }
+                    } />
+                // Groups in curated order. Each is a native <details>; its
+                // `open` FOLLOWS the signal (a filter force-opens every group
+                // that has a match without touching the remembered state)
+                // and the summary click is intercepted below — no `toggle`
+                // listener, because `toggle` also fires for script-driven
+                // `open` changes and would clobber what the operator chose.
+                {move || {
+                    let f = nav_filter.get().trim().to_lowercase();
+                    let filtering = !f.is_empty();
+                    GROUPS.iter().filter_map(|(title, cmds)| {
+                        let title: &'static str = title;
+                        let rows: Vec<(&'static str, &'static str)> = cmds.iter().copied()
+                            .filter(|(c, d)| cmd_matches(&f, title, c, d))
+                            .collect();
+                        (!rows.is_empty()).then(|| view! {
+                            <details class="nav-group"
+                                open=move || filtering || !collapsed.with(|v| v.contains(&title))>
+                                <summary on:click=move |ev: leptos::ev::MouseEvent| {
+                                    ev.prevent_default(); // cancel the native toggle
+                                    if filtering {
+                                        return;
+                                    }
+                                    collapsed.update(|v| {
+                                        if let Some(i) = v.iter().position(|t| *t == title) {
+                                            v.remove(i);
+                                        } else {
+                                            v.push(title);
+                                        }
+                                    });
+                                    save_collapsed(&collapsed.get_untracked());
+                                }>{title}</summary>
+                                {rows.into_iter().map(|(c, d)| view! {
+                                    <button class="cmd" on:click=move |_| dispatch(c)>
+                                        {c}" "<code>{d}</code>
+                                    </button>
+                                }).collect_view()}
+                            </details>
+                        })
+                    }).collect_view()
+                }}
             </div>
 
             <div class="main">
@@ -542,7 +630,7 @@ pub fn App() -> impl IntoView {
                         if let Some(i) = spec_idx("/provider --setup") { open_modal(i); }
                     }>"Provider setup"</button>
                     <span class="lbl" style="margin-left:auto">
-                        "Other setups (/git-setup, /github-token, /ssh-keygen) are in the nav."
+                        "Git & SSH setups (/git-setup, /github-token, /git-token, /ssh-keygen) are in the sidebar."
                     </span>
                 </div>
                 {move || guide.get().then(|| view! {
@@ -763,12 +851,10 @@ pub fn App() -> impl IntoView {
                                 on:input=move |e| filter.set(event_target_value(&e)) />
                             <div class="list">
                                 {move || {
-                                    let f = filter.get().to_lowercase();
+                                    let f = filter.get().trim().to_lowercase();
                                     flat().into_iter()
-                                        .filter(move |(c, d)| {
-                                            f.is_empty() || c.contains(&f) || d.contains(&f)
-                                        })
-                                        .map(|(c, d)| view! {
+                                        .filter(move |(g, c, d)| cmd_matches(&f, g, c, d))
+                                        .map(|(_, c, d)| view! {
                                             <div class="row" on:click=move |_| {
                                                 palette_open.set(false);
                                                 dispatch(c);

@@ -476,44 +476,46 @@ fn focus_chat_textarea() {
 
 /// Curated slash-command catalogue for the picker sheet.
 ///
-/// Mirrors the desktop sidebar's `GROUPS` minus `/ml` and
-/// `/guardian-define` — both require richer client UI (multi-line
-/// editor) that mobile doesn't have in v2. Multi-step interactive
-/// wizards (e.g. `/provider --setup`) are also intentionally excluded:
-/// they prompt the operator for one answer at a time and need an
-/// inline form to be sensible on a phone (Phase 3 polish).
+/// Mirrors the desktop sidebar's `GROUPS` (`app.rs`) — the same eight
+/// titles in the same order — minus the three console-local rows: `/ml`
+/// and `/guardian-define` open the desktop's multi-line editor (the
+/// composer here IS multi-line), and `/media` drives the TUI media pane
+/// (the chat UI renders images inline). Multi-step wizards such as
+/// `/provider --setup` ARE listed: their one-answer-at-a-time prompts
+/// render through `SetupOverlay`. Tapping a row types `"{cmd} "` into the
+/// composer; the operator appends any argument and sends.
 const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
     ("Session", &[
-        ("/status", "system overview"),
         ("/sessions", "list sessions"),
         ("/new", "new session (needs name)"),
         ("/switch", "switch session (needs name)"),
         ("/close", "close current session"),
-        ("/stop", "stop a stuck turn (use the \u{25a0} button mid-turn)"),
         ("/sessions delete", "guided delete (needs name)"),
         ("/sessions restore", "restore deleted (needs name)"),
-        ("/mode", "show operating mode"),
     ]),
-    ("Identity", &[
-        ("/soul", "show soul document"),
-        ("/identity", "show identity document"),
-    ]),
-    ("Provider", &[
-        ("/provider", "show or switch provider"),
-        ("/model", "show / switch Anthropic model"),
-        ("/effort", "show / set Anthropic effort"),
+    ("Turn", &[
+        ("/stop", "stop a stuck turn (use the \u{25a0} button mid-turn)"),
         ("/iter-cap", "show / set tool iteration cap"),
         ("/show-reasoning", "toggle reasoning panel"),
-        ("/attach", "attach a workspace image to your next message (needs id or path)"),
-        ("/image-provider", "image-generation backend / model / key (needs args)"),
     ]),
-    ("Setup", &[
+    ("Model", &[
+        ("/provider", "show or switch provider"),
+        ("/provider --setup", "guided key / endpoint setup (needs provider)"),
+        ("/model", "show / switch Anthropic model"),
+        ("/effort", "show / set Anthropic effort"),
+    ]),
+    ("Media", &[
+        ("/attach", "attach a workspace image to your next message (needs id or path)"),
+        ("/image-provider", "image-generation backend: status / gemini / clear"),
+        ("/image-provider model", "pick the image model (needs id)"),
+        ("/image-provider key", "set / show the image-generation key"),
+    ]),
+    ("Git & SSH", &[
         ("/git-setup", "show git identity"),
         ("/github-token", "set / show GitHub token"),
         ("/git-token", "set token for a self-hosted git server"),
         ("/ssh-keygen", "generate SSH key"),
         ("/ssh-copy-id", "copy SSH key to host (needs target)"),
-        ("/feedback-loop", "toggle feedback loop"),
     ]),
     ("Guardian", &[
         ("/guardian list", "list dynamic tools"),
@@ -524,8 +526,15 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/guardian delete", "remove tool (needs name)"),
         ("/guardian key brave", "set / show Brave Search API key"),
     ]),
-    ("Help", &[
+    ("Identity", &[
+        ("/soul", "show soul document"),
+        ("/identity", "show identity document"),
+        ("/mode", "show operating mode + seal status"),
+    ]),
+    ("System", &[
+        ("/status", "system overview"),
         ("/help", "show command help"),
+        ("/feedback-loop", "trigger the feedback loop (experimental)"),
     ]),
 ];
 
