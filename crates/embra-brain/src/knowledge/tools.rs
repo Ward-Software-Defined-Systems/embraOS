@@ -586,26 +586,26 @@ pub async fn knowledge_query(
     // Truncate to max_results after filtering
     results.truncate(max_results);
 
-    // Count by source
+    // Count by source. The `other` bucket has had no producer since graph
+    // expansion was deleted (2026-09-08); it is kept so an unrecognized
+    // source label shows up in the header instead of vanishing.
     let mut direct = 0usize;
     let mut session = 0usize;
-    let mut graph = 0usize;
+    let mut other = 0usize;
     for r in &results {
         match r.source.as_str() {
             "direct_query" => direct += 1,
             "session_based" => session += 1,
-            "graph_expansion" => graph += 1,
-            _ => graph += 1,
+            _ => other += 1,
         }
     }
 
-    // The pre-ranking funnel line makes "graph: 0" self-explaining: the
-    // header counts the RETURNED set, candidates_* what retrieval actually
-    // considered — expansion producing candidates that ranking outranks is
-    // by design, expansion producing zero is worth investigating.
+    // The header counts the RETURNED set; this line reports what retrieval
+    // actually considered before ranking, so "few results" can be told apart
+    // from "few candidates".
     let candidates_line = format!(
-        "Candidates considered: {} (direct {}, session {}, graph {} — pre-ranking)\n",
-        stats.candidates_total, stats.direct_query, stats.session_based, stats.graph_expansion
+        "Candidates considered: {} (direct {}, session {} — pre-ranking)\n",
+        stats.candidates_total, stats.direct_query, stats.session_based
     );
 
     if results.is_empty() {
@@ -616,12 +616,12 @@ pub async fn knowledge_query(
     }
 
     let mut out = format!(
-        "Knowledge query: \"{}\" ({} results — direct: {}, session: {}, graph: {})\n",
-        query_text, results.len(), direct, session, graph
+        "Knowledge query: \"{}\" ({} results — direct: {}, session: {}, other: {})\n",
+        query_text, results.len(), direct, session, other
     );
     out.push_str(&candidates_line);
     if direct == 0 {
-        out.push_str("[No direct matches — showing graph-expanded results]\n");
+        out.push_str("[No direct matches — these are session-adjacent results]\n");
     }
     out.push('\n');
     for (i, r) in results.iter().enumerate() {

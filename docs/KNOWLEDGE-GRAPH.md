@@ -19,6 +19,8 @@ If the intelligence has reported `knowledge_graph_stats` output showing somethin
 3. **`knowledge_query` truncates at read time, not write time.** Ranking-then-truncating to top-K runs per query (default 20, max 100). The graph can be enormous; the answer set is always small.
 4. **`knowledge_sweep_orphans` only removes dangling refs.** It cleans up edges whose source or target node was deleted (typically by `forget` calls predating the cascade fix, or by direct deletes that bypassed `knowledge_unlink_node`). It is not a density-management tool.
 
+**Changed 2026-09-08:** point 1's strongest justification used to be that per-turn retrieval expanded depth-2 through the auto layer, so density was the substrate that made expansion useful. Retrieval no longer traverses at all — the step was measured contributing nothing and deleted. The auto layer is still cheap to write and still backs `knowledge_traverse`, but its warrant is narrower than this section has historically claimed. Tracked in `docs/OPEN-PROBLEMS.md`.
+
 If you want to see the per-write math, the **Worked example** below traces one `remember` through `derive_edges`. The **Why the density isn't bloat** section explains why this design holds at scale.
 
 ---
@@ -176,11 +178,11 @@ The only edge-removing maintenance tool is `knowledge_sweep_orphans` (`tools.rs:
 
 Auto-enrichment is even more aggressive: `MAX_INJECTED = 5` (`crates/embra-brain/src/knowledge/enrichment.rs:21`) with a `SCORE_THRESHOLD = 0.3` floor (`enrichment.rs:18, 70`). The graph can hold millions of edges; only five high-scoring nodes per turn ever reach the model.
 
-### Depth-2 expansion needs the density
+### ~~Depth-2 expansion needs the density~~ (retired 2026-09-08)
 
-`knowledge_query`'s graph-expansion step (`crates/embra-brain/src/knowledge/retrieval.rs`, Step 4) seeds ONE multi-source depth-2 traversal with the top 10 *scored* candidates from direct + session retrieval (since 2026-07-04; previously 10 HashMap-order seeds each walked their own ~90%-overlapping BFS). The point of expansion is to surface adjacent knowledge the operator didn't explicitly ask about — *"the user asked about cert refresh; the graph also says cert refresh contradicts the old systemd unit cleanup"*.
+This section used to be the density layer's main justification: retrieval expanded depth-2 from its top-10 candidates, so a sparse graph would expand to nothing useful. **That step no longer exists.** Measured on production, expansion reached a 1,000-node slab — 42% of the whole graph — of which 97.7–99.6% arrived through `same_session`/`tag_overlap`/`temporal`, and none of it ever reached the injected top-20.
 
-A sparse graph would expand to nothing useful. The auto-derived layer's job is to be the substrate that depth-2 expansion can actually find adjacent nodes through.
+The auto-derived layer is now justified by `knowledge_traverse` alone, which the intelligence invokes deliberately rather than on every turn. That is a much narrower warrant than this section claimed, and whether the layer earns its 99.36% share of 408,046 edges is an open question — see `docs/OPEN-PROBLEMS.md`.
 
 ### `knowledge_sweep_orphans` is the only edge-removing maintenance tool
 
@@ -218,7 +220,7 @@ The promotion flow, in order:
 
 Promotion is one-way. There is no demote tool. To reverse a promotion, the operator asks the intelligence to unlink the semantic/procedural node; the intelligence calls `knowledge_unlink_node`, which cascades the `derived_from` edge plus every other edge referencing the node, then clears the source entry's `promoted_to` pointer (`tools.rs:253-272`).
 
-`retrieve_relevant_knowledge` uses `redirect_if_promoted` (`retrieval.rs`, store-backed since 2026-07-04 — the target resolves from the per-call `NodeStore` prefetch, with a point-read fallback for window misses) to short-circuit the indirection: when Step 3 (content-substring on `memory.entries`) finds a doc with a non-null `promoted_to`, it loads the target node instead and adds *that* to the result set, keyed by the target's `(collection, id)`. Step 4 (graph expansion) does the same redirect with a duplicate-check. Effect: a promoted entry and its target never both surface in the same retrieval result.
+`retrieve_relevant_knowledge` uses `redirect_if_promoted` (`retrieval.rs`, store-backed since 2026-07-04 — the target resolves from the per-call `NodeStore` prefetch, with a point-read fallback for window misses) to short-circuit the indirection: when Step 3 (content-substring on `memory.entries`) finds a doc with a non-null `promoted_to`, it loads the target node instead and adds *that* to the result set, keyed by the target's `(collection, id)`. Effect: a promoted entry and its target never both surface in the same retrieval result.
 
 ---
 
@@ -276,58 +278,76 @@ When a session resumes (`SessionManager.pending_resume_briefing` is set), `build
 
 ## Retrieval and ranking (`knowledge_query` internals)
 
-`retrieve_relevant_knowledge` (`crates/embra-brain/src/knowledge/retrieval.rs`) is shared by `knowledge_query` and auto-enrichment. It collects candidates from five sources (tag match, content match over promoted nodes, session adjacency, content match over entries, graph expansion), ranks-and-truncates, and returns funnel stats alongside the results (`RetrievalStats` — pre-threshold candidate counts by source; enrichment logs them).
+`retrieve_relevant_knowledge` (`crates/embra-brain/src/knowledge/retrieval.rs`) is shared by `knowledge_query` and auto-enrichment. It collects candidates from four sources (tag match, content match over promoted nodes, session adjacency, content match over entries), ranks-and-truncates, and returns funnel stats alongside the results (`RetrievalStats` — pre-threshold candidate counts by source; enrichment logs them).
+
+**Graph expansion was deleted 2026-09-08.** A fifth step seeded a depth-2 `traverse_multi` from the top-10 scored candidates. Measured against a copy of production (2,388 nodes / 408,046 edges), the shipped Rust spent 764–1,506 ms and **2,130–3,486 WardSONDB round-trips** per retrieval, ~96% of it in that one step — while it contributed **0 of the top 5, 0 of the top 10 and 0 of the top 20** on every query measured. It could not do better by construction: its candidates entered with `content_strength = 0.0` and no query-tag overlap, so `relevance` was 0 and the `0.5` source multiplier capped them at `(0 + 0.3 + 0.2 + 0.1) x 0.5 = 0.300` — exactly the enrichment threshold, below every real direct hit. Removing it took the same six-query set to **54–115 ms at 62–64 round-trips**, with top-5 quality equal or better on four of six. `traverse_multi` is untouched and still backs `knowledge_traverse`.
 
 ### Collection steps
 
 Every step window is recency- or rank-sorted with an explicit limit (2026-07-02 search-freeze fix — an unsorted, unlimited WardSONDB query silently returns the *oldest* 100 docs, which froze retrieval as collections grew). Query bodies are built by pure per-step builder functions with shape-asserting unit tests (`step_query_body_tests`).
 
-Since 2026-07-04 the pipeline opens by prefetching `memory.semantic` + `memory.procedural` into a per-call **`NodeStore`** (`knowledge/node_store.rs`; two `fetch_recent` windows at `MEMORY_FETCH_WINDOW`, saturation-warned) — every later node lookup in Steps 1–4 joins in memory, with a cached point-read fallback for docs outside the windows. This replaced hundreds of sequential HTTP point reads per retrieval.
+Since 2026-07-04 the pipeline opens by prefetching `memory.semantic` + `memory.procedural` into a per-call **`NodeStore`** (`knowledge/node_store.rs`; two `fetch_recent` windows at `MEMORY_FETCH_WINDOW`, saturation-warned) — every later node lookup joins in memory, with a cached point-read fallback for docs outside the windows. This replaced hundreds of sequential HTTP point reads per retrieval.
+
+The `memory.entries` window is fetched alongside that prefetch rather than at its consuming step (2026-09-08). Steps 2 and 3b produce content strengths that are compared against each other during ranking, so they must share **one IDF corpus** — see **Content matching and IDF** below.
 
 1. **Direct tag match** (in-memory, `step1_tag_hits`) — each input tag is matched against the prefetched node collections with the exact server `$contains` semantics: **case-sensitive** array membership (`node_store::doc_tag_contains` — query tags arrive lowercased while stored tags are as-typed, so only lowercase-stored tags match, same as the old server query), newest **100** per tag per collection by doc `created_at` (missing-last, mirroring the server comparator; raised from 20 in the 2026-07-31 scale wave — the 20 was the old server query's window, and matching is in-memory now). Query tags come from the shared tokenizer (`knowledge/text.rs::query_tag_tokens`): punctuation-trimmed, deduped, hyphenated forms preserved. Zero round trips per tag. Source label: `direct_query`.
-2. **Content-token match over promoted nodes** (in-memory, `step3_content_hits` over the same prefetched slices — 2026-07-31; before this, semantic/procedural CONTENT was unsearchable anywhere: a promoted fact whose tags didn't match was invisible to direct retrieval). A node matches when it shares ≥ 2 distinct content tokens with the query (≥ 1 when the query has ≤ 2 tokens); tokens are the audit's rule (`content_tokens`: lowercase alnum runs ≥ 3 bytes; procedural nodes match on `title` + `description`). Top 100 admissions per collection ordered (match count desc, recency desc, id asc); each carries a `content_strength = matched / min(query tokens, 8)` that feeds scoring. Source label: `direct_query`.
+2. **Content-token match over promoted nodes** (in-memory, `step3_content_hits` over the same prefetched slices — 2026-07-31; before this, semantic/procedural CONTENT was unsearchable anywhere: a promoted fact whose tags didn't match was invisible to direct retrieval). A node matches when it shares ≥ 2 distinct content tokens with the query (≥ 1 when the query has ≤ 2 tokens) **and at least one matched token is not a stopword**; tokens are the audit's rule (`content_tokens`: lowercase alnum runs ≥ 3 bytes; procedural nodes match on `title` + `description`). Top 100 admissions per collection ordered (match count desc, recency desc, id asc); each carries an IDF-weighted `content_strength` that feeds scoring — see **Content matching and IDF**. Source label: `direct_query`.
 3. **Session-based** (`session_entries_query_body` + `session_edge_query_body`) — the newest 50 `memory.entries` in the current session (`created_at desc`), then walk `same_session` edges from **all 50** (was the top 20; edge windows fetch at bounded concurrency 8), per-entry edge window ranked `weight desc, created_at desc`, limit 50, with `memory.entries` targets excluded **server-side** via `target_collection: {$ne: "memory.entries"}` so the window is spent only on useful targets — a client-side skip remains as defense-in-depth. Edge targets resolve through the NodeStore. Source label: `session_based`.
-4. **Content-token match on entries** (2026-07-31 — replaces the whole-message substring, which required the ENTIRE user message to appear verbatim inside an entry and so never fired on natural messages) — same matcher and per-collection cap over the 10,000 most-recent `memory.entries` (`fetch_recent`, sorted `_created_at desc, _id desc`, saturation-warned). If `promoted_to` is set, `redirect_if_promoted` substitutes the target node (store-backed) and the match strength rides the redirect. The fetched entries window then joins the NodeStore so the expansion step resolves entry neighbors without point reads. Source label: `direct_query`.
-5. **Graph expansion** — the top 10 *scored* candidates from the direct/session steps (`seed_keys`: shared scoring core, deterministic `(collection, id)` tie-break — never HashMap iteration order) seed **one** multi-source depth-2 `traverse_multi` call (no edge-type filter, no min-weight filter → the type-partitioned hop applies; bounded by the per-hop windows and the global node budget — see **Traversal**). For each discovered node (`depth > 0`), redirect-if-promoted and `insert_collected`. Source label: `graph_expansion`.
+4. **Content-token match on entries** (2026-07-31 — replaces the whole-message substring, which required the ENTIRE user message to appear verbatim inside an entry and so never fired on natural messages) — same matcher and per-collection cap over the 10,000 most-recent `memory.entries` (`fetch_recent`, sorted `_created_at desc, _id desc`, saturation-warned). If `promoted_to` is set, `redirect_if_promoted` substitutes the target node (store-backed) and the match strength rides the redirect. Source label: `direct_query`.
+The four steps populate a `HashMap<(collection, id), Collected>` keyed by `(collection, id)` — same key everywhere else in the codebase. First insert wins; subsequent inserts of the same key are skipped (`insert_collected`), except `content_strength`, which max-merges.
 
-The four steps populate a `HashMap<(collection, id), Collected>` keyed by `(collection, id)` — same key everywhere else in the codebase. First insert wins; subsequent inserts of the same key are skipped (`insert_collected`).
+### Content matching and IDF (2026-09-08)
+
+`content_tokens` had no stopword floor: every query token counted equally, so three stopword hits outscored one rare-term hit. Measured in production, `the` appears in 58% of semantic nodes, `and` 33%, `not` 26%, `for` 21%, `from` 20% — and *"What is the plan for the code review?"* returned Earth's-Black-Box and void-session nodes matched purely on `for,the,what`, while `plan` (df 7) and `review` (df 14) contributed nothing to rank.
+
+`knowledge/idf.rs` computes per-query document frequency over the corpus retrieval has already prefetched — **only the query's own tokens**, so it is a handful of counters regardless of corpus size.
+
+| Quantity | Rule |
+|---|---|
+| `idf(t)` | `ln((N + 1) / (df(t) + 1)) + 1.0` — smoothed, floored at 1.0 so no query token ever weighs zero. At N = 2,281: `the` (df ~1,324) scores 1.55, `review` (df 14) scores 6.02 |
+| stopword | `df(t) / N > STOPWORD_DF_RATIO` (0.15). Skipped entirely below `MIN_CORPUS_FOR_STOPWORDS` (50 docs) — df is meaningless on a freshly-seeded instance, the same reasoning as the degenerate-recency guard |
+| admission | ≥ 2 matched tokens (≥ 1 for queries of ≤ 2 tokens) **of which at least one is a non-stopword**. Stopwords still add strength; they can never carry admission alone |
+| `content_strength` | `sum(idf of matched) / sum(idf of the IDF_DENOM_CAP=8 highest-weighted query tokens)`, clamped `[0,1]`. The top-8 denominator preserves the intent of `RELEVANCE_DENOM_CAP` under IDF weighting — a 25-word message cannot dilute a strong hit |
+
+**`text.rs::content_tokens` is deliberately untouched by this.** `audit.rs::tokenize` delegates to it and `text.rs::content_tokens_match_audit_similarity_rule` pins the two byte-for-byte, so changing tokenization would silently diverge the audit's similarity scoring from retrieval's matching. All IDF weighting lives in the scoring layer.
+
+*Known limitation:* `content_strength` has no document-length normalization, so a long document matches more query tokens by sheer length. On the production corpus this lets long research nodes outrank short, precisely-relevant ones. IDF narrows the gap but does not close it; BM25-style length normalization is an unvalidated candidate, deliberately not taken.
 
 ### Ranking
 
-`score_and_rank` (`retrieval.rs`) applies a 4-signal base score and a source-quality multiplier. One scoring core (`score_one` + `build_score_ctx`) drives both this final ranking and Step 4's seed selection, so the two cannot drift.
+`score_and_rank` (`retrieval.rs`) applies a 3-signal base score and a source-quality multiplier. `score_one` + `build_score_ctx` are the one scoring core. Weights were retuned 2026-09-08 against a production copy — see the signal table.
 
 Base score:
 
 ```
-base = relevance    * 0.4      (relevance = max(tag_relevance, content_strength))
-     + recency      * 0.3
-     + access_frequency * 0.2
-     + confidence   * 0.1
+base = relevance         * 0.5   (relevance = max(tag_relevance, content_strength))
+     + recency           * 0.3
+     + access_frequency  * 0.2   (log-scaled)
 ```
 
 Signal definitions:
 
 | Signal | Weight | Calculation |
 |---|---|---|
-| `relevance` | 0.4 | `max(tag_relevance, content_strength)` (2026-07-31). `tag_relevance = min(matching_tags / tag_denom, 1.0)` (case-insensitive), where `tag_denom = min(deduped query tokens, 8)` — the old denominator was the raw, non-deduped, stopword-inclusive token count, which diluted a 2-tag hit on a 25-word message to ~0.04 of the budget and let recency carry the enrichment threshold. `content_strength` comes from the Step-2/3b token matcher. |
+| `relevance` | 0.5 | `max(tag_relevance, content_strength)` (2026-07-31). `tag_relevance = min(matching_tags / tag_denom, 1.0)` (case-insensitive), where `tag_denom = min(deduped query tokens, 8)` — the old denominator was the raw, non-deduped, stopword-inclusive token count, which diluted a 2-tag hit on a 25-word message to ~0.04 of the budget and let recency carry the enrichment threshold. `content_strength` comes from the IDF-weighted Step-2/3b token matcher. Weight raised 0.4 → 0.5 (2026-09-08): measured on production, relevance was only **17–36%** of the top-5 score while recency routinely hit 1.0 and won. |
 | `recency` | 0.3 | `(ts - ts_min) / (ts_max - ts_min)` — normalized over the candidate set, clamped `[0,1]`. Degenerate sets (<2 distinct parseable timestamps — e.g. a freshly-seeded instance) score a neutral `0.5` (2026-07-31 fix: the old fallback fed RAW epoch seconds through, ~1.8e9); missing/unparseable `created_at` stays `0.0`. |
-| `access_frequency` | 0.2 | `access_count / max(access_count in candidate set)`; since 2026-07-04 `access_count` counts *retrieval hits* (returned-only touching), not BFS sweeps, so the signal is meaningful again |
-| `confidence` | 0.1 | per-node field — `0.9` semantic default, `1.0` for procedural/episodic (`insert_collected`) |
+| `access_frequency` | 0.2 | `ln(1 + access_count) / ln(1 + max_access)` — **log-scaled since 2026-09-08**. Linear `count / max` let one heavily-accessed node flatten every other candidate to ~0.000, so the weight was dead across the whole production corpus. Degenerate sets (nothing accessed more than once) score `0.0`: absent ordering is not a full mark. Since 2026-07-04 `access_count` counts *retrieval hits* (returned-only touching), not BFS sweeps |
+
+**`confidence` was removed from the ranking 2026-09-08.** It was 0.9–1.0 for every node — and `insert_collected` *synthesized* `1.0` for three of the four collections — so its 0.1 weight was a constant offset every candidate received, not a signal. The stored document field is untouched; only the ranking input is gone. The operator-visible consequence: a maximally-recent node with **zero** relevance used to score `0.3 + 0.1 = 0.40` and clear the `0.3` enrichment threshold on recency alone. It now scores exactly `0.30`.
 
 Source multiplier (`score_one`):
 
 | Source | Multiplier | When |
 |---|---|---|
-| `direct_query` | 1.0 | matched via tag or content substring |
+| `direct_query` | 1.0 | matched via tag or content token |
 | `session_based` | 0.75 | reached through `same_session` edges |
-| `graph_expansion` | 0.5 | discovered by depth-2 BFS expansion |
-| fallback | 0.5 | unrecognized source string |
+| fallback | 0.5 | unrecognized source string (incl. the retired `graph_expansion` label, which nothing produces) |
 
 Final: `score = base * source_mult`. Results are sorted descending by score (exact-score ties order deterministically by `(collection, id)`) and truncated to `max_results`. The finally-returned top-K — and only it — is then access-touched in one background task (`spawn_access_touches`).
 
 ### `knowledge_query` output
 
-`knowledge_query` (`crates/embra-brain/src/knowledge/tools.rs:482-574`) takes `<query_text> [| <max_results> [| <categories_csv>]]`. After ranking, it applies the optional `categories` filter on semantic nodes only (episodic/procedural pass through — `tools.rs:532-537`), truncates to `max_results`, and renders a textual report with a source-breakdown header: `direct: N, session: N, graph: N`. If `direct == 0` (no direct matches), it prefixes `[No direct matches — showing graph-expanded results]` so the operator can calibrate confidence.
+`knowledge_query` (`crates/embra-brain/src/knowledge/tools.rs`) takes `<query_text> [| <max_results> [| <categories_csv>]]`. After ranking, it applies the optional `categories` filter on semantic nodes only (episodic/procedural pass through), truncates to `max_results`, and renders a textual report with a source-breakdown header: `direct: N, session: N, other: N`. If `direct == 0` (no direct matches), it prefixes `[No direct matches — these are session-adjacent results]` so the operator can calibrate confidence. The `other` bucket has had no producer since graph expansion was deleted; it is kept so an unrecognized source label surfaces instead of vanishing.
 
 `max_results` default is 20; clamp `[1, 100]`. Internal fetch is `(max_results * 3).clamp(20, 100)` when category filtering is active, so post-filter truncation doesn't starve the output.
 
@@ -335,7 +355,7 @@ Final: `score = base * source_mult`. Results are sorted descending by score (exa
 
 ## Traversal (`knowledge_traverse` internals)
 
-`traverse_multi` (`crates/embra-brain/src/knowledge/traversal.rs`) is a multi-source, level-synchronous BFS over `memory.edges`. `knowledge_traverse` passes one start node; retrieval Step 4 passes up to 10 seeds into one shared walk (shared visited set, shared budget).
+`traverse_multi` (`crates/embra-brain/src/knowledge/traversal.rs`) is a multi-source, level-synchronous BFS over `memory.edges`. Its only caller since 2026-09-08 is `knowledge_traverse`, which passes one start node; the multi-source path is retained (it costs nothing, and the shared visited set / shared budget semantics are load-bearing for any future multi-seed caller). Retrieval no longer traverses — see the graph-expansion note under **Retrieval and ranking**.
 
 | Parameter | Source | Note |
 |---|---|---|
@@ -347,7 +367,7 @@ Final: `score = base * source_mult`. Results are sorted descending by score (exa
 | node budget | `config.kg_traversal_node_budget` (1000) | GLOBAL per call; BFS stops (with `truncated: true`) once the visited set reaches it |
 | node docs | caller-supplied `NodeStore` | prefetched collections resolve in memory; anything else is a cached point-read fallback |
 
-A visited set keyed on `(collection, id)` prevents revisiting. **Expansion is undirected** (since 2026-07-03) and **arm-split** (since 2026-07-04): each hop fetches the edges touching a node via TWO indexed equality queries — the source arm (`{source_id, source_collection}`) and the target arm (`{target_id, target_collection}`) — merged client-side by the server's own comparator (`weight desc, created_at desc`, plus an `_id desc` tie-break; WardSONDB builds with the F2 planner fix tie-break `_id` in the last sort field's direction themselves, older builds lack one), deduped by `_id`, truncated to the window. The neighbor is the *other* endpoint (`neighbor_of`). Undirectedness matters because brain-created structural edges are stored as **one** directed doc while auto-derived edges are double-written: an outgoing-only hop silently hid `enables`/`contradicts`/`refines`/`depends_on`/`related_to`/`derived_from` from every node except their source. Result edges keep their true stored direction; the visited check dedupes the twin docs of bidirectional auto edges. Multi-source caveat: edges *between* two seeds are not recorded in `result.edges` (both endpoints pre-visited) — retrieval only consumes `result.nodes`, and the tool is single-start, so nothing observable changes.
+A visited set keyed on `(collection, id)` prevents revisiting. **Expansion is undirected** (since 2026-07-03) and **arm-split** (since 2026-07-04): each hop fetches the edges touching a node via TWO indexed equality queries — the source arm (`{source_id, source_collection}`) and the target arm (`{target_id, target_collection}`) — merged client-side by the server's own comparator (`weight desc, created_at desc`, plus an `_id desc` tie-break; WardSONDB builds with the F2 planner fix tie-break `_id` in the last sort field's direction themselves, older builds lack one), deduped by `_id`, truncated to the window. The neighbor is the *other* endpoint (`neighbor_of`). Undirectedness matters because brain-created structural edges are stored as **one** directed doc while auto-derived edges are double-written: an outgoing-only hop silently hid `enables`/`contradicts`/`refines`/`depends_on`/`related_to`/`derived_from` from every node except their source. Result edges keep their true stored direction; the visited check dedupes the twin docs of bidirectional auto edges. Multi-source caveat: edges *between* two seeds are not recorded in `result.edges` (both endpoints pre-visited) — the only caller is single-start, so nothing observable changes.
 
 **Why arm-split (2026-07-04 performance rework):** WardSONDB's planner sends every `$or` filter to a full collection scan — at 99,417 production edges that was ~300–420 ms *per hop*, and a hub-seeded retrieval issues hundreds to thousands of hops, which put 5–8 **minute** `knowledge_query` latencies (and per-turn enrichment stalls) into production. The source arm rides the single-field `idx_edge_source_id` (**boot-ensured on every startup since 2026-07-16** — WardSONDB's F2 planner fix stopped serving single-field lookups from compound indexes, so the `source_id`-leading compounds this arm originally rode no longer count; pre-F2 builds still serve the compound prefix, making the ensured index harmless there) and the target arm rides the single-field `idx_edge_target` (~0.6 ms each, `docs_scanned` = actual matches), and their merged window is provably identical to the `$or` window (any member of the union's top-K is in its own arm's top-K; only exact weight/`created_at` ties at the truncation boundary can differ). Measured end-to-end on a production copy: the worst benchmark query went from ~417 s to ~1.9 s. Arm queries within a BFS level run with bounded concurrency (`HOP_CONCURRENCY` = 8, ordered so output stays deterministic). The arm filters MUST keep the id+collection pair as top-level sibling equality keys — wrapping them in any combinator reverts to the full scan (guarded by `hot_path_arm_bodies_never_contain_or`).
 
@@ -371,7 +391,7 @@ Twelve `knowledge_*` tools registered via `#[embra_tool(...)]` macros — ten in
 
 ### Read tools
 
-**`knowledge_query`** — multi-signal ranking + depth-2 expansion. `query` is required; `max_results` defaults to 20 (clamp `[1, 100]`); `categories` is an optional CSV of semantic categories (filter applied after ranking, semantic-only). Since 2026-07-31 the query text also token-matches node CONTENT (semantic content, procedural title+description, entry content — see the funnel above), so untagged-but-relevant knowledge is findable. Output renders the source breakdown (`direct: N, session: N, graph: N`); when the intelligence relays this back in conversation, the operator can read whether the retrieval is hitting direct matches or only expansion noise.
+**`knowledge_query`** — multi-signal ranking over the four collection steps. `query` is required; `max_results` defaults to 20 (clamp `[1, 100]`); `categories` is an optional CSV of semantic categories (filter applied after ranking, semantic-only). Since 2026-07-31 the query text also token-matches node CONTENT (semantic content, procedural title+description, entry content — see the funnel above), so untagged-but-relevant knowledge is findable. Output renders the source breakdown (`direct: N, session: N, other: N`); when the intelligence relays this back in conversation, the operator can read whether the retrieval is hitting direct matches or only session-adjacent ones.
 
 **`knowledge_traverse`** — BFS from a single start node, **undirected** since 2026-07-03: each hop follows edges touching the node from either side, so directional structural edges (stored as one doc) are reachable from both endpoints — previously they were invisible from everywhere but their source. Since 2026-07-04 each hop is indexed arm queries merged client-side (no `$or` full scan — see **Traversal**), and since 2026-07-31 the hop is **type-partitioned**: meaningful edges ride their own 2000-edge window and can no longer be pruned by `same_session` floods at dense hubs. Node docs resolve from a prefetched `NodeStore`, and result edges still render their true stored direction (preferring meaningful witness edges when a neighbor is reachable both ways). Default depth comes from `config.kg_max_traversal_depth` (3), ceiling is `config.kg_traversal_depth_ceiling` (5). `edge_types` is an optional CSV filter; `min_weight` is an optional `f64` floor. Side-effect: increments `access_count` + `last_accessed` on the *returned* node set, in one background task (which then feeds the `access_frequency` ranking signal).
 
@@ -434,7 +454,7 @@ No. Density is the design (see **Why the density isn't bloat** above). Auto-deri
 
 Correct — they're not re-derived (`tools.rs:307-308, 927`). Two options:
 
-- **Accept the stale weight.** It just affects ranking. The depth-2 expansion path still finds the node; the score may be slightly off relative to a freshly-derived edge.
+- **Accept the stale weight.** It just affects edge ranking inside `knowledge_traverse`'s windows; retrieval no longer reads edge weights at all.
 - **Clean up specifically.** Ask the intelligence to remove the stale edges; it calls `knowledge_unlink_edge` on each affected triple. The brain has system-prompt guidance pointing at this exact case (per ARCHITECTURE.md Sprint-2 follow-up), so it will often volunteer the cleanup on its own after a substantive tag change.
 
 The reason `knowledge_update` doesn't re-derive is that doing so would require either (a) recomputing every existing edge involving the node, which is `O(N)` in the node's degree and could itself be hundreds of edges, or (b) implicitly deleting then re-deriving, which would silently churn edge IDs and break any external references. Both are worse than leaving the cleanup explicit and conversation-driven.

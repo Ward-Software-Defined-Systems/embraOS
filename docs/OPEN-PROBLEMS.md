@@ -29,3 +29,13 @@ In bare metal mode, module containers share the same kernel as embraOS. In K8s m
 ## Module image provenance
 
 If module source originates inside the OS (operator-authored via Guardian, or — under future governance design — brain-proposed), the provenance chain must be auditable end-to-end: source code → `modules.source` → sandboxed build → image signing → governance review → allowlist → deploy. Each step must be logged and verifiable. The sandboxed build pipeline is not yet designed.
+
+## Does the auto-derived edge layer still earn its cost?
+
+Opened 2026-09-08, when retrieval's graph-expansion step was deleted. `same_session`, `temporal` and `tag_overlap` account for **405,429 of production's 408,046 edges (99.36%)**, growing ~1.7x faster than the node layer (edges +44.5% against nodes +26% over 19 days), and 21% of sampled nodes now exceed the 500-edge auto window — up from 10.8% a month earlier.
+
+That layer's headline justification was per-turn depth-2 expansion during retrieval: density was the substrate expansion needed to find adjacent nodes. Measurement retired that argument. Expansion reached a 1,000-node slab (42% of the graph) that was 97.7–99.6% auto-reached, cost ~96% of retrieval latency, and contributed **nothing** to the injected top-20 on any query tested.
+
+What remains is `knowledge_traverse`, which the intelligence invokes deliberately rather than on every turn — and the control case is instructive: identity nodes carry no auto edges, and a traversal from one is **100% meaningful**. The graph is useful exactly where the auto layer does not drown it.
+
+Options, none taken: decay `same_session`/`temporal` weights with age and prune below a floor; stop double-writing auto edges; cap per-node auto degree at write time; or accept the growth as the cost of a traversal tool used a few times a session. The decision needs a measurement of what `knowledge_traverse` actually returns in practice, which does not exist yet. Related: the WardSONDB traverse endpoint stays deferred precisely because the step it would accelerate was the one deleted (`embraOS-Phase1-Implementation/Sprint 6/KG-DEFERRED-ITEMS-DECISION.md`).

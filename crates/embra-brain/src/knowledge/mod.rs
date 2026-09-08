@@ -11,6 +11,7 @@
 pub mod audit;
 pub mod edges;
 pub mod enrichment;
+pub(crate) mod idf;
 pub mod merge;
 pub(crate) mod node_store;
 pub mod promotion;

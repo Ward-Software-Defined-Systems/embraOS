@@ -73,14 +73,16 @@ pub async fn build_turn_context(
     // Funnel observability (2026-07-31): the candidates_* fields are
     // PRE-threshold counts across the whole retrieval funnel — the journal
     // can now answer "was retrieval comprehensive", not just show the
-    // surviving top-5.
+    // surviving top-5. `candidates_graph` was retired 2026-09-08 with the
+    // graph-expansion step; `candidates_other` reports the unknown-source
+    // bucket that field became and should read 0 forever.
     tracing::info!(
         session = session_name,
         tag_count = query_tags.len(),
         candidates_total = stats.candidates_total,
         candidates_direct = stats.direct_query,
         candidates_session = stats.session_based,
-        candidates_graph = stats.graph_expansion,
+        candidates_other = stats.graph_expansion,
         result_count = qualifying.len(),
         top_score = qualifying.first().map(|r| r.score).unwrap_or(0.0),
         "auto-enrichment"
