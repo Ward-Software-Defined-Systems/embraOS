@@ -1,0 +1,186 @@
+# embraOS CI — Rust-level regression net.
+#
+# Ported from .github/workflows/ci.yml (2026-09-08) when the primary origin
+# moved to gitlab.ops.wsds. Scope is unchanged and deliberate: workspace
+# tests, the musl static cross-build (the ship path, minus Buildroot), and
+# invariant guards. This complements — never replaces — the local pipeline
+# (build-image.sh → Buildroot → QEMU boot against existing DATA), which
+# remains the authority for image/runtime validation.
+#
+# The toolchain is pinned HERE (CI-only, matching the wsds-devops dev host)
+# so CI doesn't drift with the runner image; bump RUST_TOOLCHAIN deliberately
+# and change the `image:` tag with it. The rustc-version guard in every job
+# fails loudly if the two ever disagree. An aarch64 job is queued until the
+# x86_64 pipeline is proven.
+
+stages: [build, test]
+
+variables:
+  CARGO_TERM_COLOR: "always"
+  RUST_TOOLCHAIN: "1.94.1"
+  # Matches the wsds-devops install (cargo install trunk --locked); bump deliberately.
+  TRUNK_VERSION: "0.21.14"
+  # GitLab only caches paths inside the project dir, so cargo's home moves here.
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  GIT_DEPTH: "0"
+
+default:
+  image: "rust:${RUST_TOOLCHAIN}-bookworm"
+  interruptible: true
+  before_script:
+    # The pin is the contract: a runner image that isn't the pinned toolchain
+    # must fail here, not silently validate a different compiler.
+    - test "$(rustc --version | cut -d' ' -f2)" = "$RUST_TOOLCHAIN" ||
+      { echo "rustc $(rustc --version) does not match RUST_TOOLCHAIN=$RUST_TOOLCHAIN" >&2; exit 1; }
+
+workflow:
+  auto_cancel:
+    on_new_commit: interruptible
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "web"
+
+# embra-web embeds crates/embra-web-ui/dist via rust-embed at COMPILE time,
+# and dist/ is gitignored Trunk output — a fresh checkout cannot compile
+# embra-web without it (build-image.sh Step 0.5 is what creates it locally).
+# This job mirrors Step 0.5 and hands dist/ to the compile jobs.
+frontend:
+  stage: build
+  timeout: 30m
+  cache:
+    - key: "frontend-cargo-$CI_COMMIT_REF_SLUG"
+      paths: [.cargo/bin/, .cargo/registry/index/, .cargo/registry/cache/, .cargo/git/db/]
+    - key:
+        files: [Cargo.lock]
+        prefix: frontend-target
+      paths: [crates/embra-web-ui/target/]
+  script:
+    - rustup target add wasm32-unknown-unknown
+    - |
+      if ! trunk --version 2>/dev/null | grep -q "trunk ${TRUNK_VERSION}\$"; then
+        cargo install trunk --locked --version "${TRUNK_VERSION}" --force
+      fi
+      trunk --version
+    - cd crates/embra-web-ui && trunk build --release
+  artifacts:
+    name: embra-web-ui-dist
+    paths: [crates/embra-web-ui/dist]
+    expire_in: 1 day
+
+guards:
+  stage: build
+  timeout: 10m
+  # Pure text checks over Cargo.lock — no toolchain needed, so skip the pin guard.
+  image: alpine:3.22
+  before_script: []
+  script:
+    # The seven pins carry on-disk-format compat with production DATA
+    # (CLAUDE.md "vendored FORK" invariant; vendor commit 3dc3e29 landed them
+    # at exactly upstream's regression-tested lock). A casual `cargo update`
+    # bump must fail loudly here — changing one is a deliberate divergence
+    # decision, not routine maintenance.
+    - |
+      set -eu
+      check() {
+        name="$1"; want="$2"
+        n=$(grep -c "^name = \"$name\"\$" Cargo.lock || true)
+        if [ "$n" != "1" ]; then
+          echo "ERROR: $name: expected exactly 1 lock entry, found $n" >&2
+          return 1
+        fi
+        if ! grep -A1 "^name = \"$name\"\$" Cargo.lock | grep -q "^version = \"$want\"\$"; then
+          got=$(grep -A1 "^name = \"$name\"\$" Cargo.lock | grep '^version' || true)
+          echo "ERROR: $name pin drift: $got (expected \"$want\")" >&2
+          return 1
+        fi
+        echo "ok: $name $want"
+      }
+      fail=0
+      check fjall               2.11.2         || fail=1
+      check lsm-tree            2.10.4         || fail=1
+      check value-log           1.9.0          || fail=1
+      check rust-rocksdb        0.46.0         || fail=1
+      check rust-librocksdb-sys 0.42.0+10.10.1 || fail=1
+      check roaring             0.10.12        || fail=1
+      check tikv-jemallocator   0.6.1          || fail=1
+      exit $fail
+
+test:
+  stage: test
+  timeout: 60m
+  needs: [frontend]
+  cache:
+    - key: "test-cargo-$CI_COMMIT_REF_SLUG"
+      paths: [.cargo/registry/index/, .cargo/registry/cache/, .cargo/git/db/]
+    - key:
+        files: [Cargo.lock]
+        prefix: test-target
+      paths: [target/]
+  script:
+    # dist landed where rust-embed looks (guards artifact-layout changes)
+    - test -f crates/embra-web-ui/dist/index.html
+    # protoc for tonic-build, libclang for bindgen
+    - apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libclang-dev
+    - rustup component add clippy
+    - cargo test --workspace --locked
+    # wardsondb stays clippy-clean (ratchet — zero warnings at vendor time)
+    - cargo clippy -p wardsondb --all-targets --locked -- -D warnings
+
+musl-cross:
+  stage: test
+  timeout: 60m
+  needs: [frontend]
+  variables:
+    # Bootlin's Buildroot-built musl toolchain (gcc 14.3.0). The image builds
+    # use musl.cc instead; musl.cc refused GitHub's runner IPs, which is why
+    # CI diverged in the first place. On this self-hosted runner musl.cc is
+    # reachable, so exact-toolchain parity is now an open follow-up — land it
+    # only after this ported pipeline is proven green.
+    # Bump the sha256 AND the cache key together, deliberately.
+    BOOTLIN_SDK: "x86-64--musl--stable-2025.08-1"
+    BOOTLIN_SHA: "09fca3aa89540f1b01b5f4210d488cbeb00f522044c53e9989b1dd8a38076912"
+  cache:
+    - key: "musl-cargo-$CI_COMMIT_REF_SLUG"
+      paths: [.cargo/registry/index/, .cargo/registry/cache/, .cargo/git/db/]
+    - key:
+        files: [Cargo.lock]
+        prefix: musl-target
+      paths: [target/]
+    - key: "bootlin-x86-64-musl-stable-2025.08-1"
+      paths: [.bootlin/]
+  script:
+    - test -f crates/embra-web-ui/dist/index.html
+    - apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libclang-dev xz-utils curl
+    - rustup target add x86_64-unknown-linux-musl
+    - |
+      set -eu
+      if [ ! -x ".bootlin/$BOOTLIN_SDK/bin/x86_64-buildroot-linux-musl-gcc" ]; then
+        url="https://toolchains.bootlin.com/downloads/releases/toolchains/x86-64/tarballs/${BOOTLIN_SDK}.tar.xz"
+        for i in 1 2 3; do
+          curl -fSL --connect-timeout 20 --max-time 600 -o /tmp/bootlin-musl.tar.xz "$url" && break
+          [ "$i" = 3 ] && exit 1
+          echo "download attempt $i failed; retrying in $((i * 20))s"; sleep $((i * 20))
+        done
+        echo "$BOOTLIN_SHA  /tmp/bootlin-musl.tar.xz" | sha256sum -c -
+        mkdir -p .bootlin && tar -xJf /tmp/bootlin-musl.tar.xz -C .bootlin
+      fi
+      # Buildroot SDKs bake their build path into the compiler wrappers.
+      # relocate-sdk.sh rewrites them for the extracted location; it is
+      # idempotent, so it runs on a cache hit too (CI_PROJECT_DIR is stable
+      # per runner+project, but re-running costs nothing and survives a move).
+      "./.bootlin/$BOOTLIN_SDK/relocate-sdk.sh"
+    - |
+      export PATH="$CI_PROJECT_DIR/.bootlin/$BOOTLIN_SDK/bin:$PATH"
+      export CC_x86_64_unknown_linux_musl=x86_64-buildroot-linux-musl-gcc
+      export CXX_x86_64_unknown_linux_musl=x86_64-buildroot-linux-musl-g++
+      export AR_x86_64_unknown_linux_musl=x86_64-buildroot-linux-musl-ar
+      export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-buildroot-linux-musl-gcc
+      cargo build --release --target x86_64-unknown-linux-musl --locked
+    - |
+      set -eu
+      for bin in embra-init embrad embra-apid embra-trustd embra-brain embra-console embra-web wardsondb; do
+        p="target/x86_64-unknown-linux-musl/release/$bin"
+        test -x "$p" || { echo "ERROR: missing binary: $bin" >&2; exit 1; }
+        file "$p"
+      done
