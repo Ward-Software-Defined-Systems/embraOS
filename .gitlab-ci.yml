@@ -10,8 +10,14 @@
 # The toolchain is pinned HERE (CI-only, matching the wsds-devops dev host)
 # so CI doesn't drift with the runner image; bump RUST_TOOLCHAIN deliberately
 # and change the `image:` tag with it. The rustc-version guard in every job
-# fails loudly if the two ever disagree. An aarch64 job is queued until the
-# x86_64 pipeline is proven.
+# fails loudly if the two ever disagree.
+#
+# Proven green on pipeline 314 (2026-09-08, 6m52s warm). The GitHub Actions
+# workflow it replaced was retired in the same commit — three runs were needed
+# because the port inherited three unstated dependencies on the old runner's
+# Ubuntu image: ~/.cargo on PATH, a preinstalled `file`, and LLVM packaged so
+# libclang could find its own builtin headers. Assume the same class of risk
+# for the queued aarch64 job and for the musl.cc toolchain-parity follow-up.
 
 stages: [build, test]
 
@@ -147,15 +153,22 @@ musl-cross:
     # Bump the sha256 AND the cache key together, deliberately.
     BOOTLIN_SDK: "x86-64--musl--stable-2025.08-1"
     BOOTLIN_SHA: "09fca3aa89540f1b01b5f4210d488cbeb00f522044c53e9989b1dd8a38076912"
+  # when: always mirrors the GitHub workflow's cache-on-failure intent. GitLab
+  # defaults to on_success, so a failed attempt saved nothing and re-downloaded
+  # the 78 MB SDK every iteration — which is exactly what the first two failed
+  # runs cost. A retry now starts from the previous attempt's progress.
   cache:
     - key: "musl-cargo-$CI_COMMIT_REF_SLUG"
       paths: [.cargo/registry/index/, .cargo/registry/cache/, .cargo/git/db/]
+      when: always
     - key:
         files: [Cargo.lock]
         prefix: musl-target
       paths: [target/]
+      when: always
     - key: "bootlin-x86-64-musl-stable-2025.08-1"
       paths: [.bootlin/]
+      when: always
   script:
     - test -f crates/embra-web-ui/dist/index.html
     # `file` is used by the shipped-binary check below and is NOT in the rust
