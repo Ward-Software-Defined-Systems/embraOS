@@ -310,6 +310,26 @@ fi
     make BR2_EXTERNAL="$(pwd)/../buildroot" embraos_x86_64_defconfig && \
     make -j"$JOBS")
 
+# Post-Buildroot assert. Both ways this package can fail are SILENT: a package
+# whose Config.in is not sourced from buildroot/Config.in has its defconfig
+# symbol dropped without warning, and <PKG>_NAME is a Buildroot-reserved
+# variable, so using it for the install directory redirects the payload to
+# .../models/embra-embedding-model. Either way the image builds fine and the
+# brain reports "model at: NOT FOUND" only at runtime. Fail here instead.
+EMBED_TARGET="$BUILDROOT_DIR/output/target/usr/share/embra/models/${EMBED_MODEL_NAME:-bge-small-en-v1.5}"
+for f in model.onnx tokenizer.json; do
+    if [ ! -s "$EMBED_TARGET/$f" ]; then
+        echo "ERROR: embedding model missing from the rootfs: $EMBED_TARGET/$f" >&2
+        echo "       Semantic KG retrieval would silently fall back to lexical-only." >&2
+        echo "       Check that buildroot/Config.in sources the package's Config.in," >&2
+        echo "       that BR2_PACKAGE_EMBRA_EMBEDDING_MODEL=y survived into" >&2
+        echo "       $BUILDROOT_DIR/.config, and that the .mk installs to" >&2
+        echo "       \$(EMBRA_EMBEDDING_MODEL_DIRNAME) — never \$(EMBRA_EMBEDDING_MODEL_NAME)." >&2
+        exit 1
+    fi
+done
+echo "embedding model present in rootfs: $EMBED_TARGET"
+
 echo "=== Step 5: Copy outputs ==="
 mkdir -p output/images
 cp "$BUILDROOT_DIR/output/images/embraos.img" output/images/

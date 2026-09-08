@@ -20,13 +20,20 @@ EMBRA_EMBEDDING_MODEL_VERSION = 1.0
 EMBRA_EMBEDDING_MODEL_SITE = $(BR2_EXTERNAL_EMBRAOS_PATH)/../vendor/embedding-model
 EMBRA_EMBEDDING_MODEL_SITE_METHOD = local
 
-# Must match crate::embedding::EmbeddingProviderKind::default_model() and the
-# directory staged by build-image.sh Step 3.6.
-EMBRA_EMBEDDING_MODEL_NAME = bge-small-en-v1.5
+# The installed directory name. Must match
+# crate::embedding::EmbeddingProviderKind::default_model() and the directory
+# staged by build-image.sh Step 3.6 — the brain resolves the model by this
+# name under /usr/share/embra/models.
+#
+# NOT named EMBRA_EMBEDDING_MODEL_NAME: Buildroot's package infrastructure
+# defines <PKG>_NAME itself (as the package name) and silently overrides any
+# value set here, which installs the model to .../models/embra-embedding-model
+# and leaves `/embeddings` reporting "model at: NOT FOUND".
+EMBRA_EMBEDDING_MODEL_DIRNAME = bge-small-en-v1.5
 
 define EMBRA_EMBEDDING_MODEL_INSTALL_TARGET_CMDS
-	mkdir -p $(TARGET_DIR)/usr/share/embra/models/$(EMBRA_EMBEDDING_MODEL_NAME)
-	cp -a $(@D)/. $(TARGET_DIR)/usr/share/embra/models/$(EMBRA_EMBEDDING_MODEL_NAME)/
+	mkdir -p $(TARGET_DIR)/usr/share/embra/models/$(EMBRA_EMBEDDING_MODEL_DIRNAME)
+	cp -a $(@D)/. $(TARGET_DIR)/usr/share/embra/models/$(EMBRA_EMBEDDING_MODEL_DIRNAME)/
 endef
 
 $(eval $(generic-package))

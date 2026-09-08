@@ -395,6 +395,17 @@ fi
     make BR2_EXTERNAL="$(pwd)/../buildroot" "$BUILDROOT_DEFCONFIG" && \
     make -j"$JOBS")
 
+# Same silent-failure guard as the x86_64 script — see its comment.
+EMBED_TARGET="$BUILDROOT_DIR/output/target/usr/share/embra/models/${EMBED_MODEL_NAME:-bge-small-en-v1.5}"
+for f in model.onnx tokenizer.json; do
+    if [ ! -s "$EMBED_TARGET/$f" ]; then
+        echo "ERROR: embedding model missing from the rootfs: $EMBED_TARGET/$f" >&2
+        echo "       Semantic KG retrieval would silently fall back to lexical-only." >&2
+        exit 1
+    fi
+done
+echo "embedding model present in rootfs: $EMBED_TARGET"
+
 echo "=== Step 5: Copy outputs ==="
 mkdir -p output/images
 cp "$BUILDROOT_DIR/output/images/embraos.img" output/images/

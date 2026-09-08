@@ -42,6 +42,9 @@ Model:
   /model <opus-5|opus-4.8|fable-5>       Switch the Anthropic model (next message)
   /effort                                Show the Anthropic effort level
   /effort <low|medium|high|xhigh|max>    Set effort (default max, next message)
+  /embeddings                            Show the semantic-similarity layer: model, index, coverage
+  /embeddings <on|off>                   Enable/disable semantic similarity in retrieval (default on)
+  /embeddings backfill [--force]         Embed nodes that need it (local, ~55ms/node)
 
 Media:
   /attach <id|path>              Attach an image (uploaded id or workspace path) to your next message
@@ -52,9 +55,6 @@ Media:
   /image-provider gemini         Use Gemini image models for image_generate
   /image-provider model <id>     gemini-3-pro-image (default) | gemini-3.1-flash-image | …
   /image-provider key <token>    Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it
-  /embeddings                    Show the semantic-similarity layer: model, index, corpus coverage
-  /embeddings <on|off>           Enable/disable semantic similarity in retrieval (default on)
-  /embeddings backfill           Embed nodes that need it (local, ~55ms/node); --force re-embeds all
 
 Git & SSH:
   /git-setup <name> | <email>    Set git user config

@@ -33,11 +33,11 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
     ("Model", &[
         ("/provider", "switch"), ("/provider --setup", "guided setup"),
         ("/model", "model"), ("/effort", "effort"),
+        ("/embeddings", "embeddings"), ("/embeddings backfill", "embed backfill"),
     ]),
     ("Media", &[
         ("/attach", "attach image"), ("/media", "media pane"),
         ("/image-provider", "image gen"), ("/image-provider model", "image model"),
-        ("/embeddings", "embeddings"), ("/embeddings backfill", "embed backfill"),
         ("/image-provider key", "image key"),
     ]),
     ("Git & SSH", &[
