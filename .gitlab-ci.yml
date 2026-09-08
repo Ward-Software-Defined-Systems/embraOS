@@ -161,7 +161,7 @@ musl-cross:
     # `file` is used by the shipped-binary check below and is NOT in the rust
     # image's buildpack-deps:bookworm-scm base — without it that last step is a
     # second exit-127 at the end of the longest job.
-    - apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libclang-dev xz-utils curl file
+    - apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libclang-dev clang xz-utils curl file
     - rustup target add x86_64-unknown-linux-musl
     - |
       set -eu
@@ -180,6 +180,21 @@ musl-cross:
       # idempotent, so it runs on a cache hit too (CI_PROJECT_DIR is stable
       # per runner+project, but re-running costs nothing and survives a move).
       "./.bootlin/$BOOTLIN_SDK/relocate-sdk.sh"
+    - |
+      set -eu
+      # bindgen (zstd-sys AND rust-librocksdb-sys) parses headers through
+      # libclang. stddef.h is a COMPILER BUILTIN living in clang's resource
+      # dir, not in any sysroot. For the HOST target clang falls back to GCC's
+      # include dir — which is why the `test` job builds these same crates
+      # fine — but targeting musl drops that fallback, and on Debian's layout
+      # libclang cannot resolve its own resource dir from the .so path. The
+      # Ubuntu image this was ported from happened to resolve it; bookworm
+      # does not. Point bindgen at the builtins explicitly, discovered rather
+      # than hardcoded so an image or LLVM bump does not silently re-break it.
+      RESOURCE_INC="$(clang -print-resource-dir)/include"
+      test -f "$RESOURCE_INC/stddef.h" || {
+        echo "clang builtin headers not found at $RESOURCE_INC" >&2; exit 1; }
+      export BINDGEN_EXTRA_CLANG_ARGS="-I$RESOURCE_INC"
     - |
       export PATH="$CI_PROJECT_DIR/.bootlin/$BOOTLIN_SDK/bin:$PATH"
       export CC_x86_64_unknown_linux_musl=x86_64-buildroot-linux-musl-gcc
