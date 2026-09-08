@@ -28,6 +28,13 @@ default:
   image: "rust:${RUST_TOOLCHAIN}-bookworm"
   interruptible: true
   before_script:
+    # CARGO_HOME is moved inside the project dir so GitLab can cache it, but
+    # the rust image's PATH still points at its own /usr/local/cargo/bin — so
+    # anything `cargo install` puts in the new CARGO_HOME/bin is invisible
+    # without this (a bare `trunk` then dies with exit 127 AFTER paying the
+    # full build cost). before_script and script share one shell, so the
+    # export carries into every step.
+    - export PATH="${CARGO_HOME}/bin:${PATH}"
     # The pin is the contract: a runner image that isn't the pinned toolchain
     # must fail here, not silently validate a different compiler.
     - test "$(rustc --version | cut -d' ' -f2)" = "$RUST_TOOLCHAIN" ||
@@ -151,7 +158,10 @@ musl-cross:
       paths: [.bootlin/]
   script:
     - test -f crates/embra-web-ui/dist/index.html
-    - apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libclang-dev xz-utils curl
+    # `file` is used by the shipped-binary check below and is NOT in the rust
+    # image's buildpack-deps:bookworm-scm base — without it that last step is a
+    # second exit-127 at the end of the longest job.
+    - apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libclang-dev xz-utils curl file
     - rustup target add x86_64-unknown-linux-musl
     - |
       set -eu
