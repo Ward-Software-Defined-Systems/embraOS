@@ -1,6 +1,6 @@
 # Tool Reference
 
-Phase 1 includes 106 internal tools the intelligence invokes during conversation. All 106 work identically across all four LLM providers (Anthropic, Gemini, Ollama, LM Studio) via per-provider tool-schema translators that share a common JSON Schema cleanup pipeline (`provider/schema_util.rs::inline_refs`). They are organized below by category.
+Phase 1 includes 116 internal tools the intelligence invokes during conversation. All 116 work identically across all four LLM providers (Anthropic, Gemini, Ollama, LM Studio) via per-provider tool-schema translators that share a common JSON Schema cleanup pipeline (`provider/schema_util.rs::inline_refs`). They are organized below by category.
 
 > **⚠️ Testing Notice:** The default tools and slash commands are actively being tested. If you encounter bugs or unexpected behavior, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
@@ -127,6 +127,16 @@ For the data model, edge taxonomy, density rationale, promotion path, auto-enric
 | **gl_mrs** | List open merge requests on a self-hosted GitLab instance (GitLab's pull requests) — shows `!iid`, title, author, `source → target` branches |
 | **gl_issue_create** | Create an issue on a self-hosted GitLab instance (title + optional Markdown description) |
 | **gl_mr_create** | Create a merge request on a self-hosted GitLab instance (`source_branch` → `target_branch`) |
+| **gl_issue_view** | View one GitLab issue in full — description plus the comment thread, with GitLab's *system* notes ("changed the description") filtered out |
+| **gl_mr_view** | View one GitLab merge request in full — branches, state, `detailed_merge_status`, draft flag, description, comment thread |
+| **gl_issue_close** | Close a GitLab issue (`state_event: close`) |
+| **gl_issue_reopen** | Reopen a closed GitLab issue (`state_event: reopen`) |
+| **gl_mr_close** | Close a GitLab merge request **without** merging it — use `gl_mr_merge` to merge |
+| **gl_issue_comment** | Post a comment (GitLab "note") on an issue |
+| **gl_mr_comment** | Post a comment on a merge request |
+| **gl_mr_merge** | Merge a merge request. GitLab's options are not GitHub's `merge_method`: `squash` is a boolean, `when_pipeline_succeeds` queues the merge behind a green pipeline, `remove_source_branch` deletes the branch after |
+| **gl_boards** | List a project's issue boards — GitLab's equivalent of GitHub Projects |
+| **gl_board_view** | View one issue board: its lists in position order with the label backing each |
 | **plan** | Create or list project plans (stored in WardSONDB `plans` collection) |
 | **plan_delete** | Delete a plan by id (irreversible). `cascade_tasks=true` also removes tasks whose `plan_id` matches; default `false` leaves them orphaned |
 | **tasks** | List tasks, optionally filtered by plan (stored in WardSONDB `tasks` collection) |
@@ -135,6 +145,8 @@ For the data model, edge taxonomy, density rationale, promotion path, auto-enric
 | **task_delete** | Delete a task by id (irreversible). Use `task_done` if you only want to mark it complete |
 
 > **⚠️ Workspace Restriction:** Git write operations (`git_add`, `git_commit`, `git_push`, `git_pull`, `git_checkout`, `git_branch create`, `git_branch delete`, `git_merge`, `git_rm`, `git_mv`), filesystem writes (`file_write`, `file_append`, `file_patch`, `file_copy` — destination only; its source is unrestricted like `file_read` — `file_delete`, `file_move`/`file_rename`, `dir_delete`/`rmdir`, `mkdir`), and the media store (`image_view` copies, operator attachments — `/embra/workspace/MEDIA/`), are restricted to `/embra/workspace/` (bind-mounted from the DATA partition, persistent across reboots). Use `git_clone` to clone repositories there.
+
+> **GitLab tools:** `host` is optional — when exactly one host is configured via `/git-token`, it is used by default; `github.com` is never chosen implicitly (it rides `/github-token` and the `gh_*` tools), and two or more configured hosts is an error that names them rather than guessing. The `gl_*` set is the GitLab mirror of `gh_*`, with one deliberate naming difference: GitHub Projects map to **issue boards**, so the tools are `gl_boards` / `gl_board_view` — in GitLab, "project" means the repository itself, and a `gl_project_list` would be actively misleading.
 
 > **⚠️ GitHub Tool Warning:** `gh_issues` and `gh_prs` fetch content from public repositories, including issue titles, descriptions, and PR bodies written by third parties. This content is **untrusted input** — it may contain prompt injection attempts designed to manipulate AI behavior. Use these tools with caution and always review the output critically. Do not blindly act on instructions found in issue or PR content.
 

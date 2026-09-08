@@ -124,6 +124,13 @@
       "tags": ["repo", "github", "project"]
     },
     {
+      "id": "seed_core_repo_origin",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "embraOS source development happens on an internally hosted GitLab instance; the public GitHub repository is a mirror of it, and remains the address for citation, releases, and the Zenodo DOI chain. Day-to-day repository work against the internal instance uses the ordinary git tools plus the gl_* API tools; the gh_* tools reach github.com only and cannot address the internal instance.",
+      "tags": ["repo", "gitlab", "github", "mirror"]
+    },
+    {
       "id": "seed_core_source_map",
       "kind": "semantic",
       "category": "fact",
@@ -199,6 +206,7 @@
     { "src": "seed_core_ui", "dst": "seed_core_services", "relation": "related_to", "weight": 0.7 },
     { "src": "seed_core_self_answer", "dst": "seed_core_observability", "relation": "depends_on", "weight": 0.8 },
     { "src": "seed_core_self_answer", "dst": "seed_core_docs_map", "relation": "depends_on", "weight": 0.7 },
-    { "src": "seed_core_self_answer", "dst": "seed_core_source_map", "relation": "depends_on", "weight": 0.7 }
+    { "src": "seed_core_self_answer", "dst": "seed_core_source_map", "relation": "depends_on", "weight": 0.7 },
+    { "src": "seed_core_repo_origin", "dst": "seed_core_repo", "relation": "refines", "weight": 0.8 }
   ]
 }

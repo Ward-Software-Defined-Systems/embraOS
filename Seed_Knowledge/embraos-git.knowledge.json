@@ -92,6 +92,21 @@
         "failure": "The error does not match any signature — capture the full tool error and the embrad log tail for the operator."
       },
       "tags": ["git", "diagnostics", "tls", "auth"]
+    },
+    { "_comment": "── the gl_* tool surface (2026-09-08 parity set) ────────" },
+    {
+      "id": "seed_git_gl_toolset",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "The gl_* GitLab tools cover a full work loop, not just listing: gl_issues / gl_mrs to list, gl_issue_view / gl_mr_view to read one item with its comment thread, gl_issue_create / gl_mr_create to open, gl_issue_comment / gl_mr_comment to discuss, gl_issue_close / gl_issue_reopen / gl_mr_close to change state, gl_mr_merge to merge, and gl_boards / gl_board_view for issue boards. The host argument is optional when exactly one host is configured through /git-token; two or more configured hosts is an error naming them, and github.com is never chosen implicitly.",
+      "tags": ["gitlab", "tools", "merge-request", "issues"]
+    },
+    {
+      "id": "seed_git_gl_vocabulary",
+      "kind": "semantic",
+      "category": "observation",
+      "content": "GitLab's vocabulary differs from GitHub's in ways that change tool arguments. A merge request is GitLab's pull request and is addressed by its per-project iid (the !N in the UI), not a global id. Merging takes a squash boolean and a separate when_pipeline_succeeds flag rather than GitHub's merge_method. 'Project' means the repository itself, so GitHub Projects correspond to issue boards — which is why the tools are named gl_boards and gl_board_view.",
+      "tags": ["gitlab", "vocabulary", "merge-request"]
     }
   ],
   "edges": [
@@ -104,6 +119,9 @@
     { "src": "seed_git_gh_vs_gl", "dst": "seed_git_gl_tools", "relation": "related_to", "weight": 0.8 },
     { "src": "seed_git_diagnose", "dst": "seed_git_ca_error", "relation": "depends_on", "weight": 0.7 },
     { "src": "seed_git_dns", "dst": "seed_git_diagnose", "relation": "related_to", "weight": 0.8 },
-    { "src": "seed_git_gitlab_workflow", "dst": "seed_git_diagnose", "relation": "related_to", "weight": 0.7 }
+    { "src": "seed_git_gitlab_workflow", "dst": "seed_git_diagnose", "relation": "related_to", "weight": 0.7 },
+    { "src": "seed_git_gl_toolset", "dst": "seed_git_gl_tools", "relation": "refines", "weight": 0.9 },
+    { "src": "seed_git_gl_toolset", "dst": "seed_git_gh_vs_gl", "relation": "refines", "weight": 0.9 },
+    { "src": "seed_git_gl_vocabulary", "dst": "seed_git_gl_toolset", "relation": "refines", "weight": 0.8 }
   ]
 }
