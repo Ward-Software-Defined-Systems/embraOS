@@ -1,6 +1,6 @@
 # Recommended Models for OpenAI-Compatible Providers
 
-**Status:** Phase 1 stable since `v0.5.0-phase1` (2026-05-07). The model below is operator-vetted as full-toolset-capable (see also the README header callout for the same pick, surfaced for fresh GitHub readers); operator-overridable at wizard time.
+**Status:** Phase 1 stable since `v0.5.0-phase1` (2026-05-07). The models below are operator-vetted as full-toolset-capable (see also the README header callout for the same picks, surfaced for fresh GitHub readers); operator-overridable at wizard time.
 
 The wizard's selector reads `GET /v1/models` from the configured server, so any pulled (Ollama) or loaded (LM Studio) model is selectable regardless of what's listed here.
 
@@ -13,14 +13,24 @@ Hardware mapping for the test fleet:
 
 ## Vetted Models
 
-The list is deliberately short. MoE models need a minimum active-parameter threshold for honest instruction-following: below ~27–49B active they become confabulation-prone under complex multi-step protocols — enough stored knowledge to sound authoritative, not enough working memory to track what they've actually done. Dense models have no total/active split, so their parameter count is honest. The pick below clears the threshold: Qwen3.6 27B is dense (27B = 27B active).
+The list is deliberately short. MoE models need a minimum active-parameter threshold for honest instruction-following: below ~27–49B active they become confabulation-prone under complex multi-step protocols — enough stored knowledge to sound authoritative, not enough working memory to track what they've actually done. Dense models have no total/active split, so their parameter count is honest. Both picks below clear the threshold: Qwen3.6 27B and Qwen3.8 27B are dense (27B = 27B active).
+
+**Qwen3.8 27B** is the current recommendation; **Qwen3.6 27B** remains vetted and fully supported — there is no need to migrate an instance that is working. Both were verified against the complete 116-tool surface, not a subset.
 
 ### Local (Ollama / LM Studio)
 
-| Server | Model | Tag |
-|--------|-------|-----|
-| Ollama | Qwen3.6 27B (dense) | `qwen3.6:27b` |
-| LM Studio | Qwen3.6 27B (dense, 8-bit) | `qwen/qwen3.6-27b` |
+| Server | Model | Tag | Size | Context |
+|--------|-------|-----|------|---------|
+| Ollama | Qwen3.8 27B (dense) | `qwen3.8:27b` | 18 GB | 256K |
+| Ollama | Qwen3.6 27B (dense) | `qwen3.6:27b` | 18 GB | 256K |
+| LM Studio | Qwen3.8 27B (dense, 8-bit) | `qwen/qwen3.8-27b` | — | 256K |
+| LM Studio | Qwen3.6 27B (dense, 8-bit) | `qwen/qwen3.6-27b` | — | 256K |
+
+Sizes and context lengths are the Ollama library's own figures for the default
+`27b` tags. **Both models are ~18 GB**, so the Mac Mini's 16 GB of unified memory
+cannot hold either — on that host, pick a smaller model or point the wizard at the
+Mac Studio. The hardware mapping above says which *server* runs where, not that
+every vetted model fits on every host.
 
 ---
 
@@ -76,4 +86,4 @@ See [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md).
 
 ---
 
-*Last updated: 2026-07-17.*
+*Last updated: 2026-09-08.*

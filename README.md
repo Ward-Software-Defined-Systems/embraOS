@@ -20,67 +20,45 @@
 
 **Current Status:** Phase 1 — Stable.
 
-Phase 2–5 add A/B partitioned rollback, an `embractl` management CLI, bare-metal and Kubernetes deployment targets, and operator-governed module surfaces. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
+Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` management CLI, an image factory targeting bare metal and Kubernetes, and a sovereign-intelligence tier — A/B partitioned rollback, LUKS, mTLS, and fully offline local inference. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
-> **Local inference — model selection matters.** For full functionality (all 106
-> tools dispatch reliably), the model your provider serves needs to handle a large
-> tool schema without truncating or hallucinating tool calls. When running locally
-> via **Ollama** or **LM Studio** this is the dominant constraint — plenty of
-> otherwise-capable models cannot. MoE models require a minimum active parameter
-> threshold for honest instruction-following. Total parameters measure stored
-> knowledge; active parameters measure working memory. Below ~27–49B active, MoE
-> models become confabulation-prone under complex multi-step protocols — they have
-> enough knowledge to sound authoritative but not enough active capacity to track
-> what they've actually done. Dense models don't have this split, so the parameter
-> count is honest: 27B means 27B active. The model currently vetted to provide
-> full functionality: **`Qwen3.6-27b`**. Experiment freely with others — this is
-> the one confirmed to handle the full toolset, and it exhibits the fewest
-> hallucinations/confabulations so far. See
-> [docs/RECOMMENDED-LOCAL-MODELS.md](docs/RECOMMENDED-LOCAL-MODELS.md) for the
-> vetted roster and server configuration.
+> **Local inference — model selection matters.** All 116 tools dispatch identically on
+> every backend, but a locally-served model has to handle a large tool schema without
+> truncating or hallucinating calls, and plenty of otherwise-capable ones cannot. For
+> MoE models the number that matters is *active* parameters, not total: below ~27–49B
+> active they have enough stored knowledge to sound authoritative and not enough
+> working memory to track what they have actually done. Dense models have no such
+> split. Operator-vetted for the full toolset: **`Qwen3.6-27b`** and
+> **`Qwen3.8-27b`** — both dense, so 27B means 27B active. Experiment freely with
+> others; these are the confirmed two.
+> **[Roster and server configuration →](docs/RECOMMENDED-LOCAL-MODELS.md)**
 
-> **New — soul-gated dynamic tools: the replicant check.** The intelligence can now
-> propose its own dynamic tools (via the `guardian_propose` tool), and operators can
-> still paste them (`/guardian-define`) — but on both paths the draft must pass the
-> **replicant check** before it compiles. The check is an independent soul-verdict
-> call: it judges the proposed Rust module against the sealed soul and returns *allow /
-> refuse / escalate*, and it fails closed. A **refuse** blocks the compile on either
-> path — the soul outranks even an operator paste, and is not waivable. A passing
-> **intelligence** proposal still needs an operator's `/guardian approve` before it
-> builds; the intelligence never approves its own draft. This is the first landing of
-> *soul-as-enforced-runtime* — the soul moving from text the model is asked to honor to
-> a gate the OS enforces. (What compiles still runs in the same zero-ambient-authority
-> `wasmtime` sandbox, reachable only via the static `guardian_*` meta-tools, so the
-> prompt cache stays byte-stable.) The first tool to clear this path — `kg_scan`,
-> proposed by the intelligence on a production instance — is committed as a worked
-> example in [`docs/GUARDIAN-KG-SCAN-EXAMPLE.md`](docs/GUARDIAN-KG-SCAN-EXAMPLE.md).
-> **Experimental.** See
-> [`docs/REPLICANT-CHECK.md`](docs/REPLICANT-CHECK.md),
-> [`docs/GUARDIAN-TOOL-EXAMPLES.md`](docs/GUARDIAN-TOOL-EXAMPLES.md), and
-> [`docs/GUARDIAN-ADVANCED-EXAMPLE.md`](docs/GUARDIAN-ADVANCED-EXAMPLE.md).
+> **Soul-gated dynamic tools: the replicant check.** *(Experimental.)* The intelligence
+> proposes its own dynamic tools (`guardian_propose`); operators paste them
+> (`/guardian-define`). **Neither compiles until the draft clears the replicant
+> check** — an independent soul-verdict call that judges it against the sealed soul,
+> returns *allow / refuse / escalate*, and fails closed. A **refuse** blocks both
+> paths: the soul outranks even an operator paste and is not waivable. A passing
+> proposal still needs an operator's `/guardian approve` — the intelligence never
+> approves its own draft. This is the first landing of *soul-as-enforced-runtime*: the
+> soul moving from text the model is asked to honor to a gate the OS enforces.
+> **[How the check works →](docs/REPLICANT-CHECK.md)** ·
+> [worked example](docs/GUARDIAN-KG-SCAN-EXAMPLE.md) ·
+> [more examples](docs/GUARDIAN-TOOL-EXAMPLES.md)
 
-> **Memory & knowledge graph today — operator-driven, by conversation.** Creating
-> episodic memories and promoting them to the cross-session knowledge graph is
-> currently a **manual** process; automation is on the near-term roadmap. The flow
-> is just a conversation: ask the intelligence to remember something specific, or
-> ask whether anything from the current session is worth promoting to the knowledge
-> graph — it has the `remember` and `knowledge_*` tools and will write the entries
-> itself. Graph hygiene is tool-assisted: `knowledge_audit` (read-only
-> duplicate/orphan/rot/contradiction detection) feeds `knowledge_merge`
-> (dry-run-first node consolidation with edge redirect). Baseline knowledge
-> ships as **seed packs** (`Seed_Knowledge/*.knowledge.json`) loaded into
-> the graph at every boot — the default packs teach an instance how its
-> own memory works and how to author Guardian tools within the sandbox
-> contract, and operators can drop their own packs into STATE.
-> Separately, **`/feedback-loop`** (**experimental**) runs a full
-> self-realignment against the intelligence's identity and soul — a different
-> concern, not a memory-promotion sweep. Memory search and graph retrieval read
-> **recency-ranked windows** (the 10,000 most-recent documents per memory
-> collection; graph traversal ranked by edge weight and recency), and every window
-> is observable — `system_status` reports per-collection counts against the window
-> and flags `search_window_saturated` if a collection ever outgrows it. See
-> [`docs/KNOWLEDGE-GRAPH.md`](docs/KNOWLEDGE-GRAPH.md) for the data model, edge
-> taxonomy, auto-derived edge density rationale, and the twelve `knowledge_*` tools.
+> **Memory & knowledge graph today.** ***Writing*** memories is still operator-driven,
+> by conversation: ask the intelligence to remember something, or whether anything from
+> this session is worth promoting — it has `remember` and twelve `knowledge_*` tools and
+> writes the entries itself. Automation is on the near-term roadmap. ***Reading*** is
+> automatic on every turn: tag and IDF-weighted content matching over recency-ranked
+> windows (saturation reported by `system_status`, never silent), plus **semantic
+> similarity from a sentence-embedding model that runs inside the OS** — recall by
+> meaning rather than wording, with no API key, no per-query cost, and no network.
+> Hygiene is tool-assisted (`knowledge_audit` → `knowledge_merge`) and baseline
+> knowledge ships as **seed packs** loaded at every boot. `/feedback-loop`
+> (**experimental**) is a separate concern — self-realignment against identity and
+> soul, not a memory sweep.
+> **[Data model and retrieval pipeline →](docs/KNOWLEDGE-GRAPH.md)**
 
 ---
 
