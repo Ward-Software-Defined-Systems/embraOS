@@ -43,6 +43,10 @@ pub async fn promote_to_semantic(
 
     let new_id = db.write("memory.semantic", &semantic_doc).await?;
 
+    // Embed AFTER the document is durably written; a failure here leaves the
+    // node unembedded and fully usable (KG-02 spec §6.1).
+    crate::embedding::write::embed_node(db, config, "memory.semantic", &new_id, &semantic_doc).await;
+
     // PATCH the source entry to record the promotion.
     let _ = db.patch_document("memory.entries", entry_id, &json!({
         "promoted_to": { "collection": "memory.semantic", "id": new_id }
@@ -122,6 +126,8 @@ pub async fn promote_to_procedural(
     });
 
     let new_id = db.write("memory.procedural", &proc_doc).await?;
+
+    crate::embedding::write::embed_node(db, config, "memory.procedural", &new_id, &proc_doc).await;
 
     let _ = db.patch_document("memory.entries", entry_id, &json!({
         "promoted_to": { "collection": "memory.procedural", "id": new_id }

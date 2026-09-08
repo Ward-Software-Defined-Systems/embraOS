@@ -53,6 +53,9 @@ Every slash command available in an embraOS session, grouped as in the web conso
 | `/image-provider model <id>` | Pick the model: `gemini-3-pro-image` (default, 4K-capable), `gemini-3.1-flash-image`, `gemini-3.1-flash-lite-image` (1K only), `gemini-2.5-flash-image` (legacy). Persists to `SystemConfig.image_model`; takes effect on the next `image_generate` call |
 | `/image-provider key <token>` \| `key` \| `key remove` | Set a dedicated image-generation key (`/embra/state/api_key_image_gemini`, `0600`, never echoed), show whether one is set, or delete it. Precedence: `EMBRA_IMAGE_API_KEY` env > this key > the Gemini LLM key |
 | `/image-provider clear` | Reset provider + model to the defaults (the key file is untouched) |
+| `/embeddings` | Show the local semantic-similarity layer: whether it is enabled, the model, where the model was found (`env` / `state` / `rootfs`), how many vectors are indexed, and how much of the corpus is embedded |
+| `/embeddings on` \| `off` | Enable or disable semantic similarity in retrieval. Persists to `SystemConfig.embedding_enabled`; takes effect on the next message. Disabled, retrieval falls back to lexical matching with no other change |
+| `/embeddings backfill [--force]` | Embed every node that needs it — missing a vector, or carrying one from a different model. Runs locally (~55 ms/node measured; ~2 min for a 2,300-node corpus), reports progress, and is resumable: the work set is re-derived from disk on each run. `--force` re-embeds everything |
 
 ## Git & SSH
 

@@ -716,6 +716,16 @@ async fn execute_merge_plan(
             "all edges are redirected — re-run knowledge_merge (converges), or knowledge_unlink_node the source",
         );
     }
+    // The loser is gone — drop its vector so similarity search cannot return a
+    // node that no longer resolves.
+    crate::embedding::write::forget_node(src.0, src.1).await;
+
+    // The winner absorbed the loser's tags and, under merge_content, its body
+    // — so its embeddable text changed and the stored vector now describes the
+    // pre-merge node. Re-embed from what is actually on disk.
+    if let Ok(merged) = db.read(tgt.0, tgt.1).await {
+        crate::embedding::write::embed_node(db, config, tgt.0, tgt.1, &merged).await;
+    }
 
     render_success(plan, &counters, src, tgt, strategy)
 }

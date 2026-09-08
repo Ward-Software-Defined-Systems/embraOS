@@ -278,7 +278,7 @@ When a session resumes (`SessionManager.pending_resume_briefing` is set), `build
 
 ## Retrieval and ranking (`knowledge_query` internals)
 
-`retrieve_relevant_knowledge` (`crates/embra-brain/src/knowledge/retrieval.rs`) is shared by `knowledge_query` and auto-enrichment. It collects candidates from four sources (tag match, content match over promoted nodes, session adjacency, content match over entries), ranks-and-truncates, and returns funnel stats alongside the results (`RetrievalStats` — pre-threshold candidate counts by source; enrichment logs them).
+`retrieve_relevant_knowledge` (`crates/embra-brain/src/knowledge/retrieval.rs`) is shared by `knowledge_query` and auto-enrichment. It collects candidates from five sources (tag match, content match over promoted nodes, session adjacency, content match over entries, semantic similarity), ranks-and-truncates, and returns funnel stats alongside the results (`RetrievalStats` — pre-threshold candidate counts by source; enrichment logs them).
 
 **Graph expansion was deleted 2026-09-08.** A fifth step seeded a depth-2 `traverse_multi` from the top-10 scored candidates. Measured against a copy of production (2,388 nodes / 408,046 edges), the shipped Rust spent 764–1,506 ms and **2,130–3,486 WardSONDB round-trips** per retrieval, ~96% of it in that one step — while it contributed **0 of the top 5, 0 of the top 10 and 0 of the top 20** on every query measured. It could not do better by construction: its candidates entered with `content_strength = 0.0` and no query-tag overlap, so `relevance` was 0 and the `0.5` source multiplier capped them at `(0 + 0.3 + 0.2 + 0.1) x 0.5 = 0.300` — exactly the enrichment threshold, below every real direct hit. Removing it took the same six-query set to **54–115 ms at 62–64 round-trips**, with top-5 quality equal or better on four of six. `traverse_multi` is untouched and still backs `knowledge_traverse`.
 
@@ -294,7 +294,9 @@ The `memory.entries` window is fetched alongside that prefetch rather than at it
 2. **Content-token match over promoted nodes** (in-memory, `step3_content_hits` over the same prefetched slices — 2026-07-31; before this, semantic/procedural CONTENT was unsearchable anywhere: a promoted fact whose tags didn't match was invisible to direct retrieval). A node matches when it shares ≥ 2 distinct content tokens with the query (≥ 1 when the query has ≤ 2 tokens) **and at least one matched token is not a stopword**; tokens are the audit's rule (`content_tokens`: lowercase alnum runs ≥ 3 bytes; procedural nodes match on `title` + `description`). Top 100 admissions per collection ordered (match count desc, recency desc, id asc); each carries an IDF-weighted `content_strength` that feeds scoring — see **Content matching and IDF**. Source label: `direct_query`.
 3. **Session-based** (`session_entries_query_body` + `session_edge_query_body`) — the newest 50 `memory.entries` in the current session (`created_at desc`), then walk `same_session` edges from **all 50** (was the top 20; edge windows fetch at bounded concurrency 8), per-entry edge window ranked `weight desc, created_at desc`, limit 50, with `memory.entries` targets excluded **server-side** via `target_collection: {$ne: "memory.entries"}` so the window is spent only on useful targets — a client-side skip remains as defense-in-depth. Edge targets resolve through the NodeStore. Source label: `session_based`.
 4. **Content-token match on entries** (2026-07-31 — replaces the whole-message substring, which required the ENTIRE user message to appear verbatim inside an entry and so never fired on natural messages) — same matcher and per-collection cap over the 10,000 most-recent `memory.entries` (`fetch_recent`, sorted `_created_at desc, _id desc`, saturation-warned). If `promoted_to` is set, `redirect_if_promoted` substitutes the target node (store-backed) and the match strength rides the redirect. Source label: `direct_query`.
-The four steps populate a `HashMap<(collection, id), Collected>` keyed by `(collection, id)` — same key everywhere else in the codebase. First insert wins; subsequent inserts of the same key are skipped (`insert_collected`), except `content_strength`, which max-merges.
+5. **Semantic similarity** (`knowledge/embedding` — KG-02, 2026-09-08) — the query is embedded once and cosine-matched against the in-process vector index. The top `EMBEDDING_TOP_K` (100) hits above `EMBEDDING_MIN_SIMILARITY` (0.5) are admitted as new candidates; then **every** already-collected candidate that has a vector is scored too, so the semantic signal corrects lexical noise rather than merely competing with it inside a top-K. Source label: `direct_query` — a cosine hit is a direct match on meaning, and must not take the 0.5 fallback multiplier that made graph expansion structurally incapable of reaching the top-5. Wholly optional: no model, no embeddings, or any error degrades to the lexical result with nothing else changed. See **Semantic similarity** below.
+
+The five steps populate a `HashMap<(collection, id), Collected>` keyed by `(collection, id)` — same key everywhere else in the codebase. First insert wins; subsequent inserts of the same key are skipped (`insert_collected`), except `content_strength`, which max-merges.
 
 ### Content matching and IDF (2026-09-08)
 
@@ -320,8 +322,8 @@ The four steps populate a `HashMap<(collection, id), Collected>` keyed by `(coll
 Base score:
 
 ```
-base = relevance         * 0.5   (relevance = max(tag_relevance, content_strength))
-     + recency           * 0.3
+base = relevance         * 0.6   (see the relevance rule below)
+     + recency           * 0.2
      + access_frequency  * 0.2   (log-scaled)
 ```
 
@@ -329,9 +331,21 @@ Signal definitions:
 
 | Signal | Weight | Calculation |
 |---|---|---|
-| `relevance` | 0.5 | `max(tag_relevance, content_strength)` (2026-07-31). `tag_relevance = min(matching_tags / tag_denom, 1.0)` (case-insensitive), where `tag_denom = min(deduped query tokens, 8)` — the old denominator was the raw, non-deduped, stopword-inclusive token count, which diluted a 2-tag hit on a 25-word message to ~0.04 of the budget and let recency carry the enrichment threshold. `content_strength` comes from the IDF-weighted Step-2/3b token matcher. Weight raised 0.4 → 0.5 (2026-09-08): measured on production, relevance was only **17–36%** of the top-5 score while recency routinely hit 1.0 and won. |
-| `recency` | 0.3 | `(ts - ts_min) / (ts_max - ts_min)` — normalized over the candidate set, clamped `[0,1]`. Degenerate sets (<2 distinct parseable timestamps — e.g. a freshly-seeded instance) score a neutral `0.5` (2026-07-31 fix: the old fallback fed RAW epoch seconds through, ~1.8e9); missing/unparseable `created_at` stays `0.0`. |
+| `relevance` | 0.6 | `max(tag_relevance, similarity_or_content)` — see **The relevance rule** below. `tag_relevance = min(matching_tags / tag_denom, 1.0)` (case-insensitive), where `tag_denom = min(deduped query tokens, 8)`. Weight raised 0.4 → 0.5 → **0.6** across the two 2026-09-08 waves: relevance measured only **17–36%** of the top-5 score while recency routinely hit 1.0 and won, and once relevance became a *direct* semantic measure rather than a lexical proxy it earned the larger share. |
+| `recency` | 0.2 | `(ts - ts_min) / (ts_max - ts_min)` — normalized over the candidate set, clamped `[0,1]`. Degenerate sets (<2 distinct parseable timestamps — e.g. a freshly-seeded instance) score a neutral `0.5` (2026-07-31 fix: the old fallback fed RAW epoch seconds through, ~1.8e9); missing/unparseable `created_at` stays `0.0`. |
 | `access_frequency` | 0.2 | `ln(1 + access_count) / ln(1 + max_access)` — **log-scaled since 2026-09-08**. Linear `count / max` let one heavily-accessed node flatten every other candidate to ~0.000, so the weight was dead across the whole production corpus. Degenerate sets (nothing accessed more than once) score `0.0`: absent ordering is not a full mark. Since 2026-07-04 `access_count` counts *retrieval hits* (returned-only touching), not BFS sweeps |
+
+### The relevance rule
+
+```
+relevance = max( tag_relevance , similarity.unwrap_or(content_strength) )
+```
+
+The two content signals are **not interchangeable**, and combining all three with a flat `max()` was measured doing real damage. Lexical token overlap is a *proxy* for aboutness, and a length-biased one: a long document shares more query tokens by sheer length. Cosine measures aboutness directly. So where a node has a vector, its similarity **replaces** the lexical score; lexical only carries nodes with no vector (episodic entries, anything not yet backfilled).
+
+Measured on production, under a flat `max()`: for *"How does the soul verification work at boot?"* a long unrelated node about Sumerian provenance scored lexical **0.687** and took #1, while the boot-chain node that answers the question sat at 0.561. With similarity authoritative, the boot-chain node takes #1 and the unrelated node leaves the top 5 entirely.
+
+Tags stay inside the `max()`: they are operator- or model-authored and high-precision, not a proxy for anything.
 
 **`confidence` was removed from the ranking 2026-09-08.** It was 0.9–1.0 for every node — and `insert_collected` *synthesized* `1.0` for three of the four collections — so its 0.1 weight was a constant offset every candidate received, not a signal. The stored document field is untouched; only the ranking input is gone. The operator-visible consequence: a maximally-recent node with **zero** relevance used to score `0.3 + 0.1 = 0.40` and clear the `0.3` enrichment threshold on recency alone. It now scores exactly `0.30`.
 
@@ -345,9 +359,33 @@ Source multiplier (`score_one`):
 
 Final: `score = base * source_mult`. Results are sorted descending by score (exact-score ties order deterministically by `(collection, id)`) and truncated to `max_results`. The finally-returned top-K — and only it — is then access-touched in one background task (`spawn_access_touches`).
 
+### Semantic similarity (KG-02, 2026-09-08)
+
+Retrieval's fifth candidate source, and the answer to a gap the decision doc measured but no lexical tuning could close: the node that literally answers *"what did we decide about vector embeddings for the KG"* says "vector similarity" and "ranking" while the query says "vector embeddings" and "knowledge graph". It ranked **282nd** under keyword retrieval, **47th** under the best lexical weighting tried, and **1st** with embeddings.
+
+**Everything runs in-OS.** `crates/embra-brain/src/embedding/` loads an ONNX sentence-embedding model through [`tract`](https://github.com/sonos/tract) — pure Rust, so it static-links into the musl ship binaries; `ort` and `rust-bert` bind libonnxruntime C++ and cannot. No API key, no per-query cost, no data egress, and retrieval works with the network down. The KG-02 spec assumed a first-party Anthropic embeddings endpoint and flagged the claim unverified; it is false — Anthropic publishes none and points at Voyage AI — so this takes the local branch the spec anticipated in its §5.2.
+
+| | |
+|---|---|
+| model | `BAAI/bge-small-en-v1.5` (MIT, 33.4M params, 384-d, 512-token context) |
+| where | `/usr/share/embra/models/<name>`, baked by the `embra-embedding-model` Buildroot package; operator override at `/embra/state/models/<name>` (STATE wins); `EMBRA_EMBEDDING_MODEL_DIR` is an exclusive dev override |
+| pooling | **CLS** (position 0), then L2-normalize — BGE is a CLS model; mean pooling yields plausible-looking vectors that rank measurably worse |
+| query side | prefixed `Represent this sentence for searching relevant passages: `; documents get no prefix |
+| storage | three additive fields on `memory.semantic` / `memory.procedural` — `embedding` (base64 of little-endian f32, 2.5x smaller than a JSON number array), `embedding_model`, `embedding_updated_at`. Serde-additive: `CURRENT_SCHEMA_VERSION` stays 13 |
+| index | process-wide, loaded once, ~1.5 KB/node (~3.5 MB for a 2,300-node corpus); reloads when a collection's document count diverges, and write paths update it in place |
+| search | brute-force cosine over the whole index. Vectors are L2-normalized so cosine **is** the dot product. Sub-millisecond at this scale — an ANN index would optimize the cheapest step in the pipeline and cost a WardSONDB fork divergence, so the spec's §9.2 is descoped |
+
+**`memory.entries` is deliberately unembedded** (spec §4.3): high volume, noisy, and the entries that matter get promoted — and embedded — as semantic or procedural nodes.
+
+**Embed-at-write-time, and an embedding failure never fails the write.** The document is saved first, then embedded, then patched (`embedding/write.rs`). A model that is absent, disabled or erroring leaves the node fully usable through lexical retrieval. Write sites: promotion, `knowledge_update` (only when `content`/`title`/`description`/`preconditions`/`steps` changed — editing tags must not pay for an inference pass), `knowledge_merge` (the winner absorbed the loser's text, so it is re-embedded; the loser's vector is dropped), and seed-pack insertion. The three fields are on `knowledge_update`'s IMMUTABLE denylist: the model cannot compute a vector, and a forged one would silently poison every future search.
+
+**Operator surface:** `/embeddings` reports the model, where it was found, index size and corpus coverage; `/embeddings on|off`; `/embeddings backfill [--force]` embeds what needs it (~55 ms/node measured, ~1 minute per thousand nodes), reports progress, and is resumable because the work set is re-derived from disk each run. Backfill is never automatic.
+
+**Measured on a production copy (1,153 semantic + procedural nodes):** backfill 42.7 s, zero failures; retrieval 106–160 ms end to end including the query embedding (~12 ms) and the full index scan; vector index 1.7 MB.
+
 ### `knowledge_query` output
 
-`knowledge_query` (`crates/embra-brain/src/knowledge/tools.rs`) takes `<query_text> [| <max_results> [| <categories_csv>]]`. After ranking, it applies the optional `categories` filter on semantic nodes only (episodic/procedural pass through), truncates to `max_results`, and renders a textual report with a source-breakdown header: `direct: N, session: N, other: N`. If `direct == 0` (no direct matches), it prefixes `[No direct matches — these are session-adjacent results]` so the operator can calibrate confidence. The `other` bucket has had no producer since graph expansion was deleted; it is kept so an unrecognized source label surfaces instead of vanishing.
+`knowledge_query` (`crates/embra-brain/src/knowledge/tools.rs`) takes `<query_text> [| <max_results> [| <categories_csv>]]`. After ranking, it applies the optional `categories` filter on semantic nodes only (episodic/procedural pass through), truncates to `max_results`, and renders a textual report with a source-breakdown header: `direct: N, session: N, other: N`, and a pre-ranking funnel line that also reports how many candidates similarity search contributed. If `direct == 0` (no direct matches), it prefixes `[No direct matches — these are session-adjacent results]` so the operator can calibrate confidence. The `other` bucket has had no producer since graph expansion was deleted; it is kept so an unrecognized source label surfaces instead of vanishing.
 
 `max_results` default is 20; clamp `[1, 100]`. Internal fetch is `(max_results * 3).clamp(20, 100)` when category filtering is active, so post-filter truncation doesn't starve the output.
 

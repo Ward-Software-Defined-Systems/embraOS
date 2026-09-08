@@ -340,7 +340,7 @@ pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String
 ///
 /// Auto-derived edges (`tag_overlap`, `temporal`) are NOT re-derived. If a tag
 /// change makes specific edges stale, follow up with `knowledge_unlink_edge`.
-pub async fn knowledge_update(params: &str, db: &WardsonDbClient) -> String {
+pub async fn knowledge_update(params: &str, db: &WardsonDbClient, config: &SystemConfig) -> String {
     let trimmed = params.trim();
     if trimmed.is_empty() {
         return "knowledge_update rejected (missing arguments). Usage: knowledge_update <collection>:<id> | <json_patch>".into();
@@ -384,6 +384,13 @@ pub async fn knowledge_update(params: &str, db: &WardsonDbClient) -> String {
         "access_count",
         "last_accessed",
         "updated_at",
+        // Embedding fields are derived from the node's own text. The model
+        // must never hand-write a vector: it cannot compute one, and a forged
+        // value would silently poison every future similarity search. They are
+        // maintained by the write path and `/embeddings backfill`.
+        "embedding",
+        "embedding_model",
+        "embedding_updated_at",
     ];
     for field in IMMUTABLE {
         if obj.contains_key(*field) {
@@ -407,6 +414,17 @@ pub async fn knowledge_update(params: &str, db: &WardsonDbClient) -> String {
 
     if let Err(e) = db.patch_document(coll, id, &patch).await {
         return format!("knowledge_update failed: {}", e);
+    }
+
+    // Re-embed when the node's own embeddable text changed. Editing tags or
+    // `superseded_by` must not pay for an inference pass; editing `content`
+    // must, or the vector silently describes the pre-edit node.
+    if changed_fields
+        .iter()
+        .any(|f| matches!(f.as_str(), "content" | "title" | "description" | "preconditions" | "steps"))
+        && let Ok(updated) = db.read(coll, id).await
+    {
+        crate::embedding::write::embed_node(db, config, coll, id, &updated).await;
     }
 
     let preview_src = existing
@@ -604,8 +622,8 @@ pub async fn knowledge_query(
     // actually considered before ranking, so "few results" can be told apart
     // from "few candidates".
     let candidates_line = format!(
-        "Candidates considered: {} (direct {}, session {} — pre-ranking)\n",
-        stats.candidates_total, stats.direct_query, stats.session_based
+        "Candidates considered: {} (direct {}, session {}, similarity {} — pre-ranking)\n",
+        stats.candidates_total, stats.direct_query, stats.session_based, stats.embedding
     );
 
     if results.is_empty() {
@@ -1914,7 +1932,7 @@ pub struct KnowledgeUpdateArgs {
 impl KnowledgeUpdateArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
         let param = format!("{}:{} | {}", self.collection, self.id, self.patch_json);
-        Ok(knowledge_update(&param, ctx.db).await)
+        Ok(knowledge_update(&param, ctx.db, ctx.config).await)
     }
 }
 

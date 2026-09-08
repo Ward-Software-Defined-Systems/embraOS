@@ -83,6 +83,7 @@ pub async fn build_turn_context(
         candidates_direct = stats.direct_query,
         candidates_session = stats.session_based,
         candidates_other = stats.graph_expansion,
+        candidates_embedding = stats.embedding,
         result_count = qualifying.len(),
         top_score = qualifying.first().map(|r| r.score).unwrap_or(0.0),
         "auto-enrichment"

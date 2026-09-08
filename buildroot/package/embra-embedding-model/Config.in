@@ -1,0 +1,20 @@
+config BR2_PACKAGE_EMBRA_EMBEDDING_MODEL
+	bool "embra-embedding-model"
+	help
+	  Sentence-embedding model installed read-only at
+	  /usr/share/embra/models/<name>: an ONNX graph plus its
+	  tokenizer, run in-process by embra-brain through tract for
+	  knowledge-graph semantic retrieval (KG-02).
+
+	  Default is BAAI/bge-small-en-v1.5 (MIT, 33.4M parameters,
+	  384 dimensions, ~133 MB). Everything runs locally: no API
+	  key, no per-query cost, no data leaves the instance, and
+	  retrieval works with the network down.
+
+	  Staged host-side by scripts/build-image.sh (Step 3.6) into
+	  vendor/embedding-model, sha256-verified before staging. An
+	  operator can override the baked copy per instance by seeding
+	  /embra/state/models/<name> on STATE.
+
+	  Without this package retrieval still works — it falls back to
+	  lexical matching and /embeddings reports the model missing.

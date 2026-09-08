@@ -52,6 +52,9 @@ Media:
   /image-provider gemini         Use Gemini image models for image_generate
   /image-provider model <id>     gemini-3-pro-image (default) | gemini-3.1-flash-image | …
   /image-provider key <token>    Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it
+  /embeddings                    Show the semantic-similarity layer: model, index, corpus coverage
+  /embeddings <on|off>           Enable/disable semantic similarity in retrieval (default on)
+  /embeddings backfill           Embed nodes that need it (local, ~55ms/node); --force re-embeds all
 
 Git & SSH:
   /git-setup <name> | <email>    Set git user config

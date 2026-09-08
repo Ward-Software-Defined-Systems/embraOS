@@ -240,6 +240,8 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            embedding_enabled: None,
+            embedding_model: None,
             image_provider: None,
             image_model: None,
             git_tokens: None,

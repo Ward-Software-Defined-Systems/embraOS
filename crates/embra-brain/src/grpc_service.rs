@@ -417,6 +417,8 @@ impl BrainService for BrainGrpcService {
                     gemini_model: None,
                     anthropic_model: None,
                     anthropic_effort: None,
+                    embedding_enabled: None,
+                    embedding_model: None,
                     image_provider: None,
                     image_model: None,
                     git_tokens: None,
@@ -877,6 +879,8 @@ async fn handle_request(
                 gemini_model: None,
                 anthropic_model: None,
                 anthropic_effort: None,
+                embedding_enabled: None,
+                embedding_model: None,
                 image_provider: None,
                 image_model: None,
                 git_tokens: None,
@@ -2326,7 +2330,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-5|opus-4.8|fable-5>   Switch the Anthropic model (next message)\n  /effort                            Show the Anthropic effort level\n  /effort <low|medium|high|xhigh|max>  Set effort (default max, next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image (uploaded id or a workspace path) to your next message\n  /attach list | clear               Show or drop the staged images\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-3-pro-image (default) | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-5|opus-4.8|fable-5>   Switch the Anthropic model (next message)\n  /effort                            Show the Anthropic effort level\n  /effort <low|medium|high|xhigh|max>  Set effort (default max, next message)\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image (uploaded id or a workspace path) to your next message\n  /attach list | clear               Show or drop the staged images\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-3-pro-image (default) | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /embeddings                        Show the local semantic-similarity layer: model, index, corpus coverage\n  /embeddings <on|off>               Enable or disable semantic similarity in retrieval (default on)\n  /embeddings backfill [--force]     Embed nodes that need it (local CPU, ~55ms/node); --force re-embeds all\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -2350,6 +2354,7 @@ async fn handle_slash_command(
         "/attach" => {
             handle_attach_command(args, tx, db, session_mgr).await;
         }
+        "/embeddings" => { handle_embeddings_command(args, tx, db).await; }
         "/image-provider" => {
             handle_image_provider_command(args, tx, db).await;
         }
@@ -4803,6 +4808,179 @@ async fn handle_attach_command(
     }
 }
 
+/// `/embeddings` — the local semantic-similarity layer (KG-02). Status (no
+/// args), `on`, `off`, `backfill [--force]`. Modeled on
+/// `/image-provider` (config load → validate → save) with no key subcommand:
+/// inference is in-OS, so there is no secret to hold.
+async fn handle_embeddings_command(
+    args: &str,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    db: &Arc<WardsonDbClient>,
+) {
+    let send = |content: String, kind: SystemMessageType| {
+        let tx = tx.clone();
+        async move {
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage { content, msg_type: kind as i32 },
+                    )),
+                }))
+                .await;
+        }
+    };
+
+    let mut cfg = match config::load_config(db).await {
+        Ok(c) => c,
+        Err(e) => {
+            send(format!("Failed to load config: {}", e), SystemMessageType::Error).await;
+            return;
+        }
+    };
+
+    let usage = "Usage: /embeddings | /embeddings on | /embeddings off | /embeddings backfill [--force]";
+    let parts: Vec<&str> = args.split_whitespace().collect();
+
+    match parts.as_slice() {
+        [] => {
+            let enabled = crate::embedding::embedding_enabled(&cfg);
+            let model = crate::embedding::model_id(&cfg);
+            let mut out = String::from("Embeddings (local semantic similarity)\n");
+            out.push_str(&format!("  enabled:  {}\n", if enabled { "yes" } else { "no" }));
+            out.push_str(&format!("  model:    {}\n", model));
+            match crate::embedding::resolve_model_dir(&cfg) {
+                Some((dir, source)) => {
+                    out.push_str(&format!("  model at: {} ({})\n", dir.display(), source))
+                }
+                None => out.push_str("  model at: NOT FOUND — retrieval is lexical-only\n"),
+            }
+            if enabled {
+                if crate::embedding::provider(&cfg).await.is_some() {
+                    let (vectors, m) = crate::embedding::cache::stats().await;
+                    let (needed, total) =
+                        crate::embedding::backfill::survey(db, &model, false).await;
+                    out.push_str(&format!(
+                        "  loaded:   yes ({} dims)\n  indexed:  {} vectors{}\n  corpus:   {}/{} embedded",
+                        crate::embedding::EMBEDDING_DIM,
+                        vectors,
+                        if m.is_empty() { String::new() } else { format!(" [{m}]") },
+                        total.saturating_sub(needed),
+                        total,
+                    ));
+                    if needed > 0 {
+                        out.push_str(&format!(
+                            "\n  {} node(s) need embedding — run /embeddings backfill",
+                            needed
+                        ));
+                    }
+                } else {
+                    out.push_str("  loaded:   no — retrieval is lexical-only");
+                }
+            }
+            send(out, SystemMessageType::Info).await;
+        }
+        ["on"] | ["off"] => {
+            let on = parts[0] == "on";
+            cfg.embedding_enabled = Some(on);
+            match config::save_config(db, &cfg).await {
+                Ok(_) => {
+                    send(
+                        format!(
+                            "Embeddings {}.{}",
+                            if on { "enabled" } else { "disabled" },
+                            if on { " Takes effect on the next message." } else { "" }
+                        ),
+                        SystemMessageType::Info,
+                    )
+                    .await
+                }
+                Err(e) => send(format!("Failed to save config: {}", e), SystemMessageType::Error).await,
+            }
+        }
+        ["backfill"] | ["backfill", "--force"] => {
+            let force = parts.len() == 2;
+            if !crate::embedding::embedding_enabled(&cfg) {
+                send(
+                    "Embeddings are disabled — run /embeddings on first.".to_string(),
+                    SystemMessageType::Error,
+                )
+                .await;
+                return;
+            }
+            let model = crate::embedding::model_id(&cfg);
+            let (needed, total) = crate::embedding::backfill::survey(db, &model, force).await;
+            if needed == 0 {
+                send(
+                    format!("Nothing to do — all {total} node(s) are embedded with {model}."),
+                    SystemMessageType::Info,
+                )
+                .await;
+                return;
+            }
+            send(
+                format!(
+                    "Backfilling {needed} of {total} node(s) with {model}. This runs locally and \
+                     takes roughly {} — the session is busy until it finishes.",
+                    humanize_secs((needed as f64 * 0.055) as u64)
+                ),
+                SystemMessageType::Info,
+            )
+            .await;
+            let started = std::time::Instant::now();
+            let report = crate::embedding::backfill::run(db, &cfg, force, |line| {
+                let tx = tx.clone();
+                async move {
+                    let _ = tx
+                        .send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::System(
+                                SystemMessage {
+                                    content: line,
+                                    msg_type: SystemMessageType::Info as i32,
+                                },
+                            )),
+                        }))
+                        .await;
+                }
+            })
+            .await;
+            match report {
+                Ok(r) => {
+                    let mut out = format!(
+                        "Backfill complete in {}: {} embedded",
+                        humanize_secs(started.elapsed().as_secs()),
+                        r.embedded
+                    );
+                    if r.already_current > 0 {
+                        out.push_str(&format!(", {} already current", r.already_current));
+                    }
+                    if r.skipped_empty > 0 {
+                        out.push_str(&format!(", {} skipped (no text)", r.skipped_empty));
+                    }
+                    if r.failed > 0 {
+                        out.push_str(&format!(", {} FAILED (see system_logs)", r.failed));
+                    }
+                    send(
+                        out,
+                        if r.failed > 0 { SystemMessageType::Warning } else { SystemMessageType::Info },
+                    )
+                    .await;
+                }
+                Err(e) => send(format!("Backfill failed: {e}"), SystemMessageType::Error).await,
+            }
+        }
+        _ => send(usage.to_string(), SystemMessageType::Error).await,
+    }
+}
+
+/// Rough human duration for operator-facing estimates.
+fn humanize_secs(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m{:02}s", secs / 60, secs % 60)
+    }
+}
+
 /// `/image-provider` — the image_generate backend. Status (no args),
 /// `gemini`, `model <id>`, `key [<token>|remove]`, `clear`. Modeled on
 /// `/effort` (config load → validate → save) and `/guardian key brave`
@@ -6667,6 +6845,8 @@ mod native_loop_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            embedding_enabled: None,
+            embedding_model: None,
             image_provider: None,
             image_model: None,
             git_tokens: None,
@@ -7510,6 +7690,8 @@ mod reasoning_delta_privacy_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            embedding_enabled: None,
+            embedding_model: None,
             image_provider: None,
             image_model: None,
             git_tokens: None,
@@ -7568,6 +7750,8 @@ mod soul_sealed_mode_change_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            embedding_enabled: None,
+            embedding_model: None,
             image_provider: None,
             image_model: None,
             git_tokens: None,

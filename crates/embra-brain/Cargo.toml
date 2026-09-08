@@ -35,6 +35,12 @@ futures-util = "0.3"
 async-trait = "0.1"
 libc = "0.2"
 base64 = "0.22"
+# Local embedding inference (KG-02). tract is pure Rust and static-links under
+# musl; ort/rust-bert bind libonnxruntime C++ and cannot. tokenizers MUST stay
+# default-features = false: the default `esaxx_fast` pulls esaxx-rs/cpp, and
+# `fancy-regex` is the pure-Rust alternative to the `onig` C backend.
+tract-onnx = "0.23"
+tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
 
 [build-dependencies]
 tonic-build = { workspace = true }

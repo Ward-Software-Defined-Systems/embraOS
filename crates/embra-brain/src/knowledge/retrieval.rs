@@ -1,7 +1,7 @@
 //! Context-aware retrieval over the promoted knowledge collections.
 //!
 //! Multi-signal ranking:
-//!   score = relevance*0.5 + recency*0.3 + access_frequency*0.2
+//!   score = relevance*0.6 + recency*0.2 + access_frequency*0.2
 //!
 //! Since 2026-07-04 the pipeline joins against a per-call `NodeStore`
 //! prefetch instead of issuing point reads: Step 1 tag-matches in memory and
@@ -54,6 +54,47 @@ const STEP2_WALK_CONCURRENCY: usize = 8;
 /// growth; scoring ranks the survivors.
 const STEP3_PER_COLLECTION_CAP: usize = 100;
 
+/// Fields the retrieval prefetch actually reads. This is an INCLUSION list,
+/// and it is load-bearing: without it `fetch_recent` pulls every field, which
+/// since KG-02 includes the base64 `embedding` — ~2 KB per document, up to
+/// ~20 MB on the wire per turn at the `MEMORY_FETCH_WINDOW` ceiling, for data
+/// retrieval never reads (similarity runs off the in-process vector index).
+/// Pinned by `prefetch_projection_covers_every_field_retrieval_reads`.
+const PREFETCH_FIELDS: [&str; 10] = [
+    "_id",
+    "content",
+    "tags",
+    "created_at",
+    "access_count",
+    "category",
+    "title",
+    "description",
+    "promoted_to",
+    "node_type",
+];
+
+/// Similarity candidates admitted per retrieval, before ranking.
+const EMBEDDING_TOP_K: usize = 100;
+
+/// Cosine floor for admission. Below this the neighbour is not "about" the
+/// query in any useful sense and only dilutes the candidate set.
+const EMBEDDING_MIN_SIMILARITY: f32 = 0.5;
+
+/// Rescale a raw cosine onto the [0,1] scale the other relevance signals use.
+///
+/// Cosine and `tag_relevance` are NOT the same units, and feeding a raw cosine
+/// into `relevance` conflates them. `tag_relevance` is a fraction of the query
+/// matched, so 0.5 genuinely means "half"; a cosine of 0.5 means "barely
+/// related at all" — it is the admission floor. Real cosines on this corpus
+/// occupy a narrow high band (~0.45–0.85), so passing them through raw
+/// compresses every similarity hit into a thin slice of the relevance budget
+/// and hands the decision to recency — the exact defect the scoring wave was
+/// fixing. Mapping [floor, 1.0] onto [0, 1] restores the discrimination.
+fn similarity_strength(cosine: f32) -> f64 {
+    let floor = EMBEDDING_MIN_SIMILARITY;
+    (((cosine - floor) / (1.0 - floor)) as f64).clamp(0.0, 1.0)
+}
+
 /// Tag-relevance denominator cap (2026-07-31 scoring fix): tag_relevance
 /// divides by `min(deduped query tokens, THIS)` — a 25-word message no longer
 /// dilutes a 2-tag hit to ~0.04 of the relevance budget. Content strength uses
@@ -71,9 +112,11 @@ struct Collected {
     access_count: u64,
     node_type: NodeType,
     source: String,
-    /// Step-3 content-match strength in [0,1] (0.0 = no content match).
-    /// Feeds the relevance signal as `max(tag_relevance, content_strength)`.
+    /// Step-3 LEXICAL content-match strength in [0,1] (0.0 = no match).
     content_strength: f64,
+    /// Rescaled cosine, when this node has a vector (Step 3c). Deliberately a
+    /// separate channel from `content_strength`: see `score_one`.
+    similarity: Option<f64>,
 }
 
 /// Pre-threshold, pre-truncation funnel counts — the observability seam
@@ -85,9 +128,13 @@ pub struct RetrievalStats {
     pub direct_query: usize,
     pub session_based: usize,
     /// Unknown-source bucket. Held at its historical name because it is `pub`
-    /// and enrichment logs it as `candidates_graph`; since graph expansion was
+    /// and enrichment logs it as `candidates_other`; since graph expansion was
     /// deleted (2026-09-08) nothing populates it and it reads 0.
     pub graph_expansion: usize,
+    /// Candidates admitted by similarity search that no lexical step had
+    /// already found. Counted at the step because cosine hits carry the
+    /// `direct_query` label and `funnel_stats` cannot tell them apart.
+    pub embedding: usize,
 }
 
 pub async fn retrieve_relevant_knowledge(
@@ -96,8 +143,6 @@ pub async fn retrieve_relevant_knowledge(
     tags: &[String],
     query_text: &str,
     max_results: usize,
-    // Held for signature stability across both call sites (`knowledge_query`
-    // and auto-enrichment); the graph-expansion step that read it is gone.
     _config: &SystemConfig,
 ) -> Result<(Vec<RankedNode>, RetrievalStats)> {
     let mut collected: HashMap<(String, String), Collected> = HashMap::new();
@@ -109,7 +154,7 @@ pub async fn retrieve_relevant_knowledge(
     let mut prefetched: Vec<(&str, Vec<serde_json::Value>)> = Vec::new();
     for coll in ["memory.semantic", "memory.procedural"] {
         let docs = db
-            .fetch_recent(coll, crate::db::MEMORY_FETCH_WINDOW)
+            .fetch_recent_with_fields(coll, crate::db::MEMORY_FETCH_WINDOW, Some(&PREFETCH_FIELDS))
             .await
             .unwrap_or_else(|e| {
                 tracing::warn!("retrieval prefetch of {} failed: {}", coll, e);
@@ -125,9 +170,13 @@ pub async fn retrieve_relevant_knowledge(
     let all_entries: Vec<serde_json::Value> = if query_tokens.is_empty() {
         Vec::new()
     } else {
-        db.fetch_recent("memory.entries", crate::db::MEMORY_FETCH_WINDOW)
-            .await
-            .unwrap_or_default()
+        db.fetch_recent_with_fields(
+            "memory.entries",
+            crate::db::MEMORY_FETCH_WINDOW,
+            Some(&PREFETCH_FIELDS),
+        )
+        .await
+        .unwrap_or_default()
     };
 
     // Per-query document frequency (2026-09-08). Counts only the query's own
@@ -226,8 +275,64 @@ pub async fn retrieve_relevant_knowledge(
         }
     }
 
+    // Step 3c: semantic similarity (KG-02). Takes the slot graph expansion
+    // vacated, and fills the role expansion was meant to fill but could not —
+    // finding nodes that ARE about the query under different words. Wholly
+    // optional: no model, no embeddings, or any error degrades to the lexical
+    // result above, silently and by design.
+    let mut embedding_candidates = 0usize;
+    if !query_text.trim().is_empty()
+        && let Some(provider) = crate::embedding::provider(_config).await
+    {
+        {
+            crate::embedding::cache::ensure_current(db, provider.as_ref()).await;
+            match provider.embed_query(query_text).await {
+                Ok(qv) => {
+                    let hits = crate::embedding::cache::search(
+                        &qv,
+                        EMBEDDING_TOP_K,
+                        EMBEDDING_MIN_SIMILARITY,
+                    )
+                    .await;
+                    for (coll, id, score) in hits {
+                        if let Some(doc) = store.get_or_fetch(db, &coll, &id).await {
+                            let before = collected.len();
+                            // Source stays `direct_query`: a cosine hit IS a
+                            // direct match on meaning, and it must not take the
+                            // 0.5 fallback multiplier that made graph expansion
+                            // structurally incapable of reaching the top-5.
+                            insert_collected(
+                                &mut collected,
+                                &doc,
+                                &coll,
+                                "direct_query",
+                                similarity_strength(score),
+                            );
+                            if collected.len() > before {
+                                embedding_candidates += 1;
+                            }
+                        }
+                    }
+
+                    // Every candidate the lexical steps found also gets its
+                    // cosine, so the semantic signal corrects lexical noise
+                    // instead of merely competing with it inside the top-K.
+                    let keys: Vec<(String, String)> = collected.keys().cloned().collect();
+                    let scored = crate::embedding::cache::score_keys(&qv, &keys).await;
+                    for (key, cos) in scored {
+                        if let Some(c) = collected.get_mut(&key) {
+                            c.similarity = Some(similarity_strength(cos));
+                        }
+                    }
+                }
+                Err(e) => tracing::debug!(target: "kg::embedding", "query embedding failed: {e}"),
+            }
+        }
+    }
+
     // Funnel stats — pre-threshold, pre-truncation (the observability seam).
-    let stats = funnel_stats(&collected);
+    let mut stats = funnel_stats(&collected);
+    stats.embedding = embedding_candidates;
 
     // Score and rank; access-touch ONLY what is returned (the 2026-07-04
     // semantics change: access_count = retrieval hits, not BFS sweeps).
@@ -461,6 +566,7 @@ fn insert_collected(
         node_type,
         source: source.to_string(),
         content_strength: content_strength.clamp(0.0, 1.0),
+        similarity: None,
     });
 }
 
@@ -534,10 +640,19 @@ fn score_one(c: &Collected, ctx: &ScoreCtx, input_tags: &[String]) -> f64 {
         .filter(|t| input_tags.iter().any(|it| it.eq_ignore_ascii_case(t)))
         .count() as f64;
     let tag_relevance = (matching_tags / ctx.tag_denom).min(1.0);
-    // Relevance = the stronger of the two direct-match signals (2026-07-31):
-    // untagged-but-relevant content becomes scoreable above the enrichment
-    // threshold instead of riding on recency alone.
-    let relevance = tag_relevance.max(c.content_strength.clamp(0.0, 1.0));
+    // Relevance takes the best available evidence, but the two content signals
+    // are NOT interchangeable. Lexical overlap is a proxy for aboutness and a
+    // biased one — a long document shares more query tokens by sheer length.
+    // Cosine measures aboutness directly. So where a node has a vector, its
+    // similarity REPLACES the lexical score rather than competing with it via
+    // max(); lexical only carries nodes that have no vector (episodic entries,
+    // anything not yet backfilled). Measured on production: under max(), a
+    // long unrelated node scored lexical 0.687 and beat the node that
+    // literally answered the question at cosine-derived 0.529.
+    // Tags are kept in the max: they are operator- or model-authored and
+    // high-precision, not a proxy for anything.
+    let content_signal = c.similarity.unwrap_or(c.content_strength);
+    let relevance = tag_relevance.max(content_signal.clamp(0.0, 1.0));
 
     // Degenerate sets (2026-07-31 fix): with <2 distinct timestamps the
     // signal carries no ordering — neutral 0.5 keeps absolute comparisons
@@ -564,7 +679,7 @@ fn score_one(c: &Collected, ctx: &ScoreCtx, input_tags: &[String]) -> f64 {
         ((c.access_count as f64) + 1.0).ln() / (ctx.max_access + 1.0).ln()
     };
 
-    let base = relevance * 0.5 + recency * 0.3 + access_frequency * 0.2;
+    let base = relevance * 0.6 + recency * 0.2 + access_frequency * 0.2;
     // Source-quality multiplier separates direct matches from weaker ones.
     // The `graph_expansion` arm is retained for legibility: nothing produces
     // that label since the step was deleted, and it shares the 0.5 fallback.
@@ -664,6 +779,57 @@ mod step_query_body_tests {
 }
 
 #[cfg(test)]
+mod prefetch_projection_tests {
+    //! The prefetch projection is an INCLUSION list, so a field added to the
+    //! readers but not to `PREFETCH_FIELDS` degrades silently — the document
+    //! arrives without it and every `.unwrap_or` default takes over. This
+    //! scans the module's own source for the node fields it reads and fails
+    //! if any is missing from the list.
+    use super::PREFETCH_FIELDS;
+
+    #[test]
+    fn prefetch_projection_covers_every_field_retrieval_reads() {
+        let src = include_str!("retrieval.rs");
+        // Node-document fields read anywhere in this module. Edge and
+        // sub-object keys are excluded: they never come from the prefetch.
+        const NOT_FROM_PREFETCH: &[&str] = &[
+            "collection",       // promoted_to sub-object + edge docs
+            "id",               // promoted_to sub-object
+            "target_collection", // edge docs
+            "target_id",        // edge docs
+            "embedding",        // vector index only, deliberately NOT prefetched
+            "embedding_model",
+        ];
+        let mut missing: Vec<&str> = Vec::new();
+        let mut rest = src;
+        while let Some(i) = rest.find(".get(\"") {
+            rest = &rest[i + 6..];
+            let Some(end) = rest.find('"') else { break };
+            let field = &rest[..end];
+            if NOT_FROM_PREFETCH.contains(&field) {
+                continue;
+            }
+            if !PREFETCH_FIELDS.contains(&field) && !missing.contains(&field) {
+                missing.push(field);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "fields read by retrieval but absent from PREFETCH_FIELDS: {missing:?} \
+             — add them, or the prefetch returns documents without them"
+        );
+    }
+
+    #[test]
+    fn projection_excludes_the_embedding_vector() {
+        // ~2 KB per document that retrieval never reads; similarity runs off
+        // the in-process index. If this ever lands in the projection, every
+        // turn pays for it.
+        assert!(!PREFETCH_FIELDS.contains(&"embedding"));
+    }
+}
+
+#[cfg(test)]
 mod step1_tag_tests {
     use super::super::node_store::sort_created_desc;
     use super::{step1_tag_hits, STEP1_PER_TAG_CAP};
@@ -695,7 +861,7 @@ mod step1_tag_tests {
 #[cfg(test)]
 mod scoring_tests {
     //! The shared scoring core drives the final ranking — these lock the
-    //! documented formula (`relevance*0.5 + recency*0.3 + access*0.2`, with
+    //! documented formula (`relevance*0.6 + recency*0.2 + access*0.2`, with
     //! access log-scaled) and the source multipliers. If one of these fails,
     //! the module doc comment at the top of this file is now wrong too: they
     //! are a matched pair.
@@ -718,6 +884,7 @@ mod scoring_tests {
             node_type: NodeType::Semantic { category: SemanticCategory::Fact },
             source: source.into(),
             content_strength: 0.0,
+            similarity: None,
         }
     }
 
@@ -777,8 +944,8 @@ mod scoring_tests {
         let mid = item("mid", &[], "2026-07-04T00:00:00Z", 20, "direct_query");
         let refs = vec![&hub, &mid];
         let ctx = build_score_ctx(&refs, &input_tags);
-        // Degenerate recency (one distinct timestamp) contributes 0.5*0.3 to both.
-        let mid_access = (score_one(&mid, &ctx, &input_tags) - 0.15) / 0.2;
+        // Degenerate recency (one distinct timestamp) contributes 0.5*0.2 to both.
+        let mid_access = (score_one(&mid, &ctx, &input_tags) - 0.10) / 0.2;
         let linear = 20.0 / 4000.0;
         assert!(
             (mid_access - (21.0f64.ln() / 4001.0f64.ln())).abs() < 1e-9,
@@ -800,8 +967,8 @@ mod scoring_tests {
         let refs = vec![&a, &b];
         let ctx = build_score_ctx(&refs, &input_tags);
         assert!(ctx.degenerate_access);
-        // a: 0 relevance + recency 1.0*0.3 + access 0.0 = 0.3
-        assert!((score_one(&a, &ctx, &input_tags) - 0.3).abs() < 1e-9);
+        // a: 0 relevance + recency 1.0*0.2 + access 0.0 = 0.2
+        assert!((score_one(&a, &ctx, &input_tags) - 0.2).abs() < 1e-9);
     }
 
     #[test]
@@ -813,15 +980,15 @@ mod scoring_tests {
         let plain = item("p", &[], "2026-07-01T00:00:00Z", 0, "direct_query");
         let refs = vec![&c, &plain];
         let ctx = build_score_ctx(&refs, &input_tags);
-        // c: relevance 0.75*0.5 + recency 1.0*0.3 + access 0 = 0.675
-        assert!((score_one(&c, &ctx, &input_tags) - 0.675).abs() < 1e-9);
+        // c: relevance 0.75*0.6 + recency 1.0*0.2 + access 0 = 0.65
+        assert!((score_one(&c, &ctx, &input_tags) - 0.65).abs() < 1e-9);
         // A tag match stronger than the content strength wins the max.
         let mut t = item("t", &["kg"], "2026-07-04T00:00:00Z", 0, "direct_query");
         t.content_strength = 0.25;
         let refs = vec![&t, &plain];
         let ctx = build_score_ctx(&refs, &input_tags);
         // tag_relevance 1/1 = 1.0 > 0.25 → relevance 1.0.
-        assert!((score_one(&t, &ctx, &input_tags) - (0.5 + 0.3)).abs() < 1e-9);
+        assert!((score_one(&t, &ctx, &input_tags) - (0.6 + 0.2)).abs() < 1e-9);
     }
 
     #[test]
@@ -833,8 +1000,8 @@ mod scoring_tests {
         let old = item("o", &[], "2026-07-01T00:00:00Z", 0, "direct_query");
         let refs = vec![&a, &old];
         let ctx = build_score_ctx(&refs, &input_tags);
-        // relevance (4/8)*0.5 = 0.25 + recency 0.3 = 0.55
-        assert!((score_one(&a, &ctx, &input_tags) - 0.55).abs() < 1e-9);
+        // relevance (4/8)*0.6 = 0.30 + recency 0.2 = 0.50
+        assert!((score_one(&a, &ctx, &input_tags) - 0.50).abs() < 1e-9);
     }
 
     #[test]
@@ -846,8 +1013,8 @@ mod scoring_tests {
         let b = item("b", &[], "2026-07-04T00:00:00Z", 0, "direct_query");
         let refs = vec![&a, &b];
         let ctx = build_score_ctx(&refs, &input_tags);
-        // 0 + 0.5*0.3 + 0 = 0.15 — sane against the 0.3 threshold scale.
-        assert!((score_one(&a, &ctx, &input_tags) - 0.15).abs() < 1e-9);
+        // 0 + 0.5*0.2 + 0 = 0.10 — sane against the 0.3 threshold scale.
+        assert!((score_one(&a, &ctx, &input_tags) - 0.10).abs() < 1e-9);
 
         // Unparseable created_at is NOT neutral — missing data scores 0.
         let bad = item("bad", &[], "not-a-date", 0, "direct_query");
@@ -857,17 +1024,63 @@ mod scoring_tests {
     }
 
     #[test]
-    fn a_relevance_free_recent_node_no_longer_clears_the_enrichment_threshold() {
-        // The reweight's operator-visible consequence: under the old weights a
+    fn a_relevance_free_recent_node_cannot_clear_the_enrichment_threshold() {
+        // The reweights' operator-visible consequence. Originally a
         // maximally-recent node with ZERO relevance scored 0.3*1.0 +
-        // 0.1*confidence = 0.40 and was injected. It now lands at 0.30 — at,
-        // not above, `enrichment::SCORE_THRESHOLD`.
+        // 0.1*confidence = 0.40 and was injected on recency alone. After the
+        // scoring wave it sat at exactly 0.30, the threshold itself; with
+        // relevance raised to 0.6 it lands at 0.20 — safely below
+        // `enrichment::SCORE_THRESHOLD`, which is the point.
         let input_tags: Vec<String> = vec![];
         let newest = item("new", &[], "2026-07-04T00:00:00Z", 0, "direct_query");
         let oldest = item("old", &[], "2026-07-01T00:00:00Z", 0, "direct_query");
         let refs = vec![&newest, &oldest];
         let ctx = build_score_ctx(&refs, &input_tags);
-        assert!((score_one(&newest, &ctx, &input_tags) - 0.30).abs() < 1e-9);
+        let s = score_one(&newest, &ctx, &input_tags);
+        assert!((s - 0.20).abs() < 1e-9, "got {s}");
+        assert!(s < 0.3, "must not clear the enrichment threshold on recency alone");
+    }
+
+    #[test]
+    fn similarity_replaces_the_lexical_signal_rather_than_competing_with_it() {
+        // Measured on production: a long unrelated node scored lexical 0.687
+        // and beat the node that literally answered the question, whose
+        // cosine-derived strength was 0.529. Lexical overlap is a
+        // length-biased proxy for aboutness; cosine measures it directly, so
+        // where a vector exists it REPLACES the lexical score.
+        let input_tags: Vec<String> = vec![];
+        let mut noisy = item("noisy", &[], "2026-07-04T00:00:00Z", 0, "direct_query");
+        noisy.content_strength = 0.687;
+        noisy.similarity = Some(0.10); // the embedding says: not really related
+        let mut answer = item("answer", &[], "2026-07-04T00:00:00Z", 0, "direct_query");
+        answer.content_strength = 0.0;
+        answer.similarity = Some(0.529);
+        let refs = vec![&noisy, &answer];
+        let ctx = build_score_ctx(&refs, &input_tags);
+        assert!(
+            score_one(&answer, &ctx, &input_tags) > score_one(&noisy, &ctx, &input_tags),
+            "the semantic signal must override lexical length bias"
+        );
+        // Without a vector the lexical score still carries the node.
+        let mut lexical_only = item("lex", &[], "2026-07-04T00:00:00Z", 0, "direct_query");
+        lexical_only.content_strength = 0.8;
+        let refs = vec![&lexical_only, &answer];
+        let ctx = build_score_ctx(&refs, &input_tags);
+        assert!((score_one(&lexical_only, &ctx, &input_tags) - (0.8 * 0.6 + 0.5 * 0.2)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn tags_still_win_over_a_weak_similarity_score() {
+        // Tags are operator- or model-authored and high-precision — they are
+        // not a proxy for anything, so they stay in the max().
+        let input_tags = vec!["kg".to_string()];
+        let mut tagged = item("t", &["kg"], "2026-07-01T00:00:00Z", 0, "direct_query");
+        tagged.similarity = Some(0.05);
+        let other = item("o", &[], "2026-07-04T00:00:00Z", 0, "direct_query");
+        let refs = vec![&tagged, &other];
+        let ctx = build_score_ctx(&refs, &input_tags);
+        // relevance = max(tag 1.0, similarity 0.05) = 1.0 → 0.6, recency 0.
+        assert!((score_one(&tagged, &ctx, &input_tags) - 0.6).abs() < 1e-9);
     }
 
     #[test]
@@ -1048,4 +1261,5 @@ mod content_match_tests {
         assert!((out[&key].content_strength - 0.8).abs() < 1e-9);
     }
 }
+
 

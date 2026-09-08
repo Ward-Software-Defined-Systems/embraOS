@@ -187,6 +187,42 @@ else
     echo "  staged Rust $RUST_TOOLCHAIN_VERSION ($(du -sh "$RUST_STAGE" 2>/dev/null | cut -f1)) → $RUST_STAGE"
 fi
 
+# SITE rsync needs vendor/embedding-model present before Step 4.
+echo "=== Step 3.6: Stage the embedding model (KG-02) ==="
+EMBED_MODEL_NAME="${EMBED_MODEL_NAME:-bge-small-en-v1.5}"
+EMBED_MODEL_REPO="${EMBED_MODEL_REPO:-BAAI/bge-small-en-v1.5}"
+EMBED_STAGE="$PWD/vendor/embedding-model"
+# Pinned by sha256, like CI's Bootlin SDK: the payload is fetched, never
+# committed, and a changed upstream file fails the build instead of silently
+# shipping different weights. Verified 2026-09-08.
+EMBED_ONNX_SHA="828e1496d7fabb79cfa4dcd84fa38625c0d3d21da474a00f08db0f559940cf35"
+EMBED_TOKENIZER_SHA="d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"
+
+if [ -s "$EMBED_STAGE/model.onnx" ] && [ -s "$EMBED_STAGE/tokenizer.json" ] && \
+   echo "$EMBED_ONNX_SHA  $EMBED_STAGE/model.onnx" | sha256sum -c --status - 2>/dev/null; then
+    echo "embedding model already staged ($EMBED_MODEL_NAME) — skipping"
+else
+    EMBED_BASE="${EMBED_BASE:-https://huggingface.co}/${EMBED_MODEL_REPO}/resolve/main"
+    EMBED_TMP="$(mktemp -d)"
+    echo "  downloading $EMBED_MODEL_REPO (~133 MB)"
+    curl -fSL --retry 3 -o "$EMBED_TMP/model.onnx" "$EMBED_BASE/onnx/model.onnx" \
+        || { echo "ERROR: download of model.onnx failed" >&2; rm -rf "$EMBED_TMP"; exit 1; }
+    curl -fSL --retry 3 -o "$EMBED_TMP/tokenizer.json" "$EMBED_BASE/tokenizer.json" \
+        || { echo "ERROR: download of tokenizer.json failed" >&2; rm -rf "$EMBED_TMP"; exit 1; }
+    # config.json is not read at runtime; it is staged so an operator can see
+    # what the baked model actually is without consulting this script.
+    curl -fSL --retry 3 -o "$EMBED_TMP/config.json" "$EMBED_BASE/config.json" || true
+    echo "$EMBED_ONNX_SHA  $EMBED_TMP/model.onnx" | sha256sum -c --status - \
+        || { echo "ERROR: sha256 mismatch for model.onnx (upstream changed — verify before repinning)" >&2; rm -rf "$EMBED_TMP"; exit 1; }
+    echo "$EMBED_TOKENIZER_SHA  $EMBED_TMP/tokenizer.json" | sha256sum -c --status - \
+        || { echo "ERROR: sha256 mismatch for tokenizer.json" >&2; rm -rf "$EMBED_TMP"; exit 1; }
+    rm -rf "$EMBED_STAGE"
+    mkdir -p "$(dirname "$EMBED_STAGE")"
+    mv "$EMBED_TMP" "$EMBED_STAGE"
+    chmod -R a+rX "$EMBED_STAGE"
+    echo "staged $EMBED_MODEL_NAME -> $EMBED_STAGE"
+fi
+
 echo "=== Step 4: Buildroot ==="
 # Buildroot requires a Linux host (compiles Linux kernel, uses Linux-specific tools)
 if [ "$(uname)" = "Darwin" ]; then

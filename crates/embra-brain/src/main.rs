@@ -26,6 +26,7 @@ mod provider;
 mod setup;
 mod guardian;
 mod media;
+mod embedding;
 
 use grpc_service::BrainGrpcService;
 

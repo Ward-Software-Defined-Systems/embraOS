@@ -82,6 +82,16 @@ pub struct SystemConfig {
     /// arm on `ProviderKind` (that enum drives LLM construction and
     /// session-compat checks). Set via `/image-provider gemini`.
     /// Serde-additive `Option` — no schema bump.
+    /// Local embedding kill switch (KG-02). `None` = enabled — a boot with
+    /// the model present should just work. Serde-additive: no schema bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_enabled: Option<bool>,
+
+    /// Embedding model directory name under the model roots. `None` = the
+    /// kind's default (`bge-small-en-v1.5`). Serde-additive: no schema bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub embedding_model: Option<String>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub image_provider: Option<String>,
     /// Image-generation model id. `None` = the backend's default
@@ -316,6 +326,8 @@ pub async fn run_config_wizard() -> Result<SystemConfig> {
         gemini_model: None,
         anthropic_model: None,
         anthropic_effort: None,
+        embedding_enabled: None,
+        embedding_model: None,
         image_provider: None,
         image_model: None,
         git_tokens: None,
@@ -831,6 +843,8 @@ pub async fn run_config_wizard_grpc(
         gemini_model: None,
         anthropic_model,
         anthropic_effort: None,
+        embedding_enabled: None,
+        embedding_model: None,
         image_provider: None,
         image_model: None,
         git_tokens: None,
@@ -1007,6 +1021,8 @@ mod key_lookup_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            embedding_enabled: None,
+            embedding_model: None,
             image_provider: None,
             image_model: None,
             git_tokens: None,
@@ -1101,6 +1117,8 @@ pub(crate) mod tests_support {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            embedding_enabled: None,
+            embedding_model: None,
             image_provider: None,
             image_model: None,
             git_tokens: None,
@@ -1137,6 +1155,8 @@ mod max_tool_iterations_serde_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            embedding_enabled: None,
+            embedding_model: None,
             image_provider: None,
             image_model: None,
             git_tokens: None,

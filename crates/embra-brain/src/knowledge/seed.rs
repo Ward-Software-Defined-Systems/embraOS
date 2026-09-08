@@ -581,6 +581,17 @@ async fn reconcile_pack(
                 Ok(_) => {
                     healed_nodes += 1;
                     fresh.push(node);
+                    // Best-effort, like every other seed write: an unembedded
+                    // seed node is fully usable and backfill collects it.
+                    // Seeds run in the migrations tail where config may not be
+                    // loaded yet; with no config there is no model choice to
+                    // honour, so skip rather than guess.
+                    if let Some(cfg) = config {
+                        crate::embedding::write::embed_node(
+                            db, cfg, node.collection(), &node.id, &doc,
+                        )
+                        .await;
+                    }
                 }
                 Err(e) => warn!(
                     target: "knowledge_seed",
