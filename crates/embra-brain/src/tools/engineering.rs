@@ -262,9 +262,49 @@ fn encode_gitlab_project(path: &str) -> String {
 /// Resolve the PAT for a GitLab host from `git_tokens`, with a uniform
 /// error message when unconfigured. Host is normalized first so
 /// `https://gitlab.example.com/` and `gitlab.example.com` both resolve.
-async fn gitlab_host_token(db: &WardsonDbClient, host: &str) -> Result<(String, String), String> {
-    let host = normalize_git_host(host)?;
-    match resolve_git_tokens(db).await.remove(&host) {
+///
+/// `host` is optional: when omitted, a single configured `git_tokens` host is
+/// used as the default (the common deployment — one internal instance), and
+/// ambiguity is an error that NAMES the candidates rather than guessing.
+/// github.com is excluded from that default; it rides `github_token` and the
+/// `gh_*` tools, and `/git-token` refuses it outright.
+/// Pick the GitLab host for a `gl_*` call. Pure so the ambiguity rules are
+/// testable without a database: an explicit host always wins (normalized);
+/// otherwise a single configured non-github host is the default, and
+/// anything else is an error that NAMES the candidates rather than guessing.
+/// github.com is never a candidate — it rides `github_token` and the `gh_*`
+/// tools, and `/git-token` refuses it outright.
+fn choose_gitlab_host(
+    explicit: Option<&str>,
+    configured: &std::collections::BTreeMap<String, String>,
+) -> Result<String, String> {
+    if let Some(h) = explicit.map(str::trim).filter(|h| !h.is_empty()) {
+        return normalize_git_host(h);
+    }
+    let candidates: Vec<&str> = configured
+        .keys()
+        .map(|h| h.as_str())
+        .filter(|h| *h != "github.com")
+        .collect();
+    match candidates.len() {
+        1 => Ok(candidates[0].to_string()),
+        0 => Err("No GitLab host configured. Use /git-token <host> \
+<personal-access-token> (scope: api), or pass host explicitly."
+            .to_string()),
+        _ => Err(format!(
+            "Several git hosts are configured ({}). Pass host explicitly.",
+            candidates.join(", ")
+        )),
+    }
+}
+
+async fn gitlab_host_token(
+    db: &WardsonDbClient,
+    host: Option<&str>,
+) -> Result<(String, String), String> {
+    let mut tokens = resolve_git_tokens(db).await;
+    let host = choose_gitlab_host(host, &tokens)?;
+    match tokens.remove(&host) {
         Some(token) => Ok((host, token)),
         None => Err(format!(
             "No token configured for {}. Use /git-token {} <personal-access-token> (scope: api).",
@@ -273,8 +313,78 @@ async fn gitlab_host_token(db: &WardsonDbClient, host: &str) -> Result<(String, 
     }
 }
 
+/// GET a GitLab API path and decode JSON. `path` is everything after
+/// `/api/v4/`. Shared by the read-side `gl_*` tools so the client, headers,
+/// and error shape stay in one place.
+async fn gl_get(host: &str, token: &str, path: &str) -> Result<serde_json::Value, String> {
+    let url = format!("https://{}/api/v4/{}", host, path);
+    let resp = gitlab_client()
+        .get(&url)
+        .header("User-Agent", "embraOS/0.1.0")
+        .header("PRIVATE-TOKEN", token)
+        .send()
+        .await
+        .map_err(|e| format!("GitLab request failed: {}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("GitLab API error {}: {}", status, body));
+    }
+    resp.json().await.map_err(|e| format!("GitLab response decode failed: {}", e))
+}
+
+/// POST/PUT a JSON body to a GitLab API path and decode the result.
+async fn gl_send(
+    method: reqwest::Method,
+    host: &str,
+    token: &str,
+    path: &str,
+    payload: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let url = format!("https://{}/api/v4/{}", host, path);
+    let resp = gitlab_client()
+        .request(method, &url)
+        .header("User-Agent", "embraOS/0.1.0")
+        .header("PRIVATE-TOKEN", token)
+        .json(payload)
+        .send()
+        .await
+        .map_err(|e| format!("GitLab request failed: {}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("GitLab API error {}: {}", status, body));
+    }
+    resp.json().await.map_err(|e| format!("GitLab response decode failed: {}", e))
+}
+
+/// Render GitLab discussion notes (`/notes`), skipping system notes — the
+/// "changed the description" churn GitLab records alongside real comments.
+fn render_gl_notes(notes: &serde_json::Value) -> String {
+    let Some(arr) = notes.as_array() else { return String::new() };
+    let human: Vec<&serde_json::Value> = arr
+        .iter()
+        .filter(|n| !n.get("system").and_then(|v| v.as_bool()).unwrap_or(false))
+        .collect();
+    if human.is_empty() {
+        return "\n(no comments)\n".to_string();
+    }
+    let mut out = format!("\n--- Comments ({}) ---\n", human.len());
+    for n in human {
+        let author = n
+            .get("author")
+            .and_then(|a| a.get("username"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let created = n.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+        let body = n.get("body").and_then(|v| v.as_str()).unwrap_or("");
+        out.push_str(&format!("\n[{} at {}]\n{}\n", author, created, body));
+    }
+    out
+}
+
 /// List open GitLab issues for a project on a configured host.
-pub async fn gl_issues(db: &WardsonDbClient, host: &str, project: &str) -> String {
+pub async fn gl_issues(db: &WardsonDbClient, host: Option<&str>, project: &str) -> String {
     let (host, token) = match gitlab_host_token(db, host).await {
         Ok(t) => t,
         Err(e) => return e,
@@ -323,7 +433,7 @@ pub async fn gl_issues(db: &WardsonDbClient, host: &str, project: &str) -> Strin
 }
 
 /// List open GitLab merge requests for a project on a configured host.
-pub async fn gl_mrs(db: &WardsonDbClient, host: &str, project: &str) -> String {
+pub async fn gl_mrs(db: &WardsonDbClient, host: Option<&str>, project: &str) -> String {
     let (host, token) = match gitlab_host_token(db, host).await {
         Ok(t) => t,
         Err(e) => return e,
@@ -373,7 +483,7 @@ pub async fn gl_mrs(db: &WardsonDbClient, host: &str, project: &str) -> String {
 /// Create a GitLab issue.
 pub async fn gl_issue_create(
     db: &WardsonDbClient,
-    host: &str,
+    host: Option<&str>,
     project: &str,
     title: &str,
     description: &str,
@@ -420,7 +530,7 @@ pub async fn gl_issue_create(
 /// Create a GitLab merge request.
 pub async fn gl_mr_create(
     db: &WardsonDbClient,
-    host: &str,
+    host: Option<&str>,
     project: &str,
     title: &str,
     source_branch: &str,
@@ -472,6 +582,316 @@ pub async fn gl_mr_create(
         }
         Err(e) => format!("Failed to create merge request: {}", e),
     }
+}
+
+/// View one GitLab issue with its discussion thread.
+pub async fn gl_issue_view(
+    db: &WardsonDbClient,
+    host: Option<&str>,
+    project: &str,
+    iid: u64,
+) -> String {
+    let (host, token) = match gitlab_host_token(db, host).await {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let proj = encode_gitlab_project(project);
+    let issue = match gl_get(&host, &token, &format!("projects/{}/issues/{}", proj, iid)).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let notes = gl_get(&host, &token, &format!("projects/{}/issues/{}/notes?per_page=100", proj, iid))
+        .await
+        .unwrap_or_else(|_| serde_json::Value::Array(vec![]));
+    let labels: Vec<&str> = issue
+        .get("labels")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|l| l.as_str()).collect())
+        .unwrap_or_default();
+    format!(
+        "=== Issue #{}: {} ===\nState: {}\nAuthor: {}\nLabels: {}\nCreated: {}\nURL: {}\n\n{}\n{}",
+        iid,
+        issue.get("title").and_then(|v| v.as_str()).unwrap_or("?"),
+        issue.get("state").and_then(|v| v.as_str()).unwrap_or("?"),
+        issue
+            .get("author")
+            .and_then(|a| a.get("username"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("?"),
+        if labels.is_empty() { "none".to_string() } else { labels.join(", ") },
+        issue.get("created_at").and_then(|v| v.as_str()).unwrap_or("?"),
+        issue.get("web_url").and_then(|v| v.as_str()).unwrap_or(""),
+        issue.get("description").and_then(|v| v.as_str()).unwrap_or("(no description)"),
+        render_gl_notes(&notes)
+    )
+}
+
+/// View one GitLab merge request with its discussion thread.
+pub async fn gl_mr_view(
+    db: &WardsonDbClient,
+    host: Option<&str>,
+    project: &str,
+    iid: u64,
+) -> String {
+    let (host, token) = match gitlab_host_token(db, host).await {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let proj = encode_gitlab_project(project);
+    let mr = match gl_get(&host, &token, &format!("projects/{}/merge_requests/{}", proj, iid)).await
+    {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let notes = gl_get(
+        &host,
+        &token,
+        &format!("projects/{}/merge_requests/{}/notes?per_page=100", proj, iid),
+    )
+    .await
+    .unwrap_or_else(|_| serde_json::Value::Array(vec![]));
+    let s = |k: &str| mr.get(k).and_then(|v| v.as_str()).unwrap_or("?").to_string();
+    format!(
+        "=== MR !{}: {} ===\nState: {} (merge_status: {}, draft: {})\nAuthor: {}\nBranches: {} \u{2192} {}\nCreated: {}\nURL: {}\n\n{}\n{}",
+        iid,
+        s("title"),
+        s("state"),
+        s("detailed_merge_status"),
+        mr.get("draft").and_then(|v| v.as_bool()).unwrap_or(false),
+        mr.get("author")
+            .and_then(|a| a.get("username"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("?"),
+        s("source_branch"),
+        s("target_branch"),
+        s("created_at"),
+        mr.get("web_url").and_then(|v| v.as_str()).unwrap_or(""),
+        mr.get("description").and_then(|v| v.as_str()).unwrap_or("(no description)"),
+        render_gl_notes(&notes)
+    )
+}
+
+/// Close or reopen a GitLab issue or merge request via `state_event`.
+/// `kind` is the API segment: "issues" or "merge_requests".
+async fn gl_state_change(
+    db: &WardsonDbClient,
+    host: Option<&str>,
+    project: &str,
+    kind: &str,
+    iid: u64,
+    state_event: &str,
+) -> String {
+    let (host, token) = match gitlab_host_token(db, host).await {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let path = format!("projects/{}/{}/{}", encode_gitlab_project(project), kind, iid);
+    let payload = serde_json::json!({ "state_event": state_event });
+    match gl_send(reqwest::Method::PUT, &host, &token, &path, &payload).await {
+        Ok(v) => {
+            let marker = if kind == "issues" { "#" } else { "!" };
+            format!(
+                "{}{} is now {}: {}\n{}",
+                marker,
+                iid,
+                v.get("state").and_then(|x| x.as_str()).unwrap_or("?"),
+                v.get("title").and_then(|x| x.as_str()).unwrap_or("?"),
+                v.get("web_url").and_then(|x| x.as_str()).unwrap_or("")
+            )
+        }
+        Err(e) => e,
+    }
+}
+
+/// Close a GitLab issue.
+pub async fn gl_issue_close(db: &WardsonDbClient, host: Option<&str>, project: &str, iid: u64) -> String {
+    gl_state_change(db, host, project, "issues", iid, "close").await
+}
+
+/// Reopen a GitLab issue.
+pub async fn gl_issue_reopen(db: &WardsonDbClient, host: Option<&str>, project: &str, iid: u64) -> String {
+    gl_state_change(db, host, project, "issues", iid, "reopen").await
+}
+
+/// Close a GitLab merge request without merging it.
+pub async fn gl_mr_close(db: &WardsonDbClient, host: Option<&str>, project: &str, iid: u64) -> String {
+    gl_state_change(db, host, project, "merge_requests", iid, "close").await
+}
+
+/// Post a comment (GitLab "note") on an issue or merge request.
+async fn gl_note_create(
+    db: &WardsonDbClient,
+    host: Option<&str>,
+    project: &str,
+    kind: &str,
+    iid: u64,
+    body: &str,
+) -> String {
+    if body.trim().is_empty() {
+        return "Comment body must not be empty.".into();
+    }
+    let (host, token) = match gitlab_host_token(db, host).await {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let path = format!("projects/{}/{}/{}/notes", encode_gitlab_project(project), kind, iid);
+    let payload = serde_json::json!({ "body": body });
+    match gl_send(reqwest::Method::POST, &host, &token, &path, &payload).await {
+        Ok(v) => format!(
+            "Comment posted on {}{} (note {}).",
+            if kind == "issues" { "#" } else { "!" },
+            iid,
+            v.get("id").and_then(|x| x.as_u64()).unwrap_or(0)
+        ),
+        Err(e) => e,
+    }
+}
+
+/// Comment on a GitLab issue.
+pub async fn gl_issue_comment(
+    db: &WardsonDbClient,
+    host: Option<&str>,
+    project: &str,
+    iid: u64,
+    body: &str,
+) -> String {
+    gl_note_create(db, host, project, "issues", iid, body).await
+}
+
+/// Comment on a GitLab merge request.
+pub async fn gl_mr_comment(
+    db: &WardsonDbClient,
+    host: Option<&str>,
+    project: &str,
+    iid: u64,
+    body: &str,
+) -> String {
+    gl_note_create(db, host, project, "merge_requests", iid, body).await
+}
+
+/// Merge a GitLab merge request.
+///
+/// GitLab's merge params are not GitHub's `merge_method`: squashing is a
+/// boolean, and "merge when the pipeline passes" is a separate flag rather
+/// than a method. Both are exposed as-is instead of being forced into the
+/// GitHub vocabulary.
+pub async fn gl_mr_merge(
+    db: &WardsonDbClient,
+    host: Option<&str>,
+    project: &str,
+    iid: u64,
+    squash: bool,
+    when_pipeline_succeeds: bool,
+    remove_source_branch: bool,
+) -> String {
+    let (host, token) = match gitlab_host_token(db, host).await {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let path = format!(
+        "projects/{}/merge_requests/{}/merge",
+        encode_gitlab_project(project),
+        iid
+    );
+    let payload = serde_json::json!({
+        "squash": squash,
+        "merge_when_pipeline_succeeds": when_pipeline_succeeds,
+        "should_remove_source_branch": remove_source_branch,
+    });
+    match gl_send(reqwest::Method::PUT, &host, &token, &path, &payload).await {
+        Ok(v) => {
+            let state = v.get("state").and_then(|x| x.as_str()).unwrap_or("?");
+            format!(
+                "MR !{} {}: {}\n{}",
+                iid,
+                if state == "merged" { "merged" } else { state },
+                v.get("title").and_then(|x| x.as_str()).unwrap_or("?"),
+                v.get("web_url").and_then(|x| x.as_str()).unwrap_or("")
+            )
+        }
+        Err(e) => e,
+    }
+}
+
+/// List a project's issue boards.
+///
+/// GitLab's answer to GitHub Projects is the issue board; "project" in
+/// GitLab means repository, so these tools are named for boards to avoid
+/// colliding with that meaning.
+pub async fn gl_boards(db: &WardsonDbClient, host: Option<&str>, project: &str) -> String {
+    let (host, token) = match gitlab_host_token(db, host).await {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let path = format!("projects/{}/boards?per_page=20", encode_gitlab_project(project));
+    let boards = match gl_get(&host, &token, &path).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let Some(arr) = boards.as_array().filter(|a| !a.is_empty()) else {
+        return format!("No issue boards for {} on {}.", project, host);
+    };
+    let mut out = format!("=== Issue Boards: {} ({}) ===\n", project, arr.len());
+    for b in arr {
+        let lists = b.get("lists").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+        out.push_str(&format!(
+            "  [{}] {} ({} lists)\n",
+            b.get("id").and_then(|v| v.as_u64()).unwrap_or(0),
+            b.get("name").and_then(|v| v.as_str()).unwrap_or("?"),
+            lists
+        ));
+    }
+    out
+}
+
+/// View one issue board: its lists, in position order, with their labels.
+pub async fn gl_board_view(
+    db: &WardsonDbClient,
+    host: Option<&str>,
+    project: &str,
+    board_id: u64,
+) -> String {
+    let (host, token) = match gitlab_host_token(db, host).await {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
+    let path = format!(
+        "projects/{}/boards/{}",
+        encode_gitlab_project(project),
+        board_id
+    );
+    let board = match gl_get(&host, &token, &path).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let mut out = format!(
+        "=== Board {}: {} ===\n",
+        board_id,
+        board.get("name").and_then(|v| v.as_str()).unwrap_or("?")
+    );
+    let mut lists: Vec<&serde_json::Value> = board
+        .get("lists")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+    if lists.is_empty() {
+        out.push_str("  (no lists)\n");
+        return out;
+    }
+    lists.sort_by_key(|l| l.get("position").and_then(|v| v.as_u64()).unwrap_or(u64::MAX));
+    for l in lists {
+        let label = l
+            .get("label")
+            .and_then(|lb| lb.get("name"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("(no label)");
+        out.push_str(&format!(
+            "  {}. {}\n",
+            l.get("position").and_then(|v| v.as_u64()).unwrap_or(0),
+            label
+        ));
+    }
+    out
 }
 
 /// Clone a git repository into /embra/workspace/.
@@ -3197,15 +3617,17 @@ impl GhPrCreateArgs {
     description = "List open issues on a self-hosted GitLab instance. host is the GitLab hostname (token set via /git-token), project is the full path e.g. `group/repo`. Trusts operator CA drop-ins for private-CA instances."
 )]
 pub struct GlIssuesArgs {
-    /// GitLab hostname, e.g. `gitlab.example.com`.
-    pub host: String,
+    /// GitLab hostname, e.g. `gitlab.example.com`. Optional when exactly one
+    /// host is configured via /git-token.
+    #[serde(default)]
+    pub host: Option<String>,
     /// Full project path, e.g. `group/repo`.
     pub project: String,
 }
 
 impl GlIssuesArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        Ok(gl_issues(ctx.db, &self.host, &self.project).await)
+        Ok(gl_issues(ctx.db, self.host.as_deref(), &self.project).await)
     }
 }
 
@@ -3215,15 +3637,17 @@ impl GlIssuesArgs {
     description = "List open merge requests on a self-hosted GitLab instance (GitLab's pull requests). host is the GitLab hostname (token set via /git-token), project is the full path e.g. `group/repo`."
 )]
 pub struct GlMrsArgs {
-    /// GitLab hostname, e.g. `gitlab.example.com`.
-    pub host: String,
+    /// GitLab hostname, e.g. `gitlab.example.com`. Optional when exactly one
+    /// host is configured via /git-token.
+    #[serde(default)]
+    pub host: Option<String>,
     /// Full project path, e.g. `group/repo`.
     pub project: String,
 }
 
 impl GlMrsArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        Ok(gl_mrs(ctx.db, &self.host, &self.project).await)
+        Ok(gl_mrs(ctx.db, self.host.as_deref(), &self.project).await)
     }
 }
 
@@ -3234,8 +3658,10 @@ impl GlMrsArgs {
     description = "Create an issue on a self-hosted GitLab instance. host is the GitLab hostname (token set via /git-token), project is the full path e.g. `group/repo`."
 )]
 pub struct GlIssueCreateArgs {
-    /// GitLab hostname, e.g. `gitlab.example.com`.
-    pub host: String,
+    /// GitLab hostname, e.g. `gitlab.example.com`. Optional when exactly one
+    /// host is configured via /git-token.
+    #[serde(default)]
+    pub host: Option<String>,
     /// Full project path, e.g. `group/repo`.
     pub project: String,
     pub title: String,
@@ -3246,7 +3672,7 @@ pub struct GlIssueCreateArgs {
 
 impl GlIssueCreateArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        Ok(gl_issue_create(ctx.db, &self.host, &self.project, &self.title, &self.description)
+        Ok(gl_issue_create(ctx.db, self.host.as_deref(), &self.project, &self.title, &self.description)
             .await)
     }
 }
@@ -3258,8 +3684,10 @@ impl GlIssueCreateArgs {
     description = "Create a merge request on a self-hosted GitLab instance. source_branch is the branch with your changes, target_branch is where it merges (usually \"main\"). host/token via /git-token, project is the full path e.g. `group/repo`."
 )]
 pub struct GlMrCreateArgs {
-    /// GitLab hostname, e.g. `gitlab.example.com`.
-    pub host: String,
+    /// GitLab hostname, e.g. `gitlab.example.com`. Optional when exactly one
+    /// host is configured via /git-token.
+    #[serde(default)]
+    pub host: Option<String>,
     /// Full project path, e.g. `group/repo`.
     pub project: String,
     pub title: String,
@@ -3271,13 +3699,259 @@ impl GlMrCreateArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
         Ok(gl_mr_create(
             ctx.db,
-            &self.host,
+            self.host.as_deref(),
             &self.project,
             &self.title,
             &self.source_branch,
             &self.target_branch,
         )
         .await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gl_issue_view",
+    description = "View one issue on a self-hosted GitLab instance, with its full description and comment thread (system notes are filtered out). iid is the per-project issue number shown as #N. host/token via /git-token, project is the full path e.g. `group/repo`."
+)]
+pub struct GlIssueViewArgs {
+    /// GitLab hostname, e.g. `gitlab.example.com`. Optional when exactly one
+    /// host is configured via /git-token.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Full project path, e.g. `group/repo`.
+    pub project: String,
+    /// Issue number within the project (the `#N` shown in the UI).
+    pub iid: u64,
+}
+
+impl GlIssueViewArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(gl_issue_view(ctx.db, self.host.as_deref(), &self.project, self.iid).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gl_mr_view",
+    description = "View one merge request on a self-hosted GitLab instance, with branches, merge status, description, and comment thread. iid is the per-project MR number shown as !N. host/token via /git-token, project is the full path e.g. `group/repo`."
+)]
+pub struct GlMrViewArgs {
+    /// GitLab hostname, e.g. `gitlab.example.com`. Optional when exactly one
+    /// host is configured via /git-token.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Full project path, e.g. `group/repo`.
+    pub project: String,
+    /// Merge request number within the project (the `!N` shown in the UI).
+    pub iid: u64,
+}
+
+impl GlMrViewArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(gl_mr_view(ctx.db, self.host.as_deref(), &self.project, self.iid).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gl_issue_close",
+    is_side_effectful = true,
+    description = "Close an issue on a self-hosted GitLab instance. iid is the per-project issue number. host/token via /git-token, project is the full path e.g. `group/repo`."
+)]
+pub struct GlIssueCloseArgs {
+    /// GitLab hostname, e.g. `gitlab.example.com`. Optional when exactly one
+    /// host is configured via /git-token.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Full project path, e.g. `group/repo`.
+    pub project: String,
+    /// Issue number within the project.
+    pub iid: u64,
+}
+
+impl GlIssueCloseArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(gl_issue_close(ctx.db, self.host.as_deref(), &self.project, self.iid).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gl_issue_reopen",
+    is_side_effectful = true,
+    description = "Reopen a closed issue on a self-hosted GitLab instance. iid is the per-project issue number. host/token via /git-token, project is the full path e.g. `group/repo`."
+)]
+pub struct GlIssueReopenArgs {
+    /// GitLab hostname, e.g. `gitlab.example.com`. Optional when exactly one
+    /// host is configured via /git-token.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Full project path, e.g. `group/repo`.
+    pub project: String,
+    /// Issue number within the project.
+    pub iid: u64,
+}
+
+impl GlIssueReopenArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(gl_issue_reopen(ctx.db, self.host.as_deref(), &self.project, self.iid).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gl_mr_close",
+    is_side_effectful = true,
+    description = "Close a merge request on a self-hosted GitLab instance WITHOUT merging it. To merge, use gl_mr_merge. iid is the per-project MR number. host/token via /git-token, project is the full path e.g. `group/repo`."
+)]
+pub struct GlMrCloseArgs {
+    /// GitLab hostname, e.g. `gitlab.example.com`. Optional when exactly one
+    /// host is configured via /git-token.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Full project path, e.g. `group/repo`.
+    pub project: String,
+    /// Merge request number within the project.
+    pub iid: u64,
+}
+
+impl GlMrCloseArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(gl_mr_close(ctx.db, self.host.as_deref(), &self.project, self.iid).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gl_issue_comment",
+    is_side_effectful = true,
+    description = "Post a comment on an issue on a self-hosted GitLab instance. iid is the per-project issue number. host/token via /git-token, project is the full path e.g. `group/repo`."
+)]
+pub struct GlIssueCommentArgs {
+    /// GitLab hostname, e.g. `gitlab.example.com`. Optional when exactly one
+    /// host is configured via /git-token.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Full project path, e.g. `group/repo`.
+    pub project: String,
+    /// Issue number within the project.
+    pub iid: u64,
+    /// Comment body (Markdown).
+    pub body: String,
+}
+
+impl GlIssueCommentArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(gl_issue_comment(ctx.db, self.host.as_deref(), &self.project, self.iid, &self.body).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gl_mr_comment",
+    is_side_effectful = true,
+    description = "Post a comment on a merge request on a self-hosted GitLab instance. iid is the per-project MR number. host/token via /git-token, project is the full path e.g. `group/repo`."
+)]
+pub struct GlMrCommentArgs {
+    /// GitLab hostname, e.g. `gitlab.example.com`. Optional when exactly one
+    /// host is configured via /git-token.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Full project path, e.g. `group/repo`.
+    pub project: String,
+    /// Merge request number within the project.
+    pub iid: u64,
+    /// Comment body (Markdown).
+    pub body: String,
+}
+
+impl GlMrCommentArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(gl_mr_comment(ctx.db, self.host.as_deref(), &self.project, self.iid, &self.body).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gl_mr_merge",
+    is_side_effectful = true,
+    description = "Merge a merge request on a self-hosted GitLab instance. GitLab's options are not GitHub's merge_method: squash is a boolean, and when_pipeline_succeeds queues the merge behind a green pipeline instead of merging now. iid is the per-project MR number. host/token via /git-token, project is the full path e.g. `group/repo`."
+)]
+pub struct GlMrMergeArgs {
+    /// GitLab hostname, e.g. `gitlab.example.com`. Optional when exactly one
+    /// host is configured via /git-token.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Full project path, e.g. `group/repo`.
+    pub project: String,
+    /// Merge request number within the project.
+    pub iid: u64,
+    /// Squash the MR's commits into one. Default false.
+    #[serde(default)]
+    pub squash: bool,
+    /// Queue the merge until the pipeline passes instead of merging now. Default false.
+    #[serde(default)]
+    pub when_pipeline_succeeds: bool,
+    /// Delete the source branch after merging. Default false.
+    #[serde(default)]
+    pub remove_source_branch: bool,
+}
+
+impl GlMrMergeArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(gl_mr_merge(
+            ctx.db,
+            self.host.as_deref(),
+            &self.project,
+            self.iid,
+            self.squash,
+            self.when_pipeline_succeeds,
+            self.remove_source_branch,
+        )
+        .await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gl_boards",
+    description = "List the issue boards of a project on a self-hosted GitLab instance. Issue boards are GitLab's equivalent of GitHub Projects; note that \"project\" in GitLab means the repository itself. host/token via /git-token, project is the full path e.g. `group/repo`."
+)]
+pub struct GlBoardsArgs {
+    /// GitLab hostname, e.g. `gitlab.example.com`. Optional when exactly one
+    /// host is configured via /git-token.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Full project path, e.g. `group/repo`.
+    pub project: String,
+}
+
+impl GlBoardsArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(gl_boards(ctx.db, self.host.as_deref(), &self.project).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "gl_board_view",
+    description = "View one issue board on a self-hosted GitLab instance: its lists in position order with the label backing each. board_id comes from gl_boards. host/token via /git-token, project is the full path e.g. `group/repo`."
+)]
+pub struct GlBoardViewArgs {
+    /// GitLab hostname, e.g. `gitlab.example.com`. Optional when exactly one
+    /// host is configured via /git-token.
+    #[serde(default)]
+    pub host: Option<String>,
+    /// Full project path, e.g. `group/repo`.
+    pub project: String,
+    /// Board id, as reported by gl_boards.
+    pub board_id: u64,
+}
+
+impl GlBoardViewArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(gl_board_view(ctx.db, self.host.as_deref(), &self.project, self.board_id).await)
     }
 }
 
@@ -4169,6 +4843,113 @@ mod git_token_tests {
             ]
         );
         assert!(github_token_git_args(&None).is_empty());
+    }
+
+    #[test]
+    fn choose_gitlab_host_explicit_wins_and_normalizes() {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("gitlab.a.com".to_string(), "t1".to_string());
+        m.insert("gitlab.b.com".to_string(), "t2".to_string());
+        // Explicit host resolves even when the map is ambiguous.
+        assert_eq!(
+            choose_gitlab_host(Some("https://GitLab.B.com/group/repo.git"), &m),
+            Ok("gitlab.b.com".to_string())
+        );
+        // Blank/whitespace host is treated as absent, not as an empty host.
+        assert!(choose_gitlab_host(Some("   "), &m).is_err());
+    }
+
+    #[test]
+    fn choose_gitlab_host_defaults_to_the_single_configured_host() {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("gitlab.ops.example".to_string(), "t".to_string());
+        assert_eq!(choose_gitlab_host(None, &m), Ok("gitlab.ops.example".to_string()));
+    }
+
+    #[test]
+    fn choose_gitlab_host_never_defaults_to_github() {
+        // github.com rides github_token + the gh_* tools; it must never be
+        // picked as the implicit GitLab host, even when it is the only entry.
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("github.com".to_string(), "ghp_x".to_string());
+        assert!(choose_gitlab_host(None, &m).is_err());
+
+        // With one real GitLab host alongside it, that host wins outright.
+        m.insert("gitlab.ops.example".to_string(), "t".to_string());
+        assert_eq!(choose_gitlab_host(None, &m), Ok("gitlab.ops.example".to_string()));
+    }
+
+    #[test]
+    fn choose_gitlab_host_ambiguity_names_the_candidates() {
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("gitlab.a.com".to_string(), "t1".to_string());
+        m.insert("gitea.b.com:3000".to_string(), "t2".to_string());
+        let err = choose_gitlab_host(None, &m).unwrap_err();
+        assert!(err.contains("gitlab.a.com"), "{err}");
+        assert!(err.contains("gitea.b.com:3000"), "{err}");
+    }
+
+    #[test]
+    fn choose_gitlab_host_empty_map_explains_the_fix() {
+        let m = std::collections::BTreeMap::new();
+        let err = choose_gitlab_host(None, &m).unwrap_err();
+        assert!(err.contains("/git-token"), "{err}");
+    }
+
+    #[test]
+    fn render_gl_notes_filters_system_notes() {
+        // GitLab records "changed the description" churn as system notes;
+        // only human comments belong in the rendered thread.
+        let notes = serde_json::json!([
+            {"system": true,  "body": "changed the description",
+             "author": {"username": "bot"}, "created_at": "2026-01-01T00:00:00Z"},
+            {"system": false, "body": "looks good to me",
+             "author": {"username": "will"}, "created_at": "2026-01-02T00:00:00Z"},
+        ]);
+        let out = render_gl_notes(&notes);
+        assert!(out.contains("Comments (1)"), "{out}");
+        assert!(out.contains("looks good to me"), "{out}");
+        assert!(!out.contains("changed the description"), "{out}");
+        assert!(out.contains("will"), "{out}");
+    }
+
+    #[test]
+    fn render_gl_notes_handles_empty_and_all_system() {
+        assert!(render_gl_notes(&serde_json::json!([])).contains("(no comments)"));
+        let all_system = serde_json::json!([{"system": true, "body": "x"}]);
+        assert!(render_gl_notes(&all_system).contains("(no comments)"));
+        // A non-array (a failed fetch decoded to null) renders nothing, never panics.
+        assert_eq!(render_gl_notes(&serde_json::Value::Null), "");
+    }
+
+    #[test]
+    fn all_fourteen_gl_tools_are_registered() {
+        // gh_* parity set (2026-09-08). gl_boards/gl_board_view deliberately
+        // do NOT mirror gh_project_* by name: in GitLab "project" means the
+        // repository, so board naming avoids a misleading tool name.
+        let names: Vec<&'static str> =
+            crate::tools::registry::all_descriptors().map(|d| d.name).collect();
+        for t in [
+            "gl_issues", "gl_mrs", "gl_issue_create", "gl_mr_create",
+            "gl_issue_view", "gl_mr_view", "gl_issue_close", "gl_issue_reopen",
+            "gl_mr_close", "gl_issue_comment", "gl_mr_comment", "gl_mr_merge",
+            "gl_boards", "gl_board_view",
+        ] {
+            assert!(names.contains(&t), "gl_* tool not registered: {t}");
+        }
+        assert_eq!(names.iter().filter(|n| n.starts_with("gl_")).count(), 14);
+        // Mutating tools must be marked side-effectful so the dispatcher and
+        // the operator-facing surfaces treat them as writes.
+        for d in crate::tools::registry::all_descriptors() {
+            let mutating = matches!(
+                d.name,
+                "gl_issue_create" | "gl_mr_create" | "gl_issue_close" | "gl_issue_reopen"
+                    | "gl_mr_close" | "gl_issue_comment" | "gl_mr_comment" | "gl_mr_merge"
+            );
+            if mutating {
+                assert!(d.is_side_effectful, "{} must be side-effectful", d.name);
+            }
+        }
     }
 
     #[test]

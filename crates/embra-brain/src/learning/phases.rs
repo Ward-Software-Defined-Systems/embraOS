@@ -178,7 +178,7 @@ const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
     ("time_context", "Time & Context", 3),
     ("utility", "Utility", 2),
     ("security", "Security", 6),
-    ("engineering", "Engineering", 37),
+    ("engineering", "Engineering", 47),
     ("filesystem", "Filesystem", 12),
     ("scheduling", "Scheduling", 3),
     ("sessions", "Sessions", 10),
