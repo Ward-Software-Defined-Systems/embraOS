@@ -30,7 +30,11 @@ Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` 
 > working memory to track what they have actually done. Dense models have no such
 > split. Operator-vetted for the full toolset: **`Qwen3.6-27b`** and
 > **`Qwen3.8-27b`** — both dense, so 27B means 27B active. Experiment freely with
-> others; these are the confirmed two.
+> others; these are the confirmed two. This is about the **conversational** model only:
+> the knowledge graph's semantic search uses a separate, much smaller sentence-embedding
+> model that ships inside the image and runs in-process — nothing to pull, configure or
+> pay for, whichever backend you pick, and it stays local even when the conversational
+> model is a hosted API.
 > **[Roster and server configuration →](docs/RECOMMENDED-LOCAL-MODELS.md)**
 
 > **Soul-gated dynamic tools: the replicant check.** *(Experimental.)* The intelligence
@@ -50,14 +54,17 @@ Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` 
 > by conversation: ask the intelligence to remember something, or whether anything from
 > this session is worth promoting — it has `remember` and twelve `knowledge_*` tools and
 > writes the entries itself. Automation is on the near-term roadmap. ***Reading*** is
-> automatic on every turn: tag and IDF-weighted content matching over recency-ranked
-> windows (saturation reported by `system_status`, never silent), plus **semantic
-> similarity from a sentence-embedding model that runs inside the OS** — recall by
-> meaning rather than wording, with no API key, no per-query cost, and no network.
-> Hygiene is tool-assisted (`knowledge_audit` → `knowledge_merge`) and baseline
-> knowledge ships as **seed packs** loaded at every boot. `/feedback-loop`
-> (**experimental**) is a separate concern — self-realignment against identity and
-> soul, not a memory sweep.
+> automatic on every turn, and it is **semantic, not just lexical**: alongside tag and
+> IDF-weighted content matching over recency-ranked windows, a **sentence-embedding
+> model runs inside the OS** and ranks memories by meaning rather than wording. Measured
+> against a production graph of 2,388 nodes, the memory that actually answered a
+> question — phrased nowhere near it — ranked **282nd** under keyword search and
+> **1st** with embeddings. It needs no API key, costs nothing per query, sends nothing
+> off the machine, and works with the network down; `/embeddings` reports status and
+> runs the backfill. Hygiene is tool-assisted (`knowledge_audit` → `knowledge_merge`)
+> and baseline knowledge ships as **seed packs** loaded at every boot. `/feedback-loop`
+> (**experimental**) is a separate concern — self-realignment against identity and soul,
+> not a memory sweep.
 > **[Data model and retrieval pipeline →](docs/KNOWLEDGE-GRAPH.md)**
 
 ---
