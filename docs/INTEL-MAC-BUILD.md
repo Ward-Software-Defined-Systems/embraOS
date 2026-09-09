@@ -229,6 +229,13 @@ provider + credentials, timezone), then Learning Mode forms and seals the soul.
 > network for this and adds ~100 MB to the image. Override the pin with
 > `RUST_TOOLCHAIN_VERSION=...`.
 
+> **Embedding model (Step 3.6):** Downloads `BAAI/bge-small-en-v1.5` (~133 MB, SHA-256-verified) into
+> `vendor/embedding-model` and bakes it into the rootfs for in-process semantic KG retrieval.
+> Runs **natively on macOS** like Step 3.5 — only Step 4 (Buildroot) goes to Docker — so it needs
+> Homebrew's GNU coreutils on `PATH` for `sha256sum`, the same prerequisite Step 3.5 already has.
+> The build fails if the model is missing from the rootfs rather than shipping an image whose
+> retrieval silently falls back to keyword-only.
+
 > **Port forwarding:** QEMU forwards 50000 (gRPC) and 8443 (REST); in the
 > default web-console mode it also forwards 3345 (HTTPS —
 > https://localhost:3345/embraOS). Test:

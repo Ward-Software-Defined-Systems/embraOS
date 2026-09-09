@@ -171,6 +171,12 @@ Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, LLM p
 > rides the `-v "$PWD":/work` bind mount. First build needs network for this and adds
 > ~100 MB to the image. Override the pin with `RUST_TOOLCHAIN_VERSION=...`.
 
+> **Embedding model (Step 3.6):** Downloads `BAAI/bge-small-en-v1.5` (~133 MB, SHA-256-verified) into
+> `vendor/embedding-model` and bakes it into the rootfs for in-process semantic KG retrieval.
+> Architecture-independent — the same bytes serve x86_64 and aarch64 — and, like Step 3.5, it is
+> **skipped on macOS** and run by the Docker Buildroot pass instead. The build fails if the model is
+> missing from the rootfs rather than shipping keyword-only retrieval.
+
 > **Port forwarding:** QEMU forwards 50000 (gRPC) and 8443 (REST); in the default
 > web-console mode it also forwards 3345 (HTTPS — https://localhost:3345/embraOS). Test:
 > ```bash

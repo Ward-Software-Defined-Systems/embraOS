@@ -72,9 +72,12 @@ under `metadata.origin` (`identity_import` for the sealed graph,
   runtime mutation.
 - **Deliberately absent from bulk retrieval.** Identity nodes are not in
   enrichment's prefetch — the full sealed graph already rides the system
-  prompt. They surface through graph expansion (a memory linked to a
-  value pulls the value in, with a proper preview) and through
-  `knowledge_traverse` / `knowledge_dump` (`identity` collection).
+  prompt. Since graph expansion was removed from retrieval (2026-09-08)
+  they no longer surface there at all, which is the intended state: they
+  also carry `tags: []`, so they could never produce a tag hit, and they
+  are not embedded. They remain reachable through `knowledge_traverse` /
+  `knowledge_dump` (`identity` collection) and through the projected
+  `memory.edges`.
 
 ## Prompt rendering
 
