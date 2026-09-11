@@ -42,7 +42,7 @@ Model:
   /model <opus-5|opus-4.8|fable-5>       Switch the Anthropic model (next message)
   /effort                                Show the Anthropic effort level
   /effort <low|medium|high|xhigh|max>    Set effort (default max, next message)
-  /embeddings                            Show the semantic-similarity layer: model, index, coverage
+  /embeddings                            Show the semantic-similarity layer: model, index, nodes embedded
   /embeddings <on|off>                   Enable/disable semantic similarity in retrieval (default on)
   /embeddings backfill [--force]         Embed nodes that need it (local, ~55ms/node)
 

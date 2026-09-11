@@ -53,13 +53,16 @@ pub fn embed_text(doc: &serde_json::Value, collection: &str) -> String {
 /// Embed one node and patch the three additive fields onto it.
 ///
 /// Best-effort by construction: every failure path logs and returns. Callers
-/// invoke this AFTER the document is durably written.
+/// invoke this AFTER the document is durably written, and say whether the
+/// document is NEW (promotion, seed insert) or an existing one being
+/// re-embedded — see `cache::upsert`.
 pub async fn embed_node(
     db: &WardsonDbClient,
     cfg: &SystemConfig,
     collection: &str,
     id: &str,
     doc: &serde_json::Value,
+    new_document: bool,
 ) {
     let Some(provider) = super::provider(cfg).await else { return };
     let text = embed_text(doc, collection);
@@ -86,7 +89,7 @@ pub async fn embed_node(
         tracing::warn!(target: "kg::embedding", "storing embedding for {collection}:{id} failed: {e}");
         return;
     }
-    cache::upsert(collection, id, vector, &model).await;
+    cache::upsert(collection, id, vector, &model, new_document).await;
 }
 
 /// Drop a node's vector from the index. Called where nodes are deleted.

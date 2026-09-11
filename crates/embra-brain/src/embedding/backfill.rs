@@ -26,27 +26,47 @@ pub struct BackfillReport {
     pub already_current: usize,
 }
 
-/// What a backfill would do, without doing it: `(needing_work, total)`.
-pub async fn survey(db: &WardsonDbClient, model: &str, force: bool) -> (usize, usize) {
-    let mut needed = 0usize;
-    let mut total = 0usize;
+/// Fields the coverage survey fetches. An INCLUSION list, and it MUST cover
+/// every field `is_current` reads: a projected document simply lacks any
+/// field not named here, so a missing one makes `is_current` return false
+/// for every node and the operator sees `0/N embedded` forever — which is
+/// exactly the defect this shipped with (the list held only `embedding_model`
+/// while `is_current` also required `embedding`). Pinned by
+/// `survey_projection_covers_every_field_is_current_reads`.
+const SURVEY_FIELDS: [&str; 2] = ["embedding", "embedding_model"];
+
+/// How much of each embedded collection carries a current vector.
+#[derive(Debug, Default, Clone)]
+pub struct Coverage {
+    /// `(collection, embedded, total)` in `EMBEDDED_COLLECTIONS` order.
+    pub per_collection: Vec<(&'static str, usize, usize)>,
+}
+
+impl Coverage {
+    pub fn embedded(&self) -> usize {
+        self.per_collection.iter().map(|c| c.1).sum()
+    }
+    pub fn total(&self) -> usize {
+        self.per_collection.iter().map(|c| c.2).sum()
+    }
+    pub fn needed(&self) -> usize {
+        self.total().saturating_sub(self.embedded())
+    }
+}
+
+/// Truthful coverage, read from disk. Reports what IS embedded; callers that
+/// want to re-embed everything (`--force`) decide that themselves.
+pub async fn survey(db: &WardsonDbClient, model: &str) -> Coverage {
+    let mut cov = Coverage::default();
     for coll in EMBEDDED_COLLECTIONS {
         let docs = db
-            .fetch_recent_with_fields(
-                coll,
-                crate::db::MEMORY_FETCH_WINDOW,
-                Some(&["embedding_model"]),
-            )
+            .fetch_recent_with_fields(coll, crate::db::MEMORY_FETCH_WINDOW, Some(&SURVEY_FIELDS))
             .await
             .unwrap_or_default();
-        total += docs.len();
-        for d in &docs {
-            if force || !is_current(d, model) {
-                needed += 1;
-            }
-        }
+        let embedded = docs.iter().filter(|d| is_current(d, model)).count();
+        cov.per_collection.push((coll, embedded, docs.len()));
     }
-    (needed, total)
+    cov
 }
 
 /// A document is current when it carries a vector produced by THIS model.
@@ -104,7 +124,7 @@ where
                         tracing::warn!(target: "kg::embedding", "backfill store {coll}:{id}: {e}");
                         report.failed += 1;
                     } else {
-                        cache::upsert(coll, id, vector, &model).await;
+                        cache::upsert(coll, id, vector, &model, false).await;
                         report.embedded += 1;
                     }
                 }
@@ -130,6 +150,38 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn survey_projection_covers_every_field_is_current_reads() {
+        // The bug class this guards: a reader that checks a field the
+        // projection never fetches. Scan `is_current`'s own source.
+        let src = include_str!("backfill.rs");
+        let start = src.find("fn is_current(").expect("is_current present");
+        let body = &src[start..src[start..].find("\n}\n").map(|i| start + i).unwrap()];
+        let mut missing = Vec::new();
+        let mut rest = body;
+        while let Some(i) = rest.find(".get(\"") {
+            rest = &rest[i + 6..];
+            let end = rest.find('"').unwrap();
+            let field = &rest[..end];
+            if !SURVEY_FIELDS.contains(&field) && !missing.contains(&field) {
+                missing.push(field);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "is_current reads {missing:?} but SURVEY_FIELDS does not fetch them — \
+             every node would report as unembedded"
+        );
+    }
+
+    #[test]
+    fn a_projected_document_with_only_the_model_field_is_not_current() {
+        // Exactly the shape the old projection returned: model present, vector
+        // absent. It must NOT count as embedded — and SURVEY_FIELDS must
+        // therefore fetch the vector too (guarded above).
+        assert!(!is_current(&json!({"_id": "n", "embedding_model": "m"}), "m"));
+    }
 
     #[test]
     fn currency_requires_both_a_vector_and_a_matching_model() {

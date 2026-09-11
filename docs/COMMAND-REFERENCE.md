@@ -38,9 +38,9 @@ Every slash command available in an embraOS session, grouped as in the web conso
 | `/model <opus-5\|opus-4.8\|fable-5>` | Switch the Anthropic model (Anthropic provider only; default opus-5). Persists to `SystemConfig.anthropic_model`; takes effect on the next user message — the provider is rebuilt per turn. The `EMBRA_ANTHROPIC_MODEL` env var takes precedence over the persisted value. Switching models is a one-time prompt-cache reset (caches are model-scoped). The legacy persisted `opus-4.7` value keeps working but is no longer selectable |
 | `/effort` | Show the Anthropic `output_config.effort` level (default `max`) |
 | `/effort <low\|medium\|high\|xhigh\|max>` | Set the Anthropic effort level (Anthropic provider only). Persists to `SystemConfig.anthropic_effort`; takes effect on the next user message. The `EMBRA_ANTHROPIC_EFFORT` env var takes precedence. Lower effort trades depth for latency/cost — relevant on Fable 5, where `max`-effort turns can run many minutes |
-| `/embeddings` | Show the local semantic-similarity layer: whether it is enabled, the model, where the model was found (`env` / `state` / `rootfs`), how many vectors are indexed, and how much of the corpus is embedded |
+| `/embeddings` | Show the local semantic-similarity layer: whether it is enabled, the model, where the model was found (`env` / `state` / `rootfs`), how many vectors the in-memory index holds, and how many nodes are embedded, per collection |
 | `/embeddings on` \| `off` | Enable or disable semantic similarity in retrieval. Persists to `SystemConfig.embedding_enabled`; takes effect on the next message. Disabled, retrieval falls back to lexical matching with no other change |
-| `/embeddings backfill [--force]` | Embed every node that needs it — missing a vector, or carrying one from a different model. Runs locally (~55 ms/node measured; ~2 min for a 2,300-node corpus), reports progress, and is resumable: the work set is re-derived from disk on each run. `--force` re-embeds everything |
+| `/embeddings backfill [--force]` | Embed every node that needs it — missing a vector, or carrying one from a different model. Runs locally (~55 ms/node measured; ~2 min for 2,300 nodes), reports progress, and is resumable: the work set is re-derived from disk on each run. `--force` re-embeds everything |
 
 ## Media
 

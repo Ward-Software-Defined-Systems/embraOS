@@ -424,7 +424,7 @@ pub async fn knowledge_update(params: &str, db: &WardsonDbClient, config: &Syste
         .any(|f| matches!(f.as_str(), "content" | "title" | "description" | "preconditions" | "steps"))
         && let Ok(updated) = db.read(coll, id).await
     {
-        crate::embedding::write::embed_node(db, config, coll, id, &updated).await;
+        crate::embedding::write::embed_node(db, config, coll, id, &updated, false).await;
     }
 
     let preview_src = existing

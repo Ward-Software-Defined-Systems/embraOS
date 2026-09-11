@@ -588,7 +588,7 @@ async fn reconcile_pack(
                     // honour, so skip rather than guess.
                     if let Some(cfg) = config {
                         crate::embedding::write::embed_node(
-                            db, cfg, node.collection(), &node.id, &doc,
+                            db, cfg, node.collection(), &node.id, &doc, true,
                         )
                         .await;
                     }

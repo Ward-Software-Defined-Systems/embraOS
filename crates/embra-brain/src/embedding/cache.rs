@@ -143,17 +143,24 @@ pub async fn search(query: &[f32], top_k: usize, min_similarity: f32) -> Vec<(St
     hits
 }
 
-/// Write-through from the embed-on-write paths, so a freshly promoted node is
+/// Write-through from the embed-on-write paths, so a freshly embedded node is
 /// searchable on the very next turn without waiting for a count divergence.
-pub async fn upsert(collection: &str, id: &str, vector: Vec<f32>, model: &str) {
+///
+/// `new_document` says whether the node was just CREATED (promotion, seed
+/// insert) or merely re-embedded (backfill, `knowledge_update`, merge). The
+/// index tracks per-collection document counts to detect out-of-band change,
+/// and only a new document moves that count; bumping it on a re-embed — the
+/// original behaviour — desynced the count after every backfill and forced a
+/// full reload on the next turn.
+pub async fn upsert(collection: &str, id: &str, vector: Vec<f32>, model: &str, new_document: bool) {
     let mut idx = index().await.write().await;
     // Only meaningful once loaded and only for the model in play; otherwise
     // the next `ensure_current` picks it up from disk anyway.
     if idx.loaded && idx.model == model {
         idx.vecs.insert((collection.to_string(), id.to_string()), vector);
-        // The document count changed too — record it so the write does not
-        // immediately trigger a full reload.
-        *idx.counts.entry(collection.to_string()).or_insert(0) += 1;
+        if new_document {
+            *idx.counts.entry(collection.to_string()).or_insert(0) += 1;
+        }
     }
 }
 
@@ -181,8 +188,13 @@ pub async fn score_keys(
         .collect()
 }
 
-/// `(vectors, model)` for operator-facing status.
-pub async fn stats() -> (usize, String) {
+/// `(vectors, model)` for operator-facing status — AFTER bringing the index
+/// current. The index loads lazily on first retrieval, so a status read taken
+/// before any turn on a fresh boot would otherwise honestly report an empty
+/// index as "0 vectors" and look like a lost backfill. Taking the loader here
+/// makes that misreport impossible to reintroduce.
+pub async fn stats(db: &WardsonDbClient, provider: &dyn EmbeddingProvider) -> (usize, String) {
+    ensure_current(db, provider).await;
     let idx = index().await.read().await;
     (idx.vecs.len(), idx.model.clone())
 }

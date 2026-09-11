@@ -339,3 +339,4 @@ mod tests {
         assert_eq!(resolve_model_dir_inner(None, None, None), None);
     }
 }
+
