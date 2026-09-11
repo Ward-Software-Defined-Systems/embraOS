@@ -48,8 +48,20 @@ impl LocalEmbeddingProvider {
         let tok_path = dir.join("tokenizer.json");
         let onnx_path = dir.join("model.onnx");
 
-        let tokenizer = Tokenizer::from_file(&tok_path)
+        let mut tokenizer = Tokenizer::from_file(&tok_path)
             .map_err(|e| EmbeddingError::ModelLoad(format!("{}: {e}", tok_path.display())))?;
+        // The shipped tokenizer.json carries `truncation: null`, so on its own
+        // the tokenizer never truncates — and cutting the RAW token list at
+        // MAX_TOKENS afterwards drops the trailing [SEP] on any node longer
+        // than ~510 content tokens, which the model was trained to expect.
+        // Configured here, the tokenizer trims CONTENT to fit and re-applies
+        // [CLS]/[SEP] itself. Pinned by `long_input_truncates_to_window_and_keeps_sep`.
+        tokenizer
+            .with_truncation(Some(tokenizers::TruncationParams {
+                max_length: MAX_TOKENS,
+                ..Default::default()
+            }))
+            .map_err(|e| EmbeddingError::ModelLoad(format!("truncation config: {e}")))?;
 
         let mut model = tract_onnx::onnx()
             .model_for_path(&onnx_path)
@@ -95,6 +107,8 @@ impl Inner {
             .encode(text, true)
             .map_err(|e| EmbeddingError::Tokenize(e.to_string()))?;
 
+        // Truncation is configured on the tokenizer at load, so this cap is a
+        // guard that should never bind; it only matters if that config is lost.
         let take = |v: &[u32]| -> Vec<i64> {
             v.iter().take(MAX_TOKENS).map(|&x| x as i64).collect()
         };
@@ -207,6 +221,31 @@ mod tests {
         assert_eq!(v.len(), EMBEDDING_DIM);
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-4, "must be L2-normalized, got {norm}");
+    }
+
+    #[test]
+    #[ignore]
+    fn long_input_truncates_to_window_and_keeps_sep() {
+        // A node longer than the window must be trimmed to exactly MAX_TOKENS
+        // with [CLS] first and [SEP] last. Cutting the raw id list instead
+        // silently drops the terminator — the defect this pins.
+        let Some(dir) = model_dir() else { return };
+        let p = LocalEmbeddingProvider::load(&dir, "test").expect("loads");
+        let tok = &p.inner.tokenizer;
+        let cls = tok.token_to_id("[CLS]").expect("[CLS] in vocab");
+        let sep = tok.token_to_id("[SEP]").expect("[SEP] in vocab");
+        let long = "knowledge graph retrieval ".repeat(400); // well over 512 tokens
+        let enc = tok.encode(long.as_str(), true).expect("encodes");
+        let ids = enc.get_ids();
+        assert_eq!(ids.len(), MAX_TOKENS, "trimmed to the window, not beyond it");
+        assert_eq!(ids[0], cls, "[CLS] first");
+        assert_eq!(*ids.last().unwrap(), sep, "[SEP] last — content is trimmed, never the terminator");
+        // A short input is untouched.
+        let short = tok.encode("hello world", true).expect("encodes");
+        assert!(short.get_ids().len() < MAX_TOKENS);
+        assert_eq!(*short.get_ids().last().unwrap(), sep);
+        // And the forward pass accepts exactly the window.
+        assert_eq!(p.inner.embed_blocking(&long).expect("embeds").len(), EMBEDDING_DIM);
     }
 
     #[test]

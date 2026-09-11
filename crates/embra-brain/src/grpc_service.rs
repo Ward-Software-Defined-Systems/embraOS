@@ -4860,7 +4860,9 @@ async fn handle_embeddings_command(
                     // that has not yet run a retrieval never misreports an
                     // empty in-memory index as a lost backfill.
                     let (vectors, m) = crate::embedding::cache::stats(db, provider.as_ref()).await;
-                    let cov = crate::embedding::backfill::survey(db, &model).await;
+                    // The loaded provider's id, not the config field: they can only
+                    // drift if config changes after load, and then the index is the truth.
+                    let cov = crate::embedding::backfill::survey(db, provider.model_id()).await;
                     out.push_str(&format!(
                         "  loaded:   yes ({} dims)\n  index:    {} vectors in memory{}\n  nodes:    {}/{} embedded",
                         crate::embedding::EMBEDDING_DIM,
@@ -4918,7 +4920,11 @@ async fn handle_embeddings_command(
                 .await;
                 return;
             }
-            let model = crate::embedding::model_id(&cfg);
+            let Some(provider) = crate::embedding::provider(&cfg).await else {
+                send("No embedding model available — see /embeddings".to_string(), SystemMessageType::Error).await;
+                return;
+            };
+            let model = provider.model_id().to_string();
             let cov = crate::embedding::backfill::survey(db, &model).await;
             let total = cov.total();
             let needed = if force { total } else { cov.needed() };

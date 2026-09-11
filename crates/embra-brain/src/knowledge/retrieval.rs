@@ -143,7 +143,7 @@ pub async fn retrieve_relevant_knowledge(
     tags: &[String],
     query_text: &str,
     max_results: usize,
-    _config: &SystemConfig,
+    config: &SystemConfig,
 ) -> Result<(Vec<RankedNode>, RetrievalStats)> {
     let mut collected: HashMap<(String, String), Collected> = HashMap::new();
     let query_tokens = content_tokens(query_text);
@@ -282,7 +282,7 @@ pub async fn retrieve_relevant_knowledge(
     // result above, silently and by design.
     let mut embedding_candidates = 0usize;
     if !query_text.trim().is_empty()
-        && let Some(provider) = crate::embedding::provider(_config).await
+        && let Some(provider) = crate::embedding::provider(config).await
     {
         {
             crate::embedding::cache::ensure_current(db, provider.as_ref()).await;
