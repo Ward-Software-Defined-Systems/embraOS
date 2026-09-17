@@ -131,7 +131,7 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 }
 
 // Single source of truth for Phase 4 tool category counts.
-// (json_key, display_label, count). Sums to 106 — matches the descriptor count
+// (json_key, display_label, count). Sums to 116 — matches the descriptor count
 // in `tools::registry::REGISTRY` (guarded by
 // `category_counts_sum_matches_registry` below). Aliases (`memory_search`,
 // `search_memory`, `file_rename`, `rmdir`) are folded into their target's
