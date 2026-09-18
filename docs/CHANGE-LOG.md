@@ -19,7 +19,7 @@ Chronological merge log for `main`, anchored on tagged releases. Each entry's he
 | `v0.7.0-phase1` | 2026-07-05 | `bb1bd89` | The memory/KG search-window fixes + retrieval perf rework (`knowledge_query` 5–8 min → ~2 s), `knowledge_dump` + `data_file` + the `kg_scan` example; the embra-web console promoted to stable |
 | `v0.6.0-phase1` | 2026-06-13 | `c17e852` | First Zenodo-archived release (`CITATION.cff` + `.zenodo.json`); guardian self-authoring + the replicant check, the feedback-loop spec v2.2 |
 
-The Sprint 6 close-out wave (2026-09-17, below) and the 2026-09-18 documentation-currency pass were tagged together as `v0.15.0-phase1`.
+The Sprint 6 close-out wave (2026-09-17, below) and the 2026-09-18 documentation-currency pass were tagged together as `v0.15.0-phase1`. `phase1-sprint6` retired the same day (deleted local + origin, fully merged) and the code-review pit stop opened as branch `code-review` from `main` @ `4d942a7`.
 
 ---
 
