@@ -417,6 +417,7 @@ impl BrainService for BrainGrpcService {
                     gemini_model: None,
                     anthropic_model: None,
                     anthropic_effort: None,
+                    gemini_effort: None,
                     embedding_enabled: None,
                     embedding_model: None,
                     image_provider: None,
@@ -879,6 +880,7 @@ async fn handle_request(
                 gemini_model: None,
                 anthropic_model: None,
                 anthropic_effort: None,
+                gemini_effort: None,
                 embedding_enabled: None,
                 embedding_model: None,
                 image_provider: None,
@@ -2330,7 +2332,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-5|opus-4.8|fable-5>   Switch the Anthropic model (next message)\n  /effort                            Show the Anthropic effort level\n  /effort <low|medium|high|xhigh|max>  Set effort (default max, next message)\n  /embeddings                        Show the local semantic-similarity layer: model, index, how many nodes are embedded\n  /embeddings <on|off>               Enable or disable semantic similarity in retrieval (default on)\n  /embeddings backfill [--force]     Embed nodes that need it (local CPU, ~55ms/node); --force re-embeds all\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image (uploaded id or a workspace path) to your next message\n  /attach list | clear               Show or drop the staged images\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-3-pro-image (default) | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-5|opus-4.8|fable-5>   Switch the Anthropic model (next message)\n  /effort                            Show the active provider's effort level and what is sent\n  /effort <low|medium|high|xhigh|max>  Set effort for the active provider (Anthropic default max; Gemini high; local presets: sent verbatim, model-validated); /effort reset clears\n  /embeddings                        Show the local semantic-similarity layer: model, index, how many nodes are embedded\n  /embeddings <on|off>               Enable or disable semantic similarity in retrieval (default on)\n  /embeddings backfill [--force]     Embed nodes that need it (local CPU, ~55ms/node); --force re-embeds all\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image (uploaded id or a workspace path) to your next message\n  /attach list | clear               Show or drop the staged images\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-3-pro-image (default) | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -3711,11 +3713,7 @@ fn build_openai_compat_provider(
             preset.label()
         )
     })?;
-    let bearer_env = match preset {
-        OpenAiCompatPreset::Ollama => "EMBRA_OLLAMA_BEARER",
-        OpenAiCompatPreset::LmStudio => "EMBRA_LM_STUDIO_BEARER",
-    };
-    let bearer = std::env::var(bearer_env)
+    let bearer = std::env::var(bearer_env_var(preset))
         .ok()
         .filter(|s| !s.is_empty());
     let provider = match preset {
@@ -3726,7 +3724,11 @@ fn build_openai_compat_provider(
             OpenAICompatProvider::lm_studio(endpoint.to_string(), bearer, model.to_string())
         }
     };
-    Ok(Arc::new(provider))
+    // `/effort` override for this preset, sent verbatim when set; `None`
+    // keeps the per-model auto-map (byte-identical default).
+    Ok(Arc::new(
+        provider.with_reasoning_effort(resolve_provider_effort(kind, config)),
+    ))
 }
 
 /// Build the active LLM provider from persisted config. Shared by the
@@ -3752,7 +3754,8 @@ pub(crate) fn build_provider_from_config(
     match kind {
         ProviderKind::Gemini => {
             let model_id = resolve_gemini_model_id(cfg);
-            let p = GeminiProvider::with_model(active_key, model_id);
+            let p = GeminiProvider::with_model(active_key, model_id)
+                .with_effort(resolve_provider_effort(ProviderKind::Gemini, cfg));
             let p = match gemini_cache_db {
                 Some(db) => p.with_cache(db),
                 None => p,
@@ -4528,7 +4531,7 @@ fn normalize_anthropic_model(s: &str) -> (String, String) {
 /// Unlike the model resolver there is NO unknown-value passthrough — an
 /// unrecognized effort would 400 every turn, and unlike model ids the
 /// value set is stable across models, so strictness costs nothing.
-fn parse_anthropic_effort_choice(s: &str) -> Option<&'static str> {
+fn parse_effort_choice(s: &str) -> Option<&'static str> {
     match s.trim().to_ascii_lowercase().as_str() {
         "low" => Some("low"),
         "medium" => Some("medium"),
@@ -4553,9 +4556,48 @@ fn resolve_anthropic_effort_inner(env: Option<&str>, cfg_field: Option<&str>) ->
     [env, cfg_field]
         .into_iter()
         .flatten()
-        .find_map(parse_anthropic_effort_choice)
+        .find_map(parse_effort_choice)
         .unwrap_or("max")
         .to_string()
+}
+
+/// The operator's effort posture for `kind`, on the canonical ladder.
+/// Anthropic always resolves (default `max`). For the other providers
+/// `None` means "provider default" — Gemini `high`, OpenAI-compat the
+/// per-model auto-map — which keeps every request byte-identical to
+/// before the knob existed. Precedence env (`EMBRA_GEMINI_EFFORT` /
+/// `EMBRA_OLLAMA_EFFORT` / `EMBRA_LM_STUDIO_EFFORT`, dev-only: embrad
+/// plumbs none of them) > config; invalid values fall through.
+fn resolve_provider_effort(kind: ProviderKind, cfg: &config::SystemConfig) -> Option<String> {
+    let (env_name, cfg_field) = match kind {
+        ProviderKind::Anthropic => return Some(resolve_anthropic_effort(cfg)),
+        ProviderKind::Gemini => ("EMBRA_GEMINI_EFFORT", cfg.gemini_effort.as_deref()),
+        ProviderKind::Ollama => ("EMBRA_OLLAMA_EFFORT", cfg.openai_compat.ollama_effort.as_deref()),
+        ProviderKind::LmStudio => (
+            "EMBRA_LM_STUDIO_EFFORT",
+            cfg.openai_compat.lm_studio_effort.as_deref(),
+        ),
+    };
+    let env_override = std::env::var(env_name).ok();
+    resolve_optional_effort_inner(env_override.as_deref(), cfg_field)
+}
+
+fn resolve_optional_effort_inner(env: Option<&str>, cfg_field: Option<&str>) -> Option<String> {
+    [env, cfg_field]
+        .into_iter()
+        .flatten()
+        .find_map(parse_effort_choice)
+        .map(str::to_string)
+}
+
+/// Persist an effort level (or clear it) into the active provider's field.
+fn set_effort_field(cfg: &mut config::SystemConfig, kind: ProviderKind, level: Option<String>) {
+    match kind {
+        ProviderKind::Anthropic => cfg.anthropic_effort = level,
+        ProviderKind::Gemini => cfg.gemini_effort = level,
+        ProviderKind::Ollama => cfg.openai_compat.ollama_effort = level,
+        ProviderKind::LmStudio => cfg.openai_compat.lm_studio_effort = level,
+    }
 }
 
 /// `/model [<opus-5|opus-4.8|fable-5>]` — show or switch the Anthropic
@@ -5139,6 +5181,10 @@ async fn handle_effort_command(
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
     db: &Arc<WardsonDbClient>,
 ) {
+    use crate::provider::gemini::{thinking_level_for, THINKING_LEVEL};
+    use crate::provider::openai_compat::{
+        known_effort_ladder, reasoning_effort_for_model, OpenAiCompatPreset,
+    };
     let send = |content: String, kind: SystemMessageType| {
         let tx = tx.clone();
         async move {
@@ -5167,41 +5213,103 @@ async fn handle_effort_command(
         }
     };
 
-    let active = cfg.api_provider.clone();
+    let kind = ProviderKind::from_str(&cfg.api_provider).unwrap_or(ProviderKind::Anthropic);
+    let label = match kind {
+        ProviderKind::Anthropic => "Anthropic",
+        ProviderKind::Gemini => "Gemini",
+        ProviderKind::Ollama => "Ollama",
+        ProviderKind::LmStudio => "LM Studio",
+    };
+    let preset = match kind {
+        ProviderKind::Ollama => Some(OpenAiCompatPreset::Ollama),
+        ProviderKind::LmStudio => Some(OpenAiCompatPreset::LmStudio),
+        _ => None,
+    };
+    let local_model: Option<String> = preset.and_then(|p| {
+        cfg.openai_compat
+            .for_preset(p)
+            .map(|(_, model)| model.to_string())
+    });
     let trimmed = args.trim();
 
-    // No args → show current effort + options.
+    // No args → show the ACTIVE provider's posture, its default, and the
+    // wire value it maps to.
     if trimmed.is_empty() {
-        let current = resolve_anthropic_effort(&cfg);
-        let msg = if active == "anthropic" {
-            format!(
-                "Anthropic effort: {current}. Options: low, medium, high, xhigh, max \
-                 (default max). Use `/effort high` to switch (takes effect on your \
-                 next message)."
-            )
-        } else {
-            format!(
-                "`/effort` tunes the Anthropic provider only; active provider is \
-                 '{active}'. Current Anthropic effort: {current}."
-            )
+        let msg = match kind {
+            ProviderKind::Anthropic => {
+                let current = resolve_anthropic_effort(&cfg);
+                format!(
+                    "Anthropic effort: {current}. Options: low, medium, high, xhigh, max \
+                     (default max). Use `/effort high` to switch (takes effect on your \
+                     next message); `/effort reset` restores the default."
+                )
+            }
+            ProviderKind::Gemini => {
+                let level = resolve_provider_effort(kind, &cfg);
+                let wire = level
+                    .as_deref()
+                    .map(thinking_level_for)
+                    .unwrap_or(THINKING_LEVEL);
+                let shown = level
+                    .clone()
+                    .unwrap_or_else(|| format!("not set (default {THINKING_LEVEL})"));
+                format!(
+                    "Gemini effort: {shown} — sent as thinkingLevel={wire}. Options: low, \
+                     medium, high, xhigh, max (xhigh and max send high, Gemini 3.1 Pro's \
+                     ceiling). `/effort <level>` takes effect on your next message; \
+                     `/effort reset` restores the default."
+                )
+            }
+            ProviderKind::Ollama | ProviderKind::LmStudio => {
+                let level = resolve_provider_effort(kind, &cfg);
+                let sent = match (&level, &local_model) {
+                    (Some(l), _) => format!("sent as reasoning_effort={l}"),
+                    (None, Some(m)) => match reasoning_effort_for_model(m) {
+                        Some(auto) => format!(
+                            "not set — embraOS sends reasoning_effort={auto} for {m} automatically"
+                        ),
+                        None => format!(
+                            "not set — nothing is sent for {m}; the server's per-model default applies"
+                        ),
+                    },
+                    (None, None) => "not set (no model configured)".to_string(),
+                };
+                let hint = local_model
+                    .as_deref()
+                    .and_then(|m| known_effort_ladder(m).map(|l| (m, l)))
+                    .map(|(m, l)| format!(" {m} documents: {}.", l.join(", ")))
+                    .unwrap_or_default();
+                let shown = level.clone().unwrap_or_else(|| "not set".to_string());
+                format!(
+                    "{label} effort: {shown} — {sent}.{hint} Options: low, medium, high, \
+                     xhigh, max — sent verbatim; the server validates. `/effort <level>` \
+                     takes effect on your next message; `/effort reset` clears the override."
+                )
+            }
         };
         send(msg, SystemMessageType::Info).await;
         return;
     }
 
-    if active != "anthropic" {
+    if trimmed.eq_ignore_ascii_case("reset") {
+        set_effort_field(&mut cfg, kind, None);
+        if let Err(e) = config::save_config(&**db, &cfg).await {
+            send(
+                format!("/effort: failed to save: {e}"),
+                SystemMessageType::Error,
+            )
+            .await;
+            return;
+        }
         send(
-            format!(
-                "`/effort` currently tunes only the Anthropic provider. Active \
-                 provider is '{active}'."
-            ),
-            SystemMessageType::Error,
+            format!("{label} effort reset to the default. Takes effect on your next message."),
+            SystemMessageType::Info,
         )
         .await;
         return;
     }
 
-    let Some(level) = parse_anthropic_effort_choice(trimmed) else {
+    let Some(level) = parse_effort_choice(trimmed) else {
         send(
             format!(
                 "'{trimmed}' is not a recognized effort level. Options: low, medium, \
@@ -5213,7 +5321,7 @@ async fn handle_effort_command(
         return;
     };
 
-    cfg.anthropic_effort = Some(level.to_string());
+    set_effort_field(&mut cfg, kind, Some(level.to_string()));
     if let Err(e) = config::save_config(&**db, &cfg).await {
         send(
             format!("/effort: failed to save: {e}"),
@@ -5223,11 +5331,70 @@ async fn handle_effort_command(
         return;
     }
 
-    send(
-        format!("Anthropic effort set to {level}. Takes effect on your next message."),
-        SystemMessageType::Info,
-    )
-    .await;
+    match kind {
+        ProviderKind::Anthropic => {
+            send(
+                format!("Anthropic effort set to {level}. Takes effect on your next message."),
+                SystemMessageType::Info,
+            )
+            .await;
+        }
+        ProviderKind::Gemini => {
+            let wire = thinking_level_for(level);
+            send(
+                format!(
+                    "Gemini effort set to {level} (sent as thinkingLevel={wire}). Takes \
+                     effect on your next message."
+                ),
+                SystemMessageType::Info,
+            )
+            .await;
+        }
+        ProviderKind::Ollama | ProviderKind::LmStudio => {
+            let to_model = local_model
+                .as_deref()
+                .map(|m| format!(" to {m}"))
+                .unwrap_or_default();
+            send(
+                format!(
+                    "{label} effort set to {level} (sent as reasoning_effort={level}{to_model}). \
+                     Takes effect on your next message."
+                ),
+                SystemMessageType::Info,
+            )
+            .await;
+            // The level is sent regardless (operator intent wins); say so
+            // when the model's documented set does not include it, or when
+            // embraOS does not know the model as reasoning-effort-aware.
+            if let Some(m) = local_model.as_deref() {
+                match known_effort_ladder(m) {
+                    Some(ladder) if !ladder.contains(&level) => {
+                        send(
+                            format!(
+                                "Note: {m} documents reasoning_effort values {}; '{level}' is \
+                                 outside that set and the server may reject or ignore it.",
+                                ladder.join(", ")
+                            ),
+                            SystemMessageType::Warning,
+                        )
+                        .await;
+                    }
+                    None if reasoning_effort_for_model(m).is_none() => {
+                        send(
+                            format!(
+                                "Note: embraOS does not know {m} as a reasoning-effort model; \
+                                 the value is sent anyway — LM Studio and Ollama ignore it for \
+                                 models without the field."
+                            ),
+                            SystemMessageType::Warning,
+                        )
+                        .await;
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
 }
 
 /// Check that `session_name`'s recorded provider matches the
@@ -5437,7 +5604,9 @@ async fn run_learning_loop(
                 "gemini learning turn starting"
             );
             Arc::new(
-                GeminiProvider::with_model(active_key, model_id).with_cache(db.clone()),
+                GeminiProvider::with_model(active_key, model_id)
+                    .with_effort(resolve_provider_effort(ProviderKind::Gemini, &config))
+                    .with_cache(db.clone()),
             )
         }
         ProviderKind::Anthropic => {
@@ -6864,6 +7033,7 @@ mod native_loop_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            gemini_effort: None,
             embedding_enabled: None,
             embedding_model: None,
             image_provider: None,
@@ -7709,6 +7879,7 @@ mod reasoning_delta_privacy_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            gemini_effort: None,
             embedding_enabled: None,
             embedding_model: None,
             image_provider: None,
@@ -7769,6 +7940,7 @@ mod soul_sealed_mode_change_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            gemini_effort: None,
             embedding_enabled: None,
             embedding_model: None,
             image_provider: None,
@@ -7938,18 +8110,18 @@ mod anthropic_effort_tests {
     //! `/effort` allowlist + resolver. Unlike the model resolver there is
     //! deliberately NO unknown-value passthrough — an invalid effort would
     //! 400 every turn, so bogus env/config values fall through to `"max"`.
-    use super::{parse_anthropic_effort_choice, resolve_anthropic_effort_inner};
+    use super::{parse_effort_choice, resolve_anthropic_effort_inner};
 
     #[test]
     fn effort_allowlist_accepts_five_levels_rejects_junk() {
         for s in ["low", "medium", "high", "xhigh", "max", " HIGH ", "Max"] {
             assert!(
-                parse_anthropic_effort_choice(s).is_some(),
+                parse_effort_choice(s).is_some(),
                 "should accept: {s}"
             );
         }
         for s in ["", "maximum", "x-high", "ultra", "0.8"] {
-            assert_eq!(parse_anthropic_effort_choice(s), None, "should reject: {s}");
+            assert_eq!(parse_effort_choice(s), None, "should reject: {s}");
         }
     }
 
@@ -7970,6 +8142,18 @@ mod anthropic_effort_tests {
             resolve_anthropic_effort_inner(Some("bogus"), Some("also-bogus")),
             "max"
         );
+    }
+
+    #[test]
+    fn optional_effort_resolver_has_no_default_and_env_wins() {
+        // Gemini / OpenAI-compat: `None` = provider default (byte-identical
+        // request); env > config; invalid values fall through.
+        use super::resolve_optional_effort_inner as r;
+        assert_eq!(r(None, None), None);
+        assert_eq!(r(None, Some("xhigh")).as_deref(), Some("xhigh"));
+        assert_eq!(r(Some("low"), Some("xhigh")).as_deref(), Some("low"));
+        assert_eq!(r(Some("bogus"), Some("medium")).as_deref(), Some("medium"));
+        assert_eq!(r(Some("bogus"), Some("nope")), None);
     }
 }
 

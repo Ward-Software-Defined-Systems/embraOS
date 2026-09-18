@@ -88,6 +88,8 @@ pub struct OpenAICompatProvider {
     http: Client,
     model_id: String,
     display_name: String,
+    /// `/effort` override for this preset, sent verbatim when set.
+    reasoning_effort_override: Option<String>,
 }
 
 impl OpenAICompatProvider {
@@ -113,7 +115,20 @@ impl OpenAICompatProvider {
             http: Client::new(),
             model_id: model,
             display_name,
+            reasoning_effort_override: None,
         }
+    }
+
+    /// Operator `reasoning_effort` override (`/effort` while this preset
+    /// is active), sent VERBATIM — the accepted set belongs to the model
+    /// (Qwen3.8: low|medium|xhigh; gpt-oss: low|medium|high;
+    /// DeepSeek-V4-Pro: max) and the server validates, so nothing here
+    /// clamps. `None` keeps the per-model auto-map
+    /// ([`reasoning_effort_for_model`]), byte-identical to before the
+    /// knob existed.
+    pub fn with_reasoning_effort(mut self, level: Option<String>) -> Self {
+        self.reasoning_effort_override = level.filter(|l| !l.trim().is_empty());
+        self
     }
 
     /// Probe the endpoint for available models. Used by the wizard's
@@ -249,6 +264,32 @@ pub(crate) fn reasoning_effort_for_model(model_id: &str) -> Option<&'static str>
     None
 }
 
+/// The `reasoning_effort` values a model family DOCUMENTS, for `/effort`'s
+/// hint and warning only — nothing clamps to it (the server validates).
+/// Verified against primary docs 2026-09-17: Qwen3.8 model card
+/// (`xhigh` default | `medium` | `low`; no `high`), LM Studio's gpt-oss
+/// responses doc (`low|medium|high`), DeepSeek's thinking-mode doc
+/// (`max`). Unknown families return `None`.
+pub(crate) fn known_effort_ladder(model_id: &str) -> Option<&'static [&'static str]> {
+    let lower = model_id.to_lowercase();
+    if lower.contains("deepseek-v4-pro") {
+        return Some(&["max"]);
+    }
+    if lower.contains("gpt-oss")
+        || lower.contains("o1-mini")
+        || lower.contains("o1-preview")
+        || lower.contains("o3-mini")
+        || lower.contains("o3-pro")
+        || lower.contains("o4-mini")
+    {
+        return Some(&["low", "medium", "high"]);
+    }
+    if lower.contains("qwen3.8") {
+        return Some(&["low", "medium", "xhigh"]);
+    }
+    None
+}
+
 /// Decide whether a failed attempt warrants one retry. Connection
 /// errors and 5xx responses retry once after a 1s delay; everything
 /// else propagates immediately.
@@ -327,15 +368,21 @@ impl LlmProvider for OpenAICompatProvider {
             } else {
                 None
             },
-            // Locked Decision #4: send `reasoning_effort` only when
-            // the active model is reasoning-effort-aware. Sending to
-            // a non-reasoning model produces a `No valid custom
-            // reasoning fields found` warning on LM Studio and is
-            // silently dropped by Ollama. Omit entirely when
+            // Locked Decision #4: by default send `reasoning_effort`
+            // only when the active model is reasoning-effort-aware.
+            // Sending to a non-reasoning model produces a `No valid
+            // custom reasoning fields found` warning on LM Studio and
+            // is silently dropped by Ollama. Omit entirely when
             // unsupported. V4-Pro routes to "max"; other recognized
             // reasoning models route to "high" — see
-            // `reasoning_effort_for_model` doc.
-            reasoning_effort: reasoning_effort_for_model(&self.model_id).map(String::from),
+            // `reasoning_effort_for_model` doc. An operator override
+            // (`/effort`, `with_reasoning_effort`) is sent as-is —
+            // operator intent wins; `/effort` warns at set time when
+            // the model is not known to take the field.
+            reasoning_effort: self
+                .reasoning_effort_override
+                .clone()
+                .or_else(|| reasoning_effort_for_model(&self.model_id).map(String::from)),
             max_tokens: None,
         };
 
@@ -1208,6 +1255,18 @@ mod tests {
     }
 
     #[test]
+    fn known_effort_ladder_names_documented_sets_only() {
+        assert_eq!(known_effort_ladder("qwen/qwen3.8-27b"), Some(&["low", "medium", "xhigh"][..]));
+        assert_eq!(known_effort_ladder("qwen3.8:27b"), Some(&["low", "medium", "xhigh"][..]));
+        assert_eq!(known_effort_ladder("openai/gpt-oss-20b"), Some(&["low", "medium", "high"][..]));
+        assert_eq!(known_effort_ladder("o3-mini"), Some(&["low", "medium", "high"][..]));
+        assert_eq!(known_effort_ladder("deepseek-v4-pro:cloud"), Some(&["max"][..]));
+        // Qwen3.6 has no documented reasoning_effort set → no hint, no warning basis.
+        assert_eq!(known_effort_ladder("qwen/qwen3.6-27b"), None);
+        assert_eq!(known_effort_ladder("llama3.3"), None);
+    }
+
+    #[test]
     fn reasoning_effort_for_model_routes_gpt_oss_to_high() {
         assert_eq!(reasoning_effort_for_model("gpt-oss:20b"), Some("high"));
         assert_eq!(reasoning_effort_for_model("gpt-oss:120b"), Some("high"));
@@ -1473,6 +1532,85 @@ mod tests {
             body_json.get("reasoning_effort").and_then(|v| v.as_str()),
             Some("high")
         );
+    }
+
+    #[tokio::test]
+    async fn stream_turn_sends_operator_effort_override_verbatim() {
+        // Qwen3.8 on LM Studio: the auto-map omits the field, but an
+        // operator `/effort xhigh` is sent exactly as given — Qwen3.8's
+        // own ladder is low|medium|xhigh, so no clamping may happen here.
+        let server = MockServer::start().await;
+        let body = sse_body(&[
+            r#"{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
+        ]);
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(body)
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        let provider =
+            OpenAICompatProvider::lm_studio(server.uri(), None, "qwen/qwen3.8-27b".to_string())
+                .with_reasoning_effort(Some("xhigh".to_string()));
+        let _stream = provider
+            .stream_turn(
+                &[ApiMessage::user_text("hi")],
+                &system_bundle(),
+                &empty_manifest(),
+                LlmRequestOptions::default(),
+            )
+            .await
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        let body_json: JsonValue = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(
+            body_json.get("reasoning_effort").and_then(|v| v.as_str()),
+            Some("xhigh")
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_turn_operator_override_beats_the_auto_map() {
+        // gpt-oss auto-maps to "high"; an explicit "low" wins. And an
+        // empty/None override keeps the auto-map (covered by the two
+        // no-override tests above staying byte-identical).
+        let server = MockServer::start().await;
+        let body = sse_body(&[
+            r#"{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
+        ]);
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string(body)
+                    .insert_header("content-type", "text/event-stream"),
+            )
+            .mount(&server)
+            .await;
+        let provider = OpenAICompatProvider::ollama(server.uri(), None, "gpt-oss:20b".to_string())
+            .with_reasoning_effort(Some("low".to_string()));
+        let _stream = provider
+            .stream_turn(
+                &[ApiMessage::user_text("hi")],
+                &system_bundle(),
+                &empty_manifest(),
+                LlmRequestOptions::default(),
+            )
+            .await
+            .unwrap();
+        let requests = server.received_requests().await.unwrap();
+        let body_json: JsonValue = serde_json::from_slice(&requests[0].body).unwrap();
+        assert_eq!(
+            body_json.get("reasoning_effort").and_then(|v| v.as_str()),
+            Some("low")
+        );
+        // Blank override → treated as unset.
+        let p = OpenAICompatProvider::ollama(server.uri(), None, "gpt-oss:20b".to_string())
+            .with_reasoning_effort(Some("   ".to_string()));
+        assert!(p.reasoning_effort_override.is_none());
     }
 
     #[test]

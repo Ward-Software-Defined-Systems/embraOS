@@ -75,6 +75,15 @@ pub struct SystemConfig {
     /// no schema bump.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub anthropic_effort: Option<String>,
+    /// Gemini reasoning posture, stored on the canonical embraOS effort
+    /// ladder (`"low"|"medium"|"high"|"xhigh"|"max"`) and mapped to
+    /// `thinkingLevel` at send time (`xhigh`/`max` clamp to `high`, Gemini
+    /// 3.1 Pro's ceiling). `None` = `"high"`, byte-identical to before the
+    /// knob existed. Env `EMBRA_GEMINI_EFFORT` takes precedence. Settable
+    /// via `/effort` while Gemini is active. Serde-additive — no schema
+    /// bump; one more field on every `SystemConfig` literal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gemini_effort: Option<String>,
     /// Image-generation backend for the `image_generate` tool (media wave
     /// part 2). `None` (additive default) = Gemini when a Gemini key is
     /// resolvable, else unconfigured. Only `"gemini"` is valid today —
@@ -167,6 +176,18 @@ pub struct OpenAiCompatConfig {
     pub lm_studio_endpoint: String,
     #[serde(default)]
     pub lm_studio_model: String,
+    /// Operator `reasoning_effort` override per preset (`/effort` while
+    /// that preset is active), sent VERBATIM — the accepted set belongs
+    /// to the model (Qwen3.8: low|medium|xhigh; gpt-oss: low|medium|high;
+    /// DeepSeek-V4-Pro: max) and the server validates. `None` = the
+    /// per-model auto-map (`reasoning_effort_for_model`), byte-identical
+    /// to before the field existed. Serde-additive `Option`s — the four
+    /// String fields above stay plain `default` so persisted docs keep
+    /// their shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ollama_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lm_studio_effort: Option<String>,
 }
 
 impl OpenAiCompatConfig {
@@ -185,6 +206,18 @@ impl OpenAiCompatConfig {
             None
         } else {
             Some((endpoint.as_str(), model.as_str()))
+        }
+    }
+
+    /// The operator's stored effort override for the preset, if any.
+    pub fn effort_for_preset(
+        &self,
+        preset: crate::provider::openai_compat::OpenAiCompatPreset,
+    ) -> Option<&str> {
+        use crate::provider::openai_compat::OpenAiCompatPreset;
+        match preset {
+            OpenAiCompatPreset::Ollama => self.ollama_effort.as_deref(),
+            OpenAiCompatPreset::LmStudio => self.lm_studio_effort.as_deref(),
         }
     }
 }
@@ -326,6 +359,7 @@ pub async fn run_config_wizard() -> Result<SystemConfig> {
         gemini_model: None,
         anthropic_model: None,
         anthropic_effort: None,
+        gemini_effort: None,
         embedding_enabled: None,
         embedding_model: None,
         image_provider: None,
@@ -843,6 +877,7 @@ pub async fn run_config_wizard_grpc(
         gemini_model: None,
         anthropic_model,
         anthropic_effort: None,
+        gemini_effort: None,
         embedding_enabled: None,
         embedding_model: None,
         image_provider: None,
@@ -1021,6 +1056,7 @@ mod key_lookup_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            gemini_effort: None,
             embedding_enabled: None,
             embedding_model: None,
             image_provider: None,
@@ -1117,6 +1153,7 @@ pub(crate) mod tests_support {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            gemini_effort: None,
             embedding_enabled: None,
             embedding_model: None,
             image_provider: None,
@@ -1155,6 +1192,7 @@ mod max_tool_iterations_serde_tests {
             gemini_model: None,
             anthropic_model: None,
             anthropic_effort: None,
+            gemini_effort: None,
             embedding_enabled: None,
             embedding_model: None,
             image_provider: None,
@@ -1398,6 +1436,50 @@ mod anthropic_effort_serde_tests {
         let json = serde_json::to_value(&cfg).unwrap();
         let back: SystemConfig = serde_json::from_value(json).unwrap();
         assert_eq!(back.anthropic_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn provider_effort_fields_absent_from_json_when_none() {
+        // gemini_effort + the two OpenAiCompatConfig overrides follow the
+        // same serde-additive contract: absent → None, None → absent.
+        let doc = json!({
+            "name": "Embra",
+            "api_key": "k",
+            "timezone": "UTC",
+            "deployment_mode": "phase1",
+            "created_at": "",
+            "version": "test",
+            "kg_temporal_window_secs": 1800,
+            "kg_max_traversal_depth": 3,
+            "kg_traversal_depth_ceiling": 5,
+            "kg_edge_candidate_limit": 50,
+            "api_provider": "lm_studio",
+            "openai_compat": {"lm_studio_endpoint": "http://localhost:1234", "lm_studio_model": "qwen/qwen3.8-27b"},
+        });
+        let cfg: SystemConfig = serde_json::from_value(doc).unwrap();
+        assert!(cfg.gemini_effort.is_none());
+        assert!(cfg.openai_compat.ollama_effort.is_none());
+        assert!(cfg.openai_compat.lm_studio_effort.is_none());
+
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert!(json.get("gemini_effort").is_none(), "{json:?}");
+        let oc = json.get("openai_compat").unwrap();
+        assert!(oc.get("ollama_effort").is_none(), "{oc:?}");
+        assert!(oc.get("lm_studio_effort").is_none(), "{oc:?}");
+        // The pre-existing String leaves keep serializing (shape stable).
+        assert_eq!(oc.get("ollama_endpoint").and_then(|v| v.as_str()), Some(""));
+
+        let mut cfg = cfg;
+        cfg.gemini_effort = Some("low".into());
+        cfg.openai_compat.lm_studio_effort = Some("xhigh".into());
+        let back: SystemConfig = serde_json::from_value(serde_json::to_value(&cfg).unwrap()).unwrap();
+        assert_eq!(back.gemini_effort.as_deref(), Some("low"));
+        assert_eq!(back.openai_compat.lm_studio_effort.as_deref(), Some("xhigh"));
+        assert_eq!(
+            back.openai_compat.effort_for_preset(crate::provider::openai_compat::OpenAiCompatPreset::LmStudio),
+            Some("xhigh")
+        );
+        assert!(back.openai_compat.ollama_effort.is_none());
     }
 
     #[test]

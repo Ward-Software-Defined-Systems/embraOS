@@ -139,8 +139,9 @@ pub struct GeminiGenerationConfig {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GeminiThinkingConfig {
-    /// `"minimal"`, `"low"`, `"medium"`, or `"high"` (default for
-    /// Gemini 3.1 Pro, also the only value embraOS uses).
+    /// `"low"`, `"medium"`, or `"high"` for Gemini 3.1 Pro (`"high"` is
+    /// the default). Operator-tunable via `/effort`
+    /// (`SystemConfig.gemini_effort`); `xhigh`/`max` clamp to `"high"`.
     pub thinking_level: String,
     /// When `true`, the API returns `thought: true` text parts (chain-
     /// of-thought summaries) interleaved with the visible response.

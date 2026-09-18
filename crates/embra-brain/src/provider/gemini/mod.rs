@@ -44,10 +44,23 @@ const DEFAULT_DISPLAY_NAME: &str = "gemini-3.1-pro";
 const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 const VALIDATE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Per-Gemini-3.1-Pro-docs: 64k output ceiling, thinking_level=high
-/// is the default and only value embraOS sends. Cannot be disabled.
+/// Per-Gemini-3.1-Pro-docs: 64k output ceiling; `thinking_level` is
+/// `high` unless the operator lowers it via `/effort` (mapped by
+/// [`thinking_level_for`]). Thinking cannot be disabled.
 const MAX_OUTPUT_TOKENS: u32 = 64_000;
-const THINKING_LEVEL: &str = "high";
+pub(crate) const THINKING_LEVEL: &str = "high";
+
+/// Map the canonical embraOS effort ladder (`low|medium|high|xhigh|max`)
+/// onto Gemini 3.1 Pro's `thinkingLevel` (`low|medium|high`; thinking
+/// cannot be disabled). `xhigh`/`max` have no Gemini equivalent above
+/// `high`, so they clamp to it; anything unrecognized is the default.
+pub(crate) fn thinking_level_for(level: &str) -> &'static str {
+    match level.trim().to_ascii_lowercase().as_str() {
+        "low" => "low",
+        "medium" => "medium",
+        _ => THINKING_LEVEL,
+    }
+}
 
 /// Exponential backoff ladder (seconds) for 429 / 5xx retries on the
 /// initial request. Mid-stream errors are not retried — a partial
@@ -60,6 +73,8 @@ pub struct GeminiProvider {
     http: Client,
     model_id: String,
     display_name: String,
+    /// `thinkingLevel` sent on every request (see [`thinking_level_for`]).
+    thinking_level: String,
     /// Optional context-cache lifecycle manager. `None` if Brain
     /// construction couldn't acquire a WardSONDB handle, in which
     /// case every turn pays the full system+tools cost.
@@ -85,8 +100,22 @@ impl GeminiProvider {
             http: Client::new(),
             model_id,
             display_name,
+            thinking_level: THINKING_LEVEL.to_string(),
             cache: None,
         }
+    }
+
+    /// Operator effort posture from `/effort` (canonical embraOS ladder);
+    /// `None` keeps Gemini's default `high`. The context cache is
+    /// unaffected — `thinkingLevel` rides `generationConfig` per request,
+    /// never the cached content.
+    pub fn with_effort(mut self, level: Option<String>) -> Self {
+        self.thinking_level = level
+            .as_deref()
+            .map(thinking_level_for)
+            .unwrap_or(THINKING_LEVEL)
+            .to_string();
+        self
     }
 
     /// Attach a Context Cache lifecycle manager. Stage 10 Brain
@@ -208,6 +237,7 @@ impl LlmProvider for GeminiProvider {
             tools_empty,
             cache_handle.as_ref(),
             options,
+            &self.thinking_level,
         );
         let body_with_cache_json = serde_json::to_value(&body_with_cache)
             .map_err(|e| ProviderError::Decode(format!("request serialization: {e}")))?;
@@ -225,8 +255,15 @@ impl LlmProvider for GeminiProvider {
                 if let Some(cache) = &self.cache {
                     cache.invalidate_local().await;
                 }
-                let body_no_cache =
-                    build_request_body(&contents, system, tools, tools_empty, None, options);
+                let body_no_cache = build_request_body(
+                    &contents,
+                    system,
+                    tools,
+                    tools_empty,
+                    None,
+                    options,
+                    &self.thinking_level,
+                );
                 let body_no_cache_json = serde_json::to_value(&body_no_cache).map_err(|e| {
                     ProviderError::Decode(format!("retry serialization: {e}"))
                 })?;
@@ -280,6 +317,7 @@ fn build_request_body<'a>(
     tools_empty: bool,
     cache_handle: Option<&cache::CacheHandle>,
     options: LlmRequestOptions,
+    thinking_level: &str,
 ) -> GeminiGenerateRequest<'a> {
     let cache_active = cache_handle.is_some();
     GeminiGenerateRequest {
@@ -307,14 +345,20 @@ fn build_request_body<'a>(
                 },
             })
         },
-        generation_config: Some(GeminiGenerationConfig {
-            max_output_tokens: MAX_OUTPUT_TOKENS,
-            thinking_config: GeminiThinkingConfig {
-                thinking_level: THINKING_LEVEL.to_string(),
-                include_thoughts: options.include_reasoning,
-            },
-        }),
+        generation_config: Some(generation_config(thinking_level, options.include_reasoning)),
         cached_content: cache_handle.map(|h| h.cache_name.clone()),
+    }
+}
+
+/// The per-request `generationConfig`. Extracted so the wire shape is
+/// unit-testable without assembling a full request.
+fn generation_config(thinking_level: &str, include_reasoning: bool) -> GeminiGenerationConfig {
+    GeminiGenerationConfig {
+        max_output_tokens: MAX_OUTPUT_TOKENS,
+        thinking_config: GeminiThinkingConfig {
+            thinking_level: thinking_level.to_string(),
+            include_thoughts: include_reasoning,
+        },
     }
 }
 
@@ -416,6 +460,39 @@ async fn send_with_retry(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thinking_level_for_clamps_to_the_gemini_ladder() {
+        assert_eq!(thinking_level_for("low"), "low");
+        assert_eq!(thinking_level_for(" Medium "), "medium");
+        assert_eq!(thinking_level_for("high"), "high");
+        assert_eq!(thinking_level_for("xhigh"), "high");
+        assert_eq!(thinking_level_for("max"), "high");
+        assert_eq!(thinking_level_for("bogus"), "high");
+    }
+
+    #[test]
+    fn generation_config_default_is_high_and_carries_a_configured_level() {
+        let v = serde_json::to_value(generation_config(THINKING_LEVEL, true)).unwrap();
+        assert_eq!(v["maxOutputTokens"], 64_000);
+        assert_eq!(v["thinkingConfig"]["thinkingLevel"], "high");
+        assert_eq!(v["thinkingConfig"]["includeThoughts"], true);
+        let v = serde_json::to_value(generation_config(thinking_level_for("low"), false)).unwrap();
+        assert_eq!(v["thinkingConfig"]["thinkingLevel"], "low");
+        assert_eq!(v["thinkingConfig"]["includeThoughts"], false);
+    }
+
+    #[test]
+    fn with_effort_maps_the_ladder_and_none_restores_the_default() {
+        let p = GeminiProvider::new("k".into());
+        assert_eq!(p.thinking_level, "high");
+        let p = p.with_effort(Some("max".into()));
+        assert_eq!(p.thinking_level, "high");
+        let p = p.with_effort(Some("medium".into()));
+        assert_eq!(p.thinking_level, "medium");
+        let p = p.with_effort(None);
+        assert_eq!(p.thinking_level, "high");
+    }
 
     #[test]
     fn validate_key_rejects_empty() {
