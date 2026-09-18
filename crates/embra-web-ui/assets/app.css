@@ -135,6 +135,14 @@ button.btn.ghost:hover { border-color: var(--accent); color: var(--accent); }
 .cmd:hover { background: var(--panel); border-color: var(--line); color: var(--accent); }
 .cmd code { color: var(--txt-dim); font-size: var(--text-xs); }
 
+/* Status strip — the service/meter pills own a full-width row above the
+   terminal (moved out of the 52 px top bar 2026-09-17; they wrap freely
+   here instead of fighting the brand and the buttons for one row). */
+.main .pills.status-strip { flex: 0 0 auto; }
+/* Guided setup lives in the top bar now: compact, and it takes the
+   flexible middle so `.role` stays right-aligned. */
+.topbar .wizard { flex: 1; }
+
 /* ── Main / terminal ───────────────────────────────────── */
 .main { grid-area: main; display: flex; flex-direction: column;
   padding: 14px; gap: 12px; min-width: 0; }

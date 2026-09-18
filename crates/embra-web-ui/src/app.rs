@@ -476,46 +476,13 @@ pub fn App() -> impl IntoView {
                             .unwrap_or_else(|| "console".into())}
                     </span>
                 </div>
-                <div class="pills">
-                    {move || status.get().services.into_iter().map(|s| {
-                        let cls = if s.state == "up" { "pill up" } else { "pill down" };
-                        view! {
-                            <span class=cls title=s.detail.clone()>
-                                <span class="dot"></span>{s.name}
-                            </span>
-                        }
-                    }).collect_view()}
-                    {move || {
-                        let sys = status.get().system?;
-                        let cpu = sys.cpu_pct.map(|pct| meter_pill(
-                            "CPU", pct,
-                            "CPU across all cores (5 s average)".to_string(),
-                        ));
-                        let mem = sys.mem_pct.map(|pct| {
-                            let used = sys.mem_used_bytes.unwrap_or(0);
-                            let total = sys.mem_total_bytes.unwrap_or(0);
-                            meter_pill("MEM", pct, format!(
-                                "{:.1} GB / {:.1} GB used",
-                                used as f64 / 1_073_741_824.0,
-                                total as f64 / 1_073_741_824.0,
-                            ))
-                        });
-                        let data = sys.data_pct.map(|pct| meter_pill(
-                            "DATA", pct,
-                            fs_tooltip(sys.data_used_bytes, sys.data_total_bytes, "/embra/data"),
-                        ));
-                        let state_fs = sys.state_pct.map(|pct| meter_pill(
-                            "STATE", pct,
-                            fs_tooltip(sys.state_used_bytes, sys.state_total_bytes, "/embra/state"),
-                        ));
-                        let load = sys.load1.map(|l1| load_pill(
-                            l1,
-                            sys.load5.unwrap_or(0.0),
-                            sys.load15.unwrap_or(0.0),
-                            sys.cpu_count,
-                        ));
-                        Some(view! { <>{cpu}{mem}{data}{state_fs}{load}</> })
-                    }}
+                <div class="wizard">
+                    <span class="lbl">"Guided setup:"</span>
+                    <button class="btn"
+                        title="Git & SSH setups (/git-setup, /github-token, /git-token, /ssh-keygen) are in the sidebar."
+                        on:click=move |_| {
+                            if let Some(i) = spec_idx("/provider --setup") { open_modal(i); }
+                        }>"Provider setup"</button>
                 </div>
                 <div class="role">
                     {move || {
@@ -630,15 +597,52 @@ pub fn App() -> impl IntoView {
             </div>
 
             <div class="main">
-                <div class="wizard">
-                    <span class="lbl">"Guided setup:"</span>
-                    <button class="btn" on:click=move |_| {
-                        if let Some(i) = spec_idx("/provider --setup") { open_modal(i); }
-                    }>"Provider setup"</button>
-                    <span class="lbl" style="margin-left:auto">
-                        "Git & SSH setups (/git-setup, /github-token, /git-token, /ssh-keygen) are in the sidebar."
-                    </span>
-                </div>
+                // Service + meter pills own this full-width strip (moved out
+                // of the 52 px top bar 2026-09-17 — they need the room, and
+                // the guided-setup control needed none). Rendered from the
+                // same 5-s /api/status poll; a `provider` pill appears once
+                // the brain has probed the active LLM endpoint.
+                <div class="pills status-strip">
+                    {move || status.get().services.into_iter().map(|s| {
+                        let cls = if s.state == "up" { "pill up" } else { "pill down" };
+                        view! {
+                            <span class=cls title=s.detail.clone()>
+                                <span class="dot"></span>{s.name}
+                            </span>
+                        }
+                    }).collect_view()}
+                    {move || {
+                        let sys = status.get().system?;
+                        let cpu = sys.cpu_pct.map(|pct| meter_pill(
+                            "CPU", pct,
+                            "CPU across all cores (5 s average)".to_string(),
+                        ));
+                        let mem = sys.mem_pct.map(|pct| {
+                            let used = sys.mem_used_bytes.unwrap_or(0);
+                            let total = sys.mem_total_bytes.unwrap_or(0);
+                            meter_pill("MEM", pct, format!(
+                                "{:.1} GB / {:.1} GB used",
+                                used as f64 / 1_073_741_824.0,
+                                total as f64 / 1_073_741_824.0,
+                            ))
+                        });
+                        let data = sys.data_pct.map(|pct| meter_pill(
+                            "DATA", pct,
+                            fs_tooltip(sys.data_used_bytes, sys.data_total_bytes, "/embra/data"),
+                        ));
+                        let state_fs = sys.state_pct.map(|pct| meter_pill(
+                            "STATE", pct,
+                            fs_tooltip(sys.state_used_bytes, sys.state_total_bytes, "/embra/state"),
+                        ));
+                        let load = sys.load1.map(|l1| load_pill(
+                            l1,
+                            sys.load5.unwrap_or(0.0),
+                            sys.load15.unwrap_or(0.0),
+                            sys.cpu_count,
+                        ));
+                        Some(view! { <>{cpu}{mem}{data}{state_fs}{load}</> })
+                    }}
+                                </div>
                 {move || guide.get().then(|| view! {
                     <div class="banner">
                         <span>
