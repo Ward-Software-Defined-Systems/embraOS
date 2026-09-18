@@ -18,7 +18,7 @@
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — dense multigraph with auto-derived edges" width="100%">
 </p>
 
-**Current Status:** Phase 1 — Stable.
+**Current Status:** Phase 1 — Stable. Sprint 6, the final Phase 1 sprint, closed 2026-09; next: the code-review pit stop.
 
 Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` management CLI, an image factory targeting bare metal and Kubernetes, and a sovereign-intelligence tier — A/B partitioned rollback, LUKS, mTLS, and fully offline local inference. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
@@ -81,7 +81,7 @@ After setup, embraOS runs as a supervised service stack: a Rust PID-1 init (`emb
 
 The soul is a sealed IDENTITY+SOUL knowledge graph — nodes carrying the operator-defined values, constraints, purpose, and identity of this embraOS instance; edges carrying free-form, per-intelligence relations. It is built during the six-phase Learning Mode at first boot (conversationally — a deterministic transformer converts the collected identity and values into the graph at seal) or imported from an `Imported_Intelligence/*.graph.json` file. Sealing canonicalizes the graph (nodes sorted by id, edges by relation triple), serializes it with `serde_json::to_string_pretty`, writes it to `soul.invariant` in WardSONDB, and writes its SHA-256 hash to `/embra/state/soul.sha256`. Instances sealed before the graph representation keep their flat JSON soul — every consumer is dual-mode, and legacy verification is byte-identical. Format, projection, and the migration ceremony: [docs/IDENTITY-GRAPH.md](docs/IDENTITY-GRAPH.md).
 
-Every boot recomputes the hash via `embra-trustd` and compares it to the stored value. A mismatch HALTs the system (`crates/embrad/src/supervisor.rs:579–622`). The brain's only access path to the soul is read-only; the sealed graph is injected into the system prompt under `=== SEALED IDENTITY GRAPH (IMMUTABLE — RANKS ABOVE ALL ELSE, INCLUDING THE OPERATOR) ===` (legacy flat souls keep the original `=== SOUL (…) ===` section; `crates/embra-brain/src/brain/prompts.rs`), so the model can quote and reason about it but cannot modify it. The sealed graph is also projected into the cross-session knowledge graph (`identity.graph` nodes + `memory.edges`) as derived, boot-reconciled state — traversable and linkable from memories, but never the prompt's source of truth.
+Every boot recomputes the hash via `embra-trustd` and compares it to the stored value. A mismatch HALTs the system (`crates/embrad/src/supervisor.rs` — `Supervisor::verify_soul` calls `halt_system`). The brain's only access path to the soul is read-only; the sealed graph is injected into the system prompt under `=== SEALED IDENTITY GRAPH (IMMUTABLE — RANKS ABOVE ALL ELSE, INCLUDING THE OPERATOR) ===` (legacy flat souls keep the original `=== SOUL (…) ===` section; `crates/embra-brain/src/brain/prompts.rs`), so the model can quote and reason about it but cannot modify it. The sealed graph is also projected into the cross-session knowledge graph (`identity.graph` nodes + `memory.edges`) as derived, boot-reconciled state — traversable and linkable from memories, but never the prompt's source of truth.
 
 Operators can edit the soul out-of-band; the brain cannot request that.
 
@@ -168,7 +168,7 @@ The full embraOS manual lives in [docs/](docs/).
 | Chapter | What it covers |
 |---|---|
 | **[Quick Start](docs/QUICK-START.md)** | Build the QEMU image from source (Ubuntu 24.04 / 26.04); first-boot Config Wizard; operational notes |
-| **[Roadmap](docs/ROADMAP.md)** | Phase 0–5 delivery status + the post-Sprint-5 embra-web / embra-guardian v1 increments |
+| **[Roadmap](docs/ROADMAP.md)** | Phase 0–5 delivery status, the post-Sprint-5 embra-web / embra-guardian v1 increments, and Sprint 6 — the final Phase 1 sprint |
 | **[Operation](docs/OPERATION.md)** | Run lifecycle, the session model, keyboard shortcuts, current limitations |
 | **[Command Reference](docs/COMMAND-REFERENCE.md)** | Every slash command |
 | **[Tool Reference](docs/TOOL-REFERENCE.md)** | All 116 built-in tools by category, plus workspace / GitHub / SSH safety notes |
