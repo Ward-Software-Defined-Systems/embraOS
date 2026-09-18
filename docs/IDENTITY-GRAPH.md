@@ -60,7 +60,7 @@ under `metadata.origin` (`identity_import` for the sealed graph,
   dump, and operator edge-type filters. `knowledge_link`'s strict
   validation is unchanged — the intelligence still cannot mint edge
   types; only the projection bulk-writes them.
-- **Identity nodes are born untouchable.** `knowledge_update` and
+- **Identity nodes are untouchable from creation.** `knowledge_update` and
   `knowledge_unlink_node` remain restricted to `memory.semantic`/
   `memory.procedural`. Memories link INTO identity nodes via the normal
   `knowledge_link` (brain-created types only).
