@@ -108,11 +108,20 @@ pub enum HealthCheck {
     FileExists { path: String, timeout: Duration },
 }
 
+/// Restart budget for a supervised service. `max_restarts` is a BURST
+/// limit, not a per-boot total: once a restarted service has run for
+/// `stable_after`, its `restart_count` resets to 0 (see
+/// [`restart_budget_reset_due`]), so ten isolated exits over a long uptime
+/// never halt it — only ten exits in quick succession do. `stable_after`
+/// must exceed `backoff_max`, or a crash loop pacing itself at the maximum
+/// backoff could reset its own budget (pinned by a test).
 #[derive(Clone)]
 pub struct RestartPolicy {
     pub max_restarts: u32,
     pub backoff_base: Duration,
     pub backoff_max: Duration,
+    /// Continuous run time after which the restart budget resets.
+    pub stable_after: Duration,
 }
 
 impl Default for RestartPolicy {
@@ -121,8 +130,26 @@ impl Default for RestartPolicy {
             max_restarts: 10,
             backoff_base: Duration::from_secs(1),
             backoff_max: Duration::from_secs(30),
+            stable_after: Duration::from_secs(60),
         }
     }
+}
+
+/// The budget resets once a restarted service (`restart_count > 0`) has
+/// run continuously for `stable_after`. A never-restarted service has
+/// nothing to reset; a service that keeps dying before the window never
+/// resets, so a crash loop still reaches `max_restarts` and halts.
+fn restart_budget_reset_due(restart_count: u32, running_for: Duration, stable_after: Duration) -> bool {
+    restart_count > 0 && running_for >= stable_after
+}
+
+/// Exponential backoff before the next restart attempt: `base * 2^count`,
+/// capped at `backoff_max` (1 s, 2 s, 4 s, … 30 s with the defaults).
+fn backoff_for(policy: &RestartPolicy, restart_count: u32) -> Duration {
+    std::cmp::min(
+        policy.backoff_base * 2u32.saturating_pow(restart_count),
+        policy.backoff_max,
+    )
 }
 
 /// Running service state
@@ -702,19 +729,51 @@ impl Supervisor {
     }
 
     /// Check if a service is still running. Returns true if alive.
+    ///
+    /// Any exit — clean or not — puts the service in `Failed` so the
+    /// reconcile loop restarts it: every supervised service is meant to
+    /// run for the life of the boot (a clean exit is still an outage).
+    /// A service that has run stably for `stable_after` since its last
+    /// restart gets its restart budget back.
     pub async fn check_service(&mut self, index: usize) -> bool {
         if let Some(ref mut child) = self.services[index].child {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     // Process exited
-                    warn!("{} exited with status: {:?}", self.services[index].def.name, status);
-                    self.services[index].status = ServiceStatus::Failed(
+                    let name = &self.services[index].def.name;
+                    let detail = if status.success() {
+                        info!("{} exited cleanly (status 0) — restarting", name);
+                        "Exited cleanly (status 0)".to_string()
+                    } else {
+                        warn!("{} exited with status: {:?}", name, status);
                         format!("Exited: {:?}", status)
-                    );
+                    };
+                    self.services[index].status = ServiceStatus::Failed(detail);
                     self.services[index].child = None;
                     false
                 }
-                Ok(None) => true, // Still running
+                Ok(None) => {
+                    // Still running — a restarted service that has stayed
+                    // up for the stability window earns its budget back.
+                    let svc = &mut self.services[index];
+                    if let Some(started_at) = svc.started_at
+                        && restart_budget_reset_due(
+                            svc.restart_count,
+                            started_at.elapsed(),
+                            svc.def.restart_policy.stable_after,
+                        )
+                    {
+                        info!(
+                            "{} stable for {:?} — restart budget reset (was {} of {})",
+                            svc.def.name,
+                            svc.def.restart_policy.stable_after,
+                            svc.restart_count,
+                            svc.def.restart_policy.max_restarts
+                        );
+                        svc.restart_count = 0;
+                    }
+                    true
+                }
                 Err(e) => {
                     error!("Error checking {}: {}", self.services[index].def.name, e);
                     false
@@ -739,10 +798,7 @@ impl Supervisor {
             bail!("{} permanently failed", svc.def.name);
         }
 
-        let backoff = std::cmp::min(
-            svc.def.restart_policy.backoff_base * 2u32.saturating_pow(svc.restart_count),
-            svc.def.restart_policy.backoff_max,
-        );
+        let backoff = backoff_for(&svc.def.restart_policy, svc.restart_count);
         svc.restart_count += 1;
 
         warn!("Restarting {} (attempt {}, backoff {:?})", svc.def.name, svc.restart_count, backoff);
@@ -782,4 +838,42 @@ fn halt_system(reason: &str) -> ! {
     error!("SYSTEM HALT (dev mode, would halt on Linux): {}", reason);
     let _ = std::fs::write("/tmp/embra-halt-reason", reason);
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod restart_budget_tests {
+    use super::*;
+
+    #[test]
+    fn default_policy_is_a_burst_limit_that_cannot_self_reset_from_max_backoff() {
+        let p = RestartPolicy::default();
+        assert_eq!(p.max_restarts, 10);
+        assert_eq!(p.backoff_base, Duration::from_secs(1));
+        assert_eq!(p.backoff_max, Duration::from_secs(30));
+        assert_eq!(p.stable_after, Duration::from_secs(60));
+        // A crash loop pacing itself at the maximum backoff must never run
+        // long enough to reset its own budget.
+        assert!(p.stable_after > p.backoff_max);
+    }
+
+    #[test]
+    fn budget_resets_only_after_a_restarted_service_runs_stably() {
+        let window = Duration::from_secs(60);
+        // Never restarted → nothing to reset, however long it has run.
+        assert!(!restart_budget_reset_due(0, Duration::from_secs(3600), window));
+        // Restarted and still inside the window → keep counting.
+        assert!(!restart_budget_reset_due(3, Duration::from_secs(59), window));
+        // Restarted and stable for the window → reset.
+        assert!(restart_budget_reset_due(3, window, window));
+        assert!(restart_budget_reset_due(9, Duration::from_secs(600), window));
+    }
+
+    #[test]
+    fn backoff_doubles_from_base_and_caps_at_max() {
+        let p = RestartPolicy::default();
+        let secs: Vec<u64> = (0..7).map(|n| backoff_for(&p, n).as_secs()).collect();
+        assert_eq!(secs, vec![1, 2, 4, 8, 16, 30, 30]);
+        // Absurd counts never overflow past the cap.
+        assert_eq!(backoff_for(&p, 40), Duration::from_secs(30));
+    }
 }
