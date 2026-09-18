@@ -4629,13 +4629,17 @@ fn resolve_anthropic_effort_inner(env: Option<&str>, cfg_field: Option<&str>) ->
 /// `EMBRA_OLLAMA_EFFORT` / `EMBRA_LM_STUDIO_EFFORT`, dev-only: embrad
 /// plumbs none of them) > config; invalid values fall through.
 fn resolve_provider_effort(kind: ProviderKind, cfg: &config::SystemConfig) -> Option<String> {
+    use crate::provider::openai_compat::OpenAiCompatPreset;
     let (env_name, cfg_field) = match kind {
         ProviderKind::Anthropic => return Some(resolve_anthropic_effort(cfg)),
         ProviderKind::Gemini => ("EMBRA_GEMINI_EFFORT", cfg.gemini_effort.as_deref()),
-        ProviderKind::Ollama => ("EMBRA_OLLAMA_EFFORT", cfg.openai_compat.ollama_effort.as_deref()),
+        ProviderKind::Ollama => (
+            "EMBRA_OLLAMA_EFFORT",
+            cfg.openai_compat.effort_for_preset(OpenAiCompatPreset::Ollama),
+        ),
         ProviderKind::LmStudio => (
             "EMBRA_LM_STUDIO_EFFORT",
-            cfg.openai_compat.lm_studio_effort.as_deref(),
+            cfg.openai_compat.effort_for_preset(OpenAiCompatPreset::LmStudio),
         ),
     };
     let env_override = std::env::var(env_name).ok();
@@ -5261,7 +5265,7 @@ async fn handle_effort_command(
         }
     };
 
-    let mut cfg = match config::load_config(&**db).await {
+    let mut cfg = match config::load_config(db).await {
         Ok(c) => c,
         Err(e) => {
             send(
@@ -5353,7 +5357,7 @@ async fn handle_effort_command(
 
     if trimmed.eq_ignore_ascii_case("reset") {
         set_effort_field(&mut cfg, kind, None);
-        if let Err(e) = config::save_config(&**db, &cfg).await {
+        if let Err(e) = config::save_config(db, &cfg).await {
             send(
                 format!("/effort: failed to save: {e}"),
                 SystemMessageType::Error,
@@ -5382,7 +5386,7 @@ async fn handle_effort_command(
     };
 
     set_effort_field(&mut cfg, kind, Some(level.to_string()));
-    if let Err(e) = config::save_config(&**db, &cfg).await {
+    if let Err(e) = config::save_config(db, &cfg).await {
         send(
             format!("/effort: failed to save: {e}"),
             SystemMessageType::Error,
