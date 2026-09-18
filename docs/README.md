@@ -9,7 +9,9 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 
 ## Getting Started
 
-- [QUICK-START.md](QUICK-START.md) — Build the QEMU image from source (Ubuntu 24.04 / 26.04), the musl cross-toolchain, the build pipeline, the Config Wizard, and operational notes (terminal size, image search order, clean first boot, port forwarding, backup & restore).
+- [QUICK-START.md](QUICK-START.md) — Build the QEMU image from source (Ubuntu 24.04 / 26.04), the musl cross-toolchain, the build pipeline, the Config Wizard, and operational notes (build overrides, terminal size, image search order, clean first boot, port forwarding, backup & restore).
+- [AARCH64-BUILD.md](AARCH64-BUILD.md) — Apple Silicon hosts: the aarch64 image via `build-image-aarch64.sh` and the named-volume Docker Buildroot flow, HVF-accelerated QEMU, the Mac backup and seeding wrappers.
+- [INTEL-MAC-BUILD.md](INTEL-MAC-BUILD.md) — Intel Mac hosts: the x86_64 image through the same Docker Buildroot flow, HVF-accelerated QEMU, the Mac backup wrapper.
 - [OPERATION.md](OPERATION.md) — What running it feels like, the session model, keyboard shortcuts, current limitations.
 
 ## Reference

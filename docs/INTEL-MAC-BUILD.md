@@ -176,6 +176,7 @@ provider + credentials, timezone), then Learning Mode forms and seals the soul.
 > ```
 > Fresh clones never have a Mac-side `buildroot-src/` (the tree lives in the
 > named volume), so this is one-time migration cleanup only.
+> An explicit image outranks both locations: `./scripts/run-qemu.sh /path/to/embraos.img`, or `EMBRAOS_IMAGE=/path/to/embraos.img ./scripts/run-qemu.sh` (argument → `$EMBRAOS_IMAGE` → `buildroot-src/output/images/` → `output/images/`).
 
 > **Storage engine:** `--storage-engine rocksdb` (battle-tested) or `fjall` (pure
 > Rust) is required and is baked into the `embrad` binary at build time.
@@ -236,11 +237,13 @@ provider + credentials, timezone), then Learning Mode forms and seals the soul.
 > The build fails if the model is missing from the rootfs rather than shipping an image whose
 > retrieval silently falls back to keyword-only.
 
-> **Port forwarding:** QEMU forwards 50000 (gRPC) and 8443 (REST); in the
-> default web-console mode it also forwards 3345 (HTTPS —
-> https://localhost:3345/embraOS). Test:
+> **Port forwarding:** QEMU forwards 50000 (gRPC), 8443 (REST) and 3345 (HTTPS —
+> https://localhost:3345/embraOS) in both UI modes. apid's REST routes are
+> `/health`, `/version` and `/status` (the brain's status incl. the LLM provider
+> probe; 503 while the brain is away). Test:
 > ```bash
 > curl http://localhost:8443/health
+> curl http://localhost:8443/status
 > ```
 
 > **Backup & restore:** macOS can't loop-mount the image natively, so
@@ -249,8 +252,9 @@ provider + credentials, timezone), then Learning Mode forms and seals the soul.
 > images). Stop the VM first (`Ctrl-A X`).
 > ```bash
 > ./scripts/embraos-backup-mac.sh backup --label pre-rebuild
-> ./scripts/embraos-backup-mac.sh restore
+> ./scripts/embraos-backup-mac.sh restore            # latest; restore <name> for a specific one (asks y/N, then replaces STATE + DATA)
 > ./scripts/embraos-backup-mac.sh list
+> ./scripts/embraos-backup-mac.sh verify
 > ./scripts/embraos-backup-mac.sh --image ~/images/embraos.img verify   # a specific image
 > ```
 > Backups live in `~/embraOS_BACKUPS/` (override `EMBRAOS_BACKUP_DIR`) and are
@@ -288,7 +292,7 @@ banner at the top of this file.
    provider + credentials, timezone; full soul-formation conversation; soul
    sealed.
 3. **REST gateway:** from the host, `curl http://localhost:8443/health` →
-   healthy.
+   healthy; `curl http://localhost:8443/status` → `ok:true` with the `services` map.
 4. **Conversation session** — tool dispatch, memory writes to WardSONDB, session
    persistence; `/status` shows WardSONDB connected with populated collections.
 5. **Guardian (embra-guardian-v1):** define a small dynamic tool via `/guardian`

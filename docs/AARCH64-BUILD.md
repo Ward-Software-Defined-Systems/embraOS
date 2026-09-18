@@ -132,6 +132,7 @@ Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, LLM p
 > ```
 > Fresh clones never have a Mac-side `buildroot-src/` (the tree lives in the named
 > volume), so this is one-time migration cleanup only.
+> An explicit image outranks both locations: `./scripts/run-qemu-aarch64.sh /path/to/embraos.img`, or `EMBRAOS_IMAGE=/path/to/embraos.img ./scripts/run-qemu-aarch64.sh` (argument → `$EMBRAOS_IMAGE` → `buildroot-src/output/images/` → `output/images/`).
 
 > **Storage engine:** `--storage-engine rocksdb` (battle-tested) or `fjall` (pure
 > Rust) is required and is baked into the `embrad` binary at build time. WardSONDB
@@ -177,10 +178,13 @@ Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, LLM p
 > **skipped on macOS** and run by the Docker Buildroot pass instead. The build fails if the model is
 > missing from the rootfs rather than shipping keyword-only retrieval.
 
-> **Port forwarding:** QEMU forwards 50000 (gRPC) and 8443 (REST); in the default
-> web-console mode it also forwards 3345 (HTTPS — https://localhost:3345/embraOS). Test:
+> **Port forwarding:** QEMU forwards 50000 (gRPC), 8443 (REST) and 3345 (HTTPS —
+> https://localhost:3345/embraOS) in both UI modes. apid's REST routes are `/health`,
+> `/version` and `/status` (the brain's status incl. the LLM provider probe; 503 while
+> the brain is away). Test:
 > ```bash
 > curl http://localhost:8443/health
+> curl http://localhost:8443/status
 > ```
 
 > **Backup & restore:** macOS can't loop-mount the image natively, so
@@ -188,8 +192,10 @@ Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, LLM p
 > container. Stop the VM first (`Ctrl-A X`).
 > ```bash
 > ./scripts/embraos-backup-mac.sh backup --label pre-rebuild
-> ./scripts/embraos-backup-mac.sh restore
+> ./scripts/embraos-backup-mac.sh restore            # latest; restore <name> for a specific one (asks y/N, then replaces STATE + DATA)
 > ./scripts/embraos-backup-mac.sh list
+> ./scripts/embraos-backup-mac.sh verify
+> ./scripts/embraos-backup-mac.sh --image ~/images/embraos.img verify   # an image outside the project
 > ```
 > Backups live in `~/embraOS_BACKUPS/` (override `EMBRAOS_BACKUP_DIR`) and are
 > interchangeable with Ubuntu backups.
@@ -443,12 +449,13 @@ the inner script.
 
 #### How it works
 
-The wrapper spins up a privileged `ubuntu:24.04` container with two volume mounts:
+The wrapper spins up a privileged `ubuntu:24.04` container with two volume mounts — three when the image lives outside the project root:
 
 | Container path | Host path | Purpose |
 |---|---|---|
 | `/work` | Project root | Disk image + scripts (read/write) |
 | `/backups` | `~/embraOS_BACKUPS` | Backup storage (persists across runs) |
+| `/mnt/image` | Image's directory | Only when `--image`/`EMBRAOS_IMAGE` points outside the project root (read-write — `restore` writes the image) |
 
 `--privileged` gives the container loop device access for `mount -o loop`. The container
 installs `rsync`, `fdisk`, and `python3`, then runs the original `embraos-backup.sh`
@@ -502,6 +509,7 @@ Same options as `seed-state.sh`:
 ```bash
 ./scripts/seed-state-mac.sh --ca-dir /path/to/dir-with-rootCA.pem
 ./scripts/seed-state-mac.sh --seed-dir Seed_Knowledge --import-dir Imported_Intelligence
+./scripts/seed-state-mac.sh --wipe state,data --yes       # clean first boot, no confirmation prompt
 ./scripts/seed-state-mac.sh --dry-run --ca-dir ~/certs    # print the command, run nothing
 ```
 
@@ -918,7 +926,7 @@ Re-run it as the regression checklist after any canonical-build bump:
 2. **Config Wizard + Learning Mode** in the browser at
    `https://localhost:3345/embraOS` (accept the embraOS-CA cert) — name, LLM provider
    + credentials, timezone; full soul-formation conversation; soul sealed.
-3. **REST gateway:** from the host, `curl http://localhost:8443/health` → healthy.
+3. **REST gateway:** from the host, `curl http://localhost:8443/health` → healthy; `curl http://localhost:8443/status` → `ok:true` with the `services` map.
 4. **Conversation session** — tool dispatch, memory writes to WardSONDB, session
    persistence; `/status` shows WardSONDB connected with populated collections.
 5. **Guardian (embra-guardian-v1):** define a dynamic tool and invoke it — exercises
