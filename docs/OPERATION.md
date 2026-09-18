@@ -28,12 +28,9 @@ All sessions share the same intelligence — same memory, same identity, same so
 | Key | Action |
 |---|---|
 | `Enter` | Send message (or newline in `/ml` multi-line mode) |
-| `Alt+Enter` | New line |
 | `Up/Down` | Scroll history (`PageUp/PageDown` = 10 rows) |
 | `Shift+Up/Down` | Scroll the expression/reasoning panel (`Shift+PageUp/PageDown` = 5 rows; snaps back to the tail on your next message, on errors, or when new expression content arrives) |
 | `Esc` | Stop the current turn (only while it is thinking/streaming — idle Esc is a no-op) |
-| `Ctrl+C` | Graceful detach |
-| `Ctrl+D` | Graceful detach |
 
 *In the web console's `/ml` editor modal: Enter = newline, Ctrl/⌘+Enter or Send = submit, Esc/Cancel = discard.*
 

@@ -504,12 +504,6 @@ async fn handle_key_event(
     in_tx: &mpsc::Sender<ConversationRequest>,
 ) -> Result<()> {
     match (key.code, key.modifiers) {
-        // Quit
-        (KeyCode::Char('c'), KeyModifiers::CONTROL) |
-        (KeyCode::Char('d'), KeyModifiers::CONTROL) => {
-            app.should_quit = true;
-        }
-
         // Selector navigation
         (KeyCode::Up, _) if app.selector.is_some() => {
             if let Some(ref mut sel) = app.selector {
@@ -720,17 +714,12 @@ async fn handle_key_event(
             }
         }
 
-        // Alt+Enter — newline in input
-        (KeyCode::Enter, KeyModifiers::ALT) => {
-            let byte_pos = char_to_byte_pos(&app.input_buffer, app.cursor_pos);
-            app.input_buffer.insert(byte_pos, '\n');
-            app.cursor_pos += 1;
-        }
-
         // Expression-panel scroll (Shift chords). MUST sit before the
         // bare `(KeyCode::Up, _)` conversation-scroll arms below — the
-        // `_` modifier wildcard would swallow Shift too (the exact
-        // shadowing that makes the Alt+Enter arm above unreachable).
+        // `_` modifier wildcard would swallow Shift too. (That same
+        // shadowing is why the old Alt+Enter newline arm never fired —
+        // it sat below `(KeyCode::Enter, _)`; removed 2026-09-17, `/ml`
+        // is the multi-line path.)
         // Guarded with `.contains` so SHIFT combined with other
         // modifiers still routes here. No-op while the panel is hidden
         // (small terminals) so invisible state can't drift. Offsets
@@ -804,6 +793,14 @@ async fn handle_key_event(
                 app.cursor_pos += 1;
             }
         }
+
+        // Ctrl+<letter> chords are deliberate no-ops. There is no quit
+        // chord: the console is a supervised child on both transports
+        // (embra-web respawns it; embrad's restart budget halts the
+        // serial console after 10 exits), so a Ctrl+C/Ctrl+D exit only
+        // ever cost restart budget. Without this arm the catch-all below
+        // would type the letter (Ctrl+C → "c"). Esc still stops a turn.
+        (KeyCode::Char(_), m) if m.contains(KeyModifiers::CONTROL) => {}
 
         // Character input
         (KeyCode::Char(c), _) => {
@@ -1086,5 +1083,40 @@ mod paste_tests {
         // The serial path stays byte-identical: the flag is false unless
         // /guardian-define explicitly sets it.
         assert!(!AppState::new().guardian_capture);
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    async fn press(app: &mut AppState, code: KeyCode, mods: KeyModifiers) {
+        let (tx, _rx) = mpsc::channel::<ConversationRequest>(1);
+        handle_key_event(KeyEvent::new(code, mods), app, &tx)
+            .await
+            .expect("key handling never fails");
+    }
+
+    #[tokio::test]
+    async fn ctrl_letter_chords_are_ignored() {
+        // No quit chord (the console is a supervised child on both
+        // transports) and no stray letters: Ctrl+C / Ctrl+D / Ctrl+J
+        // leave the input untouched and never set should_quit.
+        let mut app = AppState::new();
+        for c in ['c', 'd', 'j'] {
+            press(&mut app, KeyCode::Char(c), KeyModifiers::CONTROL).await;
+        }
+        assert_eq!(app.input_buffer, "");
+        assert_eq!(app.cursor_pos, 0);
+        assert!(!app.should_quit);
+    }
+
+    #[tokio::test]
+    async fn plain_chars_still_type() {
+        let mut app = AppState::new();
+        press(&mut app, KeyCode::Char('h'), KeyModifiers::NONE).await;
+        press(&mut app, KeyCode::Char('i'), KeyModifiers::NONE).await;
+        assert_eq!(app.input_buffer, "hi");
+        assert_eq!(app.cursor_pos, 2);
     }
 }

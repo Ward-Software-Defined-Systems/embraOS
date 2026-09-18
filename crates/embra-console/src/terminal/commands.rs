@@ -81,9 +81,8 @@ System:
 
 Keyboard:
   Enter              Send message (or newline in /ml mode)
-  Alt+Enter          New line
   Up/Down            Scroll history
-  Ctrl+C / Ctrl+D    Exit"#, name)),
+  Esc                Stop the current turn"#, name)),
         "/copy" => Some("Clipboard copy not yet implemented in Phase 1.".to_string()),
         _ => None,
     }
