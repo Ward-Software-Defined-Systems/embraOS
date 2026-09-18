@@ -275,7 +275,6 @@ Session commands the user may use:
 - /status — system status
 - /soul — display soul document
 - /identity — display identity
-- /copy [n] — copy conversation to clipboard (last n messages, or all)
 - /help — show help"#
     )
 }
@@ -357,7 +356,6 @@ Session commands the user may use:
 - /status — system status
 - /soul — display soul document
 - /identity — display identity
-- /copy [n] — copy conversation to clipboard (last n messages, or all)
 - /help — show help"#
     )
 }
@@ -822,6 +820,8 @@ mod legacy_prompt_golden_tests {
     //! changes, a modification leaked into the legacy path — fix the
     //! change, never the pinned hash (updating a hash = a deliberate,
     //! operator-approved cache reset for every legacy instance).
+    //! Re-pinned 2026-09-18 (William-approved): the dead /copy line left the
+    //! legacy scaffold — one deliberate cache reset for every legacy instance.
     use super::*;
     use sha2::{Digest, Sha256};
 
@@ -863,7 +863,7 @@ mod legacy_prompt_golden_tests {
         );
         assert_eq!(
             sha256_hex(&rendered),
-            "9e6fa71b3e7b35a3a0893ee856a6cde4edf38472941a89cefba1da42c8ce2d12",
+            "2784b9357f7c4ede49c61e80492bdca0e964c8360a1700fe94868774701f1a1b",
             "LEGACY PROMPT BYTES MOVED (structured path). Diff this render \
              against git history; do not update the pinned hash without an \
              explicit operator-approved legacy cache reset.\n---\n{rendered}"
@@ -889,7 +889,7 @@ mod legacy_prompt_golden_tests {
         );
         assert_eq!(
             sha256_hex(&rendered),
-            "58966b191e2d98e5de7356fa6adc8628c774f91d14b5ce32aed576a3237a846b",
+            "18764b5c64c57ece30f04b15d4af48e00a7bf3ab058b4bef5828ad667d3e03ee",
             "LEGACY PROMPT BYTES MOVED (fallback path). Diff this render \
              against git history; do not update the pinned hash without an \
              explicit operator-approved legacy cache reset.\n---\n{rendered}"

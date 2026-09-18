@@ -1,11 +1,11 @@
 //! Slash command handling for embra-console.
 //!
-//! Only local commands (/help, /copy) are handled here.
+//! Only local commands (/help, /ml, /media) are handled here.
 //! All other commands are forwarded to embra-brain via gRPC.
 
 /// Returns true if this command is handled locally (not sent to brain)
 pub fn is_local_command(cmd: &str) -> bool {
-    matches!(cmd, "/help" | "/copy" | "/ml" | "/media")
+    matches!(cmd, "/help" | "/ml" | "/media")
 }
 
 /// Handle a local command, returning the output string
@@ -40,8 +40,9 @@ Model:
   /provider --setup <ollama|lm_studio>   Reconfigure endpoint, bearer, model (multi-turn)
   /model                                 Show the active Anthropic model
   /model <opus-5|opus-4.8|fable-5>       Switch the Anthropic model (next message)
-  /effort                                Show the Anthropic effort level
-  /effort <low|medium|high|xhigh|max>    Set effort (default max, next message)
+  /effort                                Show the active provider's effort level and what is sent
+  /effort <low|medium|high|xhigh|max>    Set effort for the active provider (Anthropic default max; Gemini high; local presets verbatim, model-validated)
+  /effort reset                          Clear the active provider's stored level
   /embeddings                            Show the semantic-similarity layer: model, index, nodes embedded
   /embeddings <on|off>                   Enable/disable semantic similarity in retrieval (default on)
   /embeddings backfill [--force]         Embed nodes that need it (local, ~55ms/node)
@@ -81,9 +82,9 @@ System:
 
 Keyboard:
   Enter              Send message (or newline in /ml mode)
-  Up/Down            Scroll history
+  Up/Down            Scroll history (PageUp/PageDown = 10 rows)
+  Shift+Up/Down      Scroll the expression/reasoning panel (Shift+PageUp/PageDown = 5 rows)
   Esc                Stop the current turn"#, name)),
-        "/copy" => Some("Clipboard copy not yet implemented in Phase 1.".to_string()),
         _ => None,
     }
 }

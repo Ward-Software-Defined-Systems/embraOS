@@ -502,7 +502,7 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/provider", "show or switch provider"),
         ("/provider --setup", "guided key / endpoint setup (needs provider)"),
         ("/model", "show / switch Anthropic model"),
-        ("/effort", "show / set Anthropic effort"),
+        ("/effort", "show / set the active provider's effort"),
         ("/embeddings", "semantic similarity: status / on / off"),
         ("/embeddings backfill", "embed nodes that need it"),
     ]),
