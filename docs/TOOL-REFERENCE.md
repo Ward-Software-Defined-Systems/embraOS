@@ -2,13 +2,15 @@
 
 Phase 1 includes 116 internal tools the intelligence invokes during conversation. All 116 work identically across all four LLM providers (Anthropic, Gemini, Ollama, LM Studio) via per-provider tool-schema translators that share a common JSON Schema cleanup pipeline (`provider/schema_util.rs::inline_refs`). They are organized below by category.
 
+Every dispatch runs under three registry-wide limits (`crates/embra-brain/src/tools/registry.rs`): text results are cut at 2 MiB (`MAX_TOOL_RESULT_SIZE` — `file_read` and the session readers page under it), a result carries at most 4 images (`MAX_TOOL_RESULT_IMAGES`; extras are dropped and the text gains `[N image(s) dropped: at most 4 images per tool result]`), and no tool runs longer than 10 minutes (`MAX_TOOL_DURATION`, a backstop — tools with their own inner timeouts keep the tighter one).
+
 > **⚠️ Testing Notice:** The default tools and slash commands are actively being tested. If you encounter bugs or unexpected behavior, please [open an issue](https://github.com/Ward-Software-Defined-Systems/embraOS/issues).
 
 **System & Status**
 
 | Tool | Description |
 |---|---|
-| **system_status** | Report system health — version, uptime, soul status, memory, a top-level `search_window_saturated` flag, plus a nested `wardsondb` block (health, collections, storage_poisoned, lifetime counters: requests/inserts/queries/deletes — all wardsondb-scoped, NOT global — and per-collection `memory_collections[]` parity: authoritative count vs the 10,000-doc search window, `saturated` when the collection has outgrown it) Since the Sprint 6 close-out also a `provider` block — the active LLM provider's last endpoint probe (`kind`, `model`, `endpoint`, `state` up/down/unknown, `reachable`, `model_present`, `key_state`, `latency_ms`, `checked_secs_ago`, `error`), omitted until the first probe ~30 s after boot. |
+| **system_status** | Report system health — version, uptime, soul status, memory, a top-level `search_window_saturated` flag, plus a nested `wardsondb` block (health, collections, storage_poisoned, lifetime counters: requests/inserts/queries/deletes — all wardsondb-scoped, NOT global — and per-collection `memory_collections[]` parity: authoritative count vs the 10,000-doc search window, `saturated` when the collection has outgrown it) Since the Sprint 6 close-out also a `provider` block — the active LLM provider's last endpoint probe (`kind`, `model`, `endpoint`, `configured`, `state` up/down/unknown, `reachable`, `model_present`, `key_state`, `latency_ms`, `checked_at`, `checked_secs_ago`, `error`), omitted until the first probe ~30 s after boot. |
 | **system_logs** | Read the tail of a service's log from the ephemeral tmpfs (`/embra/ephemeral/<service>.log`) — the OS's own journals, for self-diagnostics. `service`: `embra-brain` (default) \| `embrad` \| `wardsondb` \| `embra-trustd` \| `embra-apid` \| `embra-web` \| `embra-console` (enum-validated names, never a path — a deliberate read-only carve-out outside the workspace jail). `lines`: tail count (default 200, max 2000); `filter`: case-insensitive substring applied per line before the tail cut. The brain log carries the auto-enrichment funnel lines (`candidates_*`), `kg::traversal` saturation lines, `knowledge_seed` heals, and slow-query warns. Logs reset at boot and service restarts; very large files scan only the final 512 KiB window. Raise the brain's log detail with the `embra.loglevel=` kernel flag (`EMBRA_LOG_LEVEL` in run-qemu) |
 | **uptime_report** | Rich system report — uptime, WardSONDB health, collection count, sessions, total messages, memory entries, soul status |
 | **check_update** | Check GitHub for newer WardSONDB releases and report available updates |
@@ -92,7 +94,7 @@ For the data model, edge taxonomy, density rationale, promotion path, auto-enric
 | **mkdir** | Create a directory and all parent directories (workspace restricted) |
 | **file_symlink** | Create a symbolic link — `<target> \| <link_path>`. Both paths workspace-restricted; refuses to overwrite an existing link; dangling targets allowed (use `file_delete` to remove the link itself) |
 
-**Engineering & Project Management** (GitHub tools require `GITHUB_TOKEN`)
+**Engineering & Project Management** (GitHub tools authenticate with the token set by `/github-token` — saved to WardSONDB `config.system` and to STATE, which embrad hands to the brain at boot; a `GITHUB_TOKEN` in the brain's environment takes precedence, the development-host path)
 
 | Tool | Description |
 |---|---|

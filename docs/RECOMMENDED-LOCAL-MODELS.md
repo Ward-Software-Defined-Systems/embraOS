@@ -57,6 +57,10 @@ embra-brain sends sampler params and Ollama's `think: true` flag in each request
 
 `num_ctx` is not a documented field on Ollama's OpenAI-compat endpoint (per [`ollama#7063`](https://github.com/ollama/ollama/issues/7063), still open since 2024-10-01); for locally-loaded models a Modelfile (`PARAMETER num_ctx`) works around it.
 
+### Reasoning effort
+
+Qwen3.8 accepts `reasoning_effort` `low` | `medium` | `xhigh` (default `xhigh`; `high` is not valid for this model). Set it with `/effort <level>` while the Ollama or LM Studio preset is active — the level is sent verbatim, the server validates it, and `/effort` warns when a level is outside the model's documented set. Unset (the default) sends no field, so the server's per-model default applies; `/effort reset` clears a stored level. Qwen3.6 takes no field at all. See [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md).
+
 ### Bearer auth
 
 Both servers accept bearer tokens but neither validates them by default:
@@ -70,7 +74,7 @@ embraOS's wizard prompts for an optional bearer; supply the same token the serve
 
 ## Operator Override
 
-The list is operator-overridable at wizard time. Switching models post-wizard runs `/provider --setup <ollama|lm_studio>` (Sprint 5 reconfigure flow added in commit `4eb57e9`).
+The list is operator-overridable at wizard time. Switching models post-wizard runs `/provider --setup <ollama|lm_studio>` (Sprint 5 reconfigure flow added in commit `4eb57e9`). The same flow points either preset at any OpenAI-compatible server, local or hosted — vLLM, Together, Fireworks, OpenRouter: enter the base URL without `/v1` and the API key at the Bearer step; https endpoints keep their implicit 443.
 
 ---
 
@@ -86,4 +90,4 @@ See [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md).
 
 ---
 
-*Last updated: 2026-09-08.*
+*Last updated: 2026-09-18.*

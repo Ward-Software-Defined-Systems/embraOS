@@ -8,7 +8,7 @@ embraOS is built on a 7-layer continuity architecture (descended from the OpenCl
 | **World-State Model** | Active session, current provider, in-flight tool calls, profile context. | `crates/embra-brain/src/brain/`, sessions in WardSONDB |
 | **Continuity Engine** | Health checks, restart policies with exponential backoff, soul verification gate. | `crates/embrad/src/{supervisor,reconcile}.rs` (5-second health checks) |
 | **Influence & Propagation** | Tool dispatch, LLM provider routing, Guardian dynamic-tool gateway. | `crates/embra-brain/src/{tools,provider,guardian}/`; 116 tools, 4 providers |
-| **Action Layer** | Tool calls that touch the world — filesystem, git, HTTP, SSH, cron. | `crates/embra-brain/src/tools/registry/` |
+| **Action Layer** | Tool calls that touch the world — filesystem, git, HTTP, SSH, cron. | `crates/embra-brain/src/tools/registry.rs` |
 | **Governance & Guardrails** | Soul injection into the system prompt, workspace path restriction, RFC 1918 SSH constraint, Guardian capability broker. | `crates/embra-brain/src/brain/prompts.rs`; tool-layer enforcement |
 | **Memory & Knowledge** | Session history + cross-session knowledge graph (entries / semantic / procedural / typed edges) with auto-enrichment on retrieval ≥0.3. | `crates/embra-brain/src/knowledge/` |
 
@@ -18,7 +18,7 @@ The runtime services that implement those layers:
 |---|---|---|
 | `wardsondb` | 8090 | Rust JSON document database. Holds soul, memory, knowledge graph, sessions, schedules, and Guardian tool definitions. |
 | `embra-trustd` | 50001 | Soul SHA-256 verification + PKI (Root CA 10y, service certs 1y). |
-| `embra-apid` | 50000 / 8443 | gRPC + REST gateway, proxies brain RPCs. |
+| `embra-apid` | 50000 / 8443 | gRPC + REST gateway, proxies brain RPCs. REST: `GET /health`, `/version`, `/status` — `/status` is the brain's `GetSystemStatus` (2 s timeout, 503 when the brain is away) and carries the LLM provider probe as `llm-provider` / `llm-provider.detail`. |
 | `embra-brain` | 50002 | LLM runtime — provider abstraction, 116 tools, session manager, knowledge graph, Learning Mode. |
 | `embra-web` | 3345 | HTTPS web console (default UI); wraps embra-console in xterm.js over a PTY→WebSocket bridge. |
 | `embra-console` | — | Conversational TUI (serial; PTY-child of embra-web in default mode). |
@@ -26,6 +26,8 @@ The runtime services that implement those layers:
 | `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for dynamic tools — both authoring paths (operator paste, intelligence proposal) gated by a soul-spec replicant check; intelligence proposals additionally operator-approved; capability-broker host imports. |
 
 **Persistence:** [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a high-performance Rust JSON document database. It is the single durable store for runtime state: soul, memory entries, the knowledge graph, sessions, schedules, and Guardian dynamic-tool definitions.
+
+**Supervision:** `embrad` (PID 1) runs a 5-second reconciliation loop (`crates/embrad/src/reconcile.rs`) over every service in `crates/embrad/src/supervisor.rs`. Any exit — a clean status 0 included — is logged and restarted: a supervised service is meant to outlive the boot. Restarts back off exponentially, `1 s · 2^n` capped at 30 s (`RestartPolicy::default()`: `backoff_base` 1 s, `backoff_max` 30 s). `max_restarts` (10) is a burst limit, not a per-boot total: a restarted service that runs continuously for `stable_after` (60 s — pinned above `backoff_max`, so a crash loop pacing itself at the cap can never reset its own budget) gets its `restart_count` back to 0. Ten exits inside that window exhaust the budget and the service goes `Halted` for the rest of the boot. The soul gate is separate: `Supervisor::verify_soul` calls `halt_system` on a hash mismatch; a first boot with no soul continues into Learning Mode.
 
 **AI Model:** A pluggable LLM provider abstraction routes the Brain through one of four backends, selected at first boot and switchable at runtime via `/provider <kind>`:
 
