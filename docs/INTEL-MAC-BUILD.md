@@ -251,9 +251,12 @@ provider + credentials, timezone), then Learning Mode forms and seals the soul.
 > ./scripts/embraos-backup-mac.sh backup --label pre-rebuild
 > ./scripts/embraos-backup-mac.sh restore
 > ./scripts/embraos-backup-mac.sh list
+> ./scripts/embraos-backup-mac.sh --image ~/images/embraos.img verify   # a specific image
 > ```
 > Backups live in `~/embraOS_BACKUPS/` (override `EMBRAOS_BACKUP_DIR`) and are
-> interchangeable with Ubuntu and Apple-Silicon backups.
+> interchangeable with Ubuntu and Apple-Silicon backups. `--image <path>` (or
+> `EMBRAOS_IMAGE`) targets an image outside the project — the wrapper bind-mounts
+> its directory into the container.
 
 > **Pre-seeding STATE/DATA:** same constraint, same shape — `seed-state-mac.sh`
 > runs `seed-state.sh` inside a privileged Docker container (also arch-agnostic).

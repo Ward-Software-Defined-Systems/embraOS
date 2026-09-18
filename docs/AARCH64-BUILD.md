@@ -433,7 +433,13 @@ Same interface as the original — all commands work identically:
 ./scripts/embraos-backup-mac.sh restore 2026-04-15_1430
 ./scripts/embraos-backup-mac.sh list
 ./scripts/embraos-backup-mac.sh verify
+./scripts/embraos-backup-mac.sh --image ~/images/embraos.img verify   # a specific image
 ```
+
+`--image <path>` (or `EMBRAOS_IMAGE`) targets an image anywhere on the host: the
+wrapper resolves it host-side and bind-mounts its directory into the container
+(read-write, since `restore` writes the image), then hands the container path to
+the inner script.
 
 #### How it works
 

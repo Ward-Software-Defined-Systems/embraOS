@@ -3,9 +3,13 @@
 
 set -euo pipefail
 
-# Find image — check buildroot output first (always freshest), then output/images
+# Find image — argument, then $EMBRAOS_IMAGE, then buildroot output (always
+# freshest), then output/images (the precedence seed-state.sh and
+# embraos-backup.sh share)
 if [ -n "${1:-}" ]; then
     IMAGE="$1"
+elif [ -n "${EMBRAOS_IMAGE:-}" ]; then
+    IMAGE="$EMBRAOS_IMAGE"
 elif [ -f "buildroot-src/output/images/embraos.img" ]; then
     IMAGE="buildroot-src/output/images/embraos.img"
 elif [ -f "output/images/embraos.img" ]; then

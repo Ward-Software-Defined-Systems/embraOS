@@ -8,6 +8,15 @@
 #   ./embraos-backup.sh restore 2026-03-29_1430   # Restore a specific backup
 #   ./embraos-backup.sh list                      # List available backups
 #   ./embraos-backup.sh verify                    # Verify current disk image has valid data
+#   ./embraos-backup.sh --image /path/embraos.img verify   # Target a specific image
+#
+# Image resolution: --image <path> → $EMBRAOS_IMAGE → <root>/buildroot-src/output/images/
+# embraos.img → <root>/output/images/embraos.img (same precedence as run-qemu.sh and
+# seed-state.sh). The flag exists beside the variable because the documented
+# invocation is `sudo ./scripts/embraos-backup.sh …` and sudo's default env_reset
+# DROPS a variable set before it: `EMBRAOS_IMAGE=… sudo …` silently backs up the
+# default image. Either pass --image, or put the variable after sudo:
+# `sudo EMBRAOS_IMAGE=… ./scripts/embraos-backup.sh …`.
 #
 # Prerequisites:
 #   - Must run as root (or with sudo) for loop mount
@@ -34,15 +43,39 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 EMBRAOS_ROOT="${EMBRAOS_ROOT:-$(dirname "$SCRIPT_DIR")}"
 
-# Find image — same logic as run-qemu.sh: buildroot output first, then output/images
-if [ -n "${EMBRAOS_IMAGE:-}" ]; then
-    IMAGE="$EMBRAOS_IMAGE"
+# --- Global option: --image <path> (also --image=<path>) -----------------
+# Extracted from anywhere in the argument list; everything else reaches the
+# subcommand untouched. A flag survives sudo's env_reset, which is why it
+# exists beside EMBRAOS_IMAGE (see the header).
+IMAGE_ARG=""
+ARGS=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --image)
+            if [ $# -lt 2 ]; then echo "--image requires a value" >&2; exit 1; fi
+            IMAGE_ARG="$2"; shift 2 ;;
+        --image=*)
+            IMAGE_ARG="${1#--image=}"; shift ;;
+        *)
+            ARGS+=("$1"); shift ;;
+    esac
+done
+set -- ${ARGS[@]+"${ARGS[@]}"}
+
+# --- Image resolution ---------------------------------------------------
+# Same precedence as run-qemu.sh / seed-state.sh: --image → $EMBRAOS_IMAGE →
+# buildroot output (always freshest) → output/images. The defaults are
+# anchored on EMBRAOS_ROOT so the script works from any directory.
+if [ -n "$IMAGE_ARG" ]; then
+    IMAGE="$IMAGE_ARG"; IMAGE_SOURCE="--image"
+elif [ -n "${EMBRAOS_IMAGE:-}" ]; then
+    IMAGE="$EMBRAOS_IMAGE"; IMAGE_SOURCE="\$EMBRAOS_IMAGE"
 elif [ -f "${EMBRAOS_ROOT}/buildroot-src/output/images/embraos.img" ]; then
-    IMAGE="${EMBRAOS_ROOT}/buildroot-src/output/images/embraos.img"
+    IMAGE="${EMBRAOS_ROOT}/buildroot-src/output/images/embraos.img"; IMAGE_SOURCE="buildroot-src (freshest build)"
 elif [ -f "${EMBRAOS_ROOT}/output/images/embraos.img" ]; then
-    IMAGE="${EMBRAOS_ROOT}/output/images/embraos.img"
+    IMAGE="${EMBRAOS_ROOT}/output/images/embraos.img"; IMAGE_SOURCE="output/images"
 else
-    IMAGE=""  # Will be caught by check_image()
+    IMAGE=""; IMAGE_SOURCE=""  # Will be caught by check_image()
 fi
 # Resolve the real user's home even under sudo (sudo sets HOME to /root)
 REAL_HOME="${HOME}"
@@ -87,12 +120,18 @@ check_root() {
 check_image() {
     if [ -z "$IMAGE" ] || [ ! -f "$IMAGE" ]; then
         log_error "Disk image not found"
-        echo "  Searched: buildroot-src/output/images/embraos.img"
-        echo "            output/images/embraos.img"
-        echo "  Set EMBRAOS_IMAGE to override"
+        if [ -n "$IMAGE" ]; then
+            echo "  Given via ${IMAGE_SOURCE}: $IMAGE"
+        else
+            echo "  Searched: ${EMBRAOS_ROOT}/buildroot-src/output/images/embraos.img"
+            echo "            ${EMBRAOS_ROOT}/output/images/embraos.img"
+        fi
+        echo "  Point at one with:  sudo $0 --image /path/to/embraos.img <command>"
+        echo "  or:                 sudo EMBRAOS_IMAGE=/path/to/embraos.img $0 <command>"
+        echo "  (the variable must come AFTER sudo — sudo's env_reset drops one set before it)"
         exit 1
     fi
-    log_info "Using image: $IMAGE"
+    log_info "Using image: $IMAGE  (from ${IMAGE_SOURCE})"
 }
 
 check_vm_stopped() {
@@ -116,9 +155,15 @@ get_partition_geometry() {
 
     # fdisk -l outputs lines like:
     #   output/images/embraos.img3 158730  683017  524288  256M Linux filesystem
-    # We need the start sector and sector count (columns 2 and 4)
+    # We need the start sector and sector count (columns 2 and 4).
+    # fdisk echoes the device path exactly as given, so match on
+    # "<image path><N> " first — an --image override need not end in .img.
     local line
-    line=$(fdisk -l "$IMAGE" 2>/dev/null | grep "\.img${part_num} " || true)
+    line=$(fdisk -l "$IMAGE" 2>/dev/null | grep -F -- "${IMAGE}${part_num} " || true)
+
+    if [ -z "$line" ]; then
+        line=$(fdisk -l "$IMAGE" 2>/dev/null | grep "\.img${part_num} " || true)
+    fi
 
     if [ -z "$line" ]; then
         # Try alternate format without .img prefix
@@ -253,6 +298,7 @@ do_backup() {
     "timestamp": "${timestamp}",
     "label": "${label}",
     "image": "$(basename "$IMAGE")",
+    "image_path": "${IMAGE}",
     "image_sha256": "$(sha256sum "$IMAGE" | cut -d' ' -f1)",
     "state_files": ${state_files},
     "state_size": "${state_size}",
@@ -536,13 +582,17 @@ case "$COMMAND" in
         echo "embraos-backup.sh — Backup and restore embraOS STATE and DATA partitions"
         echo ""
         echo "Usage:"
-        echo "  sudo $0 backup [--label NAME]     Backup STATE + DATA from disk image"
-        echo "  sudo $0 restore [BACKUP_NAME]     Restore into disk image (latest if no name)"
-        echo "  sudo $0 list                      List available backups"
-        echo "  sudo $0 verify                    Check disk image has valid data"
+        echo "  sudo $0 [--image PATH] backup [--label NAME]     Backup STATE + DATA from disk image"
+        echo "  sudo $0 [--image PATH] restore [BACKUP_NAME]     Restore into disk image (latest if no name)"
+        echo "  sudo $0 list                                     List available backups"
+        echo "  sudo $0 [--image PATH] verify                    Check disk image has valid data"
+        echo ""
+        echo "Options:"
+        echo "  --image PATH        Disk image to operate on (default: buildroot-src/output/images/ then output/images/)"
         echo ""
         echo "Environment:"
-        echo "  EMBRAOS_IMAGE       Path to embraos.img (default: buildroot-src/output/images/ then output/images/)"
+        echo "  EMBRAOS_IMAGE       Same as --image. NOTE: put it AFTER sudo — sudo's env_reset drops a"
+        echo "                      variable set before it: sudo EMBRAOS_IMAGE=/path/embraos.img $0 verify"
         echo "  EMBRAOS_BACKUP_DIR  Backup storage directory (default: ~/embraOS_BACKUPS)"
         echo "  EMBRAOS_ROOT        Project root (default: parent of scripts/)"
         echo ""

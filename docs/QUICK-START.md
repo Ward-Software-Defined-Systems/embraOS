@@ -148,8 +148,11 @@ The following apply once the image is built. They are not part of the build pipe
 >
 > # Verify disk image has valid data
 > sudo ./scripts/embraos-backup.sh verify
+>
+> # Target a specific image (default: the one run-qemu.sh boots)
+> sudo ./scripts/embraos-backup.sh --image /path/to/embraos.img verify
 > ```
-> Backups are stored in `~/embraOS_BACKUPS/` by default (override with `EMBRAOS_BACKUP_DIR`). Each backup includes STATE (soul hash, PKI certs), DATA (WardSONDB collections, workspace), and metadata with SHA-256 of the source image.
+> Backups are stored in `~/embraOS_BACKUPS/` by default (override with `EMBRAOS_BACKUP_DIR`). Each backup includes STATE (soul hash, PKI certs), DATA (WardSONDB collections, workspace), and metadata with SHA-256 of the source image. To target another image pass `--image <path>`; `EMBRAOS_IMAGE` works too, but it must come *after* `sudo` (`sudo EMBRAOS_IMAGE=… ./scripts/embraos-backup.sh …`) — sudo's default `env_reset` drops a variable set before it, and the script would silently back up the default image.
 
 ---
 
