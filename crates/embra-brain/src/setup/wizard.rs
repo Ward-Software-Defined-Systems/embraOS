@@ -240,14 +240,18 @@ pub enum SubflowError {
 /// - Trim whitespace + trailing slash
 /// - Prepend `http://` if scheme missing
 /// - Append the preset's default port if no port is present in the
-///   host portion
+///   host portion — for bare hosts and `http://` only. An `https://`
+///   URL keeps its implicit 443: cloud OpenAI-compatible endpoints
+///   (OpenRouter, Together, Fireworks, …) are `https://host/path`
+///   without a port, and `https://host:1234` would break them.
 ///
 /// Examples (Ollama default port 11434):
 /// - `localhost`             → `http://localhost:11434`
 /// - `http://localhost`      → `http://localhost:11434`
 /// - `http://localhost:8080` → `http://localhost:8080`
 /// - `localhost:11434/`      → `http://localhost:11434`
-/// - `https://api.example.com` → `https://api.example.com:11434`
+/// - `https://api.example.com` → `https://api.example.com`
+/// - `https://openrouter.ai/api/` → `https://openrouter.ai/api`
 pub fn normalize_endpoint(input: &str, preset: OpenAiCompatPreset) -> String {
     let trimmed = input.trim().trim_end_matches('/');
     let with_scheme = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
@@ -282,7 +286,7 @@ pub fn normalize_endpoint(input: &str, preset: OpenAiCompatPreset) -> String {
     } else {
         host_part.contains(':')
     };
-    if has_port {
+    if has_port || scheme == "https://" {
         format!("{scheme}{host_part}{path_part}")
     } else {
         format!("{scheme}{host_part}:{default_port}{path_part}")
@@ -324,9 +328,20 @@ mod tests {
     }
 
     #[test]
-    fn normalize_https_preserved() {
+    fn normalize_https_keeps_implicit_443() {
+        // Cloud OpenAI-compatible endpoints are https without a port;
+        // injecting the preset's local default port broke them
+        // (`https://openrouter.ai:1234/api`). 2026-09-17.
         let out = normalize_endpoint("https://api.example.com", OpenAiCompatPreset::Ollama);
-        assert_eq!(out, "https://api.example.com:11434");
+        assert_eq!(out, "https://api.example.com");
+        let out = normalize_endpoint("https://openrouter.ai/api/", OpenAiCompatPreset::LmStudio);
+        assert_eq!(out, "https://openrouter.ai/api");
+    }
+
+    #[test]
+    fn normalize_https_explicit_port_kept() {
+        let out = normalize_endpoint("https://api.example.com:8443/inference", OpenAiCompatPreset::Ollama);
+        assert_eq!(out, "https://api.example.com:8443/inference");
     }
 
     #[test]
