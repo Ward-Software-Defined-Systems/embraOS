@@ -44,7 +44,7 @@ async fn main() -> anyhow::Result<()> {
 
     // REST server
     let rest_addr: std::net::SocketAddr = format!("0.0.0.0:{}", config.rest_port).parse()?;
-    let rest_router = rest::build_router();
+    let rest_router = rest::build_router(backends.clone());
 
     let rest_handle = tokio::spawn(async move {
         info!("REST server listening on {}", rest_addr);

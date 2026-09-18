@@ -48,9 +48,9 @@ const MAX_TOKENS: u32 = 128_000;
 /// supported model (Opus 5, Opus 4.8, Fable 5 — and the legacy 4.7).
 const DEFAULT_EFFORT: &str = "max";
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
-const API_VERSION: &str = "2023-06-01";
+pub(crate) const API_VERSION: &str = "2023-06-01";
 const BETA: &str = "prompt-caching-2024-07-31";
-const MODELS_URL: &str = "https://api.anthropic.com/v1/models";
+pub(crate) const MODELS_URL: &str = "https://api.anthropic.com/v1/models";
 const VALIDATE_TIMEOUT: Duration = Duration::from_secs(10);
 /// TCP + TLS establishment bound for the streaming client.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);

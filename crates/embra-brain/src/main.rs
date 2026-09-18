@@ -231,7 +231,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Start proactive engine
-    let proactive_rx = proactive::start_proactive_engine(&db, &config_tz);
+    let proactive_rx = proactive::start_proactive_engine(&db, &config_tz, &api_key);
 
     // Create the gRPC service
     let service = BrainGrpcService::new(db, config_tz, api_key, proactive_rx);

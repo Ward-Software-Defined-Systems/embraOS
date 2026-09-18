@@ -5,6 +5,13 @@
 //! the supervisor's health logic is in-process and unexposed, so we just
 //! observe the well-known localhost endpoints it manages. Frontend polls
 //! this every 5 s.
+//!
+//! One row is not a localhost probe: `provider` — the active LLM
+//! provider's endpoint health as the brain last measured it (5-minute
+//! probe + after provider changes), read through apid's REST `/status`
+//! (which proxies the brain's `GetSystemStatus`). It is omitted, not
+//! shown red, when nothing is configured yet or apid cannot reach the
+//! brain — a missing pill means "unknown", a red one means "down".
 
 use std::time::Duration;
 
@@ -49,6 +56,24 @@ fn svc(name: &str, up: bool, detail: &str) -> Value {
     json!({ "name": name, "state": if up { "up" } else { "down" }, "detail": detail })
 }
 
+/// The active LLM provider as apid's `/status` reports it: a `provider`
+/// pill when the brain has probed one (`up`/`down`), `None` for
+/// unknown/unconfigured or a non-200 answer.
+fn parse_provider_pill(resp: &str) -> Option<Value> {
+    let body = resp.split("\r\n\r\n").nth(1)?;
+    let v: Value = serde_json::from_str(body.trim()).ok()?;
+    let services = v.get("data")?.get("services")?;
+    let state = services.get("llm-provider")?.as_str()?;
+    if state != "up" && state != "down" {
+        return None;
+    }
+    let detail = services
+        .get("llm-provider.detail")
+        .and_then(Value::as_str)
+        .unwrap_or("LLM provider");
+    Some(svc("provider", state == "up", detail))
+}
+
 /// Pull `data.embraos_version` out of apid's `/version` HTTP response.
 fn parse_version(resp: &str) -> Option<String> {
     let body = resp.split("\r\n\r\n").nth(1)?;
@@ -68,16 +93,22 @@ pub async fn api_status(State(state): State<AppState>) -> Json<Value> {
         http_get("127.0.0.1:8443", "/health"),
         tcp_ok("127.0.0.1:50002"),
     );
-    let version_resp = http_get("127.0.0.1:8443", "/version").await;
+    let (version_resp, brain_status_resp) = tokio::join!(
+        http_get("127.0.0.1:8443", "/version"),
+        http_get("127.0.0.1:8443", "/status"),
+    );
 
     let apid_up = apid_grpc && apid_http.is_some();
-    let services = vec![
+    let mut services = vec![
         svc("wardsondb", wardson.is_some(), "HTTP /_health :8090"),
         svc("embra-trustd", trustd, "gRPC :50001"),
         svc("embra-apid", apid_up, "gRPC :50000 + REST :8443"),
         svc("embra-brain", brain, "gRPC :50002"),
         svc("embra-web", true, "HTTPS :3345 (self)"),
     ];
+    if let Some(provider) = brain_status_resp.as_deref().and_then(parse_provider_pill) {
+        services.push(provider);
+    }
 
     let version = version_resp
         .as_deref()
@@ -153,4 +184,40 @@ fn collect_system_metrics(state: &AppState) -> Value {
         "state_total_bytes": state_fs.map(|s| s.total_bytes),
         "state_used_bytes": state_fs.map(|s| s.used_bytes()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn http_200(body: &str) -> String {
+        format!("HTTP/1.0 200 OK\r\ncontent-type: application/json\r\n\r\n{body}")
+    }
+
+    #[test]
+    fn parse_version_reads_the_apid_payload() {
+        let resp = http_200(r#"{"ok":true,"data":{"embraos_version":"0.14.0-phase1","service":"embra-apid"}}"#);
+        assert_eq!(parse_version(&resp).as_deref(), Some("0.14.0-phase1"));
+        assert_eq!(parse_version("HTTP/1.0 200 OK\r\n\r\nnot json"), None);
+    }
+
+    #[test]
+    fn provider_pill_follows_the_brain_probe_state() {
+        let up = http_200(
+            r#"{"ok":true,"data":{"version":"x","services":{"llm-provider":"up","llm-provider.detail":"lm_studio · qwen/qwen3.8-27b · http://mac:1234 · model present · 12 ms · checked 3 s ago"}}}"#,
+        );
+        let pill = parse_provider_pill(&up).expect("pill");
+        assert_eq!(pill["name"], "provider");
+        assert_eq!(pill["state"], "up");
+        assert!(pill["detail"].as_str().unwrap().contains("qwen3.8"));
+
+        let down = http_200(r#"{"ok":true,"data":{"services":{"llm-provider":"down","llm-provider.detail":"anthropic · claude-opus-5 · api.anthropic.com · unreachable · checked 9 s ago · timeout"}}}"#);
+        assert_eq!(parse_provider_pill(&down).unwrap()["state"], "down");
+
+        // Unknown (nothing configured), no entry, or a 503 body → no pill.
+        let unknown = http_200(r#"{"ok":true,"data":{"services":{"llm-provider":"unknown","llm-provider.detail":"no LLM provider configured yet"}}}"#);
+        assert!(parse_provider_pill(&unknown).is_none());
+        assert!(parse_provider_pill(&http_200(r#"{"ok":true,"data":{"services":{}}}"#)).is_none());
+        assert!(parse_provider_pill(r#"HTTP/1.0 503 Service Unavailable\r\n\r\n{"ok":false,"error":"x"}"#).is_none());
+    }
 }

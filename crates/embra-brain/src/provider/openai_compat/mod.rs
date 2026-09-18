@@ -264,6 +264,24 @@ pub(crate) fn reasoning_effort_for_model(model_id: &str) -> Option<&'static str>
     None
 }
 
+/// STATE file holding a preset's bearer token (mode 0600; written by the
+/// setup flows, exported by embrad at boot).
+pub(crate) fn bearer_state_path(preset: OpenAiCompatPreset) -> &'static str {
+    match preset {
+        OpenAiCompatPreset::Ollama => "/embra/state/bearer_ollama",
+        OpenAiCompatPreset::LmStudio => "/embra/state/bearer_lm_studio",
+    }
+}
+
+/// Env var carrying that bearer inside the brain process; read per call
+/// so a post-setup swap needs no restart.
+pub(crate) fn bearer_env_var(preset: OpenAiCompatPreset) -> &'static str {
+    match preset {
+        OpenAiCompatPreset::Ollama => "EMBRA_OLLAMA_BEARER",
+        OpenAiCompatPreset::LmStudio => "EMBRA_LM_STUDIO_BEARER",
+    }
+}
+
 /// The `reasoning_effort` values a model family DOCUMENTS, for `/effort`'s
 /// hint and warning only — nothing clamps to it (the server validates).
 /// Verified against primary docs 2026-09-17: Qwen3.8 model card

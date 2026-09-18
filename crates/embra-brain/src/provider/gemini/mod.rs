@@ -41,7 +41,7 @@ use wire::{
 
 const DEFAULT_MODEL: &str = "gemini-3.1-pro-preview";
 const DEFAULT_DISPLAY_NAME: &str = "gemini-3.1-pro";
-const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
+pub(crate) const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 const VALIDATE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Per-Gemini-3.1-Pro-docs: 64k output ceiling; `thinking_level` is

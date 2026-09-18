@@ -83,6 +83,28 @@ pub struct WardsondbSection {
     pub memory_collections: Vec<MemoryCollectionStatus>,
 }
 
+/// The active LLM provider's last endpoint probe (`provider::health`):
+/// reachability, model presence, key state, latency, age. Absent until
+/// the health loop has run once (~30 s after boot).
+#[derive(Debug, Serialize)]
+pub struct ProviderStatus {
+    #[serde(flatten)]
+    pub probe: crate::provider::health::ProviderProbe,
+    /// `up` | `down` | `unknown` (unknown = nothing configured yet).
+    pub state: &'static str,
+    pub checked_secs_ago: u64,
+}
+
+impl From<crate::provider::health::ProviderProbe> for ProviderStatus {
+    fn from(probe: crate::provider::health::ProviderProbe) -> Self {
+        Self {
+            state: probe.state(),
+            checked_secs_ago: probe.age_secs(),
+            probe,
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct SystemStatus {
     pub version: String,
@@ -94,6 +116,9 @@ pub struct SystemStatus {
     /// monitoring idea: it watches the thing that can actually fail.
     pub search_window_saturated: bool,
     pub wardsondb: WardsondbSection,
+    /// See [`ProviderStatus`]; omitted before the first probe.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<ProviderStatus>,
 }
 
 /// Collections covered by the FIX-6 parity check — the three windowed-search
@@ -167,6 +192,7 @@ pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
             lifetime: lifetime_block,
             memory_collections,
         },
+        provider: crate::provider::health::latest().map(ProviderStatus::from),
     }
 }
 
@@ -2030,8 +2056,10 @@ mod native_args_tests {
                     saturated: false,
                 }],
             },
+            provider: None,
         };
         let v = serde_json::to_value(&s).unwrap();
+        assert!(v.get("provider").is_none(), "no probe yet → no provider block");
         assert!(v.get("lifetime_requests").is_none(), "flat field leaked");
         assert!(v.get("lifetime_inserts").is_none(), "flat field leaked");
         assert!(v.get("lifetime_queries").is_none(), "flat field leaked");

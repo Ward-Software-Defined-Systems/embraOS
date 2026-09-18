@@ -13,6 +13,7 @@
 
 pub mod anthropic;
 pub mod gemini;
+pub mod health;
 pub mod image;
 pub mod ir;
 pub mod openai_compat;

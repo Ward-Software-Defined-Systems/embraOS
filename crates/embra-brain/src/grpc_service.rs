@@ -678,7 +678,16 @@ impl BrainService for BrainGrpcService {
             uptime_seconds: self.start_time.elapsed().as_secs(),
             soul: None,
             wardsondb_status: if self.db.health().await.unwrap_or(false) { "healthy" } else { "unhealthy" }.to_string(),
-            services: std::collections::HashMap::new(),
+            // The active LLM provider's last endpoint probe, as two map
+            // entries (no proto change): apid's REST /status proxies this
+            // and the web console renders the `provider` pill from it.
+            services: match crate::provider::health::latest() {
+                Some(p) => std::collections::HashMap::from([
+                    ("llm-provider".to_string(), p.state().to_string()),
+                    ("llm-provider.detail".to_string(), p.summary_line()),
+                ]),
+                None => std::collections::HashMap::new(),
+            },
         }))
     }
 
@@ -3613,6 +3622,9 @@ async fn perform_provider_swap(
     // 3. Persist to STATE so embrad picks the right provider on the
     //    next boot.
     let _ = std::fs::write("/embra/state/api_provider", target.as_str());
+    // The active endpoint changed — re-probe now instead of at the next
+    // 5-minute tick.
+    crate::provider::health::request_probe();
 
     let cfg_after = config::load_config(&**db).await.ok();
     let model_for_swap_msg = match cfg_after.as_ref() {
@@ -3731,6 +3743,58 @@ fn build_openai_compat_provider(
     ))
 }
 
+/// What the endpoint-health probe should check, resolved from persisted
+/// config with the SAME resolvers a turn uses (env model overrides, the
+/// per-provider key with the boot-key fallback, the preset's bearer), so
+/// the probe never disagrees with the next request. `None` = nothing to
+/// probe yet (no key / no preset endpoint — a pre-wizard boot).
+pub(crate) fn provider_probe_target(
+    cfg: &config::SystemConfig,
+    boot_key: &str,
+) -> Option<crate::provider::health::ProbeTarget> {
+    use crate::provider::health::ProbeTarget;
+    use crate::provider::openai_compat::OpenAiCompatPreset;
+    let kind = ProviderKind::from_str(&cfg.api_provider).unwrap_or(ProviderKind::Anthropic);
+    match kind {
+        ProviderKind::Anthropic | ProviderKind::Gemini => {
+            let key = cfg
+                .key_for(kind)
+                .map(str::to_string)
+                .unwrap_or_else(|| boot_key.to_string());
+            if key.is_empty() {
+                return None;
+            }
+            let model = match kind {
+                ProviderKind::Anthropic => resolve_anthropic_model(cfg).0,
+                _ => resolve_gemini_model_id(cfg),
+            };
+            Some(ProbeTarget {
+                kind,
+                model,
+                key,
+                endpoint: String::new(),
+            })
+        }
+        ProviderKind::Ollama | ProviderKind::LmStudio => {
+            let preset = match kind {
+                ProviderKind::Ollama => OpenAiCompatPreset::Ollama,
+                _ => OpenAiCompatPreset::LmStudio,
+            };
+            let (endpoint, model) = cfg.openai_compat.for_preset(preset)?;
+            let bearer = std::env::var(bearer_env_var(preset))
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_default();
+            Some(ProbeTarget {
+                kind,
+                model: model.to_string(),
+                key: bearer,
+                endpoint: endpoint.to_string(),
+            })
+        }
+    }
+}
+
 /// Build the active LLM provider from persisted config. Shared by the
 /// per-turn loop and the guardian replicant check
 /// (`crate::guardian::replicant`). `fallback_key` is used for
@@ -3826,21 +3890,9 @@ const BEARER_REMOVE: &str = "Remove";
 const BEARER_SET: &str = "Set";
 const BEARER_SKIP: &str = "Skip";
 
-fn bearer_state_path(preset: crate::provider::openai_compat::OpenAiCompatPreset) -> &'static str {
-    use crate::provider::openai_compat::OpenAiCompatPreset;
-    match preset {
-        OpenAiCompatPreset::Ollama => "/embra/state/bearer_ollama",
-        OpenAiCompatPreset::LmStudio => "/embra/state/bearer_lm_studio",
-    }
-}
-
-fn bearer_env_var(preset: crate::provider::openai_compat::OpenAiCompatPreset) -> &'static str {
-    use crate::provider::openai_compat::OpenAiCompatPreset;
-    match preset {
-        OpenAiCompatPreset::Ollama => "EMBRA_OLLAMA_BEARER",
-        OpenAiCompatPreset::LmStudio => "EMBRA_LM_STUDIO_BEARER",
-    }
-}
+// Bearer helpers live with the provider now (the health probe needs them
+// too); imported here for the setup flows and their tests.
+use crate::provider::openai_compat::{bearer_env_var, bearer_state_path};
 
 /// Initialize the OpenAI-compat reconfigure state machine. Loads
 /// current config + env-var bearer, captures snapshot defaults,
@@ -4273,6 +4325,11 @@ async fn complete_openai_compat_setup(
         }
     }
 
+    // The preset's endpoint / model / bearer changed: re-probe the active
+    // provider now rather than at the next 5-minute tick (a no-op change
+    // if this preset is not the active provider).
+    crate::provider::health::request_probe();
+
     // 3. Acknowledge and clear state.
     let _ = tx
         .send(Ok(ConversationResponse {
@@ -4379,6 +4436,9 @@ async fn handle_pending_key_setup(
         .await;
         return;
     }
+    // A new key for this provider: re-probe now (the probe reads the key
+    // from the config just saved, the same way a turn does).
+    crate::provider::health::request_probe();
 
     // Persist to per-provider STATE file with mode 0600 per Locked
     // Decision #8 (Sprint 5 retroactive fix to existing api_key_*
