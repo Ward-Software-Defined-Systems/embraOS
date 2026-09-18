@@ -1,7 +1,7 @@
 {
   "upload_type": "software",
   "title": "embraOS: A continuity-preserving operating system for one AI",
-  "version": "0.14.0-phase1",
+  "version": "0.15.0-phase1",
   "creators": [
     {
       "name": "Ward, William",
