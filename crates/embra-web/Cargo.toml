@@ -16,7 +16,6 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
 axum = { version = "0.8", features = ["ws"] }
 tokio-rustls = "0.26"
 tokio-stream = "0.1"
@@ -25,3 +24,7 @@ bytes = "1"
 portable-pty = "0.9"
 rust-embed = { version = "8", features = ["compression"] }
 libc = "0.2"
+
+[dev-dependencies]
+# tls.rs tests mint a certificate the way embra-trustd does.
+rcgen = { workspace = true }
