@@ -66,7 +66,6 @@ inventory::collect!(ToolDescriptor);
 /// as long as the process.
 pub static REGISTRY: Lazy<HashMap<&'static str, &'static ToolDescriptor>> = Lazy::new(|| {
     inventory::iter::<ToolDescriptor>()
-        .into_iter()
         .map(|d| (d.name, d))
         .collect()
 });

@@ -314,7 +314,7 @@ impl SessionManager {
             .db
             .query(&collection, &history_query_body())
             .await
-            .map_err(|e| SessionError::Io(e.into()))?;
+            .map_err(SessionError::Io)?;
 
         // Stamped after a successful push so the meta update below can
         // mirror the history length; stays None when no history doc
@@ -344,7 +344,7 @@ impl SessionManager {
                     .update(&collection, id, &serde_json::to_value(&history)
                         .map_err(|e| SessionError::Io(e.into()))?)
                     .await
-                    .map_err(|e| SessionError::Io(e.into()))?;
+                    .map_err(SessionError::Io)?;
             }
         }
 
@@ -356,7 +356,7 @@ impl SessionManager {
             .db
             .query(&meta_collection, &history_query_body())
             .await
-            .map_err(|e| SessionError::Io(e.into()))?;
+            .map_err(SessionError::Io)?;
         if let Some(meta_doc) = meta_results.into_iter().next() {
             let id = meta_doc
                 .get("_id")
@@ -374,7 +374,7 @@ impl SessionManager {
                     .update(&meta_collection, &id, &serde_json::to_value(&meta)
                         .map_err(|e| SessionError::Io(e.into()))?)
                     .await
-                    .map_err(|e| SessionError::Io(e.into()))?;
+                    .map_err(SessionError::Io)?;
             }
         }
 

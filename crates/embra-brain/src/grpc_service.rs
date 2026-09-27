@@ -6247,7 +6247,7 @@ async fn save_learning_history(db: &Arc<WardsonDbClient>, history: &[Message]) -
     });
     match db.write(meta_collection, &meta).await {
         Ok(_) => Ok(()),
-        Err(_) => db.update(meta_collection, "learning", &meta).await.map_err(|e| e.into()),
+        Err(_) => db.update(meta_collection, "learning", &meta).await,
     }
 }
 

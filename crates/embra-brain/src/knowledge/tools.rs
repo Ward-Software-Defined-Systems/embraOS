@@ -2189,7 +2189,6 @@ mod native_args_tests {
     #[test]
     fn knowledge_tools_register() {
         let names: Vec<&'static str> = inventory::iter::<crate::tools::registry::ToolDescriptor>()
-            .into_iter()
             .map(|d| d.name)
             .collect();
         for expected in [

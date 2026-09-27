@@ -934,7 +934,6 @@ mod native_args_tests {
     #[test]
     fn security_tools_register() {
         let names: Vec<&'static str> = inventory::iter::<crate::tools::registry::ToolDescriptor>()
-            .into_iter()
             .map(|d| d.name)
             .filter(|n| {
                 matches!(

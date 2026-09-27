@@ -2150,7 +2150,6 @@ mod native_args_tests {
         // Descriptors are accumulated via inventory at startup; confirm the
         // three memory-search descriptors all exist as distinct names.
         let names: Vec<&'static str> = inventory::iter::<crate::tools::registry::ToolDescriptor>()
-            .into_iter()
             .map(|d| d.name)
             .filter(|n| matches!(*n, "recall" | "memory_search" | "search_memory"))
             .collect();
@@ -2215,7 +2214,6 @@ mod system_logs_tests {
     #[test]
     fn system_logs_registered_with_plain_object_schema() {
         let names: Vec<&'static str> = inventory::iter::<crate::tools::registry::ToolDescriptor>()
-            .into_iter()
             .map(|d| d.name)
             .collect();
         assert!(names.contains(&"system_logs"), "system_logs registered");

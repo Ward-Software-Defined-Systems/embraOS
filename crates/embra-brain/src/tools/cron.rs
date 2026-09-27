@@ -452,7 +452,6 @@ mod native_args_tests {
     #[test]
     fn cron_tools_register() {
         let names: Vec<&'static str> = inventory::iter::<crate::tools::registry::ToolDescriptor>()
-            .into_iter()
             .map(|d| d.name)
             .filter(|n| matches!(*n, "cron_add" | "cron_list" | "cron_remove"))
             .collect();

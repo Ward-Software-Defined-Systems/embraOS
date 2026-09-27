@@ -4595,7 +4595,6 @@ mod native_args_tests {
     #[test]
     fn engineering_tools_register() {
         let names: Vec<&'static str> = inventory::iter::<crate::tools::registry::ToolDescriptor>()
-            .into_iter()
             .map(|d| d.name)
             .collect();
         for expected in [
