@@ -101,6 +101,26 @@ pub fn winsize_font_size() -> Option<(u16, u16)> {
 /// Halfblocks need no real geometry; ratatui-image's own default ratio.
 const FALLBACK_FONT: (u16, u16) = (10, 20);
 
+/// A picker for a cell size this module already knows, forced to `protocol`.
+///
+/// The ONLY `from_fontsize` call site. ratatui-image deprecated it (9.0) for
+/// `from_query_stdio` — a stdin round-trip the web PTY cannot answer (module
+/// doc) — or `halfblocks()`, which fixes the cell at 10×20 and cannot carry
+/// the winsize geometry. Neither replaces it here, so the deprecation is
+/// allowed at this one site.
+#[allow(deprecated)]
+fn picker_for(font: (u16, u16), protocol: ProtocolType) -> Picker {
+    let mut p = Picker::from_fontsize(font.into());
+    p.set_protocol_type(protocol);
+    p
+}
+
+/// The picker's cell size as a plain pair (`FontSize` has no `PartialEq`).
+fn cell_size(picker: &Picker) -> (u16, u16) {
+    let fs = picker.font_size();
+    (fs.width, fs.height)
+}
+
 pub struct Graphics {
     mode: GraphicsMode,
     picker: Option<Picker>,
@@ -117,16 +137,11 @@ impl Graphics {
             GraphicsMode::Off => (None, false),
             GraphicsMode::Auto => match Picker::from_query_stdio() {
                 Ok(p) => (Some(p), true),
-                Err(_) => {
-                    let mut p = Picker::from_fontsize(FALLBACK_FONT);
-                    p.set_protocol_type(ProtocolType::Halfblocks);
-                    (Some(p), false)
-                }
+                Err(_) => (Some(picker_for(FALLBACK_FONT, ProtocolType::Halfblocks)), false),
             },
             GraphicsMode::Halfblocks => {
-                let mut p = Picker::from_fontsize(winsize_font_size().unwrap_or(FALLBACK_FONT));
-                p.set_protocol_type(ProtocolType::Halfblocks);
-                (Some(p), true)
+                let font = winsize_font_size().unwrap_or(FALLBACK_FONT);
+                (Some(picker_for(font, ProtocolType::Halfblocks)), true)
             }
             GraphicsMode::Sixel | GraphicsMode::Kitty | GraphicsMode::Iterm2 => {
                 Self::pixel_picker(mode, winsize_font_size())
@@ -136,21 +151,11 @@ impl Graphics {
     }
 
     fn pixel_picker(mode: GraphicsMode, font: Option<(u16, u16)>) -> (Option<Picker>, bool) {
-        match font {
-            Some(fs) => {
-                let mut p = Picker::from_fontsize(fs);
-                if let Some(proto) = mode.pixel_protocol() {
-                    p.set_protocol_type(proto);
-                }
-                (Some(p), true)
-            }
-            None => {
-                // Geometry unknown (no browser attached yet, or an old
-                // embra-web): halfblocks until a Resize brings pixels.
-                let mut p = Picker::from_fontsize(FALLBACK_FONT);
-                p.set_protocol_type(ProtocolType::Halfblocks);
-                (Some(p), false)
-            }
+        match (font, mode.pixel_protocol()) {
+            (Some(fs), Some(proto)) => (Some(picker_for(fs, proto)), true),
+            // Geometry unknown (no browser attached yet, or an old
+            // embra-web): halfblocks until a Resize brings pixels.
+            _ => (Some(picker_for(FALLBACK_FONT, ProtocolType::Halfblocks)), false),
         }
     }
 
@@ -161,16 +166,14 @@ impl Graphics {
             return false;
         }
         let font = winsize_font_size();
-        let current = self.picker.as_ref().map(Picker::font_size);
+        let current = self.picker.as_ref().map(cell_size);
         if self.mode == GraphicsMode::Halfblocks {
             // Geometry only affects the aspect math; refresh quietly.
             let fs = font.unwrap_or(FALLBACK_FONT);
             if current == Some(fs) {
                 return false;
             }
-            let mut p = Picker::from_fontsize(fs);
-            p.set_protocol_type(ProtocolType::Halfblocks);
-            self.picker = Some(p);
+            self.picker = Some(picker_for(fs, ProtocolType::Halfblocks));
             return true;
         }
         match font {
@@ -200,7 +203,7 @@ impl Graphics {
     }
 
     pub fn font_size(&self) -> (u16, u16) {
-        self.picker.as_ref().map(Picker::font_size).unwrap_or(FALLBACK_FONT)
+        self.picker.as_ref().map(cell_size).unwrap_or(FALLBACK_FONT)
     }
 
     pub fn make_protocol(&self, image: DynamicImage) -> Option<StatefulProtocol> {
@@ -291,7 +294,17 @@ mod tests {
         assert!(known);
         let p = p.unwrap();
         assert_eq!(p.protocol_type(), ProtocolType::Sixel);
-        assert_eq!(p.font_size(), (9, 18));
+        assert_eq!(cell_size(&p), (9, 18));
+    }
+
+    #[test]
+    fn halfblocks_fallback_keeps_the_library_default_cell() {
+        // FALLBACK_FONT mirrors `Picker::halfblocks()`; a drift would skew
+        // the aspect math of every image rendered without geometry.
+        assert_eq!(cell_size(&Picker::halfblocks()), FALLBACK_FONT);
+        let p = picker_for(FALLBACK_FONT, ProtocolType::Halfblocks);
+        assert_eq!(p.protocol_type(), ProtocolType::Halfblocks);
+        assert_eq!(cell_size(&p), FALLBACK_FONT);
     }
 
     #[test]
