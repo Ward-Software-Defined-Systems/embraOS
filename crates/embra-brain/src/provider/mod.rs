@@ -148,7 +148,7 @@ pub enum ProviderError {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct LlmRequestOptions {
     /// When `true`, the provider's request body opts in to reasoning /
-    /// thought streaming where applicable (Anthropic `display: summary`,
+    /// thought streaming where applicable (Anthropic `display: summarized`,
     /// Gemini `includeThoughts: true`). When `false`, providers omit
     /// those fields and suppress emission of `StreamEvent::ReasoningDelta`
     /// even if the model returns reasoning unsolicited (belt-and-

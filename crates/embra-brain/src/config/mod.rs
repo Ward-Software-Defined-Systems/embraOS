@@ -55,8 +55,9 @@ pub struct SystemConfig {
     /// env var which takes precedence over this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gemini_model: Option<String>,
-    /// Active Anthropic model alias (e.g. `"opus-5"`, `"opus-4.8"`,
-    /// `"fable-5"`; the legacy persisted `"opus-4.7"` keeps resolving). `None`
+    /// Active Anthropic model alias (`"opus-5.5"`, `"opus-5"`, `"opus-4.8"`,
+    /// `"fable-5.1"`, `"fable-5"`; the legacy persisted `"opus-4.7"` keeps
+    /// resolving). `None`
     /// (additive default) means the provider's
     /// `DEFAULT_MODEL` (`claude-opus-5`). The brain also honors the
     /// `EMBRA_ANTHROPIC_MODEL` env var, which takes precedence. Settable
@@ -274,7 +275,9 @@ fn default_kg_traversal_node_budget() -> u32 { 1000 }
 fn default_api_provider() -> String { "anthropic".to_string() }
 
 const PROVIDER_ANTHROPIC_OPUS5_LABEL: &str = "Anthropic Claude Opus 5";
+const PROVIDER_ANTHROPIC_OPUS55_LABEL: &str = "Anthropic Claude Opus 5.5";
 const PROVIDER_ANTHROPIC_OPUS48_LABEL: &str = "Anthropic Claude Opus 4.8";
+const PROVIDER_ANTHROPIC_FABLE51_LABEL: &str = "Anthropic Claude Fable 5.1";
 const PROVIDER_ANTHROPIC_FABLE_LABEL: &str = "Anthropic Claude Fable 5";
 const PROVIDER_GEMINI_LABEL: &str = "Google Gemini 3.1 Pro";
 const PROVIDER_OLLAMA_LABEL: &str = "Ollama (OpenAI-compat)";
@@ -285,9 +288,11 @@ const PROVIDER_LM_STUDIO_LABEL: &str = "LM Studio (OpenAI-compat)";
 /// option pre-selected and does not read `default_value`
 /// (`embra-console` `Selector::new`), so the label of the default model
 /// must stay first.
-pub(crate) const PROVIDER_WIZARD_LABELS: [&str; 6] = [
+pub(crate) const PROVIDER_WIZARD_LABELS: [&str; 8] = [
     PROVIDER_ANTHROPIC_OPUS5_LABEL,
+    PROVIDER_ANTHROPIC_OPUS55_LABEL,
     PROVIDER_ANTHROPIC_OPUS48_LABEL,
+    PROVIDER_ANTHROPIC_FABLE51_LABEL,
     PROVIDER_ANTHROPIC_FABLE_LABEL,
     PROVIDER_GEMINI_LABEL,
     PROVIDER_OLLAMA_LABEL,
@@ -299,8 +304,8 @@ fn provider_from_label(label: &str) -> ProviderKind {
         PROVIDER_GEMINI_LABEL => ProviderKind::Gemini,
         PROVIDER_OLLAMA_LABEL => ProviderKind::Ollama,
         PROVIDER_LM_STUDIO_LABEL => ProviderKind::LmStudio,
-        // All Anthropic labels (Opus 5, Opus 4.8, Fable 5) map here; the
-        // chosen model is captured separately by `anthropic_model_from_label`.
+        // All Anthropic labels map here; the chosen model is captured
+        // separately by `anthropic_model_from_label`.
         _ => ProviderKind::Anthropic,
     }
 }
@@ -314,7 +319,9 @@ fn provider_from_label(label: &str) -> ProviderKind {
 pub(crate) fn anthropic_model_from_label(label: &str) -> Option<String> {
     match label {
         PROVIDER_ANTHROPIC_OPUS5_LABEL => Some("opus-5".to_string()),
+        PROVIDER_ANTHROPIC_OPUS55_LABEL => Some("opus-5.5".to_string()),
         PROVIDER_ANTHROPIC_OPUS48_LABEL => Some("opus-4.8".to_string()),
+        PROVIDER_ANTHROPIC_FABLE51_LABEL => Some("fable-5.1".to_string()),
         PROVIDER_ANTHROPIC_FABLE_LABEL => Some("fable-5".to_string()),
         _ => None,
     }
@@ -616,7 +623,7 @@ pub async fn run_config_wizard_grpc(
     info!("Config wizard: name = {}", name);
 
     // Step 2: Provider selection (Sprint 4 → Sprint 5 4-way, then the
-    // Anthropic line-up: Opus 5 + Opus 4.8 + Fable 5 since 2026-07-24) —
+    // Anthropic line-up, five models since 2026-09-27) —
     // Selector UI. The default is the first label (see
     // PROVIDER_WIZARD_LABELS) and tracks the provider's DEFAULT_MODEL.
     let _ = tx.send(Ok(ConversationResponse {
@@ -634,8 +641,8 @@ pub async fn run_config_wizard_grpc(
         _ => PROVIDER_WIZARD_LABELS[0].to_string(),
     };
     let provider_kind = provider_from_label(&provider_choice);
-    // Capture the chosen Anthropic model (Opus 5, Opus 4.8, Fable 5) for
-    // the Anthropic path; persisted below as `SystemConfig.anthropic_model`.
+    // Capture the chosen Anthropic model for the Anthropic path; persisted
+    // below as `SystemConfig.anthropic_model`.
     let anthropic_model = anthropic_model_from_label(&provider_choice);
     info!(
         "Config wizard: provider = {}{}",
@@ -1335,7 +1342,8 @@ mod provider_label_tests {
     //! the console and chat-mobile UIs render whichever labels appear here.
     use super::{
         anthropic_model_from_label, provider_from_label,
-        PROVIDER_ANTHROPIC_FABLE_LABEL, PROVIDER_ANTHROPIC_OPUS48_LABEL,
+        PROVIDER_ANTHROPIC_FABLE51_LABEL, PROVIDER_ANTHROPIC_FABLE_LABEL,
+        PROVIDER_ANTHROPIC_OPUS48_LABEL, PROVIDER_ANTHROPIC_OPUS55_LABEL,
         PROVIDER_ANTHROPIC_OPUS5_LABEL, PROVIDER_GEMINI_LABEL, PROVIDER_WIZARD_LABELS,
     };
     use crate::provider::ProviderKind;
@@ -1373,7 +1381,9 @@ mod provider_label_tests {
     fn all_anthropic_labels_map_to_anthropic() {
         for label in [
             PROVIDER_ANTHROPIC_OPUS5_LABEL,
+            PROVIDER_ANTHROPIC_OPUS55_LABEL,
             PROVIDER_ANTHROPIC_OPUS48_LABEL,
+            PROVIDER_ANTHROPIC_FABLE51_LABEL,
             PROVIDER_ANTHROPIC_FABLE_LABEL,
         ] {
             assert_eq!(provider_from_label(label), ProviderKind::Anthropic);
@@ -1393,6 +1403,14 @@ mod provider_label_tests {
         assert_eq!(
             anthropic_model_from_label(PROVIDER_ANTHROPIC_FABLE_LABEL),
             Some("fable-5".to_string())
+        );
+        assert_eq!(
+            anthropic_model_from_label(PROVIDER_ANTHROPIC_OPUS55_LABEL),
+            Some("opus-5.5".to_string())
+        );
+        assert_eq!(
+            anthropic_model_from_label(PROVIDER_ANTHROPIC_FABLE51_LABEL),
+            Some("fable-5.1".to_string())
         );
         assert_eq!(anthropic_model_from_label(PROVIDER_GEMINI_LABEL), None);
     }

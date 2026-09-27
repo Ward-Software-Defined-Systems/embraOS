@@ -2341,7 +2341,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-5|opus-4.8|fable-5>   Switch the Anthropic model (next message)\n  /effort                            Show the active provider's effort level and what is sent\n  /effort <low|medium|high|xhigh|max>  Set effort for the active provider (Anthropic default max; Gemini high; local presets: sent verbatim, model-validated); /effort reset clears\n  /embeddings                        Show the local semantic-similarity layer: model, index, how many nodes are embedded\n  /embeddings <on|off>               Enable or disable semantic similarity in retrieval (default on)\n  /embeddings backfill [--force]     Embed nodes that need it (local CPU, ~55ms/node); --force re-embeds all\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image (uploaded id or a workspace path) to your next message\n  /attach list | clear               Show or drop the staged images\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-3-pro-image (default) | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-5.5|opus-5|opus-4.8|fable-5.1|fable-5>  Switch the Anthropic model (next message)\n  /effort                            Show the active provider's effort level and what is sent\n  /effort <low|medium|high|xhigh|max>  Set effort for the active provider (Anthropic default max; Gemini high; local presets: sent verbatim, model-validated); /effort reset clears\n  /embeddings                        Show the local semantic-similarity layer: model, index, how many nodes are embedded\n  /embeddings <on|off>               Enable or disable semantic similarity in retrieval (default on)\n  /embeddings backfill [--force]     Embed nodes that need it (local CPU, ~55ms/node); --force re-embeds all\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image (uploaded id or a workspace path) to your next message\n  /attach list | clear               Show or drop the staged images\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-3-pro-image (default) | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -4510,10 +4510,11 @@ fn resolve_gemini_model_id_inner(env: Option<&str>, cfg_field: Option<&str>) -> 
 /// 2. `config.anthropic_model` (persistent, set via `/model`).
 /// 3. The provider's [`DEFAULT_MODEL`](crate::provider::anthropic::DEFAULT_MODEL)
 ///    (`claude-opus-5`).
+///
 /// The request shape is identical across supported Anthropic models
-/// (Opus 5, Opus 4.8, Fable 5 — and the legacy 4.7), so this only swaps the
-/// `model` id + display
-/// name. Inner fn is pure for env-race-free tests.
+/// (Opus 5.5, Opus 5, Opus 4.8, Fable 5.1, Fable 5 — and the legacy 4.7),
+/// so this only swaps the `model` id + display name. Inner fn is pure for
+/// env-race-free tests.
 fn resolve_anthropic_model(cfg: &config::SystemConfig) -> (String, String) {
     let env_override = std::env::var("EMBRA_ANTHROPIC_MODEL").ok();
     resolve_anthropic_model_inner(env_override.as_deref(), cfg.anthropic_model.as_deref())
@@ -4539,20 +4540,28 @@ fn resolve_anthropic_model_inner(
 
 /// Map a SELECTABLE model alias to `(api_id, display)`. The `/model` command
 /// only accepts these (so a typo can't persist a bogus id that 400s every
-/// turn). Line-up as of 2026-07-24: Opus 5 (default) + Opus 4.8 + Fable 5
-/// (the same-day narrow-to-two was backtracked hours later at William's
-/// direction — 4.8 stays selectable; only 4.7 is retired from selection);
-/// the persisted 4.7 alias keeps resolving via
-/// [`canonicalize_legacy_anthropic_alias`], and the resolver additionally
-/// allows env/config passthrough for a model this build predates — see
-/// [`normalize_anthropic_model`].
-fn parse_anthropic_model_choice(s: &str) -> Option<(&'static str, &'static str)> {
+/// turn). Line-up as of 2026-09-27: Opus 5 (default), Opus 5.5, Opus 4.8,
+/// Fable 5.1, Fable 5; only 4.7 is retired from selection. The persisted
+/// 4.7 alias keeps resolving via [`canonicalize_legacy_anthropic_alias`],
+/// and the resolver additionally allows env/config passthrough for a model
+/// this build predates — see [`normalize_anthropic_model`].
+///
+/// Bare aliases: `5` is a version literal and stays Opus 5. `opus` and
+/// `fable` are family pointers; `opus` follows the default, and both keep
+/// their current targets until the default moves.
+pub(crate) fn parse_anthropic_model_choice(s: &str) -> Option<(&'static str, &'static str)> {
     match s.trim().to_ascii_lowercase().as_str() {
+        "opus-5.5" | "opus5.5" | "5.5" | "claude-opus-5-5" => {
+            Some(("claude-opus-5-5", "opus-5.5"))
+        }
         "opus-5" | "opus5" | "opus" | "5" | "claude-opus-5" => {
             Some(("claude-opus-5", "opus-5"))
         }
         "opus-4.8" | "4.8" | "opus4.8" | "claude-opus-4-8" => {
             Some(("claude-opus-4-8", "opus-4.8"))
+        }
+        "fable-5.1" | "fable5.1" | "claude-fable-5-1" => {
+            Some(("claude-fable-5-1", "fable-5.1"))
         }
         "fable-5" | "fable5" | "fable" | "claude-fable-5" => {
             Some(("claude-fable-5", "fable-5"))
@@ -4564,7 +4573,8 @@ fn parse_anthropic_model_choice(s: &str) -> Option<(&'static str, &'static str)>
 /// The selectable line-up in display order: the canonical display alias of
 /// every arm in [`parse_anthropic_model_choice`]. `/model` prints it; a
 /// test keeps the two in step.
-const ANTHROPIC_MODEL_CHOICES: [&str; 3] = ["opus-5", "opus-4.8", "fable-5"];
+pub(crate) const ANTHROPIC_MODEL_CHOICES: [&str; 5] =
+    ["opus-5.5", "opus-5", "opus-4.8", "fable-5.1", "fable-5"];
 
 fn anthropic_model_options() -> String {
     ANTHROPIC_MODEL_CHOICES.join(", ")
@@ -4673,8 +4683,8 @@ fn set_effort_field(cfg: &mut config::SystemConfig, kind: ProviderKind, level: O
     }
 }
 
-/// `/model [<opus-5|opus-4.8|fable-5>]` — show or switch the Anthropic
-/// model. Persists `SystemConfig.anthropic_model`; the loop driver rebuilds
+/// `/model [<opus-5.5|opus-5|opus-4.8|fable-5.1|fable-5>]` — show or switch
+/// the Anthropic model. Persists `SystemConfig.anthropic_model`; the loop driver rebuilds
 /// the provider per-turn from config, so a switch takes effect on the next
 /// user message. Only meaningful for the Anthropic provider (Gemini /
 /// OpenAI-compat models are set via `/provider --setup`). On a successful
@@ -8158,6 +8168,27 @@ mod anthropic_model_tests {
                 "input: {s}"
             );
         }
+        for s in ["opus-5.5", "opus5.5", "5.5", "claude-opus-5-5", "OPUS-5.5"] {
+            assert_eq!(
+                parse_anthropic_model_choice(s),
+                Some(("claude-opus-5-5", "opus-5.5")),
+                "input: {s}"
+            );
+        }
+        for s in ["fable-5.1", "fable5.1", "claude-fable-5-1", "FABLE-5.1"] {
+            assert_eq!(
+                parse_anthropic_model_choice(s),
+                Some(("claude-fable-5-1", "fable-5.1")),
+                "input: {s}"
+            );
+        }
+    }
+
+    /// `5.1` alone is not an alias: numeric-only aliases name Opus
+    /// versions (`5`, `5.5`, `4.8`), and a bare `5.1` would read as one.
+    #[test]
+    fn bare_5_1_is_not_an_alias() {
+        assert_eq!(parse_anthropic_model_choice("5.1"), None);
     }
 
     #[test]
@@ -8165,6 +8196,20 @@ mod anthropic_model_tests {
         let (id, disp) = resolve_anthropic_model_inner(None, Some("opus-4.8"));
         assert_eq!(id, "claude-opus-4-8");
         assert_eq!(disp, "opus-4.8");
+    }
+
+    #[test]
+    fn config_field_selects_opus_5_5() {
+        let (id, disp) = resolve_anthropic_model_inner(None, Some("opus-5.5"));
+        assert_eq!(id, "claude-opus-5-5");
+        assert_eq!(disp, "opus-5.5");
+    }
+
+    #[test]
+    fn config_field_selects_fable_5_1() {
+        let (id, disp) = resolve_anthropic_model_inner(None, Some("fable-5.1"));
+        assert_eq!(id, "claude-fable-5-1");
+        assert_eq!(disp, "fable-5.1");
     }
 
     /// The 400-trap guard: the persisted `"opus-4.7"` alias (wizard-seeded

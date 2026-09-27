@@ -135,7 +135,7 @@ const SPECS: &[Spec] = &[
         note: "Switch the Anthropic model (next message), or show current.",
         join: " ", guided: false,
         fields: &[sel("Model",
-            &["(show current)", "opus-5", "opus-4.8", "fable-5"], false)] },
+            &["(show current)", "opus-5.5", "opus-5", "opus-4.8", "fable-5.1", "fable-5"], false)] },
     Spec { cmd: "/attach", title: "Attach an image",
         note: "Stage an image for your next message: an uploaded media id (📎 / drop / paste does this for you) or a workspace path. Blank = list staged; 'clear' = drop them.",
         join: " ", guided: false,

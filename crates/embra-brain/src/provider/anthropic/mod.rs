@@ -1,12 +1,26 @@
-//! Anthropic provider: `claude-opus-5` (default), `claude-opus-4-8`, or
-//! `claude-fable-5` via `/v1/messages` (legacy persisted `claude-opus-4-7`
-//! instances keep resolving — see the grpc_service resolver). The model id
-//! is per-instance (`with_model`); the request shape — adaptive thinking,
-//! `effort` (default `max`), prompt-caching beta — is identical across
-//! supported models, so switching models changes only the `model` field.
-//! (Opus 5 additions verified against the API reference: thinking is on by
-//! default there — our explicit `adaptive` is equivalent — and
-//! `thinking:disabled` is effort-capped, which we never send.)
+//! Anthropic provider: `claude-opus-5` (default), `claude-opus-5-5`,
+//! `claude-opus-4-8`, `claude-fable-5-1`, or `claude-fable-5` via
+//! `/v1/messages` (legacy persisted `claude-opus-4-7` instances keep
+//! resolving — see the grpc_service resolver). The model id is per-instance
+//! (`with_model`); the request shape — adaptive thinking, `effort` (default
+//! `max`), prompt-caching beta — is identical across supported models, so
+//! switching models changes only the `model` field.
+//!
+//! What each model rejects, and why this body never trips it (verified
+//! against the API reference):
+//! - Every model: `budget_tokens` and the sampling parameters — never
+//!   sent.
+//! - Opus 5: `thinking:disabled` above effort `high`. Opus 5.5, Fable 5.1,
+//!   Fable 5: `thinking:disabled` at any effort. Thinking is always
+//!   `adaptive` here.
+//! - Opus 5.5, Fable 5.1: forced `tool_choice` (`any` / named tool) — the
+//!   body only ever sends `auto`.
+//! - Opus 5.5: its API default effort is `medium`, one level below the
+//!   other models' `high`. `output_config.effort` is always sent
+//!   explicitly, so that default never applies.
+//! - Opus 5.5, Fable 5.1: a replayed thinking block is bound to the model
+//!   that produced it and to an unedited conversation prefix. The tool
+//!   loop only appends, and thinking blocks never cross user turns.
 //!
 //! Implements `LlmProvider` over the `/v1/messages` streaming endpoint.
 //! Internal structure:
@@ -39,13 +53,14 @@ use crate::provider::{
 use crate::tools::registry::ToolDescriptor;
 
 /// Default Anthropic model when none is configured. `with_model` overrides
-/// it (e.g. `claude-opus-4-8`, `claude-fable-5`); the resolver
+/// it (e.g. `claude-opus-5-5`, `claude-fable-5-1`); the resolver
 /// in `grpc_service.rs` picks the active id from env/config.
 pub const DEFAULT_MODEL: &str = "claude-opus-5";
 const MAX_TOKENS: u32 = 128_000;
 /// Default `output_config.effort`. Runtime-tunable via `/effort`
 /// (`with_effort`); the full `low..max` range is valid on every
-/// supported model (Opus 5, Opus 4.8, Fable 5 — and the legacy 4.7).
+/// supported model (Opus 5.5, Opus 5, Opus 4.8, Fable 5.1, Fable 5 — and
+/// the legacy 4.7).
 const DEFAULT_EFFORT: &str = "max";
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 pub(crate) const API_VERSION: &str = "2023-06-01";
@@ -131,7 +146,7 @@ impl AnthropicProvider {
 
     /// Build the `/v1/messages` request body. Pure (no I/O) so the exact
     /// shape is unit-testable per model — the shape is identical across
-    /// supported models (Opus 5, Opus 4.8, Fable 5; legacy 4.7 unchanged); only
+    /// supported models (see the module doc; legacy 4.7 unchanged); only
     /// `model` and the configured `effort` vary per instance.
     ///
     /// Request body matches the pre-refactor send_message_streaming_with_tools
@@ -145,15 +160,22 @@ impl AnthropicProvider {
     /// `"omitted"` suppresses those deltas entirely. The API
     /// rejects any other value with 400 invalid_request_error
     /// ("Input should be 'summarized', 'omitted'") — do NOT change
-    /// these strings without re-checking against the live API.
+    /// these strings without re-checking against the live API. (A third
+    /// value, `"updates"`, exists only behind a beta header this provider
+    /// does not send.) On Opus 5.5 and the Fable models the notes the
+    /// model writes between tool calls arrive as thinking blocks too, so
+    /// under `"summarized"` they reach the reasoning panel and under
+    /// `"omitted"` they are empty; either way they are never persisted.
     /// Signature round-trip (signed `thinking` block carrying
     /// `signature_delta`) is unaffected by either setting and
     /// still rides via `Block::ProviderOpaque`.
     ///
-    /// Fable 5 note: `claude-fable-5` rejects `thinking:{type:"disabled"}`,
-    /// `budget_tokens`, and `temperature`/`top_p`/`top_k` with 400 — this
-    /// body sends none of them, and `{type:"adaptive", display:…}` +
-    /// `output_config.effort` are valid on it unchanged.
+    /// Every supported model rejects `budget_tokens` and
+    /// `temperature`/`top_p`/`top_k` with 400; the Fable models and
+    /// Opus 5.5 also reject `thinking:{type:"disabled"}`. This body sends
+    /// none of them, and `{type:"adaptive", display:…}` +
+    /// `output_config.effort` are valid on each unchanged
+    /// (`every_selectable_model_gets_the_same_request_shape`).
     fn request_body(
         &self,
         system_text: &str,
@@ -576,6 +598,71 @@ mod tests {
         );
         assert_eq!(p.model, "claude-fable-5");
         assert_eq!(p.display_name(), "fable-5");
+    }
+
+    /// The guard for the whole line-up, driven by the list `/model`
+    /// accepts, so a model added there is covered here without an edit.
+    /// Every body must carry what Opus 5.5 and Fable 5.1 enforce —
+    /// adaptive thinking, an EXPLICIT effort (Opus 5.5's API default is
+    /// `medium`; omitting the field would run it a level lower than every
+    /// other model), `auto` tool choice — and nothing any model rejects.
+    #[test]
+    fn every_selectable_model_gets_the_same_request_shape() {
+        use crate::grpc_service::{parse_anthropic_model_choice, ANTHROPIC_MODEL_CHOICES};
+
+        let tools = ToolManifest {
+            wire_json: json!([{"name": "time", "description": "d", "input_schema": {}}]),
+            fingerprint: String::new(),
+        };
+        let mut reference: Option<serde_json::Value> = None;
+        for choice in ANTHROPIC_MODEL_CHOICES {
+            let (id, display) = parse_anthropic_model_choice(choice).expect("listed choice parses");
+            let p = AnthropicProvider::with_model(
+                String::new(),
+                id.to_string(),
+                display.to_string(),
+            );
+            assert_eq!(p.display_name(), display);
+
+            let mut body = p.request_body(
+                "sys",
+                vec![json!({"role": "user"})],
+                &tools,
+                &LlmRequestOptions { include_reasoning: true },
+            );
+            assert_eq!(body["model"], id);
+            assert_eq!(body["thinking"]["type"], "adaptive", "{id}");
+            assert_eq!(body["thinking"]["display"], "summarized", "{id}");
+            assert!(body["thinking"].get("budget_tokens").is_none(), "{id}");
+            assert_eq!(body["output_config"]["effort"], DEFAULT_EFFORT, "{id}");
+            assert_eq!(body["tool_choice"], json!({"type": "auto"}), "{id}");
+            assert_eq!(body["max_tokens"], MAX_TOKENS, "{id}");
+            for forbidden in ["temperature", "top_p", "top_k"] {
+                assert!(body.get(forbidden).is_none(), "{id}: {forbidden} must be absent");
+            }
+            // No prefill: the last message is never an assistant turn.
+            let last = body["messages"].as_array().and_then(|m| m.last()).cloned();
+            assert_eq!(last.unwrap()["role"], "user", "{id}");
+
+            // Identical to every other model once the id is normalized.
+            body["model"] = json!("<model>");
+            match &reference {
+                Some(r) => assert_eq!(&body, r, "{id}: request shape diverged"),
+                None => reference = Some(body),
+            }
+
+            // Reasoning off → "omitted"; no tools → no tool_choice at all.
+            let bare = p.request_body(
+                "sys",
+                vec![],
+                &empty_manifest(),
+                &LlmRequestOptions { include_reasoning: false },
+            );
+            assert_eq!(bare["thinking"]["type"], "adaptive", "{id}");
+            assert_eq!(bare["thinking"]["display"], "omitted", "{id}");
+            assert!(bare.get("tools").is_none(), "{id}");
+            assert!(bare.get("tool_choice").is_none(), "{id}");
+        }
     }
 
     // ===========================================================

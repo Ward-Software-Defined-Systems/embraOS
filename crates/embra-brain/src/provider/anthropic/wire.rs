@@ -144,7 +144,7 @@ pub enum AnthropicStreamEvent {
     /// Text token from `text_delta` — forwarded to the TUI for live UX.
     Token(String),
     /// Thinking-summary token from `thinking_delta` (only emitted when
-    /// the request body sets `display: "summary"`). Translated to the
+    /// the request body sets `display: "summarized"`). Translated to the
     /// neutral `StreamEvent::ReasoningDelta` for live panel rendering;
     /// signatures (`signature_delta`) are NOT carried here — they ride
     /// on `BlockAccumulator::signature` and round-trip via

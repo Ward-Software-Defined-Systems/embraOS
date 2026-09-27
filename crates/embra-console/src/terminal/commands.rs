@@ -39,7 +39,8 @@ Model:
   /provider --setup <anthropic|gemini>   Add/replace an API key (multi-turn)
   /provider --setup <ollama|lm_studio>   Reconfigure endpoint, bearer, model (multi-turn)
   /model                                 Show the active Anthropic model
-  /model <opus-5|opus-4.8|fable-5>       Switch the Anthropic model (next message)
+  /model <opus-5.5|opus-5|opus-4.8|fable-5.1|fable-5>
+                                         Switch the Anthropic model (next message)
   /effort                                Show the active provider's effort level and what is sent
   /effort <low|medium|high|xhigh|max>    Set effort for the active provider (Anthropic default max; Gemini high; local presets verbatim, model-validated)
   /effort reset                          Clear the active provider's stored level
