@@ -68,6 +68,83 @@ fn artifact_path(name: &str) -> PathBuf {
         .join(format!("{name}.wasm"))
 }
 
+/// Whether a tool on record can run right now and, when it cannot, why.
+/// A record alone does not say: boot reconcile leaves a `Ready` tool out
+/// of the overlay when the image's toolchain has moved on, and the record
+/// keeps reading `ready`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Availability {
+    /// In the overlay.
+    Callable,
+    /// `Ready` on record, built by a toolchain this image no longer carries.
+    ToolchainMismatch { built_with: String, current: String },
+    /// `Ready` on record and the toolchain matches, but the build artifact
+    /// is missing or did not load.
+    ArtifactNotLoaded,
+    /// A proposal the operator has not approved.
+    Proposed,
+    Building,
+    Failed,
+}
+
+fn availability(doc: &ToolDoc, current_toolchain: &str, loaded: bool) -> Availability {
+    if loaded {
+        return Availability::Callable;
+    }
+    match doc.status {
+        ToolStatus::Ready if doc.toolchain_version != current_toolchain => {
+            Availability::ToolchainMismatch {
+                built_with: doc.toolchain_version.clone(),
+                current: current_toolchain.to_string(),
+            }
+        }
+        ToolStatus::Ready => Availability::ArtifactNotLoaded,
+        ToolStatus::Proposed => Availability::Proposed,
+        ToolStatus::Building => Availability::Building,
+        ToolStatus::Failed => Availability::Failed,
+    }
+}
+
+/// The operator command that brings a built-but-unloaded tool back.
+fn remedy(name: &str) -> String {
+    format!("paste the module again with /guardian-define to rebuild '{name}'")
+}
+
+impl Availability {
+    /// Why the tool cannot run and what changes that — one sentence, read
+    /// by the operator and by the model alike (the model relays the
+    /// command; it cannot run one). `None` when the tool is callable.
+    fn note(&self, name: &str) -> Option<String> {
+        match self {
+            Availability::Callable => None,
+            Availability::ToolchainMismatch { built_with, current } => Some(format!(
+                "not loaded: built with toolchain {built_with}, this OS image carries \
+                 {current}. Operator: {}.",
+                remedy(name)
+            )),
+            Availability::ArtifactNotLoaded => Some(format!(
+                "not loaded: the build artifact is missing or did not load. Operator: {}.",
+                remedy(name)
+            )),
+            Availability::Proposed => Some(format!(
+                "a proposal awaiting the operator: /guardian approve {name} builds it, \
+                 /guardian reject {name} discards it."
+            )),
+            Availability::Building => Some("build in progress.".to_string()),
+            Availability::Failed => Some(format!(
+                "the last build failed — /guardian status {name} shows the log. Operator: {}.",
+                remedy(name)
+            )),
+        }
+    }
+}
+
+/// [`availability`] for a record, against this boot's toolchain and overlay.
+fn availability_now(doc: &ToolDoc) -> Availability {
+    let loaded = embra_guardian::runtime().is_some_and(|rt| rt.get(&doc.name).is_some());
+    availability(doc, &toolchain_version(), loaded)
+}
+
 /// Read the Brave Search API key from STATE. `None` ⇒ not set; the
 /// `web_search` capability then degrades to a structured "not configured"
 /// envelope rather than failing the call.
@@ -129,8 +206,11 @@ pub async fn reconcile_on_boot(db: &WardsonDbClient) -> anyhow::Result<()> {
         }
         if doc.toolchain_version != tv {
             warn!(
-                "guardian: '{}' built with toolchain {} (now {}) — re-define to rebuild",
-                doc.name, doc.toolchain_version, tv
+                "guardian: '{}' built with toolchain {} (now {}) — not loaded; {}",
+                doc.name,
+                doc.toolchain_version,
+                tv,
+                remedy(&doc.name)
             );
             continue;
         }
@@ -146,8 +226,9 @@ pub async fn reconcile_on_boot(db: &WardsonDbClient) -> anyhow::Result<()> {
                 Err(e) => warn!("guardian: compiling '{}' failed: {e}", doc.name),
             },
             Err(_) => warn!(
-                "guardian: artifact for '{}' missing — re-define to rebuild",
-                doc.name
+                "guardian: artifact for '{}' missing — not loaded; {}",
+                doc.name,
+                remedy(&doc.name)
             ),
         }
     }
@@ -172,10 +253,7 @@ pub async fn handle_guardian_slash(args: &str, db: &Arc<WardsonDbClient>) -> Str
         "reject" => reject(db, rest.trim()).await,
         "list" => list_human(db).await,
         "status" => match load_doc(db, rest.trim()).await {
-            Some(d) => format!(
-                "guardian '{}': {:?} | caps={:?} | toolchain={} | updated={}\n--- build log tail ---\n{}",
-                d.name, d.status, d.caps, d.toolchain_version, d.updated_at, d.build_log_tail
-            ),
+            Some(d) => status_human(&d, &availability_now(&d)),
             None => format!("guardian: no such tool '{}'", rest.trim()),
         },
         "show" => match load_doc(db, rest.trim()).await {
@@ -600,16 +678,66 @@ async fn delete(db: &Arc<WardsonDbClient>, name: &str) -> String {
     format!("guardian: '{name}' deleted (manifest, overlay, project, artifact).")
 }
 
+/// `/guardian status <name>`: the record, whether the tool can run, the
+/// replicant verdict when one is stored, and the build log tail.
+fn status_human(d: &ToolDoc, avail: &Availability) -> String {
+    let mut out = format!(
+        "guardian '{}': {:?} | caps={:?} | toolchain={} | updated={}\n",
+        d.name, d.status, d.caps, d.toolchain_version, d.updated_at
+    );
+    match avail.note(&d.name) {
+        Some(note) => out.push_str(&format!("callable: no — {note}\n")),
+        None => out.push_str("callable: yes\n"),
+    }
+    if let Some(r) = &d.replicant {
+        out.push_str(&format!(
+            "replicant check: {} (model {}, judged {})\n",
+            r.verdict, r.model, r.judged_at
+        ));
+    }
+    out.push_str(&format!("--- build log tail ---\n{}", d.build_log_tail));
+    out
+}
+
+/// One `/guardian list` row.
+fn list_row(d: &ToolDoc, avail: &Availability) -> String {
+    let state = match avail {
+        Availability::Callable
+        | Availability::Proposed
+        | Availability::Building
+        | Availability::Failed => format!("{:?}", d.status),
+        Availability::ToolchainMismatch { built_with, current } => format!(
+            "{:?}, NOT LOADED: toolchain {built_with}, image carries {current}",
+            d.status
+        ),
+        Availability::ArtifactNotLoaded => {
+            format!("{:?}, NOT LOADED: artifact missing", d.status)
+        }
+    };
+    format!("  {} [{state}] caps={:?} — {}\n", d.name, d.caps, d.description)
+}
+
 async fn list_human(db: &WardsonDbClient) -> String {
     let docs = all_docs(db).await;
     if docs.is_empty() {
         return "guardian: no dynamic tools defined.".to_string();
     }
     let mut out = format!("=== Guardian dynamic tools ({}) ===\n", docs.len());
+    let mut unloaded = 0usize;
     for d in docs {
+        let avail = availability_now(&d);
+        if matches!(
+            avail,
+            Availability::ToolchainMismatch { .. } | Availability::ArtifactNotLoaded
+        ) {
+            unloaded += 1;
+        }
+        out.push_str(&list_row(&d, &avail));
+    }
+    if unloaded > 0 {
         out.push_str(&format!(
-            "  {} [{:?}] caps={:?} — {}\n",
-            d.name, d.status, d.caps, d.description
+            "{unloaded} built tool(s) are not loaded and cannot run — /guardian status <name> \
+             says why.\n"
         ));
     }
     out
@@ -685,22 +813,45 @@ async fn mark_failed(db: &WardsonDbClient, m: &ValidatedModule, tv: &str, why: &
 
 // ── meta-tool backends (called from tools/guardian.rs) ──
 
+/// Add `callable` (and `note`, when it is false) to a model-facing tool
+/// object. `status` stays the recorded build status; `callable` is what
+/// decides whether an invoke can succeed.
+fn stamp_availability(v: &mut Value, d: &ToolDoc, avail: &Availability) {
+    let Some(obj) = v.as_object_mut() else { return };
+    obj.insert("callable".into(), Value::Bool(*avail == Availability::Callable));
+    if let Some(note) = avail.note(&d.name) {
+        obj.insert("note".into(), Value::String(note));
+    }
+}
+
 /// `guardian_list` — machine-readable inventory for the model.
 pub async fn list_for_model(db: &WardsonDbClient) -> Result<String, String> {
     let docs = all_docs(db).await;
     let arr: Vec<Value> = docs
         .iter()
         .map(|d| {
-            serde_json::json!({
+            let mut v = serde_json::json!({
                 "name": d.name,
                 "description": d.description,
                 "capabilities": d.caps,
                 "status": format!("{:?}", d.status).to_lowercase(),
                 "input_schema": d.input_schema,
-            })
+            });
+            stamp_availability(&mut v, d, &availability_now(d));
+            v
         })
         .collect();
     serde_json::to_string(&serde_json::json!({ "tools": arr })).map_err(|e| e.to_string())
+}
+
+/// The invoke error for a tool on record that is not in the overlay.
+fn not_callable_message(d: &ToolDoc, avail: &Availability) -> String {
+    let status = format!("{:?}", d.status).to_lowercase();
+    let why = avail.note(&d.name).unwrap_or_default();
+    format!(
+        "guardian: tool '{}' is not callable (status: {status}) — {why}",
+        d.name
+    )
 }
 
 /// `guardian_call` backend. `action` = `invoke` | `status`.
@@ -712,15 +863,18 @@ pub async fn guardian_call(
 ) -> Result<String, DispatchError> {
     match action {
         "status" => match load_doc(db, tool).await {
-            Some(d) => Ok(serde_json::json!({
-                "name": d.name,
-                "status": format!("{:?}", d.status).to_lowercase(),
-                "capabilities": d.caps,
-                "toolchain_version": d.toolchain_version,
-                "updated_at": d.updated_at,
-                "build_log_tail": d.build_log_tail,
-            })
-            .to_string()),
+            Some(d) => {
+                let mut v = serde_json::json!({
+                    "name": d.name,
+                    "status": format!("{:?}", d.status).to_lowercase(),
+                    "capabilities": d.caps,
+                    "toolchain_version": d.toolchain_version,
+                    "updated_at": d.updated_at,
+                    "build_log_tail": d.build_log_tail,
+                });
+                stamp_availability(&mut v, &d, &availability_now(&d));
+                Ok(v.to_string())
+            }
             None => Err(DispatchError::Handler(format!(
                 "guardian: no such tool '{tool}'"
             ))),
@@ -732,14 +886,13 @@ pub async fn guardian_call(
             let compiled = match rt.get(tool) {
                 Some(t) => t,
                 None => {
-                    let status = load_doc(db, tool)
-                        .await
-                        .map(|d| format!("{:?}", d.status).to_lowercase())
-                        .unwrap_or_else(|| "not found".to_string());
-                    return Err(DispatchError::Handler(format!(
-                        "guardian: tool '{tool}' is not callable (status: {status}). \
-                         Use guardian_call action=status for details."
-                    )));
+                    return Err(DispatchError::Handler(match load_doc(db, tool).await {
+                        Some(d) => not_callable_message(&d, &availability_now(&d)),
+                        None => format!(
+                            "guardian: tool '{tool}' is not callable (status: not found). \
+                             Use guardian_list to see what exists."
+                        ),
+                    }));
                 }
             };
             // Build the per-call grant from the tool's declared caps. The
@@ -799,5 +952,117 @@ pub async fn guardian_call(
         other => Err(DispatchError::Handler(format!(
             "guardian: action must be \"invoke\" or \"status\", got \"{other}\""
         ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn doc(status: ToolStatus, toolchain: &str) -> ToolDoc {
+        let mut d = ToolDoc::building(
+            "word_count",
+            "Counts words.",
+            serde_json::json!({"type": "object", "properties": {}}),
+            "// guardian-tool: word_count",
+            vec![],
+            toolchain,
+            "2026-09-27T00:00:00Z",
+        );
+        d.status = status;
+        d
+    }
+
+    #[test]
+    fn availability_covers_every_recorded_status() {
+        let mismatch = Availability::ToolchainMismatch {
+            built_with: "1.94.1".into(),
+            current: "1.98.1".into(),
+        };
+        // The case the record hides: `ready`, yet left out at boot.
+        assert_eq!(availability(&doc(ToolStatus::Ready, "1.94.1"), "1.98.1", false), mismatch);
+        assert_eq!(
+            availability(&doc(ToolStatus::Ready, "1.98.1"), "1.98.1", false),
+            Availability::ArtifactNotLoaded
+        );
+        assert_eq!(
+            availability(&doc(ToolStatus::Proposed, "1.98.1"), "1.98.1", false),
+            Availability::Proposed
+        );
+        assert_eq!(
+            availability(&doc(ToolStatus::Building, "1.98.1"), "1.98.1", false),
+            Availability::Building
+        );
+        assert_eq!(
+            availability(&doc(ToolStatus::Failed, "1.98.1"), "1.98.1", false),
+            Availability::Failed
+        );
+    }
+
+    #[test]
+    fn a_loaded_tool_is_callable_whatever_the_record_says() {
+        // A re-define keeps the previous build in the overlay while the
+        // record reads `building`.
+        for status in [ToolStatus::Ready, ToolStatus::Building, ToolStatus::Failed] {
+            assert_eq!(
+                availability(&doc(status, "1.98.1"), "1.98.1", true),
+                Availability::Callable
+            );
+        }
+        assert_eq!(Availability::Callable.note("word_count"), None);
+    }
+
+    #[test]
+    fn toolchain_mismatch_is_named_on_every_surface() {
+        let d = doc(ToolStatus::Ready, "1.94.1");
+        let avail = availability(&d, "1.98.1", false);
+
+        let status = status_human(&d, &avail);
+        assert!(status.contains("callable: no"), "{status}");
+        assert!(status.contains("1.94.1") && status.contains("1.98.1"), "{status}");
+
+        let row = list_row(&d, &avail);
+        assert!(row.contains("NOT LOADED: toolchain 1.94.1, image carries 1.98.1"), "{row}");
+
+        let err = not_callable_message(&d, &avail);
+        assert!(err.contains("(status: ready)"), "{err}");
+        assert!(err.contains("built with toolchain 1.94.1"), "{err}");
+
+        let mut v = serde_json::json!({"name": "word_count", "status": "ready"});
+        stamp_availability(&mut v, &d, &avail);
+        assert_eq!(v["callable"], false);
+        assert_eq!(v["status"], "ready");
+        assert!(v["note"].as_str().unwrap().contains("1.94.1"), "{v}");
+    }
+
+    #[test]
+    fn a_callable_tool_gets_no_note() {
+        let d = doc(ToolStatus::Ready, "1.98.1");
+        let avail = availability(&d, "1.98.1", true);
+
+        assert!(status_human(&d, &avail).contains("callable: yes"));
+        assert_eq!(list_row(&d, &avail), "  word_count [Ready] caps=[] — Counts words.\n");
+
+        let mut v = serde_json::json!({"name": "word_count"});
+        stamp_availability(&mut v, &d, &avail);
+        assert_eq!(v, serde_json::json!({"name": "word_count", "callable": true}));
+    }
+
+    #[test]
+    fn status_shows_the_stored_replicant_verdict() {
+        let mut d = doc(ToolStatus::Proposed, "1.98.1");
+        d.replicant = Some(ReplicantRecord {
+            verdict: "escalate".into(),
+            touched_lines: vec![],
+            rationale: "borderline".into(),
+            model: "opus-5".into(),
+            judged_at: "2026-09-27T00:00:01Z".into(),
+        });
+        let status = status_human(&d, &availability(&d, "1.98.1", false));
+        assert!(
+            status.contains("replicant check: escalate (model opus-5, judged 2026-09-27T00:00:01Z)"),
+            "{status}"
+        );
+        assert!(status.contains("/guardian approve word_count"), "{status}");
     }
 }
