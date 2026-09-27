@@ -137,6 +137,10 @@ pub struct OpenAiCompatSetupState {
 }
 
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "a step is named after the answer the flow is waiting for"
+)]
 pub enum OpenAiCompatSetupStep {
     AwaitingEndpoint,
     AwaitingBearerChoice {
@@ -758,6 +762,11 @@ impl BrainService for BrainGrpcService {
 }
 
 /// Handle a single incoming conversation request.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one argument per shared handle of the Converse stream; bundling them is a \
+              refactor of the stream loop, not a lint fix"
+)]
 async fn handle_request(
     req: ConversationRequest,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
@@ -2268,6 +2277,10 @@ async fn handle_request(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the same handles as handle_request, which calls it"
+)]
 async fn handle_slash_command(
     command: &str,
     args: &str,
@@ -2972,6 +2985,10 @@ async fn handle_slash_command(
 /// spec D2) a deny-then-instruct path when no key is recorded for the
 /// alternate provider. Idle switches apply immediately; in-turn
 /// switches queue via `pending_provider` and drain after the loop.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the three pending-setup slots it arbitrates between are separate handles"
+)]
 async fn handle_provider_command(
     args: &str,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,

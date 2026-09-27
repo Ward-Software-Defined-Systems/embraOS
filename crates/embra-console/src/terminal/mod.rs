@@ -814,7 +814,10 @@ async fn handle_key_event(
         // Not a match guard: this arm takes every Esc, busy or idle. As a
         // guard, an idle Esc would fall through to whatever arm is added
         // below it.
-        #[allow(clippy::collapsible_match)]
+        #[expect(
+            clippy::collapsible_match,
+            reason = "this arm must take every Esc, idle included"
+        )]
         (KeyCode::Esc, _) => {
             if app.thinking || app.streaming_text.is_some() {
                 app.stop_requested = true;

@@ -107,8 +107,11 @@ const FALLBACK_FONT: (u16, u16) = (10, 20);
 /// `from_query_stdio` — a stdin round-trip the web PTY cannot answer (module
 /// doc) — or `halfblocks()`, which fixes the cell at 10×20 and cannot carry
 /// the winsize geometry. Neither replaces it here, so the deprecation is
-/// allowed at this one site.
-#[allow(deprecated)]
+/// expected at this one site.
+#[expect(
+    deprecated,
+    reason = "no query-free constructor takes a known cell size; see the doc comment"
+)]
 fn picker_for(font: (u16, u16), protocol: ProtocolType) -> Picker {
     let mut p = Picker::from_fontsize(font.into());
     p.set_protocol_type(protocol);
