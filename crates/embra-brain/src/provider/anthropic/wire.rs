@@ -106,6 +106,9 @@ pub enum StopReason {
     ToolUse,
     Refusal,
     PauseTurn,
+    /// Generation stopped because the conversation plus the reply no
+    /// longer fits the model's context window.
+    ModelContextWindowExceeded,
 }
 
 /// Structured detail accompanying `stop_reason: "refusal"` in the final

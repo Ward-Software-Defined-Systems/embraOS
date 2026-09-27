@@ -6422,6 +6422,15 @@ fn terminal_outcome_notice(
             msg.push_str(". Any partial text above is incomplete. No fallback model was used.");
             Some((SystemMessageType::Error, msg))
         }
+        // Truncation, like MaxTokens: the reply is incomplete, nothing
+        // was declined. The remedy is a shorter history, which for the
+        // operator means a new session.
+        TurnOutcome::EarlyStop(EarlyStopReason::ContextWindow) => Some((
+            SystemMessageType::Warning,
+            "Response stopped because the conversation no longer fits the model's context \
+             window — the reply above may be cut off. Continue in a new session (/new <name>)."
+                .to_string(),
+        )),
         // Operator interrupt — not an error and not a provider action; the
         // generic "Provider stopped..." wording below would misattribute it.
         TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop) => Some((
@@ -8366,6 +8375,31 @@ mod terminal_outcome_tests {
                 .expect("frame");
         assert_eq!(kind, SystemMessageType::Error);
         assert!(msg.contains("Safety"), "{msg}");
+    }
+
+    /// A context-window stop is truncation, not a refusal: a Warning with
+    /// the operator's remedy, never the silent end of turn it used to be
+    /// and never the generic "Provider stopped" Error.
+    #[test]
+    fn context_window_stop_warns_and_names_the_remedy() {
+        let (kind, msg) = terminal_outcome_notice(
+            TurnOutcome::EarlyStop(EarlyStopReason::ContextWindow),
+            None,
+        )
+        .expect("frame");
+        assert_eq!(kind, SystemMessageType::Warning);
+        assert!(msg.contains("context window"), "{msg}");
+        assert!(msg.contains("/new"), "{msg}");
+        assert!(!msg.contains("Provider stopped"), "{msg}");
+        // Persisted like any other truncation: the partial text, unmarked.
+        assert_eq!(
+            final_assistant_text(
+                "partial",
+                &[],
+                TurnOutcome::EarlyStop(EarlyStopReason::ContextWindow)
+            ),
+            "partial"
+        );
     }
 
     #[test]

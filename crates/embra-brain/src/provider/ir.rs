@@ -159,6 +159,9 @@ pub enum EarlyStopReason {
     StopSequence,
     /// Anthropic `refusal`.
     Refusal,
+    /// Anthropic `model_context_window_exceeded`: the conversation plus
+    /// the reply no longer fits the model's context window.
+    ContextWindow,
     /// Gemini `SAFETY`.
     Safety,
     /// Gemini `RECITATION`.

@@ -349,6 +349,7 @@ fn parse_stop_reason(s: &str) -> Option<StopReason> {
         "tool_use" => StopReason::ToolUse,
         "refusal" => StopReason::Refusal,
         "pause_turn" => StopReason::PauseTurn,
+        "model_context_window_exceeded" => StopReason::ModelContextWindowExceeded,
         _ => return None,
     })
 }
@@ -686,6 +687,31 @@ mod tests {
         assert!(matches!(complete.content[0], MessageBlock::Thinking { .. }));
         assert!(matches!(complete.content[1], MessageBlock::Text { .. }));
         assert!(matches!(complete.content[2], MessageBlock::ToolUse { .. }));
+    }
+
+    /// An unrecognized stop reason parses to `None`, which the stream end
+    /// turns into `EndTurn`. That is how `model_context_window_exceeded`
+    /// used to end a turn silently; it has its own variant now.
+    #[tokio::test]
+    async fn context_window_stop_reason_is_not_folded_into_end_turn() {
+        let events = [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"model_context_window_exceeded"}}"#,
+            r#"{"type":"message_stop"}"#,
+        ];
+        let out = run_stream(&events).await;
+        let complete = out
+            .iter()
+            .find_map(|e| match e {
+                AnthropicStreamEvent::Complete { response } => Some(response.clone()),
+                _ => None,
+            })
+            .expect("Complete event");
+        assert_eq!(complete.stop_reason, StopReason::ModelContextWindowExceeded);
+        assert!(complete.stop_details.is_none());
+        assert_eq!(parse_stop_reason("something_new"), None);
     }
 
     #[tokio::test]
