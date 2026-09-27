@@ -308,7 +308,7 @@ fi
 # Includes embraOS packages AND upstream packages whose config may have changed
 (cd "$BUILDROOT_DIR" && \
     for pkg in embrad embra-apid embra-trustd embra-brain embra-console embra-web wardsondb \
-               embra-rust-toolchain git openssl libcurl openssh; do
+               embra-rust-toolchain embra-embedding-model git openssl libcurl openssh; do
         make "${pkg}-dirclean" 2>/dev/null || true
     done && \
     rm -f output/images/rootfs.squashfs output/images/embraos.img)

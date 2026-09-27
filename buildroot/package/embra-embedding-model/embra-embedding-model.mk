@@ -31,9 +31,17 @@ EMBRA_EMBEDDING_MODEL_SITE_METHOD = local
 # and leaves `/embeddings` reporting "model at: NOT FOUND".
 EMBRA_EMBEDDING_MODEL_DIRNAME = bge-small-en-v1.5
 
+# The directory is REPLACED, and only the payload is installed: $(@D) is
+# Buildroot's build directory for the package, and Buildroot keeps its own
+# bookkeeping at the top of it (.stamp_*, .files-list*). The model has no
+# dotfile of its own there. No helper variable for the path: the package
+# infrastructure owns most of the <PKG>_* namespace (see above).
 define EMBRA_EMBEDDING_MODEL_INSTALL_TARGET_CMDS
+	rm -rf $(TARGET_DIR)/usr/share/embra/models/$(EMBRA_EMBEDDING_MODEL_DIRNAME)
 	mkdir -p $(TARGET_DIR)/usr/share/embra/models/$(EMBRA_EMBEDDING_MODEL_DIRNAME)
 	cp -a $(@D)/. $(TARGET_DIR)/usr/share/embra/models/$(EMBRA_EMBEDDING_MODEL_DIRNAME)/
+	find $(TARGET_DIR)/usr/share/embra/models/$(EMBRA_EMBEDDING_MODEL_DIRNAME) \
+		-maxdepth 1 -type f -name '.*' -delete
 endef
 
 $(eval $(generic-package))
