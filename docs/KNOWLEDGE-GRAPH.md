@@ -27,9 +27,9 @@ If you want to see the per-write math, the **Worked example** below traces one `
 
 ## Worked example: one `remember` insert
 
-An operator says to the intelligence — in natural conversation — something like *"remember the embra-web cert refresh failure, tag it embra-web and cert"*. The intelligence calls `remember` with the content and tags it parsed from the request, which writes one document to `memory.entries`. Immediately after the write returns, `derive_edges` (`crates/embra-brain/src/knowledge/edges.rs:33`) fires. Here is what that single insert produces.
+An operator says to the intelligence — in natural conversation — something like *"remember the embra-web cert refresh failure, tag it embra-web and cert"*. The intelligence calls `remember` with the content and tags it parsed from the request, which writes one document to `memory.entries`. Immediately after the write returns, `derive_edges` (`crates/embra-brain/src/knowledge/edges.rs:32`) fires. Here is what that single insert produces.
 
-The engine takes the new document's `(session, tags, created_at)` and queries all three memory collections (`memory.entries`, `memory.semantic`, `memory.procedural`) for three independent candidate pools (`edges.rs:70-108`):
+The engine takes the new document's `(session, tags, created_at)` and queries all three memory collections (`memory.entries`, `memory.semantic`, `memory.procedural`) for three independent candidate pools (`edges.rs:69-107`):
 
 | Candidate type | Query | Per-collection limit |
 |---|---|---|
@@ -39,15 +39,15 @@ The engine takes the new document's `(session, tags, created_at)` and queries al
 
 The limit (50) and the temporal window (1800s) come from `config.system` — `kg_edge_candidate_limit` and `kg_temporal_window_secs` respectively. Rust defaults in the `default_kg_*` block of `crates/embra-brain/src/config/mod.rs` (~:191-196); the v5 migration writes the same values into `config.system` at first boot (`crates/embra-brain/src/migrations/mod.rs:602-605`).
 
-For an active session with two tags on the new doc, the candidate pools could each be the full 50 across each of the 3 collections. The engine then dedupes within each pool and emits edge documents bidirectionally (`push_bidirectional`, `edges.rs:229-258` — two records per logical edge):
+For an active session with two tags on the new doc, the candidate pools could each be the full 50 across each of the 3 collections. The engine then dedupes within each pool and emits edge documents bidirectionally (`push_bidirectional`, `edges.rs:222-251` — two records per logical edge):
 
 | Edge type | Candidates × collections | Bidirectional records | Notes |
 |---|---|---|---|
-| `same_session` | 50 × 3 = 150 | up to 300 | weight = `1.0` (`edges.rs:124`) |
+| `same_session` | 50 × 3 = 150 | up to 300 | weight = `1.0` (`edges.rs:123`) |
 | `temporal` | 50 × 3 = 150 | up to 300 | weight = `1.0 - dist_secs / 1800`; rejected when `dist >= window` or weight ≤ 0 |
-| `tag_overlap` (per tag) | 50 × 3 × 2 = 300 | up to 600 | weight = `overlap / max(\|A\|, \|B\|)` (`edges.rs:165-166`); skipped when `overlap == 0` |
+| `tag_overlap` (per tag) | 50 × 3 × 2 = 300 | up to 600 | weight = `overlap / max(\|A\|, \|B\|)` (`edges.rs:164-165`); skipped when `overlap == 0` |
 
-Before bulk-write, `edge_exists` (`edges.rs:260-273`) checks each candidate against `memory.edges` — repeat inserts of the same `(source_id, target_id, edge_type)` triple are skipped so the graph doesn't compound on every `remember`.
+Before bulk-write, `edge_exists` (`edges.rs:253-266`) checks each candidate against `memory.edges` — repeat inserts of the same `(source_id, target_id, edge_type)` triple are skipped so the graph doesn't compound on every `remember`.
 
 A first-time `remember` like this can emit several hundred edge documents. A `remember` into a stale session with no overlapping tags emits zero. The engine never re-derives existing pairs and never erases existing edges. The actual graph density rises quickly during active sessions and plateaus when most candidate pairs already exist.
 
@@ -71,7 +71,7 @@ Identity nodes (`_id` = graph node id, `content`/`node_type`/`origin` fields) ar
 
 ### Node identity
 
-There is no unified `NodeId` enum. Nodes are addressed everywhere as the tuple `(collection, id)` — see the visited-set keying at `crates/embra-brain/src/knowledge/edges.rs:115, 131, 155` and the traversal visited set in `traversal.rs::traverse_multi`. WardSONDB issues the `_id` per write; the collection comes from the caller.
+There is no unified `NodeId` enum. Nodes are addressed everywhere as the tuple `(collection, id)` — see the visited-set keying at `crates/embra-brain/src/knowledge/edges.rs:114, 130, 154` and the traversal visited set in `traversal.rs::traverse_multi`. WardSONDB issues the `_id` per write; the collection comes from the caller.
 
 ### Semantic nodes (`memory.semantic`)
 
@@ -116,17 +116,17 @@ Nine built-in `EdgeType` variants (`types.rs`) split into three creation paths, 
 
 ### Auto-derived at write time (3 types)
 
-Written by `derive_edges` (`edges.rs:33`) immediately after any insert into `memory.entries`, `memory.semantic`, or `memory.procedural`. All three are symmetric (stored bidirectionally via `push_bidirectional`).
+Written by `derive_edges` (`edges.rs:32`) immediately after any insert into `memory.entries`, `memory.semantic`, or `memory.procedural`. All three are symmetric (stored bidirectionally via `push_bidirectional`).
 
 | Type | Weight formula | Bound | Symmetric |
 |---|---|---|---|
-| `same_session` | constant `1.0` (`edges.rs:124`) | same session string across all 3 collections | yes — bidirectional records |
-| `temporal` | `1.0 − distance_secs / window_secs` (`edges.rs:140`) | `kg_temporal_window_secs` (default 1800 / 30 min) | yes |
-| `tag_overlap` | `overlap_count / max(\|A\|, \|B\|)` (`edges.rs:165-166`) — **not standard Jaccard** | each tag of the new doc queries with `$contains` | yes |
+| `same_session` | constant `1.0` (`edges.rs:123`) | same session string across all 3 collections | yes — bidirectional records |
+| `temporal` | `1.0 − distance_secs / window_secs` (`edges.rs:139`) | `kg_temporal_window_secs` (default 1800 / 30 min) | yes |
+| `tag_overlap` | `overlap_count / max(\|A\|, \|B\|)` (`edges.rs:164-165`) — **not standard Jaccard** | each tag of the new doc queries with `$contains` | yes |
 
-Unit-tested formulas at `edges.rs:296-315` (`test_edge_weight_temporal`, `test_edge_weight_tag_overlap`). Note that `temporal` is rejected when `distance_secs >= window_secs` or weight ≤ 0 (`edges.rs:139, 141`); `tag_overlap` is rejected when `overlap == 0` (`edges.rs:164`). The candidate limit (`kg_edge_candidate_limit`, default 50) is per *query*, not per node — multiple queries (one per collection × per edge type × per tag) contribute to a single write.
+Unit-tested formulas at `edges.rs:289-308` (`test_edge_weight_temporal`, `test_edge_weight_tag_overlap`). Note that `temporal` is rejected when `distance_secs >= window_secs` or weight ≤ 0 (`edges.rs:138, 140`); `tag_overlap` is rejected when `overlap == 0` (`edges.rs:163`). The candidate limit (`kg_edge_candidate_limit`, default 50) is per *query*, not per node — multiple queries (one per collection × per edge type × per tag) contribute to a single write.
 
-`derive_edges` is best-effort: failures log a warning and return `Ok(0)` without blocking the memory write (`edges.rs:43-48`). And `edge_exists` (`edges.rs:260-273`) checks before bulk-write so repeat inserts of the same triple don't compound.
+`derive_edges` is best-effort: failures log a warning and return `Ok(0)` without blocking the memory write (`edges.rs:42-47`). And `edge_exists` (`edges.rs:253-266`) checks before bulk-write so repeat inserts of the same triple don't compound.
 
 ### Auto-inserted by promotion (1 type)
 
@@ -148,7 +148,7 @@ This is the type whose categorization is commonly misread. `is_brain_created()` 
 | `depends_on` | no | A requires B |
 | `related_to` | yes (documented same-scope, non-hierarchical) | same topic / system area |
 
-`knowledge_link` (`crates/embra-brain/src/knowledge/tools.rs:55-127`) rejects any other edge type with: *"Brain-created types: enables, contradicts, refines, depends_on, related_to"* (`tools.rs:65, 68`). Self-loops (`tools.rs:73-75`) and weights outside `(0.0, 1.0]` (`tools.rs:80-82`) are also rejected. Duplicate `(source_id, target_id, edge_type)` triples are rejected (`tools.rs:92-108`).
+`knowledge_link` (`crates/embra-brain/src/knowledge/tools.rs:55-127`) rejects any other edge type with: *"Brain-created types: enables, contradicts, refines, depends_on, related_to"* (`tools.rs:65, 68`). Self-loops (`tools.rs:73-75`) and weights outside `(0.0, 1.0]` (`tools.rs:80-82`) are also rejected. Duplicate `(source_id, target_id, edge_type)` triples are rejected (`tools.rs:93-109`).
 
 `EdgeType::is_symmetric()` (`types.rs`) — `same_session`, `temporal`, `tag_overlap`, `related_to` are symmetric; everything else is directional. The triple form of `knowledge_unlink_edge` (`tools.rs:160-173`) consults this to decide whether to issue a bidirectional `$or` delete or a forward-only delete (Embra_Debug #63 regression test: `directional_types_not_symmetric` in `types.rs`).
 
@@ -233,7 +233,7 @@ This is where the KG actually reaches the model. `build_turn_context` (`crates/e
 Two skip conditions (`enrichment.rs:41`):
 
 1. `trimmed.len() < 15` → return the raw message unchanged (`MIN_MESSAGE_LEN`, `enrichment.rs:25`)
-2. `is_chatty_filler(trimmed)` → return the raw message unchanged. List at `enrichment.rs:161-182` (lowercased, trailing punctuation + whitespace stripped): `ok`, `okay`, `yes`, `no`, `sure`, `thanks`, `thx`, `ty`, `hi`, `hello`, `hey`, `got it`, `understood`, `cool`.
+2. `is_chatty_filler(trimmed)` → return the raw message unchanged. List in `enrichment.rs::is_chatty_filler` (lowercased, trailing punctuation + whitespace stripped): `ok`, `okay`, `yes`, `no`, `sure`, `thanks`, `thx`, `ty`, `hi`, `hello`, `hey`, `got it`, `understood`, `cool`.
 
 **Note for readers coming from CLAUDE.md:** an earlier doc revision listed a `[TOOL:` prefix gate. That gate was deleted post-NATIVE-TOOLS-01 (`enrichment.rs:37-40`): the user-message channel is plain prose only — tool calls arrive as structured `tool_use` blocks, never as `[TOOL:...]` strings — so the legacy guard came out with the parser.
 
@@ -441,7 +441,7 @@ Twelve `knowledge_*` tools registered via `#[embra_tool(...)]` macros — ten in
 
 **`knowledge_promote`** — episodic → semantic or procedural. `kind = semantic | procedural`; `data` is a category string for semantic or a JSON procedure object for procedural. Irreversible (no demote tool). Triggers `derive_edges` on the new node, so a single promotion can write many edges.
 
-**`knowledge_link`** — brain-creates an edge between any two nodes. `edge_type` is one of `enables | contradicts | refines | depends_on | related_to` — any other type is rejected (`tools.rs:64-68`). `weight` in `(0.0, 1.0]`. Self-loops rejected (`tools.rs:73-75`). Duplicate `(source_id, target_id, edge_type)` rejected (`tools.rs:92-108`).
+**`knowledge_link`** — brain-creates an edge between any two nodes. `edge_type` is one of `enables | contradicts | refines | depends_on | related_to` — any other type is rejected (`tools.rs:64-68`). `weight` in `(0.0, 1.0]`. Self-loops rejected (`tools.rs:73-75`). Duplicate `(source_id, target_id, edge_type)` rejected (`tools.rs:93-109`).
 
 **`knowledge_unlink_edge`** — by `edge_id` or by `(source_id, edge_type, target_id)` triple; since 2026-07-30 the endpoint collections are **optional** (they were required but display-only — the delete filter has always matched by id + type, and requiring them produced spurious "missing arguments" rejections; omitted collections render as "any" in the result message). `edge_id` takes precedence. Free-form identity relations are addressable via `parse_lossy` (deleting a projection edge is safe — the next boot reconcile restores it). Triple form respects `is_symmetric()`: symmetric types (`same_session`, `temporal`, `tag_overlap`, `related_to`) delete bidirectionally via `$or`; directional types (`enables`, `contradicts`, `refines`, `depends_on`, `derived_from`, and free-form relations) delete only the forward direction. The directional-only behavior is a regression-guarded fix (Embra_Debug #63, test `directional_types_not_symmetric` in `types.rs`).
 
@@ -499,7 +499,7 @@ The reason `knowledge_update` doesn't re-derive is that doing so would require e
 
 ### "Why are there two records per relationship?"
 
-Historical write-path design: under the original outgoing-only graph walk (a single `{source_id: <start>}` filter, Sprint-2 → 2026-07-03), double-writing symmetric edges was what made them reachable from either endpoint. The walk has since changed twice — undirected (2026-07-03: both endpoints queried) and arm-split (2026-07-04: two indexed arm queries merged client-side, with the visited check / `_id` dedupe collapsing a twin pair to one hop) — so the double-write is no longer load-bearing for reachability. It persists as the storage convention: the twin records are written together by `push_bidirectional` (`edges.rs:229-258`), deleted together by the symmetric branch of `knowledge_unlink_edge` (`tools.rs:160-173`), and cost doubled storage for the symmetric types (`same_session`, `temporal`, `tag_overlap`, `related_to`) plus two slots of the per-hop ranked window (see **Traversal**). Rewriting stored data to collapse the twins was considered and rejected with the same reasoning as every other stored-data prune: deleted edges are unrecoverable, and the read path already handles both shapes.
+Historical write-path design: under the original outgoing-only graph walk (a single `{source_id: <start>}` filter, Sprint-2 → 2026-07-03), double-writing symmetric edges was what made them reachable from either endpoint. The walk has since changed twice — undirected (2026-07-03: both endpoints queried) and arm-split (2026-07-04: two indexed arm queries merged client-side, with the visited check / `_id` dedupe collapsing a twin pair to one hop) — so the double-write is no longer load-bearing for reachability. It persists as the storage convention: the twin records are written together by `push_bidirectional` (`edges.rs:222-251`), deleted together by the symmetric branch of `knowledge_unlink_edge` (`tools.rs:160-173`), and cost doubled storage for the symmetric types (`same_session`, `temporal`, `tag_overlap`, `related_to`) plus two slots of the per-hop ranked window (see **Traversal**). Rewriting stored data to collapse the twins was considered and rejected with the same reasoning as every other stored-data prune: deleted edges are unrecoverable, and the read path already handles both shapes.
 
 Directional edges (`enables`, `contradicts`, `refines`, `depends_on`, `derived_from`) are stored as a single record, reachable from both endpoints since the undirected fix.
 
@@ -531,8 +531,8 @@ Six kg_* config fields tunable per-instance. The first four are set up by migrat
 
 | Field | Default | Used by |
 |---|---|---|
-| `kg_temporal_window_secs` | 1800 (30 min) | `derive_edges` temporal candidate window + weight denominator (`edges.rs:61, 84-85, 140`) |
-| `kg_edge_candidate_limit` | 50 | per-query candidate cap in `derive_edges` (`edges.rs:60, 76, 89, 102`) |
+| `kg_temporal_window_secs` | 1800 (30 min) | `derive_edges` temporal candidate window + weight denominator (`edges.rs:60, 83-84, 139`) |
+| `kg_edge_candidate_limit` | 50 | per-query candidate cap in `derive_edges` (`edges.rs:59, 75, 88, 101`) |
 | `kg_traversal_depth_ceiling` | 5 | hard cap on `knowledge_traverse` depth (`traverse_multi`) |
 | `kg_max_traversal_depth` | 3 | default depth when `knowledge_traverse` omits it (`tools.rs::knowledge_traverse`) |
 | `kg_traversal_edge_limit` | 500 | per-hop ranked window of the AUTO partition in `traverse_multi` (`weight desc, created_at desc`; saturation → `kg::traversal` debug — working as designed since the type partition; the meaningful partition rides its own 2000 module const, saturation there → warn) |
@@ -563,7 +563,7 @@ Everything below is a conversation with the intelligence — the operator types 
 
 2. **Establish a baseline.** Ask the intelligence to show the knowledge graph stats — anything like *"what does the knowledge graph look like right now?"* will route to `knowledge_graph_stats`. On a fresh DATA partition the reported numbers should be zero or near zero.
 
-3. **Trigger auto-derivation.** Ask the intelligence to remember two distinct things in the same session with overlapping tags — e.g. *"remember that the embra-web cert refresh works after manual generation, tag it embra-web and cert"* and *"now remember the trustd CA expiry pipeline issues, same tags"*. The intelligence calls `remember` for each, which fires `derive_edges` (`edges.rs:33`) on every insert. Then ask for the graph stats again. The intelligence's report should show:
+3. **Trigger auto-derivation.** Ask the intelligence to remember two distinct things in the same session with overlapping tags — e.g. *"remember that the embra-web cert refresh works after manual generation, tag it embra-web and cert"* and *"now remember the trustd CA expiry pipeline issues, same tags"*. The intelligence calls `remember` for each, which fires `derive_edges` (`edges.rs:32`) on every insert. Then ask for the graph stats again. The intelligence's report should show:
 
    - `memory.entries: 2 total, 0 promoted, 2 unpromoted`
    - `memory.edges: ~6` (the same_session + temporal + tag_overlap edges from `derive_edges`, bidirectional).
