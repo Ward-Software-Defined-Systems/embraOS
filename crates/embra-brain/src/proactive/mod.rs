@@ -28,23 +28,21 @@ impl Priority {
     }
 }
 
+/// What the proactive loops hand to the Converse stream. It carries no
+/// id, timestamp or delivery flag: a notification is shown once, when the
+/// stream drains the channel, and nothing looks it up afterwards. What
+/// must not repeat is decided before it is built (`health::transition_events`).
 #[derive(Debug, Clone)]
 pub struct Notification {
-    pub id: String,
     pub priority: Priority,
     pub message: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub delivered: bool,
 }
 
 impl Notification {
     pub fn new(priority: Priority, message: impl Into<String>) -> Self {
         Self {
-            id: uuid::Uuid::new_v4().to_string(),
             priority,
             message: message.into(),
-            created_at: chrono::Utc::now(),
-            delivered: false,
         }
     }
 

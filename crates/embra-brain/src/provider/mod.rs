@@ -161,7 +161,11 @@ pub trait LlmProvider: Send + Sync {
     /// Anthropic: `"opus-5"`. Gemini: `"gemini-3.1-pro"`.
     fn display_name(&self) -> &str;
 
-    /// For persistence + slash-command UX.
+    /// Which provider this is. Test-only: the running brain always knows
+    /// the kind from config (it picked the provider by it), while the
+    /// tests of the provider factory need it to tell what was built —
+    /// `display_name()` cannot tell Ollama from LM Studio.
+    #[cfg(test)]
     fn kind(&self) -> ProviderKind;
 
     /// Probe the provider's model-listing endpoint with the given key.

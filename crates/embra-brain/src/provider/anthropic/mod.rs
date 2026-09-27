@@ -45,9 +45,11 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{error, warn};
 
+#[cfg(test)]
+use crate::provider::ProviderKind;
 use crate::provider::{
-    ApiMessage, AssistantTurn, LlmProvider, LlmRequestOptions, ProviderError, ProviderKind,
-    StreamEvent, SystemPromptBundle, ToolManifest, ValidationResult,
+    ApiMessage, AssistantTurn, LlmProvider, LlmRequestOptions, ProviderError, StreamEvent,
+    SystemPromptBundle, ToolManifest, ValidationResult,
 };
 use crate::tools::registry::ToolDescriptor;
 
@@ -221,6 +223,7 @@ impl LlmProvider for AnthropicProvider {
         &self.display_name
     }
 
+    #[cfg(test)]
     fn kind(&self) -> ProviderKind {
         ProviderKind::Anthropic
     }

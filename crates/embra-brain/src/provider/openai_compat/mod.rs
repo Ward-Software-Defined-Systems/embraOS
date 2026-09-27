@@ -324,6 +324,7 @@ impl LlmProvider for OpenAICompatProvider {
         &self.display_name
     }
 
+    #[cfg(test)]
     fn kind(&self) -> ProviderKind {
         self.preset.as_kind()
     }
