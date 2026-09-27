@@ -414,6 +414,26 @@ for f in model.onnx tokenizer.json; do
 done
 echo "embedding model present in rootfs: $EMBED_TARGET"
 
+# Same check for the in-OS toolchain. The brain compares /opt/rust/RUST_VERSION
+# with the toolchain each Guardian tool was built by, so the rootfs must carry
+# the version this build pinned, and that version only: two libcore rlibs for
+# wasm32 mean an earlier toolchain's files survived in Buildroot's target dir.
+RUST_IN_TARGET="$BUILDROOT_DIR/output/target/opt/rust"
+if [ "$(cat "$RUST_IN_TARGET/RUST_VERSION" 2>/dev/null || true)" != "$RUST_TOOLCHAIN_VERSION" ] \
+   || [ ! -x "$RUST_IN_TARGET/bin/cargo" ]; then
+    echo "ERROR: in-OS Rust toolchain $RUST_TOOLCHAIN_VERSION missing from the rootfs: $RUST_IN_TARGET" >&2
+    echo "       Guardian tools could not be built or rebuilt on this image." >&2
+    exit 1
+fi
+RUST_CORE_COUNT=$(find "$RUST_IN_TARGET/lib/rustlib/wasm32-unknown-unknown/lib" \
+    -name 'libcore-*.rlib' 2>/dev/null | wc -l)
+if [ "$RUST_CORE_COUNT" -ne 1 ]; then
+    echo "ERROR: expected one wasm32 libcore in $RUST_IN_TARGET, found $RUST_CORE_COUNT" >&2
+    echo "       Remove $RUST_IN_TARGET and rebuild." >&2
+    exit 1
+fi
+echo "in-OS Rust toolchain present in rootfs: $RUST_TOOLCHAIN_VERSION"
+
 echo "=== Step 5: Copy outputs ==="
 mkdir -p output/images
 cp "$BUILDROOT_DIR/output/images/embraos.img" output/images/

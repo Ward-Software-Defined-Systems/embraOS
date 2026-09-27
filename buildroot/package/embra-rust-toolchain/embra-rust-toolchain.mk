@@ -14,7 +14,13 @@ EMBRA_RUST_TOOLCHAIN_VERSION = 1.0
 EMBRA_RUST_TOOLCHAIN_SITE = $(BR2_EXTERNAL_EMBRAOS_PATH)/../vendor/rust-toolchain
 EMBRA_RUST_TOOLCHAIN_SITE_METHOD = local
 
+# The prefix is REPLACED, never merged into. Buildroot's target dir persists
+# across builds and rustc names its libraries by hash
+# (librustc_driver-<hash>.so, libcore-<hash>.rlib), so after a toolchain
+# version change a plain copy would ship the old compiler's libraries next
+# to the new one's.
 define EMBRA_RUST_TOOLCHAIN_INSTALL_TARGET_CMDS
+	rm -rf $(TARGET_DIR)/opt/rust
 	mkdir -p $(TARGET_DIR)/opt/rust
 	cp -a $(@D)/. $(TARGET_DIR)/opt/rust/
 endef
