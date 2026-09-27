@@ -1008,43 +1008,88 @@ async fn countdown(db: &WardsonDbClient, param: &str) -> String {
     }
 }
 
-/// Check for due reminders. Called by the proactive engine.
-pub async fn check_reminders(db: &WardsonDbClient) -> Vec<String> {
+/// Most due reminders one check looks at, earliest trigger first.
+const REMINDER_WINDOW: usize = 500;
+
+/// The reminders that are due at `now` and have not fired, earliest trigger
+/// first, under an explicit window. A record without `fired` counts as not
+/// fired (BUG-003), and WardSONDB matches a missing field with `$exists`
+/// only, hence the `$or`. An `$or` is a collection scan; this collection is
+/// small and reaped after seven days (migration v4), and nothing here is a
+/// hot path. `trigger_at` compares as a string on the server, exactly as
+/// `due_reminders` compares it here.
+pub(crate) fn due_reminders_query_body(now: &str, limit: usize) -> serde_json::Value {
+    serde_json::json!({
+        "filter": {
+            "trigger_at": {"$lte": now},
+            "$or": [{"fired": false}, {"fired": {"$exists": false}}],
+        },
+        "sort": [{"trigger_at": "asc"}, {"_id": "asc"}],
+        "limit": limit,
+    })
+}
+
+/// Of `docs`, the reminders due at `now` that have not fired — earliest
+/// trigger first, at most `max`. Timestamps compare as the RFC 3339 strings
+/// they are stored as.
+fn due_reminders<'a>(
+    docs: &'a [serde_json::Value],
+    now: &str,
+    max: usize,
+) -> Vec<&'a serde_json::Value> {
+    let mut due: Vec<(&str, &serde_json::Value)> = docs
+        .iter()
+        .filter(|doc| {
+            // Missing `fired` field means not yet fired (BUG-003 fix)
+            !doc.get("fired").and_then(|v| v.as_bool()).unwrap_or(false)
+        })
+        .filter_map(|doc| {
+            let trigger = doc.get("trigger_at").and_then(|v| v.as_str())?;
+            (!trigger.is_empty() && trigger <= now).then_some((trigger, doc))
+        })
+        .collect();
+    due.sort_by_key(|(trigger, _)| *trigger);
+    due.into_iter().take(max).map(|(_, doc)| doc).collect()
+}
+
+/// Fire the reminders that are due, at most `max` of them, and return their
+/// messages. Called by the proactive engine, which passes the number of
+/// notifications it can hand over right now: firing marks a reminder as
+/// fired, so one that fires without a place to go is lost. What does not
+/// fit stays in the store and fires on a later check.
+pub async fn check_reminders(db: &WardsonDbClient, max: usize) -> Vec<String> {
+    if max == 0 {
+        return Vec::new();
+    }
+    let now = Utc::now().to_rfc3339();
     let reminders = db
-        .query("reminders", &serde_json::json!({}))
+        .query("reminders", &due_reminders_query_body(&now, REMINDER_WINDOW))
         .await
         .unwrap_or_default();
+    if crate::db::client::window_saturated(reminders.len(), REMINDER_WINDOW) {
+        tracing::warn!(
+            target: "wardsondb::window",
+            collection = "reminders",
+            limit = REMINDER_WINDOW,
+            "due-reminder window saturated — the latest triggers wait for earlier ones to fire"
+        );
+    }
 
-    let now = Utc::now().to_rfc3339();
     let mut fired = Vec::new();
 
-    for doc in &reminders {
-        // Missing `fired` field means not yet fired (BUG-003 fix)
-        let already_fired = doc.get("fired").and_then(|v| v.as_bool()).unwrap_or(false);
-        if already_fired {
-            continue;
-        }
-        tracing::debug!("Checking reminder: {:?}", doc.get("message"));
-
-        let trigger = doc
-            .get("trigger_at")
+    for doc in due_reminders(&reminders, &now, max) {
+        let message = doc
+            .get("message")
             .and_then(|v| v.as_str())
-            .unwrap_or("");
+            .unwrap_or("Reminder");
 
-        if !trigger.is_empty() && trigger <= now.as_str() {
-            let message = doc
-                .get("message")
-                .and_then(|v| v.as_str())
-                .unwrap_or("Reminder");
+        fired.push(format!("Reminder: {}", message));
 
-            fired.push(format!("Reminder: {}", message));
-
-            // Mark as fired
-            if let Some(id) = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()) {
-                let mut updated = doc.clone();
-                updated["fired"] = serde_json::json!(true);
-                let _ = db.update("reminders", id, &updated).await;
-            }
+        // Mark as fired
+        if let Some(id) = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()) {
+            let mut updated = doc.clone();
+            updated["fired"] = serde_json::json!(true);
+            let _ = db.update("reminders", id, &updated).await;
         }
     }
 
@@ -2225,5 +2270,68 @@ mod system_logs_tests {
         assert!(v.get("allOf").is_none());
         assert!(v.get("anyOf").is_none());
         assert_eq!(v.get("type").and_then(|t| t.as_str()), Some("object"));
+    }
+}
+
+#[cfg(test)]
+mod reminder_tests {
+    use super::*;
+    use serde_json::json;
+
+    const NOW: &str = "2026-09-27T12:00:00+00:00";
+
+    fn reminder(id: &str, trigger_at: &str, fired: Option<bool>) -> serde_json::Value {
+        let mut doc = json!({"_id": id, "message": id, "trigger_at": trigger_at});
+        if let Some(f) = fired {
+            doc["fired"] = json!(f);
+        }
+        doc
+    }
+
+    fn ids(due: &[&serde_json::Value]) -> Vec<String> {
+        due.iter().map(|d| d["_id"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn due_query_is_windowed_sorted_and_matches_records_without_the_field() {
+        let body = due_reminders_query_body(NOW, 500);
+        assert_eq!(body["limit"], json!(500));
+        // One key per array element: a multi-key object sorts alphabetically.
+        assert_eq!(body["sort"], json!([{"trigger_at": "asc"}, {"_id": "asc"}]));
+        assert_eq!(
+            body["filter"],
+            json!({
+                "trigger_at": {"$lte": NOW},
+                "$or": [{"fired": false}, {"fired": {"$exists": false}}],
+            })
+        );
+    }
+
+    #[test]
+    fn only_due_unfired_reminders_fire() {
+        let docs = vec![
+            reminder("due", "2026-09-27T11:59:00+00:00", Some(false)),
+            reminder("exactly-now", NOW, Some(false)),
+            reminder("later", "2026-09-27T12:00:01+00:00", Some(false)),
+            reminder("already-fired", "2026-09-27T11:00:00+00:00", Some(true)),
+            // Written before the field existed: counts as not fired.
+            reminder("legacy", "2026-09-27T10:00:00+00:00", None),
+            reminder("no-trigger", "", Some(false)),
+            json!({"_id": "no-trigger-field", "message": "x", "fired": false}),
+        ];
+        assert_eq!(ids(&due_reminders(&docs, NOW, 16)), ["legacy", "due", "exactly-now"]);
+    }
+
+    #[test]
+    fn the_earliest_fire_first_and_the_rest_wait() {
+        // Stored newest first; three are due and there is room for two.
+        let docs = vec![
+            reminder("c", "2026-09-27T11:30:00+00:00", Some(false)),
+            reminder("a", "2026-09-27T09:00:00+00:00", Some(false)),
+            reminder("b", "2026-09-27T10:00:00+00:00", Some(false)),
+        ];
+        assert_eq!(ids(&due_reminders(&docs, NOW, 2)), ["a", "b"]);
+        assert_eq!(ids(&due_reminders(&docs, NOW, 3)), ["a", "b", "c"]);
+        assert!(due_reminders(&docs, NOW, 0).is_empty());
     }
 }

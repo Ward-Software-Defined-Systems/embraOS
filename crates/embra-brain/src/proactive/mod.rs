@@ -2,14 +2,15 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::config;
 use crate::db::WardsonDbClient;
 use crate::provider::health::{self, ProviderProbe};
 
 const NORMAL_CHECK_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
-const UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(3600); // 1 hour
+/// Most reminders handed over by one 15-second check.
+const REMINDER_BATCH_MAX: usize = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Priority {
@@ -90,18 +91,15 @@ pub fn start_proactive_engine(
         tokio::time::sleep(Duration::from_secs(10)).await;
 
         loop {
-            let fired = crate::tools::check_reminders(&db_reminders).await;
-            for msg in fired {
-                let _ = tx_reminders
-                    .send(Notification::new(Priority::Normal, msg))
-                    .await;
-            }
+            deliver_due_reminders(&db_reminders, &tx_reminders).await;
             tokio::time::sleep(Duration::from_secs(15)).await;
         }
     });
 
-    // Cron checks every 15 seconds
-    let tx_cron = tx.clone();
+    // Cron checks every 15 seconds. The report of a run is handed over
+    // without waiting: this loop is what RUNS the jobs, and waiting for room
+    // in the channel would stop every job behind the one being reported.
+    let tx_cron = tx;
     let db_cron = db.clone();
     let config_tz_cron = config_tz;
     tokio::spawn(async move {
@@ -111,23 +109,9 @@ pub fn start_proactive_engine(
         loop {
             let fired = crate::tools::cron::check_crons(&db_cron, &config_tz_cron).await;
             for msg in fired {
-                let _ = tx_cron
-                    .send(Notification::new(Priority::Normal, msg))
-                    .await;
+                push_notification(&tx_cron, Notification::new(Priority::Normal, msg));
             }
             tokio::time::sleep(Duration::from_secs(15)).await;
-        }
-    });
-
-    // Update checks every hour
-    let tx_update = tx;
-    tokio::spawn(async move {
-        // Initial delay
-        tokio::time::sleep(Duration::from_secs(60)).await;
-
-        loop {
-            run_update_checks(&tx_update).await;
-            tokio::time::sleep(UPDATE_CHECK_INTERVAL).await;
         }
     });
 
@@ -138,10 +122,49 @@ pub fn start_proactive_engine(
 /// (64) and drained only while an operational stream holds the receiver;
 /// a headless boot fills it, and an awaiting `send` would park this loop
 /// — and every check after it — forever. Dropping a notification nobody
-/// is listening to is the right trade.
+/// is listening to is the right trade. What is dropped is logged with its
+/// text, so a cron report that found no room can still be read back
+/// (`system_logs`).
 fn push_notification(tx: &mpsc::Sender<Notification>, notification: Notification) {
-    if let Err(e) = tx.try_send(notification) {
-        warn!("proactive notification dropped (channel full or closed): {}", e);
+    use mpsc::error::TrySendError;
+    let (why, lost) = match tx.try_send(notification) {
+        Ok(()) => return,
+        Err(TrySendError::Full(n)) => ("channel full", n),
+        Err(TrySendError::Closed(n)) => ("channel closed", n),
+    };
+    warn!(
+        priority = lost.priority_label(),
+        "proactive notification dropped ({why}): {}",
+        lost.message
+    );
+}
+
+/// Room for up to `max` notifications, reserved — or `None` when the
+/// channel has none. A reserved slot cannot be taken by another loop, and
+/// one that goes unused is returned when its permit drops.
+fn reserve_slots(
+    tx: &mpsc::Sender<Notification>,
+    max: usize,
+) -> Option<mpsc::PermitIterator<'_, Notification>> {
+    let room = tx.capacity().min(max);
+    if room == 0 {
+        return None;
+    }
+    tx.try_reserve_many(room).ok()
+}
+
+/// Hand over the reminders that are due. Unlike every other notification a
+/// reminder is never dropped: firing consumes it, so it fires only into a
+/// slot reserved for it. With the channel full it stays in the store, and
+/// the operator gets it late instead of not at all.
+async fn deliver_due_reminders(db: &WardsonDbClient, tx: &mpsc::Sender<Notification>) {
+    let Some(slots) = reserve_slots(tx, REMINDER_BATCH_MAX) else {
+        debug!("proactive channel full — due reminders wait in the store");
+        return;
+    };
+    let fired = crate::tools::check_reminders(db, slots.len()).await;
+    for (slot, msg) in slots.zip(fired) {
+        slot.send(Notification::new(Priority::Normal, msg));
     }
 }
 
@@ -257,21 +280,6 @@ async fn run_health_checks(db: &WardsonDbClient, tx: &mpsc::Sender<Notification>
     }
 }
 
-async fn run_update_checks(tx: &mpsc::Sender<Notification>) {
-    if let Some(info) = crate::tools::check_wardsondb_update().await {
-        info!("WardSONDB update available: v{}", info.version);
-        let _ = tx
-            .send(Notification::new(
-                Priority::Low,
-                format!(
-                    "WardSONDB update available: v{} (current: v{})",
-                    info.version, info.current_version
-                ),
-            ))
-            .await;
-    }
-}
-
 fn get_memory_usage_mb() -> Option<u64> {
     // Read from /proc/self/status on Linux
     if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
@@ -285,4 +293,62 @@ fn get_memory_usage_mb() -> Option<u64> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn note(text: &str) -> Notification {
+        Notification::new(Priority::Normal, text)
+    }
+
+    #[test]
+    fn a_full_channel_drops_the_notification_and_returns() {
+        // Not a #[tokio::test]: push_notification must not need a runtime
+        // to get out of the way.
+        let (tx, mut rx) = mpsc::channel(2);
+        push_notification(&tx, note("one"));
+        push_notification(&tx, note("two"));
+        push_notification(&tx, note("three")); // no room: dropped, not awaited
+        assert_eq!(rx.try_recv().unwrap().message, "one");
+        assert_eq!(rx.try_recv().unwrap().message, "two");
+        assert!(rx.try_recv().is_err());
+        // A closed channel is the same non-event.
+        drop(rx);
+        push_notification(&tx, note("four"));
+    }
+
+    #[test]
+    fn slots_are_reserved_up_to_what_is_free() {
+        let (tx, mut rx) = mpsc::channel(4);
+        push_notification(&tx, note("health"));
+
+        let slots = reserve_slots(&tx, 16).expect("three slots are free");
+        assert_eq!(slots.len(), 3);
+        // Reserved means taken: nobody else gets them meanwhile.
+        assert_eq!(tx.capacity(), 0);
+        push_notification(&tx, note("cron report")); // dropped
+
+        // Two reminders fire into three slots; the third slot goes back.
+        for (slot, text) in slots.zip(["first", "second"]) {
+            slot.send(note(text));
+        }
+        assert_eq!(tx.capacity(), 1);
+        let got: Vec<String> = std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|n| n.message)
+            .collect();
+        assert_eq!(got, ["health", "first", "second"]);
+    }
+
+    #[test]
+    fn no_room_means_no_slots_and_nothing_to_fire() {
+        let (tx, _rx) = mpsc::channel(1);
+        push_notification(&tx, note("fills it"));
+        assert!(reserve_slots(&tx, 16).is_none());
+        // The cap is honored when there is plenty of room.
+        let (tx, _rx) = mpsc::channel(64);
+        assert_eq!(reserve_slots(&tx, REMINDER_BATCH_MAX).unwrap().len(), REMINDER_BATCH_MAX);
+        assert!(reserve_slots(&tx, 0).is_none());
+    }
 }
