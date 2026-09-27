@@ -168,18 +168,19 @@ async fn load_source_entry(
         .map_err(|_| anyhow!("Entry {} not found in memory.entries", entry_id))?;
 
     if let Some(promoted) = doc.get("promoted_to")
-        && !promoted.is_null() {
-            let coll = promoted.get("collection").and_then(|v| v.as_str());
-            let pid = promoted.get("id").and_then(|v| v.as_str());
-            let alive = match (coll, pid) {
-                (Some(c), Some(i)) => db.read(c, i).await.is_ok(),
-                _ => false,
-            };
-            if alive {
-                return Err(anyhow!("Entry {} already promoted to {}", entry_id, coll.unwrap_or("unknown")));
-            }
-            let _ = db.patch_document("memory.entries", entry_id, &json!({"promoted_to": null})).await;
+        && !promoted.is_null()
+    {
+        let coll = promoted.get("collection").and_then(|v| v.as_str());
+        let pid = promoted.get("id").and_then(|v| v.as_str());
+        let alive = match (coll, pid) {
+            (Some(c), Some(i)) => db.read(c, i).await.is_ok(),
+            _ => false,
+        };
+        if alive {
+            return Err(anyhow!("Entry {} already promoted to {}", entry_id, coll.unwrap_or("unknown")));
         }
+        let _ = db.patch_document("memory.entries", entry_id, &json!({"promoted_to": null})).await;
+    }
 
     let content = doc.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let tags: Vec<String> = doc.get("tags")

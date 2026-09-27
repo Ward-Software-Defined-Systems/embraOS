@@ -948,10 +948,11 @@ async fn run_v6_expression_panel(db: &WardsonDbClient) -> Result<()> {
     if !db.collection_exists("ui").await.unwrap_or(false) {
         info!("Creating collection: ui");
         if let Err(e) = db.create_collection("ui").await
-            && !is_conflict_err(&e) {
-                error!("Migration v6: failed to create collection ui: {}", e);
-                return Err(e);
-            }
+            && !is_conflict_err(&e)
+        {
+            error!("Migration v6: failed to create collection ui: {}", e);
+            return Err(e);
+        }
     }
 
     // Seed singleton — only if it does not already exist.
@@ -1234,13 +1235,12 @@ async fn run_v9_pluggable_provider(db: &WardsonDbClient) -> Result<()> {
                     mutated = true;
                 }
             }
-            if mutated
-                && let Err(e) = db.update(collection, &id, &meta_doc).await {
-                    warn!(
-                        "Migration v9: failed to update {}: {}",
-                        collection, e
-                    );
-                }
+            if mutated && let Err(e) = db.update(collection, &id, &meta_doc).await {
+                warn!(
+                    "Migration v9: failed to update {}: {}",
+                    collection, e
+                );
+            }
         }
     } else {
         warn!("Migration v9: list_collections failed; skipping session meta backfill");

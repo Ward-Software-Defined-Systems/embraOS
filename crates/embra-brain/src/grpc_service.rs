@@ -1688,28 +1688,30 @@ async fn handle_request(
                             // tx; this is the loop-side companion, mirroring
                             // the /model handler's refresh recipe. Reload
                             // fresh: `loaded_config` still holds the old name.
-                            if name == "set_name" && !is_error
-                                && let Ok(fresh) = config::load_config(db).await {
-                                    let model_display =
-                                        display_model_for(&fresh.api_provider, &fresh);
-                                    let _ = tx.send(Ok(ConversationResponse {
-                                        response_type: Some(
-                                            conversation_response::ResponseType::ModeChange(
-                                                ModeTransition {
-                                                    from_mode: OperatingMode::Operational as i32,
-                                                    to_mode: OperatingMode::Operational as i32,
-                                                    message: format!(
-                                                        "Operational — Name: {} — Session: {} — TZ: {} — Brain: {}",
-                                                        fresh.name,
-                                                        session_name,
-                                                        fresh.timezone,
-                                                        model_display
-                                                    ),
-                                                },
-                                            ),
+                            if name == "set_name"
+                                && !is_error
+                                && let Ok(fresh) = config::load_config(db).await
+                            {
+                                let model_display =
+                                    display_model_for(&fresh.api_provider, &fresh);
+                                let _ = tx.send(Ok(ConversationResponse {
+                                    response_type: Some(
+                                        conversation_response::ResponseType::ModeChange(
+                                            ModeTransition {
+                                                from_mode: OperatingMode::Operational as i32,
+                                                to_mode: OperatingMode::Operational as i32,
+                                                message: format!(
+                                                    "Operational — Name: {} — Session: {} — TZ: {} — Brain: {}",
+                                                    fresh.name,
+                                                    session_name,
+                                                    fresh.timezone,
+                                                    model_display
+                                                ),
+                                            },
                                         ),
-                                    })).await;
-                                }
+                                    ),
+                                })).await;
+                            }
 
                             // Operator-facing frames for images the tool put
                             // in the MEDIA store (tools carry no tx — this is
@@ -2100,26 +2102,26 @@ async fn handle_request(
             if !new_session
                 && let Err((session_provider, active_provider)) =
                     check_session_provider(db, &session_name).await
-                {
-                    let active_session =
-                        session_mgr.read().await.active_session.clone();
-                    let _ = tx
-                        .send(Ok(ConversationResponse {
-                            response_type: Some(conversation_response::ResponseType::System(
-                                SystemMessage {
-                                    content: cross_provider_block_message(
-                                        &session_name,
-                                        &session_provider,
-                                        &active_provider,
-                                        active_session.as_deref(),
-                                    ),
-                                    msg_type: SystemMessageType::Error as i32,
-                                },
-                            )),
-                        }))
-                        .await;
-                    return Ok(());
-                }
+            {
+                let active_session =
+                    session_mgr.read().await.active_session.clone();
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::System(
+                            SystemMessage {
+                                content: cross_provider_block_message(
+                                    &session_name,
+                                    &session_provider,
+                                    &active_provider,
+                                    active_session.as_deref(),
+                                ),
+                                msg_type: SystemMessageType::Error as i32,
+                            },
+                        )),
+                    }))
+                    .await;
+                return Ok(());
+            }
 
             // Mark active only after the cross-provider check passes.
             session_mgr.write().await.active_session = Some(session_name.clone());
@@ -3586,30 +3588,31 @@ async fn perform_provider_swap(
     if let Some(ref name) = active_session {
         let collection = format!("sessions.{}.meta", name);
         if let Ok(results) = db.query(&collection, &serde_json::json!({})).await
-            && let Some(mut doc) = results.into_iter().next() {
-                let id = doc
-                    .get("_id")
-                    .or_else(|| doc.get("id"))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                if let Some(id) = id {
-                    let model_str = match config::load_config(db).await {
-                        Ok(c) => display_model_for(target.as_str(), &c),
-                        Err(_) => target.as_str().to_string(),
-                    };
-                    if let Some(obj) = doc.as_object_mut() {
-                        obj.insert(
-                            "provider".into(),
-                            serde_json::Value::String(target.as_str().to_string()),
-                        );
-                        obj.insert(
-                            "model".into(),
-                            serde_json::Value::String(model_str),
-                        );
-                    }
-                    let _ = db.update(&collection, &id, &doc).await;
+            && let Some(mut doc) = results.into_iter().next()
+        {
+            let id = doc
+                .get("_id")
+                .or_else(|| doc.get("id"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            if let Some(id) = id {
+                let model_str = match config::load_config(db).await {
+                    Ok(c) => display_model_for(target.as_str(), &c),
+                    Err(_) => target.as_str().to_string(),
+                };
+                if let Some(obj) = doc.as_object_mut() {
+                    obj.insert(
+                        "provider".into(),
+                        serde_json::Value::String(target.as_str().to_string()),
+                    );
+                    obj.insert(
+                        "model".into(),
+                        serde_json::Value::String(model_str),
+                    );
                 }
+                let _ = db.update(&collection, &id, &doc).await;
             }
+        }
     }
 
     // 3. Persist to STATE so embrad picks the right provider on the
@@ -4486,9 +4489,10 @@ fn resolve_gemini_model_id_inner(env: Option<&str>, cfg_field: Option<&str>) -> 
         }
     }
     if let Some(s) = cfg_field
-        && !s.is_empty() {
-            return s.to_string();
-        }
+        && !s.is_empty()
+    {
+        return s.to_string();
+    }
     "gemini-3.1-pro-preview".to_string()
 }
 

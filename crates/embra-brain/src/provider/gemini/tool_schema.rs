@@ -181,11 +181,12 @@ fn collapse_literal_enum_oneof(schema: &mut JsonValue) {
                 None
             };
             if let Some(values) = collapsed
-                && !values.is_empty() {
-                    map.remove("oneOf");
-                    map.insert("type".into(), JsonValue::String("string".into()));
-                    map.insert("enum".into(), JsonValue::Array(values));
-                }
+                && !values.is_empty()
+            {
+                map.remove("oneOf");
+                map.insert("type".into(), JsonValue::String("string".into()));
+                map.insert("enum".into(), JsonValue::Array(values));
+            }
             for (_, v) in map.iter_mut() {
                 collapse_literal_enum_oneof(v);
             }

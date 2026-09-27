@@ -652,14 +652,16 @@ async fn uptime_report(db: &WardsonDbClient, session_name: &str) -> String {
     // Count total messages across all session histories
     let mut total_messages = 0u64;
     for col in &collections {
-        if col.starts_with("sessions.") && col.ends_with(".history")
-            && let Ok(docs) = db.query(col, &serde_json::json!({})).await {
-                for doc in &docs {
-                    if let Some(turns) = doc.get("turns").and_then(|v| v.as_array()) {
-                        total_messages += turns.len() as u64;
-                    }
+        if col.starts_with("sessions.")
+            && col.ends_with(".history")
+            && let Ok(docs) = db.query(col, &serde_json::json!({})).await
+        {
+            for doc in &docs {
+                if let Some(turns) = doc.get("turns").and_then(|v| v.as_array()) {
+                    total_messages += turns.len() as u64;
                 }
             }
+        }
     }
 
     let healthy = db.health().await.unwrap_or(false);
@@ -1075,31 +1077,32 @@ async fn session_summary(db: &WardsonDbClient, session_name: &str) -> String {
         .unwrap_or_default();
 
     if let Some(doc) = results.into_iter().next()
-        && let Some(turns) = doc.get("turns").and_then(|v| v.as_array()) {
-            let total = turns.len();
-            let user_msgs = turns.iter().filter(|t| t.get("role").and_then(|r| r.as_str()) == Some("user")).count();
-            let ai_msgs = total - user_msgs;
+        && let Some(turns) = doc.get("turns").and_then(|v| v.as_array())
+    {
+        let total = turns.len();
+        let user_msgs = turns.iter().filter(|t| t.get("role").and_then(|r| r.as_str()) == Some("user")).count();
+        let ai_msgs = total - user_msgs;
 
-            let mut output = format!(
-                "Session '{}' summary:\nTotal messages: {} ({} from user, {} from assistant)\n\nConversation:\n",
-                session_name, total, user_msgs, ai_msgs
-            );
+        let mut output = format!(
+            "Session '{}' summary:\nTotal messages: {} ({} from user, {} from assistant)\n\nConversation:\n",
+            session_name, total, user_msgs, ai_msgs
+        );
 
-            // Include the last 20 messages for context
-            let recent = if turns.len() > 20 {
-                &turns[turns.len() - 20..]
-            } else {
-                turns
-            };
+        // Include the last 20 messages for context
+        let recent = if turns.len() > 20 {
+            &turns[turns.len() - 20..]
+        } else {
+            turns
+        };
 
-            for turn in recent {
-                let role = turn.get("role").and_then(|r| r.as_str()).unwrap_or("?");
-                let content = turn.get("content").and_then(|c| c.as_str()).unwrap_or("");
-                output.push_str(&format!("[{}]: {}\n", role, summary_preview(content)));
-            }
-
-            return output;
+        for turn in recent {
+            let role = turn.get("role").and_then(|r| r.as_str()).unwrap_or("?");
+            let content = turn.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            output.push_str(&format!("[{}]: {}\n", role, summary_preview(content)));
         }
+
+        return output;
+    }
 
     format!("No conversation history found for session '{}'.", session_name)
 }

@@ -207,11 +207,10 @@ impl AnthropicProvider {
             "messages": wire_messages_json,
             "stream": true,
         });
-        if !tools_empty
-            && let Some(obj) = body.as_object_mut() {
-                obj.insert("tools".into(), tools.wire_json.clone());
-                obj.insert("tool_choice".into(), json!({"type": "auto"}));
-            }
+        if !tools_empty && let Some(obj) = body.as_object_mut() {
+            obj.insert("tools".into(), tools.wire_json.clone());
+            obj.insert("tool_choice".into(), json!({"type": "auto"}));
+        }
         body
     }
 }
@@ -360,36 +359,39 @@ fn build_cached_messages(messages: &[wire::AnthropicWireMessage]) -> Vec<serde_j
         .enumerate()
         .map(|(i, msg)| {
             let mut v = serde_json::to_value(msg).unwrap_or(json!({}));
-            if len >= 2 && i == len - 2
-                && let Some(content) = v.get_mut("content").and_then(|c| c.as_array_mut()) {
-                    // Prefer the last text block; fall back to any
-                    // block. Avoids placing cache_control on a
-                    // tool_result whenever a text block exists.
-                    let text_idx = content
-                        .iter()
-                        .enumerate()
-                        .rev()
-                        .find(|(_, b)| b.get("type").and_then(|t| t.as_str()) == Some("text"))
-                        .map(|(i, _)| i);
-                    let target_idx = text_idx.unwrap_or_else(|| content.len().saturating_sub(1));
-                    if let Some(block) = content.get_mut(target_idx)
-                        && let Some(obj) = block.as_object_mut() {
-                            // Refuse to stamp on an empty text block —
-                            // Anthropic rejects cache_control on empty
-                            // content. (Empty assistant turns can
-                            // happen when the model ends silently.)
-                            let is_empty_text = obj.get("type").and_then(|t| t.as_str())
-                                == Some("text")
-                                && obj
-                                    .get("text")
-                                    .and_then(|t| t.as_str())
-                                    .map(str::is_empty)
-                                    .unwrap_or(false);
-                            if !is_empty_text {
-                                obj.insert("cache_control".into(), json!({"type": "ephemeral"}));
-                            }
-                        }
+            if len >= 2
+                && i == len - 2
+                && let Some(content) = v.get_mut("content").and_then(|c| c.as_array_mut())
+            {
+                // Prefer the last text block; fall back to any
+                // block. Avoids placing cache_control on a
+                // tool_result whenever a text block exists.
+                let text_idx = content
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, b)| b.get("type").and_then(|t| t.as_str()) == Some("text"))
+                    .map(|(i, _)| i);
+                let target_idx = text_idx.unwrap_or_else(|| content.len().saturating_sub(1));
+                if let Some(block) = content.get_mut(target_idx)
+                    && let Some(obj) = block.as_object_mut()
+                {
+                    // Refuse to stamp on an empty text block —
+                    // Anthropic rejects cache_control on empty
+                    // content. (Empty assistant turns can
+                    // happen when the model ends silently.)
+                    let is_empty_text = obj.get("type").and_then(|t| t.as_str())
+                        == Some("text")
+                        && obj
+                            .get("text")
+                            .and_then(|t| t.as_str())
+                            .map(str::is_empty)
+                            .unwrap_or(false);
+                    if !is_empty_text {
+                        obj.insert("cache_control".into(), json!({"type": "ephemeral"}));
+                    }
                 }
+            }
             v
         })
         .collect()

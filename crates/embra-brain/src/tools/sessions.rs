@@ -83,10 +83,11 @@ async fn fetch_turns(db: &WardsonDbClient, name: &str) -> (Vec<serde_json::Value
     }
 
     if let Some(doc) = results.into_iter().next()
-        && let Some(turns) = doc.get("turns").and_then(|v| v.as_array()) {
-            let len = turns.len();
-            return (turns.clone(), len);
-        }
+        && let Some(turns) = doc.get("turns").and_then(|v| v.as_array())
+    {
+        let len = turns.len();
+        return (turns.clone(), len);
+    }
     (Vec::new(), 0)
 }
 

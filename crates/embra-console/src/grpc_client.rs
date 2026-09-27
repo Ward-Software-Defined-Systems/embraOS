@@ -92,72 +92,72 @@ impl BrainClient {
                 match resp_stream.message().await {
                     Ok(Some(resp)) => {
                         // Deserialize the pass-through payload into brain::ConversationResponse
-                        if let Ok(brain_resp) = brain::ConversationResponse::decode(
-                            resp.payload.as_slice()
-                        )
-                            && let Some(rt) = brain_resp.response_type {
-                                let event = match rt {
-                                    brain::conversation_response::ResponseType::Token(t) => {
-                                        ConsoleEvent::Token(t.text)
-                                    }
-                                    brain::conversation_response::ResponseType::Done(d) => {
-                                        ConsoleEvent::ResponseDone(d.full_response)
-                                    }
-                                    brain::conversation_response::ResponseType::System(s) => {
-                                        ConsoleEvent::SystemMessage {
-                                            content: s.content,
-                                            msg_type: format!("{}", s.msg_type),
-                                        }
-                                    }
-                                    brain::conversation_response::ResponseType::Tool(t) => {
-                                        ConsoleEvent::ToolExecution {
-                                            name: t.tool_name,
-                                            input_json: t.input_json,
-                                            result: t.result,
-                                            is_error: t.is_error,
-                                        }
-                                    }
-                                    brain::conversation_response::ResponseType::Thinking(t) => {
-                                        ConsoleEvent::ThinkingState {
-                                            is_thinking: t.is_thinking,
-                                            name: t.name,
-                                            current_tool: if t.current_tool.is_empty() {
-                                                None
-                                            } else {
-                                                Some(t.current_tool)
-                                            },
-                                        }
-                                    }
-                                    brain::conversation_response::ResponseType::ModeChange(m) => {
-                                        ConsoleEvent::ModeTransition {
-                                            to_mode: m.to_mode,
-                                            message: m.message,
-                                        }
-                                    }
-                                    brain::conversation_response::ResponseType::Setup(s) => {
-                                        ConsoleEvent::SetupPrompt {
-                                            field_type: match s.field_type {
-                                                1 => "text".to_string(),
-                                                2 => "selector".to_string(),
-                                                3 => "confirm".to_string(),
-                                                _ => "text".to_string(),
-                                            },
-                                            prompt: s.prompt,
-                                            options: s.options,
-                                            default_value: s.default_value,
-                                        }
-                                    }
-                                    brain::conversation_response::ResponseType::ReasoningDelta(r) => {
-                                        ConsoleEvent::ReasoningDelta(r.text)
-                                    }
-                                    brain::conversation_response::ResponseType::Media(m) => {
-                                        ConsoleEvent::Media(m)
-                                    }
-                                };
-                                if out_tx.send(event).await.is_err() {
-                                    break; // Console closed
+                        if let Ok(brain_resp) =
+                            brain::ConversationResponse::decode(resp.payload.as_slice())
+                            && let Some(rt) = brain_resp.response_type
+                        {
+                            let event = match rt {
+                                brain::conversation_response::ResponseType::Token(t) => {
+                                    ConsoleEvent::Token(t.text)
                                 }
+                                brain::conversation_response::ResponseType::Done(d) => {
+                                    ConsoleEvent::ResponseDone(d.full_response)
+                                }
+                                brain::conversation_response::ResponseType::System(s) => {
+                                    ConsoleEvent::SystemMessage {
+                                        content: s.content,
+                                        msg_type: format!("{}", s.msg_type),
+                                    }
+                                }
+                                brain::conversation_response::ResponseType::Tool(t) => {
+                                    ConsoleEvent::ToolExecution {
+                                        name: t.tool_name,
+                                        input_json: t.input_json,
+                                        result: t.result,
+                                        is_error: t.is_error,
+                                    }
+                                }
+                                brain::conversation_response::ResponseType::Thinking(t) => {
+                                    ConsoleEvent::ThinkingState {
+                                        is_thinking: t.is_thinking,
+                                        name: t.name,
+                                        current_tool: if t.current_tool.is_empty() {
+                                            None
+                                        } else {
+                                            Some(t.current_tool)
+                                        },
+                                    }
+                                }
+                                brain::conversation_response::ResponseType::ModeChange(m) => {
+                                    ConsoleEvent::ModeTransition {
+                                        to_mode: m.to_mode,
+                                        message: m.message,
+                                    }
+                                }
+                                brain::conversation_response::ResponseType::Setup(s) => {
+                                    ConsoleEvent::SetupPrompt {
+                                        field_type: match s.field_type {
+                                            1 => "text".to_string(),
+                                            2 => "selector".to_string(),
+                                            3 => "confirm".to_string(),
+                                            _ => "text".to_string(),
+                                        },
+                                        prompt: s.prompt,
+                                        options: s.options,
+                                        default_value: s.default_value,
+                                    }
+                                }
+                                brain::conversation_response::ResponseType::ReasoningDelta(r) => {
+                                    ConsoleEvent::ReasoningDelta(r.text)
+                                }
+                                brain::conversation_response::ResponseType::Media(m) => {
+                                    ConsoleEvent::Media(m)
+                                }
+                            };
+                            if out_tx.send(event).await.is_err() {
+                                break; // Console closed
                             }
+                        }
                     }
                     Ok(None) => break, // Stream ended
                     Err(e) => {

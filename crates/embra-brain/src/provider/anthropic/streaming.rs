@@ -182,9 +182,10 @@ pub async fn process_sse_stream(
                         // accumulator path doesn't have to undo it.
                         if let Some(input) = cb.get("input")
                             && let Ok(s) = serde_json::to_string(input)
-                                && s != "{}" {
-                                    acc.input_json = s;
-                                }
+                            && s != "{}"
+                        {
+                            acc.input_json = s;
+                        }
                         blocks.insert(index, acc);
                     }
                 }

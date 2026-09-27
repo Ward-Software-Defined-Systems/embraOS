@@ -1023,9 +1023,10 @@ mod key_lookup_tests {
 fn detect_timezone() -> String {
     // Try to read from system
     if let Ok(tz) = std::env::var("TZ")
-        && !tz.is_empty() {
-            return tz;
-        }
+        && !tz.is_empty()
+    {
+        return tz;
+    }
     // Try reading /etc/timezone (Linux)
     if let Ok(tz) = std::fs::read_to_string("/etc/timezone") {
         let tz = tz.trim().to_string();

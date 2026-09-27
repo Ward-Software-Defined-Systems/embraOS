@@ -54,12 +54,13 @@ fn parse_schedule(schedule: &str, config_tz: &str) -> Option<(u64, String)> {
         let time_str = time_str.trim();
         let parts: Vec<&str> = time_str.split(':').collect();
         if parts.len() == 2
-            && let (Ok(hour), Ok(minute)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
-                let resolved = super::resolve_timezone(config_tz);
-                let tz: Tz = resolved.parse().unwrap_or(chrono_tz::UTC);
-                let next_utc = daily_next(Utc::now(), tz, hour, minute)?;
-                return Some((86400, next_utc.to_rfc3339()));
-            }
+            && let (Ok(hour), Ok(minute)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>())
+        {
+            let resolved = super::resolve_timezone(config_tz);
+            let tz: Tz = resolved.parse().unwrap_or(chrono_tz::UTC);
+            let next_utc = daily_next(Utc::now(), tz, hour, minute)?;
+            return Some((86400, next_utc.to_rfc3339()));
+        }
         return None;
     }
 
