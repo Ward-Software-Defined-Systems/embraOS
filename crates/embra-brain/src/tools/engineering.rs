@@ -4083,9 +4083,9 @@ impl FileReadArgs {
             if let Some(l) = self.limit {
                 param = format!("{}|{}", param, l);
             }
-        } else if self.limit.is_some() {
+        } else if let Some(l) = self.limit {
             // Edge case: limit without offset — retain both in the legacy format.
-            param = format!("{}|0|{}", param, self.limit.unwrap());
+            param = format!("{}|0|{}", param, l);
         }
         Ok(file_read(&param).await)
     }

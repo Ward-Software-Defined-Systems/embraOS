@@ -13,6 +13,9 @@ use crate::db::WardsonDbClient;
 use super::node_store::{graph_node_from_doc, NodeStore};
 use super::types::{EdgeType, KnowledgeEdge, TraversalResult};
 
+/// How the graph addresses a node: `(collection, id)`.
+type NodeKey = (String, String);
+
 /// Bounded fan-out for the per-level arm queries. A module const, not a
 /// SystemConfig field — it tunes HTTP pipelining against the local DB, not
 /// retrieval semantics.
@@ -250,7 +253,7 @@ pub async fn traverse_multi(
 
 /// Dedup starts preserving first-occurrence order; the deduped set seeds the
 /// visited set (depth-0 frontier).
-fn seed_level(starts: &[(String, String)]) -> (HashSet<(String, String)>, Vec<(String, String)>) {
+fn seed_level(starts: &[NodeKey]) -> (HashSet<NodeKey>, Vec<NodeKey>) {
     let mut visited = HashSet::new();
     let mut level = Vec::new();
     for (coll, id) in starts {
@@ -473,9 +476,9 @@ fn expand_node_edges(
     coll: &str,
     id: &str,
     edges: Vec<KnowledgeEdge>,
-    visited: &mut HashSet<(String, String)>,
+    visited: &mut HashSet<NodeKey>,
     node_budget: u32,
-) -> (Vec<(KnowledgeEdge, (String, String))>, bool) {
+) -> (Vec<(KnowledgeEdge, NodeKey)>, bool) {
     if visited.len() as u32 >= node_budget {
         return (Vec::new(), true);
     }

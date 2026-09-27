@@ -323,9 +323,9 @@ impl BrainService for BrainGrpcService {
 
                 // Spawn wizard task
                 let wizard_db = db.clone();
-                let wizard_gRPC_tx = tx.clone();
+                let wizard_grpc_tx = tx.clone();
                 let mut wizard_handle = tokio::spawn(async move {
-                    config::run_config_wizard_grpc(&wizard_gRPC_tx, &mut wizard_rx, &wizard_db).await
+                    config::run_config_wizard_grpc(&wizard_grpc_tx, &mut wizard_rx, &wizard_db).await
                 });
 
                 // Watch for ANOTHER stream finishing the wizard (multiple
@@ -1220,7 +1220,8 @@ async fn handle_request(
                 .unwrap_or(DEFAULT_MAX_TOOL_ITERATIONS)
                 .clamp(1, 1000);
             let mut tool_iter: usize = 0;
-            let mut last_response_text = String::new();
+            // Assigned from the first response below, before any read.
+            let mut last_response_text: String;
             // Transcript accumulator — every iteration's operator-visible
             // text, not just the last (multi-tool turns previously
             // persisted only the final segment; narration the operator

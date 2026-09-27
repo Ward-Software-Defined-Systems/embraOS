@@ -134,6 +134,29 @@ pub fn build_resumption_context() -> String {
     )
 }
 
+fn is_chatty_filler(s: &str) -> bool {
+    let lower = s.to_lowercase();
+    let stripped = lower.trim_end_matches(|c: char| {
+        matches!(c, '.' | '!' | '?') || c.is_whitespace()
+    });
+    matches!(
+        stripped,
+        "ok" | "okay"
+            | "yes"
+            | "no"
+            | "sure"
+            | "thanks"
+            | "thx"
+            | "ty"
+            | "hi"
+            | "hello"
+            | "hey"
+            | "got it"
+            | "understood"
+            | "cool"
+    )
+}
+
 #[cfg(test)]
 mod resumption_context_tests {
     //! Verifies the brain-facing wrapper used in place of
@@ -166,27 +189,4 @@ mod resumption_context_tests {
             "must clarify the user did not type"
         );
     }
-}
-
-fn is_chatty_filler(s: &str) -> bool {
-    let lower = s.to_lowercase();
-    let stripped = lower.trim_end_matches(|c: char| {
-        matches!(c, '.' | '!' | '?') || c.is_whitespace()
-    });
-    matches!(
-        stripped,
-        "ok" | "okay"
-            | "yes"
-            | "no"
-            | "sure"
-            | "thanks"
-            | "thx"
-            | "ty"
-            | "hi"
-            | "hello"
-            | "hey"
-            | "got it"
-            | "understood"
-            | "cool"
-    )
 }

@@ -107,7 +107,7 @@ pub(crate) fn history_query_body() -> serde_json::Value {
 /// sort, so sessions with identical timestamps keep the incoming
 /// collection-name (alphabetical) order as the deterministic tie-break.
 pub(crate) fn sort_by_last_active_desc(sessions: &mut [SessionMeta]) {
-    sessions.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.last_active));
 }
 
 /// Pure soft-delete transition on a meta doc (unit-tested; the async

@@ -176,11 +176,9 @@ pub fn validate(source: &str, reserved: &[&str]) -> Result<ValidatedModule, Vali
                     _ => {}
                 }
             }
-            syn::Item::Fn(f) => {
-                if f.sig.ident == "run" {
-                    run_count += 1;
-                    check_run_sig(f)?;
-                }
+            syn::Item::Fn(f) if f.sig.ident == "run" => {
+                run_count += 1;
+                check_run_sig(f)?;
             }
             _ => {}
         }
