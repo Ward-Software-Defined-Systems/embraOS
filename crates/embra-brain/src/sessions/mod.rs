@@ -100,7 +100,7 @@ fn default_legacy_format_version() -> u32 {
 /// one doc per session; an empty body would ride the server's default
 /// limit and key order).
 pub(crate) fn history_query_body() -> serde_json::Value {
-    serde_json::json!({ "limit": 10, "sort": [{"_created_at": "asc"}] })
+    crate::db::client::first_doc_query_body()
 }
 
 /// Operator-facing listing order: most recently active first. Stable

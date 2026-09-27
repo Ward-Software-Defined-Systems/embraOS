@@ -14,6 +14,21 @@ use super::error::WardsonDbError;
 /// SEARCH_WINDOW_SATURATED when a collection outgrows it.
 pub const MEMORY_FETCH_WINDOW: usize = 10_000;
 
+/// Window for the collections a tool owns outright — tasks, plans, drafts,
+/// definitions, crons, Guardian tools, the migration ledger. They are small
+/// by nature, but "small" is not a limit: asked with an empty body the
+/// server answers with its default window, the first 100 documents in key
+/// order, and the 101st task was invisible to the tool that created it.
+pub const TOOL_COLLECTION_WINDOW: usize = 1_000;
+
+/// Body for reading the ONE document of a single-document collection
+/// (soul, identity, operator profile, config, a session's meta / history /
+/// summary): explicit limit, oldest first, so the first document returned
+/// is deterministically the canonical one.
+pub(crate) fn first_doc_query_body() -> serde_json::Value {
+    serde_json::json!({ "limit": 10, "sort": [{"_created_at": "asc"}] })
+}
+
 /// Body for a most-recent-first windowed fetch. Sort keys are one-per-array-
 /// element (WardSONDB requirement — a multi-key object degrades to
 /// alphabetical priority); `_id` (UUIDv7) breaks sub-second `_created_at`
@@ -339,6 +354,16 @@ impl WardsonDbClient {
         Ok(docs)
     }
 
+    /// Every document of a collection a tool owns, in creation order — the
+    /// order an empty query body returned them in, without its silent limit
+    /// of 100. The window is the newest `TOOL_COLLECTION_WINDOW`; filling it
+    /// warns (`fetch_recent`).
+    pub async fn fetch_collection(&self, collection: &str) -> Result<Vec<serde_json::Value>> {
+        let mut docs = self.fetch_recent(collection, TOOL_COLLECTION_WINDOW).await?;
+        docs.reverse();
+        Ok(docs)
+    }
+
     /// Authoritative document count for a collection via `count_only`
     /// (FIX-6). Uses `query_with_options` because the count response's
     /// `data` is an object (`{"count": N}`), not the array `query()`
@@ -643,6 +668,86 @@ mod window_query_tests {
         assert_eq!(body["fields"], json!(["content", "tags"]));
         let bare = recent_query_body(50, None);
         assert!(bare.get("fields").is_none());
+    }
+
+    #[test]
+    fn first_doc_body_is_limited_and_oldest_first() {
+        let body = super::first_doc_query_body();
+        assert_eq!(body["limit"], json!(10));
+        assert_eq!(body["sort"], json!([{"_created_at": "asc"}]));
+    }
+
+    /// No query leaves this crate without a window. An empty body is not
+    /// "everything": the server answers it with its default window, the
+    /// first 100 documents in key order — the defect behind the 2026-07
+    /// memory search freeze, and behind the 101st task, draft or definition
+    /// going invisible. This reads the crate's own source, so a new call
+    /// site cannot bring the pattern back unnoticed.
+    ///
+    /// Use `fetch_collection` / `fetch_recent` for a collection,
+    /// `first_doc_query_body()` for a single-document one, or a body of
+    /// your own with `limit` and `sort`.
+    #[test]
+    fn no_query_is_sent_with_an_empty_body() {
+        fn visit(dir: &std::path::Path, hits: &mut Vec<String>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    visit(&path, hits);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                // Spelled in two pieces so this file does not find itself.
+                let empty_body = ["json!(", "{})"].concat();
+                let mut from = 0;
+                while let Some(found) = text[from..].find(".query") {
+                    let start = from + found;
+                    from = start + 1;
+                    // `.query(`, `.query_with_meta(`, `.query_with_options(`
+                    let Some(open) = text[start..].find('(').map(|p| start + p) else {
+                        continue;
+                    };
+                    let name = &text[start + 1..open];
+                    if !matches!(name, "query" | "query_with_meta" | "query_with_options") {
+                        continue;
+                    }
+                    // The call's arguments: up to the parenthesis that closes it.
+                    let mut depth = 0usize;
+                    let mut end = open;
+                    for (i, c) in text[open..].char_indices() {
+                        match c {
+                            '(' => depth += 1,
+                            ')' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    end = open + i;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    if text[open..end].contains(&empty_body) {
+                        let line = text[..start].matches('\n').count() + 1;
+                        hits.push(format!("{}:{line}", path.display()));
+                    }
+                }
+            }
+        }
+        let mut hits = Vec::new();
+        visit(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut hits,
+        );
+        assert!(
+            hits.is_empty(),
+            "queries sent with an empty body (server default: the first 100 \
+             documents in key order):\n{}",
+            hits.join("\n")
+        );
     }
 
     #[test]

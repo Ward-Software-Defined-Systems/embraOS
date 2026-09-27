@@ -3605,7 +3605,7 @@ async fn perform_provider_swap(
     let active_session = session_mgr.read().await.active_session.clone();
     if let Some(ref name) = active_session {
         let collection = format!("sessions.{}.meta", name);
-        if let Ok(results) = db.query(&collection, &serde_json::json!({})).await
+        if let Ok(results) = db.query(&collection, &crate::sessions::history_query_body()).await
             && let Some(mut doc) = results.into_iter().next()
         {
             let id = doc
@@ -5539,7 +5539,7 @@ async fn read_session_provider(db: &Arc<WardsonDbClient>, session_name: &str) ->
     // to `"anthropic"` if the doc lacks a provider field (legacy pre-Sprint-4
     // session that v9 migration also missed for the same _id reason).
     let collection = format!("sessions.{}.meta", session_name);
-    match db.query(&collection, &serde_json::json!({})).await {
+    match db.query(&collection, &crate::sessions::history_query_body()).await {
         Ok(results) => results
             .into_iter()
             .next()

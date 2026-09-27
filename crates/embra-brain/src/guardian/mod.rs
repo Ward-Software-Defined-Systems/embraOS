@@ -176,13 +176,18 @@ async fn load_doc(db: &WardsonDbClient, name: &str) -> Option<ToolDoc> {
         .and_then(|v| ToolDoc::from_value(&v).ok())
 }
 
+/// Every tool on record, by name. The ids of this collection are the tool
+/// names, so name order is the order an unsorted query returned.
 async fn all_docs(db: &WardsonDbClient) -> Vec<ToolDoc> {
-    db.query(COLLECTION, &serde_json::json!({}))
+    let mut docs: Vec<ToolDoc> = db
+        .fetch_collection(COLLECTION)
         .await
         .unwrap_or_default()
         .iter()
         .filter_map(|v| ToolDoc::from_value(v).ok())
-        .collect()
+        .collect();
+    docs.sort_by(|a, b| a.name.cmp(&b.name));
+    docs
 }
 
 // ── boot reconcile ──

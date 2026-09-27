@@ -430,7 +430,7 @@ mod hot_path_index_tests {
 
 async fn get_schema_version(db: &WardsonDbClient) -> i32 {
     let docs = db
-        .query("system.migrations", &serde_json::json!({}))
+        .fetch_collection("system.migrations")
         .await
         .unwrap_or_default();
 
@@ -1010,7 +1010,7 @@ async fn run_v7_native_tools(db: &WardsonDbClient) -> Result<()> {
     // Step 1: crons schema migration.
     if db.collection_exists("crons").await.unwrap_or(false) {
         let docs = db
-            .query("crons", &serde_json::json!({}))
+            .fetch_collection("crons")
             .await
             .unwrap_or_default();
         let mut migrated = 0usize;
@@ -1062,7 +1062,7 @@ async fn run_v7_native_tools(db: &WardsonDbClient) -> Result<()> {
         if !col.starts_with("sessions.") || !col.ends_with(".history") {
             continue;
         }
-        let docs = db.query(&col, &serde_json::json!({})).await.unwrap_or_default();
+        let docs = db.fetch_collection(&col).await.unwrap_or_default();
         for doc in docs {
             if doc.get("format_version").is_some() {
                 continue;
@@ -1201,7 +1201,7 @@ async fn run_v9_pluggable_provider(db: &WardsonDbClient) -> Result<()> {
             // would 404. Query the collection for its single doc and
             // update by the discovered `_id` (matches the pattern in
             // `SessionManager::update_state` / `::reattach`).
-            let results = match db.query(collection, &serde_json::json!({})).await {
+            let results = match db.query(collection, &crate::sessions::history_query_body()).await {
                 Ok(r) => r,
                 Err(_) => continue,
             };

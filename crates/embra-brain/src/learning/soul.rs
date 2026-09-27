@@ -55,7 +55,7 @@ async fn load_soul_doc(db: &WardsonDbClient) -> Result<Option<serde_json::Value>
     }
     // Fallback: query (pre-migration data)
     let results = db
-        .query("soul.invariant", &serde_json::json!({}))
+        .query("soul.invariant", &crate::db::client::first_doc_query_body())
         .await?;
     Ok(results.into_iter().next())
 }

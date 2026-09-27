@@ -777,7 +777,7 @@ pub async fn session_meta(db: &WardsonDbClient, param: &str) -> String {
     let name = param.trim();
     let meta_col = format!("sessions.{}.meta", name);
     let meta_docs = db
-        .query(&meta_col, &serde_json::json!({}))
+        .query(&meta_col, &crate::sessions::history_query_body())
         .await
         .unwrap_or_default();
 
@@ -813,7 +813,7 @@ pub async fn session_meta(db: &WardsonDbClient, param: &str) -> String {
     let summary_col = format!("sessions.{}.summary", name);
     let summary_status = if db.collection_exists(&summary_col).await.unwrap_or(false) {
         let summary_docs = db
-            .query(&summary_col, &serde_json::json!({}))
+            .query(&summary_col, &crate::sessions::history_query_body())
             .await
             .unwrap_or_default();
         if summary_docs.is_empty() {
@@ -1349,7 +1349,7 @@ pub async fn session_summarize(db: &WardsonDbClient, param: &str) -> String {
     let summary_col = format!("sessions.{}.summary", name);
     if db.collection_exists(&summary_col).await.unwrap_or(false) {
         let summary_docs = db
-            .query(&summary_col, &serde_json::json!({}))
+            .query(&summary_col, &crate::sessions::history_query_body())
             .await
             .unwrap_or_default();
 

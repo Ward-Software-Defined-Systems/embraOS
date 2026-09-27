@@ -612,7 +612,7 @@ async fn uptime_report(db: &WardsonDbClient, session_name: &str) -> String {
     let session_age_line = {
         let meta_col = format!("sessions.{}.meta", session_name);
         let created_at = db
-            .query(&meta_col, &serde_json::json!({}))
+            .query(&meta_col, &crate::sessions::history_query_body())
             .await
             .ok()
             .and_then(|docs| docs.into_iter().next())
@@ -654,7 +654,7 @@ async fn uptime_report(db: &WardsonDbClient, session_name: &str) -> String {
     for col in &collections {
         if col.starts_with("sessions.")
             && col.ends_with(".history")
-            && let Ok(docs) = db.query(col, &serde_json::json!({})).await
+            && let Ok(docs) = db.query(col, &crate::sessions::history_query_body()).await
         {
             for doc in &docs {
                 if let Some(turns) = doc.get("turns").and_then(|v| v.as_array()) {
@@ -759,7 +759,7 @@ async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
     let soul_doc = db.read("soul.invariant", "soul").await.ok();
     let soul_doc = match soul_doc {
         Some(doc) => Some(doc),
-        None => db.query("soul.invariant", &serde_json::json!({})).await.ok().and_then(|v| v.into_iter().next()),
+        None => db.query("soul.invariant", &crate::db::client::first_doc_query_body()).await.ok().and_then(|v| v.into_iter().next()),
     };
     if let Some(doc) = soul_doc {
         let mut soul = doc.get("soul").unwrap_or(&doc);
@@ -813,7 +813,7 @@ async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
         let id_doc = db.read("memory.identity", "identity").await.ok();
         let id_doc = match id_doc {
             Some(doc) => Some(doc),
-            None => db.query("memory.identity", &serde_json::json!({})).await.ok().and_then(|v| v.into_iter().next()),
+            None => db.query("memory.identity", &crate::db::client::first_doc_query_body()).await.ok().and_then(|v| v.into_iter().next()),
         };
         if let Some(doc) = id_doc {
             output.push_str("\n=== IDENTITY ===\n");
@@ -831,7 +831,7 @@ async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
         let user_doc = db.read("memory.user", "user").await.ok();
         let user_doc = match user_doc {
             Some(doc) => Some(doc),
-            None => db.query("memory.user", &serde_json::json!({})).await.ok().and_then(|v| v.into_iter().next()),
+            None => db.query("memory.user", &crate::db::client::first_doc_query_body()).await.ok().and_then(|v| v.into_iter().next()),
         };
         if let Some(doc) = user_doc {
             output.push_str("\n=== USER PROFILE ===\n");
@@ -857,7 +857,7 @@ async fn changelog(db: &WardsonDbClient, current_session: &str) -> String {
     // Find the current session's creation time
     let meta_col = format!("sessions.{}.meta", current_session);
     let session_start = db
-        .query(&meta_col, &serde_json::json!({}))
+        .query(&meta_col, &crate::sessions::history_query_body())
         .await
         .ok()
         .and_then(|docs| docs.into_iter().next())
@@ -1224,7 +1224,7 @@ async fn define(db: &WardsonDbClient, param: &str) -> String {
             return "define rejected (delete requires a term)".into();
         }
         let results = db
-            .query("knowledge.definitions", &serde_json::json!({}))
+            .fetch_collection("knowledge.definitions")
             .await
             .unwrap_or_default();
         let match_id = results.iter().find_map(|doc| {
@@ -1254,7 +1254,7 @@ async fn define(db: &WardsonDbClient, param: &str) -> String {
         }
 
         let results = db
-            .query("knowledge.definitions", &serde_json::json!({}))
+            .fetch_collection("knowledge.definitions")
             .await
             .unwrap_or_default();
 
@@ -1291,7 +1291,7 @@ async fn define(db: &WardsonDbClient, param: &str) -> String {
     let term = param;
     let term_lower = term.to_lowercase();
     let results = db
-        .query("knowledge.definitions", &serde_json::json!({}))
+        .fetch_collection("knowledge.definitions")
         .await
         .unwrap_or_default();
 
@@ -1334,7 +1334,7 @@ async fn draft(db: &WardsonDbClient, param: &str, session: &str) -> String {
         if title.is_empty() {
             return "draft rejected (delete requires a title)".into();
         }
-        let existing = db.query("drafts", &serde_json::json!({})).await.unwrap_or_default();
+        let existing = db.fetch_collection("drafts").await.unwrap_or_default();
         let match_id = existing.iter().find_map(|doc| {
             let doc_title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("");
             if doc_title.eq_ignore_ascii_case(title) {
@@ -1368,7 +1368,7 @@ async fn draft(db: &WardsonDbClient, param: &str, session: &str) -> String {
     };
 
     // DESIGN-001: Check for existing draft with same title and upsert
-    let existing = db.query("drafts", &serde_json::json!({})).await.unwrap_or_default();
+    let existing = db.fetch_collection("drafts").await.unwrap_or_default();
     let existing_id = existing.iter().find_map(|doc| {
         let doc_title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("");
         if doc_title.eq_ignore_ascii_case(title) {

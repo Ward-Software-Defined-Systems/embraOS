@@ -137,7 +137,7 @@ pub async fn cron_list(db: &WardsonDbClient) -> String {
     ensure_collection(db).await;
 
     let crons = db
-        .query("crons", &serde_json::json!({}))
+        .fetch_collection("crons")
         .await
         .unwrap_or_default();
 
@@ -188,7 +188,7 @@ pub async fn cron_remove(db: &WardsonDbClient, param: &str) -> String {
 /// Returns a list of result messages for fired crons.
 pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
     let crons = db
-        .query("crons", &serde_json::json!({}))
+        .fetch_collection("crons")
         .await
         .unwrap_or_default();
 

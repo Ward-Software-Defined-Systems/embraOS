@@ -375,7 +375,7 @@ pub async fn load_config(db: &WardsonDbClient) -> Result<SystemConfig> {
         Err(_) => {
             // Fallback: query pattern (pre-migration data)
             let results = db
-                .query("config.system", &serde_json::json!({}))
+                .query("config.system", &crate::db::client::first_doc_query_body())
                 .await?;
             let doc = results
                 .into_iter()

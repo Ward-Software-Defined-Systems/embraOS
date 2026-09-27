@@ -1032,7 +1032,7 @@ pub async fn plan(db: &WardsonDbClient, param: &str) -> String {
         // List plans
         ensure_collection(db, "plans").await;
         let plans = db
-            .query("plans", &serde_json::json!({}))
+            .fetch_collection("plans")
             .await
             .unwrap_or_default();
 
@@ -1078,7 +1078,7 @@ pub async fn tasks(db: &WardsonDbClient, param: &str) -> String {
 
     if param.is_empty() {
         let all_tasks = db
-            .query("tasks", &serde_json::json!({}))
+            .fetch_collection("tasks")
             .await
             .unwrap_or_default();
 
@@ -1099,7 +1099,7 @@ pub async fn tasks(db: &WardsonDbClient, param: &str) -> String {
 
     // Filter by plan_id if param looks like an ID
     let filtered = db
-        .query("tasks", &serde_json::json!({}))
+        .fetch_collection("tasks")
         .await
         .unwrap_or_default();
 
