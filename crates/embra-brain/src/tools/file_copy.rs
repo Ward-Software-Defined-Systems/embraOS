@@ -1362,8 +1362,8 @@ mod file_copy_tests {
         let dir = TempDir::new("t08");
         let root = dir.0.join("tree");
         make_tree(&root);
-        std::fs::set_permissions(&root.join("sub"), std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::set_permissions(&root.join("a.txt"), std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::set_permissions(root.join("sub"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::set_permissions(root.join("a.txt"), std::fs::Permissions::from_mode(0o600)).unwrap();
         let dst = dir.0.join("out/copy");
         let mut o = opts(&dir);
         o.recursive = true;

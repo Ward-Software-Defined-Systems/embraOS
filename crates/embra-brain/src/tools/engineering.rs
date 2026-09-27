@@ -2903,7 +2903,7 @@ pub async fn git_rm(param: &str) -> String {
     let file_args: Vec<&str> = files.split_whitespace().collect();
 
     match tokio::process::Command::new("git")
-        .args(&["-C", &dir, "rm"])
+        .args(["-C", &dir, "rm"])
         .args(&file_args)
         .output()
         .await

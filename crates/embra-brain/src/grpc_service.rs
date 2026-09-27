@@ -1264,7 +1264,7 @@ async fn handle_request(
                 .await
                 .map_err(|e| anyhow::anyhow!("Brain call failed: {}", e))?;
             let Some(mut current_turn) =
-                collect_response(first_stream, &tx, &config_name, Some(&mut stop_check)).await?
+                collect_response(first_stream, tx, &config_name, Some(&mut stop_check)).await?
             else {
                 // Stream closed without Complete — treat as error and save nothing.
                 drop(in_turn_guard);
@@ -1358,7 +1358,7 @@ async fn handle_request(
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("Brain pause-resume failed: {}", e))?;
-                        let Some(resp) = collect_response(stream, &tx, &config_name, Some(&mut stop_check)).await? else {
+                        let Some(resp) = collect_response(stream, tx, &config_name, Some(&mut stop_check)).await? else {
                             break;
                         };
                         current_turn = resp;
@@ -1424,7 +1424,7 @@ async fn handle_request(
                             {
                                 Ok(stream) => {
                                     if let Some(final_turn) =
-                                        collect_response(stream, &tx, &config_name, Some(&mut stop_check)).await?
+                                        collect_response(stream, tx, &config_name, Some(&mut stop_check)).await?
                                     {
                                         let final_text = turn_text(&final_turn);
                                         api_messages.push(ApiMessage::assistant_blocks(
@@ -1770,7 +1770,7 @@ async fn handle_request(
                                     "Brain continuation failed (iter {tool_iter}): {e}"
                                 )
                             })?;
-                        let Some(resp) = collect_response(stream, &tx, &config_name, Some(&mut stop_check)).await? else {
+                        let Some(resp) = collect_response(stream, tx, &config_name, Some(&mut stop_check)).await? else {
                             break;
                         };
                         current_turn = resp;
@@ -1861,7 +1861,7 @@ async fn handle_request(
             {
                 let mut guard = pending_provider.lock().await;
                 if let Some(target) = guard.take() {
-                    perform_provider_swap(target, db, session_mgr, &tx).await;
+                    perform_provider_swap(target, db, session_mgr, tx).await;
                 }
             }
 
