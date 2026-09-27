@@ -72,7 +72,7 @@ For the data model, edge taxonomy, density rationale, promotion path, auto-enric
 | Tool | Description |
 |---|---|
 | **time** | Current date, time, and day of week in the operator's configured timezone |
-| **calculate** | Evaluate math expressions — arithmetic, trig, and more via `meval` |
+| **calculate** | Evaluate math expressions — arithmetic (`+ - * / %`, `**` for exponent), `pi` and `e`, trig and hyperbolic functions, `sqrt` / `exp` / `ln` / `abs`, rounding, `atan2`, `max` / `min` |
 | **draft** | Save structured text artifacts (drafts, outlines, notes) — upserts by title; `draft delete <title>` removes (case-insensitive) |
 | **countdown** | Set a reminder with duration and message — proactive engine checks every 15 seconds |
 | **cron_add** | Schedule recurring tool execution — supports `every 5m`, `every 1h`, `hourly`, `daily 09:00`, etc. |

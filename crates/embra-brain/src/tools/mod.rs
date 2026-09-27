@@ -6,8 +6,6 @@ use crate::config::SystemConfig;
 use crate::db::{WardsonDbClient, MEMORY_FETCH_WINDOW};
 use crate::knowledge;
 
-// Test-only until `calculate` switches over from `meval`.
-#[cfg(test)]
 mod calc;
 pub mod cron;
 pub mod engineering;
@@ -1138,9 +1136,9 @@ fn calculate(expression: &str) -> String {
     }
 
     // Exponent is ** (Python/Rust convention). Reject bare ^ up-front so it
-    // never silently resolves to meval's native power operator — in Python ^
-    // is XOR, and this tool does not support XOR. Detect ^ before translating
-    // ** → ^ for meval.
+    // never silently resolves to the evaluator's native power operator — in
+    // Python ^ is XOR, and this tool does not support XOR. Detect ^ before
+    // translating ** → ^ for the evaluator.
     if expression.contains('^') {
         return format!(
             "Could not evaluate '{}': '^' is not supported. Use ** for exponent (e.g. 2 ** 10). XOR is not available in this tool.",
@@ -1149,7 +1147,7 @@ fn calculate(expression: &str) -> String {
     }
     let normalized = expression.replace("**", "^");
 
-    match meval::eval_str(&normalized) {
+    match calc::eval(&normalized) {
         Ok(result) => {
             if result == result.floor() && result.abs() < 1e15 {
                 format!("{} = {}", expression, result as i64)

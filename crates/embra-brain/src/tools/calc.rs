@@ -3,8 +3,9 @@
 //! In-tree replacement for the `meval` crate, which is unmaintained and
 //! whose `nom 1.2.4` dependency trips a future-incompatibility lint on
 //! every build. The grammar and the results are meval 0.2.0's, held by a
-//! corpus of expressions whose expected values were taken from it
-//! (`calc_tests`):
+//! corpus of expressions whose expected values were taken from it while
+//! both evaluators were in the tree (`calc_tests::GOLDEN`; the differential
+//! run, including 80,000 generated expressions, is commit `3f1501d`):
 //!
 //! - binary `+ -` (precedence 1, left), `* / %` (2, left), `^` (4, right)
 //! - unary `+ -` (3): `-2^2` is `-(2^2)`, `2^-2` is `2^(-2)`
@@ -437,243 +438,243 @@ fn eval_rpn(rpn: &[Token<'_>]) -> Result<f64, CalcError> {
 mod calc_tests {
     use super::*;
 
-    /// Expressions that exercise every operator, function, constant,
-    /// number form and error path. `calculate` rewrites `**` to `^` before
-    /// evaluating, so the corpus writes `^`.
-    pub(super) const CORPUS: &[&str] = &[
-        // numbers
-        "1", "42", "007", "1.5", "1.", "1.e2", "1e3", "1E3", "1e+3", "1e-3", "1.5e2",
-        "0.1+0.2", "0.1*3", "9007199254740993", "1e308*10", "1e-320", "123456789*987654321",
-        // not numbers
-        ".5", "1e", "1e+", "1.2.3", "1..2", "1e5x",
-        // binary operators, precedence, associativity
-        "1+2", "1-2", "2*3", "7/2", "7%3", "-7%3", "7%-3", "7.5%2", "2^10", "2^0.5",
-        "2^3^2", "(2^3)^2", "1+2*3", "(1+2)*3", "1-2-3", "8/4/2", "2*3%4", "10%4*2",
-        "2+3*4^2", "2*3+4*5", "100/3", "1/3+1/3+1/3", "2^10-1",
-        // unary signs
-        "-1", "+1", "--1", "-+-1", "-2^2", "2^-2", "-2^-2", "2*-3", "2--3", "2+-3",
-        "-(1+2)", "-2*3", "- 2", "2^-3^2", "-2*3^2", "2^-3*4", "2*-3+4", "+-+-2",
-        "-pi", "-sqrt(4)", "2^-sqrt(4)",
-        // whitespace
-        " 1 + 2 ", "1\t+\n2", "sqrt (4)", "max ( 1 , 2 )", "1 +\r\n 2",
-        // constants
-        "pi", "e", "2*pi", "e^1", "pi*e", "pi^2", "e^pi",
-        // functions
-        "sqrt(16)", "exp(1)", "ln(e)", "abs(-3.5)", "sin(pi/2)", "cos(0)", "tan(pi/4)",
-        "asin(1)", "acos(1)", "atan(1)", "sinh(1)", "cosh(1)", "tanh(1)", "asinh(1)",
-        "acosh(2)", "atanh(0.5)", "floor(-1.5)", "ceil(-1.5)", "round(2.5)", "round(-2.5)",
-        "round(2.4)", "signum(-3)", "signum(0)", "signum(3)", "atan2(1,2)", "atan2(-1,-1)",
-        "max(1)", "max(1,2,3)", "max(3,2,1)", "min(1)", "min(3,2,1)", "min(1,2,3)",
-        "max(-1,-2)", "min(1e3,1e-3)",
-        // nesting
-        "sqrt(abs(-16))", "max(sqrt(16), 2^3)", "max((1+2), 3)", "min(max(1,2),max(3,4))",
-        "sqrt(sqrt(sqrt(256)))", "((((1))))", "(1+(2*(3-(4/5))))", "sin(cos(tan(1)))",
-        "max(1, max(2, max(3, 4)))", "2*(3+4)*(5-1)", "-(-(-(1)))",
-        // domain edges
-        "sqrt(-1)", "ln(0)", "ln(-1)", "1/0", "-1/0", "0/0", "acos(2)", "5%0", "0^0",
-        "(-8)^(1/3)", "atanh(1)",
-        // errors
-        "", "1+", "+", "*2", "1 2", "2(3)", "(1", "((1)", "1)", "()", "sqrt()",
-        "sqrt(1,2)", "atan2(1)", "atan2(1,2,3)", "foo(1)", "x", "sqrt", "pi(2)", "1,2",
-        "max(1,)", "max(,1)", "(1,2)", "max((1,2))", "2 pi", "1 + * 2", "3 $ 4",
-        "a b", "1 +", "(", ")", "((", "sqrt(", "max(1", "max(1,2", "1 ^", "^", "-",
-        "2 * (3 + 4", "foo(x)", "sqrt(x)", "_a", "a1_b2(3)", "1 = 2", "1 < 2", "2!",
-        "\u{221a}4", "1 + \u{3c0}",
+    enum Want {
+        Value(f64),
+        Inf,
+        NegInf,
+        Nan,
+        Err(&'static str),
+    }
+
+    /// Every operator, function, constant, number form and error path.
+    /// The expected values are meval 0.2.0's: this table was generated
+    /// from a run in which both evaluators agreed on each entry, values
+    /// bit for bit and messages word for word. `calculate` rewrites `**`
+    /// to `^` before evaluating, so the table writes `^`.
+    ///
+    /// A changed expectation is a changed tool behavior. Extend the table;
+    /// do not edit entries to make a change pass.
+    #[rustfmt::skip]
+    const GOLDEN: &[(&str, Want)] = &[
+        ("1", Want::Value(1.0)),
+        ("42", Want::Value(42.0)),
+        ("007", Want::Value(7.0)),
+        ("1.5", Want::Value(1.5)),
+        ("1.", Want::Value(1.0)),
+        ("1.e2", Want::Value(100.0)),
+        ("1e3", Want::Value(1000.0)),
+        ("1E3", Want::Value(1000.0)),
+        ("1e+3", Want::Value(1000.0)),
+        ("1e-3", Want::Value(0.001)),
+        ("1.5e2", Want::Value(150.0)),
+        ("0.1+0.2", Want::Value(0.30000000000000004)),
+        ("0.1*3", Want::Value(0.30000000000000004)),
+        ("9007199254740993", Want::Value(9007199254740992.0)),
+        ("1e308*10", Want::Inf),
+        ("1e-320", Want::Value(1e-320)),
+        ("123456789*987654321", Want::Value(1.2193263111263526e+17)),
+        (".5", Want::Err("Parse error: Unexpected token at byte 0.")),
+        ("1e", Want::Err("Parse error: Unexpected token at byte 0.")),
+        ("1e+", Want::Err("Parse error: Unexpected token at byte 0.")),
+        ("1.2.3", Want::Err("Parse error: Unexpected token at byte 3.")),
+        ("1..2", Want::Err("Parse error: Unexpected token at byte 2.")),
+        ("1e5x", Want::Err("Parse error: Unexpected token at byte 3.")),
+        ("1+2", Want::Value(3.0)),
+        ("1-2", Want::Value(-1.0)),
+        ("2*3", Want::Value(6.0)),
+        ("7/2", Want::Value(3.5)),
+        ("7%3", Want::Value(1.0)),
+        ("-7%3", Want::Value(-1.0)),
+        ("7%-3", Want::Value(1.0)),
+        ("7.5%2", Want::Value(1.5)),
+        ("2^10", Want::Value(1024.0)),
+        ("2^0.5", Want::Value(1.4142135623730951)),
+        ("2^3^2", Want::Value(512.0)),
+        ("(2^3)^2", Want::Value(64.0)),
+        ("1+2*3", Want::Value(7.0)),
+        ("(1+2)*3", Want::Value(9.0)),
+        ("1-2-3", Want::Value(-4.0)),
+        ("8/4/2", Want::Value(1.0)),
+        ("2*3%4", Want::Value(2.0)),
+        ("10%4*2", Want::Value(4.0)),
+        ("2+3*4^2", Want::Value(50.0)),
+        ("2*3+4*5", Want::Value(26.0)),
+        ("100/3", Want::Value(33.333333333333336)),
+        ("1/3+1/3+1/3", Want::Value(1.0)),
+        ("2^10-1", Want::Value(1023.0)),
+        ("-1", Want::Value(-1.0)),
+        ("+1", Want::Value(1.0)),
+        ("--1", Want::Value(1.0)),
+        ("-+-1", Want::Value(1.0)),
+        ("-2^2", Want::Value(-4.0)),
+        ("2^-2", Want::Value(0.25)),
+        ("-2^-2", Want::Value(-0.25)),
+        ("2*-3", Want::Value(-6.0)),
+        ("2--3", Want::Value(5.0)),
+        ("2+-3", Want::Value(-1.0)),
+        ("-(1+2)", Want::Value(-3.0)),
+        ("-2*3", Want::Value(-6.0)),
+        ("- 2", Want::Value(-2.0)),
+        ("2^-3^2", Want::Value(0.001953125)),
+        ("-2*3^2", Want::Value(-18.0)),
+        ("2^-3*4", Want::Value(0.5)),
+        ("2*-3+4", Want::Value(-2.0)),
+        ("+-+-2", Want::Value(2.0)),
+        ("-pi", Want::Value(-3.141592653589793)),
+        ("-sqrt(4)", Want::Value(-2.0)),
+        ("2^-sqrt(4)", Want::Value(0.25)),
+        (" 1 + 2 ", Want::Value(3.0)),
+        ("1\t+\n2", Want::Value(3.0)),
+        ("sqrt (4)", Want::Value(2.0)),
+        ("max ( 1 , 2 )", Want::Value(2.0)),
+        ("1 +\r\n 2", Want::Value(3.0)),
+        ("pi", Want::Value(3.141592653589793)),
+        ("e", Want::Value(2.718281828459045)),
+        ("2*pi", Want::Value(6.283185307179586)),
+        ("e^1", Want::Value(2.718281828459045)),
+        ("pi*e", Want::Value(8.539734222673566)),
+        ("pi^2", Want::Value(9.869604401089358)),
+        ("e^pi", Want::Value(23.140692632779263)),
+        ("sqrt(16)", Want::Value(4.0)),
+        ("exp(1)", Want::Value(2.718281828459045)),
+        ("ln(e)", Want::Value(1.0)),
+        ("abs(-3.5)", Want::Value(3.5)),
+        ("sin(pi/2)", Want::Value(1.0)),
+        ("cos(0)", Want::Value(1.0)),
+        ("tan(pi/4)", Want::Value(0.9999999999999999)),
+        ("asin(1)", Want::Value(1.5707963267948966)),
+        ("acos(1)", Want::Value(0.0)),
+        ("atan(1)", Want::Value(0.7853981633974483)),
+        ("sinh(1)", Want::Value(1.1752011936438014)),
+        ("cosh(1)", Want::Value(1.5430806348152437)),
+        ("tanh(1)", Want::Value(0.7615941559557649)),
+        ("asinh(1)", Want::Value(0.881373587019543)),
+        ("acosh(2)", Want::Value(1.3169578969248166)),
+        ("atanh(0.5)", Want::Value(0.5493061443340548)),
+        ("floor(-1.5)", Want::Value(-2.0)),
+        ("ceil(-1.5)", Want::Value(-1.0)),
+        ("round(2.5)", Want::Value(3.0)),
+        ("round(-2.5)", Want::Value(-3.0)),
+        ("round(2.4)", Want::Value(2.0)),
+        ("signum(-3)", Want::Value(-1.0)),
+        ("signum(0)", Want::Value(1.0)),
+        ("signum(3)", Want::Value(1.0)),
+        ("atan2(1,2)", Want::Value(0.4636476090008061)),
+        ("atan2(-1,-1)", Want::Value(-2.356194490192345)),
+        ("max(1)", Want::Value(1.0)),
+        ("max(1,2,3)", Want::Value(3.0)),
+        ("max(3,2,1)", Want::Value(3.0)),
+        ("min(1)", Want::Value(1.0)),
+        ("min(3,2,1)", Want::Value(1.0)),
+        ("min(1,2,3)", Want::Value(1.0)),
+        ("max(-1,-2)", Want::Value(-1.0)),
+        ("min(1e3,1e-3)", Want::Value(0.001)),
+        ("sqrt(abs(-16))", Want::Value(4.0)),
+        ("max(sqrt(16), 2^3)", Want::Value(8.0)),
+        ("max((1+2), 3)", Want::Value(3.0)),
+        ("min(max(1,2),max(3,4))", Want::Value(2.0)),
+        ("sqrt(sqrt(sqrt(256)))", Want::Value(2.0)),
+        ("((((1))))", Want::Value(1.0)),
+        ("(1+(2*(3-(4/5))))", Want::Value(5.4)),
+        ("sin(cos(tan(1)))", Want::Value(0.013387802193205699)),
+        ("max(1, max(2, max(3, 4)))", Want::Value(4.0)),
+        ("2*(3+4)*(5-1)", Want::Value(56.0)),
+        ("-(-(-(1)))", Want::Value(-1.0)),
+        ("sqrt(-1)", Want::Nan),
+        ("ln(0)", Want::NegInf),
+        ("ln(-1)", Want::Nan),
+        ("1/0", Want::Inf),
+        ("-1/0", Want::NegInf),
+        ("0/0", Want::Nan),
+        ("acos(2)", Want::Nan),
+        ("5%0", Want::Nan),
+        ("0^0", Want::Value(1.0)),
+        ("(-8)^(1/3)", Want::Nan),
+        ("atanh(1)", Want::Inf),
+        ("", Want::Err("Parse error: Missing argument at the end of expression.")),
+        ("1+", Want::Err("Parse error: Missing argument at the end of expression.")),
+        ("+", Want::Err("Parse error: Missing argument at the end of expression.")),
+        ("*2", Want::Err("Parse error: Unexpected token at byte 0.")),
+        ("1 2", Want::Err("Parse error: Unexpected token at byte 2.")),
+        ("2(3)", Want::Err("Parse error: Unexpected token at byte 1.")),
+        ("(1", Want::Err("Parse error: Missing 1 right parenthesis.")),
+        ("((1)", Want::Err("Parse error: Missing 1 right parenthesis.")),
+        ("1)", Want::Err("Parse error: Unexpected token at byte 1.")),
+        ("()", Want::Err("Parse error: Unexpected token at byte 1.")),
+        ("sqrt()", Want::Err("Parse error: Unexpected token at byte 5.")),
+        ("sqrt(1,2)", Want::Err("Evaluation error: function `sqrt`: Expected 1 arguments")),
+        ("atan2(1)", Want::Err("Evaluation error: function `atan2`: Expected 2 arguments")),
+        ("atan2(1,2,3)", Want::Err("Evaluation error: function `atan2`: Expected 2 arguments")),
+        ("foo(1)", Want::Err("Evaluation error: function `foo`: Unknown function")),
+        ("x", Want::Err("Evaluation error: unknown variable `x`.")),
+        ("sqrt", Want::Err("Evaluation error: unknown variable `sqrt`.")),
+        ("pi(2)", Want::Err("Evaluation error: function `pi`: Unknown function")),
+        ("1,2", Want::Err("Parse error: Unexpected token at byte 1.")),
+        ("max(1,)", Want::Err("Parse error: Unexpected token at byte 6.")),
+        ("max(,1)", Want::Err("Parse error: Unexpected token at byte 4.")),
+        ("(1,2)", Want::Err("Parse error: Unexpected token at byte 2.")),
+        ("max((1,2))", Want::Err("Parse error: Unexpected token at byte 6.")),
+        ("2 pi", Want::Err("Parse error: Unexpected token at byte 2.")),
+        ("1 + * 2", Want::Err("Parse error: Unexpected token at byte 4.")),
+        ("3 $ 4", Want::Err("Parse error: Unexpected token at byte 2.")),
+        ("a b", Want::Err("Parse error: Unexpected token at byte 2.")),
+        ("1 +", Want::Err("Parse error: Missing argument at the end of expression.")),
+        ("(", Want::Err("Parse error: Missing argument at the end of expression.")),
+        (")", Want::Err("Parse error: Unexpected token at byte 0.")),
+        ("((", Want::Err("Parse error: Missing argument at the end of expression.")),
+        ("sqrt(", Want::Err("Parse error: Missing argument at the end of expression.")),
+        ("max(1", Want::Err("Parse error: Missing 1 right parenthesis.")),
+        ("max(1,2", Want::Err("Parse error: Missing 1 right parenthesis.")),
+        ("1 ^", Want::Err("Parse error: Missing argument at the end of expression.")),
+        ("^", Want::Err("Parse error: Unexpected token at byte 0.")),
+        ("-", Want::Err("Parse error: Missing argument at the end of expression.")),
+        ("2 * (3 + 4", Want::Err("Parse error: Missing 1 right parenthesis.")),
+        ("foo(x)", Want::Err("Evaluation error: unknown variable `x`.")),
+        ("sqrt(x)", Want::Err("Evaluation error: unknown variable `x`.")),
+        ("_a", Want::Err("Evaluation error: unknown variable `_a`.")),
+        ("a1_b2(3)", Want::Err("Evaluation error: function `a1_b2`: Unknown function")),
+        ("1 = 2", Want::Err("Parse error: Unexpected token at byte 2.")),
+        ("1 < 2", Want::Err("Parse error: Unexpected token at byte 2.")),
+        ("2!", Want::Err("Parse error: Unexpected token at byte 1.")),
+        ("√4", Want::Err("Parse error: Unexpected token at byte 0.")),
+        ("1 + π", Want::Err("Parse error: Unexpected token at byte 4.")),
     ];
 
-    fn same(a: f64, b: f64) -> bool {
-        (a.is_nan() && b.is_nan()) || a.to_bits() == b.to_bits()
+    /// Finite values compare within 1e-12 relative: `sin`, `exp`, `powf`
+    /// and friends come from the platform's libm, which may differ in the
+    /// last bit between hosts. A grammar or precedence regression moves a
+    /// result by far more than that.
+    fn close(got: f64, want: f64) -> bool {
+        got == want || (got - want).abs() <= 1e-12 * got.abs().max(want.abs()).max(1.0)
     }
 
-    /// E1 of the meval replacement: the two evaluators must agree on every
-    /// corpus entry — value bit for bit, error message word for word. Where
-    /// meval panics, this evaluator must return an error.
     #[test]
-    fn agrees_with_meval_on_the_corpus() {
-        let quiet = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let mut panicked = Vec::new();
+    fn golden_corpus() {
         let mut failures = Vec::new();
-        for expr in CORPUS {
-            let theirs = std::panic::catch_unwind(|| meval::eval_str(expr));
-            let ours = eval(expr);
-            match (theirs, ours) {
-                (Ok(Ok(t)), Ok(o)) if same(t, o) => {}
-                (Ok(Err(t)), Err(o)) if t.to_string() == o.to_string() => {}
-                (Err(_), Err(_)) => panicked.push(*expr),
-                (t, o) => failures.push(format!(
-                    "{expr:?}: meval={:?} ours={o:?}",
-                    t.map(|r| r.map_err(|e| e.to_string())).map_err(|_| "PANIC")
-                )),
+        for (expr, want) in GOLDEN {
+            let got = eval(expr);
+            let ok = match (want, &got) {
+                (Want::Value(w), Ok(g)) => g.is_finite() && close(*g, *w),
+                (Want::Inf, Ok(g)) => *g == f64::INFINITY,
+                (Want::NegInf, Ok(g)) => *g == f64::NEG_INFINITY,
+                (Want::Nan, Ok(g)) => g.is_nan(),
+                (Want::Err(w), Err(g)) => g.to_string() == *w,
+                _ => false,
+            };
+            if !ok {
+                failures.push(format!("{expr:?}: got {got:?}"));
             }
         }
-        std::panic::set_hook(quiet);
-        assert!(failures.is_empty(), "disagreements:\n{}", failures.join("\n"));
-        // Printed with --nocapture: the table E2 freezes.
-        for expr in CORPUS {
-            match eval(expr) {
-                Ok(v) => println!("GOLDEN {expr:?} => Ok({:#018x}) // {v}", v.to_bits()),
-                Err(e) => println!("GOLDEN {expr:?} => Err({:?})", e.to_string()),
-            }
-        }
-        println!("MEVAL_PANICS {panicked:?}");
+        assert!(failures.is_empty(), "{} of {} moved:\n{}", failures.len(), GOLDEN.len(), failures.join("\n"));
     }
 
-    /// Beyond the hand-picked corpus: fragments glued together at random
-    /// (seeded, so the run is reproducible), most of them malformed. Same
-    /// rule as above.
+    /// meval panicked on these (its tokenizer, on input that is only
+    /// whitespace); the tool guards just the empty string.
     #[test]
-    fn agrees_with_meval_on_generated_expressions() {
-        const FRAGMENTS: &[&str] = &[
-            "0", "1", "2", "3.5", "10", "1e2", "1.", "2e-1", ".5", "1e", "pi", "e", "x",
-            "+", "-", "*", "/", "%", "^", "(", ")", ",", " ", "  ", "\t",
-            "sqrt(", "abs(", "ln(", "sin(", "max(", "min(", "atan2(", "floor(", "foo(",
-            "round(", "exp(", "signum(", "$", "!", "=", "_", "a1",
-        ];
-        let quiet = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let mut state: u64 = 0x5eed_cafe_f00d_1234;
-        let mut next = move |bound: usize| -> usize {
-            // xorshift64*
-            state ^= state >> 12;
-            state ^= state << 25;
-            state ^= state >> 27;
-            (state.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 33) as usize % bound
-        };
-        let (mut agreed_ok, mut agreed_err, mut meval_panics) = (0u32, 0u32, 0u32);
-        let mut failures = Vec::new();
-        let mut panic_examples = Vec::new();
-        for _ in 0..60_000 {
-            let len = 1 + next(10);
-            let expr: String = (0..len).map(|_| FRAGMENTS[next(FRAGMENTS.len())]).collect();
-            let probe = expr.clone();
-            let theirs = std::panic::catch_unwind(move || meval::eval_str(&probe));
-            let ours = eval(&expr);
-            match (theirs, ours) {
-                (Ok(Ok(t)), Ok(o)) if same(t, o) => agreed_ok += 1,
-                (Ok(Err(t)), Err(o)) if t.to_string() == o.to_string() => agreed_err += 1,
-                (Err(_), Err(o)) => {
-                    meval_panics += 1;
-                    if panic_examples.len() < 5 {
-                        panic_examples.push(format!("{expr:?} -> ours: {o}"));
-                    }
-                }
-                (t, o) => {
-                    if failures.len() < 20 {
-                        failures.push(format!(
-                            "{expr:?}: meval={:?} ours={o:?}",
-                            t.map(|r| r.map_err(|e| e.to_string())).map_err(|_| "PANIC")
-                        ));
-                    }
-                }
-            }
+    fn whitespace_only_input_is_an_error_not_a_panic() {
+        for expr in [" ", "  ", "\t", "\n", " \r\n\t "] {
+            assert_eq!(eval(expr), Err(CalcError::MissingArgument), "{expr:?}");
         }
-        std::panic::set_hook(quiet);
-        println!("GENERATED ok={agreed_ok} err={agreed_err} meval_panics={meval_panics}");
-        println!("PANIC_EXAMPLES {panic_examples:#?}");
-        assert!(failures.is_empty(), "disagreements:\n{}", failures.join("\n"));
-        assert!(agreed_ok > 1_000, "the generator produced too few valid expressions");
-    }
-
-    /// Well-formed expressions built from the grammar (seeded): random
-    /// trees of operators, signs, calls with the right arity, constants
-    /// and numbers, with whitespace sprinkled in. Every one must evaluate
-    /// to the same bits in both evaluators.
-    #[test]
-    fn agrees_with_meval_on_generated_well_formed_expressions() {
-        struct Gen(u64);
-        impl Gen {
-            fn next(&mut self, bound: usize) -> usize {
-                self.0 ^= self.0 >> 12;
-                self.0 ^= self.0 << 25;
-                self.0 ^= self.0 >> 27;
-                (self.0.wrapping_mul(0x2545_f491_4f6c_dd1d) >> 33) as usize % bound
-            }
-            fn ws(&mut self) -> &'static str {
-                ["", "", "", " ", "  ", "\t"][self.next(6)]
-            }
-            fn atom(&mut self) -> String {
-                const ATOMS: &[&str] = &[
-                    "0", "1", "2", "3", "7", "10", "0.5", "1.25", "3.", "1e2", "2E-2",
-                    "1.5e+1", "pi", "e", "100", "0.001",
-                ];
-                ATOMS[self.next(ATOMS.len())].to_string()
-            }
-            fn expr(&mut self, depth: usize) -> String {
-                if depth == 0 {
-                    return self.atom();
-                }
-                match self.next(10) {
-                    0 | 1 => self.atom(),
-                    2..=5 => {
-                        let op = ["+", "-", "*", "/", "%", "^"][self.next(6)];
-                        format!(
-                            "{}{}{}{}{}",
-                            self.expr(depth - 1),
-                            self.ws(),
-                            op,
-                            self.ws(),
-                            self.expr(depth - 1)
-                        )
-                    }
-                    6 => format!("({}{}{})", self.ws(), self.expr(depth - 1), self.ws()),
-                    7 => format!("{}{}{}", ["-", "+"][self.next(2)], self.ws(), self.expr(depth - 1)),
-                    8 => {
-                        const UNARY: &[&str] = &[
-                            "sqrt", "exp", "ln", "abs", "sin", "cos", "tan", "asin", "acos",
-                            "atan", "sinh", "cosh", "tanh", "asinh", "acosh", "atanh", "floor",
-                            "ceil", "round", "signum",
-                        ];
-                        format!(
-                            "{}{}({})",
-                            UNARY[self.next(UNARY.len())],
-                            self.ws(),
-                            self.expr(depth - 1)
-                        )
-                    }
-                    _ => match self.next(3) {
-                        0 => format!(
-                            "atan2({},{}{})",
-                            self.expr(depth - 1),
-                            self.ws(),
-                            self.expr(depth - 1)
-                        ),
-                        which => {
-                            let name = if which == 1 { "max" } else { "min" };
-                            let n = 1 + self.next(4);
-                            let args: Vec<String> =
-                                (0..n).map(|_| self.expr(depth - 1)).collect();
-                            format!("{name}({})", args.join(", "))
-                        }
-                    },
-                }
-            }
-        }
-
-        let mut g = Gen(0x0dd_ba11_5eed_0001);
-        let mut failures = Vec::new();
-        let mut finite = 0u32;
-        for _ in 0..20_000 {
-            let depth = 1 + g.next(5);
-            let expr = g.expr(depth);
-            let theirs = meval::eval_str(&expr)
-                .unwrap_or_else(|e| panic!("generator produced {expr:?}, which meval rejects: {e}"));
-            match eval(&expr) {
-                Ok(ours) if same(theirs, ours) => {
-                    if ours.is_finite() {
-                        finite += 1;
-                    }
-                }
-                other => {
-                    if failures.len() < 20 {
-                        failures.push(format!("{expr:?}: meval={theirs:?} ours={other:?}"));
-                    }
-                }
-            }
-        }
-        println!("WELL_FORMED finite={finite} of 20000");
-        assert!(failures.is_empty(), "disagreements:\n{}", failures.join("\n"));
-        assert!(finite > 5_000, "too few finite results to mean much: {finite}");
     }
 
     #[test]

@@ -27,7 +27,6 @@ hex = { workspace = true }
 schemars = { workspace = true }
 inventory = { workspace = true }
 once_cell = { workspace = true }
-meval = "0.2"
 uuid = { version = "1", features = ["v4"] }
 tokio-stream = "0.1"
 futures = "0.3"
