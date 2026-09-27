@@ -464,9 +464,9 @@ mod tests {
     }
 
     // Deserialized, not a struct literal — SystemConfig has no Default and
-    // every literal is a maintenance site for new fields (see the
-    // 11-literal invariant); serde fills everything past the required
-    // strings.
+    // every literal is a maintenance site for new fields (ten of them,
+    // found by grepping `anthropic_effort:`); serde fills everything past
+    // the required strings.
     fn test_config() -> SystemConfig {
         serde_json::from_value(serde_json::json!({
             "name": "Embra",
