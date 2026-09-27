@@ -171,10 +171,11 @@ Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, LLM p
 > `rust-std-1.98.1-wasm32-unknown-unknown` — into `vendor/rust-toolchain`, baked into
 > the rootfs at `/opt/rust` for embra-guardian-v1. On macOS it is deliberately
 > **deferred to the Docker pass** (macOS lacks `sha256sum`/`xz`); `vendor/rust-toolchain`
-> rides the `-v "$PWD":/work` bind mount. First build needs network for this and adds
-> ~100 MB to the image. Override the pin with `RUST_TOOLCHAIN_VERSION=...`. An image
-> with a different pin leaves existing Guardian tools unloaded until the operator runs
-> `/guardian rebuild --all`.
+> rides the `-v "$PWD":/work` bind mount. First build needs network for this. The
+> toolchain is the largest item in the image: about 285 MiB of the root filesystem, as
+> compressed in the SquashFS. Override the pin with `RUST_TOOLCHAIN_VERSION=...`. An
+> image with a different pin leaves existing Guardian tools unloaded until the operator
+> runs `/guardian rebuild --all`.
 
 > **Embedding model (Step 3.6):** Downloads `BAAI/bge-small-en-v1.5` (~133 MB, SHA-256-verified) into
 > `vendor/embedding-model` and bakes it into the rootfs for in-process semantic KG retrieval.
