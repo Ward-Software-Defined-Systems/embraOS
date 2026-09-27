@@ -130,15 +130,6 @@ impl GeminiProvider {
         self
     }
 
-    /// Run the boot self-heal probe so a stored cache handle that
-    /// no longer exists server-side is cleared. Safe to call even
-    /// when no cache is attached (no-op).
-    pub async fn boot_self_heal(&self) {
-        if let Some(cache) = &self.cache {
-            cache.boot_self_heal().await;
-        }
-    }
-
     fn stream_url(&self) -> String {
         format!(
             "{}/models/{}:streamGenerateContent?alt=sse",

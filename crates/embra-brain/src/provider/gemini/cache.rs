@@ -26,7 +26,6 @@
 //!   and the create event respectively).
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use reqwest::Client;
@@ -41,7 +40,6 @@ const COLLECTION: &str = "provider.gemini_cache";
 const HANDLE_ID: &str = "current";
 const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_TTL_SECS: u32 = 3600;
-const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Live handle to a Gemini cached-content resource.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,53 +89,6 @@ impl GeminiCacheManager {
             api_key,
             db,
             model_id,
-        }
-    }
-
-    /// Boot self-heal: if a stored handle's `cache_name` returns 404
-    /// from Gemini, clear the WardSONDB doc so the next turn creates
-    /// fresh. Costs one round-trip per Brain boot.
-    pub async fn boot_self_heal(&self) {
-        let stored = match self.read_stored().await {
-            Some(s) => s,
-            None => return,
-        };
-        let probe_client = match Client::builder().timeout(PROBE_TIMEOUT).build() {
-            Ok(c) => c,
-            Err(_) => return,
-        };
-        let url = format!("{}/{}", API_BASE, stored.cache_name);
-        match probe_client
-            .get(&url)
-            .header("x-goog-api-key", &self.api_key)
-            .send()
-            .await
-        {
-            Ok(r) if r.status().is_success() => {
-                info!(
-                    target: "gemini::cache",
-                    cache_name = %stored.cache_name,
-                    "boot self-heal: existing handle still valid"
-                );
-            }
-            Ok(r) if r.status().as_u16() == 404 => {
-                warn!(
-                    target: "gemini::cache",
-                    cache_name = %stored.cache_name,
-                    "boot self-heal: handle missing on server, clearing local doc"
-                );
-                let _ = self.db.delete(COLLECTION, HANDLE_ID).await;
-            }
-            Ok(r) => {
-                warn!(
-                    target: "gemini::cache",
-                    status = r.status().as_u16(),
-                    "boot self-heal: probe returned unexpected status; leaving handle"
-                );
-            }
-            Err(e) => {
-                warn!(target: "gemini::cache", "boot self-heal probe failed: {e}");
-            }
         }
     }
 
