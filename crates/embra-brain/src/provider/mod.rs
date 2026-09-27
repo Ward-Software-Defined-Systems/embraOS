@@ -103,13 +103,6 @@ pub enum StreamEvent {
     /// One block in the assistant turn finalized. Carries no payload
     /// here — the assembled blocks come back together in `Complete`.
     BlockComplete,
-    /// Incremental tool-args streaming. Held for forward compat;
-    /// providers may not emit this in v1.
-    ToolArgsDelta {
-        call_id: String,
-        path: String,
-        fragment: String,
-    },
     /// Terminal event — turn assembled, ready for the loop driver.
     Complete(AssistantTurn),
     /// Provider-side error (4xx, 5xx, decode, network). Surfaced to
@@ -138,8 +131,6 @@ pub enum ProviderError {
     Network(String),
     #[error("decode: {0}")]
     Decode(String),
-    #[error("unsupported: {0}")]
-    Unsupported(String),
 }
 
 /// Per-turn request-shaping knobs the brain reads from `SystemConfig`

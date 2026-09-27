@@ -320,15 +320,8 @@ impl LlmProvider for AnthropicProvider {
                             None
                         }
                     }
-                    wire::AnthropicStreamEvent::Done(_) => {
-                        // Anthropic emits a Done after Complete carrying
-                        // the full accumulated text. The neutral stream
-                        // surfaces all text via Complete(turn) — drop the
-                        // Done duplicate to keep the contract clean.
-                        None
-                    }
                     wire::AnthropicStreamEvent::Error(s) => Some(StreamEvent::Error(s)),
-                    wire::AnthropicStreamEvent::BlockComplete { .. } => {
+                    wire::AnthropicStreamEvent::BlockComplete => {
                         Some(StreamEvent::BlockComplete)
                     }
                     wire::AnthropicStreamEvent::Complete { response } => {

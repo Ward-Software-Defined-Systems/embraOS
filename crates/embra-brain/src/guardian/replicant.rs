@@ -148,7 +148,7 @@ async fn collect_text(
                 }
                 return Ok(accum);
             }
-            // ReasoningDelta (never persisted), BlockComplete, ToolArgsDelta.
+            // ReasoningDelta (never persisted), BlockComplete.
             _ => {}
         }
     }

@@ -149,15 +149,11 @@ pub enum AnthropicStreamEvent {
     /// on `BlockAccumulator::signature` and round-trip via
     /// `Block::ProviderOpaque`.
     ThinkingDelta(String),
-    /// Full accumulated text on stream end. The provider synthesizes
-    /// a gRPC `Done` from this.
-    Done(String),
     Error(String),
-    /// One block finalized.
-    BlockComplete {
-        block_index: usize,
-        block: MessageBlock,
-    },
+    /// One block finalized. No payload: the blocks arrive together in
+    /// `Complete`. The event is still sent, because the send is where the
+    /// parser learns that the receiver is gone (operator `/stop`).
+    BlockComplete,
     /// Stream end with full typed response ready for IR conversion.
     Complete { response: AssistantResponse },
 }

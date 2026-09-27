@@ -118,7 +118,6 @@ pub async fn process_sse_stream(
 ) -> Result<()> {
     let mut stream = response.bytes_stream();
     let mut buffer = String::new();
-    let mut full_text = String::new();
     let mut blocks: BTreeMap<usize, BlockAccumulator> = BTreeMap::new();
     let mut stop_reason: Option<StopReason> = None;
     let mut stop_details: Option<StopDetails> = None;
@@ -140,7 +139,7 @@ pub async fn process_sse_stream(
                 continue;
             };
             if data == "[DONE]" {
-                emit_complete(&tx, &mut blocks, stop_reason, stop_details, &full_text).await;
+                emit_complete(&tx, &mut blocks, stop_reason, stop_details).await;
                 return Ok(());
             }
 
@@ -207,7 +206,6 @@ pub async fn process_sse_stream(
                         "text_delta" => {
                             if let Some(t) = delta.get("text").and_then(|v| v.as_str()) {
                                 acc.text.push_str(t);
-                                full_text.push_str(t);
                                 // Receiver dropped = consumer aborted the
                                 // turn (operator /stop): exit so `stream`
                                 // (and the connection) drop. Load-bearing
@@ -252,14 +250,9 @@ pub async fn process_sse_stream(
                         .unwrap_or(0) as usize;
                     if let Some(acc) = blocks.remove(&index) {
                         let block = acc.finalize();
-                        if tx
-                            .send(AnthropicStreamEvent::BlockComplete {
-                                block_index: index,
-                                block: block.clone(),
-                            })
-                            .await
-                            .is_err()
-                        {
+                        // A /stop checkpoint: the event has no payload,
+                        // the send is what notices a dropped receiver.
+                        if tx.send(AnthropicStreamEvent::BlockComplete).await.is_err() {
                             return Ok(());
                         }
                         // Reinsert the finalized block so the final
@@ -278,7 +271,7 @@ pub async fn process_sse_stream(
                     }
                 }
                 "message_stop" => {
-                    emit_complete(&tx, &mut blocks, stop_reason, stop_details, &full_text).await;
+                    emit_complete(&tx, &mut blocks, stop_reason, stop_details).await;
                     return Ok(());
                 }
                 "error" => {
@@ -297,7 +290,7 @@ pub async fn process_sse_stream(
 
     // Stream ended without message_stop — emit Complete anyway so
     // consumers don't hang.
-    emit_complete(&tx, &mut blocks, stop_reason, stop_details, &full_text).await;
+    emit_complete(&tx, &mut blocks, stop_reason, stop_details).await;
     Ok(())
 }
 
@@ -306,7 +299,6 @@ async fn emit_complete(
     blocks: &mut BTreeMap<usize, BlockAccumulator>,
     stop_reason: Option<StopReason>,
     stop_details: Option<StopDetails>,
-    full_text: &str,
 ) {
     let content: Vec<MessageBlock> = std::mem::take(blocks)
         .into_iter()
@@ -330,12 +322,7 @@ async fn emit_complete(
         stop_details,
     };
     let _ = tx
-        .send(AnthropicStreamEvent::Complete {
-            response: response.clone(),
-        })
-        .await;
-    let _ = tx
-        .send(AnthropicStreamEvent::Done(full_text.to_string()))
+        .send(AnthropicStreamEvent::Complete { response })
         .await;
 }
 
@@ -393,7 +380,6 @@ mod tests {
     // body).
     async fn drive_fake(body: String, tx: mpsc::Sender<AnthropicStreamEvent>) -> Result<()> {
         let mut buffer = String::new();
-        let mut full_text = String::new();
         let mut blocks: BTreeMap<usize, BlockAccumulator> = BTreeMap::new();
         let mut stop_reason: Option<StopReason> = None;
         let mut stop_details: Option<StopDetails> = None;
@@ -409,7 +395,7 @@ mod tests {
                 continue;
             };
             if data == "[DONE]" {
-                emit_complete(&tx, &mut blocks, stop_reason, stop_details, &full_text).await;
+                emit_complete(&tx, &mut blocks, stop_reason, stop_details).await;
                 return Ok(());
             }
             let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
@@ -461,7 +447,6 @@ mod tests {
                         "text_delta" => {
                             if let Some(t) = delta.get("text").and_then(|v| v.as_str()) {
                                 acc.text.push_str(t);
-                                full_text.push_str(t);
                                 let _ = tx.send(AnthropicStreamEvent::Token(t.to_string())).await;
                             }
                         }
@@ -496,12 +481,7 @@ mod tests {
                         .unwrap_or(0) as usize;
                     if let Some(acc) = blocks.remove(&index) {
                         let block = acc.finalize();
-                        let _ = tx
-                            .send(AnthropicStreamEvent::BlockComplete {
-                                block_index: index,
-                                block: block.clone(),
-                            })
-                            .await;
+                        let _ = tx.send(AnthropicStreamEvent::BlockComplete).await;
                         blocks.insert(index, BlockAccumulator::from_finalized(block));
                     }
                 }
@@ -516,13 +496,13 @@ mod tests {
                     }
                 }
                 "message_stop" => {
-                    emit_complete(&tx, &mut blocks, stop_reason, stop_details, &full_text).await;
+                    emit_complete(&tx, &mut blocks, stop_reason, stop_details).await;
                     return Ok(());
                 }
                 _ => {}
             }
         }
-        emit_complete(&tx, &mut blocks, stop_reason, stop_details, &full_text).await;
+        emit_complete(&tx, &mut blocks, stop_reason, stop_details).await;
         Ok(())
     }
 

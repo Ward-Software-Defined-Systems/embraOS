@@ -6195,7 +6195,7 @@ async fn stream_brain_to_grpc(
                     full_response = full;
                 }
             }
-            StreamEvent::BlockComplete | StreamEvent::ToolArgsDelta { .. } => {}
+            StreamEvent::BlockComplete => {}
             StreamEvent::ReasoningDelta(text) => {
                 // Forward to the expression panel via the dedicated
                 // ReasoningDelta proto frame. CRITICAL: must NOT append
@@ -6973,7 +6973,6 @@ async fn collect_response(
                     .await;
             }
             StreamEvent::BlockComplete => {}
-            StreamEvent::ToolArgsDelta { .. } => {}
             StreamEvent::ReasoningDelta(text) => {
                 // Forward to the expression panel via the dedicated
                 // ReasoningDelta proto frame. CRITICAL: must NOT append
