@@ -59,6 +59,9 @@ workflow:
 # and dist/ is gitignored Trunk output — a fresh checkout cannot compile
 # embra-web without it (build-image.sh Step 0.5 is what creates it locally).
 # This job mirrors Step 0.5 and hands dist/ to the compile jobs.
+#
+# embra-web-ui is excluded from the workspace (it builds for wasm32 only), so
+# the workspace clippy in `test` never sees it. Its lint ratchet lives here.
 frontend:
   stage: build
   timeout: 30m
@@ -66,17 +69,23 @@ frontend:
     - key: "frontend-cargo-$CI_COMMIT_REF_SLUG"
       paths: [.cargo/bin/, .cargo/registry/index/, .cargo/registry/cache/, .cargo/git/db/]
     - key:
-        files: [Cargo.lock]
+        # the crate has its own lockfile; the workspace's says nothing about it
+        files: [crates/embra-web-ui/Cargo.lock]
         prefix: "frontend-target-$RUST_TOOLCHAIN"
       paths: [crates/embra-web-ui/target/]
   script:
     - rustup target add wasm32-unknown-unknown
+    - rustup component add clippy
     - |
       if ! trunk --version 2>/dev/null | grep -q "trunk ${TRUNK_VERSION}\$"; then
         cargo install trunk --locked --version "${TRUNK_VERSION}" --force
       fi
       trunk --version
-    - cd crates/embra-web-ui && trunk build --release
+    - cd crates/embra-web-ui
+    # Zero warnings, as in the workspace. A lint that is right to keep gets
+    # #[expect(.., reason = "..")] at its site, never a relaxed command line.
+    - cargo clippy --target wasm32-unknown-unknown --all-targets --locked -- -D warnings
+    - trunk build --release --locked
   artifacts:
     name: embra-web-ui-dist
     paths: [crates/embra-web-ui/dist]
@@ -138,8 +147,21 @@ test:
     - apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libclang-dev
     - rustup component add clippy
     - cargo test --workspace --locked
-    # wardsondb stays clippy-clean (ratchet — zero warnings at vendor time)
-    - cargo clippy -p wardsondb --all-targets --locked -- -D warnings
+    # Lint ratchet: the whole workspace at zero warnings, tests included.
+    # It covers the vendored wardsondb, which has been held at zero since
+    # vendor time. A lint that is right to keep gets
+    # #[expect(.., reason = "..")] at its site (never in crates/wardsondb —
+    # a finding there is a sync-or-diverge decision). A new compiler brings
+    # new lints: run this command on it BEFORE moving RUST_TOOLCHAIN.
+    - cargo clippy --workspace --all-targets --locked -- -D warnings
+    # serde_json's preserve_order must stay off for every crate: the soul's
+    # seal hash is taken over alphabetical key order, in the brain and in
+    # trustd. A dependency that turns the feature on would do it for all of
+    # them (feature unification) and every sealed instance would HALT at
+    # its next boot.
+    - |
+      n=$(cargo tree --locked -e features -i serde_json | grep -c preserve_order || true)
+      test "$n" = "0" || { echo "serde_json preserve_order is enabled ($n mentions)" >&2; exit 1; }
 
 musl-cross:
   stage: test
