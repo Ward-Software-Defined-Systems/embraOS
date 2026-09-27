@@ -191,11 +191,14 @@ if [ "$BUILDROOT_ONLY" = false ]; then
         exit 1
     fi
     rustup target add wasm32-unknown-unknown
-    (cd crates/embra-web-ui && trunk build --release)
+    (cd crates/embra-web-ui && trunk build --release --locked)
 
     echo "=== Step 1: Build Rust binaries (aarch64 musl static) ==="
     rustup target add "$RUST_TARGET"
-    cargo build --release --target "$RUST_TARGET"
+    # --locked: the image is built from the committed Cargo.lock. A lock
+    # that no longer matches a manifest stops the build instead of being
+    # re-resolved here (the storage pins ride on it).
+    cargo build --release --locked --target "$RUST_TARGET"
     # wardsondb is a workspace member (crates/wardsondb, vendored 2026-07-17)
     # and builds in Step 1 with the other binaries. The former Step 2
     # sibling-repo build/copy is gone; Buildroot's wardsondb.mk picks the
