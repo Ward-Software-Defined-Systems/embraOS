@@ -175,6 +175,4 @@ pub struct GeminiCandidate {
     /// `functionCall` parts present is the continuation signal.)
     #[serde(default)]
     pub finish_reason: Option<String>,
-    #[serde(default)]
-    pub index: u32,
 }

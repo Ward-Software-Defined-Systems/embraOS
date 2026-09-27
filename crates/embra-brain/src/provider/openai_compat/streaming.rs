@@ -53,6 +53,7 @@ use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
 
 use crate::provider::ir::{AssistantTurn, Block, EarlyStopReason, TurnOutcome};
+use crate::provider::openai_compat::conv::reasoning_block;
 use crate::provider::openai_compat::sanitize::sanitize_harmony_tokens;
 use crate::provider::openai_compat::wire::OpenAIChatChunk;
 use crate::provider::StreamEvent;
@@ -266,10 +267,7 @@ impl ParserState {
         // Reasoning first (cookbook recommendation: round-trip CoT
         // before the visible answer in our IR ordering).
         if !self.reasoning_buffer.is_empty() {
-            content.push(Block::ProviderOpaque(serde_json::json!({
-                "kind": "reasoning",
-                "content": self.reasoning_buffer,
-            })));
+            content.push(reasoning_block(&self.reasoning_buffer));
         }
 
         // Visible text.
@@ -353,7 +351,7 @@ fn map_finish_reason(reason: Option<&str>, content: &[Block]) -> TurnOutcome {
 /// Parse the accumulated `arguments` string into a JsonValue. On
 /// parse failure (malformed JSON from the model), returns `{}` and
 /// logs a warning; downstream tool dispatch will surface the bad-args
-/// path naturally. Mirrors `conv::parse_tool_args` behavior.
+/// path naturally.
 fn parse_tool_args(raw: &str) -> JsonValue {
     if raw.is_empty() {
         return JsonValue::Object(serde_json::Map::new());
@@ -1010,6 +1008,64 @@ mod tests {
             panic!("expected Text");
         };
         assert_eq!(t, "hi");
+    }
+
+    #[tokio::test]
+    async fn chunks_without_envelope_fields_are_processed() {
+        // Only `choices[].delta` and `finish_reason` are read, so only
+        // they are needed. Before the receive-side structs were trimmed
+        // to that, each of these chunks failed to parse and was skipped:
+        // the turn completed empty.
+        let mut sse = String::new();
+        sse.push_str(&data_frame(json!({"choices": [{"delta": {"content": "Hel"}}]})));
+        sse.push_str(&data_frame(json!({"choices": [{"delta": {"content": "lo"}}]})));
+        sse.push_str(&data_frame(json!({
+            "choices": [{"delta": {}, "finish_reason": "stop"}]
+        })));
+        sse.push_str("data: [DONE]\n\n");
+
+        let events = drive_fake(&sse, "test-model").await;
+        assert_eq!(text_deltas(&events), vec!["Hel", "lo"]);
+        let turn = complete_event(&events);
+        assert_eq!(turn.outcome, TurnOutcome::EndTurn);
+        let Block::Text(t) = &turn.content[0] else {
+            panic!("expected Text");
+        };
+        assert_eq!(t, "Hello");
+    }
+
+    #[tokio::test]
+    async fn in_stream_error_object_is_skipped() {
+        // No `choices`: not a chunk. Skipped like any frame that does not
+        // parse; the stream goes on.
+        let mut sse = String::new();
+        sse.push_str(&data_frame(json!({"error": {"message": "slot busy"}})));
+        sse.push_str(&data_frame(assistant_chunk_with_text("ok", Some("stop"))));
+        sse.push_str("data: [DONE]\n\n");
+
+        let events = drive_fake(&sse, "test-model").await;
+        assert_eq!(text_deltas(&events), vec!["ok"]);
+        assert_eq!(complete_event(&events).content.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn empty_reasoning_shards_produce_no_block() {
+        // Servers that always send the key send it empty on text chunks.
+        // An empty buffer at the terminal must not become a reasoning
+        // block that is then replayed to the model.
+        let mut sse = String::new();
+        sse.push_str(&data_frame(json!({
+            "choices": [{"delta": {"content": "answer", "reasoning": ""}}]
+        })));
+        sse.push_str(&data_frame(json!({
+            "choices": [{"delta": {"reasoning_content": ""}, "finish_reason": "stop"}]
+        })));
+        sse.push_str("data: [DONE]\n\n");
+
+        let events = drive_fake(&sse, "test-model").await;
+        let turn = complete_event(&events);
+        assert_eq!(turn.content.len(), 1);
+        assert!(matches!(turn.content[0], Block::Text(_)));
     }
 
     #[tokio::test]

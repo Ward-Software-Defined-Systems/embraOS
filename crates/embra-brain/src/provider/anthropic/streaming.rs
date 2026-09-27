@@ -325,10 +325,8 @@ async fn emit_complete(
         StopReason::EndTurn
     });
     let response = AssistantResponse {
-        id: None,
         content,
         stop_reason: effective_stop,
-        stop_sequence: None,
         stop_details,
     };
     let _ = tx

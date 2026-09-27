@@ -128,12 +128,8 @@ pub struct StopDetails {
 /// Fully assembled assistant response from a single API call.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AssistantResponse {
-    #[serde(default)]
-    pub id: Option<String>,
     pub content: Vec<MessageBlock>,
     pub stop_reason: StopReason,
-    #[serde(default)]
-    pub stop_sequence: Option<String>,
     /// Present only when `stop_reason` is `Refusal`.
     #[serde(default)]
     pub stop_details: Option<StopDetails>,

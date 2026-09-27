@@ -31,19 +31,6 @@ pub struct OpenAITool {
     pub function: OpenAIToolFunction,
 }
 
-impl OpenAITool {
-    pub fn function(name: String, description: String, parameters: JsonValue) -> Self {
-        Self {
-            tool_type: "function".to_string(),
-            function: OpenAIToolFunction {
-                name,
-                description,
-                parameters,
-            },
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenAIToolFunction {
     pub name: String,
@@ -169,60 +156,26 @@ pub struct OpenAIChatRequest {
 }
 
 // ============================================================
-// Non-streaming response
+// Streaming chunks (parsed in streaming.rs)
 // ============================================================
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct OpenAIChatResponse {
-    pub id: String,
-    pub choices: Vec<OpenAIChoice>,
-    #[serde(default)]
-    pub usage: Option<JsonValue>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct OpenAIChoice {
-    pub index: u32,
-    pub message: OpenAIMessageOut,
-    #[serde(default)]
-    pub finish_reason: Option<String>,
-}
-
-/// Out-of-band message variant used for non-streaming response parsing.
-/// The full streaming/non-streaming roundtrip uses [`OpenAIMessage`];
-/// this is the receive-side shape with both reasoning field aliases
-/// flattened for defensive parsing.
-#[derive(Debug, Clone, Deserialize)]
-pub struct OpenAIMessageOut {
-    pub role: String,
-    #[serde(default)]
-    pub content: Option<String>,
-    #[serde(default)]
-    pub tool_calls: Option<Vec<OpenAIToolCall>>,
-    #[serde(default)]
-    pub reasoning: Option<String>,
-    #[serde(default)]
-    pub reasoning_content: Option<String>,
-}
-
-// ============================================================
-// Streaming chunks (Stage 2 will lean on these in streaming.rs)
-// ============================================================
+//
+// The receive-side structs name only the fields the parser reads; serde
+// skips the rest. That is a contract, not an economy: a field declared
+// here without a default is REQUIRED, and a chunk missing it fails to
+// parse and is dropped whole (streaming.rs skips what it cannot parse).
+// The envelope fields `id`, `object`, `created`, `model` and the choice
+// `index` were once declared that way and never read, so a server that
+// left one out lost every token. Servers differ in which they send.
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OpenAIChatChunk {
-    pub id: String,
-    pub object: String,
-    pub created: u64,
-    pub model: String,
+    /// Required. An in-stream `{"error": ...}` object has no `choices`,
+    /// fails to parse, and is skipped with a warning.
     pub choices: Vec<OpenAIChoiceDelta>,
-    #[serde(default)]
-    pub usage: Option<JsonValue>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OpenAIChoiceDelta {
-    pub index: u32,
     pub delta: OpenAIDelta,
     #[serde(default)]
     pub finish_reason: Option<String>,
@@ -235,8 +188,6 @@ pub struct OpenAIChoiceDelta {
 /// `reasoning_content` (LM Studio newer default).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct OpenAIDelta {
-    #[serde(default)]
-    pub role: Option<String>,
     #[serde(default)]
     pub content: Option<String>,
     #[serde(default)]
@@ -255,8 +206,6 @@ pub struct OpenAIToolCallDelta {
     pub index: u32,
     #[serde(default)]
     pub id: Option<String>,
-    #[serde(default, rename = "type")]
-    pub call_type: Option<String>,
     #[serde(default)]
     pub function: Option<OpenAIToolCallFunctionDelta>,
 }
@@ -278,19 +227,12 @@ pub struct OpenAIToolCallFunctionDelta {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelsResponse {
-    pub object: String,
     pub data: Vec<ModelEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ModelEntry {
     pub id: String,
-    #[serde(default)]
-    pub object: Option<String>,
-    #[serde(default)]
-    pub created: Option<i64>,
-    #[serde(default)]
-    pub owned_by: Option<String>,
 }
 
 #[cfg(test)]
@@ -438,11 +380,57 @@ mod tests {
             ]
         });
         let parsed: ModelsResponse = serde_json::from_value(raw).unwrap();
-        assert_eq!(parsed.object, "list");
         assert_eq!(parsed.data.len(), 2);
         assert_eq!(parsed.data[0].id, "gpt-oss:20b");
         assert_eq!(parsed.data[1].id, "qwen3:8b");
-        assert_eq!(parsed.data[1].object, None);
+    }
+
+    #[test]
+    fn models_response_needs_only_the_ids() {
+        // The probe reads ids and nothing else; a server that omits the
+        // list's `object` tag is still a server with models.
+        let parsed: ModelsResponse =
+            serde_json::from_value(json!({"data": [{"id": "qwen3:8b"}]})).unwrap();
+        assert_eq!(parsed.data[0].id, "qwen3:8b");
+        // An entry without an id is not a model.
+        assert!(serde_json::from_value::<ModelsResponse>(json!({"data": [{"object": "model"}]}))
+            .is_err());
+    }
+
+    #[test]
+    fn chunk_parses_without_the_envelope_fields() {
+        // Every token of a server that leaves out `id`, `object`,
+        // `created`, `model` or the choice `index` used to be dropped:
+        // the chunk failed to parse over a field nothing read.
+        let chunk: OpenAIChatChunk = serde_json::from_value(json!({
+            "choices": [{"delta": {"content": "hi"}}]
+        }))
+        .unwrap();
+        assert_eq!(chunk.choices[0].delta.content.as_deref(), Some("hi"));
+        assert_eq!(chunk.choices[0].finish_reason, None);
+        // The full envelope parses as before, null fields included.
+        let chunk: OpenAIChatChunk = serde_json::from_value(json!({
+            "id": null, "object": "chat.completion.chunk", "created": 1700000000u64,
+            "model": "m", "usage": null,
+            "choices": [{"index": 0, "delta": {"role": "assistant", "content": "hi"},
+                         "finish_reason": "stop"}]
+        }))
+        .unwrap();
+        assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
+    }
+
+    #[test]
+    fn chunk_without_choices_is_rejected() {
+        // What keeps an in-stream error object from being read as an
+        // empty chunk: `choices` has no default.
+        assert!(serde_json::from_value::<OpenAIChatChunk>(
+            json!({"error": {"message": "model not loaded"}})
+        )
+        .is_err());
+        // A usage-only final chunk carries an empty `choices` and parses.
+        let chunk: OpenAIChatChunk =
+            serde_json::from_value(json!({"choices": [], "usage": {"total_tokens": 9}})).unwrap();
+        assert!(chunk.choices.is_empty());
     }
 
     #[test]
