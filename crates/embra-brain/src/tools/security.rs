@@ -48,11 +48,10 @@ pub async fn security_check() -> String {
                             // 0A = LISTEN
                             // Parse port from local_address (hex)
                             let local = fields[1];
-                            if let Some(port_hex) = local.split(':').nth(1) {
-                                if let Ok(port) = u16::from_str_radix(port_hex, 16) {
+                            if let Some(port_hex) = local.split(':').nth(1)
+                                && let Ok(port) = u16::from_str_radix(port_hex, 16) {
                                     return Some(format!("{}", port));
                                 }
-                            }
                         }
                     }
                     None
@@ -202,14 +201,13 @@ fn parse_port_spec(spec: &str) -> Vec<(u16, String)> {
                     }
                 }
             }
-        } else if let Ok(p) = tok.parse::<u16>() {
-            if seen.insert(p) {
+        } else if let Ok(p) = tok.parse::<u16>()
+            && seen.insert(p) {
                 out.push((p, port_label(p)));
                 if out.len() >= MAX_USER_PORTS {
                     return out;
                 }
             }
-        }
     }
     out
 }

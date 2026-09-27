@@ -94,8 +94,8 @@ impl BrainClient {
                         // Deserialize the pass-through payload into brain::ConversationResponse
                         if let Ok(brain_resp) = brain::ConversationResponse::decode(
                             resp.payload.as_slice()
-                        ) {
-                            if let Some(rt) = brain_resp.response_type {
+                        )
+                            && let Some(rt) = brain_resp.response_type {
                                 let event = match rt {
                                     brain::conversation_response::ResponseType::Token(t) => {
                                         ConsoleEvent::Token(t.text)
@@ -158,7 +158,6 @@ impl BrainClient {
                                     break; // Console closed
                                 }
                             }
-                        }
                     }
                     Ok(None) => break, // Stream ended
                     Err(e) => {

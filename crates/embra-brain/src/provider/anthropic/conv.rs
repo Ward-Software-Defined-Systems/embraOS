@@ -49,12 +49,11 @@ pub fn ir_blocks_to_wire(blocks: &[Block]) -> Vec<MessageBlock> {
         match b {
             Block::Text(text) => out.push(MessageBlock::Text { text: text.clone() }),
             Block::ToolCall { id, name, args, provider_opaque } => {
-                if let Some(opaque) = provider_opaque {
-                    if let Ok(thinking) = serde_json::from_value::<MessageBlock>(opaque.clone()) {
+                if let Some(opaque) = provider_opaque
+                    && let Ok(thinking) = serde_json::from_value::<MessageBlock>(opaque.clone()) {
                         // Verbatim re-emit; signature MUST round-trip.
                         out.push(thinking);
                     }
-                }
                 out.push(MessageBlock::ToolUse {
                     id: id.clone(),
                     name: name.clone(),

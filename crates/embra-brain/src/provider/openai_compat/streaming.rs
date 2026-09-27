@@ -203,12 +203,11 @@ impl ParserState {
     ) {
         for choice in chunk.choices {
             // Text content — emit live + accumulate.
-            if let Some(content) = choice.delta.content {
-                if !content.is_empty() {
+            if let Some(content) = choice.delta.content
+                && !content.is_empty() {
                     self.text_buffer.push_str(&content);
                     self.send(tx, StreamEvent::TextDelta(content)).await;
                 }
-            }
             // Reasoning content — accumulate for round-trip and (when
             // operator opted in) emit as ReasoningDelta for the live
             // expression panel. NEVER emitted as TextDelta — the

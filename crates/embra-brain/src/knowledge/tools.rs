@@ -99,14 +99,13 @@ pub async fn knowledge_link(params: &str, db: &WardsonDbClient) -> String {
         },
         "limit": 1,
     });
-    if let Ok(existing) = db.query("memory.edges", &dup_filter).await {
-        if !existing.is_empty() {
+    if let Ok(existing) = db.query("memory.edges", &dup_filter).await
+        && !existing.is_empty() {
             return format!(
                 "Error: Edge already exists from {}:{} to {}:{} with type {}",
                 src_coll, src_id, tgt_coll, tgt_id, edge_type.as_str()
             );
         }
-    }
 
     let edge_doc = json!({
         "source_id": src_id,

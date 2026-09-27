@@ -180,13 +180,11 @@ pub async fn process_sse_stream(
                         // Initial tool_use input may arrive inline as
                         // `{}`; only seed when non-empty so the delta
                         // accumulator path doesn't have to undo it.
-                        if let Some(input) = cb.get("input") {
-                            if let Ok(s) = serde_json::to_string(input) {
-                                if s != "{}" {
+                        if let Some(input) = cb.get("input")
+                            && let Ok(s) = serde_json::to_string(input)
+                                && s != "{}" {
                                     acc.input_json = s;
                                 }
-                            }
-                        }
                         blocks.insert(index, acc);
                     }
                 }

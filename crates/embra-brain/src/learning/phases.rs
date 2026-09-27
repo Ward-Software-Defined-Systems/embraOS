@@ -434,11 +434,10 @@ fn extract_json_from_text(text: &str) -> Option<serde_json::Value> {
                 _ => {}
             }
         }
-        if let Some(end) = end {
-            if let Ok(val) = serde_json::from_str(&text[start..end]) {
+        if let Some(end) = end
+            && let Ok(val) = serde_json::from_str(&text[start..end]) {
                 return Some(val);
             }
-        }
     }
 
     None

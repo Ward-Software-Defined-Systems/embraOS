@@ -244,8 +244,8 @@ async fn run_health_checks(db: &WardsonDbClient, tx: &mpsc::Sender<Notification>
     }
 
     // Check system memory
-    if let Some(usage) = get_memory_usage_mb() {
-        if usage > 512 {
+    if let Some(usage) = get_memory_usage_mb()
+        && usage > 512 {
             push_notification(
                 tx,
                 Notification::new(
@@ -254,7 +254,6 @@ async fn run_health_checks(db: &WardsonDbClient, tx: &mpsc::Sender<Notification>
                 ),
             );
         }
-    }
 }
 
 async fn run_update_checks(tx: &mpsc::Sender<Notification>) {

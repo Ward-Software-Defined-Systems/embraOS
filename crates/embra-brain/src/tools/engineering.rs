@@ -64,21 +64,19 @@ async fn resolve_base_ref(dir: &str, base: &str) -> Result<String, String> {
         .args(["-C", dir, "rev-parse", "--verify", "--quiet", base])
         .output()
         .await;
-    if let Ok(out) = &local_check {
-        if out.status.success() {
+    if let Ok(out) = &local_check
+        && out.status.success() {
             return Ok(base.to_string());
         }
-    }
     let remote = format!("origin/{}", base);
     let remote_check = tokio::process::Command::new("git")
         .args(["-C", dir, "rev-parse", "--verify", "--quiet", &remote])
         .output()
         .await;
-    if let Ok(out) = &remote_check {
-        if out.status.success() {
+    if let Ok(out) = &remote_check
+        && out.status.success() {
             return Ok(remote);
         }
-    }
     Err(format!(
         "Cannot verify merge status: neither '{}' nor 'origin/{}' exists locally. Fetch first.",
         base, base
@@ -87,18 +85,15 @@ async fn resolve_base_ref(dir: &str, base: &str) -> Result<String, String> {
 
 /// Resolve GITHUB_TOKEN: env var first, then WardSONDB config.system.github_token.
 pub async fn resolve_github_token(db: &WardsonDbClient) -> Option<String> {
-    if let Ok(t) = std::env::var("GITHUB_TOKEN") {
-        if !t.is_empty() {
+    if let Ok(t) = std::env::var("GITHUB_TOKEN")
+        && !t.is_empty() {
             return Some(t);
         }
-    }
-    if let Ok(doc) = db.read("config.system", "config").await {
-        if let Some(t) = doc.get("github_token").and_then(|v| v.as_str()) {
-            if !t.is_empty() {
+    if let Ok(doc) = db.read("config.system", "config").await
+        && let Some(t) = doc.get("github_token").and_then(|v| v.as_str())
+            && !t.is_empty() {
                 return Some(t.to_string());
             }
-        }
-    }
     None
 }
 
@@ -2627,13 +2622,12 @@ pub(crate) fn expand_escapes(s: &str) -> String {
 /// Ensure parent directories exist for a path. Workspace restricted.
 async fn ensure_parent_dirs(path: &str) -> Result<(), String> {
     let file_path = std::path::Path::new(path);
-    if let Some(parent) = file_path.parent() {
-        if !parent.exists() {
+    if let Some(parent) = file_path.parent()
+        && !parent.exists() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
         }
-    }
     Ok(())
 }
 

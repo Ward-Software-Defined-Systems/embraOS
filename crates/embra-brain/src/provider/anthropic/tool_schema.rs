@@ -31,11 +31,10 @@ pub fn build_tools_snapshot(descriptors: &[&'static ToolDescriptor]) -> serde_js
             .unwrap_or("")
             .cmp(b.get("name").and_then(|n| n.as_str()).unwrap_or(""))
     });
-    if let Some(last) = tools.last_mut() {
-        if let Some(obj) = last.as_object_mut() {
+    if let Some(last) = tools.last_mut()
+        && let Some(obj) = last.as_object_mut() {
             obj.insert("cache_control".into(), json!({"type": "ephemeral"}));
         }
-    }
     serde_json::Value::Array(tools)
 }
 

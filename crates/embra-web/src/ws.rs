@@ -136,11 +136,10 @@ async fn handle_socket(socket: WebSocket, st: AppState) {
                             }
                         }
                         ClientControl::Key { code } => {
-                            if arbiter.is_writer(id) {
-                                if let Some(seq) = key_to_bytes(&code) {
+                            if arbiter.is_writer(id)
+                                && let Some(seq) = key_to_bytes(&code) {
                                     bridge.write_input(seq.to_vec());
                                 }
-                            }
                         }
                     }
                 }

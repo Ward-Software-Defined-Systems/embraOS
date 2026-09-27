@@ -113,13 +113,11 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
     let (term_tx, mut term_rx) = mpsc::channel::<Event>(100);
     std::thread::spawn(move || {
         loop {
-            if event::poll(Duration::from_millis(50)).unwrap_or(false) {
-                if let Ok(ev) = event::read() {
-                    if term_tx.blocking_send(ev).is_err() {
+            if event::poll(Duration::from_millis(50)).unwrap_or(false)
+                && let Ok(ev) = event::read()
+                    && term_tx.blocking_send(ev).is_err() {
                         break;
                     }
-                }
-            }
         }
     });
 
@@ -210,8 +208,8 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
 
             // Expression panel poll (EXPR-01)
             _ = expression_tick.tick() => {
-                if let Ok((content, version)) = client.get_expression().await {
-                    if version != app.expression_version {
+                if let Ok((content, version)) = client.get_expression().await
+                    && version != app.expression_version {
                         app.expression_content = content;
                         app.expression_version = version;
                         // New content — snap the panel scroll back to the
@@ -219,7 +217,6 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
                         // expression.
                         app.expression_scroll = 0;
                     }
-                }
             }
 
             // Media pane: a fetched + decoded image is ready (or failed).
@@ -425,11 +422,10 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
         ConsoleEvent::SetupPrompt { field_type, prompt, options, default_value } => {
             app.messages.push(DisplayMessage::system_with_tz(&prompt, &app.config_tz));
 
-            if field_type == "confirm" || field_type == "selector" {
-                if !options.is_empty() {
+            if (field_type == "confirm" || field_type == "selector")
+                && !options.is_empty() {
                     app.selector = Some(Selector::new(options));
                 }
-            }
 
             if !default_value.is_empty() {
                 app.setup_default = Some(default_value);

@@ -1688,8 +1688,8 @@ async fn handle_request(
                             // tx; this is the loop-side companion, mirroring
                             // the /model handler's refresh recipe. Reload
                             // fresh: `loaded_config` still holds the old name.
-                            if name == "set_name" && !is_error {
-                                if let Ok(fresh) = config::load_config(db).await {
+                            if name == "set_name" && !is_error
+                                && let Ok(fresh) = config::load_config(db).await {
                                     let model_display =
                                         display_model_for(&fresh.api_provider, &fresh);
                                     let _ = tx.send(Ok(ConversationResponse {
@@ -1710,7 +1710,6 @@ async fn handle_request(
                                         ),
                                     })).await;
                                 }
-                            }
 
                             // Operator-facing frames for images the tool put
                             // in the MEDIA store (tools carry no tx — this is
@@ -2098,8 +2097,8 @@ async fn handle_request(
             // process-level provider, refuse the attach with a
             // clear error rather than silently corrupting state on
             // the first turn.
-            if !new_session {
-                if let Err((session_provider, active_provider)) =
+            if !new_session
+                && let Err((session_provider, active_provider)) =
                     check_session_provider(db, &session_name).await
                 {
                     let active_session =
@@ -2121,7 +2120,6 @@ async fn handle_request(
                         .await;
                     return Ok(());
                 }
-            }
 
             // Mark active only after the cross-provider check passes.
             session_mgr.write().await.active_session = Some(session_name.clone());
@@ -3587,8 +3585,8 @@ async fn perform_provider_swap(
     let active_session = session_mgr.read().await.active_session.clone();
     if let Some(ref name) = active_session {
         let collection = format!("sessions.{}.meta", name);
-        if let Ok(results) = db.query(&collection, &serde_json::json!({})).await {
-            if let Some(mut doc) = results.into_iter().next() {
+        if let Ok(results) = db.query(&collection, &serde_json::json!({})).await
+            && let Some(mut doc) = results.into_iter().next() {
                 let id = doc
                     .get("_id")
                     .or_else(|| doc.get("id"))
@@ -3612,7 +3610,6 @@ async fn perform_provider_swap(
                     let _ = db.update(&collection, &id, &doc).await;
                 }
             }
-        }
     }
 
     // 3. Persist to STATE so embrad picks the right provider on the
@@ -4488,11 +4485,10 @@ fn resolve_gemini_model_id_inner(env: Option<&str>, cfg_field: Option<&str>) -> 
             return trimmed.to_string();
         }
     }
-    if let Some(s) = cfg_field {
-        if !s.is_empty() {
+    if let Some(s) = cfg_field
+        && !s.is_empty() {
             return s.to_string();
         }
-    }
     "gemini-3.1-pro-preview".to_string()
 }
 
