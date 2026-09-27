@@ -18,6 +18,7 @@ pub mod image;
 pub mod ir;
 pub mod openai_compat;
 pub mod schema_util;
+pub(crate) mod sse;
 
 pub use ir::*;
 

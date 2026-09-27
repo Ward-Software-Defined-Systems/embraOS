@@ -1,8 +1,9 @@
 //! OpenAI Chat Completions SSE stream parser.
 //!
-//! Hand-rolled, line-buffered SSE consumer matching the Anthropic and
-//! Gemini parser shapes but adapted to OpenAI's chunk format and
-//! tool-call argument-shard assembly state machine:
+//! Hand-rolled SSE consumer matching the Anthropic and Gemini parser
+//! shapes but adapted to OpenAI's chunk format and tool-call
+//! argument-shard assembly state machine. Lines are framed by the shared
+//! [`LineBuffer`]:
 //!
 //! ```json
 //! {
@@ -56,6 +57,7 @@ use crate::provider::ir::{AssistantTurn, Block, EarlyStopReason, TurnOutcome};
 use crate::provider::openai_compat::conv::reasoning_block;
 use crate::provider::openai_compat::sanitize::sanitize_harmony_tokens;
 use crate::provider::openai_compat::wire::OpenAIChatChunk;
+use crate::provider::sse::LineBuffer;
 use crate::provider::StreamEvent;
 
 /// Drive an SSE stream from `/v1/chat/completions`, emitting neutral
@@ -89,14 +91,13 @@ where
     B: AsRef<[u8]>,
     E: Into<anyhow::Error>,
 {
-    let mut buffer = String::new();
+    let mut lines = LineBuffer::default();
     let mut state = ParserState::new(model_id, include_reasoning);
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(Into::into)?;
-        let text = String::from_utf8_lossy(chunk.as_ref());
-        buffer.push_str(&text);
-        consume_sse_lines(&mut buffer, &mut state, &tx).await;
+        lines.push(chunk.as_ref());
+        consume_sse_lines(&mut lines, &mut state, &tx).await;
         if state.completed {
             return Ok(());
         }
@@ -120,17 +121,14 @@ where
     Ok(())
 }
 
-/// Drain complete SSE frames from `buffer` into the parser. Frames
-/// without a trailing `\n` stay in the buffer for the next chunk.
+/// Drain the complete lines into the parser. A line without its `\n`
+/// stays in the buffer for the next chunk.
 async fn consume_sse_lines(
-    buffer: &mut String,
+    lines: &mut LineBuffer,
     state: &mut ParserState,
     tx: &mpsc::Sender<StreamEvent>,
 ) {
-    while let Some(newline_pos) = buffer.find('\n') {
-        let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
-        *buffer = buffer[newline_pos + 1..].to_string();
-
+    while let Some(line) = lines.next_line() {
         if line.is_empty() || line.starts_with(':') {
             continue;
         }
@@ -1210,6 +1208,58 @@ mod tests {
             .filter(|e| matches!(e, StreamEvent::Complete(_)))
             .count();
         assert_eq!(completes, 1);
+    }
+
+    /// The network cuts where it cuts, and that can be inside a character.
+    /// Both halves are bytes of the same line and have to be decoded
+    /// together: decoded chunk by chunk, each half becomes U+FFFD - in
+    /// the text the operator reads, and in what a tool call writes.
+    #[tokio::test]
+    async fn a_character_cut_in_two_by_the_network_stays_whole() {
+        // 2, 3 and 4 bytes a character.
+        let said = "caf\u{e9} \u{2014} \u{6f22}\u{5b57} \u{1f600}";
+        let args = json!({"path": "notes.md", "content": said}).to_string();
+        let mut sse = String::new();
+        sse.push_str(&data_frame(json!({
+            "choices": [{"delta": {"reasoning": said}, "finish_reason": null}]
+        })));
+        sse.push_str(&data_frame(assistant_chunk_with_text(said, None)));
+        sse.push_str(&data_frame(json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [{
+                    "index": 0, "id": "call_1", "type": "function",
+                    "function": {"name": "file_write", "arguments": args}
+                }]},
+                "finish_reason": "tool_calls"
+            }]
+        })));
+        sse.push_str("data: [DONE]\n\n");
+        let body = sse.into_bytes();
+        assert!(body.len() > body.iter().filter(|b| b.is_ascii()).count(), "raw UTF-8 on the wire");
+
+        for cut in 1..body.len() {
+            let chunks = vec![body[..cut].to_vec(), body[cut..].to_vec()];
+            let events = run_chunks(chunks, "test-model", true).await;
+            assert_eq!(text_deltas(&events), [said], "text, cut at byte {cut}");
+            let reasoning: Vec<&str> = events
+                .iter()
+                .filter_map(|e| match e {
+                    StreamEvent::ReasoningDelta(t) => Some(t.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(reasoning, [said], "reasoning, cut at byte {cut}");
+            match &complete_event(&events).content[..] {
+                [Block::ProviderOpaque(thought), Block::Text(text), Block::ToolCall { args, .. }] => {
+                    assert_eq!(thought["content"], said, "reasoning block, cut at byte {cut}");
+                    assert_eq!(text, said, "text block, cut at byte {cut}");
+                    assert_eq!(args["content"], said, "tool args, cut at byte {cut}");
+                    assert_eq!(args["path"], "notes.md", "cut at byte {cut}");
+                }
+                other => panic!("cut at byte {cut}: {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]

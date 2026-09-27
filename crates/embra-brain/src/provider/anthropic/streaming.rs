@@ -16,6 +16,7 @@ use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
 use super::wire::{AnthropicStreamEvent, AssistantResponse, MessageBlock, StopDetails, StopReason};
+use crate::provider::sse::LineBuffer;
 
 #[derive(Debug)]
 enum BlockKind {
@@ -128,20 +129,16 @@ where
     B: AsRef<[u8]>,
     E: Into<anyhow::Error>,
 {
-    let mut buffer = String::new();
+    let mut lines = LineBuffer::default();
     let mut blocks: BTreeMap<usize, BlockAccumulator> = BTreeMap::new();
     let mut stop_reason: Option<StopReason> = None;
     let mut stop_details: Option<StopDetails> = None;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(Into::into)?;
-        let text = String::from_utf8_lossy(chunk.as_ref());
-        buffer.push_str(&text);
+        lines.push(chunk.as_ref());
 
-        while let Some(newline_pos) = buffer.find('\n') {
-            let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
-            buffer = buffer[newline_pos + 1..].to_string();
-
+        while let Some(line) = lines.next_line() {
             if line.is_empty() || line.starts_with(':') {
                 continue;
             }
@@ -764,6 +761,55 @@ mod tests {
                 assert_eq!(input["content"], "plain text");
             }
             other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    /// The network cuts where it cuts, and that can be inside a character.
+    /// Both halves are bytes of the same line and have to be decoded
+    /// together: decoded chunk by chunk, each half becomes U+FFFD - in
+    /// the text the operator reads, and in what a tool call writes.
+    #[tokio::test]
+    async fn a_character_cut_in_two_by_the_network_stays_whole() {
+        // 2, 3 and 4 bytes a character.
+        let said = "caf\u{e9} \u{2014} \u{6f22}\u{5b57} \u{1f600}";
+        let args = serde_json::json!({"path": "notes.md", "content": said}).to_string();
+        let events = [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#.to_string(),
+            serde_json::json!({"type":"content_block_delta","index":0,
+                "delta":{"type":"thinking_delta","thinking": said}}).to_string(),
+            r#"{"type":"content_block_stop","index":0}"#.to_string(),
+            r#"{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}"#.to_string(),
+            serde_json::json!({"type":"content_block_delta","index":1,
+                "delta":{"type":"text_delta","text": said}}).to_string(),
+            r#"{"type":"content_block_stop","index":1}"#.to_string(),
+            r#"{"type":"content_block_start","index":2,"content_block":{"type":"tool_use","id":"toolu_1","name":"file_write","input":{}}}"#.to_string(),
+            serde_json::json!({"type":"content_block_delta","index":2,
+                "delta":{"type":"input_json_delta","partial_json": args}}).to_string(),
+            r#"{"type":"content_block_stop","index":2}"#.to_string(),
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#.to_string(),
+            r#"{"type":"message_stop"}"#.to_string(),
+        ];
+        let events: Vec<&str> = events.iter().map(String::as_str).collect();
+        let body = sse_body(&events);
+        assert!(body.len() > body.iter().filter(|b| b.is_ascii()).count(), "raw UTF-8 on the wire");
+
+        for cut in 1..body.len() {
+            let out = run_chunks(vec![body[..cut].to_vec(), body[cut..].to_vec()]).await;
+            assert_eq!(tokens(&out), [said], "text, cut at byte {cut}");
+            let response = complete(&out).expect("Complete event");
+            match &response.content[..] {
+                [
+                    MessageBlock::Thinking { thinking, .. },
+                    MessageBlock::Text { text },
+                    MessageBlock::ToolUse { input, .. },
+                ] => {
+                    assert_eq!(thinking, said, "thinking, cut at byte {cut}");
+                    assert_eq!(text, said, "text block, cut at byte {cut}");
+                    assert_eq!(input["content"], said, "tool input, cut at byte {cut}");
+                    assert_eq!(input["path"], "notes.md", "cut at byte {cut}");
+                }
+                other => panic!("cut at byte {cut}: {other:?}"),
+            }
         }
     }
 

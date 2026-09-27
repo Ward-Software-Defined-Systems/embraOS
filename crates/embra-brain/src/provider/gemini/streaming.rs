@@ -1,7 +1,8 @@
 //! Gemini SSE stream parser for `streamGenerateContent?alt=sse`.
 //!
-//! Hand-rolled, line-buffered SSE consumer matching the Anthropic
-//! parser's structure but adapted to Gemini's chunk shape:
+//! Hand-rolled SSE consumer matching the Anthropic parser's structure
+//! but adapted to Gemini's chunk shape. Lines are framed by the shared
+//! [`LineBuffer`]:
 //!
 //! ```json
 //! {
@@ -43,6 +44,7 @@ use futures_util::{Stream, StreamExt};
 use tokio::sync::mpsc;
 
 use crate::provider::ir::{AssistantTurn, Block, EarlyStopReason, TurnOutcome};
+use crate::provider::sse::LineBuffer;
 use crate::provider::StreamEvent;
 
 use super::wire::{GeminiPart, GeminiStreamChunk};
@@ -75,18 +77,14 @@ where
     B: AsRef<[u8]>,
     E: Into<anyhow::Error>,
 {
-    let mut buffer = String::new();
+    let mut lines = LineBuffer::default();
     let mut state = ParserState::with_options(include_reasoning);
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(Into::into)?;
-        let text = String::from_utf8_lossy(chunk.as_ref());
-        buffer.push_str(&text);
+        lines.push(chunk.as_ref());
 
-        while let Some(newline_pos) = buffer.find('\n') {
-            let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
-            buffer = buffer[newline_pos + 1..].to_string();
-
+        while let Some(line) = lines.next_line() {
             if line.is_empty() || line.starts_with(':') {
                 continue;
             }
@@ -753,6 +751,52 @@ mod tests {
             .filter(|e| matches!(e, StreamEvent::Complete(_)))
             .count();
         assert_eq!(completes, 1);
+    }
+
+    /// The network cuts where it cuts, and that can be inside a character.
+    /// Both halves are bytes of the same line and have to be decoded
+    /// together: decoded chunk by chunk, each half becomes U+FFFD - in
+    /// the text the operator reads, and in what a tool call writes.
+    #[tokio::test]
+    async fn a_character_cut_in_two_by_the_network_stays_whole() {
+        // 2, 3 and 4 bytes a character.
+        let said = "caf\u{e9} \u{2014} \u{6f22}\u{5b57} \u{1f600}";
+        let events = [
+            serde_json::json!({"candidates":[{"content":{"role":"model","parts":[
+                {"text": said, "thought": true}]},"index":0}]}).to_string(),
+            serde_json::json!({"candidates":[{"content":{"role":"model","parts":[
+                {"text": said}]},"index":0}]}).to_string(),
+            serde_json::json!({"candidates":[{"content":{"role":"model","parts":[
+                {"functionCall":{"id":"fc1","name":"file_write",
+                    "args":{"path":"notes.md","content": said}}}]},
+                "finishReason":"STOP","index":0}]}).to_string(),
+        ];
+        let events: Vec<&str> = events.iter().map(String::as_str).collect();
+        let body = sse_body(&events);
+        assert!(body.len() > body.iter().filter(|b| b.is_ascii()).count(), "raw UTF-8 on the wire");
+
+        for cut in 1..body.len() {
+            let out = run_chunks(vec![body[..cut].to_vec(), body[cut..].to_vec()], true).await;
+            assert_eq!(text_deltas(&out), [said], "text, cut at byte {cut}");
+            let reasoning: Vec<&str> = out
+                .iter()
+                .filter_map(|e| match e {
+                    StreamEvent::ReasoningDelta(t) => Some(t.as_str()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(reasoning, [said], "reasoning, cut at byte {cut}");
+            let turn = complete_turn(&out);
+            match &turn.content[..] {
+                [Block::ProviderOpaque(thought), Block::Text(text), Block::ToolCall { args, .. }] => {
+                    assert_eq!(thought["text"], said, "thought, cut at byte {cut}");
+                    assert_eq!(text, said, "text block, cut at byte {cut}");
+                    assert_eq!(args["content"], said, "tool args, cut at byte {cut}");
+                    assert_eq!(args["path"], "notes.md", "cut at byte {cut}");
+                }
+                other => panic!("cut at byte {cut}: {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]
