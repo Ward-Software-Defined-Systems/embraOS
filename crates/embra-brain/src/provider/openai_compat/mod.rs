@@ -29,7 +29,6 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use reqwest::Client;
 use serde_json::{json, Value as JsonValue};
-use sha2::{Digest, Sha256};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::error;
@@ -440,15 +439,7 @@ impl LlmProvider for OpenAICompatProvider {
                 JsonValue::Array(Vec::new())
             }
         };
-        let canonical = serde_json::to_string(&wire_json).unwrap_or_default();
-        let mut hasher = Sha256::new();
-        hasher.update(canonical.as_bytes());
-        let digest = hasher.finalize();
-        let fingerprint = hex::encode(&digest[..8]);
-        ToolManifest {
-            wire_json,
-            fingerprint,
-        }
+        ToolManifest { wire_json }
     }
 }
 
@@ -471,7 +462,6 @@ mod tests {
     fn system_bundle() -> SystemPromptBundle {
         SystemPromptBundle {
             text: "you are a test".to_string(),
-            fingerprint: "abc".to_string(),
             session_name: "test".to_string(),
         }
     }
@@ -479,7 +469,6 @@ mod tests {
     fn empty_manifest() -> ToolManifest {
         ToolManifest {
             wire_json: json!([]),
-            fingerprint: "0".to_string(),
         }
     }
 
@@ -1242,7 +1231,7 @@ mod tests {
     }
 
     #[test]
-    fn build_tool_manifest_produces_sorted_array_with_fingerprint() {
+    fn build_tool_manifest_produces_sorted_function_array() {
         let p = OpenAICompatProvider::ollama(
             "http://x".to_string(),
             None,
@@ -1257,7 +1246,15 @@ mod tests {
         for tool in arr {
             assert_eq!(tool["type"], "function");
         }
-        assert_eq!(manifest.fingerprint.len(), 16, "16 hex chars");
+        // Sorted by name: the manifest is part of the prompt prefix a
+        // local server caches, so its order must not depend on link order.
+        let names: Vec<&str> = arr
+            .iter()
+            .map(|t| t["function"]["name"].as_str().expect("name"))
+            .collect();
+        let mut sorted = names.clone();
+        sorted.sort_unstable();
+        assert_eq!(names, sorted);
     }
 
     #[test]
@@ -1408,7 +1405,6 @@ mod tests {
                 "type": "function",
                 "function": {"name": "test", "description": "x", "parameters": {"type":"object","properties":{}}}
             }]),
-            fingerprint: "0".to_string(),
         };
         let _stream = provider
             .stream_turn(

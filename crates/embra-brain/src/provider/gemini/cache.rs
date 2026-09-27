@@ -358,7 +358,6 @@ mod tests {
     fn bundle(text: &str) -> SystemPromptBundle {
         SystemPromptBundle {
             text: text.to_string(),
-            fingerprint: "ignored".into(),
             session_name: "main".into(),
         }
     }
@@ -366,7 +365,6 @@ mod tests {
     fn manifest(value: serde_json::Value) -> ToolManifest {
         ToolManifest {
             wire_json: value,
-            fingerprint: "ignored".into(),
         }
     }
 

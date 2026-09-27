@@ -308,7 +308,6 @@ impl ParserState {
             StreamEvent::Complete(AssistantTurn {
                 content,
                 outcome,
-                usage: None,
                 stop_details: None,
             }),
         )

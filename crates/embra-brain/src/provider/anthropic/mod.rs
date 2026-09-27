@@ -40,7 +40,6 @@ use async_trait::async_trait;
 use futures::stream::{BoxStream, StreamExt};
 use reqwest::Client;
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -332,7 +331,6 @@ impl LlmProvider for AnthropicProvider {
                         Some(StreamEvent::Complete(AssistantTurn {
                             content,
                             outcome,
-                            usage: None,
                             stop_details,
                         }))
                     }
@@ -345,15 +343,7 @@ impl LlmProvider for AnthropicProvider {
 
     fn build_tool_manifest(&self, descriptors: &[&'static ToolDescriptor]) -> ToolManifest {
         let wire_json = tool_schema::build_tools_snapshot(descriptors);
-        let canonical = serde_json::to_string(&wire_json).unwrap_or_default();
-        let mut hasher = Sha256::new();
-        hasher.update(canonical.as_bytes());
-        let digest = hasher.finalize();
-        let fingerprint = hex::encode(&digest[..8]);
-        ToolManifest {
-            wire_json,
-            fingerprint,
-        }
+        ToolManifest { wire_json }
     }
 }
 
@@ -605,7 +595,6 @@ mod tests {
 
         let tools = ToolManifest {
             wire_json: json!([{"name": "time", "description": "d", "input_schema": {}}]),
-            fingerprint: String::new(),
         };
         let mut reference: Option<serde_json::Value> = None;
         for choice in ANTHROPIC_MODEL_CHOICES {
@@ -828,7 +817,6 @@ mod tests {
     fn empty_manifest() -> ToolManifest {
         ToolManifest {
             wire_json: json!([]),
-            fingerprint: String::new(),
         }
     }
 
@@ -843,7 +831,6 @@ mod tests {
         };
         let tools = ToolManifest {
             wire_json: json!([{"name": "time", "description": "d", "input_schema": {}}]),
-            fingerprint: String::new(),
         };
         let fable = AnthropicProvider::with_model(
             String::new(),

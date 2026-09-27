@@ -18,7 +18,6 @@ pub mod wire;
 use async_trait::async_trait;
 use futures::stream::BoxStream;
 use reqwest::Client;
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -294,15 +293,7 @@ impl LlmProvider for GeminiProvider {
                 serde_json::Value::Array(vec![])
             }
         };
-        let canonical = serde_json::to_string(&wire_json).unwrap_or_default();
-        let mut hasher = Sha256::new();
-        hasher.update(canonical.as_bytes());
-        let digest = hasher.finalize();
-        let fingerprint = hex::encode(&digest[..8]);
-        ToolManifest {
-            wire_json,
-            fingerprint,
-        }
+        ToolManifest { wire_json }
     }
 }
 
@@ -536,7 +527,6 @@ mod tests {
             }
             other => panic!("expected array, got {other:?}"),
         }
-        assert!(!manifest.fingerprint.is_empty());
     }
 
     #[test]

@@ -64,16 +64,15 @@ pub struct ToolManifest {
     /// Anthropic this is `[{name, description, input_schema}, ...]`; for
     /// Gemini it is `[{functionDeclarations: [...]}]`.
     pub wire_json: JsonValue,
-    /// SHA-256 over the canonical JSON, truncated to 16 hex chars.
-    /// Used by Gemini's context-cache manager to detect staleness.
-    pub fingerprint: String,
 }
 
-/// System prompt + identity hash. Identity hash is stable across turns
-/// (no per-turn state injection) so context-cache reuse works.
+/// The system prompt, and the session it is sent for. The text is stable
+/// across turns (no per-turn state injection), which is what prompt
+/// caching — Anthropic's and Gemini's — depends on. Gemini's cache
+/// manager derives its staleness fingerprint from this text and the tool
+/// manifest itself (`gemini::cache::compute_fingerprint`).
 pub struct SystemPromptBundle {
     pub text: String,
-    pub fingerprint: String,
     /// Active session name. The Anthropic provider ignores this; the
     /// Gemini provider uses it to scope its Context Cache (switching
     /// sessions invalidates and recreates the cache).

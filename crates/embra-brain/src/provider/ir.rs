@@ -190,9 +190,6 @@ pub struct StopDetails {
 pub struct AssistantTurn {
     pub content: Vec<Block>,
     pub outcome: TurnOutcome,
-    /// Provider-specific usage JSON (token counts, cache stats). Used
-    /// only for tracing — never for control flow.
-    pub usage: Option<JsonValue>,
     /// Populated only alongside `TurnOutcome::EarlyStop(Refusal)` — the
     /// loop driver folds it into the operator-facing refusal notice.
     pub stop_details: Option<StopDetails>,

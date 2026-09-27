@@ -159,8 +159,6 @@ pub struct GeminiThinkingConfig {
 pub struct GeminiStreamChunk {
     #[serde(default)]
     pub candidates: Vec<GeminiCandidate>,
-    #[serde(default)]
-    pub usage_metadata: Option<JsonValue>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

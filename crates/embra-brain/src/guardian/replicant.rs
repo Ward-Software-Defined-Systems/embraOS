@@ -62,7 +62,6 @@ pub async fn evaluate_against_soul(
     let soul_text = crate::brain::render_constitution(soul);
     let system = SystemPromptBundle {
         text: replicant_system_prompt(&soul_text),
-        fingerprint: "replicant-check".to_string(),
         session_name: String::new(),
     };
     let messages = vec![ApiMessage::user_text(replicant_user_message(module))];
@@ -70,7 +69,6 @@ pub async fn evaluate_against_soul(
     // pure-text JSON verdict back, no tool calls).
     let tools = ToolManifest {
         wire_json: serde_json::json!([]),
-        fingerprint: "none".to_string(),
     };
     // include_reasoning: false — we read only the final verdict text; any
     // reasoning stays unpersisted per REASONING-STREAM-01.

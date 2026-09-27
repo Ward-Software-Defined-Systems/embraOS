@@ -1036,7 +1036,6 @@ async fn handle_request(
                 tools::registry::all_descriptors().collect();
             let tool_manifest: ToolManifest = provider.build_tool_manifest(&descriptors);
             let system_bundle = SystemPromptBundle {
-                fingerprint: prompt_fingerprint(&system_prompt),
                 text: system_prompt,
                 session_name: session_name.clone(),
             };
@@ -5861,7 +5860,6 @@ async fn run_learning_loop(
         // Build system prompt for current phase
         let system_prompt = learning::system_prompt_for_phase(&state, &config);
         let system_bundle = SystemPromptBundle {
-            fingerprint: prompt_fingerprint(&system_prompt),
             text: system_prompt,
             session_name: "learning".to_string(),
         };
@@ -6028,7 +6026,6 @@ async fn run_learning_loop(
                             // Rebuild system prompt (may include newly extracted docs)
                             let system_prompt = learning::system_prompt_for_phase(&state, &config);
                             let system_bundle = SystemPromptBundle {
-                                fingerprint: prompt_fingerprint(&system_prompt),
                                 text: system_prompt,
                                 session_name: "learning".to_string(),
                             };
@@ -6266,18 +6263,6 @@ impl Drop for InTurnGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
     }
-}
-
-/// SHA-256 fingerprint over the system prompt text, truncated to 16
-/// hex chars. Used by Gemini's context-cache manager (Stage 6) to
-/// detect staleness; harmless for Anthropic (the fingerprint is just
-/// computed, never inspected).
-fn prompt_fingerprint(text: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let mut h = Sha256::new();
-    h.update(text.as_bytes());
-    let digest = h.finalize();
-    hex::encode(&digest[..8])
 }
 
 /// Convert a legacy on-disk `Message` (role + String content) to the
@@ -6649,7 +6634,6 @@ mod transcript_segments_tests {
                         },
                     ],
                     outcome: TurnOutcome::ToolUse,
-                    usage: None,
                     stop_details: None,
                 }),
             ],
@@ -6658,7 +6642,6 @@ mod transcript_segments_tests {
                 StreamEvent::Complete(AssistantTurn {
                     content: vec![Block::Text(answer.to_string())],
                     outcome: TurnOutcome::EndTurn,
-                    usage: None,
                     stop_details: None,
                 }),
             ],
@@ -6921,7 +6904,6 @@ async fn collect_response(
                         return Ok(Some(AssistantTurn {
                             content,
                             outcome: TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop),
-                            usage: None,
                             stop_details: None,
                         }));
                     }
@@ -7062,7 +7044,6 @@ mod native_loop_tests {
                 Block::Text(", world".into()),
             ],
             outcome: TurnOutcome::EndTurn,
-            usage: None,
             stop_details: None,
         };
         assert_eq!(turn_text(&turn), "Hello, world");
@@ -7322,7 +7303,6 @@ mod native_loop_tests {
                 "signature": "sig"
             }))],
             outcome: TurnOutcome::ToolUse,
-            usage: None,
             stop_details: None,
         };
         assert_eq!(turn_text(&turn), "");
@@ -7804,7 +7784,6 @@ mod reasoning_delta_privacy_tests {
             StreamEvent::Complete(AssistantTurn {
                 content: vec![Block::Text(visible.to_string())],
                 outcome: TurnOutcome::EndTurn,
-                usage: None,
                 stop_details: None,
             }),
         ];
@@ -7890,7 +7869,6 @@ mod reasoning_delta_privacy_tests {
             StreamEvent::Complete(AssistantTurn {
                 content: vec![Block::Text("real text".to_string())],
                 outcome: TurnOutcome::EndTurn,
-                usage: None,
                 stop_details: None,
             }),
         ];

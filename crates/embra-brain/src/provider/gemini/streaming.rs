@@ -115,7 +115,6 @@ pub async fn process_sse_stream(
 struct ParserState {
     parts: Vec<GeminiPart>,
     finish_reason: Option<String>,
-    usage_metadata: Option<serde_json::Value>,
     /// Set true once `process_chunk` sees a finishReason so the
     /// driver loop knows to emit Complete and exit.
     terminal: bool,
@@ -155,9 +154,6 @@ impl ParserState {
         chunk: GeminiStreamChunk,
         tx: &mpsc::Sender<StreamEvent>,
     ) {
-        if let Some(usage) = chunk.usage_metadata {
-            self.usage_metadata = Some(usage);
-        }
         let Some(candidate) = chunk.candidates.into_iter().next() else {
             return;
         };
@@ -327,7 +323,6 @@ impl ParserState {
             .send(StreamEvent::Complete(AssistantTurn {
                 content,
                 outcome,
-                usage: self.usage_metadata.take(),
                 stop_details: None,
             }))
             .await;
@@ -505,7 +500,6 @@ mod tests {
             Block::Text(t) => assert_eq!(t, "Hello world"),
             other => panic!("expected Text, got {other:?}"),
         }
-        assert!(turn.usage.is_some());
     }
 
     #[tokio::test]
