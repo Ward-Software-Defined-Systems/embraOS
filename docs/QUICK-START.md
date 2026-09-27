@@ -161,6 +161,8 @@ The following apply once the image is built. They are not part of the build pipe
 > sudo ./scripts/embraos-backup.sh --image /path/to/embraos.img verify
 > ```
 > Backups are stored in `~/embraOS_BACKUPS/` by default — under `sudo` that is still the invoking user's home, resolved from `$SUDO_USER` (override with `EMBRAOS_BACKUP_DIR`). `restore` prints the backup's metadata, asks `Continue? [y/N]`, then empties the image's STATE and DATA partitions before copying the backup in — a fresh image's seed contents are replaced, not merged. Each backup includes STATE (soul hash, PKI certs), DATA (WardSONDB collections, workspace), and metadata with SHA-256 of the source image. To target another image pass `--image <path>`; `EMBRAOS_IMAGE` works too, but it must come *after* `sudo` (`sudo EMBRAOS_IMAGE=… ./scripts/embraos-backup.sh …`) — sudo's default `env_reset` drops a variable set before it, and the script would silently back up the default image.
+>
+> **After restoring onto a rebuilt image:** Guardian dynamic tools are compiled inside the OS, and the brain loads one only if it was built by the toolchain the image carries. When a new image has a different in-OS toolchain, the tools come back `NOT LOADED` (`/guardian list`). `/guardian rebuild --all` builds them again from their stored modules; each passes validation and the replicant check before it compiles.
 
 ---
 
