@@ -4825,12 +4825,6 @@ async fn handle_model_command(
         .await;
 }
 
-/// `/effort [<low|medium|high|xhigh|max>]` — show or set the Anthropic
-/// `output_config.effort` level. Persists `SystemConfig.anthropic_effort`;
-/// the loop driver rebuilds the provider per-turn from config, so a change
-/// takes effect on the next user message. Mirrors `handle_model_command`
-/// minus the ModeChange emit — the status pill shows the model display
-/// name, which effort doesn't change.
 /// `/attach <id|path>` — stage an image for the session's next message;
 /// `/attach` / `/attach list` — show the staging + store usage;
 /// `/attach clear` — drop the staging. Refused pre-seal (learning mode
@@ -5267,6 +5261,19 @@ async fn handle_image_provider_command(
     }
 }
 
+/// `/effort [<low|medium|high|xhigh|max> | reset]` — show or set the effort
+/// level of the ACTIVE provider. Each provider has its own field
+/// (`anthropic_effort`, `gemini_effort`, `openai_compat.ollama_effort` /
+/// `lm_studio_effort`), and its own wire form: Anthropic sends the level as
+/// `output_config.effort`, Gemini clamps it to a `thinkingLevel`, the
+/// OpenAI-compatible presets send it verbatim as `reasoning_effort` — the
+/// accepted set is the model's, so nothing is clamped there. `reset` clears
+/// the active provider's field.
+///
+/// The loop driver rebuilds the provider from config every turn, so a
+/// change takes effect on the next user message. No ModeChange is emitted:
+/// the status pill shows the model's display name, which effort does not
+/// change.
 async fn handle_effort_command(
     args: &str,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
