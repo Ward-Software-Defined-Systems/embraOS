@@ -1032,7 +1032,7 @@ mod staged_media_tests {
 
     #[test]
     fn staged_media_is_per_session_deduped_and_drained_once() {
-        let mut mgr = SessionManager::new(WardsonDbClient::new(1));
+        let mut mgr = SessionManager::new(WardsonDbClient::from_url("http://localhost:1"));
         assert_eq!(mgr.stage_media("alpha", meta("att-20260820T153012Z-00000001")), 1);
         assert_eq!(mgr.stage_media("alpha", meta("att-20260820T153012Z-00000002")), 2);
         // Re-staging the same id replaces, never duplicates.

@@ -113,12 +113,6 @@ struct WardsonEnvelope<T> {
 }
 
 #[derive(Debug, Deserialize)]
-struct InsertData {
-    #[serde(alias = "id")]
-    _id: String,
-}
-
-#[derive(Debug, Deserialize)]
 struct CollectionInfo {
     name: String,
 }
@@ -126,11 +120,6 @@ struct CollectionInfo {
 #[derive(Debug, Serialize)]
 struct CreateCollectionRequest {
     name: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct HealthResponse {
-    pub status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,24 +140,7 @@ pub struct HealthDetail {
     pub warning: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-struct QueryResponse {
-    data: Vec<serde_json::Value>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ServerInfo {
-    version: Option<String>,
-}
-
 impl WardsonDbClient {
-    pub fn new(port: u16) -> Self {
-        Self {
-            base_url: format!("http://localhost:{}", port),
-            http_client: reqwest::Client::new(),
-        }
-    }
-
     /// Create a client from a full URL (Phase 1: embrad passes --wardsondb-url)
     pub fn from_url(url: &str) -> Self {
         Self {
@@ -187,16 +159,6 @@ impl WardsonDbClient {
             Ok(r) => Ok(r.status().is_success()),
             Err(_) => Ok(false),
         }
-    }
-
-    pub async fn version(&self) -> Result<String> {
-        let resp = self
-            .http_client
-            .get(&self.base_url)
-            .send()
-            .await?;
-        let envelope: WardsonEnvelope<ServerInfo> = resp.json().await?;
-        Ok(envelope.data.version.unwrap_or_else(|| "unknown".into()))
     }
 
     pub async fn list_collections(&self) -> Result<Vec<String>> {
@@ -441,10 +403,6 @@ impl WardsonDbClient {
             return Err(WardsonDbError::Api { status, body }.into());
         }
         Ok(())
-    }
-
-    pub async fn disk_usage(&self) -> Result<serde_json::Value> {
-        self.stats().await
     }
 
     pub async fn stats(&self) -> Result<serde_json::Value> {
