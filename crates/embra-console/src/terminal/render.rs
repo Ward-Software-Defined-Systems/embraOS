@@ -22,24 +22,6 @@ impl StyledSegment {
 /// A line composed of multiple styled segments
 pub type StyledLine = Vec<StyledSegment>;
 
-/// Strip ANSI escape codes from text for width calculation
-pub fn visible_width(text: &str) -> usize {
-    let mut width = 0;
-    let mut in_escape = false;
-    for ch in text.chars() {
-        if in_escape {
-            if ch.is_ascii_alphabetic() {
-                in_escape = false;
-            }
-        } else if ch == '\x1b' {
-            in_escape = true;
-        } else {
-            width += 1;
-        }
-    }
-    width
-}
-
 /// Parse a line of text into styled segments, handling markdown-like formatting.
 /// base_style is the default style for unformatted text.
 pub fn parse_styled_line(line: &str, base_style: Style) -> StyledLine {

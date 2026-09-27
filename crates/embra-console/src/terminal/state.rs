@@ -76,14 +76,6 @@ pub struct DisplayMessage {
 }
 
 impl DisplayMessage {
-    pub fn new(role: impl Into<String>, content: impl Into<String>) -> Self {
-        Self {
-            role: role.into(),
-            content: content.into(),
-            timestamp: Utc::now().format("%b %d %H:%M").to_string(),
-        }
-    }
-
     pub fn new_with_tz(role: impl Into<String>, content: impl Into<String>, tz_str: &str) -> Self {
         let ts = if let Ok(tz) = tz_str.parse::<Tz>() {
             Utc::now().with_timezone(&tz).format("%b %d %H:%M").to_string()
@@ -97,28 +89,8 @@ impl DisplayMessage {
         }
     }
 
-    pub fn system(content: impl Into<String>) -> Self {
-        Self::new("system", content)
-    }
-
     pub fn system_with_tz(content: impl Into<String>, tz_str: &str) -> Self {
         Self::new_with_tz("system", content, tz_str)
-    }
-
-    pub fn user(content: impl Into<String>) -> Self {
-        Self::new("user", content)
-    }
-
-    pub fn assistant(content: impl Into<String>) -> Self {
-        Self::new("assistant", content)
-    }
-
-    pub fn tool(name: &str, result: &str) -> Self {
-        Self::new("tool", format!("[{}] {}", name, result))
-    }
-
-    pub fn tool_with_tz(name: &str, result: &str, tz_str: &str) -> Self {
-        Self::new_with_tz("tool", format!("[{}] {}", name, result), tz_str)
     }
 
     /// Media card: the text row every surface gets for a `MediaRef`

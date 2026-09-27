@@ -6,7 +6,6 @@
 
 mod commands;
 pub mod graphics;
-mod input;
 mod input_layout;
 mod render;
 pub mod state;
@@ -22,11 +21,11 @@ use crossterm::{
         self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent,
         KeyModifiers,
     },
-    terminal::{self, disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{self, disable_raw_mode, enable_raw_mode},
     ExecutableCommand,
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
-use std::io::{self, stdout};
+use std::io::stdout;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -369,7 +368,7 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
                 }
             }
         }
-        ConsoleEvent::ModeTransition { from_mode: _, to_mode, message } => {
+        ConsoleEvent::ModeTransition { to_mode, message } => {
             // Mode change resets per-turn UI context — drop any pending
             // reasoning from the prior phase.
             app.clear_live_reasoning();
@@ -898,7 +897,6 @@ mod reasoning_tests {
         app.live_reasoning = "old phase".to_string();
         handle_console_event(
             ConsoleEvent::ModeTransition {
-                from_mode: 2,
                 to_mode: 3,
                 message: "Operational — Name: Embra — Session: main — TZ: UTC".to_string(),
             },
@@ -1001,7 +999,6 @@ mod reasoning_tests {
         app.expression_scroll = 4;
         handle_console_event(
             ConsoleEvent::ModeTransition {
-                from_mode: 3,
                 to_mode: 3,
                 message: "Operational — Name: Embra — Session: main — TZ: UTC — Brain: opus-5"
                     .to_string(),

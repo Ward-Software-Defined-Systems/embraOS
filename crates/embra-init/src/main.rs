@@ -35,7 +35,6 @@ fn boot() -> Result<(), Box<dyn std::error::Error>> {
     use nix::mount::{mount, MsFlags};
     use nix::unistd::{chdir, execv};
     use std::ffi::CString;
-    use std::path::Path;
 
     const NEWROOT: &str = "/mnt/root";
 

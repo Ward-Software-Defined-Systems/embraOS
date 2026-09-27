@@ -55,8 +55,6 @@ pub struct StatusData {
     #[serde(default)]
     pub version: Option<String>,
     #[serde(default)]
-    pub ts: u64,
-    #[serde(default)]
     pub system: Option<SystemMetrics>,
 }
 

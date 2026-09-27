@@ -21,14 +21,13 @@ pub enum ConsoleEvent {
     ResponseDone(String),
     SystemMessage { content: String, msg_type: String },
     ToolExecution {
-        tool_use_id: String,
         name: String,
         input_json: String,
         result: String,
         is_error: bool,
     },
     ThinkingState { is_thinking: bool, name: String, current_tool: Option<String> },
-    ModeTransition { from_mode: i32, to_mode: i32, message: String },
+    ModeTransition { to_mode: i32, message: String },
     SetupPrompt { field_type: String, prompt: String, options: Vec<String>, default_value: String },
     /// Live reasoning/CoT shard from the brain. Routed exclusively to
     /// the expression panel surface; never appended to the response
@@ -112,7 +111,6 @@ impl BrainClient {
                                     }
                                     brain::conversation_response::ResponseType::Tool(t) => {
                                         ConsoleEvent::ToolExecution {
-                                            tool_use_id: t.tool_use_id,
                                             name: t.tool_name,
                                             input_json: t.input_json,
                                             result: t.result,
@@ -132,7 +130,6 @@ impl BrainClient {
                                     }
                                     brain::conversation_response::ResponseType::ModeChange(m) => {
                                         ConsoleEvent::ModeTransition {
-                                            from_mode: m.from_mode,
                                             to_mode: m.to_mode,
                                             message: m.message,
                                         }
