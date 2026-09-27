@@ -2544,8 +2544,8 @@ pub async fn file_read(params: &str) -> String {
             offset, size
         );
     }
-    let mut read_end = (offset + limit as u64).min(size);
-    let read_bytes = (read_end - offset) as usize;
+    let window_end = (offset + limit as u64).min(size);
+    let read_bytes = (window_end - offset) as usize;
 
     use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
     let mut f = match tokio::fs::File::open(&path).await {
@@ -2575,15 +2575,29 @@ pub async fn file_read(params: &str) -> String {
     // before that character; the trailer names where it starts. A window
     // that is nothing but the cut character is left alone — shortening
     // it would read nothing.
-    if read_end < size {
+    if window_end < size {
         let cut = cut_character_len(&buf);
         if cut < buf.len() {
             buf.truncate(buf.len() - cut);
-            read_end -= cut as u64;
         }
     }
 
-    let content = String::from_utf8_lossy(&buf);
+    // The ceiling is on what is RETURNED. A byte that is not UTF-8 reads
+    // as U+FFFD, three bytes for one, so a window of the full ceiling from
+    // a file in another encoding decodes to three times the ceiling — and
+    // what the dispatcher then cuts off is the trailer. The text is decoded
+    // within the ceiling and the window ends where the text does.
+    let decoded = decode_within(&buf, FILE_READ_MAX);
+    let read_end = offset + decoded.raw_len as u64;
+    let content = decoded.text;
+    let encoding_note = if decoded.replaced > 0 {
+        format!(
+            "; not UTF-8: {} byte sequence(s) shown as U+FFFD, writing this text back would alter the file",
+            decoded.replaced
+        )
+    } else {
+        String::new()
+    };
     let more = if read_end < size {
         // Speak the JSON-arg vocabulary the model actually calls with (the
         // old trailer taught the legacy pipe syntax). Omitting `limit` in the
@@ -2606,9 +2620,57 @@ pub async fn file_read(params: &str) -> String {
         String::new()
     };
     format!(
-        "=== {} ({} bytes, showing {}..{}) ===\n{}{}",
-        path, size, offset, read_end, content, more
+        "=== {} ({} bytes, showing {}..{}{}) ===\n{}{}",
+        path, size, offset, read_end, encoding_note, content, more
     )
+}
+
+/// A byte window read as text.
+struct Decoded {
+    text: String,
+    /// How many bytes of the window the text stands for.
+    raw_len: usize,
+    /// How many byte sequences were not UTF-8 and read as U+FFFD.
+    replaced: usize,
+}
+
+/// Decode a window as `String::from_utf8_lossy` does, stopping before the
+/// text would pass `budget` bytes. It stops between characters and never
+/// inside an invalid sequence, so the windows of a chunked read decode to
+/// what one decoding of the file gives. A budget of 4 or more always makes
+/// progress on a window that is not empty.
+fn decode_within(window: &[u8], budget: usize) -> Decoded {
+    const REPLACEMENT: &str = "\u{FFFD}";
+    let mut text = String::with_capacity(window.len().min(budget));
+    let mut raw_len = 0;
+    let mut replaced = 0;
+    for chunk in window.utf8_chunks() {
+        let valid = chunk.valid();
+        let room = budget - text.len();
+        if valid.len() > room {
+            let mut end = room;
+            while !valid.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.push_str(&valid[..end]);
+            raw_len += end;
+            break;
+        }
+        text.push_str(valid);
+        raw_len += valid.len();
+
+        let invalid = chunk.invalid();
+        if invalid.is_empty() {
+            continue;
+        }
+        if budget - text.len() < REPLACEMENT.len() {
+            break;
+        }
+        text.push_str(REPLACEMENT);
+        raw_len += invalid.len();
+        replaced += 1;
+    }
+    Decoded { text, raw_len, replaced }
 }
 
 /// The length of the character a byte window cuts at its end: 0 when the
@@ -4849,6 +4911,114 @@ mod file_io_caps_tests {
             let (whole, _) = read_in_chunks(path, Some(limit)).await;
             assert_eq!(whole, text, "limit {limit}");
         }
+    }
+
+    #[test]
+    fn text_is_decoded_within_its_budget() {
+        let lossy = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+        // With room for everything it is `from_utf8_lossy`.
+        let mixed = b"caf\xc3\xa9 \xff \xe2\x82 \xf0\x9f\x98\x80 end";
+        let all = decode_within(mixed, 1024);
+        assert_eq!(all.text, lossy(mixed));
+        assert_eq!(all.raw_len, mixed.len());
+        assert_eq!(all.replaced, 2);
+
+        // Under every budget: the text fits, it is a prefix of the whole,
+        // it stands for exactly the bytes it says, and it grows with the
+        // budget.
+        let mut last = 0;
+        for budget in 4..=all.text.len() + 2 {
+            let d = decode_within(mixed, budget);
+            assert!(d.text.len() <= budget, "budget {budget}");
+            assert!(all.text.starts_with(&d.text), "budget {budget}");
+            assert_eq!(d.text, lossy(&mixed[..d.raw_len]), "budget {budget}");
+            assert!(d.raw_len > 0 && d.raw_len >= last, "budget {budget}");
+            last = d.raw_len;
+        }
+        assert_eq!(last, mixed.len());
+
+        // Three bytes of text for one of file: a third of the budget.
+        let latin1 = vec![0xE9u8; 100];
+        let d = decode_within(&latin1, 30);
+        assert_eq!((d.text.len(), d.raw_len, d.replaced), (30, 10, 10));
+        let d = decode_within(&latin1, 31);
+        assert_eq!((d.text.len(), d.raw_len, d.replaced), (30, 10, 10));
+        // Nothing to read is nothing read.
+        let d = decode_within(b"", 4);
+        assert_eq!((d.text.as_str(), d.raw_len, d.replaced), ("", 0, 0));
+    }
+
+    #[tokio::test]
+    async fn a_file_in_another_encoding_keeps_its_trailer() {
+        // Latin-1 text: every byte is a character there and none of them
+        // is UTF-8. Each reads as U+FFFD - three bytes for one - so a
+        // window of the full ceiling decodes to three times the ceiling,
+        // the dispatcher cuts it, and the trailer that says where to go on
+        // is what gets cut.
+        let dir = TempDir::new("latin1");
+        let target = dir.0.join("latin1.txt");
+        let data = vec![0xE9u8; FILE_READ_MAX + 1000];
+        std::fs::write(&target, &data).unwrap();
+        let path = target.to_str().unwrap();
+
+        let first = file_read(path).await;
+        assert!(
+            first.len() <= crate::tools::registry::MAX_TOOL_RESULT_SIZE,
+            "the framed result must fit under the dispatcher cap ({} > {})",
+            first.len(),
+            crate::tools::registry::MAX_TOOL_RESULT_SIZE
+        );
+        let (body, next) = body_and_next(&first);
+        let next = next.expect("a trailer names where to go on");
+        // One U+FFFD for every byte that was read, and the trailer resumes
+        // at the first byte that was not.
+        assert!(body.chars().all(|c| c == '\u{fffd}'));
+        assert_eq!(body.chars().count() as u64, next);
+        assert!(body.len() <= FILE_READ_MAX);
+        // The reader is told what it is looking at.
+        let header = first.lines().next().unwrap();
+        assert!(header.contains(&format!("showing 0..{next}")), "{header}");
+        assert!(header.contains("not UTF-8"), "{header}");
+
+        let (whole, calls) = read_in_chunks(path, None).await;
+        assert_eq!(whole.chars().count(), data.len(), "every byte read once");
+        assert!(whole.chars().all(|c| c == '\u{fffd}'));
+        assert_eq!(calls, 4);
+    }
+
+    #[tokio::test]
+    async fn chunked_reads_decode_like_one_read() {
+        // Text with stray bytes in it: invalid sequences of every length
+        // between characters of every length. Wherever the chunks end,
+        // the text is what one lossy decoding of the file gives.
+        let mut data = Vec::new();
+        for i in 0..200 {
+            data.extend_from_slice("caf\u{e9} \u{2014} \u{1f600} ".as_bytes());
+            data.extend_from_slice(match i % 5 {
+                0 => b"\xff".as_slice(),
+                1 => b"\xe2\x82".as_slice(),
+                2 => b"\xf0\x9f\x98".as_slice(),
+                3 => b"\x80\x80".as_slice(),
+                _ => b"\xc3".as_slice(),
+            });
+            data.push(b'\n');
+        }
+        let want = String::from_utf8_lossy(&data).into_owned();
+        assert!(want.contains('\u{fffd}'));
+        let dir = TempDir::new("stray");
+        let target = dir.0.join("stray.txt");
+        std::fs::write(&target, &data).unwrap();
+        let path = target.to_str().unwrap();
+
+        for limit in [4usize, 5, 6, 7, 16, 61, 1000, data.len()] {
+            let (whole, _) = read_in_chunks(path, Some(limit)).await;
+            assert_eq!(whole, want, "limit {limit}");
+        }
+        // A file that IS UTF-8 says nothing about encodings.
+        let clean = dir.0.join("clean.txt");
+        std::fs::write(&clean, "caf\u{e9}\n").unwrap();
+        let out = file_read(clean.to_str().unwrap()).await;
+        assert!(!out.contains("UTF-8"), "{out}");
     }
 
     #[tokio::test]
