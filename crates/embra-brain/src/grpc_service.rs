@@ -4561,6 +4561,15 @@ fn parse_anthropic_model_choice(s: &str) -> Option<(&'static str, &'static str)>
     }
 }
 
+/// The selectable line-up in display order: the canonical display alias of
+/// every arm in [`parse_anthropic_model_choice`]. `/model` prints it; a
+/// test keeps the two in step.
+const ANTHROPIC_MODEL_CHOICES: [&str; 3] = ["opus-5", "opus-4.8", "fable-5"];
+
+fn anthropic_model_options() -> String {
+    ANTHROPIC_MODEL_CHOICES.join(", ")
+}
+
 /// LEGACY alias canonicalization — NOT selectable via `/model`, but a
 /// persisted `anthropic_model` of `"opus-4.7"` (wizard-seeded before
 /// 2026-07-06, or the frozen v9 backfill) must keep resolving to its
@@ -4707,13 +4716,14 @@ async fn handle_model_command(
 
     let active = cfg.api_provider.clone();
     let trimmed = args.trim();
+    let options = anthropic_model_options();
 
     // No args → show current model + options.
     if trimmed.is_empty() {
         let current = display_model_for(&active, &cfg);
         let msg = if active == "anthropic" {
             format!(
-                "Anthropic model: {current}. Options: opus-5, opus-4.8, fable-5. \
+                "Anthropic model: {current}. Options: {options}. \
                  Use `/model fable-5` to switch (takes effect on your next message)."
             )
         } else {
@@ -4745,13 +4755,10 @@ async fn handle_model_command(
             format!(
                 "'{trimmed}' was retired from the selectable line-up \
                  (an instance already persisted on it keeps working). Options: \
-                 opus-5, opus-4.8, fable-5."
+                 {options}."
             )
         } else {
-            format!(
-                "'{trimmed}' is not a recognized Anthropic model. Options: opus-5, \
-                 opus-4.8, fable-5."
-            )
+            format!("'{trimmed}' is not a recognized Anthropic model. Options: {options}.")
         };
         send(msg, SystemMessageType::Error).await;
         return;
@@ -8064,8 +8071,36 @@ mod anthropic_model_tests {
     //! mutated across the suite (same discipline as the Gemini resolver).
     use super::{
         canonicalize_legacy_anthropic_alias, normalize_anthropic_model,
-        parse_anthropic_model_choice, resolve_anthropic_model_inner,
+        parse_anthropic_model_choice, resolve_anthropic_model_inner, ANTHROPIC_MODEL_CHOICES,
     };
+
+    /// `/model` prints `ANTHROPIC_MODEL_CHOICES`; every entry must be the
+    /// canonical display of a selectable arm.
+    #[test]
+    fn listed_choices_are_the_canonical_displays() {
+        for choice in ANTHROPIC_MODEL_CHOICES {
+            let (_, display) = parse_anthropic_model_choice(choice)
+                .unwrap_or_else(|| panic!("'{choice}' is listed but not selectable"));
+            assert_eq!(display, choice);
+        }
+    }
+
+    /// The wizard persists the alias `anthropic_model_from_label` returns.
+    /// An alias with no selectable arm would reach the API as a raw model
+    /// id and 400 every turn.
+    #[test]
+    fn wizard_seeded_aliases_are_selectable() {
+        for label in crate::config::PROVIDER_WIZARD_LABELS {
+            let Some(alias) = crate::config::anthropic_model_from_label(label) else {
+                continue;
+            };
+            let (_, display) = parse_anthropic_model_choice(&alias).unwrap_or_else(|| {
+                panic!("wizard label '{label}' seeds '{alias}', which /model does not accept")
+            });
+            assert_eq!(display, alias, "{label}");
+            assert!(ANTHROPIC_MODEL_CHOICES.contains(&display), "{label}");
+        }
+    }
 
     #[test]
     fn defaults_to_opus_5_when_unset() {

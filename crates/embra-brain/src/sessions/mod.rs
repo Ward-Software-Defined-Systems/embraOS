@@ -253,7 +253,9 @@ impl SessionManager {
                         .anthropic_model
                         .clone()
                         .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| "opus-5".to_string()),
+                        .unwrap_or_else(|| {
+                            crate::provider::anthropic::DEFAULT_DISPLAY_NAME.to_string()
+                        }),
                 };
                 (Some(cfg.api_provider), Some(m))
             }

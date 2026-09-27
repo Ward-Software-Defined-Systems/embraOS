@@ -280,6 +280,20 @@ const PROVIDER_GEMINI_LABEL: &str = "Google Gemini 3.1 Pro";
 const PROVIDER_OLLAMA_LABEL: &str = "Ollama (OpenAI-compat)";
 const PROVIDER_LM_STUDIO_LABEL: &str = "LM Studio (OpenAI-compat)";
 
+/// The provider-selection labels, in display order. INDEX 0 IS THE
+/// EFFECTIVE DEFAULT: the console builds its selector with the first
+/// option pre-selected and does not read `default_value`
+/// (`embra-console` `Selector::new`), so the label of the default model
+/// must stay first.
+pub(crate) const PROVIDER_WIZARD_LABELS: [&str; 6] = [
+    PROVIDER_ANTHROPIC_OPUS5_LABEL,
+    PROVIDER_ANTHROPIC_OPUS48_LABEL,
+    PROVIDER_ANTHROPIC_FABLE_LABEL,
+    PROVIDER_GEMINI_LABEL,
+    PROVIDER_OLLAMA_LABEL,
+    PROVIDER_LM_STUDIO_LABEL,
+];
+
 fn provider_from_label(label: &str) -> ProviderKind {
     match label {
         PROVIDER_GEMINI_LABEL => ProviderKind::Gemini,
@@ -297,7 +311,7 @@ fn provider_from_label(label: &str) -> ProviderKind {
 /// choice keeps meaning what the operator picked even if the provider's
 /// `DEFAULT_MODEL` changes in a later build. Non-Anthropic labels yield
 /// `None`. Later switchable at runtime via `/model`.
-fn anthropic_model_from_label(label: &str) -> Option<String> {
+pub(crate) fn anthropic_model_from_label(label: &str) -> Option<String> {
     match label {
         PROVIDER_ANTHROPIC_OPUS5_LABEL => Some("opus-5".to_string()),
         PROVIDER_ANTHROPIC_OPUS48_LABEL => Some("opus-4.8".to_string()),
@@ -603,27 +617,21 @@ pub async fn run_config_wizard_grpc(
 
     // Step 2: Provider selection (Sprint 4 → Sprint 5 4-way, then the
     // Anthropic line-up: Opus 5 + Opus 4.8 + Fable 5 since 2026-07-24) —
-    // Selector UI. Default tracks the provider's DEFAULT_MODEL (Opus 5).
+    // Selector UI. The default is the first label (see
+    // PROVIDER_WIZARD_LABELS) and tracks the provider's DEFAULT_MODEL.
     let _ = tx.send(Ok(ConversationResponse {
         response_type: Some(conversation_response::ResponseType::Setup(
             SetupPrompt {
                 field_type: SetupFieldType::Selector as i32,
                 prompt: "Which AI provider would you like to use?".to_string(),
-                options: vec![
-                    PROVIDER_ANTHROPIC_OPUS5_LABEL.to_string(),
-                    PROVIDER_ANTHROPIC_OPUS48_LABEL.to_string(),
-                    PROVIDER_ANTHROPIC_FABLE_LABEL.to_string(),
-                    PROVIDER_GEMINI_LABEL.to_string(),
-                    PROVIDER_OLLAMA_LABEL.to_string(),
-                    PROVIDER_LM_STUDIO_LABEL.to_string(),
-                ],
-                default_value: PROVIDER_ANTHROPIC_OPUS5_LABEL.to_string(),
+                options: PROVIDER_WIZARD_LABELS.iter().map(|l| l.to_string()).collect(),
+                default_value: PROVIDER_WIZARD_LABELS[0].to_string(),
             }
         )),
     })).await;
     let provider_choice = match response_rx.recv().await {
         Some(input) if !input.is_empty() => input,
-        _ => PROVIDER_ANTHROPIC_OPUS5_LABEL.to_string(),
+        _ => PROVIDER_WIZARD_LABELS[0].to_string(),
     };
     let provider_kind = provider_from_label(&provider_choice);
     // Capture the chosen Anthropic model (Opus 5, Opus 4.8, Fable 5) for
@@ -985,7 +993,7 @@ pub async fn run_config_wizard_grpc(
         OperatingMode::Learning
     };
     // Sprint 4: include the active model so the console status bar
-    // refreshes from its default ("opus-5") to whatever provider
+    // refreshes from its first-paint default to whatever provider
     // the operator just selected. Inline match — display_model_for
     // lives in grpc_service.rs and we don't want a circular dep.
     // Sprint 5: OpenAI-compat presets show the operator-selected
@@ -1015,7 +1023,7 @@ pub async fn run_config_wizard_grpc(
             .anthropic_model
             .clone()
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "opus-5".to_string()),
+            .unwrap_or_else(|| crate::provider::anthropic::DEFAULT_DISPLAY_NAME.to_string()),
     };
     let _ = tx.send(Ok(ConversationResponse {
         response_type: Some(conversation_response::ResponseType::ModeChange(
@@ -1328,9 +1336,38 @@ mod provider_label_tests {
     use super::{
         anthropic_model_from_label, provider_from_label,
         PROVIDER_ANTHROPIC_FABLE_LABEL, PROVIDER_ANTHROPIC_OPUS48_LABEL,
-        PROVIDER_ANTHROPIC_OPUS5_LABEL, PROVIDER_GEMINI_LABEL,
+        PROVIDER_ANTHROPIC_OPUS5_LABEL, PROVIDER_GEMINI_LABEL, PROVIDER_WIZARD_LABELS,
     };
     use crate::provider::ProviderKind;
+
+    /// The console pre-selects index 0 and ignores `default_value`, so the
+    /// first label is what an operator gets by pressing Enter. It must
+    /// name the provider's default model.
+    #[test]
+    fn first_wizard_label_is_the_default_model() {
+        let first = PROVIDER_WIZARD_LABELS[0];
+        assert_eq!(provider_from_label(first), ProviderKind::Anthropic);
+        assert_eq!(
+            anthropic_model_from_label(first).as_deref(),
+            Some(crate::provider::anthropic::DEFAULT_DISPLAY_NAME)
+        );
+    }
+
+    /// `provider_from_label` has a catch-all, so an Anthropic label with
+    /// no arm in `anthropic_model_from_label` would persist `None` and run
+    /// the default model under another model's name.
+    #[test]
+    fn every_anthropic_wizard_label_seeds_a_model() {
+        for label in PROVIDER_WIZARD_LABELS {
+            match provider_from_label(label) {
+                ProviderKind::Anthropic => assert!(
+                    anthropic_model_from_label(label).is_some(),
+                    "'{label}' seeds no model"
+                ),
+                _ => assert_eq!(anthropic_model_from_label(label), None, "{label}"),
+            }
+        }
+    }
 
     #[test]
     fn all_anthropic_labels_map_to_anthropic() {
