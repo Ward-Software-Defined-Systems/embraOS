@@ -161,7 +161,7 @@ fn bring_up_eth0() {
             (*mask_rt).sin_family = libc::AF_INET as u16;
             (*mask_rt).sin_addr.s_addr = 0; // 0.0.0.0
 
-            rt.rt_flags = libc::RTF_UP as u16 | libc::RTF_GATEWAY as u16;
+            rt.rt_flags = libc::RTF_UP | libc::RTF_GATEWAY;
 
             if libc::ioctl(route_sock, libc::SIOCADDRT as _, &rt) < 0 {
                 tracing::warn!("Failed to add default route (may already exist)");

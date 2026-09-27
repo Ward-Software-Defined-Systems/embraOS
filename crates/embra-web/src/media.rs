@@ -281,7 +281,9 @@ mod tests {
 
     #[test]
     fn body_limit_leaves_room_for_the_brain_to_answer() {
-        assert!(MEDIA_BODY_LIMIT > MEDIA_UPLOAD_MAX);
-        assert!(MEDIA_BODY_LIMIT < embra_common::GRPC_MAX_MESSAGE_BYTES);
+        // Checked when this test is compiled: a body limit outside the
+        // window stops the build.
+        const { assert!(MEDIA_BODY_LIMIT > MEDIA_UPLOAD_MAX) };
+        const { assert!(MEDIA_BODY_LIMIT < embra_common::GRPC_MAX_MESSAGE_BYTES) };
     }
 }

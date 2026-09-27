@@ -178,10 +178,12 @@ mod tests {
         assert_eq!(MEDIA_MAX_PER_MESSAGE, 10);
         assert_eq!(MEDIA_HISTORY_MAX_IMAGES, 20);
         assert_eq!(MEDIA_HISTORY_MAX_BYTES, 16 * 1024 * 1024);
+        // Relations between constants are checked when this test is
+        // compiled, not when it runs: breaking one stops the build.
         // The replay ceiling must stay under the vision API's 32 MB
         // request cap after base64 inflation (×4/3).
-        assert!(MEDIA_HISTORY_MAX_BYTES * 4 / 3 < 32 * 1_000_000);
+        const { assert!(MEDIA_HISTORY_MAX_BYTES * 4 / 3 < 32 * 1_000_000) };
         // One inline image can never exceed the API's per-image cap.
-        assert!(MEDIA_INLINE_MAX * 4 / 3 < 10 * 1_000_000);
+        const { assert!(MEDIA_INLINE_MAX * 4 / 3 < 10 * 1_000_000) };
     }
 }

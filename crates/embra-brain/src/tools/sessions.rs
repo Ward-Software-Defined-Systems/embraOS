@@ -1403,40 +1403,7 @@ pub async fn session_summarize(db: &WardsonDbClient, param: &str) -> String {
     }
 
     // Select turns for large sessions
-    let selected_turns: Vec<(usize, &serde_json::Value)> = if total > 50 {
-        let mut selected = Vec::new();
-        // First 5 turns
-        for i in 0..5.min(total) {
-            selected.push((i, &turns[i]));
-        }
-        // Turns referencing tool activity. Post-NATIVE-TOOLS-01 sessions
-        // store tool calls as structured blocks rather than text, so this
-        // substring check is a LEGACY fallback that still catches
-        // pre-v7 session content where tool calls appear as [TOOL:...]
-        // strings. Safe to keep indefinitely: false positives on natural
-        // prose containing "[TOOL:" as a literal quote are rare and
-        // harmless (the turn is merely included in the summary corpus).
-        for i in 5..total.saturating_sub(10) {
-            let content = turns[i]
-                .get("content")
-                .and_then(|c| c.as_str())
-                .unwrap_or("");
-            if content.contains("[TOOL:") {
-                selected.push((i, &turns[i]));
-            }
-        }
-        // Last 10 turns
-        let last_start = total.saturating_sub(10);
-        for i in last_start..total {
-            if !selected.iter().any(|(idx, _)| *idx == i) {
-                selected.push((i, &turns[i]));
-            }
-        }
-        selected.sort_by_key(|(i, _)| *i);
-        selected
-    } else {
-        turns.iter().enumerate().collect()
-    };
+    let selected_turns = select_key_turns(&turns, 0);
 
     let mut formatted = String::new();
     for (i, turn) in &selected_turns {
@@ -1556,6 +1523,44 @@ pub async fn session_summary_save(db: &WardsonDbClient, param: &str) -> String {
     }
 }
 
+/// A stretch longer than this is shown by its key turns only.
+const KEY_TURNS_THRESHOLD: usize = 50;
+const KEY_TURNS_HEAD: usize = 5;
+const KEY_TURNS_TAIL: usize = 10;
+
+/// The turns `session_summarize` and `session_extract` put in front of
+/// the model. Up to [`KEY_TURNS_THRESHOLD`] turns are shown whole. Of a
+/// longer stretch: the first 5, the last 10, and every turn in between
+/// that carries a `[TOOL:` marker.
+///
+/// The marker is a LEGACY fallback. Sessions since NATIVE-TOOLS-01 store
+/// tool calls as structured blocks; the substring still catches pre-v7
+/// content, where a call is `[TOOL:...]` text. A false positive on prose
+/// that quotes the marker only adds a turn to the corpus.
+///
+/// Indices are positions in the session: `offset` is where `turns[0]`
+/// sits. The result is in turn order.
+fn select_key_turns(turns: &[serde_json::Value], offset: usize) -> Vec<(usize, &serde_json::Value)> {
+    let tail_start = if turns.len() > KEY_TURNS_THRESHOLD {
+        turns.len() - KEY_TURNS_TAIL
+    } else {
+        0 // everything is "tail": the stretch is shown whole
+    };
+    turns
+        .iter()
+        .enumerate()
+        .filter(|(i, turn)| {
+            *i < KEY_TURNS_HEAD
+                || *i >= tail_start
+                || turn
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .is_some_and(|c| c.contains("[TOOL:"))
+        })
+        .map(|(i, turn)| (offset + i, turn))
+        .collect()
+}
+
 /// Extract learnings from a session into memory (Option B: returns context for Brain).
 /// Param: `<name> [start-end]`
 pub async fn session_extract(db: &WardsonDbClient, param: &str) -> String {
@@ -1585,37 +1590,7 @@ pub async fn session_extract(db: &WardsonDbClient, param: &str) -> String {
     let turn_slice = &turns[start..end];
 
     // For large selections, pick key turns
-    let selected: Vec<(usize, &serde_json::Value)> = if turn_slice.len() > 50 {
-        let mut sel = Vec::new();
-        // First 5
-        for i in 0..5.min(turn_slice.len()) {
-            sel.push((start + i, &turn_slice[i]));
-        }
-        // Tool-containing turns — legacy [TOOL:...] substring fallback
-        // for pre-NATIVE-TOOLS-01 session content. New sessions store
-        // tool calls as structured blocks; this path is a best-effort
-        // for frozen legacy sessions that remain readable.
-        for i in 5..turn_slice.len().saturating_sub(10) {
-            let content = turn_slice[i]
-                .get("content")
-                .and_then(|c| c.as_str())
-                .unwrap_or("");
-            if content.contains("[TOOL:") {
-                sel.push((start + i, &turn_slice[i]));
-            }
-        }
-        // Last 10
-        let last_start = turn_slice.len().saturating_sub(10);
-        for i in last_start..turn_slice.len() {
-            if !sel.iter().any(|(idx, _)| *idx == start + i) {
-                sel.push((start + i, &turn_slice[i]));
-            }
-        }
-        sel.sort_by_key(|(i, _)| *i);
-        sel
-    } else {
-        turn_slice.iter().enumerate().map(|(i, t)| (start + i, t)).collect()
-    };
+    let selected = select_key_turns(turn_slice, start);
 
     let mut formatted = String::new();
     for (i, turn) in &selected {
@@ -2165,5 +2140,109 @@ mod session_query_plan_tests {
             .unwrap();
         // First token is "sweep" — its position in content_lower
         assert_eq!(&"the tool verification sweep".to_lowercase()[pos..pos + len], "sweep");
+    }
+}
+
+#[cfg(test)]
+mod key_turn_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    /// The selection as `session_summarize` and `session_extract` each
+    /// spelled it out before they shared `select_key_turns`: three index
+    /// loops, a de-duplication, a sort. Kept as the oracle.
+    fn reference(turns: &[Value], offset: usize) -> Vec<(usize, &Value)> {
+        if turns.len() <= 50 {
+            return turns.iter().enumerate().map(|(i, t)| (offset + i, t)).collect();
+        }
+        let mut sel = Vec::new();
+        for (i, turn) in turns.iter().enumerate().take(5) {
+            sel.push((offset + i, turn));
+        }
+        for (i, turn) in turns.iter().enumerate().take(turns.len() - 10).skip(5) {
+            let content = turn.get("content").and_then(|c| c.as_str()).unwrap_or("");
+            if content.contains("[TOOL:") {
+                sel.push((offset + i, turn));
+            }
+        }
+        for (i, turn) in turns.iter().enumerate().skip(turns.len() - 10) {
+            if !sel.iter().any(|(idx, _)| *idx == offset + i) {
+                sel.push((offset + i, turn));
+            }
+        }
+        sel.sort_by_key(|(i, _)| *i);
+        sel
+    }
+
+    /// `n` turns; the ones listed in `tool_at` carry the legacy marker.
+    fn turns(n: usize, tool_at: &[usize]) -> Vec<Value> {
+        (0..n)
+            .map(|i| {
+                if tool_at.contains(&i) {
+                    json!({"role": "assistant", "content": format!("[TOOL:git_status] turn {i}")})
+                } else if i % 7 == 3 {
+                    json!({"role": "user"}) // no content at all
+                } else {
+                    json!({"role": "user", "content": format!("turn {i}")})
+                }
+            })
+            .collect()
+    }
+
+    fn indices(sel: &[(usize, &Value)]) -> Vec<usize> {
+        sel.iter().map(|(i, _)| *i).collect()
+    }
+
+    #[test]
+    fn up_to_fifty_turns_are_shown_whole() {
+        for n in [0, 1, 5, 15, 49, 50] {
+            let t = turns(n, &[2, 20]);
+            assert_eq!(indices(&select_key_turns(&t, 0)), (0..n).collect::<Vec<_>>(), "n={n}");
+        }
+    }
+
+    #[test]
+    fn a_long_stretch_keeps_head_tail_and_tool_turns() {
+        let t = turns(60, &[3, 7, 30, 49, 50, 55]);
+        // 0..5 head; 7, 30, 49 tool turns of the middle; 50..60 tail.
+        // 3, 50 and 55 carry the marker too and appear once.
+        let want: Vec<usize> = (0..5).chain([7, 30, 49]).chain(50..60).collect();
+        assert_eq!(indices(&select_key_turns(&t, 0)), want);
+        // 51 turns is the first length that is cut.
+        let t = turns(51, &[]);
+        let want: Vec<usize> = (0..5).chain(41..51).collect();
+        assert_eq!(indices(&select_key_turns(&t, 0)), want);
+    }
+
+    #[test]
+    fn indices_are_session_positions() {
+        // session_extract hands over a slice that starts at `start`.
+        let t = turns(60, &[30]);
+        let sel = select_key_turns(&t, 100);
+        let want: Vec<usize> = (100..105).chain([130]).chain(150..160).collect();
+        assert_eq!(indices(&sel), want);
+        // Each index travels with its own turn.
+        for (i, turn) in sel {
+            if let Some(c) = turn.get("content").and_then(|c| c.as_str()) {
+                assert!(c.ends_with(&format!("turn {}", i - 100)), "{i}: {c}");
+            }
+        }
+    }
+
+    #[test]
+    fn matches_the_loops_it_replaced() {
+        for n in 0..=130usize {
+            let edge = [n.saturating_sub(10), n.saturating_sub(11)];
+            for tool_at in [&[][..], &[0], &[4, 5], &[n / 2], &edge] {
+                for offset in [0, 7] {
+                    let t = turns(n, tool_at);
+                    assert_eq!(
+                        select_key_turns(&t, offset),
+                        reference(&t, offset),
+                        "n={n} tool_at={tool_at:?} offset={offset}"
+                    );
+                }
+            }
+        }
     }
 }

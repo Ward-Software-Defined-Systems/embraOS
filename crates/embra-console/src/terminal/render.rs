@@ -92,13 +92,7 @@ pub fn parse_styled_line(line: &str, base_style: Style) -> StyledLine {
                 current.clear();
             }
             let start = i + 1;
-            let mut end = None;
-            for j in start..len {
-                if chars[j] == '`' {
-                    end = Some(j);
-                    break;
-                }
-            }
+            let end = chars[start..].iter().position(|&c| c == '`').map(|p| start + p);
             if let Some(end_pos) = end {
                 let code_text: String = chars[start..end_pos].iter().collect();
                 segments.push(StyledSegment::new(
@@ -233,5 +227,53 @@ pub fn parse_json_line(line: &str) -> StyledLine {
         vec![StyledSegment::new(String::new(), base_style)]
     } else {
         segments
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn texts(line: &str) -> Vec<(String, bool)> {
+        let code = Style::default().fg(Color::Gray);
+        parse_styled_line(line, Style::default())
+            .into_iter()
+            .map(|s| (s.text, s.style == code))
+            .collect()
+    }
+
+    fn seg(text: &str, code: bool) -> (String, bool) {
+        (text.to_string(), code)
+    }
+
+    #[test]
+    fn inline_code_is_its_own_segment() {
+        assert_eq!(
+            texts("run `cargo test` now"),
+            vec![seg("run ", false), seg("cargo test", true), seg(" now", false)]
+        );
+        // At the line's edges, and empty.
+        assert_eq!(texts("`a`"), vec![seg("a", true)]);
+        assert_eq!(texts("x``y"), vec![seg("x", false), seg("", true), seg("y", false)]);
+        // Two spans: the search for a closing tick starts after the opening one.
+        assert_eq!(
+            texts("`a` and `b`"),
+            vec![seg("a", true), seg(" and ", false), seg("b", true)]
+        );
+    }
+
+    #[test]
+    fn an_unclosed_backtick_is_text() {
+        assert_eq!(texts("a ` b"), vec![seg("a ", false), seg("` b", false)]);
+        // As the last character: nothing to search, nothing to index past.
+        assert_eq!(texts("tail `"), vec![seg("tail ", false), seg("`", false)]);
+    }
+
+    #[test]
+    fn multibyte_text_around_code_is_kept() {
+        assert_eq!(
+            texts("café `é` ünï"),
+            vec![seg("café ", false), seg("é", true), seg(" ünï", false)]
+        );
     }
 }
