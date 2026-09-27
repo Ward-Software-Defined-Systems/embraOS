@@ -167,12 +167,14 @@ Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, LLM p
 > --buildroot-only`.
 
 > **In-OS Rust toolchain (Guardian):** Step 3.5 downloads a SHA-256-verified Rust
-> toolchain — host `rust-1.94.1-aarch64-unknown-linux-musl` + arch-agnostic
-> `rust-std-1.94.1-wasm32-unknown-unknown` — into `vendor/rust-toolchain`, baked into
+> toolchain — host `rust-1.98.1-aarch64-unknown-linux-musl` + arch-agnostic
+> `rust-std-1.98.1-wasm32-unknown-unknown` — into `vendor/rust-toolchain`, baked into
 > the rootfs at `/opt/rust` for embra-guardian-v1. On macOS it is deliberately
 > **deferred to the Docker pass** (macOS lacks `sha256sum`/`xz`); `vendor/rust-toolchain`
 > rides the `-v "$PWD":/work` bind mount. First build needs network for this and adds
-> ~100 MB to the image. Override the pin with `RUST_TOOLCHAIN_VERSION=...`.
+> ~100 MB to the image. Override the pin with `RUST_TOOLCHAIN_VERSION=...`. An image
+> with a different pin leaves existing Guardian tools unloaded until the operator runs
+> `/guardian rebuild --all`.
 
 > **Embedding model (Step 3.6):** Downloads `BAAI/bge-small-en-v1.5` (~133 MB, SHA-256-verified) into
 > `vendor/embedding-model` and bakes it into the rootfs for in-process semantic KG retrieval.
@@ -334,10 +336,10 @@ or the intelligence proposes one, both soul-checked first (intelligence proposal
 also operator-approved) — to WebAssembly **with a Rust toolchain inside the image**, then
 runs them in a `wasmtime` sandbox. Step 3.5 stages that toolchain.
 
-- **What it downloads:** host `rust-1.94.1-aarch64-unknown-linux-musl` (aarch64 because
+- **What it downloads:** host `rust-1.98.1-aarch64-unknown-linux-musl` (aarch64 because
   it runs *inside* the aarch64 guest; `aarch64-unknown-linux-musl` is a Tier-2
   *with-host-tools* target so a prebuilt `rustc`/`cargo` exists) + arch-agnostic
-  `rust-std-1.94.1-wasm32-unknown-unknown`. Both are SHA-256-verified against the
+  `rust-std-1.98.1-wasm32-unknown-unknown`. Both are SHA-256-verified against the
   `.sha256` sidecars from `static.rust-lang.org`.
 - **Where it goes:** staged into `vendor/rust-toolchain`, installed read-only at
   `/opt/rust` in the rootfs by the `embra-rust-toolchain` Buildroot package. `rustc`
@@ -585,7 +587,7 @@ by design). The Docker `ubuntu:24.04` pass needs these.
 the Quick Start command; `sha256sum` ships in `coreutils` in the base image). On a bare
 ARM64 Linux host: `apt-get install -y xz-utils curl coreutils`.
 
-#### `sha256 verification failed for rust-1.94.1-aarch64-unknown-linux-musl.tar.xz`
+#### `sha256 verification failed for rust-1.98.1-aarch64-unknown-linux-musl.tar.xz`
 
 **Cause:** Truncated/corrupt download, or a stale partial stage.
 

@@ -3,6 +3,12 @@
 //! (regenerate with `cargo run -p embra-guardian --example gen_fixture`).
 //! Keeps `cargo test` self-contained — no in-OS toolchain needed.
 //!
+//! The fixture is what the in-OS toolchain pin produces: built with Rust
+//! 1.98.1, and the musl-host compiler the image carries emits the same
+//! bytes as a glibc-host 1.98.1. Regenerate it when the pin moves
+//! (`RUST_TOOLCHAIN_VERSION` in scripts/build-image*.sh), so the sandbox
+//! tests load what the OS will build.
+//!
 //! The `probe` tool: `{a,b,url?}` -> `{sum, fetched}`; `fetched` is the
 //! `host::http_get` result when `url` is present, else `null`.
 

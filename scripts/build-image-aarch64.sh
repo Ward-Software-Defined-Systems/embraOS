@@ -45,7 +45,12 @@ KERNEL_NAME="Image"
 
 # embra-guardian-v1 in-OS Rust toolchain pin (musl host + wasm32 std).
 # Staged into vendor/rust-toolchain by Step 3.5 and installed at /opt/rust.
-RUST_TOOLCHAIN_VERSION="${RUST_TOOLCHAIN_VERSION:-1.94.1}"
+# Kept at the host compiler's version (rust-toolchain.toml) as a convention,
+# but a separate setting: the brain loads a Guardian tool only when it was
+# built by the version in /opt/rust/RUST_VERSION, so moving this pin leaves
+# every existing tool unloaded on the next boot until the operator runs
+# `/guardian rebuild --all`.
+RUST_TOOLCHAIN_VERSION="${RUST_TOOLCHAIN_VERSION:-1.98.1}"
 
 # Buildroot release pin. Override at runtime:
 #   BUILDROOT_VERSION=2024.02 ./scripts/build-image-aarch64.sh ...

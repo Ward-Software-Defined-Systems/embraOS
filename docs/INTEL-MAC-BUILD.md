@@ -224,13 +224,14 @@ provider + credentials, timezone), then Learning Mode forms and seals the soul.
 > hosts (2026-07-19).
 
 > **In-OS Rust toolchain (Step 3.5):** Downloads a SHA-256-verified
-> `rust-1.94.1-x86_64-unknown-linux-musl` (host triple = guest arch, not
-> build-host arch) + `rust-std-1.94.1-wasm32-unknown-unknown` into
+> `rust-1.98.1-x86_64-unknown-linux-musl` (host triple = guest arch, not
+> build-host arch) + `rust-std-1.98.1-wasm32-unknown-unknown` into
 > `vendor/rust-toolchain`, baked into the rootfs at `/opt/rust` for
 > embra-guardian-v1. Needs `xz` + `sha256sum` on PATH — `brew install xz
 > coreutils` + the gnubin PATH from step 1 satisfies both. First build needs
 > network for this and adds ~100 MB to the image. Override the pin with
-> `RUST_TOOLCHAIN_VERSION=...`.
+> `RUST_TOOLCHAIN_VERSION=...`. An image with a different pin leaves existing
+> Guardian tools unloaded until the operator runs `/guardian rebuild --all`.
 
 > **Embedding model (Step 3.6):** Downloads `BAAI/bge-small-en-v1.5` (~133 MB, SHA-256-verified) into
 > `vendor/embedding-model` and bakes it into the rootfs for in-process semantic KG retrieval.

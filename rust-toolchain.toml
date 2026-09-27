@@ -6,7 +6,9 @@
 # .gitlab-ci.yml (the CI image tag derives from it, and every job asserts
 # the running rustc matches). The in-OS Guardian toolchain
 # (`RUST_TOOLCHAIN_VERSION` in scripts/build-image*.sh) is a separate pin,
-# for the compiler baked into the image.
+# for the compiler baked into the image. It is kept at this version as a
+# convention; moving it has a cost of its own (every Guardian tool needs a
+# `/guardian rebuild`), so it does not have to follow every bump here.
 #
 # Bump deliberately. A new compiler is a new clippy lint set, and CI denies
 # warnings: run the build, the tests, the musl cross-build, the Trunk build
