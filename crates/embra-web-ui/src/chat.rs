@@ -986,6 +986,11 @@ pub fn ChatApp() -> impl IntoView {
 
 // ── WS task ──────────────────────────────────────────────────────────
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one signal per piece of chat state the socket task feeds; the reasoning \
+              text stays its own signal so it can never reach the timeline"
+)]
 async fn run_ws_forever(
     outbound: RwSignal<Option<mpsc::UnboundedSender<ClientMsg>>>,
     messages: RwSignal<Vec<Bubble>>,
@@ -1043,6 +1048,10 @@ enum ExitReason {
     Err(String),
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the same signals as run_ws_forever, which calls it"
+)]
 async fn run_ws_once(
     mut rx: mpsc::UnboundedReceiver<ClientMsg>,
     messages: RwSignal<Vec<Bubble>>,
@@ -1130,6 +1139,10 @@ async fn run_ws_once(
     ExitReason::Ok
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the same signals as run_ws_once, which calls it"
+)]
 fn handle_server_msg(
     srv: ServerMsg,
     messages: RwSignal<Vec<Bubble>>,
@@ -1675,13 +1688,12 @@ where
         // leptos types `paste` as a plain Event; narrow to the clipboard
         // event to reach the pasted files.
         let Some(ce) = e.dyn_ref::<web_sys::ClipboardEvent>() else { return };
-        if let Some(dt) = ce.clipboard_data() {
-            if let Some(files) = dt.files() {
-                if files.length() > 0 {
-                    e.prevent_default();
-                    queue_files(Some(files), pending, session_name, next_local_id);
-                }
-            }
+        if let Some(dt) = ce.clipboard_data()
+            && let Some(files) = dt.files()
+            && files.length() > 0
+        {
+            e.prevent_default();
+            queue_files(Some(files), pending, session_name, next_local_id);
         }
     };
     let remove_pending = move |local_id: u32| {

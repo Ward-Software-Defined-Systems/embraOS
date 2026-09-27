@@ -63,10 +63,10 @@ pub fn use_status() -> RwSignal<StatusData> {
     let sig = RwSignal::new(StatusData::default());
     spawn_local(async move {
         loop {
-            if let Ok(resp) = gloo_net::http::Request::get("/api/status").send().await {
-                if let Ok(data) = resp.json::<StatusData>().await {
-                    sig.set(data);
-                }
+            if let Ok(resp) = gloo_net::http::Request::get("/api/status").send().await
+                && let Ok(data) = resp.json::<StatusData>().await
+            {
+                sig.set(data);
             }
             gloo_timers::future::TimeoutFuture::new(5_000).await;
         }

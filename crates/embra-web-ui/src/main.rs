@@ -31,13 +31,13 @@ fn pick_chat_mode() -> bool {
         Some(w) => w,
         None => return false,
     };
-    if let Ok(Some(ls)) = win.local_storage() {
-        if let Ok(Some(stored)) = ls.get_item("embra-mode") {
-            match stored.as_str() {
-                "chat" => return true,
-                "desktop" => return false,
-                _ => {}
-            }
+    if let Ok(Some(ls)) = win.local_storage()
+        && let Ok(Some(stored)) = ls.get_item("embra-mode")
+    {
+        match stored.as_str() {
+            "chat" => return true,
+            "desktop" => return false,
+            _ => {}
         }
     }
     win.inner_width()
