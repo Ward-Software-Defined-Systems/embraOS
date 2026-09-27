@@ -15,7 +15,7 @@ Hardware mapping for the test fleet:
 
 The list is deliberately short. MoE models need a minimum active-parameter threshold for honest instruction-following: below ~27–49B active they become confabulation-prone under complex multi-step protocols — enough stored knowledge to sound authoritative, not enough working memory to track what they've actually done. Dense models have no total/active split, so their parameter count is honest. Both picks below clear the threshold: Qwen3.6 27B and Qwen3.8 27B are dense (27B = 27B active).
 
-**Qwen3.8 27B** is the current recommendation; **Qwen3.6 27B** remains vetted and fully supported — there is no need to migrate an instance that is working. Both were verified against the complete 116-tool surface, not a subset.
+**Qwen3.8 27B** is the current recommendation; **Qwen3.6 27B** remains vetted and fully supported — there is no need to migrate an instance that is working. Both were verified against the complete tool surface of their time (116 tools; 115 since `check_update` was removed), not a subset.
 
 ### Local (Ollama / LM Studio)
 

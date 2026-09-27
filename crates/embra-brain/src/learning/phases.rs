@@ -131,7 +131,7 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 }
 
 // Single source of truth for Phase 4 tool category counts.
-// (json_key, display_label, count). Sums to 116 — matches the descriptor count
+// (json_key, display_label, count). Sums to 115 — matches the descriptor count
 // in `tools::registry::REGISTRY` (guarded by
 // `category_counts_sum_matches_registry` below). Aliases (`memory_search`,
 // `search_memory`, `file_rename`, `rmdir`) are folded into their target's
@@ -171,8 +171,12 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 // same day: Gemini image models via the Interactions API, default
 // gemini-3-pro-image, full-res file in MEDIA + a normalized copy back to
 // the model).
+// System went 4 → 3 when `check_update` was removed (2026-09-27): it asked
+// GitHub whether upstream WardSONDB had a release other than a hardcoded
+// "0.1.0", for a database that is vendored into an immutable rootfs. The
+// first tool ever REMOVED — the count fell, 116 → 115.
 const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
-    ("system", "System", 4),
+    ("system", "System", 3),
     ("memory_knowledge", "Memory & Knowledge", 7),
     ("self_awareness", "Self-Awareness", 5),
     ("time_context", "Time & Context", 3),

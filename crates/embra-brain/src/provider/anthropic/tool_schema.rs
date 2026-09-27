@@ -122,6 +122,10 @@ mod tests {
     /// unintentionally, fix the change, not the pin. Re-pinning is the
     /// deliberate act that records a tool-surface change; the count moves
     /// with `CATEGORY_COUNTS`.
+    ///
+    /// Re-pinned once: 2026-09-27, `check_update` removed (William's
+    /// decision), 116 → 115, `8a435cdf…` → `3b23798a…`. The manifest lost
+    /// that one element and no other byte.
     #[test]
     fn tools_snapshot_bytes_are_frozen() {
         use sha2::{Digest, Sha256};
@@ -132,7 +136,7 @@ mod tests {
         }
 
         let snapshot = snapshot();
-        assert_eq!(snapshot.len(), 116, "registered tool count moved");
+        assert_eq!(snapshot.len(), 115, "registered tool count moved");
 
         let canonical = serde_json::to_string(&serde_json::Value::Array(snapshot.clone()))
             .expect("snapshot serializes");
@@ -148,7 +152,7 @@ mod tests {
             .collect();
         assert_eq!(
             sha256_hex(&canonical),
-            "8a435cdf3b04ee7543ff42484161a1d8e2c1b6c6d22ecb7368a034c15d48099b",
+            "3b23798af82ad4130e8d3f359db0285b5f846227b60d17da347e22a4062793ba",
             "TOOL MANIFEST BYTES MOVED. Do not update the pinned hash unless \
              the tool surface was changed on purpose.\n---\n{}",
             per_tool.join("\n")

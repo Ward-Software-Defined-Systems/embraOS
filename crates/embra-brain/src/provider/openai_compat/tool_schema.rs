@@ -120,7 +120,7 @@ mod tests {
     /// Universal coverage: every registered descriptor must translate
     /// without error. The OpenAI-compat counterpart of Gemini's
     /// `all_registry_tools_translate_cleanly`. Counts >=70 to leave
-    /// headroom; current registry is 90.
+    /// headroom; the exact count is pinned by the Anthropic golden.
     #[test]
     fn all_registry_tools_translate_cleanly_openai_compat() {
         let descriptors: Vec<&'static ToolDescriptor> = registry::all_descriptors().collect();

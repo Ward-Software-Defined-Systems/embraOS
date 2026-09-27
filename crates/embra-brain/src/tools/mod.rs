@@ -197,47 +197,6 @@ pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UpdateInfo {
-    pub version: String,
-    pub current_version: String,
-    pub download_url: String,
-}
-
-pub async fn check_wardsondb_update() -> Option<UpdateInfo> {
-    let client = reqwest::Client::new();
-    let resp = client
-        .get("https://api.github.com/repos/ward-software-defined-systems/wardsondb/releases/latest")
-        .header("User-Agent", "embraOS/0.1.0")
-        .send()
-        .await
-        .ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let data: serde_json::Value = resp.json().await.ok()?;
-    let latest_tag = data.get("tag_name")?.as_str()?;
-    let latest_version = latest_tag.trim_start_matches('v');
-    let current_version = "0.1.0";
-    if latest_version != current_version {
-        let download_url = data
-            .get("assets")
-            .and_then(|a| a.as_array())
-            .and_then(|a| a.first())
-            .and_then(|a| a.get("browser_download_url"))
-            .and_then(|u| u.as_str())
-            .unwrap_or("")
-            .to_string();
-        Some(UpdateInfo {
-            version: latest_version.to_string(),
-            current_version: current_version.to_string(),
-            download_url,
-        })
-    } else {
-        None
-    }
-}
-
 // ── Memory & Knowledge Tools ──
 
 async fn ensure_collection(db: &WardsonDbClient, name: &str) {
@@ -1668,25 +1627,6 @@ pub struct SystemLogsArgs {
 impl SystemLogsArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
         Ok(system_logs(self.service.as_deref(), self.lines, self.filter.as_deref()).await)
-    }
-}
-
-#[derive(Debug, Deserialize, JsonSchema)]
-#[embra_tool(
-    name = "check_update",
-    description = "Check for available updates to WardSONDB. Returns \"up to date\" or the available version and download URL."
-)]
-pub struct CheckUpdateArgs {}
-
-impl CheckUpdateArgs {
-    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        Ok(match check_wardsondb_update().await {
-            Some(info) => format!(
-                "WardSONDB update available: v{} (current: v{})",
-                info.version, info.current_version
-            ),
-            None => "WardSONDB is up to date.".into(),
-        })
     }
 }
 
