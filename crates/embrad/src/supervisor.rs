@@ -84,7 +84,9 @@ fn db_verbose_enabled() -> bool {
         .any(|p| p == "embra.dbverbose=1")
 }
 
-/// Service definition
+/// Service definition. There is no dependency list: `register_services`
+/// registers each service after everything it needs, and registration
+/// order is the start order (and, reversed, the stop order).
 #[derive(Clone)]
 pub struct ServiceDef {
     pub name: String,
@@ -92,7 +94,6 @@ pub struct ServiceDef {
     pub args: Vec<String>,
     pub env: Vec<(String, String)>,
     pub health_check: HealthCheck,
-    pub depends_on: Vec<String>,
     pub restart_policy: RestartPolicy,
 }
 
@@ -104,8 +105,6 @@ pub enum HealthCheck {
     Grpc { port: u16, timeout: Duration },
     /// Just check if the process is alive
     ProcessAlive,
-    /// Custom: wait for a file to appear
-    FileExists { path: String, timeout: Duration },
 }
 
 /// Restart budget for a supervised service. `max_restarts` is a BURST
@@ -172,19 +171,19 @@ pub enum ServiceStatus {
 }
 
 pub struct Supervisor {
+    /// In start order.
     services: Vec<ServiceState>,
-    service_order: Vec<String>, // Names in start order
 }
 
 impl Supervisor {
     pub fn new() -> Self {
         Self {
             services: Vec::new(),
-            service_order: Vec::new(),
         }
     }
 
-    /// Register all embraOS services in dependency order.
+    /// Register all embraOS services in dependency order: `start_all`
+    /// starts them in the order they are registered here.
     pub fn register_services(&mut self) {
         // Set TZ for all child processes (read from STATE, written by config wizard)
         let tz = std::fs::read_to_string("/embra/state/timezone")
@@ -224,7 +223,6 @@ impl Supervisor {
                 url: "http://127.0.0.1:8090/_health".to_string(),
                 timeout: Duration::from_secs(30),
             },
-            depends_on: vec![],
             restart_policy: RestartPolicy::default(),
         });
 
@@ -242,7 +240,6 @@ impl Supervisor {
                 port: 50001,
                 timeout: Duration::from_secs(15),
             },
-            depends_on: vec!["wardsondb".to_string()],
             restart_policy: RestartPolicy::default(),
         });
 
@@ -261,7 +258,6 @@ impl Supervisor {
                 port: 50000,
                 timeout: Duration::from_secs(15),
             },
-            depends_on: vec!["embra-trustd".to_string()],
             restart_policy: RestartPolicy::default(),
         });
 
@@ -355,7 +351,6 @@ impl Supervisor {
                 port: 50002,
                 timeout: Duration::from_secs(30),
             },
-            depends_on: vec!["wardsondb".to_string(), "embra-apid".to_string()],
             restart_policy: RestartPolicy::default(),
         });
 
@@ -386,7 +381,6 @@ impl Supervisor {
                     port: 3345,
                     timeout: std::time::Duration::from_secs(45),
                 },
-                depends_on: vec!["embra-brain".to_string()],
                 restart_policy: RestartPolicy::default(),
             });
         } else {
@@ -409,14 +403,12 @@ impl Supervisor {
                 ],
                 env: console_env,
                 health_check: HealthCheck::ProcessAlive,
-                depends_on: vec!["embra-brain".to_string()],
                 restart_policy: RestartPolicy::default(),
             });
         }
     }
 
     fn add_service(&mut self, def: ServiceDef) {
-        let name = def.name.clone();
         self.services.push(ServiceState {
             def,
             child: None,
@@ -425,10 +417,9 @@ impl Supervisor {
             restart_count: 0,
             status: ServiceStatus::Stopped,
         });
-        self.service_order.push(name);
     }
 
-    /// Start all services in dependency order.
+    /// Start all services in registration order.
     /// After embra-trustd starts, verifies the soul. HALTs if verification fails.
     pub async fn start_all(&mut self) -> Result<()> {
         for i in 0..self.services.len() {
@@ -648,17 +639,6 @@ impl Supervisor {
                 // Just check the process exists
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 Ok(())
-            }
-            HealthCheck::FileExists { path, timeout } => {
-                let deadline = Instant::now() + *timeout;
-                while Instant::now() < deadline {
-                    if std::path::Path::new(path).exists() {
-                        return Ok(());
-                    }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                }
-                bail!("{} failed health check (file {} not created within {:?})",
-                    svc.def.name, path, timeout);
             }
         }
     }

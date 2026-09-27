@@ -11,7 +11,7 @@ use tracing::{info, debug};
 /// Called only when running as PID 1 (these are already mounted in dev mode).
 #[cfg(target_os = "linux")]
 pub fn mount_pseudofs() -> Result<()> {
-    use nix::mount::{mount, MsFlags};
+    use nix::mount::MsFlags;
 
     // /proc
     mount_if_needed("proc", "/proc", "proc", MsFlags::MS_NOEXEC | MsFlags::MS_NOSUID | MsFlags::MS_NODEV)?;
@@ -208,7 +208,7 @@ pub fn verify_partitions() -> Result<()> {
     // Mount tmpfs on /embra/ephemeral if not already mounted
     #[cfg(target_os = "linux")]
     {
-        use nix::mount::{mount, MsFlags};
+        use nix::mount::MsFlags;
         mount_if_needed("tmpfs", "/embra/ephemeral", "tmpfs", MsFlags::MS_NOSUID | MsFlags::MS_NODEV)?;
     }
 
