@@ -805,7 +805,7 @@ async fn handle_request(
                 }
             }
 
-            let pending_target = pending_key_setup.lock().await.clone();
+            let pending_target = *pending_key_setup.lock().await;
             if let Some(target) = pending_target {
                 let candidate = msg.content.trim().to_string();
                 handle_pending_key_setup(target, candidate, tx, db, pending_key_setup).await;
@@ -2907,7 +2907,7 @@ async fn handle_slash_command(
                     .args([
                         "-i", pub_path,
                         "-o", "StrictHostKeyChecking=accept-new",
-                        "-o", &format!("UserKnownHostsFile=/embra/workspace/.ssh/known_hosts"),
+                        "-o", "UserKnownHostsFile=/embra/workspace/.ssh/known_hosts",
                         target,
                     ])
                     .output(),

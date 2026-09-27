@@ -300,8 +300,8 @@ async fn emit_complete(
     stop_details: Option<StopDetails>,
 ) {
     let content: Vec<MessageBlock> = std::mem::take(blocks)
-        .into_iter()
-        .map(|(_, acc)| acc.finalize())
+        .into_values()
+        .map(|acc| acc.finalize())
         .collect();
     let effective_stop = stop_reason.unwrap_or_else(|| {
         // A missing message_delta means the SSE stream ended without

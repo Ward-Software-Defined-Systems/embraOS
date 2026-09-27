@@ -258,20 +258,17 @@ async fn run_health_checks(db: &WardsonDbClient, tx: &mpsc::Sender<Notification>
 }
 
 async fn run_update_checks(tx: &mpsc::Sender<Notification>) {
-    match crate::tools::check_wardsondb_update().await {
-        Some(info) => {
-            info!("WardSONDB update available: v{}", info.version);
-            let _ = tx
-                .send(Notification::new(
-                    Priority::Low,
-                    format!(
-                        "WardSONDB update available: v{} (current: v{})",
-                        info.version, info.current_version
-                    ),
-                ))
-                .await;
-        }
-        None => {}
+    if let Some(info) = crate::tools::check_wardsondb_update().await {
+        info!("WardSONDB update available: v{}", info.version);
+        let _ = tx
+            .send(Notification::new(
+                Priority::Low,
+                format!(
+                    "WardSONDB update available: v{} (current: v{})",
+                    info.version, info.current_version
+                ),
+            ))
+            .await;
     }
 }
 

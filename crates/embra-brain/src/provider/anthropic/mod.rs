@@ -754,8 +754,7 @@ mod tests {
         let url = format!("{}/v1/messages", server.uri());
         let err = send_with_retry(&Client::new(), &url, "k", &json!({}), &[0, 0])
             .await
-            .err()
-            .expect("expected exhaustion");
+            .expect_err("expected exhaustion");
         match &err {
             SendError::Http {
                 status,
@@ -786,8 +785,7 @@ mod tests {
         let url = format!("{}/v1/messages", server.uri());
         let err = send_with_retry(&Client::new(), &url, "k", &json!({}), &[0, 0])
             .await
-            .err()
-            .expect("expected immediate failure");
+            .expect_err("expected immediate failure");
         // Byte-identical to the pre-retry error format.
         assert_eq!(err.into_wire_message(), "API error 400: bad request");
     }
@@ -804,8 +802,7 @@ mod tests {
             &[0],
         )
         .await
-        .err()
-        .expect("expected network failure");
+        .expect_err("expected network failure");
         match &err {
             SendError::Network { attempts, .. } => assert_eq!(*attempts, 2),
             other => panic!("expected Network, got {other:?}"),

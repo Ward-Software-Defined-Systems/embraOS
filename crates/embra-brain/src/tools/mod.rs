@@ -756,7 +756,7 @@ async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
     let mut output = String::new();
 
     // Load soul (direct GET, fallback to query)
-    let soul_doc = db.read("soul.invariant", "soul").await.ok().or_else(|| None);
+    let soul_doc = db.read("soul.invariant", "soul").await.ok();
     let soul_doc = match soul_doc {
         Some(doc) => Some(doc),
         None => db.query("soul.invariant", &serde_json::json!({})).await.ok().and_then(|v| v.into_iter().next()),
@@ -810,7 +810,7 @@ async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
 
     // Load identity (direct GET, fallback to query)
     if focus.is_empty() || focus_lower.contains("identity") || focus_lower.contains("personality") || focus_lower.contains("traits") {
-        let id_doc = db.read("memory.identity", "identity").await.ok().or_else(|| None);
+        let id_doc = db.read("memory.identity", "identity").await.ok();
         let id_doc = match id_doc {
             Some(doc) => Some(doc),
             None => db.query("memory.identity", &serde_json::json!({})).await.ok().and_then(|v| v.into_iter().next()),
@@ -828,7 +828,7 @@ async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
 
     // Load user profile (direct GET, fallback to query)
     if focus.is_empty() || focus_lower.contains("user") || focus_lower.contains("operator") {
-        let user_doc = db.read("memory.user", "user").await.ok().or_else(|| None);
+        let user_doc = db.read("memory.user", "user").await.ok();
         let user_doc = match user_doc {
             Some(doc) => Some(doc),
             None => db.query("memory.user", &serde_json::json!({})).await.ok().and_then(|v| v.into_iter().next()),
@@ -1119,7 +1119,7 @@ mod session_summary_preview_tests {
         let preview = summary_preview(&content);
         assert!(preview.ends_with("..."));
         assert!(preview.len() <= SESSION_SUMMARY_PREVIEW_MAX + 3);
-        assert!(preview.strip_suffix("...").unwrap().len() % 3 == 0);
+        assert!(preview.strip_suffix("...").unwrap().len().is_multiple_of(3));
     }
 
     #[test]

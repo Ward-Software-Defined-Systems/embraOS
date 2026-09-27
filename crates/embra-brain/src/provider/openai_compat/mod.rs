@@ -808,7 +808,7 @@ mod tests {
         out
     }
 
-    fn complete_block<'a>(events: &'a [ProviderStreamEvent]) -> &'a Block {
+    fn complete_block(events: &[ProviderStreamEvent]) -> &Block {
         let turn = events
             .iter()
             .find_map(|e| match e {

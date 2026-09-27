@@ -173,7 +173,8 @@ mod tests {
     fn parses_proc_stat_aggregate_line() {
         let s = "cpu  100 10 20 1000 5 0 1 0 0 0\ncpu0 50 5 10 500 2 0 0 0 0 0\n";
         let snap = parse_proc_stat(s).unwrap();
-        assert_eq!(snap.total, 100 + 10 + 20 + 1000 + 5 + 0 + 1 + 0 + 0 + 0);
+        // One term per column of the `cpu` line, zeros included.
+        assert_eq!(snap.total, [100, 10, 20, 1000, 5, 0, 1, 0, 0, 0].iter().sum::<u64>());
         assert_eq!(snap.idle, 1000 + 5);
     }
 

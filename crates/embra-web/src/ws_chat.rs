@@ -161,5 +161,5 @@ fn json_err(message: &str) -> String {
     serde_json::to_string(&ServerMsg::Error {
         message: message.to_string(),
     })
-    .unwrap_or_else(|_| format!(r#"{{"t":"error","message":"json_err fallback"}}"#))
+    .unwrap_or_else(|_| r#"{"t":"error","message":"json_err fallback"}"#.to_string())
 }

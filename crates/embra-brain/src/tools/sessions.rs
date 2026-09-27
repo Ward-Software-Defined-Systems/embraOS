@@ -135,7 +135,7 @@ fn parse_range(range_str: &str, total: usize) -> Result<(usize, usize), String> 
     }
     if range_str.is_empty() {
         // Default: last 30 turns.
-        let start = if total > 30 { total - 30 } else { 0 };
+        let start = total.saturating_sub(30);
         return Ok((start, total));
     }
 
@@ -1131,7 +1131,7 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
                     .or_else(|| doc.get("id"))
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                ids.iter().any(|target| id == *target)
+                ids.contains(&id)
             })
             .collect()
     };
