@@ -73,7 +73,7 @@ For the data model, edge taxonomy, density rationale, promotion path, auto-enric
 | **time** | Current date, time, and day of week in the operator's configured timezone |
 | **calculate** | Evaluate math expressions — arithmetic (`+ - * / %`, `**` for exponent), `pi` and `e`, trig and hyperbolic functions, `sqrt` / `exp` / `ln` / `abs`, rounding, `atan2`, `max` / `min` |
 | **draft** | Save structured text artifacts (drafts, outlines, notes) — upserts by title; `draft delete <title>` removes (case-insensitive) |
-| **countdown** | Set a reminder with duration and message — proactive engine checks every 15 seconds |
+| **countdown** | Set a reminder with duration and message (`30s`, `5m`, `200h`) — the proactive engine checks every 15 seconds; a reminder is kept until 7 days after it was due, however far ahead it was set |
 | **cron_add** | Schedule recurring tool execution — supports `every 5m`, `every 1h`, `hourly`, `daily 09:00`, etc. |
 | **cron_list** | List all scheduled cron jobs with status and next/last run times |
 | **cron_remove** | Remove a scheduled cron job by ID |

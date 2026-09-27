@@ -134,6 +134,9 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
     // (unversioned on purpose — see ensure_hot_path_indexes).
     ensure_hot_path_indexes(db).await;
 
+    // Retention policies — every boot as well (see ensure_ttl_policies).
+    ensure_ttl_policies(db).await;
+
     // Identity-projection reconcile — also every boot, unversioned (the
     // sealed doc is the source of truth forever; insert-missing-only, so a
     // healthy boot costs two reads + a count). No-op on legacy flat souls.
@@ -332,6 +335,61 @@ async fn ensure_hot_path_indexes(db: &WardsonDbClient) {
                 name, collection, e
             ),
         }
+    }
+}
+
+/// Retention policies asserted on every boot: (collection, days, field).
+/// A document is removed once `field` is older than `days`.
+fn ttl_policy_specs() -> Vec<(&'static str, u64, &'static str)> {
+    vec![(
+        "reminders",
+        crate::tools::REMINDER_RETENTION_DAYS,
+        crate::tools::REMINDER_TTL_FIELD,
+    )]
+}
+
+/// Assert the retention policies — warn-don't-fail, runs on every boot.
+///
+/// Not a versioned migration, for the reason the hot-path indexes are not:
+/// a one-shot step that fails quietly records itself applied and never runs
+/// again (v4 logged a failed `set_ttl` and went on), and one that fails
+/// loudly stops the brain at boot over a cleanup policy. Setting a policy
+/// replaces the one stored, so this is idempotent, and the policy it sets
+/// is the more lenient one: a reminder is created before it is due, so
+/// nothing is removed earlier than v4's policy removed it.
+async fn ensure_ttl_policies(db: &WardsonDbClient) {
+    for (collection, days, field) in ttl_policy_specs() {
+        match db.set_ttl(collection, days, field).await {
+            Ok(()) => info!(
+                "Retention on {}: {} days after {} — ensured",
+                collection, days, field
+            ),
+            Err(e) => warn!(
+                "Retention on {} could not be set (the stored policy stays): {}",
+                collection, e
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod ttl_policy_tests {
+    use super::ttl_policy_specs;
+
+    /// The policy that lost reminders counted from `created_at`. The field
+    /// must be the one a reminder is DUE at, and must be one it carries
+    /// (`tools::reminder_tests::a_reminder_outlives_its_own_wait`).
+    #[test]
+    fn reminders_are_kept_until_after_they_are_due() {
+        let specs = ttl_policy_specs();
+        let reminders: Vec<_> = specs.iter().filter(|(c, _, _)| *c == "reminders").collect();
+        assert_eq!(reminders.len(), 1, "one policy per collection");
+        let (_, days, field) = reminders[0];
+        assert_eq!(*field, "trigger_at");
+        assert_ne!(*field, "created_at");
+        // The database refuses a retention of zero days.
+        assert!(*days >= 1);
+        assert_eq!(*days, 7);
     }
 }
 
@@ -769,6 +827,11 @@ async fn run_v3_singleton_ids(db: &WardsonDbClient) -> Result<()> {
 }
 
 /// Migration v4: Set TTL policies for auto-cleanup of ephemeral collections.
+///
+/// The reminders policy below is what v4 set on every existing instance and
+/// is kept as it ran. It is SUPERSEDED: counted from `created_at`, a reminder
+/// for more than seven days ahead was removed before it was due.
+/// `ensure_ttl_policies` re-keys it on every boot.
 async fn run_v4_ttl_policies(db: &WardsonDbClient) -> Result<()> {
     info!("Running migration v4: TTL policies");
 

@@ -945,16 +945,12 @@ async fn countdown(db: &WardsonDbClient, param: &str) -> String {
         return format!("Could not parse duration '{}'. Use formats like: 5m, 30s, 1h, '20 minutes'", duration_str);
     }
 
-    let trigger_at = Utc::now() + chrono::Duration::seconds(seconds as i64);
+    let now = Utc::now();
+    let trigger_at = now + chrono::Duration::seconds(seconds as i64);
 
     ensure_collection(db, "reminders").await;
 
-    let doc = serde_json::json!({
-        "message": message,
-        "trigger_at": trigger_at.to_rfc3339(),
-        "created_at": Utc::now().to_rfc3339(),
-        "fired": false,
-    });
+    let doc = reminder_doc(message, trigger_at, now);
 
     match db.write("reminders", &doc).await {
         Ok(id) => format!(
@@ -966,6 +962,28 @@ async fn countdown(db: &WardsonDbClient, param: &str) -> String {
         Err(e) => format!("Failed to set reminder: {}", e),
     }
 }
+
+/// A reminder as it is stored.
+fn reminder_doc(
+    message: &str,
+    trigger_at: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "message": message,
+        "trigger_at": trigger_at.to_rfc3339(),
+        "created_at": now.to_rfc3339(),
+        "fired": false,
+    })
+}
+
+/// What a reminder's lifetime is counted from, and for how long: it is
+/// removed `REMINDER_RETENTION_DAYS` after it was DUE. Counted from
+/// `created_at`, as migration v4 set it up, a reminder for more than seven
+/// days ahead was removed before it could fire. The policy is asserted on
+/// every boot (`migrations::ensure_ttl_policies`).
+pub(crate) const REMINDER_TTL_FIELD: &str = "trigger_at";
+pub(crate) const REMINDER_RETENTION_DAYS: u64 = 7;
 
 /// Most due reminders one check looks at, earliest trigger first.
 const REMINDER_WINDOW: usize = 500;
@@ -2230,6 +2248,32 @@ mod reminder_tests {
 
     fn ids(due: &[&serde_json::Value]) -> Vec<String> {
         due.iter().map(|d| d["_id"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn a_reminder_outlives_its_own_wait() {
+        // What the database compares is the stored string, as a string.
+        let now = chrono::DateTime::parse_from_rfc3339(NOW).unwrap().with_timezone(&Utc);
+        let hours = |h: i64| now + chrono::Duration::hours(h);
+        let doc = reminder_doc("the quarterly review", hours(200), now);
+        let kept_from = doc[REMINDER_TTL_FIELD].as_str().expect("the lifetime field is written");
+        assert_eq!(kept_from, hours(200).to_rfc3339());
+        assert_eq!(doc["fired"], json!(false));
+
+        // The worker removes what is older than now - retention. On the day
+        // the reminder is due it has been stored for 200 hours: more than
+        // the retention, and it must still be there.
+        let retention = chrono::Duration::days(REMINDER_RETENTION_DAYS as i64);
+        assert!(hours(200) - now > retention, "the case: a wait longer than the retention");
+        let cutoff_when_due = (hours(200) - retention).to_rfc3339();
+        assert!(kept_from >= cutoff_when_due.as_str(), "kept until it is due");
+        assert!(
+            doc["created_at"].as_str().unwrap() < cutoff_when_due.as_str(),
+            "counted from created_at it would be gone by then"
+        );
+        // And it goes once the retention has passed AFTER it was due.
+        let cutoff_later = (hours(200) + chrono::Duration::hours(1)).to_rfc3339();
+        assert!(kept_from < cutoff_later.as_str());
     }
 
     #[test]
