@@ -24,7 +24,6 @@ struct Candidate {
     id: String,
     collection: String,
     created_at: String,
-    session: String,
     tags: Vec<String>,
 }
 
@@ -211,18 +210,12 @@ fn is_self(id: &str, coll: &str, self_id: &str, self_coll: &str) -> bool {
 fn doc_to_candidate(doc: &serde_json::Value, collection: &str) -> Option<Candidate> {
     let id = doc.get("_id").and_then(|v| v.as_str())?.to_string();
     let created_at = doc.get("created_at").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    // session field differs across collections
-    let session = if collection == "memory.entries" {
-        doc.get("session").and_then(|v| v.as_str()).unwrap_or("").to_string()
-    } else {
-        doc.get("source_session").and_then(|v| v.as_str()).unwrap_or("").to_string()
-    };
     let tags = doc
         .get("tags")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
-    Some(Candidate { id, collection: collection.to_string(), created_at, session, tags })
+    Some(Candidate { id, collection: collection.to_string(), created_at, tags })
 }
 
 #[allow(clippy::too_many_arguments)]

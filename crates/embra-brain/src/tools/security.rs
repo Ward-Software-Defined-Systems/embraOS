@@ -352,7 +352,6 @@ pub async fn port_scan(param: &str) -> String {
 
 struct SshSession {
     user_host: String,      // "user@host"
-    port: u16,              // SSH port (default 22)
     control_path: String,   // "/tmp/embra-ssh-{uuid}"
 }
 
@@ -580,7 +579,6 @@ pub async fn ssh_session_start(param: &str) -> String {
                     if stdout.contains("embra_probe_ok") {
                         *lock = Some(SshSession {
                             user_host: user_host.clone(),
-                            port,
                             control_path,
                         });
                         format!(

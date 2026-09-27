@@ -62,10 +62,10 @@ Five WardSONDB collections, four node kinds and one edge layer. Memory collectio
 | Collection | Struct | Created by | Promoted/auto |
 |---|---|---|---|
 | `memory.entries` | (DB-only — no Rust struct) | `remember` tool; conversation persistence | episodic |
-| `memory.semantic` | `SemanticNode` (`crates/embra-brain/src/knowledge/types.rs:38-52`) | `knowledge_promote` | one-way irreversible |
-| `memory.procedural` | `ProceduralNode` (`types.rs:68-84`) | `knowledge_promote` | one-way irreversible |
+| `memory.semantic` | (DB-only — built field by field in `promotion.rs::promote_to_semantic`) | `knowledge_promote` | one-way irreversible |
+| `memory.procedural` | (DB-only — built in `promotion.rs::promote_to_procedural`) | `knowledge_promote` | one-way irreversible |
 | `identity.graph` | (DB-only — projection docs) | the identity-graph projection (seal/import + boot reconcile) | derived from the sealed doc — see [IDENTITY-GRAPH.md](IDENTITY-GRAPH.md) |
-| `memory.edges` | `KnowledgeEdge` (`types.rs:229-241`) | `derive_edges` + `knowledge_promote` + `knowledge_link` + the identity projection | mixed |
+| `memory.edges` | `KnowledgeEdge` (`crates/embra-brain/src/knowledge/types.rs`) | `derive_edges` + `knowledge_promote` + `knowledge_link` + the identity projection | mixed |
 
 Identity nodes (`_id` = graph node id, `content`/`node_type`/`origin` fields) are full graph citizens — traversable, dumpable, linkable from memories — but deliberately absent from enrichment's bulk prefetch (the sealed graph rides the system prompt) and untouchable by `knowledge_update`/`knowledge_unlink_node` (collection restriction). Their edges carry free-form per-intelligence relations via `EdgeType::Other` and provenance under `metadata.origin`; the every-boot reconcile restores any deleted projection doc from the sealed source.
 
@@ -73,18 +73,18 @@ Identity nodes (`_id` = graph node id, `content`/`node_type`/`origin` fields) ar
 
 There is no unified `NodeId` enum. Nodes are addressed everywhere as the tuple `(collection, id)` — see the visited-set keying at `crates/embra-brain/src/knowledge/edges.rs:115, 131, 155` and the traversal visited set in `traversal.rs::traverse_multi`. WardSONDB issues the `_id` per write; the collection comes from the caller.
 
-### `SemanticNode` (`memory.semantic`)
+### Semantic nodes (`memory.semantic`)
 
-Promoted factual knowledge with five categories (`SemanticCategory`, `types.rs:7-13`): `fact`, `preference`, `decision`, `observation`, `pattern`. Fields:
+Promoted factual knowledge with five categories (`SemanticCategory` in `types.rs`): `fact`, `preference`, `decision`, `observation`, `pattern`. Schema-by-convention, like every node collection: only edges have a Rust struct. Fields:
 
 - `content`, `category`, `tags`, `confidence` (default `0.9`; stored only — removed from the ranking 2026-09-08, see **The relevance rule**)
 - `source_entry_id`, `source_session` (provenance back to the episodic entry)
 - `access_count`, `last_accessed` (incremented only for nodes actually *returned* by retrieval/traversal since 2026-07-04 — see **Traversal** below)
 - `created_at`, `updated_at`
 
-### `ProceduralNode` (`memory.procedural`)
+### Procedural nodes (`memory.procedural`)
 
-Structured how-to knowledge with `title`, `description`, `preconditions`, `steps` (`Vec<ProceduralStep>` — `order` + `action` + optional `notes`), and `outcomes` (`success` + `failure`). Same provenance + access tracking fields as `SemanticNode`. `confidence` is not a ranking input (removed 2026-09-08 — `retrieval.rs::score_one` does not read it; pinned by `confidence_is_not_a_ranking_term`).
+Structured how-to knowledge with `title`, `description`, `preconditions`, `steps` (an array of `{order, action, notes?}` objects, stored as the caller supplied it), and `outcomes` (`success` + `failure`). Same provenance + access tracking fields as a semantic node. `confidence` is not a ranking input (removed 2026-09-08 — `retrieval.rs::score_one` does not read it; pinned by `confidence_is_not_a_ranking_term`).
 
 ### Episodic entries (`memory.entries`)
 
@@ -106,7 +106,7 @@ pub struct KnowledgeEdge {
 }
 ```
 
-(`types.rs:229-241`.) Indexed by `(source_id, edge_type)` and `(target_id, edge_type)` at migration v5. `metadata` is type-specific — `{session}` for `same_session`, `{distance_secs, window_secs}` for `temporal`, `{overlap_count}` for `tag_overlap`, `{promotion_type, category?}` for `derived_from`.
+(`KnowledgeEdge` in `types.rs`.) Indexed by `(source_id, edge_type)` and `(target_id, edge_type)` at migration v5. `metadata` is type-specific — `{session}` for `same_session`, `{distance_secs, window_secs}` for `temporal`, `{overlap_count}` for `tag_overlap`, `{promotion_type, category?}` for `derived_from`.
 
 ---
 
@@ -134,7 +134,7 @@ Unit-tested formulas at `edges.rs:296-315` (`test_edge_weight_temporal`, `test_e
 |---|---|---|---|
 | `derived_from` | `1.0` (`promotion.rs:204`) | semantic/procedural → source entry | every `knowledge_promote` call |
 
-Inserted by `insert_derived_from_edge` (`promotion.rs:189-209`). Directional (not symmetric) — verified by `directional_types_not_symmetric` (`types.rs:200-214`). `knowledge_unlink_edge` in triple form will NOT bidirectional-delete it.
+Inserted by `insert_derived_from_edge` (`promotion.rs:189-209`). Directional (not symmetric) — verified by `directional_types_not_symmetric` (`types.rs`). `knowledge_unlink_edge` in triple form will NOT bidirectional-delete it.
 
 This is the type whose categorization is commonly misread. `is_brain_created()` excludes it — the brain cannot create it via `knowledge_link`. It is purely a provenance edge written by the promotion path.
 
@@ -150,7 +150,7 @@ This is the type whose categorization is commonly misread. `is_brain_created()` 
 
 `knowledge_link` (`crates/embra-brain/src/knowledge/tools.rs:55-127`) rejects any other edge type with: *"Brain-created types: enables, contradicts, refines, depends_on, related_to"* (`tools.rs:65, 68`). Self-loops (`tools.rs:73-75`) and weights outside `(0.0, 1.0]` (`tools.rs:80-82`) are also rejected. Duplicate `(source_id, target_id, edge_type)` triples are rejected (`tools.rs:92-108`).
 
-`is_symmetric()` (`types.rs:154-159`) — `same_session`, `temporal`, `tag_overlap`, `related_to` are symmetric; everything else is directional. The triple form of `knowledge_unlink_edge` (`tools.rs:160-173`) consults this to decide whether to issue a bidirectional `$or` delete or a forward-only delete (Embra_Debug #63 regression test at `types.rs:200`).
+`EdgeType::is_symmetric()` (`types.rs`) — `same_session`, `temporal`, `tag_overlap`, `related_to` are symmetric; everything else is directional. The triple form of `knowledge_unlink_edge` (`tools.rs:160-173`) consults this to decide whether to issue a bidirectional `$or` delete or a forward-only delete (Embra_Debug #63 regression test: `directional_types_not_symmetric` in `types.rs`).
 
 ---
 
@@ -205,7 +205,7 @@ Both are query-time costs, not write-time costs. Neither is on a hot path. The a
 
 Promotion is one conversation-driven path that side-effects the edge layer — the operator asks the intelligence to consolidate a memory ("promote that as a semantic observation" / "save that as a procedure"), and the intelligence calls `knowledge_promote`. Implemented in `crates/embra-brain/src/knowledge/promotion.rs`. Two entry points:
 
-- `promote_to_semantic` (`:22-77`) — requires a category (`fact` / `preference` / `decision` / `observation` / `pattern`); writes a `SemanticNode` with `confidence: 0.9`.
+- `promote_to_semantic` (`:22-77`) — requires a category (`fact` / `preference` / `decision` / `observation` / `pattern`); writes a `memory.semantic` document with `confidence: 0.9`.
 - `promote_to_procedural` (`:80-153`) — requires a JSON object with `title`, `description`, `preconditions`, `steps`, `outcomes.{success, failure}` (schema validated at `:91-106`).
 
 Both share `load_source_entry` (`:157-187`) which rejects an already-promoted entry unless the target was deleted (in which case the stale `promoted_to` is cleared and promotion proceeds — `:172-176`).
@@ -443,7 +443,7 @@ Twelve `knowledge_*` tools registered via `#[embra_tool(...)]` macros — ten in
 
 **`knowledge_link`** — brain-creates an edge between any two nodes. `edge_type` is one of `enables | contradicts | refines | depends_on | related_to` — any other type is rejected (`tools.rs:64-68`). `weight` in `(0.0, 1.0]`. Self-loops rejected (`tools.rs:73-75`). Duplicate `(source_id, target_id, edge_type)` rejected (`tools.rs:92-108`).
 
-**`knowledge_unlink_edge`** — by `edge_id` or by `(source_id, edge_type, target_id)` triple; since 2026-07-30 the endpoint collections are **optional** (they were required but display-only — the delete filter has always matched by id + type, and requiring them produced spurious "missing arguments" rejections; omitted collections render as "any" in the result message). `edge_id` takes precedence. Free-form identity relations are addressable via `parse_lossy` (deleting a projection edge is safe — the next boot reconcile restores it). Triple form respects `is_symmetric()`: symmetric types (`same_session`, `temporal`, `tag_overlap`, `related_to`) delete bidirectionally via `$or`; directional types (`enables`, `contradicts`, `refines`, `depends_on`, `derived_from`, and free-form relations) delete only the forward direction. The directional-only behavior is a regression-guarded fix (Embra_Debug #63, test at `types.rs:200-214`).
+**`knowledge_unlink_edge`** — by `edge_id` or by `(source_id, edge_type, target_id)` triple; since 2026-07-30 the endpoint collections are **optional** (they were required but display-only — the delete filter has always matched by id + type, and requiring them produced spurious "missing arguments" rejections; omitted collections render as "any" in the result message). `edge_id` takes precedence. Free-form identity relations are addressable via `parse_lossy` (deleting a projection edge is safe — the next boot reconcile restores it). Triple form respects `is_symmetric()`: symmetric types (`same_session`, `temporal`, `tag_overlap`, `related_to`) delete bidirectionally via `$or`; directional types (`enables`, `contradicts`, `refines`, `depends_on`, `derived_from`, and free-form relations) delete only the forward direction. The directional-only behavior is a regression-guarded fix (Embra_Debug #63, test `directional_types_not_symmetric` in `types.rs`).
 
 **`knowledge_unlink_node`** — cascade-deletes a `memory.semantic` or `memory.procedural` node. Workflow (`tools.rs:221-294`): read node → clear `promoted_to` on every source entry the node `derived_from`-points back to → delete all edges referencing the node (source OR target) via `$or` query → delete the node. Reports cleared-entry count and cascaded-edge count. `memory.entries` is rejected — for episodic cleanup the intelligence uses `forget` instead, which has its own cascade per the post-Sprint-2 fix (see CHANGE-LOG or ARCHITECTURE.md commit log #33).
 

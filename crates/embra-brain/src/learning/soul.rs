@@ -34,26 +34,6 @@ pub async fn seal_soul(db: &WardsonDbClient, soul: &serde_json::Value) -> Result
     Ok(())
 }
 
-pub async fn verify_soul(db: &WardsonDbClient) -> Result<bool> {
-    let doc = match load_soul_doc(db).await? {
-        Some(doc) => doc,
-        None => return Ok(false),
-    };
-
-    let soul = doc
-        .get("soul")
-        .ok_or_else(|| anyhow::anyhow!("Soul document missing 'soul' field"))?;
-    let stored_hash = doc
-        .get("sha256")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("Soul document missing hash"))?;
-
-    let soul_json = serde_json::to_string_pretty(soul)?;
-    let computed_hash = compute_sha256(&soul_json);
-
-    Ok(computed_hash == stored_hash)
-}
-
 pub async fn is_soul_sealed(db: &WardsonDbClient) -> Result<bool> {
     db.collection_exists("soul.invariant").await
 }
@@ -87,7 +67,8 @@ fn compute_sha256(data: &str) -> String {
 }
 
 /// Compute the SHA-256 hash of a soul value, using the same serialization
-/// as `seal_soul` and `verify_soul`. Shared by startup validation and migrations.
+/// as `seal_soul` — and as embra-trustd, which verifies it at every boot.
+/// Shared by startup validation and migrations.
 pub fn compute_soul_hash(soul: &serde_json::Value) -> Result<String> {
     let soul_json = serde_json::to_string_pretty(soul)?;
     Ok(compute_sha256(&soul_json))

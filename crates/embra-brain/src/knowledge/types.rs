@@ -35,54 +35,6 @@ impl SemanticCategory {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SemanticNode {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub _id: Option<String>,
-    pub content: String,
-    pub category: SemanticCategory,
-    pub tags: Vec<String>,
-    pub source_entry_id: String,
-    pub source_session: String,
-    pub confidence: f64,
-    pub access_count: u64,
-    pub last_accessed: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProceduralStep {
-    pub order: u32,
-    pub action: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub notes: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProceduralOutcomes {
-    pub success: String,
-    pub failure: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProceduralNode {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub _id: Option<String>,
-    pub title: String,
-    pub description: String,
-    pub preconditions: Vec<String>,
-    pub steps: Vec<ProceduralStep>,
-    pub outcomes: ProceduralOutcomes,
-    pub tags: Vec<String>,
-    pub source_entry_id: String,
-    pub source_session: String,
-    pub access_count: u64,
-    pub last_accessed: Option<String>,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
 #[derive(Debug, Clone, PartialEq)]
 pub enum EdgeType {
     // Auto-derived at write time

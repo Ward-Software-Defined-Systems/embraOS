@@ -360,12 +360,6 @@ Session commands the user may use:
     )
 }
 
-pub fn reconnection_briefing(name: &str, last_active: &str) -> String {
-    format!(
-        "{name} reconnected. Last active: {last_active}. Session history restored."
-    )
-}
-
 #[cfg(test)]
 mod prompt_cleanup_tests {
     use super::*;

@@ -130,9 +130,6 @@ pub struct BrainGrpcService {
 #[derive(Debug, Clone)]
 pub struct OpenAiCompatSetupState {
     pub preset: crate::provider::openai_compat::OpenAiCompatPreset,
-    /// Whether the preset already had a config when --setup started.
-    /// Drives default-value selection on each prompt.
-    pub pre_existed: bool,
     pub current_endpoint: Option<String>,
     pub current_bearer: Option<String>,
     pub current_model: Option<String>,
@@ -3926,8 +3923,6 @@ async fn enter_openai_compat_setup(
         .ok()
         .filter(|s| !s.is_empty());
 
-    let pre_existed = current_endpoint.is_some() && current_model.is_some();
-
     let default_endpoint = current_endpoint
         .clone()
         .unwrap_or_else(|| preset.default_base_url().to_string());
@@ -3939,7 +3934,6 @@ async fn enter_openai_compat_setup(
 
     *pending.lock().await = Some(OpenAiCompatSetupState {
         preset,
-        pre_existed,
         current_endpoint,
         current_bearer,
         current_model,
@@ -3977,7 +3971,6 @@ async fn handle_pending_openai_compat_step(
     db: &Arc<WardsonDbClient>,
     pending: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
 ) -> SetupStepOutcome {
-    use crate::provider::openai_compat::OpenAiCompatPreset;
     let trimmed = input.trim();
 
     let next_step = std::mem::replace(&mut state.step, OpenAiCompatSetupStep::AwaitingEndpoint);
@@ -7366,7 +7359,6 @@ mod setup_reconfigure_tests {
     ) -> OpenAiCompatSetupState {
         OpenAiCompatSetupState {
             preset,
-            pre_existed: endpoint.is_some() && model.is_some(),
             current_endpoint: endpoint.map(String::from),
             current_bearer: bearer.map(String::from),
             current_model: model.map(String::from),
