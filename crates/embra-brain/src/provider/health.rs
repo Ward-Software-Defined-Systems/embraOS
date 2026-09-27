@@ -360,12 +360,18 @@ pub fn transition_events(prev: Option<&ProviderProbe>, next: &ProviderProbe) -> 
         ));
     }
     if next.model_present == Some(false) && prev_model_present != Some(false) {
+        // The Anthropic model is chosen with `/model`; `/provider --setup
+        // anthropic` only takes an API key.
+        let remedy = if next.kind == ProviderKind::Anthropic.as_str() {
+            "run /model to pick an available model".to_string()
+        } else {
+            format!("run /provider --setup {} to pick an available model", next.kind)
+        };
         out.push(Notification::new(
             Priority::Critical,
             format!(
-                "Configured model '{}' was not found on {} ({}) — run /provider --setup {} \
-                 to pick an available model.",
-                next.model, next.kind, next.endpoint, next.kind
+                "Configured model '{}' was not found on {} ({}) — {remedy}.",
+                next.model, next.kind, next.endpoint
             ),
         ));
     }
@@ -451,6 +457,29 @@ mod tests {
         assert_eq!(ok.state(), "up");
         assert_eq!(down.state(), "down");
         assert!(ok.healthy() && !down.healthy() && !absent.healthy() && !bad_key.healthy());
+    }
+
+    /// A model the API does not serve (a selectable id the key has no
+    /// access to, or an env/config passthrough id) must point the operator
+    /// at the command that changes it. For Anthropic that is `/model`.
+    #[test]
+    fn missing_model_hint_names_the_command_that_fixes_it() {
+        let mut absent = ProviderProbe::base(
+            &target(ProviderKind::Anthropic, "claude-opus-5-5", ""),
+            "api.anthropic.com".into(),
+        );
+        absent.reachable = true;
+        absent.model_present = Some(false);
+        absent.key_state = Some("valid".into());
+        let n = transition_events(None, &absent);
+        assert_eq!(n.len(), 1);
+        assert!(n[0].message.contains("'claude-opus-5-5' was not found"), "{}", n[0].message);
+        assert!(n[0].message.contains("run /model to pick"), "{}", n[0].message);
+        assert!(!n[0].message.contains("--setup"), "{}", n[0].message);
+
+        // OpenAI-compat presets pick their model in the setup flow.
+        let n = transition_events(None, &result(true, Some(false), Some("valid")));
+        assert!(n[0].message.contains("run /provider --setup lm_studio to pick"));
     }
 
     #[test]
