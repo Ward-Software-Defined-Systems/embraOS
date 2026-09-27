@@ -6,6 +6,9 @@ use crate::config::SystemConfig;
 use crate::db::{WardsonDbClient, MEMORY_FETCH_WINDOW};
 use crate::knowledge;
 
+// Test-only until `calculate` switches over from `meval`.
+#[cfg(test)]
+mod calc;
 pub mod cron;
 pub mod engineering;
 pub mod express;
