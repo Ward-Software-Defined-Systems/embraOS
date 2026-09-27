@@ -393,10 +393,10 @@ impl BrainService for BrainGrpcService {
             }
 
             // Stage 2: Learning Mode (if soul not sealed)
-            let soul_sealed = learning::is_soul_sealed(&**&db).await.unwrap_or(false);
+            let soul_sealed = learning::is_soul_sealed(&db).await.unwrap_or(false);
             if !soul_sealed {
                 info!("Soul not sealed — entering Learning Mode");
-                let loaded_config = config::load_config(&**&db).await.unwrap_or_else(|_| config::SystemConfig {
+                let loaded_config = config::load_config(&db).await.unwrap_or_else(|_| config::SystemConfig {
                     name: "Embra".to_string(),
                     api_key: api_key.clone(),
                     timezone: config_tz.clone(),
@@ -430,7 +430,7 @@ impl BrainService for BrainGrpcService {
                     Ok(()) => {
                         info!("Learning Mode complete — transitioning to Operational");
                         // Reload config in case it was updated
-                        if let Ok(cfg) = config::load_config(&**&db).await {
+                        if let Ok(cfg) = config::load_config(&db).await {
                             api_key = cfg.api_key;
                             config_tz = cfg.timezone;
                         }
@@ -689,7 +689,7 @@ impl BrainService for BrainGrpcService {
     }
 
     async fn get_soul_document(&self, _req: Request<GetSoulDocumentRequest>) -> Result<Response<GetSoulDocumentResponse>, Status> {
-        match learning::load_soul(&**&self.db).await {
+        match learning::load_soul(&self.db).await {
             Ok(Some(soul)) => {
                 let hash = learning::compute_soul_hash(&soul).unwrap_or_default();
                 Ok(Response::new(GetSoulDocumentResponse {
@@ -734,7 +734,7 @@ impl BrainService for BrainGrpcService {
     }
 
     async fn get_mode(&self, _req: Request<GetModeRequest>) -> Result<Response<GetModeResponse>, Status> {
-        let is_sealed = learning::is_soul_sealed(&**&self.db).await.unwrap_or(false);
+        let is_sealed = learning::is_soul_sealed(&self.db).await.unwrap_or(false);
         let mode = if is_sealed {
             OperatingMode::Operational
         } else {
@@ -941,14 +941,14 @@ async fn handle_request(
             }
 
             // Build system prompt
-            let system_prompt = if learning::is_soul_sealed(&**db).await.unwrap_or(false) {
+            let system_prompt = if learning::is_soul_sealed(db).await.unwrap_or(false) {
                 // Operational mode — build full system prompt
                 // Pass the soul as a Value — operational_mode renders it
                 // into the embraOS constitution via brain::render_constitution.
                 // The stored doc is read-only here; never re-serialized into
                 // storage, so the SHA-256 seal and trustd verification are
                 // untouched.
-                let soul = learning::load_soul(&**db)
+                let soul = learning::load_soul(db)
                     .await
                     .ok()
                     .flatten()
@@ -1689,7 +1689,7 @@ async fn handle_request(
                             // the /model handler's refresh recipe. Reload
                             // fresh: `loaded_config` still holds the old name.
                             if name == "set_name" && !is_error {
-                                if let Ok(fresh) = config::load_config(&**db).await {
+                                if let Ok(fresh) = config::load_config(db).await {
                                     let model_display =
                                         display_model_for(&fresh.api_provider, &fresh);
                                     let _ = tx.send(Ok(ConversationResponse {
@@ -2172,9 +2172,9 @@ async fn handle_request(
             })).await;
 
             // Send ModeTransition so console knows the correct mode, timezone, and name
-            let is_sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
+            let is_sealed = learning::is_soul_sealed(db).await.unwrap_or(false);
             let mode = if is_sealed { OperatingMode::Operational } else { OperatingMode::Learning };
-            let cfg = config::load_config(&**db).await.ok();
+            let cfg = config::load_config(db).await.ok();
             let tz = cfg.as_ref().map(|c| c.timezone.clone()).unwrap_or_else(|| config_tz.to_string());
             let name = cfg.as_ref().map(|c| c.name.clone()).unwrap_or_else(|| "Embra".to_string());
             let active_provider = cfg.as_ref().map(|c| c.api_provider.clone()).unwrap_or_else(|| "anthropic".to_string());
@@ -2297,7 +2297,7 @@ async fn handle_slash_command(
     // Sprint 4: includes the active model in the message so the
     // console status bar can render it without a separate event.
     let tz = config_tz.to_string();
-    let cfg_loaded = config::load_config(&**db).await.ok();
+    let cfg_loaded = config::load_config(db).await.ok();
     let config_name = cfg_loaded
         .as_ref()
         .map(|c| c.name.clone())
@@ -2394,12 +2394,12 @@ async fn handle_slash_command(
             match sub {
                 "" => {
                     let mgr = session_mgr.read().await;
-                    let is_sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
+                    let is_sealed = learning::is_soul_sealed(db).await.unwrap_or(false);
                     // Configured timezone for the last-active render — fresh
                     // config wins over the threaded boot value (the SessionAttach
                     // ModeChange pattern), so a runtime timezone change shows
                     // immediately.
-                    let display_tz = config::load_config(&**db)
+                    let display_tz = config::load_config(db)
                         .await
                         .ok()
                         .map(|c| c.timezone)
@@ -2656,7 +2656,7 @@ async fn handle_slash_command(
                     // It still records the attempt so a WS re-attach seconds
                     // later (while this briefing may still be in flight, with
                     // last_active not yet bumped) is cooldown-suppressed.
-                    let is_sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
+                    let is_sealed = learning::is_soul_sealed(db).await.unwrap_or(false);
                     if is_sealed && history_len > 0 {
                         let mut mgr = session_mgr.write().await;
                         mgr.record_briefing_attempt(args);
@@ -2680,7 +2680,7 @@ async fn handle_slash_command(
             }
         }
         "/soul" => {
-            let output = match learning::load_soul(&**db).await {
+            let output = match learning::load_soul(db).await {
                 Ok(Some(soul)) => {
                     if crate::identity_graph::is_graph_soul(&soul) {
                         // Graph mode: grouped prose + the seal header
@@ -2710,7 +2710,7 @@ async fn handle_slash_command(
                 Err(_) => {
                     // Graph mode (imported instances write no identity
                     // doc): identity lives in the sealed graph.
-                    match learning::load_soul(&**db).await {
+                    match learning::load_soul(db).await {
                         Ok(Some(soul)) if crate::identity_graph::is_graph_soul(&soul) => {
                             format!(
                                 "Identity is part of the sealed identity graph:\n\n{}",
@@ -2724,12 +2724,12 @@ async fn handle_slash_command(
             send_msg(tx, output).await;
         }
         "/mode" => {
-            let sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
+            let sealed = learning::is_soul_sealed(db).await.unwrap_or(false);
             send_msg(tx, if sealed { "Operational (soul sealed)".to_string() } else { "Learning (soul not sealed)".to_string() }).await;
         }
         "/github-token" => {
             if args.is_empty() {
-                let has_token = tools::engineering::resolve_github_token(&**db).await.is_some();
+                let has_token = tools::engineering::resolve_github_token(db).await.is_some();
                 if has_token {
                     send_msg(tx, "GitHub token is configured. Use /github-token <token> to update it.".to_string()).await;
                 } else {
@@ -2741,10 +2741,10 @@ async fn handle_slash_command(
                     send_msg(tx, "Warning: token doesn't look like a GitHub token (expected ghp_/gho_/github_pat_ prefix). Saving anyway.".to_string()).await;
                 }
                 // Save to WardSONDB config.system
-                match config::load_config(&**db).await {
+                match config::load_config(db).await {
                     Ok(mut cfg) => {
                         cfg.github_token = Some(token.clone());
-                        if let Err(e) = config::save_config(&**db, &cfg).await {
+                        if let Err(e) = config::save_config(db, &cfg).await {
                             send_msg(tx, format!("Failed to save token: {}", e)).await;
                             return None;
                         }
@@ -3009,7 +3009,7 @@ async fn handle_provider_command(
     // auto-target match below). OpenAI-compat presets must be
     // specified explicitly.
     if let Some(rest) = action.strip_prefix("--setup") {
-        let cfg = match config::load_config(&**db).await {
+        let cfg = match config::load_config(db).await {
             Ok(c) => c,
             Err(_) => {
                 send_msg(
@@ -3107,7 +3107,7 @@ async fn handle_provider_command(
 
     match action {
         "" | "status" => {
-            let cfg = config::load_config(&**db).await.ok();
+            let cfg = config::load_config(db).await.ok();
             let provider = cfg
                 .as_ref()
                 .map(|c| c.api_provider.clone())
@@ -3139,7 +3139,7 @@ async fn handle_provider_command(
             // Surface a missing-config error early so the operator gets
             // a useful hint instead of a per-call failure on the next
             // turn.
-            let cfg = match config::load_config(&**db).await {
+            let cfg = match config::load_config(db).await {
                 Ok(c) => c,
                 Err(_) => {
                     send_msg(
@@ -3271,7 +3271,7 @@ async fn handle_iter_cap_command(
         }
     };
 
-    let mut cfg = match config::load_config(&**db).await {
+    let mut cfg = match config::load_config(db).await {
         Ok(c) => c,
         Err(e) => {
             send_msg(
@@ -3309,7 +3309,7 @@ async fn handle_iter_cap_command(
     // Reset / default → clear the override
     if trimmed.eq_ignore_ascii_case("reset") || trimmed.eq_ignore_ascii_case("default") {
         cfg.max_tool_iterations = None;
-        if let Err(e) = config::save_config(&**db, &cfg).await {
+        if let Err(e) = config::save_config(db, &cfg).await {
             send_msg(
                 format!("/iter-cap: failed to save: {e}"),
                 SystemMessageType::Error,
@@ -3332,7 +3332,7 @@ async fn handle_iter_cap_command(
     match parse_iter_cap_value(trimmed) {
         Ok(n) => {
             cfg.max_tool_iterations = Some(n);
-            if let Err(e) = config::save_config(&**db, &cfg).await {
+            if let Err(e) = config::save_config(db, &cfg).await {
                 send_msg(
                     format!("/iter-cap: failed to save: {e}"),
                     SystemMessageType::Error,
@@ -3392,7 +3392,7 @@ async fn handle_show_reasoning_command(
         }
     };
 
-    let mut cfg = match config::load_config(&**db).await {
+    let mut cfg = match config::load_config(db).await {
         Ok(c) => c,
         Err(e) => {
             send_msg(
@@ -3444,7 +3444,7 @@ async fn handle_show_reasoning_command(
     };
 
     cfg.show_reasoning = new_value;
-    if let Err(e) = config::save_config(&**db, &cfg).await {
+    if let Err(e) = config::save_config(db, &cfg).await {
         send_msg(
             format!("/show-reasoning: failed to save: {e}"),
             SystemMessageType::Error,
@@ -3499,7 +3499,7 @@ async fn perform_provider_swap(
     //    /embra/state/api_key so the supervisor's existing read path
     //    keeps working until a future change teaches embrad about
     //    per-provider STATE.
-    if let Ok(mut cfg) = config::load_config(&**db).await {
+    if let Ok(mut cfg) = config::load_config(db).await {
         // Sprint 5: OpenAI-compat presets are pre-checked for
         // endpoint + model configuration rather than api_key presence.
         // Bearer comes from runtime env; absence is OK (no-auth path).
@@ -3555,7 +3555,7 @@ async fn perform_provider_swap(
         };
         cfg.api_provider = target.as_str().to_string();
         cfg.api_key = target_key.clone();
-        if let Err(e) = config::save_config(&**db, &cfg).await {
+        if let Err(e) = config::save_config(db, &cfg).await {
             let _ = tx
                 .send(Ok(ConversationResponse {
                     response_type: Some(conversation_response::ResponseType::System(
@@ -3595,7 +3595,7 @@ async fn perform_provider_swap(
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
                 if let Some(id) = id {
-                    let model_str = match config::load_config(&**db).await {
+                    let model_str = match config::load_config(db).await {
                         Ok(c) => display_model_for(target.as_str(), &c),
                         Err(_) => target.as_str().to_string(),
                     };
@@ -3622,7 +3622,7 @@ async fn perform_provider_swap(
     // 5-minute tick.
     crate::provider::health::request_probe();
 
-    let cfg_after = config::load_config(&**db).await.ok();
+    let cfg_after = config::load_config(db).await.ok();
     let model_for_swap_msg = match cfg_after.as_ref() {
         Some(c) => display_model_for(target.as_str(), c),
         None => target.as_str().to_string(),
@@ -3662,7 +3662,7 @@ async fn perform_provider_swap(
         .map(|c| c.timezone.clone())
         .unwrap_or_else(|| "Etc/UTC".to_string());
     let model = model_for_swap_msg.clone();
-    let is_sealed = learning::is_soul_sealed(&**db).await.unwrap_or(false);
+    let is_sealed = learning::is_soul_sealed(db).await.unwrap_or(false);
     let mode = if is_sealed {
         OperatingMode::Operational
     } else {
@@ -3906,7 +3906,7 @@ async fn enter_openai_compat_setup(
         _ => unreachable!("enter_openai_compat_setup called with non-OpenAI-compat kind"),
     };
 
-    let cfg = config::load_config(&**db).await.ok();
+    let cfg = config::load_config(db).await.ok();
     let (current_endpoint, current_model) = match (cfg.as_ref(), preset) {
         (Some(c), OpenAiCompatPreset::Ollama) => (
             non_empty(&c.openai_compat.ollama_endpoint),
@@ -4238,7 +4238,7 @@ async fn complete_openai_compat_setup(
     use crate::provider::openai_compat::OpenAiCompatPreset;
 
     // 1. Persist endpoint + model on config; api_provider untouched.
-    let mut cfg = match config::load_config(&**db).await {
+    let mut cfg = match config::load_config(db).await {
         Ok(c) => c,
         Err(_) => {
             let _ = tx
@@ -4265,7 +4265,7 @@ async fn complete_openai_compat_setup(
             cfg.openai_compat.lm_studio_model = model.clone();
         }
     }
-    if let Err(e) = config::save_config(&**db, &cfg).await {
+    if let Err(e) = config::save_config(db, &cfg).await {
         let _ = tx
             .send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::System(SystemMessage {
@@ -4396,7 +4396,7 @@ async fn handle_pending_key_setup(
     }
 
     // Persist into config.
-    let mut cfg = match config::load_config(&**db).await {
+    let mut cfg = match config::load_config(db).await {
         Ok(c) => c,
         Err(_) => {
             send_msg(
@@ -4420,7 +4420,7 @@ async fn handle_pending_key_setup(
             // of SystemConfig fields.
         }
     }
-    if let Err(e) = config::save_config(&**db, &cfg).await {
+    if let Err(e) = config::save_config(db, &cfg).await {
         send_msg(
             format!("Failed to persist key: {}", e),
             SystemMessageType::Error,
@@ -4704,7 +4704,7 @@ async fn handle_model_command(
         }
     };
 
-    let mut cfg = match config::load_config(&**db).await {
+    let mut cfg = match config::load_config(db).await {
         Ok(c) => c,
         Err(e) => {
             send(
@@ -4767,7 +4767,7 @@ async fn handle_model_command(
     };
 
     cfg.anthropic_model = Some(display.to_string());
-    if let Err(e) = config::save_config(&**db, &cfg).await {
+    if let Err(e) = config::save_config(db, &cfg).await {
         send(
             format!("/model: failed to save: {e}"),
             SystemMessageType::Error,
@@ -5488,7 +5488,7 @@ async fn check_session_provider(
     session_name: &str,
 ) -> Result<(), (String, String)> {
     let session_provider = read_session_provider(db, session_name).await;
-    let active_provider = config::load_config(&**db)
+    let active_provider = config::load_config(db)
         .await
         .map(|c| c.api_provider)
         .unwrap_or_else(|_| "anthropic".to_string());
@@ -5710,7 +5710,7 @@ async fn run_learning_loop(
         state.phase = learning::LearningPhase::SoulDefinition;
     }
     // If soul is sealed, we shouldn't be here — but check anyway
-    if learning::is_soul_sealed(&**db).await.unwrap_or(false) {
+    if learning::is_soul_sealed(db).await.unwrap_or(false) {
         return Ok(());
     }
 
@@ -5756,7 +5756,7 @@ async fn run_learning_loop(
         if state.phase == learning::LearningPhase::IdentityFormation && !import_offered {
             import_offered = true;
             use crate::identity_graph::import_flow::{offer_import, ImportOutcome};
-            match offer_import(tx, incoming, &mut stage_rx, &**db, &config, &mut state).await? {
+            match offer_import(tx, incoming, &mut stage_rx, db, &config, &mut state).await? {
                 ImportOutcome::NoCandidates | ImportOutcome::Conversational => {
                     // Fall through to the normal Phase-2 kickoff below.
                 }
@@ -5834,7 +5834,7 @@ async fn run_learning_loop(
                 )),
             })).await;
 
-            if let Err(e) = learning::handle_phase_complete(&mut state, &**db, &config).await {
+            if let Err(e) = learning::handle_phase_complete(&mut state, db, &config).await {
                 error!("Phase 4 auto-advance failed: {}", e);
                 let _ = tx.send(Ok(ConversationResponse {
                     response_type: Some(conversation_response::ResponseType::System(
@@ -5924,7 +5924,7 @@ async fn run_learning_loop(
 
         if phase_complete {
             // Persist extracted documents and advance phase
-            match learning::handle_phase_complete(&mut state, &**db, &config).await {
+            match learning::handle_phase_complete(&mut state, db, &config).await {
                 Err(e) => {
                     error!("Phase complete handling failed: {}", e);
                     let _ = tx.send(Ok(ConversationResponse {
@@ -6011,7 +6011,7 @@ async fn run_learning_loop(
                         // second client staying frozen on Learning after another
                         // completes onboarding. The task owns an `Arc<Sender>`
                         // clone for its lifetime, so `changed()` never errors.
-                        if learning::is_soul_sealed(&**db).await.unwrap_or(false) {
+                        if learning::is_soul_sealed(db).await.unwrap_or(false) {
                             let _ = tx.send(Ok(soul_sealed_mode_change(&config))).await;
                             return Ok(());
                         }
@@ -6066,7 +6066,7 @@ async fn run_learning_loop(
                             state.conversation_history.push(Message::assistant(&history_entry));
 
                             if phase_complete {
-                                if let Err(e) = learning::handle_phase_complete(&mut state, &**db, &config).await {
+                                if let Err(e) = learning::handle_phase_complete(&mut state, db, &config).await {
                                     error!("Phase complete handling failed: {}", e);
                                 }
 
