@@ -114,6 +114,47 @@ mod tests {
         }
     }
 
+    /// Byte-stability tripwire for the tool manifest. The serialized
+    /// snapshot is part of the prompt-cache key on every turn, so a moved
+    /// byte — a reworded description, a doc comment on a `JsonSchema`
+    /// field, a `schemars`/`serde_json` bump that reorders or reshapes a
+    /// schema — is a cache event for every instance. If the hash changes
+    /// unintentionally, fix the change, not the pin. Re-pinning is the
+    /// deliberate act that records a tool-surface change; the count moves
+    /// with `CATEGORY_COUNTS`.
+    #[test]
+    fn tools_snapshot_bytes_are_frozen() {
+        use sha2::{Digest, Sha256};
+        fn sha256_hex(s: &str) -> String {
+            let mut h = Sha256::new();
+            h.update(s.as_bytes());
+            format!("{:x}", h.finalize())
+        }
+
+        let snapshot = snapshot();
+        assert_eq!(snapshot.len(), 116, "registered tool count moved");
+
+        let canonical = serde_json::to_string(&serde_json::Value::Array(snapshot.clone()))
+            .expect("snapshot serializes");
+        // Per-tool digests localize a failure: diff this list against the
+        // same output from the last green commit.
+        let per_tool: Vec<String> = snapshot
+            .iter()
+            .map(|t| {
+                let name = t.get("name").and_then(|v| v.as_str()).unwrap_or("<unknown>");
+                let body = serde_json::to_string(t).unwrap_or_default();
+                format!("{name} {}", &sha256_hex(&body)[..12])
+            })
+            .collect();
+        assert_eq!(
+            sha256_hex(&canonical),
+            "8a435cdf3b04ee7543ff42484161a1d8e2c1b6c6d22ecb7368a034c15d48099b",
+            "TOOL MANIFEST BYTES MOVED. Do not update the pinned hash unless \
+             the tool surface was changed on purpose.\n---\n{}",
+            per_tool.join("\n")
+        );
+    }
+
     #[test]
     fn tools_snapshot_is_nonempty_and_includes_known_tools() {
         let snapshot = snapshot();
