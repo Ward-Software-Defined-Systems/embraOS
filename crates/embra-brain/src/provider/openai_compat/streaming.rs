@@ -48,7 +48,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
 
@@ -72,13 +72,29 @@ pub async fn process_sse_stream(
     model_id: String,
     include_reasoning: bool,
 ) -> Result<()> {
-    let mut stream = response.bytes_stream();
+    pump(response.bytes_stream(), tx, model_id, include_reasoning).await
+}
+
+/// The parser, over any stream of byte chunks: the response body in
+/// production, a list of byte vectors in the tests. The tests run this
+/// function, not a part of it.
+async fn pump<S, B, E>(
+    mut stream: S,
+    tx: mpsc::Sender<StreamEvent>,
+    model_id: String,
+    include_reasoning: bool,
+) -> Result<()>
+where
+    S: Stream<Item = std::result::Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+    E: Into<anyhow::Error>,
+{
     let mut buffer = String::new();
     let mut state = ParserState::new(model_id, include_reasoning);
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        let text = String::from_utf8_lossy(&chunk);
+        let chunk = chunk.map_err(Into::into)?;
+        let text = String::from_utf8_lossy(chunk.as_ref());
         buffer.push_str(&text);
         consume_sse_lines(&mut buffer, &mut state, &tx).await;
         if state.completed {
@@ -143,8 +159,7 @@ async fn consume_sse_lines(
     }
 }
 
-/// In-flight assembly state. `pub(super)` so the test harness can
-/// drive it without a real `reqwest::Response`.
+/// In-flight assembly state.
 pub(super) struct ParserState {
     pub(super) model_id: String,
     pub(super) text_buffer: String,
@@ -374,11 +389,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// In-memory test harness that drives the parser without an HTTP
-    /// transport. Returns all StreamEvents and the final state.
-    /// `include_reasoning: false` matches the existing tests'
-    /// expectation that reasoning never streams; reasoning-on tests
-    /// call `drive_fake_with_reasoning` instead.
+    /// The body in one chunk, reasoning off. Reasoning-on tests call
+    /// `drive_fake_with_options`.
     async fn drive_fake(sse_text: &str, model_id: &str) -> Vec<StreamEvent> {
         drive_fake_with_options(sse_text, model_id, false).await
     }
@@ -388,18 +400,25 @@ mod tests {
         model_id: &str,
         include_reasoning: bool,
     ) -> Vec<StreamEvent> {
+        run_chunks(vec![sse_text.as_bytes().to_vec()], model_id, include_reasoning).await
+    }
+
+    /// Run the parser over the chunks and collect what it emits.
+    async fn run_chunks(
+        chunks: Vec<Vec<u8>>,
+        model_id: &str,
+        include_reasoning: bool,
+    ) -> Vec<StreamEvent> {
         let (tx, mut rx) = mpsc::channel(256);
-        let mut buffer = sse_text.to_string();
-        let mut state = ParserState::new(model_id.to_string(), include_reasoning);
-        consume_sse_lines(&mut buffer, &mut state, &tx).await;
-        if !state.completed {
-            state.emit_complete(&tx).await;
-        }
-        drop(tx);
+        let stream = futures_util::stream::iter(
+            chunks.into_iter().map(Ok::<_, std::convert::Infallible>),
+        );
+        let parser = tokio::spawn(pump(stream, tx, model_id.to_string(), include_reasoning));
         let mut events = Vec::new();
         while let Some(e) = rx.recv().await {
             events.push(e);
         }
+        parser.await.expect("parser task").expect("parser result");
         events
     }
 
@@ -1080,5 +1099,146 @@ mod tests {
             serde_json::from_value(assistant_chunk_with_text("token", None)).unwrap();
         state.process_chunk(chunk, &tx).await;
         assert!(state.receiver_gone, "send to a dropped receiver must flag receiver_gone");
+    }
+
+    /// The same contract one level up: with the flag set the parser
+    /// returns, and with it goes the response body — the connection. It
+    /// must not read on.
+    #[tokio::test]
+    async fn a_dropped_receiver_ends_the_parser_at_its_next_send() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let text = data_frame(assistant_chunk_with_text("one", None)).into_bytes();
+        let reasoning = data_frame(json!({
+            "choices": [{"delta": {"reasoning": "hm"}, "finish_reason": null}]
+        }))
+        .into_bytes();
+        for (checkpoint, first) in [("text", &text), ("reasoning", &reasoning)] {
+            let read = Arc::new(AtomicUsize::new(0));
+            let counter = read.clone();
+            let chunks = vec![first.clone(), text.clone(), text.clone(), text.clone()];
+            let stream = futures_util::stream::iter(
+                chunks.into_iter().map(Ok::<_, std::convert::Infallible>),
+            )
+            .inspect(move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            });
+            let (tx, rx) = mpsc::channel(8);
+            drop(rx);
+            pump(stream, tx, "test-model".to_string(), true)
+                .await
+                .expect("a dropped receiver is not an error");
+            assert_eq!(read.load(Ordering::SeqCst), 1, "read on after {checkpoint}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_line_is_read_whole_wherever_the_chunks_were_cut() {
+        let mut sse = String::new();
+        sse.push_str(&data_frame(assistant_chunk_with_text("I'll write it.", None)));
+        sse.push_str(&data_frame(json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [{
+                    "index": 0, "id": "call_1", "type": "function",
+                    "function": {"name": "file_write", "arguments": "{\"path\":\"notes.md\","}
+                }]},
+                "finish_reason": null
+            }]
+        })));
+        sse.push_str(&data_frame(json!({
+            "choices": [{
+                "index": 0,
+                "delta": {"tool_calls": [{
+                    "index": 0,
+                    "function": {"arguments": "\"content\":\"plain text\"}"}
+                }]},
+                "finish_reason": "tool_calls"
+            }]
+        })));
+        sse.push_str("data: [DONE]\n\n");
+        let body = sse.into_bytes();
+
+        let whole = run_chunks(vec![body.clone()], "test-model", false).await;
+        let turn = complete_event(&whole);
+        assert_eq!(turn.outcome, TurnOutcome::ToolUse);
+        let Block::ToolCall { args, .. } = &turn.content[1] else {
+            panic!("expected ToolCall, got {:?}", turn.content);
+        };
+        assert_eq!(args, &json!({"path": "notes.md", "content": "plain text"}));
+        // No `PartialEq` on the turn; its `Debug` form says it all.
+        let want = format!("{turn:?}");
+        for cut in 1..body.len() {
+            let chunks = vec![body[..cut].to_vec(), body[cut..].to_vec()];
+            let events = run_chunks(chunks, "test-model", false).await;
+            assert_eq!(text_deltas(&events), ["I'll write it."], "cut at byte {cut}");
+            assert_eq!(format!("{:?}", complete_event(&events)), want, "cut at byte {cut}");
+        }
+    }
+
+    #[tokio::test]
+    async fn crlf_and_a_data_prefix_without_its_space_are_read() {
+        let chunk = assistant_chunk_with_text("hi", Some("stop"));
+        let sse = format!("event: message\r\ndata:{chunk}\r\n\r\ndata: [DONE]\r\n\r\n");
+        let events = drive_fake(&sse, "test-model").await;
+        assert_eq!(text_deltas(&events), ["hi"]);
+        assert_eq!(complete_event(&events).outcome, TurnOutcome::EndTurn);
+    }
+
+    #[tokio::test]
+    async fn a_bare_end_of_stream_still_completes_once() {
+        // No finish_reason and no [DONE]: the body just ends.
+        let sse = data_frame(assistant_chunk_with_text("hi", None));
+        let events = drive_fake(&sse, "test-model").await;
+        let completes = events
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::Complete(_)))
+            .count();
+        assert_eq!(completes, 1);
+        assert_eq!(complete_event(&events).outcome, TurnOutcome::EndTurn);
+
+        // A finish_reason, then [DONE], then more: one Complete, and
+        // nothing after the end is read.
+        let mut sse = data_frame(assistant_chunk_with_text("hi", Some("stop")));
+        sse.push_str("data: [DONE]\n\n");
+        sse.push_str(&data_frame(assistant_chunk_with_text(" after", None)));
+        let events = drive_fake(&sse, "test-model").await;
+        assert_eq!(text_deltas(&events), ["hi"]);
+        let completes = events
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::Complete(_)))
+            .count();
+        assert_eq!(completes, 1);
+    }
+
+    #[tokio::test]
+    async fn a_last_line_without_its_newline_is_not_processed() {
+        let mut sse = data_frame(assistant_chunk_with_text("whole", None));
+        sse.push_str(&format!("data: {}", assistant_chunk_with_text(" cut off", None)));
+        let events = drive_fake(&sse, "test-model").await;
+        assert_eq!(text_deltas(&events), ["whole"]);
+        let Block::Text(t) = &complete_event(&events).content[0] else {
+            panic!("expected Text");
+        };
+        assert_eq!(t, "whole");
+    }
+
+    #[tokio::test]
+    async fn a_transport_error_is_returned_to_the_caller() {
+        let first = data_frame(assistant_chunk_with_text("one", None)).into_bytes();
+        let stream = futures_util::stream::iter(vec![
+            Ok(first),
+            Err(std::io::Error::other("connection reset")),
+        ]);
+        let (tx, mut rx) = mpsc::channel(8);
+        let err = pump(stream, tx, "test-model".to_string(), false)
+            .await
+            .expect_err("the read error");
+        assert!(err.to_string().contains("connection reset"));
+        // What arrived before it was delivered; nothing is made up after
+        // it. The caller turns the error into the Error event.
+        assert!(matches!(rx.recv().await, Some(StreamEvent::TextDelta(t)) if t == "one"));
+        assert!(rx.recv().await.is_none());
     }
 }

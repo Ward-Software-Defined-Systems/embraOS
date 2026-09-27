@@ -39,7 +39,7 @@
 //!   the presence of `functionCall` parts is the continuation signal.
 
 use anyhow::Result;
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use tokio::sync::mpsc;
 
 use crate::provider::ir::{AssistantTurn, Block, EarlyStopReason, TurnOutcome};
@@ -59,13 +59,28 @@ pub async fn process_sse_stream(
     tx: mpsc::Sender<StreamEvent>,
     include_reasoning: bool,
 ) -> Result<()> {
-    let mut stream = response.bytes_stream();
+    pump(response.bytes_stream(), tx, include_reasoning).await
+}
+
+/// The parser, over any stream of byte chunks: the response body in
+/// production, a list of byte vectors in the tests. The tests run this
+/// function; there is no second copy of it for them to drift from.
+async fn pump<S, B, E>(
+    mut stream: S,
+    tx: mpsc::Sender<StreamEvent>,
+    include_reasoning: bool,
+) -> Result<()>
+where
+    S: Stream<Item = std::result::Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+    E: Into<anyhow::Error>,
+{
     let mut buffer = String::new();
     let mut state = ParserState::with_options(include_reasoning);
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        let text = String::from_utf8_lossy(&chunk);
+        let chunk = chunk.map_err(Into::into)?;
+        let text = String::from_utf8_lossy(chunk.as_ref());
         buffer.push_str(&text);
 
         while let Some(newline_pos) = buffer.find('\n') {
@@ -109,8 +124,7 @@ pub async fn process_sse_stream(
     Ok(())
 }
 
-/// Mutable in-flight assembly state. Public-via-this-module only so
-/// the test harness can drive it without a real `reqwest::Response`.
+/// Mutable in-flight assembly state.
 #[derive(Default)]
 struct ParserState {
     parts: Vec<GeminiPart>,
@@ -412,58 +426,43 @@ fn part_to_blocks(part: GeminiPart) -> Vec<Block> {
 mod tests {
     use super::*;
 
-    /// Drive the parser against an in-memory SSE body without going
-    /// through `reqwest::Response` (which is opaque). Pulls the
-    /// state-machine logic into the test directly.
-    async fn run_stream(events: &[&str]) -> Vec<StreamEvent> {
+    fn sse_body(events: &[&str]) -> Vec<u8> {
         let mut body = String::new();
         for e in events {
             body.push_str("data: ");
             body.push_str(e);
             body.push_str("\n\n");
         }
+        body.into_bytes()
+    }
+
+    /// The events as one SSE body, arriving in one chunk; reasoning off.
+    async fn run_stream(events: &[&str]) -> Vec<StreamEvent> {
+        run_chunks(vec![sse_body(events)], false).await
+    }
+
+    /// Run the parser over the chunks and collect what it emits.
+    async fn run_chunks(chunks: Vec<Vec<u8>>, include_reasoning: bool) -> Vec<StreamEvent> {
         let (tx, mut rx) = mpsc::channel(128);
-        tokio::spawn(async move {
-            drive_fake(body, tx).await;
-        });
+        let stream = futures_util::stream::iter(
+            chunks.into_iter().map(Ok::<_, std::convert::Infallible>),
+        );
+        let parser = tokio::spawn(pump(stream, tx, include_reasoning));
         let mut out = Vec::new();
         while let Some(ev) = rx.recv().await {
             out.push(ev);
         }
+        parser.await.expect("parser task").expect("parser result");
         out
     }
 
-    async fn drive_fake(body: String, tx: mpsc::Sender<StreamEvent>) {
-        drive_fake_with_options(body, tx, false).await;
-    }
-
-    async fn drive_fake_with_options(
-        body: String,
-        tx: mpsc::Sender<StreamEvent>,
-        include_reasoning: bool,
-    ) {
-        let mut state = ParserState::with_options(include_reasoning);
-        for line in body.lines() {
-            if line.is_empty() || line.starts_with(':') {
-                continue;
-            }
-            let Some(data) = line.strip_prefix("data: ") else {
-                continue;
-            };
-            if data == "[DONE]" {
-                state.emit_complete(&tx).await;
-                return;
-            }
-            let Ok(chunk) = serde_json::from_str::<GeminiStreamChunk>(data) else {
-                continue;
-            };
-            state.process_chunk(chunk, &tx).await;
-            if state.terminal {
-                state.emit_complete(&tx).await;
-                return;
-            }
-        }
-        state.emit_complete(&tx).await;
+    fn text_deltas(out: &[StreamEvent]) -> Vec<&str> {
+        out.iter()
+            .filter_map(|e| match e {
+                StreamEvent::TextDelta(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect()
     }
 
     fn complete_turn(out: &[StreamEvent]) -> AssistantTurn {
@@ -510,20 +509,7 @@ mod tests {
             r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"Considering the question.","thought":true}]},"index":0}]}"#,
             r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"Visible answer.","thought":false}]},"finishReason":"STOP","index":0}]}"#,
         ];
-        let mut body = String::new();
-        for e in events {
-            body.push_str("data: ");
-            body.push_str(e);
-            body.push_str("\n\n");
-        }
-        let (tx, mut rx) = mpsc::channel(64);
-        tokio::spawn(async move {
-            drive_fake_with_options(body, tx, true).await;
-        });
-        let mut out = Vec::new();
-        while let Some(ev) = rx.recv().await {
-            out.push(ev);
-        }
+        let out = run_chunks(vec![sse_body(&events)], true).await;
 
         let reasoning: Vec<_> = out
             .iter()
@@ -701,5 +687,135 @@ mod tests {
         let out = run_stream(&events).await;
         let turn = complete_turn(&out);
         assert_eq!(turn.outcome, TurnOutcome::EarlyStop(EarlyStopReason::Safety));
+    }
+
+    // What follows had no test while the tests ran a copy of the line
+    // loop: the copy read a whole body at once and never looked at the
+    // receiver.
+
+    #[tokio::test]
+    async fn a_line_is_read_whole_wherever_the_chunks_were_cut() {
+        let events = [
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"I'll write it."}]},"index":0}]}"#,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"id":"fc1","name":"file_write","args":{"path":"notes.md","content":"plain text"}},"thoughtSignature":"sig-abc"}]},"finishReason":"STOP","index":0}]}"#,
+        ];
+        let body = sse_body(&events);
+        let whole = complete_turn(&run_chunks(vec![body.clone()], false).await);
+        assert_eq!(whole.outcome, TurnOutcome::ToolUse);
+        assert_eq!(whole.content.len(), 2);
+        // No `PartialEq` on the turn; its `Debug` form says it all.
+        let want = format!("{whole:?}");
+        for cut in 1..body.len() {
+            let out = run_chunks(vec![body[..cut].to_vec(), body[cut..].to_vec()], false).await;
+            assert_eq!(text_deltas(&out), ["I'll write it."], "cut at byte {cut}");
+            assert_eq!(format!("{:?}", complete_turn(&out)), want, "cut at byte {cut}");
+        }
+    }
+
+    #[tokio::test]
+    async fn framing_noise_is_skipped() {
+        let body = concat!(
+            ": ping\r\n",
+            "event: message\r\n",
+            "data: not json\n\n",
+            r#"data: {"candidates":[{"content":{"role":"model","parts":[{"text":"kept"}]},"index":0}]}"#,
+            "\r\n\r\n",
+            r#"data: {"candidates":[{"content":{"role":"model","parts":[]},"finishReason":"STOP","index":0}]}"#,
+            "\n\n",
+            r#"data: {"candidates":[{"content":{"role":"model","parts":[{"text":" after the end"}]},"index":0}]}"#,
+            "\n\n",
+        );
+        let out = run_chunks(vec![body.as_bytes().to_vec()], false).await;
+        assert_eq!(text_deltas(&out), ["kept"]);
+        let turn = complete_turn(&out);
+        assert!(matches!(&turn.content[..], [Block::Text(t)] if t == "kept"));
+    }
+
+    #[tokio::test]
+    async fn done_sentinel_and_a_bare_end_of_stream_both_complete() {
+        let text = [
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"index":0}]}"#,
+        ];
+        // The body just ends: no finishReason.
+        let turn = complete_turn(&run_stream(&text).await);
+        assert_eq!(turn.outcome, TurnOutcome::EndTurn);
+        assert!(matches!(&turn.content[..], [Block::Text(t)] if t == "hi"));
+
+        let mut body = sse_body(&text);
+        body.extend_from_slice(b"data: [DONE]\n\n");
+        body.extend_from_slice(&sse_body(&[
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":" after"}]},"index":0}]}"#,
+        ]));
+        let out = run_chunks(vec![body], false).await;
+        assert_eq!(text_deltas(&out), ["hi"]);
+        let completes = out
+            .iter()
+            .filter(|e| matches!(e, StreamEvent::Complete(_)))
+            .count();
+        assert_eq!(completes, 1);
+    }
+
+    #[tokio::test]
+    async fn a_last_line_without_its_newline_is_not_processed() {
+        let mut body = sse_body(&[
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"whole"}]},"index":0}]}"#,
+        ]);
+        body.extend_from_slice(
+            br#"data: {"candidates":[{"content":{"role":"model","parts":[{"text":" cut off"}]},"index":0}]}"#,
+        );
+        let out = run_chunks(vec![body], false).await;
+        assert_eq!(text_deltas(&out), ["whole"]);
+        assert!(matches!(&complete_turn(&out).content[..], [Block::Text(t)] if t == "whole"));
+    }
+
+    /// The `/stop` contract. The consumer drops the stream; the next send
+    /// fails; the parser returns, and with it goes the response body —
+    /// the connection. It must not read on.
+    #[tokio::test]
+    async fn a_dropped_receiver_ends_the_parser_at_its_next_send() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let text = sse_body(&[
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"one"}]},"index":0}]}"#,
+        ]);
+        let thought = sse_body(&[
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"hm","thought":true}]},"index":0}]}"#,
+        ]);
+        for (checkpoint, first) in [("text", &text), ("thought", &thought)] {
+            let read = Arc::new(AtomicUsize::new(0));
+            let counter = read.clone();
+            let chunks = vec![first.clone(), text.clone(), text.clone(), text.clone()];
+            let stream = futures_util::stream::iter(
+                chunks.into_iter().map(Ok::<_, std::convert::Infallible>),
+            )
+            .inspect(move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            });
+            let (tx, rx) = mpsc::channel(8);
+            drop(rx);
+            pump(stream, tx, true)
+                .await
+                .expect("a dropped receiver is not an error");
+            assert_eq!(read.load(Ordering::SeqCst), 1, "read on after {checkpoint}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_transport_error_is_returned_to_the_caller() {
+        let first = sse_body(&[
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"one"}]},"index":0}]}"#,
+        ]);
+        let stream = futures_util::stream::iter(vec![
+            Ok(first),
+            Err(std::io::Error::other("connection reset")),
+        ]);
+        let (tx, mut rx) = mpsc::channel(8);
+        let err = pump(stream, tx, false).await.expect_err("the read error");
+        assert!(err.to_string().contains("connection reset"));
+        // What arrived before it was delivered; nothing is made up after
+        // it. The caller turns the error into the Error event.
+        assert!(matches!(rx.recv().await, Some(StreamEvent::TextDelta(t)) if t == "one"));
+        assert!(rx.recv().await.is_none());
     }
 }

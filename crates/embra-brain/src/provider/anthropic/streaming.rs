@@ -11,7 +11,7 @@
 //! [`crate::provider::StreamEvent`].
 
 use anyhow::Result;
-use futures_util::StreamExt;
+use futures_util::{Stream, StreamExt};
 use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
@@ -116,15 +116,26 @@ pub async fn process_sse_stream(
     response: reqwest::Response,
     tx: mpsc::Sender<AnthropicStreamEvent>,
 ) -> Result<()> {
-    let mut stream = response.bytes_stream();
+    pump(response.bytes_stream(), tx).await
+}
+
+/// The parser, over any stream of byte chunks: the response body in
+/// production, a list of byte vectors in the tests. The tests run this
+/// function; there is no second copy of it for them to drift from.
+async fn pump<S, B, E>(mut stream: S, tx: mpsc::Sender<AnthropicStreamEvent>) -> Result<()>
+where
+    S: Stream<Item = std::result::Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+    E: Into<anyhow::Error>,
+{
     let mut buffer = String::new();
     let mut blocks: BTreeMap<usize, BlockAccumulator> = BTreeMap::new();
     let mut stop_reason: Option<StopReason> = None;
     let mut stop_details: Option<StopDetails> = None;
 
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        let text = String::from_utf8_lossy(&chunk);
+        let chunk = chunk.map_err(Into::into)?;
+        let text = String::from_utf8_lossy(chunk.as_ref());
         buffer.push_str(&text);
 
         while let Some(newline_pos) = buffer.find('\n') {
@@ -340,8 +351,7 @@ fn parse_stop_reason(s: &str) -> Option<StopReason> {
 
 /// Extract `stop_details` from a `message_delta`'s `delta` object. The
 /// API includes it only alongside `stop_reason: "refusal"`; absent,
-/// null, or malformed → `None`. Shared by the production parser and the
-/// `drive_fake` test mirror so the two can't drift.
+/// null, or malformed → `None`.
 fn parse_stop_details(delta: &serde_json::Value) -> Option<StopDetails> {
     delta
         .get("stop_details")
@@ -353,156 +363,50 @@ fn parse_stop_details(delta: &serde_json::Value) -> Option<StopDetails> {
 mod tests {
     use super::*;
 
-    async fn run_stream(events: &[&str]) -> Vec<AnthropicStreamEvent> {
-        // Build a synthetic SSE response body and drive the parser by
-        // bypassing reqwest::Response (which is opaque).
+    fn sse_body(events: &[&str]) -> Vec<u8> {
         let mut body = String::new();
         for e in events {
             body.push_str("data: ");
             body.push_str(e);
             body.push_str("\n\n");
         }
+        body.into_bytes()
+    }
+
+    /// The events as one SSE body, arriving in one chunk.
+    async fn run_stream(events: &[&str]) -> Vec<AnthropicStreamEvent> {
+        run_chunks(vec![sse_body(events)]).await
+    }
+
+    /// Run the parser over the chunks and collect what it emits.
+    async fn run_chunks(chunks: Vec<Vec<u8>>) -> Vec<AnthropicStreamEvent> {
         let (tx, mut rx) = mpsc::channel(128);
-        let body_arc = body.clone();
-        tokio::spawn(async move {
-            let _ = drive_fake(body_arc, tx).await;
-        });
+        let stream = futures_util::stream::iter(
+            chunks.into_iter().map(Ok::<_, std::convert::Infallible>),
+        );
+        let parser = tokio::spawn(pump(stream, tx));
         let mut out = Vec::new();
         while let Some(ev) = rx.recv().await {
             out.push(ev);
         }
+        parser.await.expect("parser task").expect("parser result");
         out
     }
 
-    // Drive the SSE parser against an in-memory body string by reusing
-    // the state-machine logic manually (the prod fn takes a reqwest
-    // body).
-    async fn drive_fake(body: String, tx: mpsc::Sender<AnthropicStreamEvent>) -> Result<()> {
-        let mut buffer = String::new();
-        let mut blocks: BTreeMap<usize, BlockAccumulator> = BTreeMap::new();
-        let mut stop_reason: Option<StopReason> = None;
-        let mut stop_details: Option<StopDetails> = None;
-        buffer.push_str(&body);
+    fn tokens(out: &[AnthropicStreamEvent]) -> Vec<&str> {
+        out.iter()
+            .filter_map(|e| match e {
+                AnthropicStreamEvent::Token(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
 
-        while let Some(newline_pos) = buffer.find('\n') {
-            let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
-            buffer = buffer[newline_pos + 1..].to_string();
-            if line.is_empty() || line.starts_with(':') {
-                continue;
-            }
-            let Some(data) = line.strip_prefix("data: ") else {
-                continue;
-            };
-            if data == "[DONE]" {
-                emit_complete(&tx, &mut blocks, stop_reason, stop_details).await;
-                return Ok(());
-            }
-            let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else {
-                continue;
-            };
-            let event_type = event.get("type").and_then(|t| t.as_str()).unwrap_or("");
-            match event_type {
-                "content_block_start" => {
-                    let index = event
-                        .get("index")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as usize;
-                    if let Some(cb) = event.get("content_block") {
-                        let btype = cb.get("type").and_then(|v| v.as_str()).unwrap_or("text");
-                        let kind = match btype {
-                            "text" => BlockKind::Text,
-                            "thinking" => BlockKind::Thinking,
-                            "tool_use" => BlockKind::ToolUse,
-                            _ => BlockKind::Unknown,
-                        };
-                        let mut acc = BlockAccumulator::new(kind);
-                        acc.id = cb
-                            .get("id")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string);
-                        acc.name = cb
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string);
-                        if let Some(sig) = cb.get("signature").and_then(|v| v.as_str()) {
-                            acc.signature = Some(sig.to_string());
-                        }
-                        blocks.insert(index, acc);
-                    }
-                }
-                "content_block_delta" => {
-                    let index = event
-                        .get("index")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as usize;
-                    let Some(delta) = event.get("delta") else {
-                        continue;
-                    };
-                    let delta_type = delta.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                    let Some(acc) = blocks.get_mut(&index) else {
-                        continue;
-                    };
-                    match delta_type {
-                        "text_delta" => {
-                            if let Some(t) = delta.get("text").and_then(|v| v.as_str()) {
-                                acc.text.push_str(t);
-                                let _ = tx.send(AnthropicStreamEvent::Token(t.to_string())).await;
-                            }
-                        }
-                        "thinking_delta" => {
-                            if let Some(t) = delta.get("thinking").and_then(|v| v.as_str()) {
-                                acc.thinking.push_str(t);
-                                let _ = tx
-                                    .send(AnthropicStreamEvent::ThinkingDelta(t.to_string()))
-                                    .await;
-                            }
-                        }
-                        "signature_delta" => {
-                            if let Some(s) = delta.get("signature").and_then(|v| v.as_str()) {
-                                match acc.signature.as_mut() {
-                                    Some(existing) => existing.push_str(s),
-                                    None => acc.signature = Some(s.to_string()),
-                                }
-                            }
-                        }
-                        "input_json_delta" => {
-                            if let Some(s) = delta.get("partial_json").and_then(|v| v.as_str()) {
-                                acc.input_json.push_str(s);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                "content_block_stop" => {
-                    let index = event
-                        .get("index")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as usize;
-                    if let Some(acc) = blocks.remove(&index) {
-                        let block = acc.finalize();
-                        let _ = tx.send(AnthropicStreamEvent::BlockComplete).await;
-                        blocks.insert(index, BlockAccumulator::from_finalized(block));
-                    }
-                }
-                "message_delta" => {
-                    if let Some(delta) = event.get("delta") {
-                        if let Some(sr) = delta.get("stop_reason").and_then(|v| v.as_str()) {
-                            stop_reason = parse_stop_reason(sr);
-                        }
-                        if let Some(sd) = parse_stop_details(delta) {
-                            stop_details = Some(sd);
-                        }
-                    }
-                }
-                "message_stop" => {
-                    emit_complete(&tx, &mut blocks, stop_reason, stop_details).await;
-                    return Ok(());
-                }
-                _ => {}
-            }
-        }
-        emit_complete(&tx, &mut blocks, stop_reason, stop_details).await;
-        Ok(())
+    fn complete(out: &[AnthropicStreamEvent]) -> Option<AssistantResponse> {
+        out.iter().find_map(|e| match e {
+            AnthropicStreamEvent::Complete { response } => Some(response.clone()),
+            _ => None,
+        })
     }
 
     #[tokio::test]
@@ -752,5 +656,190 @@ mod tests {
             })
             .expect("Complete event");
         assert_eq!(complete.stop_details, None);
+    }
+
+    // What follows had no test while the tests ran a copy of the parser:
+    // the copy had none of these paths.
+
+    #[tokio::test]
+    async fn tool_input_given_whole_at_block_start_is_kept() {
+        let events = [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"recall","input":{"query":"alerts"}}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#,
+            r#"{"type":"message_stop"}"#,
+        ];
+        let response = complete(&run_stream(&events).await).expect("Complete event");
+        match &response.content[0] {
+            MessageBlock::ToolUse { input, .. } => assert_eq!(input["query"], "alerts"),
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn error_event_is_reported_and_ends_the_stream() {
+        let events = [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}"#,
+            r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" never read"}}"#,
+            r#"{"type":"message_stop"}"#,
+        ];
+        let out = run_stream(&events).await;
+        assert_eq!(tokens(&out), ["partial"]);
+        assert!(
+            matches!(out.last(), Some(AnthropicStreamEvent::Error(m)) if m == "Overloaded"),
+            "the error is the last event: {out:?}"
+        );
+        // No Complete: a turn that ended in an error is not a finished turn.
+        assert!(complete(&out).is_none());
+    }
+
+    #[tokio::test]
+    async fn done_sentinel_and_a_bare_end_of_stream_both_complete() {
+        let text = [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#,
+        ];
+        // The body just ends: no message_delta, no message_stop.
+        let response = complete(&run_stream(&text).await).expect("Complete event");
+        assert_eq!(response.stop_reason, StopReason::EndTurn);
+        assert!(matches!(&response.content[0], MessageBlock::Text { text } if text == "hi"));
+
+        let mut body = sse_body(&text);
+        body.extend_from_slice(b"data: [DONE]\n\n");
+        body.extend_from_slice(&sse_body(&[
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" after"}}"#,
+        ]));
+        let out = run_chunks(vec![body]).await;
+        assert_eq!(tokens(&out), ["hi"]);
+        assert!(complete(&out).is_some());
+    }
+
+    #[tokio::test]
+    async fn framing_noise_is_skipped() {
+        // Comments, `event:` lines, CRLF line ends, a frame that is not
+        // JSON, a delta for a block that never started.
+        let body = concat!(
+            ": ping\r\n",
+            "event: content_block_start\r\n",
+            r#"data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            "\r\n\r\n",
+            "data: not json\n\n",
+            r#"data: {"type":"content_block_delta","index":7,"delta":{"type":"text_delta","text":"stray"}}"#,
+            "\n\n",
+            r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"kept"}}"#,
+            "\r\n\r\n",
+            r#"data: {"type":"message_stop"}"#,
+            "\n\n",
+        );
+        let out = run_chunks(vec![body.as_bytes().to_vec()]).await;
+        assert_eq!(tokens(&out), ["kept"]);
+        let response = complete(&out).expect("Complete event");
+        assert!(matches!(&response.content[0], MessageBlock::Text { text } if text == "kept"));
+    }
+
+    #[tokio::test]
+    async fn a_line_is_read_whole_wherever_the_chunks_were_cut() {
+        let events = [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"file_write","input":{}}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"notes.md\","}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"\"content\":\"plain text\"}"}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#,
+            r#"{"type":"message_stop"}"#,
+        ];
+        let body = sse_body(&events);
+        let whole = complete(&run_chunks(vec![body.clone()]).await).expect("Complete event");
+        // No `PartialEq` on the wire types; their `Debug` form says it all.
+        let want = format!("{whole:?}");
+        for cut in 1..body.len() {
+            let out = run_chunks(vec![body[..cut].to_vec(), body[cut..].to_vec()]).await;
+            let got = complete(&out).expect("Complete event");
+            assert_eq!(format!("{got:?}"), want, "cut at byte {cut}");
+        }
+        match &whole.content[0] {
+            MessageBlock::ToolUse { input, .. } => {
+                assert_eq!(input["path"], "notes.md");
+                assert_eq!(input["content"], "plain text");
+            }
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_last_line_without_its_newline_is_not_processed() {
+        let mut body = sse_body(&[
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"whole"}}"#,
+        ]);
+        body.extend_from_slice(
+            br#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":" cut off"}}"#,
+        );
+        let out = run_chunks(vec![body]).await;
+        assert_eq!(tokens(&out), ["whole"]);
+        assert!(complete(&out).is_some());
+    }
+
+    /// The `/stop` contract. The consumer drops the stream; the next send
+    /// fails; the parser returns, and with it goes the response body —
+    /// the connection. It must not read on.
+    #[tokio::test]
+    async fn a_dropped_receiver_ends_the_parser_at_its_next_send() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let first = sse_body(&[
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"one"}}"#,
+        ]);
+        let more = sse_body(&[
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"two"}}"#,
+        ]);
+        for checkpoint in ["text", "thinking", "block end"] {
+            let first = match checkpoint {
+                "text" => first.clone(),
+                "thinking" => sse_body(&[
+                    r#"{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}"#,
+                    r#"{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hm"}}"#,
+                ]),
+                _ => sse_body(&[
+                    r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t","name":"time"}}"#,
+                    r#"{"type":"content_block_stop","index":0}"#,
+                ]),
+            };
+            let read = Arc::new(AtomicUsize::new(0));
+            let counter = read.clone();
+            let chunks = vec![first, more.clone(), more.clone(), more.clone()];
+            let stream = futures_util::stream::iter(
+                chunks.into_iter().map(Ok::<_, std::convert::Infallible>),
+            )
+            .inspect(move |_| {
+                counter.fetch_add(1, Ordering::SeqCst);
+            });
+            let (tx, rx) = mpsc::channel(8);
+            drop(rx);
+            pump(stream, tx).await.expect("a dropped receiver is not an error");
+            assert_eq!(read.load(Ordering::SeqCst), 1, "read on after {checkpoint}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_transport_error_is_returned_to_the_caller() {
+        let first = sse_body(&[
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"one"}}"#,
+        ]);
+        let stream = futures_util::stream::iter(vec![
+            Ok(first),
+            Err(std::io::Error::other("connection reset")),
+        ]);
+        let (tx, mut rx) = mpsc::channel(8);
+        let err = pump(stream, tx).await.expect_err("the read error");
+        assert!(err.to_string().contains("connection reset"));
+        // What arrived before it was delivered; nothing is made up after
+        // it. The caller turns the error into the Error event.
+        assert!(matches!(rx.recv().await, Some(AnthropicStreamEvent::Token(t)) if t == "one"));
+        assert!(rx.recv().await.is_none());
     }
 }
