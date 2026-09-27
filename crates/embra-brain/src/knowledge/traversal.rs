@@ -39,8 +39,9 @@ const MEANINGFUL_EDGE_LIMIT: u32 = 2000;
 ///
 /// - **Undirected expansion, arm-split hops (2026-07-04):** each hop fetches
 ///   the edges touching a node via TWO indexed equality queries — the source
-///   arm (`source_id` + `source_collection`) and the target arm (`target_id`
-///   + `target_collection`) — merged client-side into one ranked window.
+///   arm (`source_id` + `source_collection`) and the target arm
+///   (`target_id` + `target_collection`) — merged client-side into one
+///   ranked window.
 ///   The old single `$or` filter forced WardSONDB into a full collection
 ///   scan per hop (its planner cannot index `$or`), which at ~99k edges ×
 ///   hundreds of hops put 5–8 minute latencies on every retrieval. The

@@ -2806,6 +2806,7 @@ pub async fn file_symlink(param: &str) -> String {
 /// - Symlinks to directories: unlinked (only the link goes; the target
 ///   directory is untouched). `Path::is_dir()` follows symlinks and would
 ///   have refused these.
+///
 /// Param format: `<path>`
 pub async fn file_delete(param: &str) -> String {
     if param.is_empty() {

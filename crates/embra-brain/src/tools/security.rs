@@ -365,6 +365,7 @@ fn ssh_session_lock() -> &'static tokio::sync::Mutex<Option<SshSession>> {
 /// - `host`            → (root, host, 22)
 /// - `user@host:port`  → (user, host, port)
 /// - `host:port`       → (root, host, port)
+///
 /// If `port` is present but unparseable, it is silently ignored and 22 is
 /// used (keeps the caller's `is_private_address` path robust; bad input still
 /// fails the RFC 1918 check or the subsequent SSH connection, not this parser).
