@@ -2544,7 +2544,7 @@ pub async fn file_read(params: &str) -> String {
             offset, size
         );
     }
-    let read_end = (offset + limit as u64).min(size);
+    let mut read_end = (offset + limit as u64).min(size);
     let read_bytes = (read_end - offset) as usize;
 
     use tokio::io::{AsyncReadExt, AsyncSeekExt, SeekFrom};
@@ -2568,6 +2568,19 @@ pub async fn file_read(params: &str) -> String {
             "{} is a binary file ({} bytes); for images use image_view",
             path, size
         );
+    }
+
+    // A window that ends inside a character gives the model half of it
+    // here and half in the next chunk, each as U+FFFD. End the window
+    // before that character; the trailer names where it starts. A window
+    // that is nothing but the cut character is left alone — shortening
+    // it would read nothing.
+    if read_end < size {
+        let cut = cut_character_len(&buf);
+        if cut < buf.len() {
+            buf.truncate(buf.len() - cut);
+            read_end -= cut as u64;
+        }
     }
 
     let content = String::from_utf8_lossy(&buf);
@@ -2596,6 +2609,25 @@ pub async fn file_read(params: &str) -> String {
         "=== {} ({} bytes, showing {}..{}) ===\n{}{}",
         path, size, offset, read_end, content, more
     )
+}
+
+/// The length of the character a byte window cuts at its end: 0 when the
+/// window ends on a character boundary, else the 1–3 bytes of the
+/// character that does not fit. Bytes that are not UTF-8 there count as
+/// a boundary.
+fn cut_character_len(window: &[u8]) -> usize {
+    // A cut character has its first byte among the last three.
+    for back in 1..=window.len().min(3) {
+        let need = match window[window.len() - back] {
+            0x80..=0xBF => continue, // a continuation byte: look further back
+            0xC0..=0xDF => 2,
+            0xE0..=0xEF => 3,
+            0xF0..=0xF7 => 4,
+            _ => return 0,
+        };
+        return if back < need { back } else { 0 };
+    }
+    0
 }
 
 /// Expand escape sequences in tool content: `\\n` → newline, `\\t` → tab, `\\\\` → backslash.
@@ -4708,6 +4740,115 @@ mod file_io_caps_tests {
         assert!(!cont.contains("[... "), "final chunk must end clean, got: {}", &cont[cont.len().saturating_sub(160)..]);
         let cont_body = &cont[cont.find('\n').unwrap() + 1..];
         assert_eq!(cont_body.as_bytes(), &data[FILE_READ_MAX..]);
+    }
+
+    /// The content of a framed file_read result and, when the read did
+    /// not reach the end, the offset its trailer names.
+    fn body_and_next(out: &str) -> (&str, Option<u64>) {
+        let body = &out[out.find('\n').expect("header line") + 1..];
+        match body.rfind("\n[... ") {
+            Some(at) => {
+                let trailer = &body[at..];
+                let from = trailer.find("offset=").expect("offset in trailer") + "offset=".len();
+                let digits: String = trailer[from..]
+                    .chars()
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                (&body[..at], Some(digits.parse().expect("offset")))
+            }
+            None => (body, None),
+        }
+    }
+
+    /// Follow the trailers from the start of the file to its end.
+    async fn read_in_chunks(path: &str, limit: Option<usize>) -> (String, usize) {
+        let mut whole = String::new();
+        let mut offset = 0u64;
+        let mut calls = 0;
+        loop {
+            let params = match limit {
+                Some(l) => format!("{path}|{offset}|{l}"),
+                None => format!("{path}|{offset}"),
+            };
+            let out = file_read(&params).await;
+            calls += 1;
+            let (body, next) = body_and_next(&out);
+            whole.push_str(body);
+            match next {
+                Some(n) => {
+                    assert!(n > offset, "no progress at offset {offset}: {out}");
+                    offset = n;
+                }
+                None => return (whole, calls),
+            }
+        }
+    }
+
+    #[test]
+    fn a_cut_character_is_measured_from_its_first_byte() {
+        let text = "a\u{e9}\u{2014}\u{1f600}";
+        let bytes = text.as_bytes();
+        for end in 0..=bytes.len() {
+            let window = &bytes[..end];
+            let cut = cut_character_len(window);
+            // What is left is whole characters, and nothing whole was cut.
+            let kept = std::str::from_utf8(&window[..end - cut])
+                .unwrap_or_else(|e| panic!("window of {end} bytes, cut {cut}: {e}"));
+            assert_eq!(cut == 0, text.is_char_boundary(end), "window of {end} bytes");
+            assert!(text.starts_with(kept));
+            assert!(cut <= 3);
+        }
+        // Not UTF-8: nothing to respect, nothing cut.
+        assert_eq!(cut_character_len(b"abc\xff"), 0);
+        assert_eq!(cut_character_len(b"abc\x80\x80\x80"), 0);
+        assert_eq!(cut_character_len(b""), 0);
+        // A window that starts inside a character and ends inside the next.
+        assert_eq!(cut_character_len(b"\xa9 \xe2\x80"), 2);
+    }
+
+    #[tokio::test]
+    async fn a_chunk_never_ends_inside_a_character() {
+        // The ceiling falls between the two bytes of a character. Cut
+        // there, the chunk ends in U+FFFD and the next one starts with
+        // one: the model has read a file that is not the file, and what
+        // it writes back is corrupted.
+        let dir = TempDir::new("charcut");
+        let target = dir.0.join("big.txt");
+        let mut data = ascii_bytes(FILE_READ_MAX - 1);
+        data.extend_from_slice("\u{e9}".as_bytes());
+        data.extend_from_slice(&ascii_bytes(1000));
+        std::fs::write(&target, &data).unwrap();
+        let path = target.to_str().unwrap();
+
+        let first = file_read(path).await;
+        assert!(first.len() <= crate::tools::registry::MAX_TOOL_RESULT_SIZE);
+        let (body, next) = body_and_next(&first);
+        assert_eq!(next, Some(FILE_READ_MAX as u64 - 1), "the chunk ends before the character");
+        assert_eq!(body.as_bytes(), &data[..FILE_READ_MAX - 1]);
+        assert!(
+            first.contains(&format!("showing 0..{}) ===", FILE_READ_MAX - 1)),
+            "the header names what was read"
+        );
+
+        let (whole, calls) = read_in_chunks(path, None).await;
+        assert_eq!(calls, 2);
+        assert_eq!(whole.as_bytes(), &data[..]);
+    }
+
+    #[tokio::test]
+    async fn chunked_reads_of_any_size_give_the_file_back() {
+        // 2, 3 and 4 bytes a character. A limit under 4 cannot hold every
+        // character, so it cannot promise this.
+        let text = "caf\u{e9} \u{2014} \u{6f22}\u{5b57} \u{1f600} end. ".repeat(3);
+        let dir = TempDir::new("anysize");
+        let target = dir.0.join("text.txt");
+        std::fs::write(&target, &text).unwrap();
+        let path = target.to_str().unwrap();
+
+        for limit in 4..=text.len() {
+            let (whole, _) = read_in_chunks(path, Some(limit)).await;
+            assert_eq!(whole, text, "limit {limit}");
+        }
     }
 
     #[tokio::test]
