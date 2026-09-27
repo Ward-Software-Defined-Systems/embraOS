@@ -35,11 +35,4 @@ impl TrustdConfig {
         self.state_dir.join("pki")
     }
 
-    pub fn ca_cert_path(&self) -> PathBuf {
-        self.pki_dir().join("ca.crt")
-    }
-
-    pub fn ca_key_path(&self) -> PathBuf {
-        self.pki_dir().join("ca.key")
-    }
 }

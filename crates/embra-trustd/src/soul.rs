@@ -5,7 +5,7 @@
 
 use anyhow::{Result, Context};
 use sha2::{Sha256, Digest};
-use tracing::{info, debug};
+use tracing::debug;
 
 pub struct SoulVerifier {
     wardsondb_url: String,
@@ -108,15 +108,4 @@ impl SoulVerifier {
         Ok(hash)
     }
 
-    /// Store the soul hash on the STATE partition.
-    /// Called after Learning Mode seals the soul.
-    pub fn store_hash(&self, hash: &str) -> Result<()> {
-        // Create parent directories if needed
-        if let Some(parent) = self.hash_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&self.hash_path, hash)?;
-        info!("Soul hash stored at {}", self.hash_path.display());
-        Ok(())
-    }
 }
