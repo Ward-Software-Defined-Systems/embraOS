@@ -22,6 +22,11 @@ so what's here is exactly what the gate accepts.
    — you never type tool-call syntax.
 6. Manage: `/guardian list`, `/guardian show <name>`,
    `/guardian delete <name>`.
+7. After an OS update that changes the in-OS toolchain, built tools are
+   left unloaded at boot and `/guardian list` marks them `NOT LOADED`.
+   `/guardian rebuild --all` (or `/guardian rebuild <name>`) builds them
+   again from the stored modules — nothing is pasted again. Each module
+   is validated and replicant-checked again before it compiles.
 
 ## The contract
 

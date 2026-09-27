@@ -525,6 +525,7 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/guardian show", "show tool source (needs name)"),
         ("/guardian approve", "approve a proposed tool (needs name)"),
         ("/guardian reject", "reject a proposed tool (needs name)"),
+        ("/guardian rebuild", "rebuild unloaded or failed tools (needs name or --all)"),
         ("/guardian delete", "remove tool (needs name)"),
         ("/guardian key brave", "set / show Brave Search API key"),
     ]),

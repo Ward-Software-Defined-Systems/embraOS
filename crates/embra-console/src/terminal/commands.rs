@@ -69,6 +69,7 @@ Guardian:
   /guardian-define               Define a dynamic tool (paste a Rust module)
   /guardian list|status <n>|show <n>|delete <n>   Manage dynamic tools
   /guardian approve <n>|reject <n>   Approve/reject a tool the intelligence proposed
+  /guardian rebuild <n>|--all    Rebuild tools an OS update left unloaded, or failed builds
   /guardian key brave <token>    Set the Brave Search API key (web_search tools)
 
 Identity:

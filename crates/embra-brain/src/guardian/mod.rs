@@ -5,6 +5,7 @@
 //! themselves live in the decoupled `embra-guardian` crate.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use embra_guardian::build::{self, BuildEnv};
@@ -107,7 +108,7 @@ fn availability(doc: &ToolDoc, current_toolchain: &str, loaded: bool) -> Availab
 
 /// The operator command that brings a built-but-unloaded tool back.
 fn remedy(name: &str) -> String {
-    format!("paste the module again with /guardian-define to rebuild '{name}'")
+    format!("/guardian rebuild {name}")
 }
 
 impl Availability {
@@ -132,7 +133,8 @@ impl Availability {
             )),
             Availability::Building => Some("build in progress.".to_string()),
             Availability::Failed => Some(format!(
-                "the last build failed — /guardian status {name} shows the log. Operator: {}.",
+                "the last build failed — /guardian status {name} shows the log. Operator: {} \
+                 retries it.",
                 remedy(name)
             )),
         }
@@ -187,8 +189,8 @@ async fn all_docs(db: &WardsonDbClient) -> Vec<ToolDoc> {
 
 /// Initialize the runtime overlay and load previously-built artifacts for
 /// `Ready` tools whose toolchain still matches. Missing/stale/foreign-
-/// toolchain tools are logged and left out (re-define rebuilds them) —
-/// boot is never blocked on a compile.
+/// toolchain tools are logged and left out (`/guardian rebuild` brings
+/// them back) — boot is never blocked on a compile.
 pub async fn reconcile_on_boot(db: &WardsonDbClient) -> anyhow::Result<()> {
     let tv = toolchain_version();
     let rt = embra_guardian::overlay::init(tv.clone())
@@ -201,6 +203,25 @@ pub async fn reconcile_on_boot(db: &WardsonDbClient) -> anyhow::Result<()> {
     let total = docs.len();
     let mut loaded = 0usize;
     for doc in docs {
+        if doc.status == ToolStatus::Building {
+            // No build outlives the brain process, so a record still
+            // reading `building` at boot has lost its build. Left alone it
+            // would answer "already building" to every rebuild.
+            warn!(
+                "guardian: '{}' was building when the brain last stopped — marked failed; {}",
+                doc.name,
+                remedy(&doc.name)
+            );
+            let mut d = doc.clone();
+            d.status = ToolStatus::Failed;
+            d.build_log_tail =
+                format!("build interrupted by a restart — {} retries it", remedy(&doc.name));
+            d.updated_at = chrono::Utc::now().to_rfc3339();
+            if let Err(e) = upsert(db, &d).await {
+                error!("guardian: failed to persist status for '{}': {e}", doc.name);
+            }
+            continue;
+        }
         if doc.status != ToolStatus::Ready {
             continue;
         }
@@ -276,15 +297,17 @@ pub async fn handle_guardian_slash(args: &str, db: &Arc<WardsonDbClient>) -> Str
             None => format!("guardian: no such tool '{}'", rest.trim()),
         },
         "delete" => delete(db, rest.trim()).await,
+        "rebuild" => rebuild(db, rest).await,
         "key" => key_cmd(rest),
         "" => "Usage: /guardian-define (paste a module) | /guardian list | \
                 /guardian status <name> | /guardian show <name> | \
                 /guardian approve <name> | /guardian reject <name> | \
+                /guardian rebuild <name> | /guardian rebuild --all | \
                 /guardian delete <name> | /guardian key brave <token>"
             .to_string(),
         other => format!(
             "guardian: unknown subcommand '{other}'. Use list|status|show|approve|reject|\
-             delete|key, or /guardian-define to paste a module."
+             rebuild|delete|key, or /guardian-define to paste a module."
         ),
     }
 }
@@ -611,8 +634,9 @@ async fn approve(db: &Arc<WardsonDbClient>, name: &str) -> String {
         }
         ToolStatus::Failed => {
             return format!(
-                "guardian: '{name}' previously failed to build. /guardian delete it, then have \
-                 the intelligence re-propose."
+                "guardian: '{name}' was approved before and failed to build — {} retries it \
+                 (/guardian status {name} shows the log).",
+                remedy(name)
             );
         }
         ToolStatus::Proposed => {}
@@ -662,6 +686,281 @@ async fn reject(db: &Arc<WardsonDbClient>, name: &str) -> String {
             format!("{:?}", d.status).to_lowercase()
         ),
         None => format!("guardian: no such proposal '{name}'."),
+    }
+}
+
+// ── /guardian rebuild ──
+
+/// Set while a `/guardian rebuild --all` batch runs. One at a time: every
+/// tool in it costs a model call (the replicant check) and a compile in
+/// the shared target dir.
+static REBUILD_BATCH: AtomicBool = AtomicBool::new(false);
+
+/// Clears [`REBUILD_BATCH`] when the batch task ends, a panic included.
+struct BatchGuard;
+
+impl Drop for BatchGuard {
+    fn drop(&mut self) {
+        REBUILD_BATCH.store(false, Ordering::SeqCst);
+    }
+}
+
+/// What `/guardian rebuild` does with one tool on record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RebuildDecision {
+    /// Built but not loaded, or failed: run the gates, then build.
+    Rebuild,
+    /// Loaded, built by the toolchain this image carries.
+    UpToDate,
+    /// A proposal. Building it is the operator's approval — `--all` must
+    /// never grant that in passing.
+    AwaitingApproval,
+    /// A build owns the record.
+    AlreadyBuilding,
+}
+
+fn rebuild_decision(doc: &ToolDoc, current_toolchain: &str, loaded: bool) -> RebuildDecision {
+    match doc.status {
+        ToolStatus::Proposed => RebuildDecision::AwaitingApproval,
+        ToolStatus::Building => RebuildDecision::AlreadyBuilding,
+        ToolStatus::Failed => RebuildDecision::Rebuild,
+        ToolStatus::Ready if loaded && doc.toolchain_version == current_toolchain => {
+            RebuildDecision::UpToDate
+        }
+        ToolStatus::Ready => RebuildDecision::Rebuild,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RebuildTarget<'a> {
+    All,
+    One(&'a str),
+    Usage,
+}
+
+fn parse_rebuild_target(arg: &str) -> RebuildTarget<'_> {
+    let mut words = arg.split_whitespace();
+    match (words.next(), words.next()) {
+        (Some("--all"), None) => RebuildTarget::All,
+        (Some(name), None) if !name.starts_with('-') => RebuildTarget::One(name),
+        _ => RebuildTarget::Usage,
+    }
+}
+
+fn is_loaded(name: &str) -> bool {
+    embra_guardian::runtime().is_some_and(|rt| rt.get(name).is_some())
+}
+
+/// `/guardian rebuild <name> | --all` — build a tool again from the module
+/// on record. For tools an OS update left unloaded (the in-OS toolchain
+/// moved) and for failed builds. The source is never taken from the
+/// command line, and the stored module passes the same two gates as a
+/// paste before it compiles.
+async fn rebuild(db: &Arc<WardsonDbClient>, arg: &str) -> String {
+    match parse_rebuild_target(arg) {
+        RebuildTarget::Usage => "Usage: /guardian rebuild <name>  (one tool) | \
+                                 /guardian rebuild --all  (every built tool that is not \
+                                 loaded, and every failed build)"
+            .to_string(),
+        RebuildTarget::All => rebuild_all(db).await,
+        RebuildTarget::One(name) => rebuild_named(db, name).await,
+    }
+}
+
+/// Gates 1 and 2 on a STORED module — static validation, then the
+/// replicant check — as `define` runs them on a paste: a `refuse` blocks
+/// and is not waivable, a check that cannot run fails closed, and no
+/// sealed soul means there is nothing to judge against. `Err` is the
+/// reason the tool was not rebuilt, in operator words.
+async fn rebuild_gates(
+    db: &WardsonDbClient,
+    doc: &ToolDoc,
+) -> Result<(ValidatedModule, Option<ReplicantRecord>), String> {
+    let module = embra_guardian::validate(&doc.source, &reserved_names())
+        .map_err(|e| format!("the stored module no longer validates ({e})"))?;
+    if module.name != doc.name {
+        return Err(format!(
+            "the stored module names itself '{}', not '{}'",
+            module.name, doc.name
+        ));
+    }
+    let cfg = crate::config::load_config(db)
+        .await
+        .map_err(|e| format!("could not load config for the replicant check ({e})"))?;
+    match run_replicant_check(db, &cfg, &module).await? {
+        Some((verdict, _)) if verdict.is_refuse() => {
+            let touched = if verdict.touched_lines.is_empty() {
+                String::new()
+            } else {
+                format!(" (touched: {})", verdict.touched_lines.join("; "))
+            };
+            Err(format!(
+                "it did not pass the replicant check{touched} — {}",
+                verdict.rationale
+            ))
+        }
+        Some((verdict, model)) => {
+            let now = chrono::Utc::now().to_rfc3339();
+            Ok((module, Some(replicant_record(&verdict, &model, &now))))
+        }
+        None => Ok((module, None)),
+    }
+}
+
+/// Hand a gated module to the build: the record reads `building` and
+/// carries the fresh verdict before the compile starts.
+async fn begin_rebuild(
+    db: &WardsonDbClient,
+    doc: &ToolDoc,
+    record: Option<ReplicantRecord>,
+) -> Result<(), String> {
+    let mut d = doc.clone();
+    d.status = ToolStatus::Building;
+    d.updated_at = chrono::Utc::now().to_rfc3339();
+    if record.is_some() {
+        d.replicant = record;
+    }
+    upsert(db, &d).await
+}
+
+/// A gate stopped the rebuild: say so on the record, where
+/// `/guardian status` shows it. The status does NOT change — a built tool
+/// that merely missed a rebuild (provider down, say) keeps the `ready`
+/// that stops a proposal from taking its name.
+async fn record_rebuild_stopped(db: &WardsonDbClient, doc: &ToolDoc, why: &str) {
+    warn!("guardian: '{}' not rebuilt: {why}", doc.name);
+    let mut d = doc.clone();
+    d.build_log_tail = format!("not rebuilt: {why}").chars().take(8 * 1024).collect();
+    d.updated_at = chrono::Utc::now().to_rfc3339();
+    if let Err(e) = upsert(db, &d).await {
+        error!("guardian: failed to persist rebuild outcome for '{}': {e}", doc.name);
+    }
+}
+
+/// What the gates said, for the operator's confirmation line.
+fn gates_passed_text(record: &Option<ReplicantRecord>) -> &'static str {
+    match record {
+        Some(r) if r.verdict == "escalate" => {
+            "passed validation; the replicant check ESCALATED it as soul-borderline (review \
+             with /guardian show)"
+        }
+        Some(_) => "passed validation and the replicant check",
+        None => "passed validation (no soul is sealed, so there was no replicant check)",
+    }
+}
+
+async fn rebuild_named(db: &Arc<WardsonDbClient>, name: &str) -> String {
+    if REBUILD_BATCH.load(Ordering::SeqCst) {
+        return "guardian: a rebuild of all tools is running — /guardian list shows progress. \
+                Try again when it is done."
+            .to_string();
+    }
+    let Some(doc) = load_doc(db, name).await else {
+        return format!("guardian: no such tool '{name}'.");
+    };
+    let tv = toolchain_version();
+    match rebuild_decision(&doc, &tv, is_loaded(name)) {
+        RebuildDecision::UpToDate => format!(
+            "guardian: '{name}' is loaded and built with the current toolchain ({tv}) — \
+             nothing to rebuild."
+        ),
+        RebuildDecision::AwaitingApproval => format!(
+            "guardian: '{name}' is a proposal, not a built tool — /guardian approve {name} \
+             builds it, /guardian reject {name} discards it."
+        ),
+        RebuildDecision::AlreadyBuilding => format!(
+            "guardian: '{name}' is already building — poll with /guardian status {name}."
+        ),
+        RebuildDecision::Rebuild => match rebuild_gates(db, &doc).await {
+            Err(why) => {
+                record_rebuild_stopped(db, &doc, &why).await;
+                format!("guardian: '{name}' not rebuilt — {why}.")
+            }
+            Ok((module, record)) => {
+                let passed = gates_passed_text(&record);
+                if let Err(e) = begin_rebuild(db, &doc, record).await {
+                    return format!("guardian: could not start the rebuild of '{name}' — {e}");
+                }
+                let db2 = db.clone();
+                tokio::spawn(async move { build_and_register(db2, module).await });
+                format!(
+                    "guardian: '{name}' {passed}. Rebuilding in the background — poll with \
+                     /guardian status {name}."
+                )
+            }
+        },
+    }
+}
+
+async fn rebuild_all(db: &Arc<WardsonDbClient>) -> String {
+    let tv = toolchain_version();
+    let (mut queue, mut proposals, mut building, mut current) = (Vec::new(), 0usize, 0usize, 0usize);
+    for d in all_docs(db).await {
+        match rebuild_decision(&d, &tv, is_loaded(&d.name)) {
+            RebuildDecision::Rebuild => queue.push(d.name),
+            RebuildDecision::UpToDate => current += 1,
+            RebuildDecision::AwaitingApproval => proposals += 1,
+            RebuildDecision::AlreadyBuilding => building += 1,
+        }
+    }
+    queue.sort();
+
+    let mut others = String::new();
+    if building > 0 {
+        others.push_str(&format!(" {building} already building."));
+    }
+    if proposals > 0 {
+        others.push_str(&format!(
+            " {proposals} proposal(s) left alone — /guardian approve builds a proposal."
+        ));
+    }
+    if queue.is_empty() {
+        return format!(
+            "guardian: nothing to rebuild — {current} tool(s) loaded on toolchain {tv}.{others}"
+        );
+    }
+    if REBUILD_BATCH
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return "guardian: a rebuild of all tools is already running — /guardian list shows \
+                progress."
+            .to_string();
+    }
+
+    let names = queue.join(", ");
+    let count = queue.len();
+    let db2 = db.clone();
+    tokio::spawn(async move {
+        let _batch = BatchGuard;
+        for name in queue {
+            rebuild_in_batch(&db2, &name).await;
+        }
+        info!("guardian: rebuild batch finished ({count} tool(s))");
+    });
+    format!(
+        "guardian: rebuilding {count} tool(s) in the background, one at a time: {names}. Each \
+         passes validation and the replicant check again before it compiles; one that does \
+         not is left unbuilt, with the reason in /guardian status <name>. /guardian list \
+         shows progress.{others}"
+    )
+}
+
+/// One tool of a batch, start to finish. The record is read again here:
+/// the batch may reach it minutes after it was queued.
+async fn rebuild_in_batch(db: &Arc<WardsonDbClient>, name: &str) {
+    let Some(doc) = load_doc(db, name).await else {
+        return;
+    };
+    if rebuild_decision(&doc, &toolchain_version(), is_loaded(name)) != RebuildDecision::Rebuild {
+        return;
+    }
+    match rebuild_gates(db, &doc).await {
+        Err(why) => record_rebuild_stopped(db, &doc, &why).await,
+        Ok((module, record)) => match begin_rebuild(db, &doc, record).await {
+            Ok(()) => build_and_register(db.clone(), module).await,
+            Err(e) => error!("guardian: could not start the rebuild of '{name}': {e}"),
+        },
     }
 }
 
@@ -736,8 +1035,8 @@ async fn list_human(db: &WardsonDbClient) -> String {
     }
     if unloaded > 0 {
         out.push_str(&format!(
-            "{unloaded} built tool(s) are not loaded and cannot run — /guardian status <name> \
-             says why.\n"
+            "{unloaded} built tool(s) are not loaded and cannot run — /guardian rebuild --all \
+             rebuilds them.\n"
         ));
     }
     out
@@ -1046,6 +1345,85 @@ mod tests {
         let mut v = serde_json::json!({"name": "word_count"});
         stamp_availability(&mut v, &d, &avail);
         assert_eq!(v, serde_json::json!({"name": "word_count", "callable": true}));
+    }
+
+    #[test]
+    fn rebuild_decision_covers_every_recorded_status() {
+        use RebuildDecision::*;
+        let now = "1.98.1";
+        // Left out at boot by a toolchain bump: the case the command exists for.
+        assert_eq!(rebuild_decision(&doc(ToolStatus::Ready, "1.94.1"), now, false), Rebuild);
+        // Same toolchain, artifact gone.
+        assert_eq!(rebuild_decision(&doc(ToolStatus::Ready, now), now, false), Rebuild);
+        assert_eq!(rebuild_decision(&doc(ToolStatus::Failed, now), now, false), Rebuild);
+        assert_eq!(rebuild_decision(&doc(ToolStatus::Failed, "1.94.1"), now, false), Rebuild);
+        assert_eq!(rebuild_decision(&doc(ToolStatus::Ready, now), now, true), UpToDate);
+        assert_eq!(rebuild_decision(&doc(ToolStatus::Building, now), now, false), AlreadyBuilding);
+        // A re-define in flight: the old build is loaded, a new one owns the record.
+        assert_eq!(rebuild_decision(&doc(ToolStatus::Building, now), now, true), AlreadyBuilding);
+    }
+
+    #[test]
+    fn rebuild_never_builds_a_proposal() {
+        // Building a proposal is the operator's approval. Whatever the
+        // toolchain or the overlay say, rebuild leaves it to /guardian approve.
+        for toolchain in ["1.94.1", "1.98.1"] {
+            for loaded in [false, true] {
+                assert_eq!(
+                    rebuild_decision(&doc(ToolStatus::Proposed, toolchain), "1.98.1", loaded),
+                    RebuildDecision::AwaitingApproval
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rebuild_target_parses_one_name_or_all() {
+        assert_eq!(parse_rebuild_target("--all"), RebuildTarget::All);
+        assert_eq!(parse_rebuild_target("  --all  "), RebuildTarget::All);
+        assert_eq!(parse_rebuild_target("word_count"), RebuildTarget::One("word_count"));
+        assert_eq!(parse_rebuild_target(" word_count\n"), RebuildTarget::One("word_count"));
+        for bad in ["", "   ", "--force", "-a", "word_count extra", "--all word_count", "a --all"] {
+            assert_eq!(parse_rebuild_target(bad), RebuildTarget::Usage, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn unloaded_and_failed_tools_point_at_rebuild() {
+        let stale = doc(ToolStatus::Ready, "1.94.1");
+        let note = availability(&stale, "1.98.1", false).note("word_count").unwrap();
+        assert!(note.contains("/guardian rebuild word_count"), "{note}");
+        let failed = doc(ToolStatus::Failed, "1.98.1");
+        let note = availability(&failed, "1.98.1", false).note("word_count").unwrap();
+        assert!(note.contains("/guardian rebuild word_count"), "{note}");
+        // A proposal is pointed at approve, never at rebuild.
+        let proposed = doc(ToolStatus::Proposed, "1.98.1");
+        let note = availability(&proposed, "1.98.1", false).note("word_count").unwrap();
+        assert!(note.contains("/guardian approve word_count"), "{note}");
+        assert!(!note.contains("rebuild"), "{note}");
+    }
+
+    #[test]
+    fn gates_text_tells_the_three_outcomes_apart() {
+        let record = |verdict: &str| {
+            Some(ReplicantRecord {
+                verdict: verdict.into(),
+                touched_lines: vec![],
+                rationale: String::new(),
+                model: "opus-5".into(),
+                judged_at: "2026-09-27T00:00:01Z".into(),
+            })
+        };
+        assert!(gates_passed_text(&record("allow")).ends_with("and the replicant check"));
+        assert!(gates_passed_text(&record("escalate")).contains("ESCALATED"));
+        assert!(gates_passed_text(&None).contains("no soul is sealed"));
+    }
+
+    #[test]
+    fn batch_guard_releases_the_flag() {
+        assert!(!REBUILD_BATCH.swap(true, Ordering::SeqCst), "no batch runs in tests");
+        drop(BatchGuard);
+        assert!(!REBUILD_BATCH.load(Ordering::SeqCst));
     }
 
     #[test]

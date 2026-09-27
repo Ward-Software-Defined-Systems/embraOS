@@ -72,6 +72,18 @@ Two rules hold on both paths:
 
 The verdict is persisted with the tool (`ReplicantRecord`: `verdict`, `touched_lines`, `rationale`, `model`, `judged_at`) and shown at `/guardian show <name>` and `/guardian status <name>`, so the operator sees *why* something passed when deciding whether to approve it.
 
+### Rebuilds are checked again
+
+`/guardian rebuild <name> | --all` compiles a tool again from the module on record — after an OS update that changes the in-OS toolchain, or after a failed build. The stored module goes through the same two gates as a paste, in the same order: static validation, then the replicant check against the soul as it is sealed **now**.
+
+| verdict | rebuild |
+|---|---|
+| **allow** | compiles; the new verdict replaces the stored one |
+| **escalate** | compiles, flagged for review; the new verdict replaces the stored one |
+| **refuse** | blocked; the tool stays unbuilt and unloaded, with the reason in `/guardian status <name>` |
+
+Both rules above hold: a check that cannot run fails closed, and before a soul is sealed there is nothing to check against. A gate that stops a rebuild writes its reason to the record and leaves the recorded status alone. Rebuild never builds a `proposed` tool — that is what `/guardian approve` is for, and `--all` must not grant approval in passing.
+
 ---
 
 ## Operator workflow
@@ -81,7 +93,9 @@ The verdict is persisted with the tool (`ReplicantRecord`: `verdict`, `touched_l
 /guardian show <name>          # source + the stored replicant verdict
 /guardian approve <name>       # build + enable a proposed tool
 /guardian reject <name>        # discard a proposal
-/guardian status <name>        # build state + log tail + verdict
+/guardian status <name>        # build state + callable or not + verdict + log tail
+/guardian rebuild <name>       # build again from the stored module (gated like a paste)
+/guardian rebuild --all        # every built-but-unloaded tool and every failed build
 ```
 
 `guardian_propose`, `guardian_call`, and `guardian_list` are the only Guardian-facing tools the model sees; dynamic tools themselves are never injected into the provider tool schema, so the prompt cache stays byte-stable.
@@ -98,6 +112,7 @@ Operator-verified end-to-end on QEMU (2026-06-06) — including the refuse path 
 4. **Operator path is gated too.** `/guardian-define` and paste a soul-violating module. Confirm the **refuse blocks the compile** — the operator cannot waive the soul.
 5. **Escalate.** A soul-borderline tool should land as a flagged `proposed` (intelligence) or compile with a warning (operator).
 6. **Fail closed.** With the configured provider unreachable, confirm nothing compiles on either path.
+7. **Rebuild is gated.** Boot an image whose in-OS toolchain differs from the one a tool was built with: `/guardian list` marks the tool `NOT LOADED`, `guardian_call` names the toolchain mismatch, and `/guardian rebuild <name>` runs the check before the compile (`/guardian show` then carries the new `judged_at`).
 
 ---
 
