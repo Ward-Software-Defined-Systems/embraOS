@@ -806,6 +806,105 @@ mod graph_prompt_tests {
 }
 
 #[cfg(test)]
+mod graph_prompt_golden_tests {
+    //! Byte-stability tripwire for the GRAPH-mode operational prompt, the
+    //! counterpart of `legacy_prompt_golden_tests` below. The scaffold of
+    //! `operational_mode_graph` is part of every graph instance's cached
+    //! prompt prefix: one changed byte is one cache reset for each of them.
+    //! The content guards above say what the scaffold must contain; these
+    //! say that it did not move.
+    //!
+    //! If a hash here changes and the edit was meant, re-pin it and record
+    //! the cache event. If it was not meant, fix the edit. A change in how
+    //! the graph itself renders trips `golden_meridian_render_hash`
+    //! (graph_render.rs) as well — that one names the renderer, these name
+    //! the prompt as the model receives it.
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    fn sha256_hex(s: &str) -> String {
+        let mut h = Sha256::new();
+        h.update(s.as_bytes());
+        format!("{:x}", h.finalize())
+    }
+
+    fn graph_operator() -> serde_json::Value {
+        crate::identity_graph::transform::user_to_graph(
+            &serde_json::json!({
+                "name": "William",
+                "role": "operator",
+                "background": "Rust developer.",
+                "communication": ["direct", "concise"],
+                "boundaries": ["No unreviewed pushes."]
+            }),
+            false,
+        )
+        .unwrap()
+        .canonicalize("William")
+    }
+
+    /// A graph built by the flat -> graph transformer at the end of a
+    /// conversational Learning Mode, with the operator profile in graph
+    /// shape, as it is after the seal.
+    #[test]
+    fn learned_graph_operational_prompt_bytes_are_frozen() {
+        let identity = serde_json::json!({
+            "name": "Embra",
+            "personality": "Present, not performative.",
+            "traits": ["honest", "anchored"],
+            "voice": "Direct, precise, grounded.",
+            "values_in_practice": ["Says 'I don't know' rather than pretend."]
+        });
+        let soul = serde_json::json!({
+            "purpose": "Preserve continuity across sessions.",
+            "ethical_lines": ["Never deceive the operator.", "Never pretend to know."],
+            "values": ["Truth over comfort", "Restraint over power"],
+            "surviving_constraints": ["One operator, one origin."]
+        });
+        let sealed = crate::identity_graph::transform::flat_to_graph(&identity, &soul, "Embra")
+            .canonicalize("Embra");
+        let rendered = operational_mode_graph(
+            "Embra",
+            &sealed,
+            &graph_operator(),
+            "session: fixed-context",
+        );
+        assert_eq!(
+            sha256_hex(&rendered),
+            "01128326db0eb86fb12d0d672289309595404e9efd1270c2c05368132c93d7a1",
+            "GRAPH PROMPT BYTES MOVED (learned graph). One cache reset for \
+             every graph instance: re-pin only if the edit was meant.\n---\n{rendered}"
+        );
+    }
+
+    /// An imported graph — the committed Meridian file — with a flat
+    /// operator profile, as it is between import and the first profile
+    /// write.
+    #[test]
+    fn imported_graph_operational_prompt_bytes_are_frozen() {
+        let graph = crate::identity_graph::format::parse_import(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../Imported_Intelligence/Meridian_IDENTITY-SOUL.graph.json"
+        )))
+        .unwrap();
+        let name = graph.display_name();
+        let sealed = graph.canonicalize(&name);
+        let rendered = operational_mode_graph(
+            &name,
+            &sealed,
+            &serde_json::json!({"name": "William", "role": "operator"}),
+            "session: fixed-context",
+        );
+        assert_eq!(
+            sha256_hex(&rendered),
+            "02f637edb6d94c27d75aa5e2bcc2d0bbd8a1fe5e157372bd7ed5aea63eb9d43b",
+            "GRAPH PROMPT BYTES MOVED (imported graph). One cache reset for \
+             every graph instance: re-pin only if the edit was meant.\n---\n{rendered}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod legacy_prompt_golden_tests {
     //! Byte-stability tripwire for the LEGACY (flat-document) operational
     //! prompt. The graph-era identity work must never move a byte of the
