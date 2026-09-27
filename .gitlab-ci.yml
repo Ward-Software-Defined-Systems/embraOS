@@ -7,10 +7,11 @@
 # (build-image.sh → Buildroot → QEMU boot against existing DATA), which
 # remains the authority for image/runtime validation.
 #
-# The toolchain is pinned HERE (CI-only, matching the wsds-devops dev host)
-# so CI doesn't drift with the runner image; bump RUST_TOOLCHAIN deliberately
-# and change the `image:` tag with it. The rustc-version guard in every job
-# fails loudly if the two ever disagree.
+# The toolchain is pinned HERE and in rust-toolchain.toml, which every host
+# (and rustup inside this image) reads. Bump both deliberately and together;
+# the `image:` tag derives from RUST_TOOLCHAIN. The rustc-version guard in
+# every job resolves rustc through rust-toolchain.toml, so it fails loudly
+# if the file, the variable and the image ever disagree.
 #
 # Proven green on pipeline 314 (2026-09-08, 6m52s warm). The GitHub Actions
 # workflow it replaced was retired in the same commit — three runs were needed
@@ -23,7 +24,7 @@ stages: [build, test]
 
 variables:
   CARGO_TERM_COLOR: "always"
-  RUST_TOOLCHAIN: "1.94.1"
+  RUST_TOOLCHAIN: "1.98.1"
   # Matches the wsds-devops install (cargo install trunk --locked); bump deliberately.
   TRUNK_VERSION: "0.21.14"
   # GitLab only caches paths inside the project dir, so cargo's home moves here.
@@ -66,7 +67,7 @@ frontend:
       paths: [.cargo/bin/, .cargo/registry/index/, .cargo/registry/cache/, .cargo/git/db/]
     - key:
         files: [Cargo.lock]
-        prefix: frontend-target
+        prefix: "frontend-target-$RUST_TOOLCHAIN"
       paths: [crates/embra-web-ui/target/]
   script:
     - rustup target add wasm32-unknown-unknown
@@ -128,7 +129,7 @@ test:
       paths: [.cargo/registry/index/, .cargo/registry/cache/, .cargo/git/db/]
     - key:
         files: [Cargo.lock]
-        prefix: test-target
+        prefix: "test-target-$RUST_TOOLCHAIN"
       paths: [target/]
   script:
     # dist landed where rust-embed looks (guards artifact-layout changes)
@@ -163,7 +164,7 @@ musl-cross:
       when: always
     - key:
         files: [Cargo.lock]
-        prefix: musl-target
+        prefix: "musl-target-$RUST_TOOLCHAIN"
       paths: [target/]
       when: always
     - key: "bootlin-x86-64-musl-stable-2025.08-1"

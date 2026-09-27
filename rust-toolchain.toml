@@ -1,0 +1,21 @@
+# The compiler embraOS is built, tested and linted with, on every host.
+# rustup reads this file and installs the toolchain on the first cargo run
+# inside the checkout.
+#
+# Two pins must agree: `channel` here and `RUST_TOOLCHAIN` in
+# .gitlab-ci.yml (the CI image tag derives from it, and every job asserts
+# the running rustc matches). The in-OS Guardian toolchain
+# (`RUST_TOOLCHAIN_VERSION` in scripts/build-image*.sh) is a separate pin,
+# for the compiler baked into the image.
+#
+# Bump deliberately. A new compiler is a new clippy lint set, and CI denies
+# warnings: run the build, the tests, the musl cross-build, the Trunk build
+# and clippy with `cargo +<new version>` before changing the number.
+[toolchain]
+channel = "1.98.1"
+components = ["clippy", "rustfmt"]
+targets = [
+    "wasm32-unknown-unknown",      # embra-web-ui (Trunk)
+    "x86_64-unknown-linux-musl",   # the OS binaries, x86_64 image
+    "aarch64-unknown-linux-musl",  # the OS binaries, aarch64 image
+]

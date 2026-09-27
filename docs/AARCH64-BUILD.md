@@ -56,7 +56,9 @@ Rust toolchain) and Step 4 (Buildroot) run in a `linux/arm64` Docker container.
 ### 1. Prerequisites (macOS, Apple Silicon)
 
 ```bash
-# Rust via rustup — NOT Homebrew (brew uninstall rust first if present)
+# Rust via rustup — NOT Homebrew (brew uninstall rust first if present).
+# The checkout pins its compiler in rust-toolchain.toml; rustup installs
+# that version on the first cargo run inside the repository.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source ~/.cargo/env
 rustup target add aarch64-unknown-linux-musl     # this build

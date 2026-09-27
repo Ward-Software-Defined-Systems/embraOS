@@ -46,7 +46,9 @@ source ~/.bashrc
 x86_64-linux-musl-gcc --version
 x86_64-linux-musl-g++ --version
 
-# Install Rust
+# Install Rust. The checkout pins its compiler in rust-toolchain.toml
+# (1.98.1, with clippy, rustfmt, and the wasm32 + musl targets); rustup
+# installs it on the first cargo run inside the repository.
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source ~/.cargo/env
 rustup target add x86_64-unknown-linux-musl
@@ -94,7 +96,7 @@ EMBRA_TUI=1 EMBRA_GRAPHICS=sixel ./scripts/run-qemu.sh  # serial TUI image pane:
 
 > **Buildroot version:** Defaults to `2026.02.1` (LTS, designed for Ubuntu 26.04 era). Override with `BUILDROOT_VERSION=2024.02 ./scripts/build-image.sh ...` if you need to fall back on an older host.
 
-> **In-OS Rust toolchain:** Guardian dynamic tools compile inside the image, so `build-image.sh` Step 3.5 downloads a pinned toolchain (musl host + `wasm32` std, SHA-256-verified) from `static.rust-lang.org`, caches it under `vendor/rust-toolchain`, and bakes it into the rootfs at `/opt/rust`. The first build needs network for this and adds ~100 MB to the image. The pin is `1.94.1` (the toolchain CI builds with); override it with `RUST_TOOLCHAIN_VERSION=... ./scripts/build-image.sh ...`.
+> **In-OS Rust toolchain:** Guardian dynamic tools compile inside the image, so `build-image.sh` Step 3.5 downloads a pinned toolchain (musl host + `wasm32` std, SHA-256-verified) from `static.rust-lang.org`, caches it under `vendor/rust-toolchain`, and bakes it into the rootfs at `/opt/rust`. The first build needs network for this and adds ~100 MB to the image. The pin is `1.94.1`, separate from the host compiler in `rust-toolchain.toml`; override it with `RUST_TOOLCHAIN_VERSION=... ./scripts/build-image.sh ...`.
 
 > **Embedding model:** Semantic knowledge-graph retrieval runs in-process, so `build-image.sh` **Step 3.6** downloads `BAAI/bge-small-en-v1.5` (~133 MB, SHA-256-verified against a pin), caches it under `vendor/embedding-model`, and bakes it into the rootfs at `/usr/share/embra/models/`. Like the toolchain above, the first build needs network for it; later builds skip the download when the cached copy still matches the pin. The build **fails** if the model is missing from the rootfs rather than shipping an image whose retrieval silently falls back to keyword-only. Operators can override the baked copy per instance by seeding `/embra/state/models/<name>` on STATE.
 
