@@ -129,8 +129,7 @@ fn session_manager(
 
     loop {
         match run_one_session(
-            &console_bin,
-            &apid_addr,
+            console_command(&console_bin, &apid_addr),
             &output_tx,
             &mut input_rx,
             &mut resize_rx,
@@ -151,18 +150,8 @@ fn session_manager(
     }
 }
 
-/// One console lifetime: open PTY, spawn child, pump until it exits.
-fn run_one_session(
-    console_bin: &str,
-    apid_addr: &str,
-    output_tx: &broadcast::Sender<Bytes>,
-    input_rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
-    resize_rx: &mut mpsc::UnboundedReceiver<(u16, u16, u16, u16)>,
-    last_size: &mut PtySize,
-    repaint: &AtomicBool,
-) -> anyhow::Result<()> {
-    let pair = native_pty_system().openpty(*last_size)?;
-
+/// The console child's command line and environment.
+fn console_command(console_bin: &str, apid_addr: &str) -> CommandBuilder {
     let mut cmd = CommandBuilder::new(console_bin);
     cmd.arg("--apid-addr");
     cmd.arg(apid_addr);
@@ -175,6 +164,19 @@ fn run_one_session(
     // serial console never gets this env (its default is halfblocks).
     cmd.env("EMBRA_TUI_GRAPHICS", "sixel");
     cmd.env("TERM", "xterm-256color");
+    cmd
+}
+
+/// One console lifetime: open PTY, spawn child, pump until it exits.
+fn run_one_session(
+    cmd: CommandBuilder,
+    output_tx: &broadcast::Sender<Bytes>,
+    input_rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
+    resize_rx: &mut mpsc::UnboundedReceiver<(u16, u16, u16, u16)>,
+    last_size: &mut PtySize,
+    repaint: &AtomicBool,
+) -> anyhow::Result<()> {
+    let pair = native_pty_system().openpty(*last_size)?;
 
     // Spawn on the slave, then drop our slave handle so the master read
     // EOFs when the child exits (otherwise it would block forever).
@@ -263,5 +265,158 @@ fn run_one_session(
         }
 
         std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicU32;
+
+    /// Marks the re-executed test binary as the stand-in console.
+    const CHILD_ENV: &str = "EMBRA_PTY_FAKE_CONSOLE";
+    const DEADLINE: Duration = Duration::from_secs(20);
+
+    static WINCH: AtomicU32 = AtomicU32::new(0);
+
+    extern "C" fn on_winch(_: libc::c_int) {
+        WINCH.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// `<tag> <cols>x<rows> <xpixel>x<ypixel>` for the terminal on stdout.
+    fn report(tag: &str) {
+        // SAFETY: TIOCGWINSZ fills a plain C struct.
+        let mut ws: libc::winsize = unsafe { std::mem::zeroed() };
+        unsafe { libc::ioctl(libc::STDOUT_FILENO, libc::TIOCGWINSZ, &mut ws) };
+        println!("{tag} {}x{} {}x{}", ws.ws_col, ws.ws_row, ws.ws_xpixel, ws.ws_ypixel);
+        let _ = std::io::stdout().flush();
+    }
+
+    /// Not a test of its own: the stand-in console `session_round_trip`
+    /// runs on its PTY by re-executing this test binary. It reports the
+    /// winsize at start and on every SIGWINCH, and exits on a `quit` line.
+    #[test]
+    #[ignore = "helper process for session_round_trip"]
+    fn fake_console_child() {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            return;
+        }
+        // SAFETY: the handler only bumps an atomic.
+        unsafe {
+            libc::signal(libc::SIGWINCH, on_winch as extern "C" fn(libc::c_int) as libc::sighandler_t);
+        }
+        report("ready");
+        std::thread::spawn(|| {
+            let mut seen = 0;
+            loop {
+                let n = WINCH.load(Ordering::SeqCst);
+                if n != seen {
+                    seen = n;
+                    report(&format!("winch {n}"));
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let mut line = String::new();
+        loop {
+            line.clear();
+            match std::io::stdin().read_line(&mut line) {
+                Ok(0) | Err(_) => break,
+                Ok(_) if line.trim() == "quit" => {
+                    println!("bye");
+                    break;
+                }
+                Ok(_) => {}
+            }
+        }
+    }
+
+    /// Drain the broadcast into `seen` until `needle` shows up.
+    fn expect(rx: &mut broadcast::Receiver<Bytes>, seen: &mut String, needle: &str) {
+        let start = Instant::now();
+        while !seen.contains(needle) {
+            match rx.try_recv() {
+                Ok(chunk) => seen.push_str(&String::from_utf8_lossy(&chunk)),
+                Err(_) => {
+                    assert!(
+                        start.elapsed() < DEADLINE,
+                        "no {needle:?} within {DEADLINE:?}; PTY output so far:\n{seen}"
+                    );
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn console_command_carries_the_web_pty_environment() {
+        let cmd = console_command("/usr/bin/embra-console", "http://127.0.0.1:50000");
+        let argv: Vec<_> = cmd.get_argv().iter().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(argv, ["/usr/bin/embra-console", "--apid-addr", "http://127.0.0.1:50000"]);
+        let env = |k: &str| cmd.get_env(k).map(|v| v.to_string_lossy().into_owned());
+        // The console's PTY-only behavior, its sixel pane and its color
+        // depth all hang off these three.
+        assert_eq!(env("EMBRA_WEB_PTY").as_deref(), Some("1"));
+        assert_eq!(env("EMBRA_TUI_GRAPHICS").as_deref(), Some("sixel"));
+        assert_eq!(env("TERM").as_deref(), Some("xterm-256color"));
+    }
+
+    /// One console lifetime against a real PTY: the opening size, a resize
+    /// with pixel geometry (what the sixel pane derives its cell from), the
+    /// fresh-attach repaint signal, input, and exit detection.
+    #[test]
+    fn session_round_trip() {
+        if !std::path::Path::new("/dev/ptmx").exists() {
+            eprintln!("skipped: this host has no /dev/ptmx");
+            return;
+        }
+        let mut cmd = CommandBuilder::new(std::env::current_exe().expect("test binary path"));
+        cmd.args([
+            "--exact",
+            "pty_bridge::tests::fake_console_child",
+            "--ignored",
+            "--nocapture",
+        ]);
+        cmd.env(CHILD_ENV, "1");
+
+        let (output_tx, mut output_rx) = broadcast::channel::<Bytes>(2048);
+        let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (resize_tx, mut resize_rx) = mpsc::unbounded_channel::<(u16, u16, u16, u16)>();
+        let repaint = Arc::new(AtomicBool::new(false));
+
+        let session = {
+            let output_tx = output_tx.clone();
+            let repaint = repaint.clone();
+            std::thread::spawn(move || {
+                let mut size = PtySize::default();
+                run_one_session(cmd, &output_tx, &mut input_rx, &mut resize_rx, &mut size, &repaint)
+                    .map(|()| size)
+                    .map_err(|e| format!("{e:#}"))
+            })
+        };
+
+        let mut seen = String::new();
+        expect(&mut output_rx, &mut seen, "ready 80x24 0x0");
+
+        // A real size change: the kernel signals the child itself.
+        resize_tx.send((100, 30, 900, 540)).unwrap();
+        expect(&mut output_rx, &mut seen, "winch 1 100x30 900x540");
+
+        // Same size, so no kernel signal — the bridge sends SIGWINCH.
+        repaint.store(true, Ordering::SeqCst);
+        expect(&mut output_rx, &mut seen, "winch 2 100x30 900x540");
+        assert!(!repaint.load(Ordering::SeqCst), "the pump consumes the repaint request");
+
+        input_tx.send(b"quit\n".to_vec()).unwrap();
+        expect(&mut output_rx, &mut seen, "bye");
+
+        let start = Instant::now();
+        while !session.is_finished() {
+            assert!(start.elapsed() < DEADLINE, "the session did not notice the child's exit");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let size = session.join().expect("session thread").expect("session result");
+        // A restart reopens at the operator's last size.
+        assert_eq!((size.cols, size.rows, size.pixel_width, size.pixel_height), (100, 30, 900, 540));
     }
 }

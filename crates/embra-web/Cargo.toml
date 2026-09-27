@@ -22,6 +22,6 @@ tokio-rustls = "0.26"
 tokio-stream = "0.1"
 futures-util = "0.3"
 bytes = "1"
-portable-pty = "0.8"
+portable-pty = "0.9"
 rust-embed = { version = "8", features = ["compression"] }
 libc = "0.2"
