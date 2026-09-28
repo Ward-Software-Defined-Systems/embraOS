@@ -1170,6 +1170,9 @@ async fn run_v8_turn_trace_reset(db: &WardsonDbClient) -> Result<()> {
         return Ok(());
     }
 
+    // The one empty filter in the crate: every document of this diagnostic
+    // collection goes. Not a pattern to copy — any other delete names what
+    // it removes.
     match db
         .delete_by_query("tools.turn_trace", &serde_json::json!({}))
         .await

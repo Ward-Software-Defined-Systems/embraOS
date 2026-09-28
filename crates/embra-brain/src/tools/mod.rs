@@ -812,6 +812,51 @@ async fn introspect(db: &WardsonDbClient, focus: &str) -> String {
     }
 }
 
+/// The entries `changelog` reports, from a newest-first window: those
+/// created after the session started, or the whole window when the session
+/// has no start on record. The order is kept.
+fn entries_since<'a>(
+    newest_first: &'a [serde_json::Value],
+    session_start: Option<&str>,
+) -> Vec<&'a serde_json::Value> {
+    match session_start {
+        Some(start) => newest_first
+            .iter()
+            .filter(|doc| {
+                doc.get("created_at")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|ts| ts > start)
+            })
+            .collect(),
+        None => newest_first.iter().collect(),
+    }
+}
+
+#[cfg(test)]
+mod changelog_tests {
+    use super::entries_since;
+    use serde_json::json;
+
+    #[test]
+    fn entries_after_the_session_start_are_reported_newest_first() {
+        // As `fetch_recent_with_fields` returns them: newest first.
+        let window = vec![
+            json!({"content": "c", "created_at": "2026-09-28T12:00:00Z"}),
+            json!({"content": "b", "created_at": "2026-09-28T11:00:00Z"}),
+            json!({"content": "a", "created_at": "2026-09-27T09:00:00Z"}),
+            json!({"content": "no timestamp"}),
+        ];
+        let since = entries_since(&window, Some("2026-09-28T00:00:00Z"));
+        let contents: Vec<_> = since.iter().map(|d| d["content"].as_str().unwrap()).collect();
+        assert_eq!(contents, ["c", "b"]);
+
+        // Without a start on record the whole window is reported, in its order.
+        let all = entries_since(&window, None);
+        assert_eq!(all.len(), 4);
+        assert_eq!(all[0]["content"], "c");
+    }
+}
+
 async fn changelog(db: &WardsonDbClient, current_session: &str) -> String {
     // Find the current session's creation time
     let meta_col = format!("sessions.{}.meta", current_session);
@@ -824,35 +869,22 @@ async fn changelog(db: &WardsonDbClient, current_session: &str) -> String {
 
     let mut output = String::from("Changes since last session:\n");
 
-    // Recent memory entries (with projection)
+    // Recent memory entries, newest first. The window and its order are
+    // explicit: a body that carries a projection and nothing else is
+    // answered with the server's default window, the OLDEST 100 documents,
+    // and an instance with more entries than that would never see a new one.
     let entries = db
-        .query(
+        .fetch_recent_with_fields(
             "memory.entries",
-            &serde_json::json!({"fields": ["content", "tags", "created_at"]}),
+            MEMORY_FETCH_WINDOW,
+            Some(&["content", "tags", "created_at"]),
         )
         .await
         .unwrap_or_default();
 
     const DISPLAY_CAP: usize = 5;
 
-    // Newest first in both branches so the list's order matches expectations.
-    // The session_start branch filters to entries created after session start
-    // (variable count); the no-session-start branch shows the tail of history.
-    let recent_entries: Vec<_> = if let Some(ref start) = session_start {
-        let mut filtered: Vec<_> = entries
-            .iter()
-            .filter(|doc| {
-                doc.get("created_at")
-                    .and_then(|v| v.as_str())
-                    .map(|ts| ts > start.as_str())
-                    .unwrap_or(false)
-            })
-            .collect();
-        filtered.reverse();
-        filtered
-    } else {
-        entries.iter().rev().collect()
-    };
+    let recent_entries = entries_since(&entries, session_start.as_deref());
 
     let total_recent = recent_entries.len();
     if total_recent == 0 {

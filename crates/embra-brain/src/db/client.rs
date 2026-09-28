@@ -494,6 +494,13 @@ impl WardsonDbClient {
         Ok(())
     }
 
+    /// Delete every document the filter matches; returns how many.
+    ///
+    /// The filter is the whole condition, so an empty one matches the whole
+    /// collection. Migration v8 is the one caller that passes it, to clear a
+    /// diagnostic collection. The cascades that pass `$or` are cold paths:
+    /// the server answers that shape with a full scan, and it never goes
+    /// into a `query()` on a hot path.
     pub async fn delete_by_query(
         &self,
         collection: &str,
@@ -745,6 +752,135 @@ mod window_query_tests {
         assert!(
             hits.is_empty(),
             "queries sent with an empty body (server default: the first 100 \
+             documents in key order):\n{}",
+            hits.join("\n")
+        );
+    }
+
+    /// Where a `{`-delimited literal that opens at `open` closes. Braces
+    /// inside string literals do not count.
+    fn literal_end(text: &str, open: usize) -> usize {
+        let bytes = text.as_bytes();
+        let (mut depth, mut i) = (0usize, open);
+        while i < bytes.len() {
+            match bytes[i] {
+                b'"' => {
+                    i += 1;
+                    while i < bytes.len() && bytes[i] != b'"' {
+                        if bytes[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                }
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return i;
+                    }
+                }
+                _ => {}
+            }
+            i += 1;
+        }
+        bytes.len().saturating_sub(1)
+    }
+
+    /// The keys a JSON object literal has at its top level.
+    fn top_level_keys(literal: &str) -> Vec<&str> {
+        let bytes = literal.as_bytes();
+        let (mut keys, mut depth, mut i) = (Vec::new(), 0usize, 0usize);
+        while i < bytes.len() {
+            match bytes[i] {
+                b'"' => {
+                    let start = i + 1;
+                    i = start;
+                    while i < bytes.len() && bytes[i] != b'"' {
+                        if bytes[i] == b'\\' {
+                            i += 1;
+                        }
+                        i += 1;
+                    }
+                    let mut after = i + 1;
+                    while after < bytes.len() && bytes[after].is_ascii_whitespace() {
+                        after += 1;
+                    }
+                    if depth == 1 && bytes.get(after) == Some(&b':') {
+                        keys.push(&literal[start..i.min(bytes.len())]);
+                    }
+                }
+                b'{' | b'[' | b'(' => depth += 1,
+                b'}' | b']' | b')' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            i += 1;
+        }
+        keys
+    }
+
+    #[test]
+    fn the_keys_of_a_literal_are_read_at_its_top_level_only() {
+        let literal = r#"{ "filter": {"limit": 1, "a": "}"}, "fields": ["x"], "limit": n }"#;
+        assert_eq!(literal_end(literal, 0), literal.len() - 1);
+        assert_eq!(top_level_keys(literal), ["filter", "fields", "limit"]);
+    }
+
+    /// The guard above sees an empty body in a call's arguments. A body with
+    /// a projection, a filter or a sort and NO `limit` is answered with the
+    /// server's default window just the same — `changelog` asked for three
+    /// fields of `memory.entries` that way and was given the oldest 100
+    /// entries. This reads every JSON object literal of the crate, wherever
+    /// it is bound, and asks those shaped like a query for a `limit`.
+    #[test]
+    fn every_query_body_carries_a_limit() {
+        fn visit(dir: &std::path::Path, hits: &mut Vec<String>) {
+            // Spelled in two pieces so this file does not find itself.
+            let opener = ["json!", "("].concat();
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    visit(&path, hits);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                let mut from = 0;
+                while let Some(found) = text[from..].find(&opener) {
+                    let at = from + found;
+                    from = at + opener.len();
+                    let rest = text[from..].trim_start();
+                    if !rest.starts_with('{') {
+                        continue;
+                    }
+                    let open = text.len() - rest.len();
+                    let literal = &text[open..=literal_end(&text, open)];
+                    let keys = top_level_keys(literal);
+                    let is_query = ["filter", "fields", "sort"].iter().any(|k| keys.contains(k));
+                    let bounded = keys.contains(&"limit") || keys.contains(&"count_only");
+                    // Two literals have such a key and are no query: an index
+                    // specification (`name` + `fields`), and the request that
+                    // `delete_by_query` wraps around the caller's filter.
+                    let index_spec = keys.contains(&"name");
+                    let delete_request =
+                        literal.split_whitespace().collect::<String>() == r#"{"filter":filter}"#;
+                    if is_query && !bounded && !index_spec && !delete_request {
+                        let line = text[..at].matches('\n').count() + 1;
+                        hits.push(format!("{}:{line}", path.display()));
+                    }
+                }
+            }
+        }
+        let mut hits = Vec::new();
+        visit(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut hits,
+        );
+        assert!(
+            hits.is_empty(),
+            "query bodies without a `limit` (server default: the first 100 \
              documents in key order):\n{}",
             hits.join("\n")
         );

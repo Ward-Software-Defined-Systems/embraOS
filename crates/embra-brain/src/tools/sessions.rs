@@ -457,11 +457,11 @@ pub async fn session_list(db: &WardsonDbClient) -> String {
 
     for name in &names {
         let meta_col = format!("sessions.{}.meta", name);
+        // One meta document per session: read like every single-document
+        // collection, with a limit and an order, so the first document
+        // returned is the canonical one.
         let meta_docs = db
-            .query(
-                &meta_col,
-                &serde_json::json!({"fields": ["session_name", "state", "status", "last_active", "created_at", "message_count"]}),
-            )
+            .query(&meta_col, &history_query_body())
             .await
             .unwrap_or_default();
 
@@ -565,6 +565,36 @@ pub async fn session_read(db: &WardsonDbClient, param: &str) -> String {
     output
 }
 
+/// How many of a session's tool-call traces `session_search` reads.
+const TRACE_SEARCH_WINDOW: usize = 500;
+
+/// Body for the trace pass of `session_search`: the NEWEST traces of one
+/// session. The order is stated because a body with a limit and no sort is
+/// answered in key order, oldest first: a session with more traces than the
+/// window would never have its recent tool calls searched.
+fn trace_search_body(session: &str) -> serde_json::Value {
+    let mut body = crate::db::client::recent_query_body(TRACE_SEARCH_WINDOW, None);
+    body["filter"] = serde_json::json!({"session": session});
+    body
+}
+
+#[cfg(test)]
+mod trace_search_body_tests {
+    use super::{trace_search_body, TRACE_SEARCH_WINDOW};
+
+    #[test]
+    fn the_trace_pass_reads_the_newest_traces_of_one_session() {
+        let body = trace_search_body("ops");
+        assert_eq!(body["filter"], serde_json::json!({"session": "ops"}));
+        assert_eq!(body["limit"], TRACE_SEARCH_WINDOW);
+        assert_eq!(
+            body["sort"],
+            serde_json::json!([{"_created_at": "desc"}, {"_id": "desc"}]),
+            "newest first: with a limit and no sort the window is the oldest 500"
+        );
+    }
+}
+
 /// Full-text search across sessions.
 ///
 /// Query semantics:
@@ -633,14 +663,18 @@ pub async fn session_search(
         // concatenation and tag the result line with [tool/<name>] so
         // the caller can distinguish it from a content match.
         if include_tool_metadata {
-            let trace_filter = serde_json::json!({
-                "filter": {"session": name.clone()},
-                "limit": 500usize,
-            });
             let trace_docs = db
-                .query("tools.turn_trace", &trace_filter)
+                .query("tools.turn_trace", &trace_search_body(name))
                 .await
                 .unwrap_or_default();
+            if crate::db::client::window_saturated(trace_docs.len(), TRACE_SEARCH_WINDOW) {
+                tracing::warn!(
+                    target: "wardsondb::window",
+                    session = %name,
+                    limit = TRACE_SEARCH_WINDOW,
+                    "session_search trace window saturated — the session's older tool calls were not searched"
+                );
+            }
             for doc in trace_docs {
                 let tool_name = doc.get("tool_name").and_then(|v| v.as_str()).unwrap_or("?");
                 let input_preview = doc
