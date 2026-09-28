@@ -165,6 +165,9 @@ resolve_path() {
 
 check_no_vm_using_image() {
     local target pid cmd tok path unknown=0
+    # The pattern matches ANY command line that holds both words, a shell
+    # that runs a script mentioning them included. A test of this check that names
+    # both words goes into a file, not onto a command line.
     pgrep -f "qemu.*embraos" >/dev/null 2>&1 || return 0
     target=$(resolve_path "$IMAGE")
 

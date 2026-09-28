@@ -59,6 +59,8 @@ fn boot() -> Result<(), Box<dyn std::error::Error>> {
 
     std::fs::create_dir_all(NEWROOT)?;
 
+    // Read-only, and it stays so: the root filesystem is immutable. What
+    // is written at run time lives on STATE, DATA or tmpfs.
     eprintln!("[embra-init] Mounting SquashFS rootfs from /dev/vda2");
     mount(
         Some("/dev/vda2"),

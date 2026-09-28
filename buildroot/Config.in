@@ -1,3 +1,7 @@
+# Every package of this tree is sourced here. One that is missing from the
+# list is left out of the image without a warning: Buildroot discards a
+# BR2_PACKAGE_*=y line of the defconfig whose symbol it does not know, and
+# the build succeeds.
 source "$BR2_EXTERNAL_EMBRAOS_PATH/package/embrad/Config.in"
 source "$BR2_EXTERNAL_EMBRAOS_PATH/package/embra-apid/Config.in"
 source "$BR2_EXTERNAL_EMBRAOS_PATH/package/embra-trustd/Config.in"

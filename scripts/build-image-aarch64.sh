@@ -49,7 +49,9 @@ KERNEL_NAME="Image"
 # but a separate setting: the brain loads a Guardian tool only when it was
 # built by the version in /opt/rust/RUST_VERSION, so moving this pin leaves
 # every existing tool unloaded on the next boot until the operator runs
-# `/guardian rebuild --all`.
+# `/guardian rebuild --all`. When it moves, the test fixture
+# crates/embra-guardian/tests/fixtures/probe.wasm is built again as well
+# (tests/fixture_roundtrip.rs says how).
 RUST_TOOLCHAIN_VERSION="${RUST_TOOLCHAIN_VERSION:-1.98.1}"
 
 # Buildroot release pin. Override at runtime:
@@ -196,6 +198,9 @@ if [ "$BUILDROOT_ONLY" = false ]; then
         exit 1
     fi
     rustup target add wasm32-unknown-unknown
+    # --locked: the frontend has a lockfile of its own
+    # (crates/embra-web-ui/Cargo.lock). When it no longer matches its
+    # manifest the build stops here; commit the lock first.
     (cd crates/embra-web-ui && trunk build --release --locked)
 
     echo "=== Step 1: Build Rust binaries (aarch64 musl static) ==="

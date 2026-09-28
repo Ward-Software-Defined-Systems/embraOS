@@ -135,6 +135,9 @@ check_image() {
 }
 
 check_vm_stopped() {
+    # The pattern matches ANY command line that holds both words, a shell
+    # that runs a script mentioning them included. A test of this check that names
+    # both words goes into a file, not onto a command line.
     if pgrep -f "qemu.*embraos" > /dev/null 2>&1; then
         log_error "QEMU appears to be running with this image"
         echo "  Stop the VM before backup/restore to avoid data corruption"

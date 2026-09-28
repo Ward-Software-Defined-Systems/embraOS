@@ -23,6 +23,10 @@ EMBRA_RUST_TOOLCHAIN_SITE_METHOD = local
 # Only the payload is installed. $(@D) is Buildroot's build directory for the
 # package, and Buildroot keeps its own bookkeeping at the top of it
 # (.stamp_*, .files-list*). The toolchain has no dotfile of its own there.
+#
+# The path is written out in each line. No helper variable for it: the
+# package infrastructure owns most of the EMBRA_RUST_TOOLCHAIN_* namespace
+# (_NAME and _DIR among them), and sets such a variable itself.
 define EMBRA_RUST_TOOLCHAIN_INSTALL_TARGET_CMDS
 	rm -rf $(TARGET_DIR)/opt/rust
 	mkdir -p $(TARGET_DIR)/opt/rust
