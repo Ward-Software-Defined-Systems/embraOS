@@ -245,6 +245,19 @@ async fn send_system(
         .await;
 }
 
+/// The options of the import offer. The safe one — build conversationally,
+/// which seals nothing — is first: the console pre-selects index 0.
+fn offer_options(candidates: &[ImportCandidate]) -> Vec<String> {
+    let mut options = vec![BUILD_CONVERSATIONALLY.to_string()];
+    options.extend(candidates.iter().map(candidate_label));
+    options
+}
+
+/// The options of the seal confirmation, the safe one first.
+fn confirm_options() -> Vec<String> {
+    vec![CONFIRM_NO.to_string(), CONFIRM_YES.to_string()]
+}
+
 async fn send_selector(
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
     prompt: String,
@@ -290,8 +303,7 @@ pub async fn offer_import(
         return Ok(ImportOutcome::NoCandidates);
     }
 
-    let mut options = vec![BUILD_CONVERSATIONALLY.to_string()];
-    options.extend(candidates.iter().map(candidate_label));
+    let options = offer_options(&candidates);
 
     loop {
         send_selector(
@@ -334,7 +346,7 @@ pub async fn offer_import(
                  The soul seal is IRREVERSIBLE.",
                 candidate.graph.display_name()
             ),
-            vec![CONFIRM_NO.to_string(), CONFIRM_YES.to_string()],
+            confirm_options(),
             CONFIRM_NO.to_string(),
         )
         .await;
@@ -485,5 +497,10 @@ mod import_flow_tests {
         // The console pre-selects index 0 — the safe option must be first.
         assert_eq!(CONFIRM_NO, "No — choose again");
         assert!(CONFIRM_YES.contains("seal permanently"));
+        // In the lists that are sent, not only in the constants.
+        assert_eq!(confirm_options(), [CONFIRM_NO, CONFIRM_YES]);
+        let offered = offer_options(&[candidate(Some("Meridian"), "meridian.graph.json")]);
+        assert_eq!(offered.len(), 2);
+        assert_eq!(offered[0], BUILD_CONVERSATIONALLY);
     }
 }

@@ -194,6 +194,21 @@ pub enum DeleteFlowPhase {
     AwaitingReason,
 }
 
+/// One user message against the delete flow. The first after the command is
+/// the kickoff the command itself dispatched: it moves the flow on and is
+/// not the reason. The second is the operator's reason: it takes the flow
+/// out of the slot, for the turn to act on.
+fn advance_delete_flow(slot: &mut Option<PendingSessionDelete>) -> Option<PendingSessionDelete> {
+    match slot.as_mut() {
+        Some(state) if state.phase == DeleteFlowPhase::AwaitingKickoff => {
+            state.phase = DeleteFlowPhase::AwaitingReason;
+            None
+        }
+        Some(_) => slot.take(),
+        None => None,
+    }
+}
+
 /// Markers the memorize turn must end with — the learning-loop
 /// `[PHASE_COMPLETE]` precedent. Scanned from the final assistant text;
 /// the brain (not the model) executes the actual soft delete.
@@ -852,14 +867,7 @@ async fn handle_request(
             // the reason must reach the model.
             let delete_exec: Option<PendingSessionDelete> = {
                 let mut guard = pending_session_delete.lock().await;
-                match guard.as_mut() {
-                    Some(state) if state.phase == DeleteFlowPhase::AwaitingKickoff => {
-                        state.phase = DeleteFlowPhase::AwaitingReason;
-                        None
-                    }
-                    Some(_) => guard.take(),
-                    None => None,
-                }
+                advance_delete_flow(&mut guard)
             };
 
             // No-session guard (session-ux-fixes). The historical fallback
@@ -8703,33 +8711,24 @@ mod session_delete_flow_tests {
 
     #[test]
     fn phase_machine_advances_kickoff_then_consumes_reason() {
-        // Mirrors the UserMessage-arm intercept: AwaitingKickoff advances
+        // The function the UserMessage arm calls: AwaitingKickoff advances
         // in place (the kickoff synthetic must run as a normal turn);
         // AwaitingReason is taken (the reason turn executes the delete).
         let mut slot = Some(PendingSessionDelete {
             name: "old-proj".into(),
             phase: DeleteFlowPhase::AwaitingKickoff,
         });
-        let first = match slot.as_mut() {
-            Some(s) if s.phase == DeleteFlowPhase::AwaitingKickoff => {
-                s.phase = DeleteFlowPhase::AwaitingReason;
-                None
-            }
-            Some(_) => slot.take(),
-            None => None,
-        };
+        let first = advance_delete_flow(&mut slot);
         assert!(first.is_none(), "kickoff message must not be consumed as the reason");
         assert_eq!(
             slot.as_ref().map(|s| s.phase),
             Some(DeleteFlowPhase::AwaitingReason)
         );
-        let second = match slot.as_mut() {
-            Some(s) if s.phase == DeleteFlowPhase::AwaitingKickoff => None,
-            Some(_) => slot.take(),
-            None => None,
-        };
+        let second = advance_delete_flow(&mut slot);
         assert_eq!(second.map(|s| s.name).as_deref(), Some("old-proj"));
         assert!(slot.is_none(), "reason consumption must clear the flow state");
+        // No flow pending: a message is a message.
+        assert!(advance_delete_flow(&mut slot).is_none());
     }
 }
 

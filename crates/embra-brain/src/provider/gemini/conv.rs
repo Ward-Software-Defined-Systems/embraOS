@@ -395,6 +395,9 @@ mod tests {
     #[test]
     fn tool_result_images_placement_is_locked() {
         // Pins the SELECTED placement (see TOOL_RESULT_IMAGE_PLACEMENT).
+        // When this fails, the constant was moved or the wire changed. The
+        // expectation below is edited only after the new placement was
+        // probed against the live API, never to make a change pass.
         let msgs = vec![
             ApiMessage::Assistant {
                 content: vec![Block::ToolCall {

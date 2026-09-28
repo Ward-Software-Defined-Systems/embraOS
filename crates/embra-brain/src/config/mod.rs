@@ -10,6 +10,10 @@ use crate::provider::gemini::GeminiProvider;
 use crate::provider::{LlmProvider, ProviderKind, ValidationResult};
 use embra_common::proto::brain::*;
 
+/// No `Default`, on purpose: a new field is written at every place a
+/// config is constructed, where the compiler asks for it. A field that old
+/// stored configs lack is optional and carries a serde default; that needs
+/// no schema version.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemConfig {
     pub name: String,

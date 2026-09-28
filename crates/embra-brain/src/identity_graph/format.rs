@@ -439,7 +439,8 @@ mod format_tests {
         )
         .unwrap_err();
         assert!(e.iter().any(|m| m.contains("duplicate node id 'me'")));
-        assert!(e.iter().any(|m| m.contains("reserved")));
+        // By its node: the message for `_bad` says "reserved" as well.
+        assert!(e.iter().any(|m| m.contains("node 'user_x'") && m.contains("id prefix is reserved")));
         assert!(e.iter().any(|m| m.contains("starts with '_'")));
         assert!(e.iter().any(|m| m.contains("missing node")));
         assert!(e.iter().any(|m| m.contains("duplicate edge")));

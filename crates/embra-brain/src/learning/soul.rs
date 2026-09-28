@@ -8,9 +8,11 @@ pub async fn seal_soul(db: &WardsonDbClient, soul: &serde_json::Value) -> Result
         db.create_collection("soul.invariant").await?;
     }
 
-    // Compute hash of the soul document for integrity verification
-    let soul_json = serde_json::to_string_pretty(soul)?;
-    let hash = compute_sha256(&soul_json);
+    // The hash embra-trustd computes again at every boot. Both sides have to
+    // serialize the value the same way, byte for byte, or the next boot
+    // halts: `compute_soul_hash` is the one place on this side, and its
+    // bytes are pinned (`canonical_meridian_seal_hash_is_frozen`).
+    let hash = compute_soul_hash(soul)?;
 
     let sealed_doc = serde_json::json!({
         "_id": "soul",

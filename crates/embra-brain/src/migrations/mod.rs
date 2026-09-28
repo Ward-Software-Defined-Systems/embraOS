@@ -4,6 +4,15 @@ use tracing::{error, info, warn};
 
 use crate::db::{WardsonDbClient, WardsonDbError};
 
+/// The version the ladder in `run_migrations` ends on
+/// (`the_ladder_ends_on_the_current_schema_version`).
+///
+/// A change of on-disk shape raises it by one and adds a step: a new
+/// collection, a field whose meaning or type changes, a document that has
+/// to be rewritten. A new field that old documents simply lack does not —
+/// it is read with a serde default. What has to hold on every boot,
+/// whatever the version (indexes, retention, the identity projection, the
+/// seed packs), is in the tail below the ladder and has no version.
 const CURRENT_SCHEMA_VERSION: u32 = 13;
 
 /// Run all pending migrations. Each migration is idempotent.
@@ -369,6 +378,32 @@ async fn ensure_ttl_policies(db: &WardsonDbClient) {
                 collection, e
             ),
         }
+    }
+}
+
+#[cfg(test)]
+mod ladder_tests {
+    use super::CURRENT_SCHEMA_VERSION;
+
+    /// The constant is what the log calls the target; the steps carry their
+    /// number as a literal. A step added without the constant, or the
+    /// constant raised without a step, shows here.
+    #[test]
+    fn the_ladder_ends_on_the_current_schema_version() {
+        let source = include_str!("mod.rs");
+        // Spelled in two pieces so this test does not read itself.
+        let call = ["set_schema_version(db", ", "].concat();
+        let steps: Vec<u32> = source
+            .match_indices(&call)
+            .filter_map(|(at, _)| {
+                let rest = &source[at + call.len()..];
+                rest[..rest.find(')')?].trim().parse().ok()
+            })
+            .collect();
+        assert_eq!(steps.iter().max(), Some(&CURRENT_SCHEMA_VERSION), "{steps:?}");
+        // One step per version, none skipped, none twice.
+        let expected: Vec<u32> = (0..=CURRENT_SCHEMA_VERSION).collect();
+        assert_eq!(steps, expected);
     }
 }
 

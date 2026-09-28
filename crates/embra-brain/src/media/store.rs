@@ -236,6 +236,8 @@ impl MediaStore {
             sha256: sha,
         };
         let path = self.dir.join(&file);
+        // Both files through the atomic writer: a reader finds a whole image
+        // and a whole sidecar, or none.
         crate::tools::file_patch::write_atomic_create(&path, &normalized.bytes)
             .await
             .map_err(MediaError::Io)?;
