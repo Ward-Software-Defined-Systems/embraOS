@@ -75,3 +75,25 @@ pub fn compute_soul_hash(soul: &serde_json::Value) -> Result<String> {
     let soul_json = serde_json::to_string_pretty(soul)?;
     Ok(compute_sha256(&soul_json))
 }
+
+#[cfg(test)]
+mod parity_tests {
+    use super::compute_soul_hash;
+
+    /// A soul value with its keys out of order, nested, with empty
+    /// containers, text outside ASCII and a line break.
+    ///
+    /// The same value and the same hash stand in embra-trustd's tests
+    /// (`embra-trustd/src/soul.rs`). trustd computes the hash again at every
+    /// boot and halts on a difference, so the two sides have to serialize a
+    /// value the same way, byte for byte. If one of them changes, its test
+    /// fails.
+    const PARITY_SOUL: &str = r#"{"name":"Parity","format":"graph.v1","nodes":[{"id":"self","type":"self","text":"Ünïcode — “quoted”\nsecond line","weight":1},{"id":"a","type":"value","text":"t","tags":[],"meta":{}}],"edges":[{"src":"self","dst":"a","relation":"holds"}],"n":42,"neg":-7,"flag":true,"nothing":null}"#;
+    const PARITY_HASH: &str = "2e825f06286345aa0e369f9107d34b5d9e77ddd4bdd693408f7a8a997a170f51";
+
+    #[test]
+    fn the_seal_hash_is_the_one_trustd_computes() {
+        let soul: serde_json::Value = serde_json::from_str(PARITY_SOUL).unwrap();
+        assert_eq!(compute_soul_hash(&soul).unwrap(), PARITY_HASH);
+    }
+}

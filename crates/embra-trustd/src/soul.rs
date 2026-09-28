@@ -7,6 +7,15 @@ use anyhow::{Result, Context};
 use sha2::{Sha256, Digest};
 use tracing::debug;
 
+/// What `verify` reports when WardSONDB holds no soul document.
+///
+/// embrad reads this TEXT to tell a first boot from a failed verification
+/// (`embrad/src/supervisor.rs`, `is_first_run`): it looks for "no soul" and
+/// for "not found". Reword it there as well, or the first boot halts. No
+/// other report of this module may carry either phrase, or a failed
+/// verification would read as a first boot.
+const NO_SOUL_ERROR: &str = "Soul document not found — no soul exists (first run or data loss)";
+
 pub struct SoulVerifier {
     wardsondb_url: String,
     hash_path: std::path::PathBuf,
@@ -58,7 +67,7 @@ impl SoulVerifier {
             .context("Failed to connect to WardSONDB")?;
 
         if response.status() == reqwest::StatusCode::NOT_FOUND {
-            anyhow::bail!("Soul document not found — no soul exists (first run or data loss)");
+            anyhow::bail!(NO_SOUL_ERROR);
         }
 
         let envelope: serde_json::Value = response.json().await
@@ -108,4 +117,62 @@ impl SoulVerifier {
         Ok(hash)
     }
 
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn verifier(hash_path: &str) -> SoulVerifier {
+        SoulVerifier::new("http://127.0.0.1:1".to_string(), hash_path.into())
+    }
+
+    /// The same value and the same hash stand in embra-brain's tests
+    /// (`embra-brain/src/learning/soul.rs`, `parity_tests`). The brain seals
+    /// with its hash and this service computes it again at every boot: the
+    /// two have to serialize a value the same way, byte for byte.
+    const PARITY_SOUL: &str = r#"{"name":"Parity","format":"graph.v1","nodes":[{"id":"self","type":"self","text":"Ünïcode — “quoted”\nsecond line","weight":1},{"id":"a","type":"value","text":"t","tags":[],"meta":{}}],"edges":[{"src":"self","dst":"a","relation":"holds"}],"n":42,"neg":-7,"flag":true,"nothing":null}"#;
+    const PARITY_HASH: &str = "2e825f06286345aa0e369f9107d34b5d9e77ddd4bdd693408f7a8a997a170f51";
+
+    #[test]
+    fn the_hash_is_the_one_the_brain_seals_with() {
+        let soul: serde_json::Value = serde_json::from_str(PARITY_SOUL).unwrap();
+        // As stored: the soul inside its document. Only the soul is hashed.
+        let doc = serde_json::json!({
+            "_id": "soul",
+            "soul": soul,
+            "sha256": "not read here",
+            "sealed_at": "2026-01-01T00:00:00Z",
+            "sealed": true,
+        });
+        assert_eq!(verifier("/nonexistent").compute_hash(&doc), PARITY_HASH);
+    }
+
+    #[test]
+    fn the_no_soul_report_carries_the_words_embrad_looks_for() {
+        assert!(NO_SOUL_ERROR.contains("no soul"));
+        assert!(NO_SOUL_ERROR.contains("not found"));
+    }
+
+    /// A soul without its stored hash is a failed verification, and embrad
+    /// halts on it. The report must not read as a first boot.
+    #[test]
+    fn a_missing_or_empty_hash_does_not_read_as_a_missing_soul() {
+        let err = verifier("/nonexistent/soul.sha256")
+            .read_stored_hash()
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("no soul") && !err.contains("not found"), "{err}");
+
+        let dir = std::env::temp_dir().join(format!("embra-trustd-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let empty = dir.join("soul.sha256");
+        std::fs::write(&empty, "  \n").unwrap();
+        let err = verifier(empty.to_str().unwrap())
+            .read_stored_hash()
+            .unwrap_err()
+            .to_string();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(!err.contains("no soul") && !err.contains("not found"), "{err}");
+    }
 }

@@ -167,7 +167,7 @@ pub enum ServiceStatus {
     Starting,
     Running,
     Failed(String),
-    Halted, // Soul verification failed — do not restart
+    Halted, // The restart budget is used up — not restarted again
 }
 
 pub struct Supervisor {
@@ -197,9 +197,11 @@ impl Supervisor {
         // Merge operator CA certs (STATE drop-in) with the stock bundle and
         // export GIT_SSL_CAINFO/SSL_CERT_FILE for all child processes.
         crate::ca_bundle::setup_operator_ca_trust();
-        // Storage engine baked at build time via scripts/build-image.sh --storage-engine.
-        // Falls back to rocksdb for dev builds (`cargo check`/`cargo run`) that bypass
-        // the build script. See crates/embrad/build.rs.
+        // Which engine: fixed in THIS binary when the image is built
+        // (scripts/build-image.sh --storage-engine, see crates/embrad/build.rs),
+        // rocksdb for a dev build that bypasses the script. WardSONDB itself
+        // has both engines compiled in and takes the choice as a flag when
+        // it starts.
         let storage_engine: &'static str =
             option_env!("EMBRA_STORAGE_ENGINE").unwrap_or("rocksdb");
         info!("WardSONDB storage engine: {}", storage_engine);
@@ -675,9 +677,7 @@ impl Supervisor {
             error!("Soul verification FAILED: {}", reason);
 
             // First run — no soul exists yet. This is expected.
-            // embra-trustd should return a specific error for "no soul found"
-            // that we can distinguish from "soul exists but hash doesn't match".
-            if reason.contains("no soul") || reason.contains("not found") {
+            if is_first_run(&reason) {
                 warn!("No soul found — this appears to be a first run. Continuing boot for Learning Mode.");
                 return Ok(());
             }
@@ -818,6 +818,42 @@ fn halt_system(reason: &str) -> ! {
     error!("SYSTEM HALT (dev mode, would halt on Linux): {}", reason);
     let _ = std::fs::write("/tmp/embra-halt-reason", reason);
     std::process::exit(1);
+}
+
+/// Whether trustd's report says there is no soul yet, as on a first boot.
+///
+/// trustd has no code for that case: its report is text, and these are the
+/// words looked for (`embra-trustd/src/soul.rs`, `NO_SOUL_ERROR`). Every
+/// other report is a failed verification and halts the system.
+fn is_first_run(reason: &str) -> bool {
+    reason.contains("no soul") || reason.contains("not found")
+}
+
+#[cfg(test)]
+mod first_run_tests {
+    use super::is_first_run;
+
+    #[test]
+    fn only_a_missing_soul_reads_as_a_first_run() {
+        // The text of embra-trustd's `NO_SOUL_ERROR`.
+        assert!(is_first_run(
+            "Soul document not found — no soul exists (first run or data loss)"
+        ));
+        // Every other report trustd can make: a failed verification, a halt.
+        for failed in [
+            "Hash mismatch",
+            "Soul hash mismatch: computed=aa, stored=bb",
+            "No stored soul hash at /embra/state/soul.sha256 — first boot or STATE partition issue",
+            "Stored soul hash is empty",
+            "Failed to read stored soul hash",
+            "Failed to connect to WardSONDB",
+            "Failed to parse WardSONDB response",
+            "Soul document is null",
+            "Expected hash aa but computed bb",
+        ] {
+            assert!(!is_first_run(failed), "{failed}");
+        }
+    }
 }
 
 #[cfg(test)]
