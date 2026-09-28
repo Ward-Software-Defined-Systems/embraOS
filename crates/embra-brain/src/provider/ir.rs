@@ -186,6 +186,8 @@ pub struct StopDetails {
     pub explanation: Option<String>,
 }
 
+/// No `Default`, on purpose: a new field is written at every place a turn
+/// is constructed, where the compiler asks for it.
 #[derive(Debug, Clone)]
 pub struct AssistantTurn {
     pub content: Vec<Block>,

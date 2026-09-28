@@ -57,8 +57,9 @@ impl ProviderKind {
     }
 }
 
-/// Per-provider tool manifest, built once at `Brain::new` from the
-/// shared registry. The `wire_json` is whatever shape the provider's API
+/// Per-provider tool manifest, built from the static registry where a
+/// turn starts (`grpc_service.rs`). The input is the same on every turn, so
+/// the bytes are. The `wire_json` is whatever shape the provider's API
 /// expects in the request body.
 pub struct ToolManifest {
     /// Pre-serialized JSON ready to splice into a request body. For
@@ -153,9 +154,9 @@ pub struct LlmRequestOptions {
 /// system prompt, and tool manifest, and returns a stream of
 /// [`StreamEvent`]s ending in `Complete(AssistantTurn)`.
 ///
-/// `build_tool_manifest` is called once at Brain construction. The
-/// returned manifest is reused across every `stream_turn` call until the
-/// registry or system prompt changes.
+/// `build_tool_manifest` is called where a turn starts, with the
+/// descriptors of the static registry. The returned manifest is reused
+/// across every `stream_turn` call of that turn's tool loop.
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     /// Human-readable model identifier for the status bar.
@@ -184,8 +185,8 @@ pub trait LlmProvider: Send + Sync {
     ) -> Result<BoxStream<'static, StreamEvent>, ProviderError>;
 
     /// Translate the registry's typed-args descriptors into the
-    /// provider's request-body tool shape. Single-shot, called from
-    /// `Brain::new`.
+    /// provider's request-body tool shape. Registry descriptors only: a
+    /// dynamic Guardian tool is none and never reaches a manifest.
     fn build_tool_manifest(
         &self,
         descriptors: &[&'static crate::tools::registry::ToolDescriptor],

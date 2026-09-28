@@ -79,7 +79,8 @@ pub async fn process_sse_stream(
 
 /// The parser, over any stream of byte chunks: the response body in
 /// production, a list of byte vectors in the tests. The tests run this
-/// function, not a part of it.
+/// function; there is no second copy of the loop for them to drift from,
+/// and none is to be written.
 async fn pump<S, B, E>(
     mut stream: S,
     tx: mpsc::Sender<StreamEvent>,

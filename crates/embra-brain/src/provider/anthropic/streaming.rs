@@ -287,6 +287,8 @@ where
                         .and_then(|e| e.get("message"))
                         .and_then(|m| m.as_str())
                         .unwrap_or("Unknown stream error");
+                    // The one kind of send whose result is not read: the
+                    // pump returns on the next line, receiver or no receiver.
                     let _ = tx.send(AnthropicStreamEvent::Error(msg.to_string())).await;
                     return Ok(());
                 }
@@ -328,6 +330,8 @@ async fn emit_complete(
         stop_reason: effective_stop,
         stop_details,
     };
+    // The last send of the stream; nothing follows that a dropped receiver
+    // would have to stop.
     let _ = tx
         .send(AnthropicStreamEvent::Complete { response })
         .await;

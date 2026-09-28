@@ -144,11 +144,13 @@ pub struct OpenAIChatRequest {
     pub stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<OpenAITool>>,
-    /// `{"type": "auto"}` when tools are present; omit when none.
+    /// The string `"auto"` when tools are present; omitted when none. Not
+    /// Anthropic's object form, which LM Studio rejects.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<JsonValue>,
-    /// `"high"`, `"medium"`, `"low"`, `"none"` per Ollama docs (Q3.4).
-    /// LM Studio accepts the same string values per #1250 resolved.
+    /// The operator's `/effort` level as typed, or what the auto-map picks
+    /// when none is set. Which values are accepted is the model's matter,
+    /// not the server's; nothing here narrows them.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

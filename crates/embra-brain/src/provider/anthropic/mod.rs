@@ -177,6 +177,10 @@ impl AnthropicProvider {
     /// none of them, and `{type:"adaptive", display:…}` +
     /// `output_config.effort` are valid on each unchanged
     /// (`every_selectable_model_gets_the_same_request_shape`).
+    ///
+    /// `fallbacks` is never sent, nor the beta header that goes with it: a
+    /// turn the model refuses is reported to the operator and is never
+    /// served by another model.
     fn request_body(
         &self,
         system_text: &str,
@@ -226,6 +230,8 @@ impl LlmProvider for AnthropicProvider {
         ProviderKind::Anthropic
     }
 
+    // One attempt, no retry: an overloaded API reads as `Unknown`, a
+    // network failure as `NetworkError`, and neither as an invalid key.
     async fn validate_key(&self, key: &str) -> ValidationResult {
         if key.is_empty() {
             return ValidationResult::InvalidKey;
@@ -621,7 +627,7 @@ mod tests {
             assert_eq!(body["output_config"]["effort"], DEFAULT_EFFORT, "{id}");
             assert_eq!(body["tool_choice"], json!({"type": "auto"}), "{id}");
             assert_eq!(body["max_tokens"], MAX_TOKENS, "{id}");
-            for forbidden in ["temperature", "top_p", "top_k"] {
+            for forbidden in ["temperature", "top_p", "top_k", "fallbacks"] {
                 assert!(body.get(forbidden).is_none(), "{id}: {forbidden} must be absent");
             }
             // No prefill: the last message is never an assistant turn.
@@ -845,7 +851,7 @@ mod tests {
         assert_eq!(body["output_config"]["effort"], "max");
         assert_eq!(body["stream"], true);
         assert_eq!(body["tool_choice"]["type"], "auto");
-        for forbidden in ["temperature", "top_p", "top_k"] {
+        for forbidden in ["temperature", "top_p", "top_k", "fallbacks"] {
             assert!(body.get(forbidden).is_none(), "{forbidden} must be absent");
         }
         assert!(body["thinking"].get("budget_tokens").is_none());

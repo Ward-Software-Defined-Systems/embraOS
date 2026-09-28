@@ -2,9 +2,10 @@
 //!
 //! Single module covering both Ollama and LM Studio backends. The
 //! presets share an HTTP client surface and wire format; the discriminator
-//! is [`OpenAiCompatPreset`] which selects defaults and labels. Future
-//! OpenAI-compat backends (vLLM, Together, Fireworks, OpenRouter) drop
-//! in as additional `OpenAiCompatPreset` variants without new modules.
+//! is [`OpenAiCompatPreset`] which selects defaults and labels. Any other
+//! OpenAI-compatible server (vLLM, Together, Fireworks, OpenRouter) is
+//! reached through one of the two, with its endpoint entered in
+//! `/provider --setup`; further named presets are not planned.
 //!
 //! Module layout:
 //! - [`wire`] — request/response/streaming types (snake_case JSON).
@@ -374,6 +375,7 @@ impl LlmProvider for OpenAICompatProvider {
         let body = OpenAIChatRequest {
             model: self.model_id.clone(),
             messages: wire_messages,
+            // Always a stream: there is no code that reads a whole response.
             stream: true,
             tools: if has_tools { Some(tools_vec) } else { None },
             // OpenAI canonical `tool_choice`: plain string `"auto"`,

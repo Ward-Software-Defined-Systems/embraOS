@@ -343,6 +343,9 @@ impl ParserState {
             Some(_other) => TurnOutcome::EarlyStop(EarlyStopReason::Other),
         };
 
+        // The last send of the stream; nothing follows that a dropped
+        // receiver would have to stop. Every other send goes through
+        // `Self::send`, which notes a receiver that is gone.
         let _ = tx
             .send(StreamEvent::Complete(AssistantTurn {
                 content,
