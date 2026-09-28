@@ -14,6 +14,13 @@
 //! top of the outer loop while the public channels persist, so connected
 //! WebSocket clients survive a console crash.
 //!
+//! Restart pacing. The console exits when it cannot do its work (no
+//! gateway, a screen that cannot be set up), and it is started again here.
+//! A console that keeps exiting early is started again more and more
+//! slowly — [`restart_delay`] — so that a failure that does not go away
+//! costs one attempt every 30 s, not one a second. There is no budget: a
+//! browser may attach at any time, and the gateway may come back.
+//!
 //! Fresh-attach repaint contract. A browser that (re)loads the page starts
 //! with an EMPTY xterm, and the console only ever writes diffs (ratatui
 //! re-diffs every ~200 ms but emits changed cells only — an idle screen
@@ -37,7 +44,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
-use portable_pty::{CommandBuilder, PtySize, native_pty_system};
+use portable_pty::{CommandBuilder, ExitStatus, PtySize, native_pty_system};
 use tokio::sync::{broadcast, mpsc};
 
 /// Handle shared across the axum app (Clone, Send + Sync).
@@ -56,6 +63,41 @@ pub struct PtyBridge {
 /// tab reconnects every 2 s, and a client looping on `/ws/terminal`
 /// must not turn into a full-screen repaint for every client per tick.
 const REPAINT_COOLDOWN: Duration = Duration::from_millis(250);
+
+/// Restart pacing — embrad's numbers for the services it supervises.
+const RESTART_BASE: Duration = Duration::from_secs(1);
+const RESTART_MAX: Duration = Duration::from_secs(30);
+/// A console that ran this long was working: whatever ended it, the next
+/// one is started after `RESTART_BASE` again. Must stay above `RESTART_MAX`,
+/// or a crash loop pacing itself at the cap would reset its own delay.
+const STABLE_AFTER: Duration = Duration::from_secs(60);
+
+/// How many consoles in a row have ended early, this one included.
+fn early_exits(before: u32, ran_for: Duration) -> u32 {
+    if ran_for >= STABLE_AFTER { 0 } else { before.saturating_add(1) }
+}
+
+/// The wait before the next console: 1 s, 1 s, 2 s, 4 s, … 30 s.
+fn restart_delay(early_exits: u32) -> Duration {
+    let doublings = early_exits.saturating_sub(1).min(16);
+    (RESTART_BASE * 2u32.pow(doublings)).min(RESTART_MAX)
+}
+
+/// "code 2", "killed by Terminated" — for the log and for the operator.
+fn describe(status: &ExitStatus) -> String {
+    match status.signal() {
+        Some(signal) => format!("killed by {signal}"),
+        None => format!("code {}", status.exit_code()),
+    }
+}
+
+/// What an attached browser is shown between two consoles.
+fn restart_banner(how: &str, delay: Duration) -> String {
+    format!(
+        "\r\n\x1b[2m[embra-web] embra-console exited ({how}) \u{2014} restarting in {} s\u{2026}\x1b[0m\r\n",
+        delay.as_secs()
+    )
+}
 
 impl PtyBridge {
     /// Spawn the PTY session manager thread and return a shared handle.
@@ -126,27 +168,45 @@ fn session_manager(
 ) {
     // Last requested size, so a restart reopens at the operator's size.
     let mut last_size = PtySize::default();
+    let mut early = 0;
 
     loop {
-        match run_one_session(
+        let started = Instant::now();
+        let outcome = run_one_session(
             console_command(&console_bin, &apid_addr),
             &output_tx,
             &mut input_rx,
             &mut resize_rx,
             &mut last_size,
             &repaint,
-        ) {
-            Ok(()) => {
-                tracing::warn!("embra-console exited; restarting in 1s");
+        );
+        let ran_for = started.elapsed();
+        early = early_exits(early, ran_for);
+        let delay = restart_delay(early);
+        let how = match outcome {
+            Ok(status) => {
+                let how = describe(&status);
+                tracing::warn!(
+                    exit = %how,
+                    ran_for_secs = ran_for.as_secs(),
+                    early_exits = early,
+                    restart_in_secs = delay.as_secs(),
+                    "embra-console exited"
+                );
+                how
             }
             Err(e) => {
-                tracing::error!(error = %e, "PTY session error; restarting in 1s");
+                tracing::error!(
+                    error = %e,
+                    early_exits = early,
+                    restart_in_secs = delay.as_secs(),
+                    "PTY session error"
+                );
+                "PTY session error".to_string()
             }
-        }
-        let _ = output_tx.send(Bytes::from_static(
-            b"\r\n\x1b[2m[embra-web] embra-console exited \xe2\x80\x94 restarting\xe2\x80\xa6\x1b[0m\r\n",
-        ));
-        std::thread::sleep(Duration::from_secs(1));
+        };
+        let _ = output_tx.send(Bytes::from(restart_banner(&how, delay)));
+        std::thread::sleep(delay);
     }
 }
 
@@ -168,6 +228,7 @@ fn console_command(console_bin: &str, apid_addr: &str) -> CommandBuilder {
 }
 
 /// One console lifetime: open PTY, spawn child, pump until it exits.
+/// Returns how it ended.
 fn run_one_session(
     cmd: CommandBuilder,
     output_tx: &broadcast::Sender<Bytes>,
@@ -175,7 +236,7 @@ fn run_one_session(
     resize_rx: &mut mpsc::UnboundedReceiver<(u16, u16, u16, u16)>,
     last_size: &mut PtySize,
     repaint: &AtomicBool,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<ExitStatus> {
     let pair = native_pty_system().openpty(*last_size)?;
 
     // Spawn on the slave, then drop our slave handle so the master read
@@ -255,13 +316,12 @@ fn run_one_session(
             }
         }
 
-        if child.try_wait()?.is_some() {
-            return Ok(());
+        if let Some(status) = child.try_wait()? {
+            return Ok(status);
         }
         if reader_done.load(Ordering::SeqCst) {
             let _ = child.kill();
-            let _ = child.wait();
-            return Ok(());
+            return Ok(child.wait()?);
         }
 
         std::thread::sleep(Duration::from_millis(15));
@@ -325,6 +385,11 @@ mod tests {
                 Ok(_) if line.trim() == "quit" => {
                     println!("bye");
                     break;
+                }
+                // What the console does when it cannot do its work.
+                Ok(_) if line.trim() == "fail" => {
+                    println!("cannot go on");
+                    std::process::exit(2);
                 }
                 Ok(_) => {}
             }
@@ -390,7 +455,7 @@ mod tests {
             std::thread::spawn(move || {
                 let mut size = PtySize::default();
                 run_one_session(cmd, &output_tx, &mut input_rx, &mut resize_rx, &mut size, &repaint)
-                    .map(|()| size)
+                    .map(|status| (size, status))
                     .map_err(|e| format!("{e:#}"))
             })
         };
@@ -415,8 +480,79 @@ mod tests {
             assert!(start.elapsed() < DEADLINE, "the session did not notice the child's exit");
             std::thread::sleep(Duration::from_millis(5));
         }
-        let size = session.join().expect("session thread").expect("session result");
+        let (size, status) = session.join().expect("session thread").expect("session result");
         // A restart reopens at the operator's last size.
         assert_eq!((size.cols, size.rows, size.pixel_width, size.pixel_height), (100, 30, 900, 540));
+        assert!(status.success(), "{status:?}");
+        assert_eq!(describe(&status), "code 0");
+    }
+
+    /// A console that gives up says so with its exit code, and the code
+    /// reaches the log and the banner.
+    #[test]
+    fn a_console_that_gives_up_is_reported_with_its_code() {
+        if !std::path::Path::new("/dev/ptmx").exists() {
+            eprintln!("skipped: this host has no /dev/ptmx");
+            return;
+        }
+        let mut cmd = CommandBuilder::new(std::env::current_exe().expect("test binary path"));
+        cmd.args([
+            "--exact",
+            "pty_bridge::tests::fake_console_child",
+            "--ignored",
+            "--nocapture",
+        ]);
+        cmd.env(CHILD_ENV, "1");
+
+        let (output_tx, mut output_rx) = broadcast::channel::<Bytes>(2048);
+        let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (_resize_tx, mut resize_rx) = mpsc::unbounded_channel::<(u16, u16, u16, u16)>();
+        let repaint = AtomicBool::new(false);
+
+        let session = std::thread::spawn({
+            let output_tx = output_tx.clone();
+            move || {
+                let mut size = PtySize::default();
+                run_one_session(cmd, &output_tx, &mut input_rx, &mut resize_rx, &mut size, &repaint)
+                    .map_err(|e| format!("{e:#}"))
+            }
+        });
+
+        let mut seen = String::new();
+        expect(&mut output_rx, &mut seen, "ready 80x24 0x0");
+        input_tx.send(b"fail\n".to_vec()).unwrap();
+        // Its last words are delivered, although it is gone a moment later.
+        expect(&mut output_rx, &mut seen, "cannot go on");
+
+        let start = Instant::now();
+        while !session.is_finished() {
+            assert!(start.elapsed() < DEADLINE, "the session did not notice the child's exit");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let status = session.join().expect("session thread").expect("session result");
+        assert!(!status.success());
+        assert_eq!(describe(&status), "code 2");
+        let banner = restart_banner(&describe(&status), restart_delay(3));
+        assert!(banner.contains("embra-console exited (code 2)"), "{banner:?}");
+        assert!(banner.contains("restarting in 4 s"), "{banner:?}");
+    }
+
+    #[test]
+    fn a_console_that_keeps_exiting_early_is_restarted_more_slowly() {
+        let secs = |n: u32| restart_delay(n).as_secs();
+        // The first restart is as quick as it always was.
+        assert_eq!([secs(0), secs(1)], [1, 1]);
+        assert_eq!([secs(2), secs(3), secs(4), secs(5)], [2, 4, 8, 16]);
+        assert_eq!([secs(6), secs(7), secs(1000), secs(u32::MAX)], [30, 30, 30, 30]);
+
+        // Early exits add up; one console that stayed up clears them.
+        let short = Duration::from_secs(3);
+        assert_eq!(early_exits(0, short), 1);
+        assert_eq!(early_exits(5, short), 6);
+        assert_eq!(early_exits(5, STABLE_AFTER - Duration::from_millis(1)), 6);
+        assert_eq!(early_exits(5, STABLE_AFTER), 0);
+        assert_eq!(early_exits(u32::MAX, short), u32::MAX);
+        // A crash loop pacing itself at the cap must not clear its own count.
+        const { assert!(STABLE_AFTER.as_secs() > RESTART_MAX.as_secs()) };
     }
 }
