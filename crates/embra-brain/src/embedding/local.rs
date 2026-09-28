@@ -143,20 +143,26 @@ impl Inner {
             .to_plain_array_view::<f32>()
             .map_err(|e| EmbeddingError::Inference(format!("output view: {e}")))?;
 
-        // BGE pools on CLS (position 0), NOT mean. Mean pooling here produces
-        // vectors that look fine — unit norm, plausible magnitudes — but rank
-        // materially worse, so this is failure-silent if it drifts. Pinned by
-        // `cls_pooling_reads_position_zero`.
-        let shape = arr.shape();
-        if shape.len() != 3 || shape[2] != EMBEDDING_DIM {
-            return Err(EmbeddingError::Inference(format!(
-                "unexpected output shape {shape:?}, want [1, S, {EMBEDDING_DIM}]"
-            )));
-        }
-        let mut v: Vec<f32> = (0..EMBEDDING_DIM).map(|d| arr[[0, 0, d]]).collect();
-        super::l2_normalize(&mut v);
-        Ok(v)
+        pool_cls(&arr)
     }
+}
+
+/// The model's output `[1, S, D]` as one vector: the row of the first token.
+///
+/// BGE pools on CLS (position 0), NOT mean. Mean pooling here produces
+/// vectors that look fine — unit norm, plausible magnitudes — but rank
+/// materially worse, so this is failure-silent if it drifts. Pinned by
+/// `cls_pooling_reads_position_zero`.
+fn pool_cls(arr: &tract_ndarray::ArrayViewD<'_, f32>) -> Result<Vec<f32>, EmbeddingError> {
+    let shape = arr.shape();
+    if shape.len() != 3 || shape[2] != EMBEDDING_DIM {
+        return Err(EmbeddingError::Inference(format!(
+            "unexpected output shape {shape:?}, want [1, S, {EMBEDDING_DIM}]"
+        )));
+    }
+    let mut v: Vec<f32> = (0..EMBEDDING_DIM).map(|d| arr[[0, 0, d]]).collect();
+    super::l2_normalize(&mut v);
+    Ok(v)
 }
 
 #[async_trait::async_trait]
@@ -212,9 +218,48 @@ mod tests {
         std::env::var("EMBRA_EMBEDDING_MODEL_DIR").ok().map(Into::into)
     }
 
+    /// Needs no model: the pooling is a function of the output array. Three
+    /// token rows that differ, so the first row, the mean and the last row
+    /// are three different vectors.
+    #[test]
+    fn cls_pooling_reads_position_zero() {
+        let rows = 3;
+        let mut data = Vec::with_capacity(rows * EMBEDDING_DIM);
+        for row in 0..rows {
+            for d in 0..EMBEDDING_DIM {
+                // Row 0 points along the first half of the axes, row 1 along
+                // the second half, row 2 along all of them.
+                let on = match row {
+                    0 => d < EMBEDDING_DIM / 2,
+                    1 => d >= EMBEDDING_DIM / 2,
+                    _ => true,
+                };
+                data.push(if on { 1.0f32 } else { 0.0 });
+            }
+        }
+        let out = tract_ndarray::ArrayD::from_shape_vec(vec![1, rows, EMBEDDING_DIM], data)
+            .expect("shape");
+        let v = pool_cls(&out.view()).expect("pools");
+
+        assert_eq!(v.len(), EMBEDDING_DIM);
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-4, "must be L2-normalized, got {norm}");
+        // The first token's row and nothing of the others: the second half of
+        // the axes is zero. A mean over the rows would put weight there.
+        assert!(v[..EMBEDDING_DIM / 2].iter().all(|x| *x > 0.0));
+        assert!(v[EMBEDDING_DIM / 2..].iter().all(|x| *x == 0.0));
+    }
+
+    #[test]
+    fn an_output_of_another_shape_is_refused() {
+        let flat = tract_ndarray::ArrayD::from_shape_vec(vec![1, EMBEDDING_DIM], vec![0.0f32; EMBEDDING_DIM])
+            .expect("shape");
+        assert!(pool_cls(&flat.view()).is_err());
+    }
+
     #[test]
     #[ignore]
-    fn cls_pooling_reads_position_zero() {
+    fn the_forward_pass_returns_a_unit_vector() {
         let Some(dir) = model_dir() else { return };
         let p = LocalEmbeddingProvider::load(&dir, "test").expect("loads");
         let v = p.inner.embed_blocking("hello world").expect("embeds");

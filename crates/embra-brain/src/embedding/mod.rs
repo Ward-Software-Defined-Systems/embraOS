@@ -321,7 +321,12 @@ mod tests {
     fn model_dir_env_override_is_exclusive() {
         // When the dev override is set it is the ONLY candidate — it must not
         // fall through to state or rootfs and report a model nobody chose.
-        let got = resolve_model_dir_inner(Some("/dev/override".into()), None, None);
+        // The other two are present here, or the test would not tell.
+        let got = resolve_model_dir_inner(
+            Some("/dev/override".into()),
+            Some("/embra/state/models/m".into()),
+            Some("/usr/share/embra/models/m".into()),
+        );
         assert_eq!(got, Some(("/dev/override".into(), "env")));
     }
 
