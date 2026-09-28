@@ -95,8 +95,20 @@ where
                 state.emit_complete(&tx).await;
                 return Ok(());
             }
-            let Ok(chunk_obj) = serde_json::from_str::<GeminiStreamChunk>(data) else {
-                continue;
+            let chunk_obj = match serde_json::from_str::<GeminiStreamChunk>(data) {
+                Ok(chunk) => chunk,
+                Err(e) => {
+                    // Skipped, and said so: a chunk that does not fit the
+                    // structs takes its text, its tool calls and its finish
+                    // reason with it.
+                    tracing::warn!(
+                        target: "gemini::streaming",
+                        error = %e,
+                        data = %crate::tools::sessions::truncate_str(data, 512),
+                        "could not parse SSE chunk; skipping"
+                    );
+                    continue;
+                }
             };
             state.process_chunk(chunk_obj, &tx).await;
             if state.terminal {
@@ -366,9 +378,22 @@ fn part_to_blocks(part: GeminiPart) -> Vec<Block> {
             .clone()
             .map(|sig| serde_json::json!({"thought_signature": sig}));
         out.push(Block::ToolCall {
-            id: call.id,
+            // The API may send no id. A result has to find its call, among
+            // parallel calls and across turns, so one is assigned here; it
+            // goes back to the API on the call and on its response alike.
+            id: if call.id.is_empty() {
+                format!("gemini-{}", uuid::Uuid::new_v4().simple())
+            } else {
+                call.id
+            },
             name: call.name,
-            args: call.args,
+            // No arguments for a tool that takes none: an empty object, which
+            // the tool's typed arguments can be read from, where `null` cannot.
+            args: if call.args.is_null() {
+                serde_json::json!({})
+            } else {
+                call.args
+            },
             provider_opaque: opaque,
         });
         return out;
@@ -690,6 +715,57 @@ mod tests {
     // What follows had no test while the tests ran a copy of the line
     // loop: the copy read a whole body at once and never looked at the
     // receiver.
+
+    /// `id` and `args` are optional in the API. A tool that takes no
+    /// parameters can be called without `args`.
+    #[tokio::test]
+    async fn a_tool_call_without_args_or_id_is_read() {
+        let events = [
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"functionCall":{"name":"system_status"}},{"functionCall":{"name":"time_now"}}]},"finishReason":"STOP","index":0}]}"#,
+        ];
+        let out = run_stream(&events).await;
+        let turn = complete_turn(&out);
+        assert_eq!(turn.outcome, TurnOutcome::ToolUse);
+        let calls: Vec<_> = turn
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                Block::ToolCall { id, name, args, .. } => Some((id.clone(), name.clone(), args.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].1, "system_status");
+        assert_eq!(calls[1].1, "time_now");
+        // Arguments the tool's typed struct can be read from.
+        assert_eq!(calls[0].2, serde_json::json!({}));
+        // An id of our own, so a result finds its call: not empty, not shared.
+        assert!(!calls[0].0.is_empty());
+        assert_ne!(calls[0].0, calls[1].0);
+    }
+
+    /// Gemini leaves `parts` out of a content that has nothing to say — a
+    /// turn that ends on `MAX_TOKENS` or `SAFETY` is the usual case — and
+    /// the same chunk carries the finish reason.
+    #[tokio::test]
+    async fn a_content_without_parts_keeps_its_finish_reason() {
+        let events = [
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"partial"}]},"index":0}]}"#,
+            r#"{"candidates":[{"content":{"role":"model"},"finishReason":"MAX_TOKENS","index":0}]}"#,
+        ];
+        let out = run_stream(&events).await;
+        assert_eq!(text_deltas(&out), ["partial"]);
+        assert_eq!(complete_turn(&out).outcome, TurnOutcome::MaxTokens);
+    }
+
+    #[tokio::test]
+    async fn a_content_without_a_role_is_read() {
+        let events = [
+            r#"{"candidates":[{"content":{"parts":[{"text":"no role"}]},"finishReason":"STOP","index":0}]}"#,
+        ];
+        let out = run_stream(&events).await;
+        assert_eq!(text_deltas(&out), ["no role"]);
+    }
 
     #[tokio::test]
     async fn a_line_is_read_whole_wherever_the_chunks_were_cut() {

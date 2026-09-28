@@ -14,7 +14,15 @@ use serde_json::Value as JsonValue;
 
 // ── Request shapes ──
 
+/// A turn's content, in a request and in a response.
+///
+/// Sent, both fields are always written. Received, either may be missing:
+/// Gemini leaves `parts` out of a content that has nothing to say (a turn
+/// that ends on `MAX_TOKENS` or `SAFETY`), and the parser never reads
+/// `role`. A field that is required here fails the whole chunk, the chunk is
+/// skipped, and its finish reason goes with it — hence the default.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct GeminiContent {
     /// `"user"` for inputs and tool results, `"model"` for assistant
     /// turns. Gemini rejects other values.
@@ -67,9 +75,15 @@ pub struct GeminiFunctionResponsePart {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GeminiFunctionCall {
     /// Provider-assigned id (Gemini 3+). Echoed back on
-    /// `functionResponse.id` to correlate.
+    /// `functionResponse.id` to correlate. Optional in the API: when the
+    /// model sends none it is read as empty, and the parser assigns one
+    /// (`streaming::part_to_blocks`).
+    #[serde(default)]
     pub id: String,
     pub name: String,
+    /// Optional in the API: a call to a tool without parameters may carry
+    /// none. Read as `null`; the parser turns that into `{}`.
+    #[serde(default)]
     pub args: JsonValue,
 }
 
