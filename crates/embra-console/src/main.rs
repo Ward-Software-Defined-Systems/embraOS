@@ -5,6 +5,30 @@ mod grpc_client;
 
 use grpc_client::BrainClient;
 
+/// How the console ends when it cannot do its work.
+///
+/// It is a supervised child on both transports — embra-web's session
+/// manager on the PTY, embrad on the serial line — and both restart what
+/// EXITS. A failure that ended in a sleep was neither restarted nor seen:
+/// the process stayed alive, and its one line of explanation went to a
+/// terminal that may have had nobody on it. The web console's empty pane of
+/// 2026-09-27 was exactly that.
+mod exit_code {
+    /// The conversation could not be opened, or the screen could not be set
+    /// up or drawn.
+    pub const TUI_FAILED: i32 = 1;
+    /// embra-apid could not be reached.
+    pub const NO_GATEWAY: i32 = 2;
+}
+
+/// Say why, and exit. The supervisor starts the console again.
+fn fail(code: i32, why: std::fmt::Arguments) -> ! {
+    use std::io::Write;
+    println!("[embra-console] {why}");
+    let _ = std::io::stdout().flush();
+    std::process::exit(code)
+}
+
 #[tokio::main]
 async fn main() {
     println!("[embra-console] starting");
@@ -43,10 +67,7 @@ async fn main() {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             match BrainClient::connect(&apid_addr).await {
                 Ok(c) => c,
-                Err(e2) => {
-                    println!("[embra-console] FATAL: {}", e2);
-                    loop { tokio::time::sleep(std::time::Duration::from_secs(3600)).await; }
-                }
+                Err(e2) => fail(exit_code::NO_GATEWAY, format_args!("FATAL: {e2}")),
             }
         }
     };
@@ -54,9 +75,6 @@ async fn main() {
     println!("[embra-console] launching TUI...");
     match terminal::run(client, device).await {
         Ok(()) => println!("[embra-console] exited"),
-        Err(e) => {
-            println!("[embra-console] TUI error: {}", e);
-            loop { tokio::time::sleep(std::time::Duration::from_secs(3600)).await; }
-        }
+        Err(e) => fail(exit_code::TUI_FAILED, format_args!("TUI error: {e}")),
     }
 }

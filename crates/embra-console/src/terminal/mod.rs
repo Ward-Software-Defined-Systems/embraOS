@@ -67,7 +67,22 @@ fn open_screen(web_pty: bool, cols: u16, rows: u16) -> Result<Screen> {
     Ok(screen)
 }
 
-pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()> {
+/// Run the console until its conversation ends or fails, and hand the
+/// terminal back as it was found either way: what `main` prints next —
+/// on a failure, the reason — has to start at the left margin, and the next
+/// console on a serial line finds it in the state this one did.
+pub async fn run(client: BrainClient, device: Option<String>) -> Result<()> {
+    let outcome = run_tui(client, device).await;
+    if std::env::var("EMBRA_WEB_PTY").is_ok() {
+        let _ = stdout().execute(DisableBracketedPaste);
+    }
+    let restored = disable_raw_mode();
+    outcome?;
+    restored?;
+    Ok(())
+}
+
+async fn run_tui(mut client: BrainClient, _device: Option<String>) -> Result<()> {
     println!("[TUI] opening conversation...");
     let (in_tx, mut out_rx) = client.open_conversation("").await?;
     println!("[TUI] conversation opened");
@@ -302,11 +317,6 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
         }
     }
 
-    // Cleanup
-    if web_pty {
-        let _ = stdout().execute(DisableBracketedPaste);
-    }
-    disable_raw_mode()?;
     Ok(())
 }
 
