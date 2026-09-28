@@ -489,6 +489,11 @@ pub(crate) async fn write_atomic_create(target: &Path, bytes: &[u8]) -> Result<(
     apply_atomic_inner(target, bytes, false, false).await
 }
 
+/// Temp-file tag of file_patch, file_write and the media store. The leak
+/// tests look for a leftover by this constant, so a new tag cannot leave
+/// them looking for the old one.
+const TMP_TAG: &str = "embra-patch";
+
 /// Same-directory temp path for an atomic write: `.{fname}.{tag}.{pid}.{seq}.tmp`.
 /// `tag` names the writing tool (`embra-patch` for file_patch / file_write /
 /// the media store, `embra-copy` for file_copy) so a leaked temp is
@@ -520,6 +525,9 @@ pub(crate) fn temp_path_for(target: &Path, tag: &str) -> Result<std::path::PathB
 /// `None`, a freshly created target has nothing to restore — then renames the
 /// temp over the target and fsyncs the directory. Any failure before the
 /// rename removes the temp and leaves the target byte-identical.
+///
+/// The one commit routine: a new writer calls this and does not bring its
+/// own.
 pub(crate) async fn commit_temp(
     tmp: &Path,
     target: &Path,
@@ -574,7 +582,7 @@ async fn apply_atomic_inner(
 ) -> Result<(), String> {
     use tokio::io::AsyncWriteExt;
 
-    let tmp = temp_path_for(target, "embra-patch")?;
+    let tmp = temp_path_for(target, TMP_TAG)?;
 
     let staged: Result<Option<std::fs::Metadata>, String> = async {
         // `None` = target legitimately absent on the create-capable path;
@@ -1408,7 +1416,7 @@ mod file_patch_tests {
         let leftovers: Vec<_> = std::fs::read_dir(&dir.0)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().contains("embra-patch"))
+            .filter(|e| e.file_name().to_string_lossy().contains(TMP_TAG))
             .collect();
         assert!(leftovers.is_empty(), "temp file leaked: {leftovers:?}");
     }
@@ -1440,7 +1448,7 @@ mod file_patch_tests {
         let leftovers: Vec<_> = std::fs::read_dir(&dir.0)
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().contains("embra-patch"))
+            .filter(|e| e.file_name().to_string_lossy().contains(TMP_TAG))
             .collect();
         assert!(leftovers.is_empty(), "temp file leaked: {leftovers:?}");
     }

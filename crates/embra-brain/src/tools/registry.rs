@@ -150,6 +150,11 @@ fn apply_caps(mut out: ToolOutput) -> ToolOutput {
 /// Wraps a handler future in a wall-time ceiling. Lifted out of
 /// [`dispatch`] so the timeout behavior is unit-testable without standing
 /// up a full `DispatchContext` against the live `REGISTRY`.
+///
+/// Known limitation: the timeout drops the future, and that does not end a
+/// child process the tool started. `tokio::process::Command::output()` does
+/// not kill on drop, so a subprocess tool that times out leaves its child
+/// running until the child exits by itself.
 pub(crate) async fn enforce_timeout<T, F>(
     fut: F,
     tool: &str,

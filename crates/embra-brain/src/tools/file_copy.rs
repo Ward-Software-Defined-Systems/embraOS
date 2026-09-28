@@ -58,7 +58,8 @@ pub(crate) const FILE_COPY_MAX_ENTRIES: usize = 100_000;
 pub(crate) const FILE_COPY_FREE_RESERVE: u64 = 256 * 1024 * 1024;
 
 /// Temp-file tag (see `file_patch::temp_path_for`): a leaked
-/// `.name.embra-copy.pid.seq.tmp` is attributable to this tool.
+/// `.name.embra-copy.pid.seq.tmp` is attributable to this tool. The leak
+/// tests look for a leftover by this constant.
 const TMP_TAG: &str = "embra-copy";
 
 /// Report list cap (file_patch §8.3 convention).
@@ -1263,7 +1264,7 @@ mod file_copy_tests {
         assert_eq!(mode(&dst), 0o640);
         // sha256("hello world") = b94d27b9…
         assert!(out.contains("sha256 b94d27b993"), "{out}");
-        assert!(leftovers(&dir.0, "embra-copy").is_empty());
+        assert!(leftovers(&dir.0, TMP_TAG).is_empty());
     }
 
     #[tokio::test]
@@ -1284,7 +1285,7 @@ mod file_copy_tests {
         assert!(out.contains("— replaced existing 3 bytes"), "{out}");
         assert_eq!(std::fs::read(&dst).unwrap(), b"restored content");
         assert_eq!(mode(&dst), 0o600);
-        assert!(leftovers(&dir.0, "embra-copy").is_empty());
+        assert!(leftovers(&dir.0, TMP_TAG).is_empty());
     }
 
     #[tokio::test]
@@ -1378,7 +1379,7 @@ mod file_copy_tests {
         assert_eq!(std::fs::read(dst.join("sub/deep/c.bin")).unwrap(), &[0u8, 1, 2, 3, 255]);
         assert_eq!(mode(&dst.join("sub")), 0o700);
         assert_eq!(mode(&dst.join("a.txt")), 0o600);
-        assert!(leftovers(&dir.0, "embra-copy").is_empty());
+        assert!(leftovers(&dir.0, TMP_TAG).is_empty());
     }
 
     #[tokio::test]
@@ -1547,7 +1548,7 @@ mod file_copy_tests {
         assert!(out.starts_with("Error: injected failure"), "{out}");
         assert!(out.contains("Rolled back:"), "{out}");
         assert!(!dst.exists(), "destination root must be gone");
-        assert!(leftovers(&dir.0, "embra-copy").is_empty(), "{:?}", leftovers(&dir.0, "embra-copy"));
+        assert!(leftovers(&dir.0, TMP_TAG).is_empty(), "{:?}", leftovers(&dir.0, TMP_TAG));
         // Source untouched.
         assert_eq!(std::fs::read(root.join("a.txt")).unwrap(), b"alpha\n");
         assert_eq!(std::fs::read(root.join("sub/b.txt")).unwrap(), b"bravo bravo\n");
@@ -1629,7 +1630,7 @@ mod file_copy_tests {
         let out = copy_at(&src, &dst, &o).await;
         assert!(out.contains("more than 16 bytes"), "{out}");
         assert!(!dst.exists());
-        assert!(leftovers(&dir.0, "embra-copy").is_empty());
+        assert!(leftovers(&dir.0, TMP_TAG).is_empty());
         // Same bound on a dry run.
         o.dry_run = true;
         let out = copy_at(&src, &dst, &o).await;

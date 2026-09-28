@@ -1,5 +1,6 @@
 //! embra-guardian-v1 meta-tools — the *only* surface the model sees for
-//! dynamic tools. Two static `#[embra_tool]`s registered at compile time
+//! dynamic tools. Three static `#[embra_tool]`s (`guardian_call`,
+//! `guardian_list`, `guardian_propose`) registered at compile time
 //! (so the provider tool snapshot stays byte-stable; dynamic tools are
 //! NEVER injected into the schema — the prompt-cache invariant holds).
 //! Backends live in `crate::guardian`.
@@ -120,6 +121,8 @@ fn inject_data_file_content(
 
 impl GuardianCallArgs {
     pub async fn run(mut self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        // Only this branch touches the input. Without `data_file` a null
+        // input reaches the guest as the text `null`, as it always has.
         if let Some(path) = self.data_file.as_deref() {
             let resolved =
                 validate_data_file_request(&self.action, path).map_err(DispatchError::Handler)?;

@@ -231,6 +231,9 @@ fn load_operator_ca_certs() -> Vec<reqwest::Certificate> {
 /// Build the reqwest client for GitLab API calls: stock webpki roots plus
 /// the operator CA drop-ins, so a self-hosted instance behind a private CA
 /// (e.g. mkcert) verifies. Falls back to a stock client on builder failure.
+///
+/// Only this client adds them. The other reqwest clients in this file keep
+/// the compiled-in roots, deliberately.
 fn gitlab_client() -> reqwest::Client {
     let mut builder = reqwest::Client::builder();
     for cert in load_operator_ca_certs() {
@@ -2788,6 +2791,9 @@ pub(crate) async fn write_at(path: &str, content: &str) -> String {
 /// Param format: `<path> | <content>`
 /// Supports `\n` for newlines and `\t` for tabs in content.
 /// Creates the file (and parent directories) if it doesn't exist.
+///
+/// Not atomic, unlike `file_write` and `file_patch`: an append that fails
+/// midway leaves what it had written.
 pub async fn file_append(param: &str) -> String {
     if param.is_empty() {
         return "Usage: file_append <path> | <content>\n\

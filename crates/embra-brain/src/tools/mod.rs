@@ -1214,6 +1214,25 @@ fn calculate(expression: &str) -> String {
     }
 }
 
+#[cfg(test)]
+mod calculate_tests {
+    use super::calculate;
+
+    #[test]
+    fn the_exponent_is_written_with_two_stars() {
+        assert_eq!(calculate("2 ** 10"), "2 ** 10 = 1024");
+        // Right-associative, as the evaluator's own `^`.
+        assert_eq!(calculate("2 ** 3 ** 2"), "2 ** 3 ** 2 = 512");
+    }
+
+    #[test]
+    fn a_bare_caret_is_refused_and_not_read_as_a_power() {
+        let out = calculate("2 ^ 10");
+        assert!(out.contains("'^' is not supported"), "{out}");
+        assert!(!out.contains("1024"), "{out}");
+    }
+}
+
 async fn define(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
         return "Usage: define <term> to look up, define <term> | <definition> to add/update, or define delete <term> to remove".into();

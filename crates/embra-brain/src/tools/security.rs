@@ -79,6 +79,10 @@ pub async fn security_check() -> String {
 }
 
 /// Check if an IP address is in a private/loopback range (RFC 1918 + loopback).
+///
+/// The gate of every SSH tool and of `/ssh-copy-id`: they connect to these
+/// addresses and to no other. A name is not resolved — only `localhost`
+/// passes — so nothing can point a name at a public address after the check.
 pub fn is_private_address(host: &str) -> bool {
     let ip: std::net::IpAddr = match host.parse() {
         Ok(ip) => ip,
@@ -386,6 +390,72 @@ fn parse_ssh_target(target: &str) -> (String, String, u16) {
         None => (host_port.to_string(), 22),
     };
     (user_part, host, port)
+}
+
+#[cfg(test)]
+mod private_address_tests {
+    use super::{is_private_address, ssh_remote_admin, ssh_session_start};
+
+    #[test]
+    fn the_private_ranges_and_loopback_pass() {
+        for host in [
+            "10.0.0.1",
+            "10.255.255.254",
+            "172.16.0.1",
+            "172.31.255.254",
+            "192.168.1.20",
+            "127.0.0.1",
+            "127.8.9.10",
+            "::1",
+            "localhost",
+        ] {
+            assert!(is_private_address(host), "{host}");
+        }
+    }
+
+    #[test]
+    fn every_other_address_is_refused() {
+        for host in [
+            "8.8.8.8",
+            // One step outside each range.
+            "9.255.255.255",
+            "11.0.0.1",
+            "172.15.255.255",
+            "172.32.0.1",
+            "192.167.255.255",
+            "192.169.0.1",
+            "126.255.255.255",
+            "128.0.0.1",
+            // Link-local, carrier-grade NAT, unspecified.
+            "169.254.1.1",
+            "100.64.0.1",
+            "0.0.0.0",
+            // IPv6 other than loopback, a private IPv4 address mapped into it too.
+            "fc00::1",
+            "2001:db8::1",
+            "::ffff:10.0.0.1",
+            // A name is not resolved, whatever it looks like.
+            "example.com",
+            "gitlab.ops.wsds",
+            "10.0.0.1.example.com",
+            "localhost.example.com",
+            // Not an address.
+            "",
+            "10.0.0",
+            "010.0.0.1",
+            "10.0.0.1:22",
+        ] {
+            assert!(!is_private_address(host), "{host}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_ssh_tools_refuse_a_public_address_before_they_connect() {
+        let out = ssh_remote_admin("root@8.8.8.8 uptime").await;
+        assert!(out.starts_with("Denied:"), "{out}");
+        let out = ssh_session_start("root@8.8.8.8").await;
+        assert!(out.starts_with("Denied:"), "{out}");
+    }
 }
 
 #[cfg(test)]
