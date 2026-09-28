@@ -374,6 +374,18 @@ if [ "$RUST_CORE_COUNT" -ne 1 ]; then
 fi
 echo "in-OS Rust toolchain present in rootfs: $RUST_TOOLCHAIN_VERSION"
 
+# No SSH server in the image (security invariant). The option is off in the
+# defconfig and post_build.sh removes what an earlier build left in the target
+# directory; this is the check that both did their work.
+for f in usr/sbin/sshd usr/libexec/sshd-session usr/libexec/sshd-auth usr/libexec/sftp-server; do
+    if [ -e "$BUILDROOT_DIR/output/target/$f" ]; then
+        echo "ERROR: SSH server file in the rootfs: $BUILDROOT_DIR/output/target/$f" >&2
+        echo "       embraOS ships the SSH client only." >&2
+        reject_image
+    fi
+done
+echo "no SSH server in rootfs"
+
 echo "=== Step 5: Copy outputs ==="
 mkdir -p output/images
 cp "$BUILDROOT_DIR/output/images/embraos.img" output/images/

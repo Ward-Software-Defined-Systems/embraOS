@@ -46,8 +46,12 @@ BR2_PACKAGE_LIBCURL_CURL=y
 BR2_PACKAGE_GIT=y
 
 # OpenSSH client only — NO server (security invariant)
+# The server is a sub-option that is ON unless it is switched off: naming the
+# client alone built and shipped sshd. post_build.sh removes what an earlier
+# build left in the target directory, and the image scripts check the result.
 BR2_PACKAGE_OPENSSH=y
 BR2_PACKAGE_OPENSSH_CLIENT=y
+# BR2_PACKAGE_OPENSSH_SERVER is not set
 
 # embraOS packages
 BR2_PACKAGE_EMBRAD=y

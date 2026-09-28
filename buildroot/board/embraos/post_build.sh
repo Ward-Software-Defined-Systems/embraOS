@@ -52,11 +52,24 @@ if ls "${REPO_ROOT}/Seed_Knowledge"/*.knowledge.json >/dev/null 2>&1; then
        "${TARGET_DIR}/usr/share/embra/seed-knowledge/"
 fi
 
+# No SSH server in the image (security invariant, see the defconfig).
+# With the server option off a fresh build tree never gets these files. A
+# tree that was built while it was on still has them: Buildroot's target
+# directory persists across builds, and an option that is switched off
+# removes nothing. They go here, on every build. The client (ssh, scp, sftp,
+# ssh-keygen, ssh-copy-id) and its configuration stay.
+rm -f "${TARGET_DIR}/usr/sbin/sshd" \
+      "${TARGET_DIR}/usr/libexec/sshd-session" \
+      "${TARGET_DIR}/usr/libexec/sshd-auth" \
+      "${TARGET_DIR}/usr/libexec/sftp-server" \
+      "${TARGET_DIR}/etc/ssh/sshd_config"
+
 # Defense-in-depth: lock the root account.
 # The Buildroot skeleton leaves /etc/shadow with an empty root password,
 # which means anyone with shell access can become root without credentials.
-# embraOS has no login paths today (no getty on the console, no SSH server in
-# the defconfig), so an empty-password root is not currently exploitable —
+# embraOS has no login paths today (nothing starts a getty, and there is no
+# SSH server in the image), so an empty-password root is not currently
+# exploitable —
 # but file_read is unrestricted and `/etc/shadow` is readable, so agent
 # compromise via prompt injection (flagged in Sprint 3 sweep #11) would hand
 # over a useful credential for free. Locking it removes that value while
