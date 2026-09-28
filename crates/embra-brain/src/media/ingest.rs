@@ -385,11 +385,39 @@ pub(crate) mod tests {
         // IHDR width/height live at bytes 16..24 (big-endian u32 each).
         bomb[16..20].copy_from_slice(&9000u32.to_be_bytes());
         bomb[20..24].copy_from_slice(&9000u32.to_be_bytes());
+        // The chunk's checksum covers its type and data (bytes 12..29) and
+        // follows them. Made right again, so that the header is a valid one
+        // and what refuses the image is its size, not a broken checksum.
+        let crc = crc32(&bomb[12..29]);
+        bomb[29..33].copy_from_slice(&crc.to_be_bytes());
         match normalize_blocking(bomb) {
+            // The brace: this module's own look at the header.
             Err(IngestError::DimensionLimit(9000, 9000, _)) => {}
-            Err(IngestError::Decode(_)) => {} // CRC mismatch rejects it even earlier — also fine
-            other => panic!("expected a refusal, got {other:?}"),
+            // The belt: the decoder's limits carry the same numbers, and for
+            // a PNG they refuse when the decoder is made, before this module
+            // gets to look. Either way no pixel buffer exists yet.
+            Err(IngestError::Decode(msg)) if msg.contains("exceeds limit") => {}
+            other => panic!("expected a refusal for its size, got {other:?}"),
         }
+    }
+
+    /// CRC-32 as PNG uses it, bit by bit: for the 17 bytes of one header.
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = 0xFFFF_FFFFu32;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+            }
+        }
+        !crc
+    }
+
+    #[test]
+    fn the_checksum_helper_agrees_with_the_fixture() {
+        // The untouched fixture carries the checksum its encoder wrote.
+        let png = png_fixture(2, 2);
+        assert_eq!(crc32(&png[12..29]).to_be_bytes(), png[29..33]);
     }
 
     #[test]

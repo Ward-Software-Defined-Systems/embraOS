@@ -56,6 +56,16 @@ mod tests {
         assert_eq!(out, "assistant");
     }
 
+    /// Always on: the model's name is for the log line and decides nothing.
+    /// A marker is stripped whichever model wrote it.
+    #[test]
+    fn the_marker_is_stripped_whatever_the_model_is_called() {
+        for model in ["qwen/qwen3.8-27b", "llama3.3", "deepseek-v4-pro:cloud", ""] {
+            let out = sanitize_harmony_tokens("file_read<|channel|>commentary", model);
+            assert_eq!(out, "file_read", "{model}");
+        }
+    }
+
     #[test]
     fn strips_other_channel_names() {
         for channel in ["analysis", "final", "commentary"] {

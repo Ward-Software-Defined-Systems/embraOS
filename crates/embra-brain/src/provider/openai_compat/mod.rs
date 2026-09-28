@@ -1552,6 +1552,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_level_outside_the_models_ladder_is_sent_as_typed() {
+        // `high` is not on Qwen3.8's ladder (low|medium|xhigh), and `max`
+        // is not on gpt-oss's. The ladder feeds the hint `/effort` prints;
+        // a clamp to it would send another level than the operator typed.
+        for (model, level) in [("qwen/qwen3.8-27b", "high"), ("openai/gpt-oss-20b", "max")] {
+            assert!(
+                !known_effort_ladder(model).unwrap().contains(&level),
+                "{model}: {level} has to be off the ladder for this test to tell"
+            );
+            let server = MockServer::start().await;
+            let body = sse_body(&[
+                r#"{"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
+            ]);
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(body)
+                        .insert_header("content-type", "text/event-stream"),
+                )
+                .mount(&server)
+                .await;
+            let provider = OpenAICompatProvider::lm_studio(server.uri(), None, model.to_string())
+                .with_reasoning_effort(Some(level.to_string()));
+            let _stream = provider
+                .stream_turn(
+                    &[ApiMessage::user_text("hi")],
+                    &system_bundle(),
+                    &empty_manifest(),
+                    LlmRequestOptions::default(),
+                )
+                .await
+                .unwrap();
+            let requests = server.received_requests().await.unwrap();
+            let body_json: JsonValue = serde_json::from_slice(&requests[0].body).unwrap();
+            assert_eq!(
+                body_json.get("reasoning_effort").and_then(|v| v.as_str()),
+                Some(level),
+                "{model}"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn stream_turn_sends_operator_effort_override_verbatim() {
         // Qwen3.8 on LM Studio: the auto-map omits the field, but an
         // operator `/effort xhigh` is sent exactly as given — Qwen3.8's
