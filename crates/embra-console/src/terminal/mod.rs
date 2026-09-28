@@ -37,6 +37,10 @@ type Screen = Terminal<backend::QuietBackend<CrosstermBackend<std::io::Stdout>>>
 /// Raw mode, and the ratatui terminal for the transport the console is on.
 fn open_screen(web_pty: bool, cols: u16, rows: u16) -> Result<Screen> {
     // Skip EnterAlternateScreen — doesn't work over QEMU serial (-nographic)
+    //
+    // No keyboard enhancement either (`PushKeyboardEnhancementFlags`): it
+    // is a question to the terminal, and nothing here may wait for an
+    // answer. Without it Shift+Enter arrives as Enter on every transport.
     enable_raw_mode()?;
 
     if web_pty {
@@ -531,6 +535,9 @@ async fn handle_key_event(
         }
 
         // Enter — send input or selector choice (multi-line aware)
+        //
+        // `_` takes every modifier. An arm for Enter with one (Alt, Shift)
+        // has to stand ABOVE this one, or it never runs.
         (KeyCode::Enter, _) => {
             if let Some(selector) = app.selector.take() {
                 // Send selector choice
@@ -832,6 +839,10 @@ async fn handle_key_event(
         // Not a match guard: this arm takes every Esc, busy or idle. As a
         // guard, an idle Esc would fall through to whatever arm is added
         // below it.
+        //
+        // Nothing else is bound to a sequence that starts with ESC. On the
+        // serial line such a sequence can arrive split, its first byte
+        // alone, and that byte is this key: it would stop a running turn.
         #[expect(
             clippy::collapsible_match,
             reason = "this arm must take every Esc, idle included"

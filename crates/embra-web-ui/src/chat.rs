@@ -10,9 +10,9 @@
 //! `embra-web/src/chat_bridge.rs` (mirrored here client-side — see the
 //! `ClientMsg` / `ServerMsg` enums below).
 //!
-//! Reasoning shards (`ServerMsg::Reasoning`) are intentionally dropped
-//! in this MVP — Phase 3 adds the side panel for them. The wire still
-//! ships them; we just don't render anywhere.
+//! Reasoning shards (`ServerMsg::Reasoning`) go into a signal of their own
+//! and are shown in the side sheet. They never enter the message timeline
+//! and are never sent back (REASONING-STREAM-01).
 //!
 //! WS connection is auto-reconnected with exponential backoff (1 → 2 → 4
 //! → 8 → 10 s cap). During disconnect the Send button is disabled.
@@ -615,8 +615,8 @@ pub fn ChatApp() -> impl IntoView {
     let slashes_open = RwSignal::new(false);
     let services_open = RwSignal::new(false);
     // Phase 3b — live reasoning shard accumulator + sheet toggle.
-    // Cleared on Done / Error / Mode / user submit (matches the TUI
-    // expression-panel contract; never persisted client-side per
+    // Cleared on Done / Error / Mode / user submit / reconnect (matches
+    // the TUI expression-panel contract; never persisted client-side per
     // REASONING-STREAM-01).
     let reasoning = RwSignal::new(String::new());
     let reasoning_open = RwSignal::new(false);
@@ -1023,6 +1023,8 @@ async fn run_ws_forever(
         outbound.set(None);
         connected.set(false);
         thinking.set(false);
+        // The reasoning of the turn that was running went with the
+        // connection as well.
         reasoning.set(String::new());
         // A stale in-flight wizard step belongs to the dead connection.
         current_setup.set(None);
@@ -1085,6 +1087,10 @@ async fn run_ws_once(
     let (mut sink, mut stream) = ws.split();
 
     // Attach on connect — empty session = restore most recent active.
+    // On EVERY open, a reconnect included, and that stays: after a brain
+    // restart the session has to be found again, and a reloaded tab needs
+    // its history. A resume briefing that fires too often is held back in
+    // the brain, which knows when the last one was; not here.
     let attach_json =
         serde_json::to_string(&ClientMsg::Attach {
             session: String::new(),
@@ -1296,6 +1302,8 @@ fn handle_server_msg(
             }));
             messages.update(|m| m.push(Bubble::Setup { prompt }));
         }
+        // Into its own signal, for the side sheet. Never a `Bubble` in
+        // `messages`, and never sent back over the socket.
         ServerMsg::Reasoning { text } => {
             reasoning.update(|s| s.push_str(&text));
         }

@@ -107,7 +107,9 @@ const FALLBACK_FONT: (u16, u16) = (10, 20);
 /// `from_query_stdio` — a stdin round-trip the web PTY cannot answer (module
 /// doc) — or `halfblocks()`, which fixes the cell at 10×20 and cannot carry
 /// the winsize geometry. Neither replaces it here, so the deprecation is
-/// expected at this one site.
+/// expected at this one site. Should a later major remove the function, the
+/// pin in `Cargo.toml` stays where it is until there is a constructor that
+/// takes a known cell size without a query.
 #[expect(
     deprecated,
     reason = "no query-free constructor takes a known cell size; see the doc comment"

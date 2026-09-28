@@ -93,6 +93,11 @@ async fn handle_socket(socket: WebSocket, st: AppState) {
                             break;
                         }
                     }
+                    // Bytes were lost to a slow socket and the gap stays.
+                    // Not the place for `bridge.repaint()`: a repaint is more
+                    // bytes, and a client that lags would ask for one after
+                    // the other. It needs a rate limit first (see the
+                    // channel's comment in `pty_bridge.rs`).
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 },

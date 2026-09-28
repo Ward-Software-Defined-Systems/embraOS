@@ -1,7 +1,7 @@
 //! Process-global Guardian runtime — the parallel dispatch overlay the
 //! `guardian_call` meta-tool consults. Mirrors the `tools::registry`
 //! `Lazy` precedent: a `OnceLock`, set once during `embra-brain` boot
-//! reconcile, so `DispatchContext` and the 90 static tools are untouched
+//! reconcile, so `DispatchContext` and the static tools are untouched
 //! (zero blast radius, prompt-cache invariant preserved).
 //!
 //! Dynamic tools are NEVER added to the provider tool schema — they are

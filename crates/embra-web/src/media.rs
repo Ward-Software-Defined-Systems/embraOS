@@ -41,6 +41,9 @@ pub const MEDIA_UPLOAD_MAX: usize = 12 * 1024 * 1024;
 pub const MEDIA_BODY_LIMIT: usize = MEDIA_UPLOAD_MAX + 64 * 1024;
 const NAME_MAX: usize = 120;
 
+/// One of the hops that receive image bytes. Each of them raises tonic's
+/// 4 MiB default to `GRPC_MAX_MESSAGE_BYTES`; left at the default, an image
+/// above it fails on its way back to the browser.
 fn client(apid_addr: &str) -> Result<EmbraApiClient<Channel>, String> {
     let endpoint = Channel::from_shared(apid_addr.to_string())
         .map_err(|e| format!("invalid apid endpoint: {e}"))?;

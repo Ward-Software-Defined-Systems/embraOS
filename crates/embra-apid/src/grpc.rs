@@ -43,6 +43,9 @@ impl EmbraApi for EmbraApiImpl {
 
         // Map apid ConversationRequest → brain ConversationRequest
         // The brain client's converse() expects Stream<Item = brain::ConversationRequest>
+        //
+        // Field by field, by hand. A field added to the proto and not copied
+        // here is dropped without an error; `timestamp` is not forwarded.
         let brain_stream = incoming.filter_map(|msg| {
             match msg {
                 Ok(req) => {

@@ -17,6 +17,8 @@ crossterm = { workspace = true }
 # Media wave: in-TUI image pane, on the ratatui 0.30 line. Defaults OFF —
 # `chafa-dyn` would dlopen libchafa (not on the static musl rootfs).
 # Pure-Rust sixel/halfblocks/kitty/iTerm2 encoders only.
+# The pin stays on a line that has `Picker::from_fontsize` (deprecated since
+# 9.0, used on purpose: src/terminal/graphics.rs, `picker_for`).
 ratatui-image = { version = "11.1", default-features = false, features = ["crossterm"] }
 image = { workspace = true }
 chrono = { workspace = true }

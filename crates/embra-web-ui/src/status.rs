@@ -4,6 +4,9 @@ use leptos::prelude::*;
 use serde::Deserialize;
 use wasm_bindgen_futures::spawn_local;
 
+/// One pill of the status strip, as the server sends it. The strip renders
+/// the rows that arrive, whatever their names: a new pill is a new row on
+/// the server and no change here.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct Svc {
     pub name: String,

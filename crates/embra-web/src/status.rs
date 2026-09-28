@@ -218,6 +218,11 @@ mod tests {
         let unknown = http_200(r#"{"ok":true,"data":{"services":{"llm-provider":"unknown","llm-provider.detail":"no LLM provider configured yet"}}}"#);
         assert!(parse_provider_pill(&unknown).is_none());
         assert!(parse_provider_pill(&http_200(r#"{"ok":true,"data":{"services":{}}}"#)).is_none());
-        assert!(parse_provider_pill(r#"HTTP/1.0 503 Service Unavailable\r\n\r\n{"ok":false,"error":"x"}"#).is_none());
+        // With real line breaks: in a raw string `\r\n` is four characters,
+        // the split finds no body and the answer is `None` whatever follows.
+        let unavailable = "HTTP/1.0 503 Service Unavailable\r\ncontent-type: application/json\r\n\r\n\
+                           {\"ok\":false,\"error\":\"brain unreachable\"}";
+        assert!(unavailable.contains("\r\n\r\n{"));
+        assert!(parse_provider_pill(unavailable).is_none());
     }
 }

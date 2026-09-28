@@ -30,13 +30,13 @@ pub enum ToolStatus {
     Failed,
 }
 
-/// Outcome of the replicant check (the soul-spec evaluation a
-/// brain-proposed tool must pass before it becomes a proposal). Pure
-/// persisted metadata — `embra-guardian` stores it but never produces it;
-/// the verdict is computed brain-side in `crate::guardian::replicant`.
-/// Only `allow`/`escalate` verdicts are ever persisted (a `refuse` blocks
-/// the proposal, so no `ToolDoc` is written). Absent on operator-defined
-/// tools (`/guardian-define` bypasses the check).
+/// Outcome of the replicant check (the soul-spec evaluation a tool must
+/// pass before it is recorded: a proposal of the brain and a paste of the
+/// operator alike). Pure persisted metadata — `embra-guardian` stores it
+/// but never produces it; the verdict is computed brain-side in
+/// `crate::guardian::replicant`. Only `allow`/`escalate` verdicts are ever
+/// persisted (a `refuse` records nothing). Absent on a tool defined before
+/// the soul was sealed, when there was nothing to check against.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicantRecord {
     /// "allow" or "escalate" (the operator decides on an escalate).
@@ -73,9 +73,10 @@ pub struct ToolDoc {
     pub source_sha256: String,
     #[serde(default)]
     pub build_log_tail: String,
-    /// Replicant-check verdict, present on brain-proposed tools only.
-    /// Additive + optional so pre-replicant docs (and operator-defined
-    /// tools) load unchanged — does NOT bump `TOOL_DOC_FORMAT`.
+    /// Replicant-check verdict. Absent on a document from before the check
+    /// existed and on a tool defined before the soul was sealed.
+    /// Additive + optional so those load unchanged — does NOT bump
+    /// `TOOL_DOC_FORMAT`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicant: Option<ReplicantRecord>,
     pub created_at: String,

@@ -13,6 +13,8 @@ use anyhow::Context;
 use embra_common::proto::trust::{CertRole, GenerateCertRequest};
 use embra_common::proto::trust::trust_service_client::TrustServiceClient;
 use rustls::ServerConfig;
+// PEM is read with rustls' own `pem` module. `rustls-pemfile` did it before;
+// it is unmaintained and out of the tree, and does not come back.
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tonic::transport::Channel;

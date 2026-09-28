@@ -17,5 +17,9 @@ pub struct AppState {
     /// Apid gRPC endpoint (e.g. `http://127.0.0.1:50000`). Each
     /// `/ws/chat` connection opens its own tonic Channel against this
     /// address — see `ws_chat::handle_chat_socket`.
+    ///
+    /// apid is embra-web's only door to the brain: chat, sessions, stop and
+    /// media all go through it. The status pills look at other services
+    /// directly, to see whether they are up, and ask nothing of them.
     pub apid_addr: String,
 }

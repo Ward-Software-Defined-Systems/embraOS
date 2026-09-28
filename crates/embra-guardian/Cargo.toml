@@ -29,6 +29,8 @@ proc-macro2 = { version = "1", features = ["span-locations"] }
 # feature). NO wasi / component-model / gc / cache / parallel-compilation
 # — keeps the static-musl link small and the sandbox import-free.
 # syn (validator) is added in the core-modules step.
+# The version is on an LTS line. A bump goes to the next LTS line, not to the
+# newest release; tests/sandbox_limits.rs pins what it has to keep.
 wasmtime = { version = "48.0.3", default-features = false, features = ["cranelift", "runtime", "std"] }
 
 [dev-dependencies]
