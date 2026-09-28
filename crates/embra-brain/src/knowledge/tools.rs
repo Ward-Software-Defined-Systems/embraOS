@@ -62,6 +62,10 @@ pub async fn knowledge_link(params: &str, db: &WardsonDbClient) -> String {
     let Some((src_coll, src_id)) = parts[0].split_once(':') else {
         return "Error: source must be <collection>:<id>".into();
     };
+    // The gate: the strict parser, then the brain-created check. The model
+    // links with the five types it may create and cannot mint another.
+    // `EdgeType::parse_lossy` is for reading — it also carries the free-form
+    // relations of an identity graph — and never goes here.
     let Some(edge_type) = EdgeType::from_str(parts[1]) else {
         return format!("Error: Invalid edge type '{}'. Brain-created types: enables, contradicts, refines, depends_on, related_to", parts[1]);
     };
@@ -258,6 +262,9 @@ pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String
     };
     let coll = coll.trim();
     let id = id.trim();
+    // Two collections, by name. `identity.graph` is not one of them: its
+    // nodes are the projection of the sealed document, and what the model
+    // may not change in the seal it may not remove here.
     if coll != "memory.semantic" && coll != "memory.procedural" {
         return format!(
             "Error: knowledge_unlink_node only operates on memory.semantic or memory.procedural (got '{}'). Use forget for memory.entries.",
@@ -357,6 +364,10 @@ pub async fn knowledge_update(params: &str, db: &WardsonDbClient, config: &Syste
         return "knowledge_update rejected (missing id after `:`)".into();
     }
 
+    // Two collections, by name. `identity.graph` is not one of them: its
+    // nodes are the projection of the sealed document. The projection adds
+    // what is missing and never patches what exists, so a change made here
+    // would stay and disagree with the seal.
     if coll != "memory.semantic" && coll != "memory.procedural" {
         return format!(
             "knowledge_update rejected (collection '{}' not supported — only memory.semantic or memory.procedural). Use forget + remember for memory.entries.",
@@ -868,6 +879,64 @@ fn provenance_summary(
     }
     out.push_str(&format!("  Brain-authored (knowledge_link): {}\n", authored));
     out
+}
+
+#[cfg(test)]
+mod gate_tests {
+    //! What the three write tools refuse before they touch the database.
+    //! The client points nowhere: a gate that let a call through would
+    //! answer "not found", not the refusal asserted here.
+    use super::{knowledge_link, knowledge_unlink_node, knowledge_update};
+    use crate::config::SystemConfig;
+    use crate::db::WardsonDbClient;
+
+    fn nowhere() -> WardsonDbClient {
+        WardsonDbClient::from_url("http://127.0.0.1:1")
+    }
+
+    // Deserialized, not a struct literal: see `learning::phases` tests.
+    fn config() -> SystemConfig {
+        serde_json::from_value(serde_json::json!({
+            "name": "Embra",
+            "api_key": "k",
+            "timezone": "UTC",
+            "deployment_mode": "phase1",
+            "created_at": "",
+            "version": "test"
+        }))
+        .expect("minimal config deserializes")
+    }
+
+    #[tokio::test]
+    async fn an_identity_node_is_neither_updated_nor_removed() {
+        let db = nowhere();
+        let out = knowledge_update(r#"identity.graph:self | {"content":"x"}"#, &db, &config()).await;
+        assert!(out.contains("not supported"), "{out}");
+        let out = knowledge_unlink_node("identity.graph:self", &db).await;
+        assert!(out.contains("only operates on"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn the_model_cannot_write_an_embedding_field() {
+        let db = nowhere();
+        for field in ["embedding", "embedding_model", "embedding_updated_at"] {
+            let params = format!(r#"memory.semantic:n1 | {{"{field}":"x"}}"#);
+            let out = knowledge_update(&params, &db, &config()).await;
+            assert!(out.contains(&format!("'{field}' is immutable")), "{field}: {out}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_model_cannot_mint_an_edge_type() {
+        let db = nowhere();
+        // A free-form relation, and two types the strict parser knows and the
+        // brain does not create.
+        for edge_type in ["mentors", "same_session", "derived_from"] {
+            let params = format!("memory.semantic:a | {edge_type} | memory.semantic:b | 0.5");
+            let out = knowledge_link(&params, &db).await;
+            assert!(out.starts_with("Error: Invalid edge type"), "{edge_type}: {out}");
+        }
+    }
 }
 
 #[cfg(test)]

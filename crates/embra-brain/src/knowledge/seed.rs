@@ -605,7 +605,7 @@ async fn reconcile_pack(
     // Auto-edge enrichment for FRESHLY inserted nodes only: session=""
     // matches nothing (seeds carry no source_session), so no same_session
     // noise; tag_overlap is the point — it wires seeds into the operator's
-    // organically-tagged knowledge for Step-4 expansion.
+    // organically-tagged knowledge, where `knowledge_traverse` walks it.
     if let Some(config) = config {
         for node in &fresh {
             let _ = derive_edges(

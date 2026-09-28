@@ -15,7 +15,13 @@ use super::retrieval::retrieve_relevant_knowledge;
 
 /// Minimum score a retrieval result must reach to be injected. Below this,
 /// the graph is reaching too far and the noise outweighs the signal.
-const SCORE_THRESHOLD: f64 = 0.3;
+///
+/// An absolute number, compared with a score whose three weights sum to 1.0
+/// (`retrieval::score_one`). A weight that changes moves what this value
+/// lets through; retrieval's guard
+/// `a_relevance_free_recent_node_cannot_clear_the_enrichment_threshold`
+/// reads the constant for that reason.
+pub(crate) const SCORE_THRESHOLD: f64 = 0.3;
 
 /// Maximum number of retrieved nodes to inject per turn.
 const MAX_INJECTED: usize = 5;

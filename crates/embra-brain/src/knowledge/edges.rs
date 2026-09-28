@@ -56,6 +56,10 @@ async fn derive_edges_inner(
     created_at: &str,
     config: &SystemConfig,
 ) -> Result<usize> {
+    // How many candidates one insert looks at, per collection and per kind,
+    // newest first. It bounds the edges an insert creates; it is not a
+    // search window. In a busy session it is full on most inserts, and
+    // nothing is logged when it is.
     let candidate_limit = config.kg_edge_candidate_limit as i64;
     let window_secs = config.kg_temporal_window_secs as i64;
 

@@ -150,6 +150,8 @@ pub async fn retrieve_relevant_knowledge(
 
     // Prefetch the promoted-node collections once; every later lookup joins
     // in memory (2026-07-04 — replaces hundreds of sequential point reads).
+    // `identity.graph` is left out on purpose: the sealed graph is in the
+    // system prompt already, rendered from the sealed document.
     let mut store = NodeStore::new();
     let mut prefetched: Vec<(&str, Vec<serde_json::Value>)> = Vec::new();
     for coll in ["memory.semantic", "memory.procedural"] {
@@ -465,6 +467,10 @@ fn step3_content_hits<'a>(
 }
 
 /// Step 2a: current-session entries — newest 50.
+///
+/// A ranked top-50 by design, not a search over the session: in a long
+/// session the window is full on every turn, and nothing is logged when it
+/// is.
 fn session_entries_query_body(session: &str) -> serde_json::Value {
     json!({
         "filter": { "session": session },
@@ -479,6 +485,11 @@ fn session_entries_query_body(session: &str) -> serde_json::Value {
 /// because every edge doc carries `target_collection` (`edges.rs::
 /// push_bidirectional` and the manual `knowledge_link` write both set it
 /// unconditionally; WardSONDB's `$ne` would drop docs missing the field).
+///
+/// Equality keys and the one `$ne`, nothing else: this body is sent once
+/// per session entry on every turn, and a combinator (`$or`, `$and`) in it
+/// would make the server scan the collection each time. Like 2a, a full
+/// window is the normal case and is not logged.
 fn session_edge_query_body(entry_id: &str) -> serde_json::Value {
     json!({
         "filter": {
@@ -766,6 +777,23 @@ mod step_query_body_tests {
     }
 
     #[test]
+    fn edge_body_filter_has_three_plain_keys_and_no_combinator() {
+        let body = session_edge_query_body("entry-1");
+        let mut keys: Vec<&str> = body["filter"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["edge_type", "source_id", "target_collection"],
+            "a combinator here is a full scan per session entry, on every turn"
+        );
+    }
+
+    #[test]
     fn edge_body_ranked_and_limited_50() {
         let body = session_edge_query_body("entry-1");
         assert_eq!(body["filter"]["source_id"], json!("entry-1"));
@@ -896,7 +924,7 @@ mod scoring_tests {
         let refs = vec![&a, &b];
         let ctx = build_score_ctx(&refs, &input_tags);
 
-        // a: relevance 1/1*0.5 + recency 1.0*0.3 + access ln(5)/ln(5)*0.2 = 1.0
+        // a: relevance 1/1*0.6 + recency 1.0*0.2 + access ln(5)/ln(5)*0.2 = 1.0
         assert!((score_one(&a, &ctx, &input_tags) - 1.0).abs() < 1e-9);
         // b: 0 + 0 + (ln(3)/ln(5))*0.2 = 0.13657..., session_based x0.75
         let expected_b = (3.0f64.ln() / 5.0f64.ln()) * 0.2 * 0.75;
@@ -1038,7 +1066,10 @@ mod scoring_tests {
         let ctx = build_score_ctx(&refs, &input_tags);
         let s = score_one(&newest, &ctx, &input_tags);
         assert!((s - 0.20).abs() < 1e-9, "got {s}");
-        assert!(s < 0.3, "must not clear the enrichment threshold on recency alone");
+        assert!(
+            s < crate::knowledge::enrichment::SCORE_THRESHOLD,
+            "must not clear the enrichment threshold on recency alone"
+        );
     }
 
     #[test]
