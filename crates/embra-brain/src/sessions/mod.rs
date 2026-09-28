@@ -389,7 +389,17 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Make an existing session the active one and load its history.
+    ///
+    /// A soft-deleted session is refused here, whatever the caller checked:
+    /// made active, it would keep its `deleted_at` stamps and its TTL, and
+    /// would be reaped while in use. `/sessions restore` is the way back.
     pub async fn reattach(&mut self, name: &str) -> Result<Vec<Message>> {
+        if let Some(meta) = self.get_meta(name).await?
+            && let Some(refusal) = reattach_refusal(name, &meta)
+        {
+            anyhow::bail!(refusal);
+        }
         self.update_state(name, SessionState::Active).await?;
         self.active_session = Some(name.to_string());
         self.load_history(name).await
@@ -502,6 +512,10 @@ impl SessionManager {
         }
     }
 
+    /// Every session's meta, and nothing of its history: one read per
+    /// session. Attach and [`Self::get_most_recent_active`] run on every
+    /// connection and stay on this; the turn counts that
+    /// `list_with_counts` adds cost a history fetch per session.
     pub async fn list(&self) -> Result<Vec<SessionMeta>> {
         Ok(self.list_docs().await?.into_iter().map(|(_, _, m)| m).collect())
     }
@@ -618,6 +632,7 @@ impl SessionManager {
     }
 
     pub async fn get_most_recent_active(&self) -> Result<Option<SessionMeta>> {
+        // `list()`, not `list_with_counts()`: see there.
         let sessions = self.list().await?;
         Ok(sessions
             .into_iter()
@@ -665,6 +680,16 @@ impl SessionManager {
         }
         Ok(false)
     }
+}
+
+/// Why a session cannot be made the active one, when it cannot.
+pub(crate) fn reattach_refusal(name: &str, meta: &SessionMeta) -> Option<String> {
+    (meta.state == SessionState::Deleted).then(|| {
+        format!(
+            "Session '{name}' is deleted and in its grace period. \
+             Restore it with /sessions restore {name}."
+        )
+    })
 }
 
 #[cfg(test)]
@@ -959,6 +984,19 @@ mod soft_delete_tests {
         let v = serde_json::to_value(&m).unwrap();
         assert!(v.get("deleted_at").is_none());
         assert!(v.get("deleted_reason").is_none());
+    }
+
+    #[test]
+    fn a_deleted_session_is_not_made_active_and_a_restored_one_is() {
+        let mut m = live_meta();
+        assert_eq!(reattach_refusal("proj", &m), None);
+
+        apply_soft_delete(&mut m, "superseded by v2", "2026-07-16T12:00:00+00:00");
+        let refusal = reattach_refusal("proj", &m).expect("a deleted session is refused");
+        assert!(refusal.contains("/sessions restore proj"), "{refusal}");
+
+        apply_restore(&mut m);
+        assert_eq!(reattach_refusal("proj", &m), None);
     }
 
     #[test]

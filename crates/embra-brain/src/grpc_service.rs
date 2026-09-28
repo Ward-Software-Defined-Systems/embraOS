@@ -636,6 +636,17 @@ impl BrainService for BrainGrpcService {
 
         let mut mgr = self.session_manager.write().await;
 
+        // A soft-deleted session is refused, as on the other three paths
+        // that make a session active (`/switch`, `/new`, attach). Asked
+        // before the current session is detached, so a refused switch
+        // leaves it in place. `reattach` would refuse as well; from there
+        // the reason would arrive as an internal error.
+        if let Ok(Some(meta)) = mgr.get_meta(&name).await
+            && let Some(refusal) = crate::sessions::reattach_refusal(&name, &meta)
+        {
+            return Err(Status::failed_precondition(refusal));
+        }
+
         // Detach current session if any
         if let Some(ref current) = mgr.active_session.clone() {
             let _ = mgr.detach(current).await;
