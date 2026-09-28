@@ -120,6 +120,10 @@ pub struct BrainGrpcService {
     /// is brain-global (soul-sealed status), so no per-session keying is
     /// needed. `send_replace` is used so a send with zero current
     /// subscribers is a no-op rather than an error.
+    ///
+    /// The watch carries the stage and nothing else. Each stream writes to
+    /// its own channel only: there is no registry of senders, and a stream
+    /// that sees the stage move announces it to its own client.
     onboarding_stage: Arc<watch::Sender<i32>>,
 }
 
@@ -773,6 +777,11 @@ impl BrainService for BrainGrpcService {
 }
 
 /// Handle a single incoming conversation request.
+///
+/// A caller that dispatches a message of its own making (the resume
+/// briefing, the delete flow) sets `active_session` first or attaches a
+/// session: a user message without one is answered with the no-session
+/// notice, and the model is not called.
 #[expect(
     clippy::too_many_arguments,
     reason = "one argument per shared handle of the Converse stream; bundling them is a \
@@ -981,6 +990,11 @@ async fn handle_request(
                     .await
                     .ok()
                     .unwrap_or(serde_json::Value::Null);
+                // Part of the system prompt, which is the same on every
+                // turn of a session: what goes in here is fixed for the
+                // session. A clock, a turn count or anything else that
+                // moves per turn belongs in the user message
+                // (`knowledge::enrichment::build_turn_context`).
                 let session_context = format!("Session: {}, Timezone: {}", session_name, config_tz);
                 if crate::identity_graph::is_graph_soul(&soul) {
                     // Graph mode (kg-native-identity): identity lives IN
@@ -1052,6 +1066,10 @@ async fn handle_request(
                         return Ok(());
                     }
                 };
+            // The static registry and nothing else. A dynamic Guardian tool
+            // is reached through the `guardian_*` meta-tools and is never
+            // added to this list: what the model is shown stays the same
+            // from turn to turn and from instance to instance.
             let descriptors: Vec<&'static tools::registry::ToolDescriptor> =
                 tools::registry::all_descriptors().collect();
             let tool_manifest: ToolManifest = provider.build_tool_manifest(&descriptors);
@@ -1128,6 +1146,8 @@ async fn handle_request(
                         turn_media.push(meta);
                     }
                 }
+                // One limit for the images named on the message and those
+                // staged with `/attach`, counted together.
                 if turn_media.len() > media::MEDIA_MAX_PER_MESSAGE {
                     let _ = tx.send(Ok(ConversationResponse {
                         response_type: Some(conversation_response::ResponseType::System(
@@ -1241,6 +1261,11 @@ async fn handle_request(
                 .clamp(1, 1000);
             let mut tool_iter: usize = 0;
             // Assigned from the first response below, before any read.
+            // The text of the LAST iteration only, and kept apart from the
+            // accumulator below on purpose: the operator-stop `Done` frame,
+            // the Gemini telemetry and `delete_flow_verdict` read it, and a
+            // `[SESSION_DELETE_READY]` the model wrote in an earlier
+            // iteration must never delete a session.
             let mut last_response_text: String;
             // Transcript accumulator — every iteration's operator-visible
             // text, not just the last (multi-tool turns previously
@@ -1643,6 +1668,10 @@ async fn handle_request(
                                             tool, limit_secs
                                         ),
                                     };
+                                    // Every dispatch error is answered as a
+                                    // tool result with `is_error`, a timeout
+                                    // included: a tool call left without a
+                                    // result is a 400 on the next request.
                                     (msg, Vec::new(), Vec::new(), true)
                                 }
                             };
@@ -2476,6 +2505,8 @@ async fn handle_slash_command(
                         send_msg(tx, "Usage: /sessions delete <name>".to_string()).await;
                         return None;
                     }
+                    // Never deletable: it is the record of how the sealed
+                    // identity came to be. Refused before the flow starts.
                     if rest == "learning" {
                         send_msg(tx, "The learning session is the sealed identity record and cannot be deleted.".to_string()).await;
                         return None;
@@ -4647,6 +4678,8 @@ fn parse_effort_choice(s: &str) -> Option<&'static str> {
 /// `config.anthropic_effort` (set via `/effort`) > `"max"`. Invalid
 /// values fall through to the next source (a hand-edited bogus config
 /// value can't 400 every turn). Inner fn is pure for env-race-free tests.
+/// The variable is for development: embrad passes none of the `_EFFORT`
+/// variables to the brain, so on an instance the level comes from `/effort`.
 fn resolve_anthropic_effort(cfg: &config::SystemConfig) -> String {
     let env_override = std::env::var("EMBRA_ANTHROPIC_EFFORT").ok();
     resolve_anthropic_effort_inner(env_override.as_deref(), cfg.anthropic_effort.as_deref())
@@ -4804,6 +4837,10 @@ async fn handle_model_command(
         .await;
         return;
     }
+    // The model is part of what the health probe checks: ask for a probe
+    // now, as after every other change of the provider, so the status does
+    // not describe the previous model until the next tick.
+    crate::provider::health::request_probe();
 
     send(
         format!("Anthropic model set to {display}. Takes effect on your next message."),
@@ -6497,15 +6534,6 @@ fn final_assistant_text(
     }
 }
 
-/// When the loop driver hits its iteration cap with `current_turn` carrying
-/// undispatched `ToolCall` blocks, synthesize one `Block::ToolResult` per
-/// call so the next API request satisfies Anthropic's "every tool_use must
-/// be answered by a tool_result" invariant. Embra_Debug #80.
-///
-/// `cap_msg` is replayed verbatim into every result with `is_error: true`,
-/// instructing the model to summarize and stop. Non-`ToolCall` blocks in
-/// `blocks` are ignored. An empty input yields an empty output — callers
-/// must skip pushing a degenerate `user_tool_results(vec![])`.
 /// gRPC status mapping for the media RPCs.
 fn media_status(e: media::store::MediaError) -> Status {
     use media::ingest::IngestError;
@@ -6519,6 +6547,15 @@ fn media_status(e: media::store::MediaError) -> Status {
     }
 }
 
+/// When the loop driver hits its iteration cap with `current_turn` carrying
+/// undispatched `ToolCall` blocks, synthesize one `Block::ToolResult` per
+/// call so the next API request satisfies Anthropic's "every tool_use must
+/// be answered by a tool_result" invariant. Embra_Debug #80.
+///
+/// `cap_msg` is replayed verbatim into every result with `is_error: true`,
+/// instructing the model to summarize and stop. Non-`ToolCall` blocks in
+/// `blocks` are ignored. An empty input yields an empty output — callers
+/// must skip pushing a degenerate `user_tool_results(vec![])`.
 fn synthesize_cap_results(blocks: &[Block], cap_msg: &str) -> Vec<Block> {
     blocks
         .iter()
@@ -6866,14 +6903,6 @@ mod iter_cap_parser_tests {
     }
 }
 
-/// Drive a provider stream, forwarding `TextDelta` events to the gRPC
-/// UX channel (`tx`) and returning the final neutral `AssistantTurn`
-/// when the stream completes. Synthesizes a gRPC `Done` from the
-/// terminal `Complete(turn)` event so the TUI's typing animation
-/// behavior matches pre-refactor.
-///
-/// Returns `Ok(None)` when the stream ended without a `Complete` event
-/// (e.g. connection dropped or fatal error mid-stream).
 /// Operator-stop observer for one turn: a subscribed watch receiver plus
 /// the stop-generation value snapshotted at turn start. "Stopped" = the
 /// counter advanced past the baseline — so a StopTurn RPC can only ever
@@ -6910,6 +6939,14 @@ impl StopCheck {
     }
 }
 
+/// Drive a provider stream, forwarding `TextDelta` events to the gRPC
+/// UX channel (`tx`) and returning the final neutral `AssistantTurn`
+/// when the stream completes. Synthesizes a gRPC `Done` from the
+/// terminal `Complete(turn)` event so the TUI's typing animation
+/// behavior matches pre-refactor.
+///
+/// Returns `Ok(None)` when the stream ended without a `Complete` event
+/// (e.g. connection dropped or fatal error mid-stream).
 async fn collect_response(
     mut brain_rx: BoxStream<'static, StreamEvent>,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
