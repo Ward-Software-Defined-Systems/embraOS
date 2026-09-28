@@ -4,6 +4,7 @@
 //! Renders the full Phase 0 visual experience: styled text, JSON highlighting,
 //! thinking indicator, multi-line input, selectors, and mode transitions.
 
+mod backend;
 mod commands;
 pub mod graphics;
 mod input_layout;
@@ -28,6 +29,43 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::stdout;
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+/// The console's screen. Its backend never asks the terminal where the
+/// cursor is — see `backend.rs` for why `Terminal::clear()` would.
+type Screen = Terminal<backend::QuietBackend<CrosstermBackend<std::io::Stdout>>>;
+
+/// Raw mode, and the ratatui terminal for the transport the console is on.
+fn open_screen(web_pty: bool, cols: u16, rows: u16) -> Result<Screen> {
+    // Skip EnterAlternateScreen — doesn't work over QEMU serial (-nographic)
+    enable_raw_mode()?;
+
+    if web_pty {
+        // Web/PTY only: lets crossterm coalesce the embra-web /ml editor's
+        // `\x1b[200~ … \x1b[201~` blob into a single Event::Paste. The
+        // serial Viewport::Fixed path deliberately never enables this, so
+        // it stays bit-identical. Best-effort: if it fails, the wrapper
+        // bytes arrive as ordinary keys — no worse than before.
+        let _ = stdout().execute(EnableBracketedPaste);
+    }
+
+    let backend = backend::QuietBackend::new(CrosstermBackend::new(stdout()));
+    let screen = if web_pty {
+        // ratatui's full-screen Terminal re-reads the backend size on every
+        // draw() (autoresize), so it reflows automatically on a size CHANGE
+        // once crossterm delivers Event::Resize. A same-size SIGWINCH —
+        // embra-web's fresh-attach repaint — changes nothing there, so the
+        // Resize arm in the event loop below clears explicitly.
+        Terminal::new(backend)?
+    } else {
+        Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, cols, rows)),
+            },
+        )?
+    };
+    Ok(screen)
+}
 
 pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()> {
     println!("[TUI] opening conversation...");
@@ -64,39 +102,9 @@ pub async fn run(mut client: BrainClient, _device: Option<String>) -> Result<()>
         gfx.font_size()
     );
 
-    // Initialize ratatui terminal
-    // Skip EnterAlternateScreen — doesn't work over QEMU serial (-nographic)
-    enable_raw_mode()?;
-
-    if web_pty {
-        // Web/PTY only: lets crossterm coalesce the embra-web /ml editor's
-        // `\x1b[200~ … \x1b[201~` blob into a single Event::Paste. The
-        // serial Viewport::Fixed path deliberately never enables this, so
-        // it stays bit-identical. Best-effort: if it fails, the wrapper
-        // bytes arrive as ordinary keys — no worse than before.
-        let _ = stdout().execute(EnableBracketedPaste);
-    }
     let use_cols = if cols > 0 { cols } else { 80 };
     let use_rows = if rows > 0 { rows } else { 24 };
-
-    let backend = CrosstermBackend::new(stdout());
-    let mut terminal_tui = if web_pty {
-        // ratatui's full-screen Terminal re-reads the backend size on every
-        // draw() (autoresize), so it reflows automatically on a size CHANGE
-        // once crossterm delivers Event::Resize. A same-size SIGWINCH —
-        // embra-web's fresh-attach repaint — changes nothing there, so the
-        // Resize arm in the event loop below clears explicitly.
-        Terminal::new(backend)?
-    } else {
-        Terminal::with_options(
-            backend,
-            ratatui::TerminalOptions {
-                viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(
-                    0, 0, use_cols, use_rows,
-                )),
-            },
-        )?
-    };
+    let mut terminal_tui = open_screen(web_pty, use_cols, use_rows)?;
     // Delay to let embrad finish its dup2 redirect, then clear any log bleed-through
     tokio::time::sleep(Duration::from_millis(500)).await;
     terminal_tui.clear()?;
@@ -842,6 +850,149 @@ fn char_to_byte_pos(s: &str, char_pos: usize) -> usize {
 /// Return the number of characters in a string (not bytes).
 fn char_count(s: &str) -> usize {
     s.chars().count()
+}
+
+/// The screen on a real terminal that nobody is sitting at.
+///
+/// The web console's PTY has no terminal emulator on it when the console
+/// starts — embra-web spawns the console before any browser attaches — and
+/// a browser that attaches as an observer may not write to it at all. A
+/// serial line has one only while an operator's terminal is connected. So
+/// whatever the console asks its terminal, nobody may answer.
+#[cfg(test)]
+mod screen_tests {
+    use super::*;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    use std::os::unix::process::CommandExt;
+    use std::time::Instant;
+
+    /// Marks the re-executed test binary as the console on the PTY, and
+    /// says which transport it is on.
+    const CHILD_ENV: &str = "EMBRA_SCREEN_TEST_CHILD";
+    const OK: &str = "screen-came-up";
+    const FAILED: &str = "screen-failed";
+    /// crossterm gives a terminal two seconds to answer a query.
+    const DEADLINE: Duration = Duration::from_secs(10);
+    /// "Where is the cursor?" — Device Status Report 6.
+    const CURSOR_QUERY: &[u8] = b"\x1b[6n";
+
+    /// Not a test of its own: what `the_screen_comes_up_*` run on their PTY.
+    /// The console's own startup — open, clear, clear, draw — and then what
+    /// the Resize arm does on every browser attach: clear, draw.
+    #[test]
+    #[ignore = "helper process for the screen tests"]
+    fn screen_child() {
+        let Ok(transport) = std::env::var(CHILD_ENV) else {
+            return;
+        };
+        let outcome = (|| -> Result<()> {
+            let mut screen = open_screen(transport == "web", 80, 24)?;
+            screen.clear()?;
+            screen.clear()?;
+            screen.draw(|f| f.render_widget(ratatui::widgets::Paragraph::new("first-frame"), f.area()))?;
+            screen.clear()?;
+            screen.draw(|f| f.render_widget(ratatui::widgets::Paragraph::new("repainted"), f.area()))?;
+            Ok(())
+        })();
+        let _ = disable_raw_mode();
+        match outcome {
+            Ok(()) => println!("\r\n{OK}"),
+            Err(e) => println!("\r\n{FAILED}: {e}"),
+        }
+    }
+
+    /// A PTY of 80x24 with the test binary as the console on its slave
+    /// side. Returns the master side; nothing is ever written to it.
+    fn console_on_a_pty(transport: &str) -> (OwnedFd, std::process::Child) {
+        let (mut master, mut slave) = (0, 0);
+        let size = libc::winsize { ws_row: 24, ws_col: 80, ws_xpixel: 800, ws_ypixel: 480 };
+        // SAFETY: openpty fills the two descriptors; the winsize is a plain
+        // C struct that outlives the call.
+        let rc = unsafe {
+            libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), &size)
+        };
+        assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
+        // SAFETY: both descriptors were just opened and are owned here.
+        let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args(["--ignored", "--exact", "--nocapture", "terminal::screen_tests::screen_child"])
+            .env(CHILD_ENV, transport)
+            .stdin(slave.try_clone().unwrap())
+            .stdout(slave.try_clone().unwrap())
+            .stderr(slave);
+        // SAFETY: between fork and exec, only async-signal-safe calls: the
+        // child becomes a session leader with the PTY as its terminal.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().expect("spawn the console stand-in");
+        (master, child)
+    }
+
+    /// Everything the console wrote, up to its verdict.
+    fn read_until_verdict(master: &OwnedFd) -> Vec<u8> {
+        let mut seen = Vec::new();
+        let start = Instant::now();
+        let mut buf = [0u8; 4096];
+        loop {
+            let text = String::from_utf8_lossy(&seen);
+            if text.contains(OK) || text.contains(FAILED) {
+                return seen;
+            }
+            assert!(
+                start.elapsed() < DEADLINE,
+                "no verdict within {DEADLINE:?}; the console wrote:\n{}",
+                text.escape_debug()
+            );
+            let mut fds = [libc::pollfd { fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+            // SAFETY: one valid pollfd, a bounded wait.
+            if unsafe { libc::poll(fds.as_mut_ptr(), 1, 100) } <= 0 {
+                continue;
+            }
+            // SAFETY: reads into a buffer of the stated length.
+            let n = unsafe { libc::read(master.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+            if n > 0 {
+                seen.extend_from_slice(&buf[..n as usize]);
+            }
+        }
+    }
+
+    fn the_screen_comes_up(transport: &str) {
+        let (master, mut child) = console_on_a_pty(transport);
+        let seen = read_until_verdict(&master);
+        let _ = child.kill();
+        let _ = child.wait();
+        let text = String::from_utf8_lossy(&seen);
+        assert!(text.contains(OK), "{transport}: the console wrote:\n{}", text.escape_debug());
+        // Both frames reached the terminal (a draw sends what differs from
+        // a blank screen, so each word arrives in one piece).
+        assert!(
+            text.contains("first-frame") && text.contains("repainted"),
+            "{transport}: the console wrote:\n{}",
+            text.escape_debug()
+        );
+        assert!(
+            !seen.windows(CURSOR_QUERY.len()).any(|w| w == CURSOR_QUERY),
+            "{transport}: the console asked the terminal for its cursor:\n{}",
+            text.escape_debug()
+        );
+    }
+
+    #[test]
+    fn the_screen_comes_up_on_a_web_pty_nobody_is_attached_to() {
+        the_screen_comes_up("web");
+    }
+
+    #[test]
+    fn the_screen_comes_up_on_a_serial_line_nobody_is_attached_to() {
+        the_screen_comes_up("serial");
+    }
 }
 
 #[cfg(test)]
