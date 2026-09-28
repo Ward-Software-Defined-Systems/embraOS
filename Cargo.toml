@@ -3,9 +3,13 @@ resolver = "2"
 members = [
     "crates/embra-init",
     "crates/embrad",
-    # Vendored fork of Ward-Software-Defined-Systems/WardSONDB @ 42fea43
-    # (main, 2026-07-17) — upstream continues independently; this copy
-    # diverges from here.
+    # The database: a vendored fork of
+    # Ward-Software-Defined-Systems/WardSONDB, which continues independently.
+    # Its sources change by adopting upstream commits or by a decision to
+    # diverge, never in passing, and no lint attribute is added there.
+    # No crate of this workspace depends on it: the services reach the
+    # database over REST (embra-brain's test
+    # `no_crate_depends_on_the_database_library` reads the manifests).
     "crates/wardsondb",
     "crates/embra-apid",
     "crates/embra-trustd",
@@ -61,6 +65,11 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # TUI
+# A bump of either is checked on a terminal, not only by compiling: the
+# console's screen tests bring the screen up on a PTY that nobody is attached
+# to, and the real console is run on one as well. ratatui 0.30 began to ask
+# the terminal for its cursor; that compiled, passed every unit test, and left
+# the web console's pane empty.
 ratatui = "0.30"
 crossterm = "0.29"
 

@@ -99,8 +99,8 @@ guards:
   before_script: []
   script:
     # The seven pins carry on-disk-format compat with production DATA
-    # (CLAUDE.md "vendored FORK" invariant; vendor commit 3dc3e29 landed them
-    # at exactly upstream's regression-tested lock). A casual `cargo update`
+    # (vendor commit 3dc3e29 landed them at exactly upstream's
+    # regression-tested lock). A casual `cargo update`
     # bump must fail loudly here — changing one is a deliberate divergence
     # decision, not routine maintenance.
     - |

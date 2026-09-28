@@ -886,6 +886,70 @@ mod window_query_tests {
         );
     }
 
+    /// Whether a manifest line makes the vendored crate a dependency.
+    fn names_the_database_crate(line: &str) -> bool {
+        let line = line.trim();
+        if line.starts_with('#') {
+            return false;
+        }
+        let key = line.split(['=', ' ']).next().unwrap_or("");
+        key == "wardsondb"
+            || line.contains("dependencies.wardsondb")
+            || (line.contains("package") && line.contains("\"wardsondb\""))
+    }
+
+    #[test]
+    fn a_manifest_line_that_names_the_database_crate_is_recognized() {
+        for line in [
+            r#"wardsondb = { path = "../wardsondb" }"#,
+            r#"wardsondb={ path = "../wardsondb" }"#,
+            r#"  wardsondb = "0.9""#,
+            "[dependencies.wardsondb]",
+            "[dev-dependencies.wardsondb]",
+            r#"db = { package = "wardsondb", path = "../wardsondb" }"#,
+        ] {
+            assert!(names_the_database_crate(line), "{line}");
+        }
+        for line in [
+            r#"# wardsondb = { path = "../wardsondb" }"#,
+            r#"    "crates/wardsondb","#,
+            "# HTTP client (for WardSONDB REST API)",
+            r#"reqwest = { version = "0.12" }"#,
+            r#"name = "wardsondb-client""#,
+        ] {
+            assert!(!names_the_database_crate(line), "{line}");
+        }
+    }
+
+    /// The services reach WardSONDB over REST, through this client. The
+    /// vendored crate has a library target and would compile as a
+    /// dependency; it would bring the database's allocator and both storage
+    /// engines into a service.
+    #[test]
+    fn no_crate_depends_on_the_database_library() {
+        let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/");
+        let mut manifests = vec![crates.parent().expect("workspace root").join("Cargo.toml")];
+        for entry in std::fs::read_dir(crates).unwrap() {
+            let dir = entry.unwrap().path();
+            if dir.file_name().and_then(|n| n.to_str()) != Some("wardsondb") {
+                manifests.push(dir.join("Cargo.toml"));
+            }
+        }
+        let mut hits = Vec::new();
+        for manifest in manifests.iter().filter(|m| m.is_file()) {
+            let text = std::fs::read_to_string(manifest).unwrap();
+            for (n, line) in text.lines().enumerate() {
+                if names_the_database_crate(line) {
+                    hits.push(format!("{}:{}: {}", manifest.display(), n + 1, line.trim()));
+                }
+            }
+        }
+        assert!(manifests.len() > 10, "manifests found: {}", manifests.len());
+        assert!(hits.is_empty(), "a crate depends on wardsondb:\n{}", hits.join("\n"));
+    }
+
     #[test]
     fn window_saturated_fires_at_limit_not_below() {
         assert!(!window_saturated(9, 10));
