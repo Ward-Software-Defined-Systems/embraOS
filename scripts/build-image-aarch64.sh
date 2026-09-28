@@ -408,13 +408,24 @@ fi
     make BR2_EXTERNAL="$(pwd)/../buildroot" "$BUILDROOT_DEFCONFIG" && \
     make -j"$JOBS")
 
+# A build that fails one of the checks below has produced an image already:
+# Buildroot wrote it before the checks ran, to the place where run-qemu.sh,
+# seed-state.sh and embraos-backup.sh look first. It is removed, so that a
+# build that failed leaves nothing that boots.
+reject_image() {
+    rm -f "$BUILDROOT_DIR/output/images/embraos.img"
+    echo "       The image this build produced was removed:" >&2
+    echo "       $BUILDROOT_DIR/output/images/embraos.img" >&2
+    exit 1
+}
+
 # Same silent-failure guard as the x86_64 script — see its comment.
 EMBED_TARGET="$BUILDROOT_DIR/output/target/usr/share/embra/models/${EMBED_MODEL_NAME:-bge-small-en-v1.5}"
 for f in model.onnx tokenizer.json; do
     if [ ! -s "$EMBED_TARGET/$f" ]; then
         echo "ERROR: embedding model missing from the rootfs: $EMBED_TARGET/$f" >&2
         echo "       Semantic KG retrieval would silently fall back to lexical-only." >&2
-        exit 1
+        reject_image
     fi
 done
 echo "embedding model present in rootfs: $EMBED_TARGET"
@@ -428,14 +439,14 @@ if [ "$(cat "$RUST_IN_TARGET/RUST_VERSION" 2>/dev/null || true)" != "$RUST_TOOLC
    || [ ! -x "$RUST_IN_TARGET/bin/cargo" ]; then
     echo "ERROR: in-OS Rust toolchain $RUST_TOOLCHAIN_VERSION missing from the rootfs: $RUST_IN_TARGET" >&2
     echo "       Guardian tools could not be built or rebuilt on this image." >&2
-    exit 1
+    reject_image
 fi
 RUST_CORE_COUNT=$(find "$RUST_IN_TARGET/lib/rustlib/wasm32-unknown-unknown/lib" \
     -name 'libcore-*.rlib' 2>/dev/null | wc -l)
 if [ "$RUST_CORE_COUNT" -ne 1 ]; then
     echo "ERROR: expected one wasm32 libcore in $RUST_IN_TARGET, found $RUST_CORE_COUNT" >&2
     echo "       Remove $RUST_IN_TARGET and rebuild." >&2
-    exit 1
+    reject_image
 fi
 echo "in-OS Rust toolchain present in rootfs: $RUST_TOOLCHAIN_VERSION"
 
