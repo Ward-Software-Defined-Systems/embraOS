@@ -35,7 +35,7 @@ The Sprint 6 close-out wave (2026-09-17, below) and the 2026-09-18 documentation
 
 Counts: workspace **1501** tests (brain **1072**), 0 failed; clippy clean with warnings denied; static musl build and Trunk build green; `cargo audit` reports no vulnerability. Tools **115**, schema **13**. Both prompt scaffolds are byte-identical to the release. **Not verified here:** anything that needs an image.
 
-Still says 116, on purpose: `README.md` (seven lines — its edits are William's to review), and `CITATION.cff` / `.zenodo.json`, which describe the release `v0.15.0-phase1`.
+`README.md` followed on William's word (`bcf4367`, eight occurrences on seven lines). Still says 116, on purpose: `CITATION.cff` / `.zenodo.json`, which describe the release `v0.15.0-phase1`.
 
 **Code-review pit stop, second pass — what the first pass left open (branch `code-review`, 2026-09-27; NOT on `main`, not pushed, operator E2E pending).** William's ask on the first pass's report: take care of the open items before the E2E. Two decisions he took: the vendored WardSONDB diverges from upstream now, in one line, and he ports that line upstream; the hourly update check goes.
 
