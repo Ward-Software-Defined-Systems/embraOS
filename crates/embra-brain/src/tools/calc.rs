@@ -454,10 +454,12 @@ mod calc_tests {
     ///
     /// A changed expectation is a changed tool behavior. Extend the table;
     /// do not edit entries to make a change pass.
-    // The values are recorded outputs. Several are π, e, √2 and friends to
-    // full precision, and naming them by constant would hide what the
-    // evaluator is expected to return.
-    #[allow(clippy::approx_constant)]
+    #[expect(
+        clippy::approx_constant,
+        reason = "the values are recorded outputs; several are π, e, √2 and friends to full \
+                  precision, and naming them by constant would hide what the evaluator is \
+                  expected to return"
+    )]
     #[rustfmt::skip]
     const GOLDEN: &[(&str, Want)] = &[
         ("1", Want::Value(1.0)),
