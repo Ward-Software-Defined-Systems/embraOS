@@ -4166,7 +4166,7 @@ impl GhProjectViewArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "file_read",
-    description = "Read a file or list a directory. path may be absolute (reads are unrestricted — `/etc`, `/proc`, `/var/log` all work) or workspace-relative (resolves under /embra/workspace/, matching file_write / mkdir / etc.). Read files WHOLE by default: omit offset and limit — one call returns up to the per-call ceiling (~2 MiB), and a larger file ends with a continuation trailer naming the exact offset to resume from. Pass offset (byte position) and limit (byte count) only when resuming from that trailer or when you deliberately need a specific slice — reading in small chunks wastes turns."
+    description = "Read a file or list a directory. A directory listing shows every entry, hidden ones (names starting with a dot) included. path may be absolute (reads are unrestricted — `/etc`, `/proc`, `/var/log` all work) or workspace-relative (resolves under /embra/workspace/, matching file_write / mkdir / etc.). Read files WHOLE by default: omit offset and limit — one call returns up to the per-call ceiling (~2 MiB), and a larger file ends with a continuation trailer naming the exact offset to resume from. Pass offset (byte position) and limit (byte count) only when resuming from that trailer or when you deliberately need a specific slice — reading in small chunks wastes turns."
 )]
 pub struct FileReadArgs {
     pub path: String,
@@ -5075,6 +5075,34 @@ mod file_io_caps_tests {
             "truncation line must render the const, got tail: {}",
             &out[out.len().saturating_sub(120)..]
         );
+    }
+
+    /// A directory listing shows every entry, hidden ones included. It is the
+    /// intelligence's only way to list a directory, and an operator check can
+    /// depend on it: no Buildroot stamp file may be left at the top of
+    /// `/opt/rust`. A filter like `ls`'s default would hide exactly those.
+    #[tokio::test]
+    async fn a_directory_listing_shows_hidden_entries() {
+        let dir = TempDir::new("hidden");
+        std::fs::create_dir(dir.0.join("bin")).unwrap();
+        std::fs::create_dir(dir.0.join(".git")).unwrap();
+        std::fs::write(dir.0.join("RUST_VERSION"), b"1.98.1").unwrap();
+        std::fs::write(dir.0.join(".stamp_built"), b"").unwrap();
+        let out = file_read(dir.0.to_str().unwrap()).await;
+        for line in ["  bin/\n", "  .git/\n", "  RUST_VERSION\n", "  .stamp_built\n"] {
+            assert!(out.contains(line), "{line:?} missing from:\n{out}");
+        }
+    }
+
+    /// The model is told so. Without it, a model reasons from `ls` and takes
+    /// a listing without dot-names to prove nothing.
+    #[test]
+    fn file_read_description_says_listings_show_hidden_entries() {
+        let desc = crate::tools::registry::all_descriptors()
+            .find(|d| d.name == "file_read")
+            .expect("file_read registered")
+            .description;
+        assert!(desc.contains("hidden ones (names starting with a dot) included"), "{desc}");
     }
 
     #[test]

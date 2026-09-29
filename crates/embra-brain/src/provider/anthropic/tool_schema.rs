@@ -123,13 +123,9 @@ mod tests {
     /// deliberate act that records a tool-surface change; the count moves
     /// with `CATEGORY_COUNTS`.
     ///
-    /// Re-pinned twice. 2026-09-27: `check_update` removed (William's
-    /// decision), 116 → 115, `8a435cdf…` → `3b23798a…`; the manifest lost
-    /// that one element and no other byte. 2026-09-28: the description of
-    /// `knowledge_query` no longer names the depth-2 expansion that left
-    /// retrieval (William's decision), `3b23798a…` → `a70d42ad…`; that one
-    /// description moved and no other byte, in all three providers'
-    /// manifests.
+    /// Every re-pin is recorded in `docs/CHANGE-LOG.md`, with the proof that
+    /// only the intended bytes moved: each provider's manifest written out
+    /// before and after the change and compared tool by tool.
     #[test]
     fn tools_snapshot_bytes_are_frozen() {
         use sha2::{Digest, Sha256};
@@ -156,7 +152,7 @@ mod tests {
             .collect();
         assert_eq!(
             sha256_hex(&canonical),
-            "a70d42ad4d193a6f9e89aecdde17d6084e5ce590477f11f13dfe1a6f7beddbad",
+            "3e6da1b9993fa530e91ea4ebc44e2ca5bc8b14384c020ade98abe73779236bcb",
             "TOOL MANIFEST BYTES MOVED. Do not update the pinned hash unless \
              the tool surface was changed on purpose.\n---\n{}",
             per_tool.join("\n")
