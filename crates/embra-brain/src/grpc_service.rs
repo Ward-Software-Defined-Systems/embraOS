@@ -449,7 +449,7 @@ impl BrainService for BrainGrpcService {
                     show_reasoning: None,
                     openai_compat: crate::config::OpenAiCompatConfig::default(),
                 });
-                match run_learning_loop(&tx, &mut incoming, &db, &loaded_config, &api_key, &onboarding_stage, &stop_rx).await {
+                match run_learning_loop(&tx, &mut incoming, &db, &loaded_config, &api_key, &onboarding_stage, TurnStop { in_turn: &in_turn, stop_rx: &stop_rx }).await {
                     Ok(()) => {
                         info!("Learning Mode complete — transitioning to Operational");
                         // Reload config in case it was updated
@@ -1089,11 +1089,9 @@ async fn handle_request(
             // Set the in-flight flag so /provider commands queue
             // instead of swapping mid-turn. Cleared in a drop guard so
             // the flag never sticks if this future is cancelled.
-            self_in_turn.store(true, Ordering::SeqCst);
-            let in_turn_guard = InTurnGuard(self_in_turn.clone());
             // Per-turn operator-stop observer: snapshots the generation
             // now, so only a StopTurn fired DURING this turn trips it.
-            let mut stop_check = StopCheck::new(stop_rx.clone());
+            let (in_turn_guard, mut stop_check) = begin_turn(&self_in_turn, stop_rx);
 
             // Load session history
             let history = {
@@ -5727,7 +5725,7 @@ async fn run_learning_loop(
     config: &config::SystemConfig,
     api_key: &str,
     onboarding_stage: &Arc<watch::Sender<i32>>,
-    stop_rx: &watch::Receiver<u64>,
+    stop: TurnStop<'_>,
 ) -> anyhow::Result<()> {
     let mut state = learning::LearningState::new();
 
@@ -5974,6 +5972,9 @@ async fn run_learning_loop(
             .iter()
             .map(legacy_message_to_api)
             .collect();
+        // A turn of the learning loop is a turn: marked as running from
+        // here to the end of its stream, so that an operator stop reaches it.
+        let (in_turn_guard, mut stop_check) = stop.begin();
         let mut brain_rx = provider
             .stream_turn(
                 &messages,
@@ -5986,21 +5987,12 @@ async fn run_learning_loop(
             .await
             .map_err(|e| anyhow::anyhow!("Brain call failed in learning: {}", e))?;
 
-        let mut stop_check = StopCheck::new(stop_rx.clone());
-        let full_response = stream_brain_to_grpc(&mut brain_rx, tx, &config.name, Some(&mut stop_check)).await;
+        let answer = stream_brain_to_grpc(&mut brain_rx, tx, &config.name, Some(&mut stop_check)).await;
+        drop(in_turn_guard);
 
-        // Check for [PHASE_COMPLETE]
-        let phase_complete = full_response.contains("[PHASE_COMPLETE]");
-        let clean_response = full_response.replace("[PHASE_COMPLETE]", "").trim().to_string();
-
-        // Add to conversation history (without marker).
-        // Opus 4.7 sometimes emits only the marker with no prose; never push
-        // an empty assistant message — Anthropic rejects empty text blocks.
-        let history_entry = if clean_response.is_empty() {
-            "(phase complete)".to_string()
-        } else {
-            clean_response.clone()
-        };
+        // What goes into the conversation history, and whether the phase is
+        // over (`[PHASE_COMPLETE]`, never on a stopped turn).
+        let (history_entry, phase_complete) = learning_turn_outcome(&answer);
         state.conversation_history.push(Message::assistant(&history_entry));
 
         if phase_complete {
@@ -6122,6 +6114,7 @@ async fn run_learning_loop(
                                 .iter()
                                 .map(legacy_message_to_api)
                                 .collect();
+                            let (in_turn_guard, mut stop_check) = stop.begin();
                             let mut brain_rx = provider
                                 .stream_turn(
                                     &messages,
@@ -6134,16 +6127,10 @@ async fn run_learning_loop(
                                 .await
                                 .map_err(|e| anyhow::anyhow!("Brain call failed: {}", e))?;
 
-                            let mut stop_check = StopCheck::new(stop_rx.clone());
-        let full_response = stream_brain_to_grpc(&mut brain_rx, tx, &config.name, Some(&mut stop_check)).await;
+                            let answer = stream_brain_to_grpc(&mut brain_rx, tx, &config.name, Some(&mut stop_check)).await;
+                            drop(in_turn_guard);
 
-                            let phase_complete = full_response.contains("[PHASE_COMPLETE]");
-                            let clean_response = full_response.replace("[PHASE_COMPLETE]", "").trim().to_string();
-                            let history_entry = if clean_response.is_empty() {
-                                "(phase complete)".to_string()
-                            } else {
-                                clean_response.clone()
-                            };
+                            let (history_entry, phase_complete) = learning_turn_outcome(&answer);
                             state.conversation_history.push(Message::assistant(&history_entry));
 
                             if phase_complete {
@@ -6186,14 +6173,50 @@ async fn run_learning_loop(
     Ok(())
 }
 
+/// What one model turn of the learning loop produced.
+struct LearningAnswer {
+    /// The concatenation of all `TextDelta`s.
+    text: String,
+    /// The operator stopped the turn; `text` is what had arrived by then.
+    stopped: bool,
+}
+
+/// What a learning turn leaves in the conversation history, and whether it
+/// ends the phase.
+///
+/// The marker `[PHASE_COMPLETE]` never goes into the history. An answer
+/// without text is written as `(phase complete)`: an empty assistant message
+/// is rejected by the API, and a model may send the marker alone. A turn the
+/// operator stopped ends no phase, whatever had arrived of it, and is marked
+/// as the operational loop marks one.
+fn learning_turn_outcome(answer: &LearningAnswer) -> (String, bool) {
+    let clean = answer.text.replace("[PHASE_COMPLETE]", "").trim().to_string();
+    if answer.stopped {
+        let entry = final_assistant_text(
+            &clean,
+            &[],
+            TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop),
+        );
+        return (entry, false);
+    }
+    let phase_complete = answer.text.contains("[PHASE_COMPLETE]");
+    let entry = if clean.is_empty() {
+        "(phase complete)".to_string()
+    } else {
+        clean
+    };
+    (entry, phase_complete)
+}
+
 /// Stream a provider response to gRPC for the learning loop, return
-/// the full response text (concatenation of all `TextDelta`s).
+/// the full response text (concatenation of all `TextDelta`s) and whether
+/// the operator stopped it.
 async fn stream_brain_to_grpc(
     brain_rx: &mut BoxStream<'static, StreamEvent>,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
     _name: &str,
     mut stop: Option<&mut StopCheck>,
-) -> String {
+) -> LearningAnswer {
     let mut full_response = String::new();
     let mut first_token = true;
 
@@ -6221,7 +6244,7 @@ async fn stream_brain_to_grpc(
                                 StreamDone { full_response: full_response.clone() }
                             )),
                         })).await;
-                        return full_response;
+                        return LearningAnswer { text: full_response, stopped: true };
                     }
                 }
             }
@@ -6294,7 +6317,7 @@ async fn stream_brain_to_grpc(
         }
     }
 
-    full_response
+    LearningAnswer { text: full_response, stopped: false }
 }
 
 /// Save learning conversation history to WardSONDB
@@ -6340,9 +6363,40 @@ async fn save_learning_history(db: &Arc<WardsonDbClient>, history: &[Message]) -
 /// forever.
 struct InTurnGuard(Arc<AtomicBool>);
 
+/// Mark a turn as running and take its stop observer.
+///
+/// `StopTurn` raises the stop counter only while a turn is marked as
+/// running, and a turn sees only a stop that was raised after it took its
+/// observer. Both belong to the start of a turn, in the operational loop
+/// and in the learning loop alike: a loop that takes the observer and does
+/// not set the mark cannot be stopped. The guard clears the mark when it is
+/// dropped, also when the turn's future is cancelled.
+fn begin_turn(
+    in_turn: &Arc<AtomicBool>,
+    stop_rx: &watch::Receiver<u64>,
+) -> (InTurnGuard, StopCheck) {
+    in_turn.store(true, Ordering::SeqCst);
+    (InTurnGuard(in_turn.clone()), StopCheck::new(stop_rx.clone()))
+}
+
 impl Drop for InTurnGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+/// The two halves of the operator stop, handed to a loop that starts turns
+/// of its own: the mark that a turn is running and the stop counter.
+#[derive(Clone, Copy)]
+struct TurnStop<'a> {
+    in_turn: &'a Arc<AtomicBool>,
+    stop_rx: &'a watch::Receiver<u64>,
+}
+
+impl TurnStop<'_> {
+    /// [`begin_turn`] with both halves.
+    fn begin(self) -> (InTurnGuard, StopCheck) {
+        begin_turn(self.in_turn, self.stop_rx)
     }
 }
 
@@ -8738,11 +8792,14 @@ mod operator_stop_tests {
     //! (refusal-precedent honesty) and the StopCheck snapshot semantics
     //! (a stop can only affect the turn in flight when it fired).
     use super::{
-        final_assistant_text, terminal_outcome_notice, StopCheck,
+        begin_turn, final_assistant_text, learning_turn_outcome, stream_brain_to_grpc,
+        terminal_outcome_notice, LearningAnswer, StopCheck,
     };
     use crate::provider::ir::{EarlyStopReason, TurnOutcome};
+    use crate::provider::StreamEvent;
     use embra_common::proto::brain::SystemMessageType;
-    use tokio::sync::watch;
+    use futures_util::stream::BoxStream;
+    use tokio::sync::{mpsc, watch};
 
     const STOPPED: TurnOutcome = TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop);
 
@@ -8786,5 +8843,98 @@ mod operator_stop_tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), awaited.triggered())
             .await
             .expect("triggered() must resolve once the generation advances");
+    }
+
+    /// `StopTurn` raises the counter only for a turn that is marked as
+    /// running. The learning loop took the observer and never set the mark,
+    /// and could not be stopped.
+    #[test]
+    fn a_turn_is_marked_as_running_until_its_guard_is_dropped() {
+        let in_turn = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, rx) = watch::channel(0u64);
+
+        let (guard, check) = begin_turn(&in_turn, &rx);
+        assert!(in_turn.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(!check.stopped());
+        tx.send_modify(|v| *v += 1);
+        assert!(check.stopped(), "a stop raised after the turn began reaches it");
+
+        drop(guard);
+        assert!(!in_turn.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn a_learning_turn_that_is_stopped_says_so() {
+        use embra_common::proto::brain::conversation_response::ResponseType;
+        use futures_util::StreamExt;
+
+        let (stop_tx, stop_rx) = watch::channel(0u64);
+        let mut check = StopCheck::new(stop_rx);
+        stop_tx.send_modify(|v| *v += 1);
+
+        // A provider that has nothing to say yet, and never will.
+        let mut silent: BoxStream<'static, StreamEvent> = futures_util::stream::pending().boxed();
+        let (tx, mut rx) = mpsc::channel(8);
+        let answer = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            stream_brain_to_grpc(&mut silent, &tx, "Embra", Some(&mut check)),
+        )
+        .await
+        .expect("a stop ends the wait for the provider");
+        assert!(answer.stopped);
+        assert_eq!(answer.text, "");
+
+        drop(tx);
+        let mut frames = Vec::new();
+        while let Some(Ok(frame)) = rx.recv().await {
+            frames.push(frame.response_type.expect("typed frame"));
+        }
+        assert!(
+            matches!(&frames[0], ResponseType::System(m)
+                if m.msg_type == SystemMessageType::Warning as i32 && m.content.contains("stopped by operator")),
+            "{frames:?}"
+        );
+        assert!(matches!(&frames[1], ResponseType::Done(_)), "{frames:?}");
+    }
+
+    #[test]
+    fn a_stopped_learning_turn_ends_no_phase_and_is_marked() {
+        // Stopped after the marker had arrived: the phase is not over.
+        let (entry, done) = learning_turn_outcome(&LearningAnswer {
+            text: "Here is what I understood so far. [PHASE_COMPLETE]".into(),
+            stopped: true,
+        });
+        assert!(!done);
+        assert_eq!(
+            entry,
+            "Here is what I understood so far.\n\n(response interrupted by operator stop)"
+        );
+
+        // Stopped before anything arrived.
+        let (entry, done) = learning_turn_outcome(&LearningAnswer { text: String::new(), stopped: true });
+        assert!(!done);
+        assert_eq!(entry, "(turn stopped by operator)");
+    }
+
+    #[test]
+    fn a_learning_turn_that_ran_to_its_end_is_written_as_before() {
+        let (entry, done) = learning_turn_outcome(&LearningAnswer {
+            text: "Tell me more about that.".into(),
+            stopped: false,
+        });
+        assert_eq!((entry.as_str(), done), ("Tell me more about that.", false));
+
+        let (entry, done) = learning_turn_outcome(&LearningAnswer {
+            text: "That completes it.\n[PHASE_COMPLETE]".into(),
+            stopped: false,
+        });
+        assert_eq!((entry.as_str(), done), ("That completes it.", true));
+
+        // The marker alone: never an empty assistant message.
+        let (entry, done) = learning_turn_outcome(&LearningAnswer {
+            text: "[PHASE_COMPLETE]".into(),
+            stopped: false,
+        });
+        assert_eq!((entry.as_str(), done), ("(phase complete)", true));
     }
 }
