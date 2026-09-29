@@ -906,16 +906,13 @@ async fn changelog(db: &WardsonDbClient, current_session: &str) -> String {
         }
     }
 
-    // List sessions. Learning sessions are a one-time setup artifact; exclude
-    // from "operational" count but note their presence so the total doesn't
-    // appear to drift vs `session_list` (which shows every session).
-    let collections = db.list_collections().await.unwrap_or_default();
-    let all_session_metas: Vec<_> = collections
-        .iter()
-        .filter(|c| c.starts_with("sessions.") && c.ends_with(".meta"))
-        .collect();
-    let learning_count = all_session_metas.iter().filter(|c| c.contains("learning")).count();
-    let operational_count = all_session_metas.len() - learning_count;
+    // Count the sessions `session_list` shows: every session the operator
+    // has not deleted. Learning sessions are a one-time setup artifact; they
+    // are left out of the "operational" count and named beside it, so that
+    // the total agrees with the list.
+    let live_sessions = sessions::live_session_names(db).await;
+    let learning_count = live_sessions.iter().filter(|name| name.contains("learning")).count();
+    let operational_count = live_sessions.len() - learning_count;
     if learning_count > 0 {
         output.push_str(&format!(
             "  Total sessions: {} operational + {} learning (use `session_list` to see all)\n",

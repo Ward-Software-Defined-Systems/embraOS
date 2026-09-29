@@ -63,6 +63,93 @@ async fn session_names(db: &WardsonDbClient) -> Vec<String> {
 // SessionManager internals and this tool layer.
 use crate::sessions::history_query_body;
 
+/// Whether a session's meta document says the operator deleted it. The state
+/// is compared as the session manager writes it.
+fn meta_says_deleted(meta: &serde_json::Value) -> bool {
+    match (
+        meta.get("state"),
+        serde_json::to_value(crate::sessions::SessionState::Deleted),
+    ) {
+        (Some(state), Ok(deleted)) => *state == deleted,
+        _ => false,
+    }
+}
+
+/// Whether the operator has deleted the session.
+///
+/// A deleted session stays in the database for its grace period, so that the
+/// operator can restore it. To the intelligence it is gone: left out of
+/// `session_list` and of a search over all sessions, and refused by name by
+/// every tool that reads or writes a session.
+async fn session_is_deleted(db: &WardsonDbClient, name: &str) -> bool {
+    let meta_col = format!("sessions.{}.meta", name);
+    db.query(&meta_col, &history_query_body())
+        .await
+        .ok()
+        .and_then(|docs| docs.into_iter().next())
+        .is_some_and(|meta| meta_says_deleted(&meta))
+}
+
+/// The sessions the operator has not deleted, by name.
+pub(crate) async fn live_session_names(db: &WardsonDbClient) -> Vec<String> {
+    let mut live = Vec::new();
+    for name in session_names(db).await {
+        if !session_is_deleted(db, &name).await {
+            live.push(name);
+        }
+    }
+    live
+}
+
+/// What a session tool answers for a session the operator has deleted.
+fn deleted_session_notice(name: &str) -> String {
+    format!(
+        "Session '{name}' was deleted by the operator and is not available. \
+         The operator can restore it during its grace period with /sessions restore {name}."
+    )
+}
+
+#[cfg(test)]
+mod deleted_session_tests {
+    use super::{deleted_session_notice, meta_says_deleted};
+    use serde_json::json;
+
+    #[test]
+    fn only_the_deleted_state_reads_as_deleted() {
+        assert!(meta_says_deleted(&json!({"name": "old", "state": "Deleted"})));
+        for state in ["Active", "Detached", "Closed", "deleted", ""] {
+            assert!(!meta_says_deleted(&json!({"state": state})), "{state}");
+        }
+        // A document without a state is not a deleted session.
+        assert!(!meta_says_deleted(&json!({"name": "old"})));
+        assert!(!meta_says_deleted(&json!({})));
+    }
+
+    #[test]
+    fn the_state_is_the_one_the_session_manager_writes() {
+        let mut meta: crate::sessions::SessionMeta = serde_json::from_value(json!({
+            "id": "uuid-x",
+            "name": "proj",
+            "state": "Active",
+            "created_at": "2026-05-01T00:00:00Z",
+            "last_active": "2026-07-10T00:00:00Z",
+        }))
+        .unwrap();
+        assert!(!meta_says_deleted(&serde_json::to_value(&meta).unwrap()));
+        crate::sessions::apply_soft_delete(&mut meta, "superseded", "2026-07-16T12:00:00+00:00");
+        assert!(meta_says_deleted(&serde_json::to_value(&meta).unwrap()));
+        crate::sessions::apply_restore(&mut meta);
+        assert!(!meta_says_deleted(&serde_json::to_value(&meta).unwrap()));
+    }
+
+    #[test]
+    fn the_notice_names_the_session_and_the_way_back() {
+        let notice = deleted_session_notice("old-proj");
+        assert!(notice.contains("'old-proj'"));
+        assert!(notice.contains("/sessions restore old-proj"));
+    }
+}
+
 /// Fetch the turns array for a session. Returns (turns_vec, total_count).
 async fn fetch_turns(db: &WardsonDbClient, name: &str) -> (Vec<serde_json::Value>, usize) {
     let collection = format!("sessions.{}.history", name);
@@ -466,6 +553,11 @@ pub async fn session_list(db: &WardsonDbClient) -> String {
             .unwrap_or_default();
 
         let (status, last_active, created_at) = if let Some(meta) = meta_docs.into_iter().next() {
+            // Deleted by the operator: not listed, as in the operator's own
+            // session list.
+            if meta_says_deleted(&meta) {
+                continue;
+            }
             (
                 meta.get("state")
                     .or_else(|| meta.get("status"))
@@ -494,6 +586,10 @@ pub async fn session_list(db: &WardsonDbClient) -> String {
             last_active,
             created_at,
         });
+    }
+
+    if sessions.is_empty() {
+        return "No sessions found.".into();
     }
 
     // Sort by last_active descending
@@ -539,6 +635,9 @@ pub async fn session_read(db: &WardsonDbClient, param: &str) -> String {
     let name = parts[0];
     let range_str = if parts.len() > 1 { parts[1].trim() } else { "" };
 
+    if session_is_deleted(db, name).await {
+        return deleted_session_notice(name);
+    }
     let (turns, total) = fetch_turns(db, name).await;
     if total == 0 {
         return format!("No conversation history found for session '{}'.", name);
@@ -612,8 +711,13 @@ pub async fn session_search(
     };
 
     let names_to_search = match session {
-        Some(s) if !s.is_empty() => vec![s.to_string()],
-        _ => session_names(db).await,
+        Some(s) if !s.is_empty() => {
+            if session_is_deleted(db, s).await {
+                return deleted_session_notice(s);
+            }
+            vec![s.to_string()]
+        }
+        _ => live_session_names(db).await,
     };
 
     let mut results = Vec::new();
@@ -814,6 +918,9 @@ pub async fn session_meta(db: &WardsonDbClient, param: &str) -> String {
         .query(&meta_col, &crate::sessions::history_query_body())
         .await
         .unwrap_or_default();
+    if meta_docs.first().is_some_and(meta_says_deleted) {
+        return deleted_session_notice(name);
+    }
 
     let (status, last_active, created_at) = if let Some(meta) = meta_docs.into_iter().next() {
         (
@@ -889,6 +996,9 @@ pub async fn session_delta(db: &WardsonDbClient, param: &str) -> String {
         Ok(n) => n,
         Err(_) => return "since_turn must be a non-negative integer.".into(),
     };
+    if session_is_deleted(db, name).await {
+        return deleted_session_notice(name);
+    }
 
     let (turns, total) = fetch_turns(db, name).await;
     if total == 0 {
@@ -1378,6 +1488,9 @@ pub async fn session_summarize(db: &WardsonDbClient, param: &str) -> String {
     }
 
     let name = param.trim();
+    if session_is_deleted(db, name).await {
+        return deleted_session_notice(name);
+    }
 
     // Cache check: see if summary already exists and is current
     let summary_col = format!("sessions.{}.summary", name);
@@ -1476,6 +1589,9 @@ pub async fn session_summary_save(db: &WardsonDbClient, param: &str) -> String {
 
     let name = param[..pipe_pos].trim();
     let json_str = param[pipe_pos + 3..].trim();
+    if session_is_deleted(db, name).await {
+        return deleted_session_notice(name);
+    }
 
     // Parse the summary JSON
     let summary_data: serde_json::Value = match serde_json::from_str(json_str) {
@@ -1607,6 +1723,9 @@ pub async fn session_extract(db: &WardsonDbClient, param: &str) -> String {
     let name = parts[0];
     let range_str = if parts.len() > 1 { parts[1].trim() } else { "" };
 
+    if session_is_deleted(db, name).await {
+        return deleted_session_notice(name);
+    }
     let (turns, total) = fetch_turns(db, name).await;
     if total == 0 {
         return format!("No conversation history found for session '{}'.", name);
