@@ -1215,6 +1215,50 @@ fn calculate(expression: &str) -> String {
 mod calculate_tests {
     use super::calculate;
 
+    /// The quoted names that open the match arms of one function of
+    /// `calc.rs`, read from its source: what the evaluator knows.
+    fn arm_names(from: &str, to: &str) -> Vec<&'static str> {
+        let src = include_str!("calc.rs");
+        let start = src.find(from).expect("start marker in calc.rs");
+        let end = start + src[start..].find(to).expect("end marker in calc.rs");
+        let mut names = Vec::new();
+        let mut rest = &src[start..end];
+        while let Some(open) = rest.find('"') {
+            let after = &rest[open + 1..];
+            let Some(close) = after.find('"') else { break };
+            let tail = &after[close + 1..];
+            if tail.trim_start().starts_with("=>") {
+                names.push(&after[..close]);
+            }
+            rest = tail;
+        }
+        names
+    }
+
+    /// The description names every function and constant the evaluator
+    /// knows. It used to list the operators only, and the model took a
+    /// working `sin(0.5)` for something leaking through.
+    #[test]
+    fn the_description_names_every_function_and_constant() {
+        let desc = crate::tools::registry::all_descriptors()
+            .find(|d| d.name == "calculate")
+            .expect("calculate registered")
+            .description;
+        let words: Vec<&str> = desc
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .collect();
+        let functions = arm_names("fn call(", "fn eval_rpn(");
+        let constants = arm_names("fn constant(", "fn call(");
+        // The scan itself works: a few names it must find.
+        for known in ["sqrt", "atan2", "max", "min"] {
+            assert!(functions.contains(&known), "{known} not found in calc.rs: {functions:?}");
+        }
+        assert_eq!(constants, ["pi", "e"]);
+        for name in functions.iter().chain(&constants) {
+            assert!(words.contains(name), "`{name}` is not named in the description: {desc}");
+        }
+    }
+
     #[test]
     fn the_exponent_is_written_with_two_stars() {
         assert_eq!(calculate("2 ** 10"), "2 ** 10 = 1024");
@@ -1947,7 +1991,7 @@ impl CountdownArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "calculate",
-    description = "Evaluate a math expression. Operators: + - * / % ( ) and ** for exponent. Bare ^ is rejected (XOR is unsupported). Example: 2 ** 10 returns 1024."
+    description = "Evaluate a math expression. Operators: + - * / % ( ) and ** for exponent. Functions, called with parentheses: sqrt, exp, ln, abs, sin, cos, tan, asin, acos, atan, sinh, cosh, tanh, asinh, acosh, atanh, floor, ceil, round, signum (one argument each), atan2(y, x), and max and min (one or more arguments). Constants: pi, e. Angles are in radians; ln is the natural logarithm and there is no log. Bare ^ is rejected (XOR is unsupported). Example: 2 ** 10 returns 1024."
 )]
 pub struct CalculateArgs {
     /// The expression to evaluate, e.g. `2 ** 10`.
