@@ -19,10 +19,10 @@
       "tags": ["memory", "promotion", "knowledge-graph"]
     },
     {
-      "id": "seed_kg_density",
+      "id": "seed_kg_density_2",
       "kind": "semantic",
       "category": "fact",
-      "content": "Edge density is the design, not bloat: every memory insert auto-derives same_session, temporal, and tag_overlap edges, and that dense structural layer is the substrate graph expansion walks. Never delete auto-derived edges to clean up — nothing re-derives them for existing documents, and read paths are ranked and windowed anyway.",
+      "content": "Edge density is the design, not bloat: every memory insert auto-derives same_session, temporal, and tag_overlap edges, and knowledge_traverse walks that dense structural layer. Never delete auto-derived edges to clean up — nothing re-derives them for existing documents, and read paths are ranked and windowed anyway.",
       "tags": ["knowledge-graph", "edges", "density", "curation"]
     },
     {
@@ -55,10 +55,10 @@
       "tags": ["retrieval", "enrichment", "memory"]
     },
     {
-      "id": "seed_kg_retrieval_funnel",
+      "id": "seed_kg_retrieval_funnel_2",
       "kind": "semantic",
       "category": "fact",
-      "content": "Retrieval collects candidates four ways — exact tag match, content-token match over memories and entries, current-session adjacency, and depth-2 graph expansion seeded from the top-scored candidates — then ranks by relevance, recency, access frequency, and confidence.",
+      "content": "Retrieval collects candidates four ways — exact tag match, content-token match over memories and entries weighted by how rare each word is, current-session adjacency, and semantic similarity from the local embedding model — then ranks by relevance, recency, and access frequency. Beyond the current session's neighbors retrieval follows no edges; knowledge_traverse does.",
       "tags": ["retrieval", "knowledge-graph", "memory"]
     },
     {
@@ -130,10 +130,10 @@
     },
     { "_comment": "── the knowledge tools ───────────────────────────────" },
     {
-      "id": "seed_kg_query_tool",
+      "id": "seed_kg_query_tool_2",
       "kind": "semantic",
       "category": "fact",
-      "content": "knowledge_query is deliberate retrieval: multi-signal ranked search with a source breakdown of direct, session, and graph hits — the way to check what the graph knows before answering from working memory alone.",
+      "content": "knowledge_query is deliberate retrieval: multi-signal ranked search with a source breakdown of direct and session hits and a count of the candidates considered — the way to check what the graph knows before answering from working memory alone.",
       "tags": ["tools", "retrieval", "knowledge-graph"]
     },
     {
@@ -158,10 +158,10 @@
       "tags": ["tools", "curation", "audit"]
     },
     {
-      "id": "seed_kg_link_tool",
+      "id": "seed_kg_link_tool_2",
       "kind": "semantic",
       "category": "fact",
-      "content": "knowledge_link records deliberate relationships — enables, contradicts, refines, depends_on, related_to — between any two nodes. These rare, meaningful edges are what make graph expansion useful, so create one whenever a real relationship is established in conversation.",
+      "content": "knowledge_link records deliberate relationships — enables, contradicts, refines, depends_on, related_to — between any two nodes. These rare, meaningful edges are what knowledge_traverse keeps when automatic edges crowd a node, and a node without one is what knowledge_audit reports as orphaned, so create one whenever a real relationship is established in conversation.",
       "tags": ["tools", "edges", "curation", "knowledge-graph"]
     },
     {
@@ -204,26 +204,26 @@
   "edges": [
     { "_comment": "architecture spine" },
     { "src": "seed_kg_promotion", "dst": "seed_kg_overview", "relation": "related_to" },
-    { "src": "seed_kg_density", "dst": "seed_kg_overview", "relation": "related_to" },
-    { "src": "seed_kg_edge_types", "dst": "seed_kg_density", "relation": "related_to" },
+    { "src": "seed_kg_density_2", "dst": "seed_kg_overview", "relation": "related_to" },
+    { "src": "seed_kg_edge_types", "dst": "seed_kg_density_2", "relation": "related_to" },
     { "src": "seed_kg_identity_projection", "dst": "seed_kg_overview", "relation": "related_to" },
-    { "src": "seed_kg_sessions_edges", "dst": "seed_kg_density", "relation": "related_to" },
+    { "src": "seed_kg_sessions_edges", "dst": "seed_kg_density_2", "relation": "related_to" },
     { "_comment": "retrieval" },
-    { "src": "seed_kg_enrichment", "dst": "seed_kg_retrieval_funnel", "relation": "depends_on" },
-    { "src": "seed_kg_retrieval_funnel", "dst": "seed_kg_overview", "relation": "related_to" },
-    { "src": "seed_kg_tag_discipline", "dst": "seed_kg_retrieval_funnel", "relation": "enables", "weight": 0.9 },
-    { "src": "seed_kg_windows_observable", "dst": "seed_kg_retrieval_funnel", "relation": "related_to" },
-    { "src": "seed_kg_link_tool", "dst": "seed_kg_retrieval_funnel", "relation": "enables", "weight": 0.9 },
+    { "src": "seed_kg_enrichment", "dst": "seed_kg_retrieval_funnel_2", "relation": "depends_on" },
+    { "src": "seed_kg_retrieval_funnel_2", "dst": "seed_kg_overview", "relation": "related_to" },
+    { "src": "seed_kg_tag_discipline", "dst": "seed_kg_retrieval_funnel_2", "relation": "enables", "weight": 0.9 },
+    { "src": "seed_kg_windows_observable", "dst": "seed_kg_retrieval_funnel_2", "relation": "related_to" },
+    { "src": "seed_kg_link_tool_2", "dst": "seed_kg_traverse_tool", "relation": "enables", "weight": 0.9 },
     { "_comment": "curation" },
     { "src": "seed_kg_hygiene_procedure", "dst": "seed_kg_audit_tool", "relation": "depends_on" },
     { "src": "seed_kg_correction", "dst": "seed_kg_hygiene_procedure", "relation": "related_to" },
     { "src": "seed_kg_superseded_marker", "dst": "seed_kg_correction", "relation": "refines" },
     { "src": "seed_kg_category_discipline", "dst": "seed_kg_promotion", "relation": "refines" },
-    { "src": "seed_kg_orphan_sweep", "dst": "seed_kg_density", "relation": "related_to" },
+    { "src": "seed_kg_orphan_sweep", "dst": "seed_kg_density_2", "relation": "related_to" },
     { "src": "seed_kg_seed_semantics", "dst": "seed_kg_seed_packs", "relation": "refines" },
     { "_comment": "tools" },
-    { "src": "seed_kg_query_tool", "dst": "seed_kg_retrieval_funnel", "relation": "related_to" },
-    { "src": "seed_kg_traverse_tool", "dst": "seed_kg_link_tool", "relation": "related_to" },
+    { "src": "seed_kg_query_tool_2", "dst": "seed_kg_retrieval_funnel_2", "relation": "related_to" },
+    { "src": "seed_kg_traverse_tool", "dst": "seed_kg_link_tool_2", "relation": "related_to" },
     { "src": "seed_kg_stats_tool", "dst": "seed_kg_windows_observable", "relation": "related_to" },
     { "src": "seed_kg_dump_tool", "dst": "seed_kg_stats_tool", "relation": "related_to" },
     { "src": "seed_kg_remember_recall", "dst": "seed_kg_promotion", "relation": "related_to" },
