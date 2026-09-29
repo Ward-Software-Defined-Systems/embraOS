@@ -2043,7 +2043,7 @@ impl KnowledgeTraverseArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "knowledge_query",
-    description = "Find relevant knowledge via graph-aware retrieval (multi-signal ranking with depth-2 expansion). max_results defaults to 20, capped at 100. categories is a CSV of semantic categories to filter by (fact, preference, decision, observation, pattern). Call this before answering questions where prior context would help."
+    description = "Find relevant knowledge by multi-signal retrieval: tag, content and similarity matches plus the current session's context, ranked by relevance, recency and access frequency. max_results defaults to 20, capped at 100. categories is a CSV of semantic categories to filter by (fact, preference, decision, observation, pattern). Call this before answering questions where prior context would help."
 )]
 pub struct KnowledgeQueryArgs {
     pub query: String,
