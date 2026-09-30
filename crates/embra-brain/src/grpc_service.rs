@@ -1106,10 +1106,7 @@ async fn handle_request(
             // Raw `msg.content` (`[Session resumed]`) is what the
             // persistence step at the end of this handler writes to
             // history, mirroring the auto-enrichment pattern below.
-            let pending_briefing = std::mem::replace(
-                &mut session_mgr.write().await.pending_resume_briefing,
-                false,
-            );
+            let pending_briefing = session_mgr.write().await.pending_resume_briefing.take();
 
             // Auto-KG-enrichment: wrap the user message in a <retrieved_context>
             // block when the knowledge graph has relevant prior knowledge. The
@@ -1122,7 +1119,7 @@ async fn handle_request(
             // staging. An unknown id aborts the turn with an Error frame
             // and persists nothing; the staging is drained only on success.
             let media_store = media::MediaStore::default_store();
-            let synthetic_turn = pending_briefing || delete_exec.is_some();
+            let synthetic_turn = pending_briefing.is_some() || delete_exec.is_some();
             let mut turn_media: Vec<media::MediaMeta> = Vec::new();
             if !synthetic_turn {
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -1214,8 +1211,25 @@ async fn handle_request(
                 // memorize prompt; the raw persisted content stays the
                 // operator's reason (same swap contract as the briefing).
                 build_delete_memorize_prompt(&del.name, &msg.content)
-            } else if pending_briefing {
-                crate::knowledge::enrichment::build_resumption_context()
+            } else if let Some(briefing) = pending_briefing {
+                // What happened while the operator was away, when the
+                // absence is known and anything happened in it.
+                let away = match briefing.away_since {
+                    Some(since) => {
+                        let metas = session_mgr.read().await.list().await.unwrap_or_default();
+                        let digest = crate::sessions::away::gather(
+                            db.as_ref(),
+                            &metas,
+                            since,
+                            chrono::Utc::now(),
+                            &session_name,
+                        )
+                        .await;
+                        crate::sessions::away::render(&digest, since, &loaded_config.timezone)
+                    }
+                    None => None,
+                };
+                crate::knowledge::enrichment::build_resumption_context(away.as_deref())
             } else if msg.content.trim().is_empty() && !turn_images.is_empty() {
                 // Image-only message: every provider path assumes a text
                 // block exists (cache breakpoints, parts arrays), and the
@@ -2285,7 +2299,12 @@ async fn handle_request(
                         false
                     } else {
                         mgr.record_briefing_attempt(&session_name);
-                        mgr.pending_resume_briefing = true;
+                        // Attach does not touch `last_active`, so the meta
+                        // read for the idle gate still holds the start of
+                        // the absence.
+                        mgr.pending_resume_briefing = Some(crate::sessions::ResumeBriefing {
+                            away_since: meta.as_ref().map(|m| m.last_active),
+                        });
                         true
                     }
                 };
@@ -2643,12 +2662,11 @@ async fn handle_slash_command(
                     // Soft-deleted sessions are unattachable during their
                     // grace period — reattach would silently resurrect a
                     // half-stamped session; restore is the sanctioned path.
-                    let is_deleted = mgr
-                        .get_meta(args)
-                        .await
-                        .ok()
-                        .flatten()
-                        .is_some_and(|m| m.state == SessionState::Deleted);
+                    let meta = mgr.get_meta(args).await.ok().flatten();
+                    let is_deleted = meta.as_ref().is_some_and(|m| m.state == SessionState::Deleted);
+                    // The start of the absence, read before `reattach`
+                    // stamps `last_active` with now.
+                    let away_since = meta.map(|m| m.last_active);
                     if is_deleted {
                         drop(mgr);
                         send_msg(tx, format!(
@@ -2722,7 +2740,8 @@ async fn handle_slash_command(
                     if is_sealed && history_len > 0 {
                         let mut mgr = session_mgr.write().await;
                         mgr.record_briefing_attempt(args);
-                        mgr.pending_resume_briefing = true;
+                        mgr.pending_resume_briefing =
+                            Some(crate::sessions::ResumeBriefing { away_since });
                         drop(mgr);
                         return Some("[Session resumed]".to_string());
                     }

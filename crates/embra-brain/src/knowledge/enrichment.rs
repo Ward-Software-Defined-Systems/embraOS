@@ -126,8 +126,11 @@ pub async fn build_turn_context(
 /// raw content (`[Session resumed]`) is what persists to history, so
 /// this instruction never leaks into subsequent turns. The system
 /// prompt is untouched, so prompt caching stays warm.
-pub fn build_resumption_context() -> String {
-    String::from(
+///
+/// `away` is the digest of what happened while the operator was away
+/// (`sessions::away::render`), when anything did.
+pub fn build_resumption_context(away: Option<&str>) -> String {
+    let mut s = String::from(
         "<session_resumption>\n\
          You have just been reconnected to this session. The user did \
          not type anything — this turn was triggered automatically by \
@@ -135,9 +138,19 @@ pub fn build_resumption_context() -> String {
          Briefly recap (2–4 sentences) where the conversation left off: \
          what we were working on, anything pending, and offer the next \
          step. Be concise — the user can already see the full prior \
-         transcript.\n\
-         </session_resumption>"
-    )
+         transcript.\n",
+    );
+    if let Some(away) = away {
+        s.push_str(
+            "Below is what happened in embraOS while the user was away. \
+             Mention what bears on this session or needs their attention \
+             in a sentence; leave out what does not.\n",
+        );
+        s.push_str(away);
+        s.push('\n');
+    }
+    s.push_str("</session_resumption>");
+    s
 }
 
 fn is_chatty_filler(s: &str) -> bool {
@@ -173,7 +186,7 @@ mod resumption_context_tests {
 
     #[test]
     fn build_resumption_context_contains_wrapper_and_recap_directive() {
-        let s = build_resumption_context();
+        let s = build_resumption_context(None);
         // Load-bearing markers — the brain uses them to distinguish a
         // resumption-triggered turn from a real user message.
         assert!(
@@ -194,5 +207,17 @@ mod resumption_context_tests {
             s.contains("did not type"),
             "must clarify the user did not type"
         );
+        // Nothing happened while away: no digest, no instruction about one.
+        assert!(!s.contains("while the user was away"), "{s}");
+    }
+
+    #[test]
+    fn a_digest_rides_inside_the_wrapper_with_its_instruction() {
+        let block = "<while_away since=\"2026-09-29 05:00 PDT\">\nCron jobs that ran:\n- time (every 5m)\n</while_away>";
+        let s = build_resumption_context(Some(block));
+        assert!(s.starts_with("<session_resumption>"), "{s}");
+        assert!(s.ends_with("</session_resumption>"), "{s}");
+        assert!(s.contains("while the user was away"), "{s}");
+        assert!(s.contains(block), "{s}");
     }
 }

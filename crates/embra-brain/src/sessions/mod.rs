@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use crate::brain::Message;
 use crate::db::WardsonDbClient;
 
+pub(crate) mod away;
+
 /// Session document format version.
 ///
 /// Set to `CURRENT_SESSION_FORMAT` on every session created post-v7
@@ -145,8 +147,9 @@ pub struct SessionManager {
     /// substitutes the `<session_resumption>` wrapper for the brain-facing
     /// call; the synthetic UserMessage's raw `content` (`[Session resumed]`)
     /// is what gets persisted to history. Pure runtime state — not
-    /// serialized, no schema bump.
-    pub pending_resume_briefing: bool,
+    /// serialized, no schema bump. It carries since when the operator was
+    /// away, for the digest of what happened meanwhile (`sessions::away`).
+    pub pending_resume_briefing: Option<ResumeBriefing>,
     /// When a resume briefing was last STARTED per session (runtime only,
     /// never serialized). Read/written by the briefing dispatch sites in
     /// grpc_service.rs to enforce `RESUME_BRIEFING_ATTEMPT_COOLDOWN_SECS`.
@@ -160,12 +163,22 @@ pub struct SessionManager {
     pending_media: std::collections::HashMap<String, Vec<crate::media::MediaMeta>>,
 }
 
+/// A resume briefing waiting for its turn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResumeBriefing {
+    /// The session's `last_active` as it stood before this attach: the
+    /// start of the absence the digest covers. Read before anything bumps
+    /// it — `reattach` does (`update_state`). `None` when the meta could not
+    /// be read; the briefing then carries no digest.
+    pub away_since: Option<DateTime<Utc>>,
+}
+
 impl SessionManager {
     pub fn new(db: WardsonDbClient) -> Self {
         Self {
             db,
             active_session: None,
-            pending_resume_briefing: false,
+            pending_resume_briefing: None,
             briefing_attempts: std::collections::HashMap::new(),
             pending_media: std::collections::HashMap::new(),
         }
@@ -871,29 +884,30 @@ mod pending_resume_briefing_tests {
     use super::*;
 
     #[test]
-    fn pending_resume_briefing_defaults_false() {
+    fn pending_resume_briefing_defaults_to_none() {
         // Dummy client — never connected; these tests don't touch the DB.
         let db = WardsonDbClient::from_url("http://127.0.0.1:1");
         let mgr = SessionManager::new(db);
         assert!(
-            !mgr.pending_resume_briefing,
-            "default must be false so the first turn after construction isn't accidentally treated as a resumption"
+            mgr.pending_resume_briefing.is_none(),
+            "default must be None so the first turn after construction isn't accidentally treated as a resumption"
         );
     }
 
     #[test]
-    fn pending_resume_briefing_replaces_cleanly() {
+    fn pending_resume_briefing_is_taken_once_with_its_cutoff() {
         let db = WardsonDbClient::from_url("http://127.0.0.1:1");
         let mut mgr = SessionManager::new(db);
-        mgr.pending_resume_briefing = true;
-        // Mirrors the read-and-clear pattern in grpc_service.rs's
-        // UserMessage handler — std::mem::replace returns the prior
-        // value and stores `false`, so the flag is one-shot.
-        let was = std::mem::replace(&mut mgr.pending_resume_briefing, false);
-        assert!(was, "replace must return the prior `true`");
+        let since = "2026-09-29T12:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        mgr.pending_resume_briefing = Some(ResumeBriefing { away_since: Some(since) });
+        // Mirrors the read-and-clear in grpc_service.rs's UserMessage
+        // handler: `take` returns the briefing and leaves None, so it is
+        // one-shot, and the cutoff travels with it.
+        let was = mgr.pending_resume_briefing.take();
+        assert_eq!(was, Some(ResumeBriefing { away_since: Some(since) }));
         assert!(
-            !mgr.pending_resume_briefing,
-            "after replace, the flag must be cleared so subsequent turns are not briefings"
+            mgr.pending_resume_briefing.is_none(),
+            "after take, subsequent turns are not briefings"
         );
     }
 }
