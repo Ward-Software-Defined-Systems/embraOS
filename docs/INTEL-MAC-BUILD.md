@@ -167,6 +167,9 @@ EMBRA_DB_VERBOSE=1 ./scripts/run-qemu.sh   # opt-in per-request WardSONDB log li
 
 Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, LLM
 provider + credentials, timezone), then Learning Mode forms and seals the soul.
+Once the soul is sealed, run `/embeddings backfill` once: the seed knowledge packs
+load before the wizard writes a configuration, so their nodes have no vectors until
+backfilled (see `docs/QUICK-START.md`).
 
 > **Upgrading from the pre-volume flow? Delete the stale Mac-side
 > `buildroot-src/`.** `run-qemu.sh` prefers `buildroot-src/output/images/` over

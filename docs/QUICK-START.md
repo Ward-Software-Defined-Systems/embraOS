@@ -106,6 +106,8 @@ EMBRA_TUI=1 EMBRA_GRAPHICS=sixel ./scripts/run-qemu.sh  # serial TUI image pane:
 
 On first boot, the Config Wizard runs — name your intelligence, choose your LLM provider (Anthropic Claude, Google Gemini, Ollama, or LM Studio), enter the corresponding credentials (API key for Anthropic/Gemini; endpoint URL + optional bearer + selected model for the OpenAI-compat presets), set your timezone. Each field is validated before commit — an invalid API key, unreachable endpoint, or garbage timezone re-prompts instead of persisting. The Ollama / LM Studio sub-flow probes `GET /v1/models` against your endpoint and presents a model selector populated from the live server response. After setup, you're in a full TUI conversation with styled text, thinking indicators, and tool execution.
 
+> **After the soul is sealed, run `/embeddings backfill` once.** The seed knowledge packs load at first boot, before the Config Wizard has written a configuration, so their nodes carry no vectors and semantic similarity cannot find them. Nothing embeds them later on its own. The backfill runs locally (about 55 ms per node) and `/embeddings` shows the coverage before and after.
+
 ### Notes
 
 The following apply once the image is built. They are not part of the build pipeline.
