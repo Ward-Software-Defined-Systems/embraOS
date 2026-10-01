@@ -183,7 +183,7 @@ With no image argument, `seed-state.sh` resolves the same one `run-qemu.sh` boot
 cannot seed one image and boot another. Pass a path — positional or `--image <path>` — to
 override. The VM must be stopped — seeding an image QEMU has open corrupts it, and the
 script refuses. `./scripts/seed-state.sh --help` lists every flag. Beyond `--ca-dir`,
-`--seed-dir` (knowledge packs), `--import-dir` (intelligence graphs) and `--wipe`:
+`--seed-dir` (your own knowledge packs — the OS's are in the image, and a copy in STATE is ignored), `--import-dir` (intelligence graphs) and `--wipe`:
 `--phase0-data <dir>` copies `<dir>/wardsondb/` onto DATA (size-checked first; its `.engine`
 marker must match the image's `--storage-engine`), `--soul-hash <hash>` writes STATE's
 `soul.sha256`, and `EMBRAOS_ROOT` re-anchors the default image paths when the script runs

@@ -27,11 +27,14 @@ is host-side documentation and is not baked.
 | Source | Path | Notes |
 |---|---|---|
 | Rootfs (baked) | `/usr/share/embra/seed-knowledge/` | the committed packs |
-| STATE (drop-in) | `/embra/state/seed-knowledge/` | operator packs; **wins filename collisions** with the rootfs |
+| STATE (drop-in) | `/embra/state/seed-knowledge/` | the operator's own packs. A copy of a pack the OS ships is **ignored** — the image's copy loads, and the boot journal names the copy |
 | Dev override | `EMBRA_SEED_DIR` env | when set, the **only** directory scanned |
 
 `scripts/seed-state.sh --seed-dir /path/to/packs` copies packs into STATE
-before first boot. Files must end in `.knowledge.json` and stay under
+before first boot. Seed your own packs there, not a copy of `Seed_Knowledge/`:
+the OS's packs are in the image, and a copy in STATE would be ignored at boot
+(it would otherwise pin the pack to the day it was copied, through every
+later image and every restored backup). Files must end in `.knowledge.json` and stay under
 4 MiB. Two files whose packs share a `name` conflate the loader's
 fast-path counts — the first file (alphabetical) wins and the other is
 skipped with a boot-journal warning.

@@ -14,8 +14,8 @@
 #
 # --seed-dir copies *.knowledge.json seed packs into STATE's
 # seed-knowledge/ directory; the brain's boot reconcile loads them into the
-# knowledge graph (STATE wins filename collisions with the rootfs-baked
-# packs).
+# knowledge graph. Seed your own packs: a copy of a pack the OS ships is
+# ignored at boot (the image's copy loads; the boot journal names the copy).
 #
 # --ca-dir copies *.pem / *.crt root CA certificates into STATE's
 # ca-certificates/ directory; embrad merges them with the stock CA bundle
@@ -61,7 +61,8 @@ Options:
   --phase0-data <dir>     Copy <dir>/wardsondb/ into DATA
   --soul-hash <hash>      Write <hash> to STATE/soul.sha256
   --import-dir <dir>      Copy *.graph.json into STATE/imported-intelligence/
-  --seed-dir <dir>        Copy *.knowledge.json into STATE/seed-knowledge/
+  --seed-dir <dir>        Copy *.knowledge.json (your own packs) into STATE/seed-knowledge/;
+                          a copy of a pack the OS ships is ignored at boot
   --ca-dir <dir>          Copy *.pem / *.crt into STATE/ca-certificates/
   -h, --help              Show this help
 

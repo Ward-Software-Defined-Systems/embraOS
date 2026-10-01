@@ -197,7 +197,7 @@
       "id": "seed_kg_seed_packs",
       "kind": "semantic",
       "category": "fact",
-      "content": "Seed knowledge packs (*.knowledge.json) load at every boot from the OS image and from /embra/state/seed-knowledge, letting operators add baseline knowledge without conversation. This very knowledge arrived through one.",
+      "content": "Seed knowledge packs (*.knowledge.json) load at every boot from the OS image and from /embra/state/seed-knowledge, letting operators add baseline knowledge without conversation; a STATE copy of a pack the OS ships is ignored, and the image's copy loads. This very knowledge arrived through one.",
       "tags": ["seed-knowledge", "embraos", "memory"]
     }
   ],

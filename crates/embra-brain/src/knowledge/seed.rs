@@ -22,7 +22,7 @@
 //! break its sufficiency heuristic).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde_json::json;
 use tracing::{info, warn};
@@ -364,46 +364,80 @@ fn dedupe_pack_names(files: Vec<SeedPackFile>) -> (Vec<SeedPackFile>, Vec<String
 
 pub(crate) fn scan_seed_dirs() -> (Vec<SeedPackFile>, Vec<String>) {
     let env_val = std::env::var(SEED_DIR_ENV).ok();
-    let mut by_name: BTreeMap<String, PathBuf> = BTreeMap::new();
-    for dir in dirs_to_scan(env_val.as_deref()) {
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
-            if !name.ends_with(SEED_FILE_SUFFIX) || !path.is_file() {
-                continue;
-            }
-            by_name.insert(name.to_string(), path);
+    scan_dirs(&dirs_to_scan(env_val.as_deref()))
+}
+
+/// The pack files of one directory, in filename order.
+fn pack_files_in(dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut found: BTreeMap<String, PathBuf> = BTreeMap::new();
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
+        if name.ends_with(SEED_FILE_SUFFIX) && path.is_file() {
+            found.insert(name.to_string(), path);
         }
     }
+    found.into_iter().collect()
+}
 
+/// Read and parse the packs of `dirs`. The first directory is the image's
+/// own: a pack it ships always loads from it, and a later directory's file
+/// carrying a pack of the same NAME is skipped and named — STATE is for the
+/// operator's own packs, and a copy of a shipped pack there would pin that
+/// pack to the day it was copied, through every later image and every
+/// restored backup. Operator packs with their own names load from STATE as
+/// before. A single directory (the `EMBRA_SEED_DIR` override) ships nothing
+/// and skips nothing. Within what loads, duplicate pack names fall to
+/// `dedupe_pack_names`.
+fn scan_dirs(dirs: &[PathBuf]) -> (Vec<SeedPackFile>, Vec<String>) {
     let mut files = Vec::new();
     let mut issues = Vec::new();
-    for (file_name, path) in by_name {
-        match std::fs::metadata(&path) {
-            Ok(m) if m.len() > SEED_FILE_MAX_BYTES => {
+    let mut shipped: HashSet<String> = HashSet::new();
+    for (index, dir) in dirs.iter().enumerate() {
+        for (file_name, path) in pack_files_in(dir) {
+            match std::fs::metadata(&path) {
+                Ok(m) if m.len() > SEED_FILE_MAX_BYTES => {
+                    issues.push(format!(
+                        "{file_name}: skipped — {} bytes exceeds the {SEED_FILE_MAX_BYTES}-byte cap",
+                        m.len()
+                    ));
+                    continue;
+                }
+                Err(e) => {
+                    issues.push(format!("{file_name}: unreadable — {e}"));
+                    continue;
+                }
+                _ => {}
+            }
+            let raw = match std::fs::read_to_string(&path) {
+                Ok(r) => r,
+                Err(e) => {
+                    issues.push(format!("{file_name}: unreadable — {e}"));
+                    continue;
+                }
+            };
+            let pack = match parse_pack(&raw) {
+                Ok(pack) => pack,
+                Err(errors) => {
+                    issues.push(format!("{file_name}: invalid — {}", errors.join("; ")));
+                    continue;
+                }
+            };
+            if index > 0 && shipped.contains(&pack.name) {
                 issues.push(format!(
-                    "{file_name}: skipped — {} bytes exceeds the {SEED_FILE_MAX_BYTES}-byte cap",
-                    m.len()
+                    "{}: skipped — the OS ships pack '{}' and loads it from {}; this copy is ignored. \
+                     Remove it: a copy pins the pack to the day it was copied.",
+                    path.display(),
+                    pack.name,
+                    dirs[0].display()
                 ));
                 continue;
             }
-            Err(e) => {
-                issues.push(format!("{file_name}: unreadable — {e}"));
-                continue;
+            if index == 0 {
+                shipped.insert(pack.name.clone());
             }
-            _ => {}
-        }
-        let raw = match std::fs::read_to_string(&path) {
-            Ok(r) => r,
-            Err(e) => {
-                issues.push(format!("{file_name}: unreadable — {e}"));
-                continue;
-            }
-        };
-        match parse_pack(&raw) {
-            Ok(pack) => files.push(SeedPackFile { file_name, pack }),
-            Err(errors) => issues.push(format!("{file_name}: invalid — {}", errors.join("; "))),
+            files.push(SeedPackFile { file_name, pack });
         }
     }
     let (files, dup_issues) = dedupe_pack_names(files);
@@ -1287,6 +1321,76 @@ mod tests {
         assert_eq!(body["filter"], json!({"source_id": "a", "target_id": "b", "edge_type": "refines"}));
         assert_eq!(body["limit"], json!(1));
         assert!(body.get("sort").is_none(), "existence probe — sanctioned no-sort");
+    }
+
+    /// Two directories on disk, as the image and STATE are.
+    fn two_dirs() -> (PathBuf, PathBuf, PathBuf) {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("embra-seed-scan-{}-{nanos}", std::process::id()));
+        let image = root.join("image");
+        let state = root.join("state");
+        std::fs::create_dir_all(&image).unwrap();
+        std::fs::create_dir_all(&state).unwrap();
+        (root, image, state)
+    }
+
+    fn pack_json(name: &str, content: &str) -> String {
+        json!({"format": "knowledge.v1", "name": name, "nodes": [
+            {"id": format!("seed_{name}_a"), "kind": "semantic", "category": "fact",
+             "content": content, "tags": ["kg"]}], "edges": []})
+        .to_string()
+    }
+
+    #[test]
+    fn a_state_copy_of_a_shipped_pack_is_ignored_and_named() {
+        let (root, image, state) = two_dirs();
+        std::fs::write(image.join("embraos-kg.knowledge.json"), pack_json("embraos-kg", "as shipped")).unwrap();
+        std::fs::write(image.join("embraos-core.knowledge.json"), pack_json("embraos-core", "core")).unwrap();
+        // The copy an operator seeded or a backup restored: same file name.
+        std::fs::write(state.join("embraos-kg.knowledge.json"), pack_json("embraos-kg", "as copied")).unwrap();
+        // The same pack under another file name: it is the NAME that counts.
+        std::fs::write(state.join("renamed.knowledge.json"), pack_json("embraos-core", "copied too")).unwrap();
+        // The operator's own pack loads.
+        std::fs::write(state.join("mine.knowledge.json"), pack_json("my-pack", "mine")).unwrap();
+
+        let (files, issues) = scan_dirs(&[image.clone(), state.clone()]);
+        let loaded: Vec<(&str, &str)> = files
+            .iter()
+            .map(|f| {
+                let content = match &f.pack.nodes[0].kind {
+                    SeedNodeKind::Semantic { content, .. } => content.as_str(),
+                    _ => unreachable!(),
+                };
+                (f.pack.name.as_str(), content)
+            })
+            .collect();
+        assert_eq!(
+            loaded,
+            [("embraos-core", "core"), ("embraos-kg", "as shipped"), ("my-pack", "mine")],
+            "{issues:?}"
+        );
+        assert_eq!(issues.len(), 2, "{issues:?}");
+        assert!(issues[0].contains("embraos-kg.knowledge.json") && issues[0].contains("ships pack 'embraos-kg'"), "{}", issues[0]);
+        assert!(issues[1].contains("renamed.knowledge.json") && issues[1].contains("ships pack 'embraos-core'"), "{}", issues[1]);
+        for issue in &issues {
+            assert!(issue.contains(&state.display().to_string()), "the copy is named by its path: {issue}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_single_directory_ships_nothing_and_skips_nothing() {
+        // The EMBRA_SEED_DIR override: one directory, every pack in it.
+        let (root, image, _state) = two_dirs();
+        std::fs::write(image.join("a.knowledge.json"), pack_json("one", "1")).unwrap();
+        std::fs::write(image.join("b.knowledge.json"), pack_json("two", "2")).unwrap();
+        let (files, issues) = scan_dirs(&[image]);
+        assert_eq!(files.len(), 2);
+        assert!(issues.is_empty(), "{issues:?}");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

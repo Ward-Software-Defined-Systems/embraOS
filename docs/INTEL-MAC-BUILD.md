@@ -277,7 +277,7 @@ backfilled (see `docs/QUICK-START.md`).
 > pass regenerates empty STATE/DATA and discards an earlier seed.
 > ```bash
 > ./scripts/seed-state-mac.sh --ca-dir /path/to/dir-with-rootCA.pem
-> ./scripts/seed-state-mac.sh --dry-run --seed-dir Seed_Knowledge   # print only
+> ./scripts/seed-state-mac.sh --dry-run --seed-dir ~/my-packs   # print only
 > ```
 > Unlike the backup wrapper this installs no apt packages, so it works offline.
 > If either wrapper is ever killed mid-run (`docker kill`, Docker restart, OOM) a loop

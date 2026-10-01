@@ -516,7 +516,7 @@ Same options as `seed-state.sh`:
 
 ```bash
 ./scripts/seed-state-mac.sh --ca-dir /path/to/dir-with-rootCA.pem
-./scripts/seed-state-mac.sh --seed-dir Seed_Knowledge --import-dir Imported_Intelligence
+./scripts/seed-state-mac.sh --seed-dir ~/my-packs --import-dir Imported_Intelligence   # your own packs; the OS's are in the image
 ./scripts/seed-state-mac.sh --wipe state,data --yes       # clean first boot, no confirmation prompt
 ./scripts/seed-state-mac.sh --dry-run --ca-dir ~/certs    # print the command, run nothing
 ```
