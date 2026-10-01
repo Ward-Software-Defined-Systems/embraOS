@@ -573,11 +573,34 @@ enum NodeRevision {
 /// equal to `created_at`; `knowledge_update` and a merge stamp a later
 /// `updated_at`. A revision by the pack leaves `updated_at` alone and
 /// stamps `seed_revised_at` instead, so it never counts as an edit.
-fn operator_edited(stored: &serde_json::Value) -> bool {
+pub(crate) fn operator_edited(stored: &serde_json::Value) -> bool {
     match (stored.get("created_at"), stored.get("updated_at")) {
         (Some(created), Some(updated)) => created != updated,
         _ => false,
     }
+}
+
+/// Every seed node of a collection, whatever its pack, with what tells an
+/// edit: the read behind `knowledge_graph_stats`' list of edited seed nodes.
+pub(crate) fn edited_seed_nodes_query_body() -> serde_json::Value {
+    json!({
+        "filter": { "origin": ORIGIN_SEED },
+        "fields": ["_id", "created_at", "updated_at"],
+        "sort": [{"_created_at": "asc"}, {"_id": "asc"}],
+        "limit": SEED_REVISION_WINDOW,
+    })
+}
+
+/// The window `edited_seed_nodes_query_body` reads under; a caller says so
+/// when it fills.
+pub(crate) const EDITED_SEED_WINDOW: usize = SEED_REVISION_WINDOW;
+
+/// The ids of the seed nodes the operator edited, in the order given.
+pub(crate) fn edited_seed_ids(docs: &[serde_json::Value]) -> Vec<String> {
+    docs.iter()
+        .filter(|d| operator_edited(d))
+        .filter_map(|d| d.get("_id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect()
 }
 
 /// A field as compared: a null is an absent field.
@@ -627,6 +650,7 @@ async fn revise_nodes(
         by_collection.entry(node.collection()).or_default().push(node);
     }
     let mut revised = 0usize;
+    let mut edited: Vec<String> = Vec::new();
     for (collection, nodes) in by_collection {
         let stored = match db.query(collection, &seed_nodes_query_body(&pack.name)).await {
             Ok(docs) => docs,
@@ -654,6 +678,9 @@ async fn revise_nodes(
             .collect();
         for node in nodes {
             let Some(doc) = by_id.get(node.id.as_str()) else { continue };
+            if operator_edited(doc) {
+                edited.push(node.id.clone());
+            }
             let seeded = seed_node_doc(node, &pack.name, now);
             match node_revision(doc, &seeded) {
                 NodeRevision::Unchanged => {}
@@ -689,6 +716,18 @@ async fn revise_nodes(
                 }
             }
         }
+    }
+    // The record of what the operator changed, whether or not the pack
+    // did: `knowledge_graph_stats` lists the same nodes on demand.
+    if !edited.is_empty() {
+        edited.sort();
+        info!(
+            target: "knowledge_seed",
+            "seed[{}]: {} seed nodes carry operator edits and are never revised: {}",
+            pack.name,
+            edited.len(),
+            edited.join(", ")
+        );
     }
     revised
 }
@@ -1395,6 +1434,28 @@ mod revision_tests {
                 assert!(!text_moved(&patch), "a tag change costs no inference pass");
             }
             other => panic!("expected Changed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn edited_seed_ids_picks_the_nodes_with_a_later_updated_at() {
+        let docs = [
+            json!({"_id": "seed_t_untouched", "created_at": T0, "updated_at": T0}),
+            json!({"_id": "seed_t_edited", "created_at": T0, "updated_at": T1}),
+            json!({"_id": "seed_t_old_shape"}),
+            json!({"_id": "seed_t_edited_too", "created_at": T0, "updated_at": T1}),
+        ];
+        assert_eq!(edited_seed_ids(&docs), ["seed_t_edited", "seed_t_edited_too"]);
+    }
+
+    #[test]
+    fn the_edited_query_reads_every_pack_under_a_window() {
+        let body = edited_seed_nodes_query_body();
+        assert_eq!(body["filter"], json!({"origin": ORIGIN_SEED}), "every pack, not one");
+        assert_eq!(body["limit"], json!(EDITED_SEED_WINDOW));
+        assert!(body["sort"].is_array());
+        for field in ["_id", "created_at", "updated_at"] {
+            assert!(body["fields"].as_array().unwrap().contains(&json!(field)), "{field}");
         }
     }
 

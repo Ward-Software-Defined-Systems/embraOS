@@ -44,8 +44,9 @@ outcomes — with what is stored. Consequences:
 
 - **Edits stick.** `knowledge_update` on a seeded node is never overwritten.
   Seeding writes `updated_at` equal to `created_at`; an edit stamps a later
-  `updated_at`, and the reconcile leaves such a node alone — and names it in
-  the boot journal when the pack has changed it.
+  `updated_at`, and the reconcile leaves such a node alone. The boot journal
+  names every edited seed node once per pack (`knowledge_seed`), and
+  `knowledge_graph_stats` lists them on demand, per collection.
 - **Deletions resurrect.** Deleting (or `knowledge_merge`-ing away) a node
   whose id is still listed in a pack brings it back at the next boot. To
   remove seeded knowledge permanently, revise the pack.

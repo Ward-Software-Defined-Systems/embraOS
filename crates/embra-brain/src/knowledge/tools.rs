@@ -695,6 +695,7 @@ pub async fn knowledge_graph_stats(db: &WardsonDbClient) -> String {
         .unwrap_or(0);
     if sem_seeded > 0 {
         out.push_str(&format!("  Seeded (knowledge_seed): {}\n", sem_seeded));
+        out.push_str(&edited_seed_nodes_line(db, "memory.semantic").await);
     }
     out.push('\n');
 
@@ -707,6 +708,7 @@ pub async fn knowledge_graph_stats(db: &WardsonDbClient) -> String {
         .unwrap_or(0);
     if proc_seeded > 0 {
         out.push_str(&format!("  Seeded (knowledge_seed): {}\n", proc_seeded));
+        out.push_str(&edited_seed_nodes_line(db, "memory.procedural").await);
     }
     out.push('\n');
 
@@ -831,6 +833,36 @@ fn seeded_nodes_filter() -> serde_json::Value {
     json!({ "origin": super::seed::ORIGIN_SEED })
 }
 
+/// The seed nodes of `collection` that carry an operator edit — the ones a
+/// changed pack will never revise. One windowed read; the line says when
+/// the window filled, so a count under it is never taken as exact.
+async fn edited_seed_nodes_line(db: &WardsonDbClient, collection: &str) -> String {
+    let docs = db
+        .query(collection, &super::seed::edited_seed_nodes_query_body())
+        .await
+        .unwrap_or_default();
+    let saturated = crate::db::client::window_saturated(docs.len(), super::seed::EDITED_SEED_WINDOW);
+    edited_seed_line(&super::seed::edited_seed_ids(&docs), saturated)
+}
+
+/// The rendered line: the ids, or `none`; and the window when it filled.
+fn edited_seed_line(ids: &[String], saturated: bool) -> String {
+    let mut line = String::from("  Edited here (updated_at past created_at): ");
+    if ids.is_empty() {
+        line.push_str("none");
+    } else {
+        line.push_str(&ids.join(", "));
+    }
+    if saturated {
+        line.push_str(&format!(
+            " (the first {} seed nodes read)",
+            super::seed::EDITED_SEED_WINDOW
+        ));
+    }
+    line.push('\n');
+    line
+}
+
 /// Render the edge provenance split (KG review 2026-07-26, A4):
 /// identity-projection edges (`metadata.origin` = `identity_import` |
 /// `user_profile`) share type buckets with brain-authored `knowledge_link`
@@ -950,6 +982,21 @@ mod windowless_stats_tests {
     };
     use serde_json::json;
     use std::collections::HashMap;
+
+    #[test]
+    fn edited_seed_line_names_the_ids_or_none() {
+        assert_eq!(
+            super::edited_seed_line(&[], false),
+            "  Edited here (updated_at past created_at): none\n"
+        );
+        let ids = ["seed_kg_density".to_string(), "seed_kg_link_tool".to_string()];
+        assert_eq!(
+            super::edited_seed_line(&ids, false),
+            "  Edited here (updated_at past created_at): seed_kg_density, seed_kg_link_tool\n"
+        );
+        // A full window is said, never passed off as the whole list.
+        assert!(super::edited_seed_line(&ids, true).contains("seed nodes read)"));
+    }
 
     #[test]
     fn group_pipeline_counts_by_field() {
