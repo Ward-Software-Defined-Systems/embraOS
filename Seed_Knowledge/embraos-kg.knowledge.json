@@ -125,7 +125,7 @@
       "id": "seed_kg_seed_semantics",
       "kind": "semantic",
       "category": "fact",
-      "content": "Nodes and edges loaded from seed knowledge packs are restored at boot if deleted, while edits made with knowledge_update stick. Permanently changing seeded content means revising the pack file, not deleting the node.",
+      "content": "Nodes and edges from seed knowledge packs are restored at boot if deleted, and a revised pack updates its nodes in place at the next boot and removes the edges it no longer lists. An edit made with knowledge_update sticks and takes that node out of pack revisions for good; knowledge_graph_stats lists the seed nodes edited this way. Changing seeded content permanently means revising the pack file, not deleting the node.",
       "tags": ["seed-knowledge", "curation", "embraos"]
     },
     { "_comment": "── the knowledge tools ───────────────────────────────" },
@@ -147,7 +147,7 @@
       "id": "seed_kg_stats_tool",
       "kind": "semantic",
       "category": "fact",
-      "content": "knowledge_graph_stats reports exact node and edge counts, category and edge-type distributions, an edge provenance split (identity projection, seed packs, brain-authored), graph density, and passive orphan detection — exact at any graph size.",
+      "content": "knowledge_graph_stats reports exact node and edge counts, category and edge-type distributions, an edge provenance split (identity projection, seed packs, brain-authored), the seed nodes that carry an operator edit, graph density, and passive orphan detection — the counts exact at any graph size.",
       "tags": ["tools", "knowledge-graph", "observability"]
     },
     {
