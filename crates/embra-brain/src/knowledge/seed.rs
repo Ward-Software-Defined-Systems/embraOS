@@ -6,14 +6,19 @@
 //! pack teaches an instance how its own memory works (KNOWLEDGE-GRAPH.md
 //! distilled), and operators can drop their own packs into STATE.
 //!
-//! ENSURE-PRESENT semantics (locked 2026-07-31, William's pick over a
-//! version ledger): presence is checked by `_id` ONLY —
-//! - `knowledge_update` edits STICK (docs are never patched by the
-//!   reconcile);
+//! The contract (ensure-present by `_id`, William's pick over a version
+//! ledger on 2026-07-31; revision in place added 2026-10-01):
+//! - a pack node that is missing is inserted; one that exists is compared
+//!   with the pack on the fields the pack decides and patched in place when
+//!   the operator never edited it (`revise_nodes`) — a revision keeps its id;
+//! - `knowledge_update` edits STICK: an edit is `updated_at != created_at`,
+//!   which seeding never produces, and such a node is never revised, only
+//!   named in the journal and by `knowledge_graph_stats`;
 //! - deleting/merging-away a pack-listed node RESURRECTS it next boot
-//!   (revise the pack instead);
-//! - pack content revisions ship as NEW node ids — dropping the old id
-//!   from the pack un-lists it, so a subsequent operator deletion sticks.
+//!   (revise the pack instead); an edge the pack no longer lists is removed;
+//!   a node the pack no longer lists stays, for the operator to remove;
+//! - a pack the image ships loads from the image; a STATE copy of it is
+//!   skipped and named (`scan_dirs`) — STATE is for the operator's own packs.
 //!
 //! Seed nodes are ORDINARY `memory.semantic`/`memory.procedural` citizens:
 //! retrieval, enrichment, traversal, audit, merge, and update all treat
@@ -37,8 +42,10 @@ use crate::identity_graph::format::id_violation;
 /// Read-only packs baked into the rootfs by `post_build.sh` from the
 /// committed `Seed_Knowledge/` directory.
 pub const ROOTFS_SEED_DIR: &str = "/usr/share/embra/seed-knowledge";
-/// Operator drop-in directory on STATE — wins filename collisions with the
-/// rootfs (same doctrine as the import dirs).
+/// Operator drop-in directory on STATE, for the operator's own packs. A
+/// file here carrying a pack the image ships is skipped and named in the
+/// journal (`scan_dirs`); the image's copy loads. (The import directories
+/// keep their own rule: there STATE wins a filename collision.)
 pub const STATE_SEED_DIR: &str = "/embra/state/seed-knowledge";
 /// Dev override: when set (non-empty), the ONLY directory scanned.
 pub const SEED_DIR_ENV: &str = "EMBRA_SEED_DIR";
@@ -334,8 +341,9 @@ pub(crate) struct SeedPackFile {
     pub pack: SeedPack,
 }
 
-/// Env override is EXCLUSIVE; otherwise rootfs first, STATE second — the
-/// BTreeMap insert order below makes STATE win filename collisions.
+/// Env override is EXCLUSIVE; otherwise the image's directory first and
+/// STATE second. The order carries meaning: `scan_dirs` takes the first
+/// directory's packs as shipped and skips a later copy of any of them.
 fn dirs_to_scan(env_val: Option<&str>) -> Vec<PathBuf> {
     match env_val {
         Some(dir) if !dir.trim().is_empty() => vec![PathBuf::from(dir.trim())],
@@ -390,6 +398,12 @@ fn pack_files_in(dir: &Path) -> Vec<(String, PathBuf)> {
 /// before. A single directory (the `EMBRA_SEED_DIR` override) ships nothing
 /// and skips nothing. Within what loads, duplicate pack names fall to
 /// `dedupe_pack_names`.
+///
+/// Shipped means parsed: a pack the image ships that fails to load (the
+/// journal says so, as `invalid` or over the size cap) ships nothing, and a
+/// STATE copy of it then loads in its place. The committed packs are
+/// validated by a test before they can ship, so this is the fallback for a
+/// broken image, not a path a sound one takes.
 fn scan_dirs(dirs: &[PathBuf]) -> (Vec<SeedPackFile>, Vec<String>) {
     let mut files = Vec::new();
     let mut issues = Vec::new();
@@ -533,7 +547,7 @@ fn seed_edge_probe_body(src: &str, dst: &str, relation: &str) -> serde_json::Val
     })
 }
 
-// ── reconcile (ensure-present, identity-projection template) ────────────
+// ── reconcile (ensure-present + revision, identity-projection template) ──
 
 // ── revision (a changed pack reaches the nodes that exist) ──────────────
 
@@ -668,6 +682,11 @@ fn text_moved(patch: &serde_json::Map<String, serde_json::Value>) -> bool {
         .any(|k| matches!(k.as_str(), "content" | "title" | "description" | "steps"))
 }
 
+/// Whether a patch changes the tags the automatic edges are derived from.
+fn tags_moved(patch: &serde_json::Map<String, serde_json::Value>) -> bool {
+    patch.contains_key("tags")
+}
+
 /// Bring the seeded nodes that exist up to the pack. A node whose fields
 /// the pack changed is patched in place when the operator never edited it,
 /// stamped `seed_revised_at`, and re-embedded when its text moved. An
@@ -725,6 +744,7 @@ async fn revise_nodes(
                 ),
                 NodeRevision::Changed(mut patch) => {
                     let reembed = text_moved(&patch);
+                    let rederive = tags_moved(&patch);
                     patch.insert("seed_revised_at".to_string(), json!(now));
                     match db
                         .patch_document(collection, &node.id, &serde_json::Value::Object(patch))
@@ -737,6 +757,16 @@ async fn revise_nodes(
                             if reembed && let Some(cfg) = config {
                                 crate::embedding::write::embed_node(
                                     db, cfg, collection, &node.id, &seeded, false,
+                                )
+                                .await;
+                            }
+                            // New tags, new tag_overlap edges: the pass a fresh
+                            // node gets, as a merge gives its target. Edges of
+                            // tags the pack dropped stay; automatic edges are
+                            // never deleted.
+                            if rederive && let Some(cfg) = config {
+                                let _ = derive_edges(
+                                    db, &node.id, collection, "", &node.tags, now, cfg,
                                 )
                                 .await;
                             }
@@ -895,8 +925,10 @@ async fn reconcile_pack(
     let mut healed_nodes = 0usize;
     let mut fresh: Vec<&SeedNode> = Vec::new();
     if !nodes_fast_path_ok(sem_count, proc_count, sem_expected, proc_expected, probe_ok) {
-        // Stage 2 — exhaustive walk: insert-missing-only by _id (presence
-        // check, never a content patch — edits stick).
+        // Stage 2 — exhaustive walk: insert-missing-only by _id. A node
+        // that exists is the revision pass's business (`revise_nodes`,
+        // below), which patches what the pack changed and leaves what the
+        // operator edited.
         for node in &pack.nodes {
             if db.read(node.collection(), &node.id).await.is_ok() {
                 continue;
@@ -1529,14 +1561,19 @@ mod revision_tests {
     }
 
     #[test]
-    fn a_change_of_tags_alone_does_not_move_the_text() {
+    fn a_change_of_tags_alone_moves_the_edges_and_not_the_text() {
         let mut a = stored("same", T0, T0);
         a["tags"] = json!(["old-tag"]);
         match node_revision(&a, &seeded("same")) {
             NodeRevision::Changed(patch) => {
                 assert_eq!(patch.keys().collect::<Vec<_>>(), ["tags"]);
                 assert!(!text_moved(&patch), "a tag change costs no inference pass");
+                assert!(tags_moved(&patch), "a tag change derives the automatic edges again");
             }
+            other => panic!("expected Changed, got {other:?}"),
+        }
+        match node_revision(&stored("old", T0, T0), &seeded("new")) {
+            NodeRevision::Changed(patch) => assert!(!tags_moved(&patch)),
             other => panic!("expected Changed, got {other:?}"),
         }
     }

@@ -27,7 +27,7 @@ is host-side documentation and is not baked.
 | Source | Path | Notes |
 |---|---|---|
 | Rootfs (baked) | `/usr/share/embra/seed-knowledge/` | the committed packs |
-| STATE (drop-in) | `/embra/state/seed-knowledge/` | the operator's own packs. A copy of a pack the OS ships is **ignored** — the image's copy loads, and the boot journal names the copy |
+| STATE (drop-in) | `/embra/state/seed-knowledge/` | the operator's own packs. A copy of a pack the OS ships is **ignored** — the image's copy loads, and the boot journal names the copy. (Should a shipped pack fail to load, which the journal reports, a STATE copy of it loads in its place.) |
 | Dev override | `EMBRA_SEED_DIR` env | when set, the **only** directory scanned |
 
 `scripts/seed-state.sh --seed-dir /path/to/packs` copies packs into STATE
@@ -58,7 +58,9 @@ outcomes — with what is stored. Consequences:
   is stamped `seed_revised_at` and, when its text moved, embedded again. An
   edge the pack no longer lists is removed. A node the pack no longer lists
   stays until the operator removes it — so a claim is withdrawn by changing
-  the node, not by dropping it.
+  the node, not by dropping it. A revision that changes a node's tags
+  derives its automatic edges again for the new tags; edges of tags it
+  dropped stay, as automatic edges are never deleted.
 
 Seeded nodes are otherwise **ordinary graph citizens**: retrieval,
 enrichment, traversal, `knowledge_audit`, `knowledge_merge`, and
