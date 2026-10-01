@@ -27,12 +27,12 @@ All sessions share the same intelligence — same memory, same identity, same so
 
 | Key | Action |
 |---|---|
-| `Enter` | Send message (or newline in `/ml` multi-line mode) |
+| `Enter` | Send message (or newline in `/ml` multi-line mode; a multi-line paste is sent whole) |
 | `Up/Down` | Scroll history (`PageUp/PageDown` = 10 rows) |
 | `Shift+Up/Down` | Scroll the expression/reasoning panel (`Shift+PageUp/PageDown` = 5 rows; snaps back to the tail on your next message, on errors, or when new expression content arrives) |
 | `Esc` | Stop the current turn (only while it is thinking/streaming — idle Esc is a no-op) |
 
-*There is no exit or detach chord. The console is a supervised child on both transports — embra-web respawns it after 1 s (`crates/embra-web/src/pty_bridge.rs`), embrad supervises it on serial (`crates/embrad/src/supervisor.rs`) — so there is nothing to detach from: leave the web console by closing the tab, the serial console with QEMU's `Ctrl+A X` below. `Ctrl+<letter>` chords are deliberate no-ops. Enter sends whatever modifier is held (`Shift+Enter` and `Alt+Enter` send too — the console's Enter arm ignores modifiers, `crates/embra-console/src/terminal/mod.rs`); `/ml` is the multi-line path.*
+*There is no exit or detach chord. The console is a supervised child on both transports — embra-web respawns it after 1 s (`crates/embra-web/src/pty_bridge.rs`), embrad supervises it on serial (`crates/embrad/src/supervisor.rs`) — so there is nothing to detach from: leave the web console by closing the tab, the serial console with QEMU's `Ctrl+A X` below. `Ctrl+<letter>` chords are deliberate no-ops. Enter sends whatever modifier is held (`Shift+Enter` and `Alt+Enter` send too — the console's Enter arm ignores modifiers, `crates/embra-console/src/terminal/mod.rs`); `/ml` and a multi-line clipboard paste are the multi-line paths.*
 
 *When the console cannot do its work it says why and exits — code 2 when it cannot reach `embra-apid`, code 1 when its conversation or its screen fails — and its supervisor starts it again. In the web console the reason and the wait are shown in the terminal pane (`[embra-web] embra-console exited (code 2) — restarting in 4 s…`) and logged by embra-web; a console that keeps exiting early is started again more slowly, 1 s doubling to 30 s, for as long as it takes.*
 

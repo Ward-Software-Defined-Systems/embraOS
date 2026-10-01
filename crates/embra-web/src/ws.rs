@@ -22,6 +22,16 @@ use serde::Deserialize;
 
 use crate::state::AppState;
 
+/// Sent to every browser as it attaches, before any console output. The
+/// console enables bracketed paste once, at its start
+/// (`embra-console/src/terminal/mod.rs`), and that is before any browser is
+/// listening: a subscriber sees only what comes after it. xterm.js wraps a
+/// clipboard paste in `ESC[200~ … ESC[201~` only once it has seen this mode
+/// set; without it a multi-line paste reaches the console as lines and
+/// Enters, one message per line. The console keeps the mode on for its
+/// life on the web PTY, so every new terminal is told so.
+pub(crate) const ATTACH_PREAMBLE: &[u8] = b"\x1b[?2004h";
+
 #[derive(Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 enum ClientControl {
@@ -85,6 +95,15 @@ async fn handle_socket(socket: WebSocket, st: AppState) {
     // To-client: one task owns the WS sink, multiplexing PTY output
     // (binary, all roles) and arbiter role frames (text).
     let mut to_client = tokio::spawn(async move {
+        // The terminal mode the console set before this browser was
+        // listening, ahead of the repaint bytes (see ATTACH_PREAMBLE).
+        if sender
+            .send(Message::Binary(axum::body::Bytes::from_static(ATTACH_PREAMBLE)))
+            .await
+            .is_err()
+        {
+            return;
+        }
         loop {
             tokio::select! {
                 out = output.recv() => match out {

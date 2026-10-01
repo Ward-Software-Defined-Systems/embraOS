@@ -218,18 +218,13 @@ async fn run_tui(mut client: BrainClient, _device: Option<String>) -> Result<()>
                             pane.protocol = proto;
                         }
                     }
-                    // Web/PTY: a bracketed-paste blob (the embra-web /ml
-                    // editor injects `\x1b[200~ … \x1b[201~`). Stage it
-                    // for the existing verbatim send path — the next Enter
-                    // takes pasted_lines and sends `pasted.join("\n")` as
-                    // one UserMessage (no trim, no slash parse). crossterm
-                    // strips CRs from paste content; split on '\n' only.
-                    // Only ever produced when bracketed paste was enabled
-                    // (web_pty-gated above), so the serial path is unaffected.
-                    Event::Paste(s) => {
-                        app.pasted_lines =
-                            Some(s.split('\n').map(str::to_string).collect());
-                    }
+                    // Web/PTY: a bracketed-paste blob — the browser's own
+                    // clipboard paste (xterm.js wraps it once it has seen
+                    // the mode set, which embra-web sends on every attach)
+                    // or the /ml editor's injection. Only ever produced
+                    // when bracketed paste was enabled (web_pty-gated
+                    // above), so the serial path is unaffected.
+                    Event::Paste(s) => apply_paste(&mut app, &s),
                     _ => {}
                 }
             }
@@ -1195,22 +1190,88 @@ mod reasoning_tests {
     }
 }
 
+/// The lines of a bracketed paste. xterm.js turns every line break of the
+/// clipboard into `\r` before it wraps the paste, and crossterm hands the
+/// bytes over as they are (`parse_csi_bracketed_paste` strips nothing), so
+/// `\r\n` and a lone `\r` are line breaks beside `\n`.
+fn paste_lines(s: &str) -> Vec<String> {
+    s.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .split('\n')
+        .map(str::to_string)
+        .collect()
+}
+
+/// What a bracketed paste does to the input. A paste with a line break is
+/// staged whole: the next Enter sends `pasted.join("\n")` as one message,
+/// verbatim — no trim, no slash parse — the path the /ml editor and the
+/// Guardian define flow rely on. A paste without one is typed into the
+/// input at the cursor, where it can be edited and sent with what is
+/// around it. In Guardian capture every paste is staged, since the capture
+/// consumes the staged paste.
+fn apply_paste(app: &mut AppState, s: &str) {
+    let lines = paste_lines(s);
+    if lines.len() > 1 || app.guardian_capture {
+        app.pasted_lines = Some(lines);
+    } else {
+        let text = &lines[0];
+        let byte_pos = char_to_byte_pos(&app.input_buffer, app.cursor_pos);
+        app.input_buffer.insert_str(byte_pos, text);
+        app.cursor_pos += text.chars().count();
+    }
+    app.scroll_offset = 0;
+}
+
 #[cfg(test)]
 mod paste_tests {
     use super::*;
 
-    // Mirrors the Event::Paste dispatch arm and the pasted_lines consume
-    // path (the next Enter sends `pasted.join("\n")` as one UserMessage,
-    // no trim, no slash parse). A bracketed-paste blob is split on '\n'
-    // into pasted_lines; this `stage` fn is byte-identical to the arm.
-    fn stage(s: &str) -> Vec<String> {
-        s.split('\n').map(str::to_string).collect()
+    // The pasted_lines consume path: the next Enter sends
+    // `pasted.join("\n")` as one UserMessage, no trim, no slash parse.
+
+    #[test]
+    fn a_paste_with_carriage_returns_is_split_into_lines() {
+        // xterm.js sends the clipboard's line breaks as `\r`; text from
+        // Windows carries `\r\n`. All of them are line breaks.
+        assert_eq!(paste_lines("a\rb\r\nc\nd"), ["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn a_single_line_paste_is_typed_at_the_cursor() {
+        let mut app = AppState::new();
+        app.input_buffer = "see  please".to_string();
+        app.cursor_pos = 4; // between the two spaces
+        apply_paste(&mut app, "https://example.test/é");
+        assert_eq!(app.input_buffer, "see https://example.test/é please");
+        assert_eq!(app.cursor_pos, 4 + "https://example.test/é".chars().count());
+        assert!(app.pasted_lines.is_none());
+    }
+
+    #[test]
+    fn a_multi_line_paste_is_staged_whole() {
+        let mut app = AppState::new();
+        app.input_buffer = "typed".to_string();
+        apply_paste(&mut app, "line 1\rline 2");
+        assert_eq!(
+            app.pasted_lines,
+            Some(vec!["line 1".to_string(), "line 2".to_string()])
+        );
+        assert_eq!(app.input_buffer, "typed", "the input is left alone");
+    }
+
+    #[test]
+    fn in_guardian_capture_every_paste_is_staged() {
+        let mut app = AppState::new();
+        app.guardian_capture = true;
+        apply_paste(&mut app, "fn run(i: &str) -> String { i.into() }");
+        assert!(app.pasted_lines.is_some());
+        assert_eq!(app.input_buffer, "");
     }
 
     #[test]
     fn paste_stages_pasted_lines() {
         let mut app = AppState::new();
-        app.pasted_lines = Some(stage("a\nb\n."));
+        app.pasted_lines = Some(paste_lines("a\nb\n."));
         // The lone "." line is preserved verbatim — the property the
         // /ml dot-terminator path could not guarantee.
         assert_eq!(
@@ -1223,7 +1284,7 @@ mod paste_tests {
     fn pasted_lines_join_roundtrips_verbatim() {
         // Leading '/', a lone '.' line, and surrounding whitespace all
         // survive the split→join round-trip — the core correctness claim.
-        let staged = stage("/status\nline 2\n.\n  trailing  ");
+        let staged = paste_lines("/status\nline 2\n.\n  trailing  ");
         assert_eq!(staged.join("\n"), "/status\nline 2\n.\n  trailing  ");
     }
 
@@ -1232,7 +1293,7 @@ mod paste_tests {
         // "".split('\n') yields [""]; join is "". The web-ui empty-guard
         // (trim_end_matches('\n') + is_empty) is what prevents an empty
         // UserMessage being sent — this documents the console side.
-        let staged = stage("");
+        let staged = paste_lines("");
         assert_eq!(staged, vec![String::new()]);
         assert_eq!(staged.join("\n"), "");
     }
@@ -1246,7 +1307,7 @@ mod paste_tests {
         // pasted_lines path guarantees), so the module reaches the
         // validator byte-for-byte.
         let module = "// guardian-tool: web_search\nconst GUARDIAN_NAME: &str = \"web_search\";\nfn run(i: &str) -> String { String::new() }";
-        let staged = stage(module);
+        let staged = paste_lines(module);
         let args = format!("define\n{}", staged.join("\n"));
         assert_eq!(args, format!("define\n{module}"));
         assert!(args.starts_with("define\n// guardian-tool: web_search"));

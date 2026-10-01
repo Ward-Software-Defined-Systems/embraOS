@@ -33,10 +33,12 @@
 //! console child a bare SIGWINCH; crossterm turns it into
 //! `Event::Resize`, which the web-pty console answers with `clear()` + a
 //! full redraw (`embra-console/src/terminal/mod.rs`, the Resize arm). A
-//! full repaint is sufficient: no terminal MODE needs replaying — the
-//! console's bracketed-paste enable is sent once, but the /ml editor
-//! wraps its paste itself and crossterm parses `ESC[200~` regardless;
-//! cursor visibility is re-emitted per draw; no alt-screen, no mouse.
+//! full repaint restores the screen. The one terminal MODE the console
+//! set before the browser was listening — bracketed paste, enabled once
+//! at its start — is replayed by `ws.rs` on every attach
+//! (`ATTACH_PREAMBLE`); without it xterm.js sends a multi-line paste as
+//! lines and Enters. Cursor visibility is re-emitted per draw; no
+//! alt-screen, no mouse.
 
 use std::io::{Read, Write};
 use std::sync::Arc;

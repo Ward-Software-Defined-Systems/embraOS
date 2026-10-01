@@ -17,7 +17,7 @@ Every slash command available in an embraOS session, grouped as in the web conso
 
 | Command | Description |
 |---|---|
-| `/ml` | Open a multi-line message editor. **Web console (default):** a textarea modal — Ctrl/⌘+Enter or **Send** to submit, Esc/Cancel to discard; sent verbatim as one message. **Serial TUI (`EMBRA_TUI=1`):** toggles dot-terminator mode — type lines, `.` on its own line to send |
+| `/ml` | Open a multi-line message editor. **Web console (default):** a textarea modal — Ctrl/⌘+Enter or **Send** to submit, Esc/Cancel to discard; sent verbatim as one message. A multi-line paste from the clipboard into the web console's input does the same without the editor: it is shown as a pasted preview and Enter sends it whole, verbatim; a single-line paste is typed into the input. **Serial TUI (`EMBRA_TUI=1`):** toggles dot-terminator mode — type lines, `.` on its own line to send |
 | `/stop` | Stop a stuck in-flight turn (local models can loop in unbounded reasoning). Console: type it or press **Esc** while the turn streams; mobile: the ■ button that replaces Send while busy. The partial response is kept, marked `(response interrupted by operator stop)` |
 | `/iter-cap` | Show the current per-turn tool iteration cap (default 100) |
 | `/iter-cap <N>` | Set the per-turn tool iteration cap (1..=1000). Persisted via `SystemConfig`; takes effect on the next user message. On cap-hit the loop emits a warning frame, asks the model to summarize, and terminates gracefully |
