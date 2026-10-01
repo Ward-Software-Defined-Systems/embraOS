@@ -501,6 +501,258 @@ fn seed_edge_probe_body(src: &str, dst: &str, relation: &str) -> serde_json::Val
 
 // ── reconcile (ensure-present, identity-projection template) ────────────
 
+// ── revision (a changed pack reaches the nodes that exist) ──────────────
+
+/// Window of the revision pass: every seed node of a pack per collection,
+/// and every seed edge of a pack. Packs hold tens of nodes; a full window
+/// is logged.
+const SEED_REVISION_WINDOW: usize = 1_000;
+
+/// The fields a pack decides. They are compared on every boot.
+const SEED_CONTENT_FIELDS: [&str; 7] = [
+    "content",
+    "category",
+    "tags",
+    "title",
+    "description",
+    "steps",
+    "outcomes",
+];
+
+/// What the revision pass reads: the content fields and what the decision
+/// needs — `_id`, and `created_at` with `updated_at`, which tell an edit.
+/// An inclusion list: a compared field missing here would read as absent
+/// and be written on every boot. Guard
+/// `the_revision_projection_covers_every_compared_field`.
+const SEED_REVISION_FIELDS: [&str; 10] = [
+    "_id",
+    "content",
+    "category",
+    "tags",
+    "title",
+    "description",
+    "steps",
+    "outcomes",
+    "created_at",
+    "updated_at",
+];
+
+/// The seed nodes of `pack` in one collection: the provenance filter, a
+/// sort, a window, and the projection the decision reads.
+fn seed_nodes_query_body(pack: &str) -> serde_json::Value {
+    json!({
+        "filter": seed_node_count_filter(pack),
+        "fields": SEED_REVISION_FIELDS,
+        "sort": [{"_created_at": "asc"}, {"_id": "asc"}],
+        "limit": SEED_REVISION_WINDOW,
+    })
+}
+
+/// The seed edges of `pack`, with what retirement needs.
+fn seed_edges_query_body(pack: &str) -> serde_json::Value {
+    json!({
+        "filter": seed_edge_count_filter(pack),
+        "fields": ["_id", "source_id", "target_id", "edge_type"],
+        "sort": [{"_created_at": "asc"}, {"_id": "asc"}],
+        "limit": SEED_REVISION_WINDOW,
+    })
+}
+
+/// What a boot does to a seeded node that exists.
+#[derive(Debug, PartialEq)]
+enum NodeRevision {
+    /// The pack and the node agree.
+    Unchanged,
+    /// The pack changed the node, and so did the operator: it is theirs.
+    Edited,
+    /// The pack changed the node and nobody else did: the fields to patch.
+    Changed(serde_json::Map<String, serde_json::Value>),
+}
+
+/// Whether the operator edited a seeded node. Seeding writes `updated_at`
+/// equal to `created_at`; `knowledge_update` and a merge stamp a later
+/// `updated_at`. A revision by the pack leaves `updated_at` alone and
+/// stamps `seed_revised_at` instead, so it never counts as an edit.
+fn operator_edited(stored: &serde_json::Value) -> bool {
+    match (stored.get("created_at"), stored.get("updated_at")) {
+        (Some(created), Some(updated)) => created != updated,
+        _ => false,
+    }
+}
+
+/// A field as compared: a null is an absent field.
+fn content_field<'a>(doc: &'a serde_json::Value, field: &str) -> Option<&'a serde_json::Value> {
+    doc.get(field).filter(|v| !v.is_null())
+}
+
+/// The pack's document for a node against the stored one.
+fn node_revision(stored: &serde_json::Value, seeded: &serde_json::Value) -> NodeRevision {
+    let mut patch = serde_json::Map::new();
+    for field in SEED_CONTENT_FIELDS {
+        let want = content_field(seeded, field);
+        if content_field(stored, field) != want {
+            // A field the pack dropped is cleared.
+            patch.insert(field.to_string(), want.cloned().unwrap_or(serde_json::Value::Null));
+        }
+    }
+    if patch.is_empty() {
+        NodeRevision::Unchanged
+    } else if operator_edited(stored) {
+        NodeRevision::Edited
+    } else {
+        NodeRevision::Changed(patch)
+    }
+}
+
+/// Whether a patch moves the text a vector is computed from.
+fn text_moved(patch: &serde_json::Map<String, serde_json::Value>) -> bool {
+    patch
+        .keys()
+        .any(|k| matches!(k.as_str(), "content" | "title" | "description" | "steps"))
+}
+
+/// Bring the seeded nodes that exist up to the pack. A node whose fields
+/// the pack changed is patched in place when the operator never edited it,
+/// stamped `seed_revised_at`, and re-embedded when its text moved. An
+/// edited node is left as it is and named in the journal. A node the pack
+/// no longer lists stays: removing it is the operator's call.
+async fn revise_nodes(
+    db: &WardsonDbClient,
+    pack: &SeedPack,
+    config: Option<&SystemConfig>,
+    now: &str,
+) -> usize {
+    let mut by_collection: HashMap<&'static str, Vec<&SeedNode>> = HashMap::new();
+    for node in &pack.nodes {
+        by_collection.entry(node.collection()).or_default().push(node);
+    }
+    let mut revised = 0usize;
+    for (collection, nodes) in by_collection {
+        let stored = match db.query(collection, &seed_nodes_query_body(&pack.name)).await {
+            Ok(docs) => docs,
+            Err(e) => {
+                warn!(
+                    target: "knowledge_seed",
+                    "seed[{}]: reading {} for revision failed (next boot retries): {}",
+                    pack.name, collection, e
+                );
+                continue;
+            }
+        };
+        if crate::db::client::window_saturated(stored.len(), SEED_REVISION_WINDOW) {
+            warn!(
+                target: "knowledge_seed",
+                collection,
+                limit = SEED_REVISION_WINDOW,
+                "seed[{}]: revision window full — nodes past it are not revised",
+                pack.name
+            );
+        }
+        let by_id: HashMap<&str, &serde_json::Value> = stored
+            .iter()
+            .filter_map(|d| d.get("_id").and_then(|v| v.as_str()).map(|id| (id, d)))
+            .collect();
+        for node in nodes {
+            let Some(doc) = by_id.get(node.id.as_str()) else { continue };
+            let seeded = seed_node_doc(node, &pack.name, now);
+            match node_revision(doc, &seeded) {
+                NodeRevision::Unchanged => {}
+                NodeRevision::Edited => info!(
+                    target: "knowledge_seed",
+                    "seed[{}]: node '{}' changed in the pack but was edited here; left as it is",
+                    pack.name, node.id
+                ),
+                NodeRevision::Changed(mut patch) => {
+                    let reembed = text_moved(&patch);
+                    patch.insert("seed_revised_at".to_string(), json!(now));
+                    match db
+                        .patch_document(collection, &node.id, &serde_json::Value::Object(patch))
+                        .await
+                    {
+                        Ok(()) => {
+                            revised += 1;
+                            // The vector describes the old text until it is
+                            // computed again; the pack's document is the text.
+                            if reembed && let Some(cfg) = config {
+                                crate::embedding::write::embed_node(
+                                    db, cfg, collection, &node.id, &seeded, false,
+                                )
+                                .await;
+                            }
+                        }
+                        Err(e) => warn!(
+                            target: "knowledge_seed",
+                            "seed[{}]: revising node '{}' failed (next boot retries): {}",
+                            pack.name, node.id, e
+                        ),
+                    }
+                }
+            }
+        }
+    }
+    revised
+}
+
+/// The ids of the stored edges whose (source, target, relation) the pack
+/// does not list.
+fn retired_edge_ids(stored: &[serde_json::Value], pack: &SeedPack) -> Vec<String> {
+    let listed: std::collections::HashSet<(&str, &str, &str)> = pack
+        .edges
+        .iter()
+        .map(|e| (e.src.as_str(), e.dst.as_str(), e.relation.as_str()))
+        .collect();
+    stored
+        .iter()
+        .filter_map(|d| {
+            let id = d.get("_id")?.as_str()?;
+            let triple = (
+                d.get("source_id")?.as_str()?,
+                d.get("target_id")?.as_str()?,
+                d.get("edge_type")?.as_str()?,
+            );
+            (!listed.contains(&triple)).then(|| id.to_string())
+        })
+        .collect()
+}
+
+/// Remove the seed edges of `pack` that the pack no longer lists: an edge
+/// is a claim of the pack, and a claim the pack withdrew is withdrawn here.
+/// Only this pack's own edges are read (`metadata.origin`, `metadata.pack`);
+/// identity and brain-made edges are never touched.
+async fn retire_edges(db: &WardsonDbClient, pack: &SeedPack) -> usize {
+    let stored = match db.query("memory.edges", &seed_edges_query_body(&pack.name)).await {
+        Ok(docs) => docs,
+        Err(e) => {
+            warn!(
+                target: "knowledge_seed",
+                "seed[{}]: reading its edges failed (next boot retries): {}",
+                pack.name, e
+            );
+            return 0;
+        }
+    };
+    if crate::db::client::window_saturated(stored.len(), SEED_REVISION_WINDOW) {
+        warn!(
+            target: "knowledge_seed",
+            limit = SEED_REVISION_WINDOW,
+            "seed[{}]: edge window full — edges past it are not retired",
+            pack.name
+        );
+    }
+    let mut retired = 0usize;
+    for id in retired_edge_ids(&stored, pack) {
+        match db.delete("memory.edges", &id).await {
+            Ok(()) => retired += 1,
+            Err(e) => warn!(
+                target: "knowledge_seed",
+                "seed[{}]: retiring edge {} failed (next boot retries): {}",
+                pack.name, id, e
+            ),
+        }
+    }
+    retired
+}
+
 /// Pure fast-path predicate: counts cover the expectations AND the
 /// first-node spot-probe resolved. `>=` on purpose — operator edits never
 /// reduce presence, and packs only ever list what must exist.
@@ -602,6 +854,9 @@ async fn reconcile_pack(
         }
     }
 
+    // The nodes that exist: a changed pack reaches them too.
+    let revised_nodes = revise_nodes(db, pack, config, &now).await;
+
     // Auto-edge enrichment for FRESHLY inserted nodes only: session=""
     // matches nothing (seeds carry no source_session), so no same_session
     // noise; tag_overlap is the point — it wires seeds into the operator's
@@ -620,6 +875,11 @@ async fn reconcile_pack(
             .await;
         }
     }
+
+    // Edges the pack withdrew go first: the count below would otherwise
+    // still cover the expectation and the edge that replaced one of them
+    // would wait for the next boot.
+    let retired_edges = retire_edges(db, pack).await;
 
     // Edges: filtered-count fast-path, then 3-eq probe walk (probe failure
     // treated as exists — never double-insert; identity pattern).
@@ -659,11 +919,11 @@ async fn reconcile_pack(
         }
     }
 
-    if healed_nodes > 0 || healed_edges > 0 {
+    if healed_nodes > 0 || healed_edges > 0 || revised_nodes > 0 || retired_edges > 0 {
         info!(
             target: "knowledge_seed",
-            "seed[{}] ({}): healed {} nodes, {} edges",
-            pack.name, file_name, healed_nodes, healed_edges
+            "seed[{}] ({}): healed {} nodes, {} edges; revised {} nodes; retired {} edges",
+            pack.name, file_name, healed_nodes, healed_edges, revised_nodes, retired_edges
         );
     }
 }
@@ -1059,5 +1319,131 @@ mod tests {
         assert!(!nodes_fast_path_ok(5, 1, 5, 2, true), "missing procedural node");
         assert!(!nodes_fast_path_ok(5, 2, 5, 2, false), "spot-probe miss forces the walk");
         assert!(nodes_fast_path_ok(0, 0, 0, 0, true), "empty pack is trivially present");
+    }
+}
+
+
+#[cfg(test)]
+mod revision_tests {
+    //! A changed pack reaches the nodes that exist, unless the operator
+    //! edited them; an edge the pack no longer lists is retired.
+    use super::*;
+    use serde_json::json;
+
+    fn stored(content: &str, created: &str, updated: &str) -> serde_json::Value {
+        json!({"_id": "seed_t_a", "content": content, "category": "fact", "tags": ["kg"],
+               "created_at": created, "updated_at": updated, "access_count": 3})
+    }
+
+    fn seeded(content: &str) -> serde_json::Value {
+        let node = SeedNode {
+            id: "seed_t_a".into(),
+            kind: SeedNodeKind::Semantic { category: SemanticCategory::Fact, content: content.into() },
+            tags: vec!["kg".into()],
+        };
+        seed_node_doc(&node, "test-pack", "2026-10-01T00:00:00+00:00")
+    }
+
+    const T0: &str = "2026-09-01T00:00:00+00:00";
+    const T1: &str = "2026-09-15T00:00:00+00:00";
+
+    #[test]
+    fn an_unchanged_node_is_left_alone() {
+        assert_eq!(node_revision(&stored("same", T0, T0), &seeded("same")), NodeRevision::Unchanged);
+    }
+
+    #[test]
+    fn a_changed_unedited_node_is_patched_with_the_fields_that_moved_only() {
+        match node_revision(&stored("old text", T0, T0), &seeded("new text")) {
+            NodeRevision::Changed(patch) => {
+                assert_eq!(patch.len(), 1, "{patch:?}");
+                assert_eq!(patch["content"], json!("new text"));
+                assert!(text_moved(&patch));
+            }
+            other => panic!("expected Changed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_changed_node_the_operator_edited_is_theirs() {
+        // knowledge_update stamped a later updated_at: the pack's change
+        // does not win over the operator's.
+        assert_eq!(node_revision(&stored("their text", T0, T1), &seeded("new text")), NodeRevision::Edited);
+        // Seeding stamps updated_at == created_at: that is not an edit.
+        assert!(!operator_edited(&stored("x", T0, T0)));
+        assert!(operator_edited(&stored("x", T0, T1)));
+        assert!(!operator_edited(&json!({"content": "no stamps at all"})));
+    }
+
+    #[test]
+    fn a_null_field_and_a_missing_field_are_the_same() {
+        // A procedural node without outcomes, stored with the field null
+        // (a patch that cleared it): not a change, so not patched on every
+        // boot.
+        let mut a = stored("same", T0, T0);
+        a["outcomes"] = serde_json::Value::Null;
+        assert_eq!(node_revision(&a, &seeded("same")), NodeRevision::Unchanged);
+    }
+
+    #[test]
+    fn a_change_of_tags_alone_does_not_move_the_text() {
+        let mut a = stored("same", T0, T0);
+        a["tags"] = json!(["old-tag"]);
+        match node_revision(&a, &seeded("same")) {
+            NodeRevision::Changed(patch) => {
+                assert_eq!(patch.keys().collect::<Vec<_>>(), ["tags"]);
+                assert!(!text_moved(&patch), "a tag change costs no inference pass");
+            }
+            other => panic!("expected Changed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_revision_projection_covers_every_compared_field() {
+        for field in SEED_CONTENT_FIELDS {
+            assert!(SEED_REVISION_FIELDS.contains(&field), "{field} is compared but not read");
+        }
+        for field in ["_id", "created_at", "updated_at"] {
+            assert!(SEED_REVISION_FIELDS.contains(&field), "{field} is needed for the decision");
+        }
+    }
+
+    #[test]
+    fn the_revision_queries_carry_a_window_a_sort_and_the_provenance_filter() {
+        for body in [seed_nodes_query_body("p"), seed_edges_query_body("p")] {
+            assert_eq!(body["limit"], json!(SEED_REVISION_WINDOW));
+            assert!(body["sort"].is_array());
+            assert!(body["fields"].is_array());
+        }
+        assert_eq!(seed_nodes_query_body("p")["filter"], json!({"origin": ORIGIN_SEED, "pack": "p"}));
+        assert_eq!(
+            seed_edges_query_body("p")["filter"],
+            json!({"metadata.origin": ORIGIN_SEED, "metadata.pack": "p"})
+        );
+    }
+
+    #[test]
+    fn an_edge_the_pack_no_longer_lists_is_retired_and_the_rest_stay() {
+        let pack = parse_pack(&json!({
+            "format": "knowledge.v1", "name": "p",
+            "nodes": [
+                {"id": "a", "kind": "semantic", "category": "fact", "content": "a", "tags": []},
+                {"id": "b", "kind": "semantic", "category": "fact", "content": "b", "tags": []},
+                {"id": "c", "kind": "semantic", "category": "fact", "content": "c", "tags": []},
+            ],
+            "edges": [
+                {"src": "a", "dst": "b", "relation": "enables"},
+                {"src": "b", "dst": "c", "relation": "related_to"},
+            ],
+        }).to_string()).expect("valid pack");
+        let stored = [
+            json!({"_id": "e1", "source_id": "a", "target_id": "b", "edge_type": "enables"}),
+            // The pack repointed this one: a -> c is no longer listed.
+            json!({"_id": "e2", "source_id": "a", "target_id": "c", "edge_type": "enables"}),
+            json!({"_id": "e3", "source_id": "b", "target_id": "c", "edge_type": "related_to"}),
+            // Same endpoints, another relation: a different claim.
+            json!({"_id": "e4", "source_id": "a", "target_id": "b", "edge_type": "refines"}),
+        ];
+        assert_eq!(retired_edge_ids(&stored, &pack), ["e2", "e4"]);
     }
 }

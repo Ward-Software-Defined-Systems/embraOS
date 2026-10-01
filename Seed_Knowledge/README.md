@@ -38,18 +38,23 @@ skipped with a boot-journal warning.
 
 ## The ensure-present contract (read this before editing a live instance)
 
-The boot reconcile checks **presence by node `_id` only**. Consequences:
+The boot reconcile inserts what is missing by node `_id` and, for the nodes
+that exist, compares what the pack decides — text, category, tags, steps,
+outcomes — with what is stored. Consequences:
 
-- **Edits stick.** `knowledge_update` on a seeded node is never overwritten
-  — the reconcile inserts missing docs, it never patches existing ones.
+- **Edits stick.** `knowledge_update` on a seeded node is never overwritten.
+  Seeding writes `updated_at` equal to `created_at`; an edit stamps a later
+  `updated_at`, and the reconcile leaves such a node alone — and names it in
+  the boot journal when the pack has changed it.
 - **Deletions resurrect.** Deleting (or `knowledge_merge`-ing away) a node
   whose id is still listed in a pack brings it back at the next boot. To
   remove seeded knowledge permanently, revise the pack.
-- **Revisions ship as new ids.** A released pack that changes a claim
-  should introduce the new text under a NEW id and drop the old id — the
-  old node is then no longer pack-listed, so an operator deletion sticks
-  (and existing instances keep the old node until the operator removes or
-  edits it).
+- **Revisions keep their ids.** A released pack that changes a node updates
+  it in place at the next boot, when the operator never edited it: the node
+  is stamped `seed_revised_at` and, when its text moved, embedded again. An
+  edge the pack no longer lists is removed. A node the pack no longer lists
+  stays until the operator removes it — so a claim is withdrawn by changing
+  the node, not by dropping it.
 
 Seeded nodes are otherwise **ordinary graph citizens**: retrieval,
 enrichment, traversal, `knowledge_audit`, `knowledge_merge`, and
