@@ -76,6 +76,113 @@ fn parse_schedule(schedule: &str, config_tz: &str) -> Option<(u64, String)> {
 }
 
 /// Calculate the next run time from now given an interval in seconds.
+/// What one job dispatches, read from its stored document in either shape.
+#[derive(Debug, PartialEq)]
+pub(crate) struct CronPlan {
+    /// The command as it was written, for the report and the list.
+    pub display: String,
+    pub name: String,
+    pub args: serde_json::Value,
+    /// Why the job runs without its arguments, when it does.
+    pub note: Option<String>,
+}
+
+/// A cron command: a tool name, optionally followed by a JSON object of
+/// arguments. Checked when the job is scheduled — the tool exists, the
+/// arguments are an object, the required ones are there — so a job that
+/// could never run is refused with the reason, not failed at every fire.
+pub(crate) fn parse_cron_command(command: &str) -> Result<(String, serde_json::Value), String> {
+    let command = command.trim();
+    let (name, rest) = match command.split_once(char::is_whitespace) {
+        Some((n, r)) => (n, r.trim()),
+        None => (command, ""),
+    };
+    if name.is_empty() {
+        return Err("the command is empty; cron runs a tool by name".to_string());
+    }
+    let Some(tool) = super::registry::all_descriptors().find(|d| d.name == name) else {
+        return Err(format!("'{name}' is not a tool; cron runs a registered tool by name"));
+    };
+    let args = if rest.is_empty() {
+        serde_json::json!({})
+    } else {
+        match serde_json::from_str::<serde_json::Value>(rest) {
+            Ok(v) if v.is_object() => v,
+            _ => {
+                return Err(format!(
+                    "the arguments after the tool name must be a JSON object, \
+                     e.g. system_logs {{\"service\":\"embra-brain\"}}; got: {rest}"
+                ))
+            }
+        }
+    };
+    let schema = (tool.input_schema)();
+    let missing: Vec<&str> = schema
+        .get("required")
+        .and_then(|r| r.as_array())
+        .map(|r| {
+            r.iter()
+                .filter_map(|k| k.as_str())
+                .filter(|k| args.get(k).is_none())
+                .collect()
+        })
+        .unwrap_or_default();
+    if !missing.is_empty() {
+        return Err(format!(
+            "tool '{name}' needs {}; give it as a JSON object after the name",
+            missing.join(", ")
+        ));
+    }
+    Ok((name.to_string(), args))
+}
+
+/// The plan for a stored job. A job scheduled since the arguments became a
+/// JSON object carries `command_name` and `command_args`. One scheduled
+/// before carries `command` alone, or `command_args` with the raw text
+/// under `_legacy_raw` (migration v7 kept it). Raw text that is a JSON
+/// object is used; any other raw text is not passed, and the note says so.
+pub(crate) fn cron_dispatch_plan(doc: &serde_json::Value) -> Option<CronPlan> {
+    let command = doc.get("command").and_then(|v| v.as_str()).unwrap_or("").trim();
+    let (name, raw): (String, Option<String>) =
+        match doc.get("command_name").and_then(|v| v.as_str()) {
+            Some(n) if !n.is_empty() => {
+                let raw = doc
+                    .get("command_args")
+                    .and_then(|a| a.get("_legacy_raw"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                (n.to_string(), raw)
+            }
+            _ => match command.split_once(char::is_whitespace) {
+                Some((n, r)) => (n.to_string(), Some(r.trim().to_string()).filter(|r| !r.is_empty())),
+                None => (command.to_string(), None),
+            },
+        };
+    if name.is_empty() {
+        return None;
+    }
+    let structured = doc
+        .get("command_args")
+        .filter(|a| a.is_object() && a.get("_legacy_raw").is_none())
+        .cloned();
+    let (args, note) = match (structured, raw) {
+        (Some(args), _) => (args, None),
+        (None, Some(raw)) => match serde_json::from_str::<serde_json::Value>(&raw) {
+            Ok(v) if v.is_object() => (v, None),
+            _ => (
+                serde_json::json!({}),
+                Some(format!(
+                    "its arguments \"{raw}\" are not a JSON object and were not passed; \
+                     re-create the job with cron_add as `{name} {{\"key\": value}}`"
+                )),
+            ),
+        },
+        (None, None) => (serde_json::json!({}), None),
+    };
+    let display = if command.is_empty() { format!("{name} {args}") } else { command.to_string() };
+    Some(CronPlan { display, name, args, note })
+}
+
 fn next_run_from_now(interval_secs: u64) -> String {
     let next = Utc::now() + chrono::Duration::seconds(interval_secs as i64);
     next.to_rfc3339()
@@ -111,12 +218,19 @@ pub async fn cron_add(db: &WardsonDbClient, param: &str, config_tz: &str) -> Str
         None => return format!("Could not parse schedule: '{}'. Use formats like: every 5m, every 1h, hourly, daily 09:00", schedule_str),
     };
 
+    let (command_name, command_args) = match parse_cron_command(command) {
+        Ok(parsed) => parsed,
+        Err(why) => return format!("Cron job not created: {why}"),
+    };
+
     ensure_collection(db).await;
 
     let doc = serde_json::json!({
         "schedule": schedule_str,
         "interval_secs": interval_secs,
         "command": command,
+        "command_name": command_name,
+        "command_args": command_args,
         "enabled": true,
         "last_run": null,
         "next_run": next_run,
@@ -206,19 +320,11 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
             continue;
         }
 
-        let command = doc
-            .get("command")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
+        let Some(plan) = cron_dispatch_plan(doc) else { continue };
         let interval_secs = doc
             .get("interval_secs")
             .and_then(|v| v.as_u64())
             .unwrap_or(300);
-
-        if command.is_empty() {
-            continue;
-        }
 
         // Execute the command via tool dispatch. Load config for dispatch; fall back
         // to a minimal in-memory SystemConfig if load fails (e.g., pre-wizard).
@@ -252,21 +358,11 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
             show_reasoning: None,
             openai_compat: crate::config::OpenAiCompatConfig::default(),
         });
-        // Direct registry dispatch — no ... synthesis, no model round-trip.
-        // The stored `command` is a plain tool name for v0 crons (pre-v7 schema);
-        // any trailing words after the first space are discarded here with a
-        // warning. Stage 8's v7 schema migration adds structured
-        // {command_name, command_args} so complex-arg crons work cleanly.
-        let (command_name, extra) = match command.split_once(' ') {
-            Some((n, rest)) => (n.to_string(), rest.trim().to_string()),
-            None => (command.clone(), String::new()),
-        };
-        if !extra.is_empty() {
-            tracing::warn!(
-                target: "cron",
-                command = %command,
-                "legacy cron command has trailing args that the v0 executor cannot pass to registry::dispatch; re-schedule after v7 migration"
-            );
+        // Direct registry dispatch — no model round-trip. The arguments are
+        // the job's own (`cron_dispatch_plan`); a job whose arguments could
+        // not be read runs without them and says so, here and in its report.
+        if let Some(note) = &plan.note {
+            tracing::warn!(target: "cron", command = %plan.display, "{}", note);
         }
 
         // Crons fire outside a user turn, so there's no in-turn trace to
@@ -282,11 +378,7 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
             trace: &cron_trace,
             turn_index: 0,
         };
-        let result_text = match super::registry::dispatch(
-            &command_name,
-            serde_json::json!({}),
-            ctx,
-        )
+        let result_text = match super::registry::dispatch(&plan.name, plan.args.clone(), ctx)
         .await
         {
             // Cron consumes the text only — a cron-fired media tool's images
@@ -294,7 +386,8 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
             Ok(out) => out.text,
             Err(e) => format!("cron dispatch failed: {e}"),
         };
-        results.push(format!("embraCRON [{}]: {}", command, result_text));
+        let note = plan.note.as_ref().map(|n| format!(" ({n})")).unwrap_or_default();
+        results.push(format!("embraCRON [{}]: {}{}", plan.display, result_text, note));
 
         // Update last_run and next_run
         if let Some(id) = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()) {
@@ -385,13 +478,11 @@ use crate::tools::registry::DispatchContext;
 #[embra_tool(
     name = "cron_add",
     is_side_effectful = true,
-    description = "Schedule recurring tool execution. schedule accepts \"every 5m\", \"every 1h\", \"every 30s\", \"hourly\", \"daily HH:MM\" (resolved in the configured timezone; avoid 02:00-03:00 on DST days). command is the tool invocation as a single string that cron will dispatch at each fire."
+    description = "Schedule recurring tool execution. schedule accepts \"every 5m\", \"every 1h\", \"every 30s\", \"hourly\", \"daily HH:MM\" (resolved in the configured timezone; avoid 02:00-03:00 on DST days). command is a tool name, optionally followed by a JSON object of arguments, e.g. system_logs {\"service\":\"embra-brain\"}; the tool must exist and its required arguments must be given, or the job is refused. Cron dispatches it at each fire."
 )]
 pub struct CronAddArgs {
     pub schedule: String,
-    /// The tool-dispatch command to execute. During Stage 2 this is still a
-    /// free-form string that the legacy executor wraps in `...`;
-    /// Stage 6 moves to a structured `{command_name, command_args}` doc.
+    /// A tool name, optionally followed by a JSON object of arguments.
     pub command: String,
 }
 
@@ -428,6 +519,81 @@ pub struct CronRemoveArgs {
 impl CronRemoveArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
         Ok(cron_remove(ctx.db, &self.id).await)
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    //! A cron command is a tool name and a JSON object of arguments,
+    //! checked when the job is scheduled; a stored job of either shape
+    //! yields the plan the executor runs.
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_tool_name_alone_schedules_with_no_arguments() {
+        assert_eq!(parse_cron_command("system_status").unwrap(), ("system_status".to_string(), json!({})));
+        assert_eq!(parse_cron_command("  system_status  ").unwrap().0, "system_status");
+    }
+
+    #[test]
+    fn a_json_object_after_the_name_is_the_arguments() {
+        let (name, args) = parse_cron_command(r#"system_logs {"service": "embra-brain", "lines": 50}"#).unwrap();
+        assert_eq!(name, "system_logs");
+        assert_eq!(args, json!({"service": "embra-brain", "lines": 50}));
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_tool_is_refused() {
+        let why = parse_cron_command("make_coffee").unwrap_err();
+        assert!(why.contains("not a tool"), "{why}");
+        assert!(parse_cron_command("").is_err());
+    }
+
+    #[test]
+    fn arguments_that_are_not_a_json_object_are_refused() {
+        // The shape that was silently cut off before: words after the name.
+        let why = parse_cron_command("system_logs embra-brain").unwrap_err();
+        assert!(why.contains("JSON object"), "{why}");
+        assert!(parse_cron_command("system_logs [1, 2]").is_err());
+    }
+
+    #[test]
+    fn a_missing_required_argument_is_refused_when_scheduled_not_at_the_fire() {
+        let why = parse_cron_command("remember").unwrap_err();
+        assert!(why.contains("needs") && why.contains("content"), "{why}");
+        assert!(parse_cron_command(r#"remember {"content": "check the build"}"#).is_ok());
+    }
+
+    #[test]
+    fn a_job_runs_with_the_arguments_it_was_scheduled_with() {
+        let doc = json!({"command": r#"system_logs {"service":"embrad"}"#,
+                         "command_name": "system_logs", "command_args": {"service": "embrad"}});
+        let plan = cron_dispatch_plan(&doc).unwrap();
+        assert_eq!(plan.name, "system_logs");
+        assert_eq!(plan.args, json!({"service": "embrad"}));
+        assert_eq!(plan.note, None);
+        assert_eq!(plan.display, r#"system_logs {"service":"embrad"}"#);
+    }
+
+    #[test]
+    fn a_job_from_before_runs_with_what_can_be_read_and_says_what_cannot() {
+        // Migration v7 kept the raw text; a JSON object in it is read.
+        let doc = json!({"command": r#"system_logs {"service":"embrad"}"#, "command_name": "system_logs",
+                         "command_args": {"_legacy_raw": r#"{"service":"embrad"}"#}});
+        let plan = cron_dispatch_plan(&doc).unwrap();
+        assert_eq!(plan.args, json!({"service": "embrad"}));
+        assert!(plan.note.is_none());
+        // Raw text that is not a JSON object is not passed, and the job says so.
+        let doc = json!({"command": "system_logs embrad", "command_name": "system_logs",
+                         "command_args": {"_legacy_raw": "embrad"}});
+        let plan = cron_dispatch_plan(&doc).unwrap();
+        assert_eq!(plan.args, json!({}));
+        assert!(plan.note.as_deref().unwrap().contains("not passed"), "{:?}", plan.note);
+        // A document with the command string alone, from before v7.
+        let plan = cron_dispatch_plan(&json!({"command": "time"})).unwrap();
+        assert_eq!((plan.name.as_str(), plan.args.clone(), plan.note.clone()), ("time", json!({}), None));
+        assert!(cron_dispatch_plan(&json!({"command": ""})).is_none());
     }
 }
 
