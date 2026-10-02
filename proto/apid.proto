@@ -13,6 +13,8 @@ service EmbraAPI {
   rpc GetExpression(GetExpressionRequest) returns (ExpressionState);
   // Out-of-band operator interrupt for a stuck in-flight turn (pass-through).
   rpc StopTurn(StopTurnRequest) returns (StopTurnResponse);
+  // The brain's activity feed, pass-through (see brain.proto).
+  rpc WatchActivity(WatchActivityRequest) returns (stream ActivityFrame);
   // Media store pass-through (unary; bytes never ride the Converse stream).
   rpc PutMedia(PutMediaRequest) returns (PutMediaResponse);
   rpc GetMedia(GetMediaRequest) returns (GetMediaResponse);
@@ -59,6 +61,8 @@ message CloseSessionRequest {}
 message CloseSessionResponse { bytes payload = 1; }
 message StopTurnRequest {}
 message StopTurnResponse { bytes payload = 1; }  // Serialized embra.brain.StopTurnResponse
+message WatchActivityRequest {}
+message ActivityFrame { bytes payload = 1; }  // Serialized embra.brain.ActivityFrame
 
 message PutMediaRequest {
   string session_name = 1;

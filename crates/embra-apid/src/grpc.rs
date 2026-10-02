@@ -124,6 +124,29 @@ impl EmbraApi for EmbraApiImpl {
         Ok(Response::new(StopTurnResponse { payload }))
     }
 
+    // --- Activity feed pass-through ---
+
+    type WatchActivityStream = Pin<Box<dyn Stream<Item = Result<ActivityFrame, Status>> + Send>>;
+
+    /// The brain's activity feed, frame by frame, as an opaque payload like
+    /// `Converse`. embra-web holds the one production subscription.
+    async fn watch_activity(
+        &self,
+        _request: Request<WatchActivityRequest>,
+    ) -> Result<Response<Self::WatchActivityStream>, Status> {
+        let mut brain = self.backends.brain_client().await?;
+        let frames = brain
+            .watch_activity(embra_common::proto::brain::WatchActivityRequest {})
+            .await?
+            .into_inner();
+        #[expect(
+            clippy::result_large_err,
+            reason = "the stream's item type is Result<_, tonic::Status>, fixed by the service trait"
+        )]
+        let output = frames.map(|frame| frame.map(|f| ActivityFrame { payload: f.encode_to_vec() }));
+        Ok(Response::new(Box::pin(output)))
+    }
+
     // --- Media store pass-through ---
 
     async fn put_media(&self, request: Request<PutMediaRequest>) -> Result<Response<PutMediaResponse>, Status> {
@@ -246,5 +269,27 @@ impl EmbraApi for EmbraApiImpl {
             uptime_seconds: self.start_time.elapsed().as_secs(),
             details: std::collections::HashMap::new(),
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Nothing listens on port 1: the watch fails like every other proxied
+    /// call, with the brain's unavailability, instead of hanging.
+    #[tokio::test]
+    async fn an_unreachable_brain_fails_the_watch_with_unavailable() {
+        let backends = BackendConnections::new(
+            "http://127.0.0.1:1".to_string(),
+            "http://127.0.0.1:1".to_string(),
+        );
+        let api = EmbraApiImpl::new(backends);
+        let err = api
+            .watch_activity(Request::new(WatchActivityRequest {}))
+            .await
+            .err()
+            .expect("no brain, no stream");
+        assert_eq!(err.code(), tonic::Code::Unavailable);
     }
 }

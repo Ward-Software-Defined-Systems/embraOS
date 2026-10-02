@@ -117,6 +117,10 @@ impl EmbraApi for Gateway {
     async fn get_expression(&self, _: Request<GetExpressionRequest>) -> Result<Response<ExpressionState>, Status> {
         Err(not_here())
     }
+    type WatchActivityStream = Pin<Box<dyn Stream<Item = Result<ActivityFrame, Status>> + Send>>;
+    async fn watch_activity(&self, _: Request<WatchActivityRequest>) -> Result<Response<Self::WatchActivityStream>, Status> {
+        Err(not_here())
+    }
     async fn stop_turn(&self, _: Request<StopTurnRequest>) -> Result<Response<StopTurnResponse>, Status> {
         Err(not_here())
     }
