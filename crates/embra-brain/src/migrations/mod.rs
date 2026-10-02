@@ -315,7 +315,8 @@ async fn doc_present(db: &WardsonDbClient, collection: &str) -> bool {
     }
 }
 
-/// Hot-path secondary indexes as `(collection, create_index body)`.
+/// Hot-path secondary indexes as `(collection, create_index body)`, and
+/// the boot-path ones the reconciles need (second and third entries).
 ///
 /// idx_edge_source_id (single-field `source_id`): the traversal source arm
 /// queries eq `{source_id, source_collection}` (`traversal.rs`). WardSONDB
@@ -334,11 +335,38 @@ fn hot_path_index_specs() -> Vec<(&'static str, serde_json::Value)> {
     // every traversal hop into a bucket scan. The arms only get their
     // indexed id lookup + type post-filter today because no such index
     // exists. Tripwire: `no_single_field_edge_type_index_on_memory_edges`.
-    vec![(
-        "memory.edges",
-        serde_json::json!({"name": "idx_edge_source_id", "field": "source_id"}),
-    )]
+    vec![
+        (
+            "memory.edges",
+            serde_json::json!({"name": "idx_edge_source_id", "field": "source_id"}),
+        ),
+        // Boot path, not hot path: the identity reconcile counts its edges
+        // by `metadata.origin`, and the seed reconcile counts and reads each
+        // pack's edges by `metadata.origin` + `metadata.pack`, on every boot.
+        // Without an index each was a full scan of memory.edges — 431k
+        // documents, ~0.9 s each, nine or ten per boot (Embra#15). The
+        // planner serves the alphabetically-first indexed key of an AND and
+        // `metadata.origin` sorts before `metadata.pack`; no hot-path edge
+        // filter carries a `metadata.*` key, so this index cannot take a
+        // traversal hop the way an `edge_type` one would. Guard:
+        // `the_boot_reconcile_edge_filters_lead_with_the_indexed_key`.
+        (
+            "memory.edges",
+            serde_json::json!({"name": "idx_edge_metadata_origin", "field": "metadata.origin"}),
+        ),
+        // The same reconcile's per-pack node count and revision read filter
+        // the node collections by `{origin, pack}`.
+        (
+            "memory.semantic",
+            serde_json::json!({"name": "idx_semantic_origin", "field": "origin"}),
+        ),
+        (
+            "memory.procedural",
+            serde_json::json!({"name": "idx_procedural_origin", "field": "origin"}),
+        ),
+    ]
 }
+
 
 /// Assert hot-path indexes exist — warn-don't-fail, runs on every boot.
 ///
@@ -613,6 +641,49 @@ mod hot_path_index_tests {
             body.get("fields").is_none(),
             "must stay single-field — compound form regresses the arm to full scan"
         );
+    }
+
+    /// Same shape for the boot-reconcile index: single-field, on the
+    /// dotted path the reconcile filters carry.
+    #[test]
+    fn metadata_origin_index_is_single_field_on_edges() {
+        let specs = hot_path_index_specs();
+        let (collection, body) = specs
+            .iter()
+            .find(|(_, b)| b["name"] == "idx_edge_metadata_origin")
+            .expect("idx_edge_metadata_origin spec present");
+        assert_eq!(*collection, "memory.edges");
+        assert_eq!(body["field"], "metadata.origin");
+        assert!(body.get("fields").is_none(), "must stay single-field");
+    }
+
+    /// WardSONDB serves an AND from the single-field index of its
+    /// alphabetically-first indexed key. The boot reconciles' edge and node
+    /// filters must lead with a key this list indexes, or every boot pays a
+    /// full scan per filter again.
+    #[test]
+    fn the_boot_reconcile_edge_filters_lead_with_the_indexed_key() {
+        fn first_key(filter: &serde_json::Value) -> String {
+            let mut keys: Vec<&String> = filter.as_object().expect("an object").keys().collect();
+            keys.sort();
+            (*keys.first().expect("a key")).clone()
+        }
+        fn indexed(collection: &str, field: &str) -> bool {
+            hot_path_index_specs()
+                .iter()
+                .any(|(c, b)| *c == collection && b["field"] == field && b.get("fields").is_none())
+        }
+        for filter in [
+            crate::knowledge::seed::seed_edge_count_filter("a-pack"),
+            crate::identity_graph::project::identity_edge_count_filter("identity_import"),
+        ] {
+            let key = first_key(&filter);
+            assert_eq!(key, "metadata.origin", "{filter}");
+            assert!(indexed("memory.edges", &key), "{filter} leads with an unindexed key");
+        }
+        let key = first_key(&crate::knowledge::seed::seed_node_count_filter("a-pack"));
+        assert_eq!(key, "origin");
+        assert!(indexed("memory.semantic", &key) && indexed("memory.procedural", &key));
     }
 
     /// The alphabetical-planner tripwire (see the comment on

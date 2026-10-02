@@ -529,12 +529,12 @@ fn seed_edge_doc(
 
 /// Node fast-path count (per pack per collection): two top-level eq keys —
 /// a full-scan `count_only`, fine at promoted-collection scale.
-fn seed_node_count_filter(pack: &str) -> serde_json::Value {
+pub(crate) fn seed_node_count_filter(pack: &str) -> serde_json::Value {
     json!({ "origin": ORIGIN_SEED, "pack": pack })
 }
 
 /// Edge fast-path count — dot-paths resolve server-side.
-fn seed_edge_count_filter(pack: &str) -> serde_json::Value {
+pub(crate) fn seed_edge_count_filter(pack: &str) -> serde_json::Value {
     json!({ "metadata.origin": ORIGIN_SEED, "metadata.pack": pack })
 }
 

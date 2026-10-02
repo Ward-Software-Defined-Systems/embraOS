@@ -34,6 +34,15 @@ pub(crate) fn identity_node_doc(node: &GraphNode, origin: &str, now: &str) -> Va
     })
 }
 
+/// The reconcile's edge count: every projected edge carries its origin
+/// under `metadata`. Served by `idx_edge_metadata_origin`
+/// (`migrations::hot_path_index_specs`) — before it, this was a full scan
+/// of memory.edges on every boot. Guard:
+/// `the_boot_reconcile_edge_filters_lead_with_the_indexed_key`.
+pub(crate) fn identity_edge_count_filter(origin: &str) -> serde_json::Value {
+    json!({"metadata.origin": origin})
+}
+
 /// Projection doc for one graph edge — exactly the memory.edges shape the
 /// tool/auto writers produce, weight 1.0, provenance under
 /// `metadata.origin`.
@@ -214,9 +223,10 @@ async fn reconcile_graph(
     // Edges: filtered count fast-path, existence probes on mismatch.
     let expected_edges = graph.edges.len() as u64;
     let actual_edges = db
-        .count_filtered("memory.edges", &json!({"metadata.origin": edge_origin}))
+        .count_filtered("memory.edges", &identity_edge_count_filter(edge_origin))
         .await
         .unwrap_or(0);
+
     let mut missing_edges = 0usize;
     if actual_edges < expected_edges {
         for edge in &graph.edges {
