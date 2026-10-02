@@ -84,9 +84,11 @@ const EMBEDDING_MIN_SIMILARITY: f32 = 0.5;
 /// with the salient terms of the recent turns appended (`should_expand`).
 /// `similarity_strength` of this value is `enrichment::MIN_RELEVANCE`: below
 /// it no similarity hit could be injected anyway, so the second inference
-/// is paid only on the turns the first one failed. Pinned by
+/// is paid only on the turns the first one failed. 0.70 is where measured
+/// turns about nothing in particular end and turns about something begin
+/// (see `MIN_RELEVANCE`). Pinned by
 /// `the_expansion_trigger_is_the_cosine_of_the_relevance_floor`.
-const EXPANSION_TRIGGER_COSINE: f32 = 0.60;
+const EXPANSION_TRIGGER_COSINE: f32 = 0.70;
 
 /// Terms appended at most — the same eight as `idf::IDF_DENOM_CAP`.
 const EXPANSION_TERMS_MAX: usize = 8;
@@ -210,6 +212,10 @@ pub async fn retrieve_relevant_knowledge(
     // of corpus size. The expansion picks context terms by IDF and keeps
     // only those the graph has seen; `denominator` still sums the query's.
     let df_tokens: HashSet<String> = query_tokens.union(&context_tokens).cloned().collect();
+    // The graph's own topical words, for the expansion of a weak query.
+    let tag_vocab = tag_vocabulary(
+        prefetched.iter().flat_map(|(_, docs)| docs.iter()).chain(all_entries.iter()),
+    );
     let doc_freq = DocFreq::build(
         &df_tokens,
         prefetched
@@ -335,7 +341,7 @@ pub async fn retrieve_relevant_knowledge(
                     // turns appended: a conversational turn says little by
                     // itself, and its vector landed near the admission
                     // floor on whatever was recent (Embra#16, part 1).
-                    let terms = expansion_terms(&context_tokens, &doc_freq);
+                    let terms = expansion_terms(&context_tokens, &doc_freq, &tag_vocab);
                     let (qv, hits) = if should_expand(top_cosine_raw, !terms.is_empty()) {
                         match provider.embed_query(&embedding_query_text(query_text, &terms)).await {
                             Ok(expanded_vector) => {
@@ -448,14 +454,39 @@ fn context_tokens(context: &[&str], query_tokens: &HashSet<String>) -> HashSet<S
         .collect()
 }
 
-/// The terms appended to a weak query: context tokens the graph has seen
-/// and that are not stopwords, rarest first, at most `EXPANSION_TERMS_MAX`.
-/// A term the graph never saw steers toward nothing it holds; a stopword
-/// steers toward everything.
-fn expansion_terms(context_tokens: &HashSet<String>, doc_freq: &DocFreq) -> Vec<String> {
+/// The words the graph uses as tags, tokenized like content (`seed-packs`
+/// gives `seed` and `packs`), from the documents retrieval has prefetched.
+/// Tags are operator- or model-authored topical words — the one vocabulary
+/// in the graph that cannot contain conversational filler.
+fn tag_vocabulary<'a>(docs: impl Iterator<Item = &'a serde_json::Value>) -> HashSet<String> {
+    let mut vocab = HashSet::new();
+    for doc in docs {
+        if let Some(tags) = doc.get("tags").and_then(|v| v.as_array()) {
+            for tag in tags.iter().filter_map(|v| v.as_str()) {
+                vocab.extend(content_tokens(tag));
+            }
+        }
+    }
+    vocab
+}
+
+/// The terms appended to a weak query: context tokens that the graph uses
+/// as tags (`tag_vocabulary`), has seen, and that are not stopwords, rarest
+/// first, at most `EXPANSION_TERMS_MAX`. A term the graph never saw steers
+/// toward nothing it holds; a stopword steers toward everything; and by IDF
+/// alone the picker chose conversational filler — "look ahead take great
+/// here caught" — because filler is rare in a corpus of technical notes
+/// (measured 2026-10-02). The tag vocabulary is the graph's own topical
+/// words: restricted to it, the expansion improved 4 of 10 measured turns
+/// and worsened 2.
+fn expansion_terms(
+    context_tokens: &HashSet<String>,
+    doc_freq: &DocFreq,
+    tag_vocab: &HashSet<String>,
+) -> Vec<String> {
     let mut terms: Vec<(&String, f64)> = context_tokens
         .iter()
-        .filter(|t| doc_freq.seen(t) && !doc_freq.is_stopword(t))
+        .filter(|t| tag_vocab.contains(*t) && doc_freq.seen(t) && !doc_freq.is_stopword(t))
         .map(|t| (t, doc_freq.idf(t)))
         .collect();
     terms.sort_by(|a, b| {
@@ -1508,11 +1539,37 @@ mod expansion_tests {
         words.iter().map(|w| w.to_string()).collect()
     }
 
+    /// Filler is rare in a corpus of technical notes and so scores a high
+    /// IDF; only words the graph uses as tags qualify.
+    #[test]
+    fn expansion_terms_are_words_the_graph_uses_as_tags() {
+        let context = set(&["cron", "great", "look"]);
+        let mut docs = corpus();
+        for d in docs.iter_mut().take(3) {
+            d.insert("great".into());
+            d.insert("look".into());
+        }
+        let df = DocFreq::build(&context, docs);
+        let vocab = set(&["cron", "guardian"]);
+        assert_eq!(expansion_terms(&context, &df, &vocab), ["cron"]);
+    }
+
+    #[test]
+    fn tag_vocabulary_tokenizes_tags_like_content() {
+        let docs = [
+            serde_json::json!({"tags": ["seed-packs", "embraCRON"]}),
+            serde_json::json!({"tags": ["kg"]}),
+            serde_json::json!({"content": "no tags"}),
+        ];
+        assert_eq!(tag_vocabulary(docs.iter()), set(&["seed", "packs", "embracron"]));
+    }
+
     #[test]
     fn expansion_terms_are_graph_known_non_stopwords_in_idf_order_capped_at_eight() {
         let context = set(&["the", "guardian", "cron", "zebra"]);
+        let vocab = context.clone();
         let df = DocFreq::build(&context, corpus());
-        assert_eq!(expansion_terms(&context, &df), ["cron", "guardian"], "rarest first; no stopword, no unseen term");
+        assert_eq!(expansion_terms(&context, &df, &vocab), ["cron", "guardian"], "rarest first; no stopword, no unseen term");
 
         // Ten seen terms of equal IDF: eight survive, in alphabetical order.
         let ten: Vec<String> = (0..10).map(|i| format!("t{i}")).collect();
@@ -1523,7 +1580,7 @@ mod expansion_tests {
             d
         }).collect();
         let df = DocFreq::build(&context, docs);
-        let terms = expansion_terms(&context, &df);
+        let terms = expansion_terms(&context, &df, &context);
         assert_eq!(terms.len(), EXPANSION_TERMS_MAX);
         assert_eq!(terms, ["t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7"]);
     }
@@ -1541,7 +1598,7 @@ mod expansion_tests {
         let context = context_tokens(&[], &query);
         assert!(context.is_empty());
         let df = DocFreq::build(&query, corpus());
-        assert!(expansion_terms(&context, &df).is_empty());
+        assert!(expansion_terms(&context, &df, &HashSet::new()).is_empty());
         assert!(!should_expand(Some(0.3), false), "nothing to append, nothing to try");
         assert_eq!(embedding_query_text("what now", &[]), "what now");
     }
@@ -1555,7 +1612,7 @@ mod expansion_tests {
     #[test]
     fn expansion_is_tried_only_when_no_hit_reaches_the_trigger() {
         assert!(should_expand(None, true), "no hit at all");
-        assert!(should_expand(Some(0.59), true));
+        assert!(should_expand(Some(0.69), true));
         assert!(!should_expand(Some(EXPANSION_TRIGGER_COSINE), true));
         assert!(!should_expand(Some(0.9), true));
         assert!(!should_expand(None, false));

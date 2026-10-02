@@ -32,17 +32,29 @@ pub(crate) const SCORE_THRESHOLD: f64 = 0.3;
 /// relevance that is the newest and the most accessed of its candidate set
 /// scores 0.40 and clears `SCORE_THRESHOLD`. On a conversational turn whose
 /// raw query is about nothing in particular, that was the top-5: recent,
-/// often-read nodes at cosines just over the 0.5 admission floor, injected
-/// at scores of 0.35–0.47 with relevance around 0.12 (Embra#16). 0.2 is
-/// `retrieval::similarity_strength` of cosine 0.60; two matched tags pass
-/// on any message, one matched tag passes on a message of up to five tag
-/// tokens. `knowledge_query` is not gated: the model sees the scores.
-/// Guards in `injection_gate_tests`.
-pub(crate) const MIN_RELEVANCE: f64 = 0.2;
+/// often-read nodes injected at scores of 0.35–0.47 (Embra#16).
+///
+/// 0.4 is `retrieval::similarity_strength` of cosine 0.70. Measured on
+/// 2026-10-02 over 19 operator turns of two debug sessions, against a copy
+/// of a production graph (1,246 nodes, bge-small): the best hit of a turn
+/// that said nothing in particular sat at cosine 0.65–0.70, the best hit of
+/// a turn about something at 0.71–0.82; a floor at 0.70 kept 9 of 10
+/// relevant top hits and dropped 6 of 9 noise injections, and 0.60 dropped
+/// none. In tag terms (`tag_denom` = min(query tag tokens, 8)): one matched
+/// tag passes on a message of up to two tag tokens, two on up to five, four
+/// on a long message — a tag hit alone rarely carries a node past the
+/// floor; its cosine does. `knowledge_query` is not gated: the model sees
+/// the scores. Guards in `injection_gate_tests`.
+pub(crate) const MIN_RELEVANCE: f64 = 0.4;
+
+/// Cosines are f32, and `similarity_strength` of exactly 0.70 lands a hair
+/// under 0.4. The floor compares with this tolerance so a hit at the
+/// expansion trigger, which is not embedded again, is injectable.
+const RELEVANCE_TOLERANCE: f64 = 1e-6;
 
 /// Both gates: the score threshold and the relevance floor.
 fn qualifies(r: &RankedNode) -> bool {
-    r.score >= SCORE_THRESHOLD && r.relevance >= MIN_RELEVANCE
+    r.score >= SCORE_THRESHOLD && r.relevance + RELEVANCE_TOLERANCE >= MIN_RELEVANCE
 }
 
 /// Maximum number of retrieved nodes to inject per turn.
@@ -317,17 +329,18 @@ mod injection_gate_tests {
         assert!(qualifies(&ranked(0.40, MIN_RELEVANCE)));
     }
 
+    /// A turn about nothing in particular tops out at cosine 0.65–0.70
+    /// (measured); a turn about something at 0.71 and up.
     #[test]
-    fn a_candidate_at_the_cosine_floor_is_not_injected_and_one_at_0_60_is() {
-        let at_the_admission_floor = similarity_strength(0.5);
-        let at_0_60 = similarity_strength(0.60);
-        assert!(!qualifies(&ranked(0.45, at_the_admission_floor)));
-        assert!(qualifies(&ranked(0.45, at_0_60)));
+    fn a_candidate_at_the_cosine_floor_is_not_injected_and_one_at_0_70_is() {
+        assert!(!qualifies(&ranked(0.45, similarity_strength(0.5))), "the admission floor");
+        assert!(!qualifies(&ranked(0.45, similarity_strength(0.65))), "what a turn about nothing gets");
+        assert!(qualifies(&ranked(0.45, similarity_strength(0.70))));
     }
 
     #[test]
-    fn min_relevance_is_the_rescaled_cosine_of_0_60() {
-        assert!((similarity_strength(0.60) - MIN_RELEVANCE).abs() < 1e-6);
+    fn min_relevance_is_the_rescaled_cosine_of_0_70() {
+        assert!((similarity_strength(0.70) - MIN_RELEVANCE).abs() < 1e-6);
     }
 
     #[test]
