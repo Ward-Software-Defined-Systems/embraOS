@@ -1,0 +1,30 @@
+{
+  "identifier": "@local:embra-os-qwen3.8-27-b",
+  "name": "embraOS_Qwen3.8-27B",
+  "changed": true,
+  "operation": {
+    "fields": [
+      {
+        "key": "llm.prediction.contextOverflowPolicy",
+        "value": "stopAtLimit"
+      },
+      {
+        "key": "llm.prediction.repeatPenalty",
+        "value": {
+          "checked": true,
+          "value": 1
+        }
+      },
+      {
+        "key": "llm.prediction.minPSampling",
+        "value": {
+          "checked": true,
+          "value": 0
+        }
+      }
+    ]
+  },
+  "load": {
+    "fields": []
+  }
+}

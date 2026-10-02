@@ -47,13 +47,15 @@ KV cache:              f16
 GPU offload:           Max
 ```
 
-embra-brain sends sampler params and chat-template config (including `chat_template_kwargs.preserve_thinking: true` for KG continuity) in each request — operators don't configure these.
+embra-brain sends no sampling parameters and no chat-template settings. Its request carries the model, the messages, the tool manifest, `stream` and `reasoning_effort` where the model documents it (`crates/embra-brain/src/provider/openai_compat/wire.rs`), so everything else is the server's own per-model configuration.
+
+That is what the preset in [`LOCAL_MODEL_SETTINGS/LM-Studio-Examples/`](LOCAL_MODEL_SETTINGS/LM-Studio-Examples/) pins. `embraOS_Qwen3.8-27B` (import it in "My Models", then select it for the model) sets the three prediction settings that matter for a tool-calling session: `contextOverflowPolicy: stopAtLimit`, so the server stops at the context limit instead of truncating the prompt — a truncation drops part of the tool manifest or the history without a word; `repeatPenalty: 1`, which turns the penalty on repeated tokens off — tool-call JSON and code repeat tokens by nature; and `minPSampling: 0`, which turns min-p sampling off. It carries no load settings; the load configuration above stays as it is.
 
 ### Ollama (Mac Mini)
 
 Set context size and KV cache via launchd env vars if needed — `OLLAMA_CONTEXT_LENGTH`, `OLLAMA_FLASH_ATTENTION`, `OLLAMA_KV_CACHE_TYPE`, set all three together (see Ollama's OpenAI-compat note: `"The OpenAI API does not have a way of setting the context size"`).
 
-embra-brain sends sampler params and Ollama's `think: true` flag in each request — operators don't configure these.
+The request is the same as for LM Studio: no sampling parameters and no `think` flag. Thinking follows `reasoning_effort` where the model documents it (`/effort`); everything else is the server's own configuration.
 
 `num_ctx` is not a documented field on Ollama's OpenAI-compat endpoint (per [`ollama#7063`](https://github.com/ollama/ollama/issues/7063), still open since 2024-10-01); for locally-loaded models a Modelfile (`PARAMETER num_ctx`) works around it.
 
