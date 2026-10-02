@@ -9,6 +9,8 @@
 //!
 //! See the approved plan for the full architecture.
 
+mod activity_bridge;
+mod activity_feed;
 mod arbiter;
 mod assets;
 mod chat_bridge;
@@ -23,10 +25,12 @@ mod state;
 mod status;
 mod tls;
 mod ws;
+mod ws_activity;
 mod ws_chat;
 
 use std::sync::{Arc, Mutex};
 
+use activity_feed::ActivityFeed;
 use arbiter::Arbiter;
 use config::WebConfig;
 use pty_bridge::PtyBridge;
@@ -62,6 +66,9 @@ async fn main() -> anyhow::Result<()> {
         arbiter: Arbiter::new(),
         cpu_snap: Arc::new(Mutex::new(None)),
         apid_addr: cfg.apid_addr.clone(),
+        // One subscription to the brain's activity feed per process,
+        // fanned out to every `/ws/activity` socket.
+        activity: ActivityFeed::spawn(cfg.apid_addr.clone()),
     };
 
     server::serve(&cfg, state, server_config).await

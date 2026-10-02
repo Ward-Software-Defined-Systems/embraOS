@@ -155,7 +155,7 @@ fn system_msg_kind(t: i32) -> &'static str {
 }
 
 /// Map `brain::OperatingMode` enum → lowercase string for JSON.
-fn operating_mode(m: i32) -> &'static str {
+pub(crate) fn operating_mode(m: i32) -> &'static str {
     match m {
         1 => "setup",
         2 => "learning",

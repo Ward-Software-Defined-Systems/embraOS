@@ -2,6 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::activity_feed::ActivityFeed;
 use crate::arbiter::Arbiter;
 use crate::metrics::CpuSnapshot;
 use crate::pty_bridge::PtyBridge;
@@ -22,4 +23,7 @@ pub struct AppState {
     /// media all go through it. The status pills look at other services
     /// directly, to see whether they are up, and ask nothing of them.
     pub apid_addr: String,
+    /// The brain's activity feed, subscribed once through apid and fanned
+    /// out to every `/ws/activity` socket (`activity_feed.rs`).
+    pub activity: ActivityFeed,
 }

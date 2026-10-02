@@ -24,6 +24,7 @@ use crate::stop::api_stop;
 use crate::state::AppState;
 use crate::status::api_status;
 use crate::ws::ws_terminal;
+use crate::ws_activity::ws_activity;
 use crate::ws_chat::ws_chat;
 
 /// A TLS-terminating listener. `axum::serve::Listener::accept` has no
@@ -69,6 +70,7 @@ pub async fn serve(
     let app = Router::new()
         .route("/ws/terminal", get(ws_terminal))
         .route("/ws/chat", get(ws_chat))
+        .route("/ws/activity", get(ws_activity))
         .route("/api/status", get(api_status))
         .route("/api/sessions", get(api_sessions_list))
         .route("/api/stop", post(api_stop))
