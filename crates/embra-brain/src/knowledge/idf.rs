@@ -69,6 +69,12 @@ impl DocFreq {
         ((self.n_docs as f64 + 1.0) / (df + 1.0)).ln() + 1.0
     }
 
+    /// True when at least one document carries the token. A term the graph
+    /// has never seen cannot steer a query toward anything it holds.
+    pub(crate) fn seen(&self, token: &str) -> bool {
+        self.df.get(token).is_some_and(|&df| df > 0)
+    }
+
     /// True when the token is too common to carry admission signal. Always
     /// false on a corpus below `MIN_CORPUS_FOR_STOPWORDS`.
     pub(crate) fn is_stopword(&self, token: &str) -> bool {

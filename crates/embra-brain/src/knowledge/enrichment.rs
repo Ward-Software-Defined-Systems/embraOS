@@ -8,6 +8,7 @@
 //! API call — `grpc_service` persists `msg.content` (the raw version) to session
 //! history, so enrichment never leaks into subsequent turns.
 
+use crate::brain::Message;
 use crate::config::SystemConfig;
 use crate::db::WardsonDbClient;
 
@@ -51,6 +52,34 @@ const MAX_INJECTED: usize = 5;
 /// almost certainly a chatty filler and doesn't warrant a DB query.
 const MIN_MESSAGE_LEN: usize = 15;
 
+/// How many of the session's recent user turns retrieval may expand a weak
+/// query with (`retrieval::should_expand`): the topic of the conversation
+/// is in them when the message itself says little.
+const RECENT_USER_TURNS: usize = 3;
+
+/// The last `RECENT_USER_TURNS` operator turns, newest first, without the
+/// synthetic ones: the resume marker and the image-only placeholder carry
+/// no topic. The history never holds the current message.
+fn recent_user_turns(history: &[Message]) -> Vec<&str> {
+    history
+        .iter()
+        .rev()
+        .filter(|m| m.role == "user")
+        .map(|m| m.content.trim())
+        .filter(|c| {
+            !c.is_empty()
+                && *c != "[Session resumed]"
+                && *c != crate::media::replay::IMAGE_ONLY_PLACEHOLDER
+        })
+        .take(RECENT_USER_TURNS)
+        .collect()
+}
+
+/// A cosine for the funnel line: three decimals, or `-` when there was none.
+fn cosine_field(cosine: Option<f32>) -> String {
+    cosine.map(|c| format!("{c:.3}")).unwrap_or_else(|| "-".to_string())
+}
+
 /// Build the turn's Brain-facing user message. If retrieval yields qualifying
 /// results, returns the raw message prefixed with a `<retrieved_context>` block.
 /// Otherwise returns the raw message unchanged.
@@ -58,6 +87,7 @@ pub async fn build_turn_context(
     db: &WardsonDbClient,
     user_message: &str,
     session_name: &str,
+    history: &[Message],
     config: &SystemConfig,
 ) -> String {
     let trimmed = user_message.trim();
@@ -73,12 +103,14 @@ pub async fn build_turn_context(
     // "graph," now matches the tag "graph", and the tag_count log field
     // reports the deduped count.
     let query_tags: Vec<String> = super::text::query_tag_tokens(trimmed);
+    let context = recent_user_turns(history);
 
     let (results, stats) = match retrieve_relevant_knowledge(
         db,
         session_name,
         &query_tags,
         trimmed,
+        &context,
         MAX_INJECTED,
         config,
     )
@@ -102,7 +134,14 @@ pub async fn build_turn_context(
     // can now answer "was retrieval comprehensive", not just show the
     // surviving top-5. `candidates_graph` was retired 2026-09-08 with the
     // graph-expansion step; `candidates_other` reports the unknown-source
-    // bucket that field became and should read 0 forever.
+    // bucket that field became and should read 0 forever. The query_* and
+    // top_cosine_* fields say whether step 3c embedded the query a second
+    // time and with what; `injected` names what the model saw, so a noisy
+    // injection can be inspected (Embra#16).
+    let injected: Vec<String> = qualifying
+        .iter()
+        .map(|r| format!("{}:{}", r.node.collection, r.node.id))
+        .collect();
     tracing::info!(
         session = session_name,
         tag_count = query_tags.len(),
@@ -111,8 +150,13 @@ pub async fn build_turn_context(
         candidates_session = stats.session_based,
         candidates_other = stats.graph_expansion,
         candidates_embedding = stats.embedding,
+        query_expanded = stats.query_expanded,
+        expansion_terms = %stats.expansion_terms.join(" "),
+        top_cosine_raw = %cosine_field(stats.top_cosine_raw),
+        top_cosine_expanded = %cosine_field(stats.top_cosine_expanded),
         result_count = qualifying.len(),
         top_score = qualifying.first().map(|r| r.score).unwrap_or(0.0),
+        injected = %injected.join(","),
         "auto-enrichment"
     );
 
@@ -290,5 +334,43 @@ mod injection_gate_tests {
     fn the_score_threshold_still_applies() {
         assert!(!qualifies(&ranked(SCORE_THRESHOLD - 0.01, 1.0)));
         assert!(qualifies(&ranked(SCORE_THRESHOLD, 1.0)));
+    }
+}
+
+#[cfg(test)]
+mod recent_turns_tests {
+    use super::*;
+
+    fn turn(role: &str, content: &str) -> Message {
+        serde_json::from_value(serde_json::json!({"role": role, "content": content})).unwrap()
+    }
+
+    /// The newest three operator turns, newest first; the assistant's turns,
+    /// the resume marker, the image-only placeholder and blank turns are
+    /// not topic.
+    #[test]
+    fn recent_user_turns_skip_the_synthetic_markers() {
+        let history = vec![
+            turn("user", "first question about cron"),
+            turn("assistant", "an answer"),
+            turn("user", "second, about guardian"),
+            turn("user", "[Session resumed]"),
+            turn("user", crate::media::replay::IMAGE_ONLY_PLACEHOLDER),
+            turn("user", "   "),
+            turn("user", "third, about the seed packs"),
+            turn("assistant", "another answer"),
+            turn("user", "fourth, about logs"),
+        ];
+        assert_eq!(
+            recent_user_turns(&history),
+            ["fourth, about logs", "third, about the seed packs", "second, about guardian"]
+        );
+        assert!(recent_user_turns(&[]).is_empty());
+    }
+
+    #[test]
+    fn a_cosine_field_has_three_decimals_or_a_dash() {
+        assert_eq!(cosine_field(Some(0.6123)), "0.612");
+        assert_eq!(cosine_field(None), "-");
     }
 }

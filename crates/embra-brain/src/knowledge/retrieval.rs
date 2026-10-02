@@ -80,6 +80,17 @@ const EMBEDDING_TOP_K: usize = 100;
 /// query in any useful sense and only dilutes the candidate set.
 const EMBEDDING_MIN_SIMILARITY: f32 = 0.5;
 
+/// Cosine a raw query's best hit must reach, or the query is embedded again
+/// with the salient terms of the recent turns appended (`should_expand`).
+/// `similarity_strength` of this value is `enrichment::MIN_RELEVANCE`: below
+/// it no similarity hit could be injected anyway, so the second inference
+/// is paid only on the turns the first one failed. Pinned by
+/// `the_expansion_trigger_is_the_cosine_of_the_relevance_floor`.
+const EXPANSION_TRIGGER_COSINE: f32 = 0.60;
+
+/// Terms appended at most — the same eight as `idf::IDF_DENOM_CAP`.
+const EXPANSION_TERMS_MAX: usize = 8;
+
 /// Rescale a raw cosine onto the [0,1] scale the other relevance signals use.
 ///
 /// Cosine and `tag_relevance` are NOT the same units, and feeding a raw cosine
@@ -122,7 +133,7 @@ struct Collected {
 /// Pre-threshold, pre-truncation funnel counts — the observability seam
 /// (2026-07-31): enrichment logs these so production journals can answer
 /// "was retrieval comprehensive", not just show the surviving top-5.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RetrievalStats {
     pub candidates_total: usize,
     pub direct_query: usize,
@@ -135,18 +146,31 @@ pub struct RetrievalStats {
     /// already found. Counted at the step because cosine hits carry the
     /// `direct_query` label and `funnel_stats` cannot tell them apart.
     pub embedding: usize,
+    /// Step 3c embedded the query a second time, with the recent turns'
+    /// terms appended (`should_expand`).
+    pub query_expanded: bool,
+    /// The terms that second embedding appended; empty when it did not run.
+    pub expansion_terms: Vec<String>,
+    /// Best cosine of the raw query's search, when a vector index was there.
+    pub top_cosine_raw: Option<f32>,
+    /// Best cosine of the expanded query's search, when it ran.
+    pub top_cosine_expanded: Option<f32>,
 }
 
+/// `context` is the recent user turns, newest first, that a weak query may
+/// be expanded with in step 3c; `knowledge_query` passes none.
 pub async fn retrieve_relevant_knowledge(
     db: &WardsonDbClient,
     session_name: &str,
     tags: &[String],
     query_text: &str,
+    context: &[&str],
     max_results: usize,
     config: &SystemConfig,
 ) -> Result<(Vec<RankedNode>, RetrievalStats)> {
     let mut collected: HashMap<(String, String), Collected> = HashMap::new();
     let query_tokens = content_tokens(query_text);
+    let context_tokens = context_tokens(context, &query_tokens);
 
     // Prefetch the promoted-node collections once; every later lookup joins
     // in memory (2026-07-04 — replaces hundreds of sequential point reads).
@@ -182,9 +206,12 @@ pub async fn retrieve_relevant_knowledge(
     };
 
     // Per-query document frequency (2026-09-08). Counts only the query's own
-    // tokens, so this is a handful of counters regardless of corpus size.
+    // tokens and the context's, so this is a handful of counters regardless
+    // of corpus size. The expansion picks context terms by IDF and keeps
+    // only those the graph has seen; `denominator` still sums the query's.
+    let df_tokens: HashSet<String> = query_tokens.union(&context_tokens).cloned().collect();
     let doc_freq = DocFreq::build(
-        &query_tokens,
+        &df_tokens,
         prefetched
             .iter()
             .flat_map(|(coll, docs)| {
@@ -283,22 +310,65 @@ pub async fn retrieve_relevant_knowledge(
     // optional: no model, no embeddings, or any error degrades to the lexical
     // result above, silently and by design.
     let mut embedding_candidates = 0usize;
+    let mut top_cosine_raw: Option<f32> = None;
+    let mut top_cosine_expanded: Option<f32> = None;
+    let mut expansion_terms_used: Vec<String> = Vec::new();
     if !query_text.trim().is_empty()
         && let Some(provider) = crate::embedding::provider(config).await
     {
         {
             crate::embedding::cache::ensure_current(db, provider.as_ref()).await;
             match provider.embed_query(query_text).await {
-                Ok(qv) => {
+                Ok(raw_vector) => {
                     crate::activity::emit(crate::activity::Event::Embedding {
                         kind: crate::activity::EmbeddingKind::Query,
                     });
-                    let hits = crate::embedding::cache::search(
-                        &qv,
+                    let raw_hits = crate::embedding::cache::search(
+                        &raw_vector,
                         EMBEDDING_TOP_K,
                         EMBEDDING_MIN_SIMILARITY,
                     )
                     .await;
+                    top_cosine_raw = raw_hits.first().map(|h| h.2);
+                    // A raw query that found nothing it is clearly about is
+                    // embedded again with the salient terms of the recent
+                    // turns appended: a conversational turn says little by
+                    // itself, and its vector landed near the admission
+                    // floor on whatever was recent (Embra#16, part 1).
+                    let terms = expansion_terms(&context_tokens, &doc_freq);
+                    let (qv, hits) = if should_expand(top_cosine_raw, !terms.is_empty()) {
+                        match provider.embed_query(&embedding_query_text(query_text, &terms)).await {
+                            Ok(expanded_vector) => {
+                                crate::activity::emit(crate::activity::Event::Embedding {
+                                    kind: crate::activity::EmbeddingKind::Query,
+                                });
+                                let expanded_hits = crate::embedding::cache::search(
+                                    &expanded_vector,
+                                    EMBEDDING_TOP_K,
+                                    EMBEDDING_MIN_SIMILARITY,
+                                )
+                                .await;
+                                top_cosine_expanded = expanded_hits.first().map(|h| h.2);
+                                expansion_terms_used = terms;
+                                (expanded_vector, expanded_hits)
+                            }
+                            Err(e) => {
+                                tracing::debug!(
+                                    target: "kg::embedding",
+                                    "expanded query embedding failed: {e}"
+                                );
+                                crate::embedding::cache::record_failure(
+                                    crate::embedding::cache::FailureKind::Query,
+                                    "query",
+                                    &e.to_string(),
+                                )
+                                .await;
+                                (raw_vector, raw_hits)
+                            }
+                        }
+                    } else {
+                        (raw_vector, raw_hits)
+                    };
                     for (coll, id, score) in hits {
                         if let Some(doc) = store.get_or_fetch(db, &coll, &id).await {
                             let before = collected.len();
@@ -346,6 +416,10 @@ pub async fn retrieve_relevant_knowledge(
     // Funnel stats — pre-threshold, pre-truncation (the observability seam).
     let mut stats = funnel_stats(&collected);
     stats.embedding = embedding_candidates;
+    stats.query_expanded = !expansion_terms_used.is_empty();
+    stats.expansion_terms = expansion_terms_used;
+    stats.top_cosine_raw = top_cosine_raw;
+    stats.top_cosine_expanded = top_cosine_expanded;
 
     // Score and rank; access-touch ONLY what is returned (the 2026-07-04
     // semantics change: access_count = retrieval hits, not BFS sweeps).
@@ -363,6 +437,52 @@ pub async fn retrieve_relevant_knowledge(
 }
 
 /// One pass over the candidate map, counting by source label.
+/// The recent turns' tokens a weak query may be expanded with: the content
+/// tokens of `context`, less the query's own, which an expansion must never
+/// repeat.
+fn context_tokens(context: &[&str], query_tokens: &HashSet<String>) -> HashSet<String> {
+    context
+        .iter()
+        .flat_map(|turn| content_tokens(turn))
+        .filter(|t| !query_tokens.contains(t))
+        .collect()
+}
+
+/// The terms appended to a weak query: context tokens the graph has seen
+/// and that are not stopwords, rarest first, at most `EXPANSION_TERMS_MAX`.
+/// A term the graph never saw steers toward nothing it holds; a stopword
+/// steers toward everything.
+fn expansion_terms(context_tokens: &HashSet<String>, doc_freq: &DocFreq) -> Vec<String> {
+    let mut terms: Vec<(&String, f64)> = context_tokens
+        .iter()
+        .filter(|t| doc_freq.seen(t) && !doc_freq.is_stopword(t))
+        .map(|t| (t, doc_freq.idf(t)))
+        .collect();
+    terms.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0.cmp(b.0))
+    });
+    terms.into_iter().take(EXPANSION_TERMS_MAX).map(|(t, _)| t.clone()).collect()
+}
+
+/// The text the expanded query embeds: the message first, so the
+/// tokenizer's right truncation (`embedding::MAX_TOKENS`) cuts the expansion
+/// and never the message.
+fn embedding_query_text(query_text: &str, terms: &[String]) -> String {
+    if terms.is_empty() {
+        query_text.to_string()
+    } else {
+        format!("{}\n{}", query_text.trim(), terms.join(" "))
+    }
+}
+
+/// Whether to embed again: there are terms to append, and no raw hit reached
+/// `EXPANSION_TRIGGER_COSINE` (or there was no hit at all).
+fn should_expand(top_cosine: Option<f32>, has_terms: bool) -> bool {
+    has_terms && top_cosine.is_none_or(|c| c < EXPANSION_TRIGGER_COSINE)
+}
+
 fn funnel_stats(collected: &HashMap<(String, String), Collected>) -> RetrievalStats {
     let mut stats = RetrievalStats {
         candidates_total: collected.len(),
@@ -1357,3 +1477,93 @@ mod content_match_tests {
 }
 
 
+
+#[cfg(test)]
+mod expansion_tests {
+    //! Step 3c's second embedding: when it runs, what it appends, and in
+    //! which order the text goes to the model.
+    use super::*;
+
+    /// 100 documents: "the" in 60 (a stopword, over `STOPWORD_DF_RATIO`),
+    /// "guardian" in 10, "cron" in 5, "zebra" in none.
+    fn corpus() -> Vec<HashSet<String>> {
+        (0..100)
+            .map(|i| {
+                let mut d: HashSet<String> = HashSet::from(["filler".to_string()]);
+                if i < 60 {
+                    d.insert("the".into());
+                }
+                if i < 10 {
+                    d.insert("guardian".into());
+                }
+                if i < 5 {
+                    d.insert("cron".into());
+                }
+                d
+            })
+            .collect()
+    }
+
+    fn set(words: &[&str]) -> HashSet<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn expansion_terms_are_graph_known_non_stopwords_in_idf_order_capped_at_eight() {
+        let context = set(&["the", "guardian", "cron", "zebra"]);
+        let df = DocFreq::build(&context, corpus());
+        assert_eq!(expansion_terms(&context, &df), ["cron", "guardian"], "rarest first; no stopword, no unseen term");
+
+        // Ten seen terms of equal IDF: eight survive, in alphabetical order.
+        let ten: Vec<String> = (0..10).map(|i| format!("t{i}")).collect();
+        let context: HashSet<String> = ten.iter().cloned().collect();
+        let docs: Vec<HashSet<String>> = (0..60).map(|i| {
+            let mut d = set(&["filler"]);
+            if i < 10 { d.insert(ten[i].clone()); }
+            d
+        }).collect();
+        let df = DocFreq::build(&context, docs);
+        let terms = expansion_terms(&context, &df);
+        assert_eq!(terms.len(), EXPANSION_TERMS_MAX);
+        assert_eq!(terms, ["t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7"]);
+    }
+
+    #[test]
+    fn expansion_terms_never_repeat_the_message_s_own_tokens() {
+        let query = content_tokens("cron logs?");
+        let context = context_tokens(&["read the cron logs"], &query);
+        assert_eq!(context, set(&["read", "the"]));
+    }
+
+    #[test]
+    fn no_context_means_no_expansion() {
+        let query = content_tokens("what now");
+        let context = context_tokens(&[], &query);
+        assert!(context.is_empty());
+        let df = DocFreq::build(&query, corpus());
+        assert!(expansion_terms(&context, &df).is_empty());
+        assert!(!should_expand(Some(0.3), false), "nothing to append, nothing to try");
+        assert_eq!(embedding_query_text("what now", &[]), "what now");
+    }
+
+    #[test]
+    fn the_message_comes_first_and_the_expansion_after_it() {
+        let terms = vec!["cron".to_string(), "guardian".to_string()];
+        assert_eq!(embedding_query_text(" What now? ", &terms), "What now?\ncron guardian");
+    }
+
+    #[test]
+    fn expansion_is_tried_only_when_no_hit_reaches_the_trigger() {
+        assert!(should_expand(None, true), "no hit at all");
+        assert!(should_expand(Some(0.59), true));
+        assert!(!should_expand(Some(EXPANSION_TRIGGER_COSINE), true));
+        assert!(!should_expand(Some(0.9), true));
+        assert!(!should_expand(None, false));
+    }
+
+    #[test]
+    fn the_expansion_trigger_is_the_cosine_of_the_relevance_floor() {
+        let at_trigger = similarity_strength(EXPANSION_TRIGGER_COSINE);
+        assert!((at_trigger - crate::knowledge::enrichment::MIN_RELEVANCE).abs() < 1e-6);
+    }
+}

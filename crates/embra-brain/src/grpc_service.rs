@@ -1312,6 +1312,7 @@ async fn handle_request(
                     db.as_ref(),
                     &msg.content,
                     &session_name,
+                    &history,
                     &loaded_config,
                 )
                 .await

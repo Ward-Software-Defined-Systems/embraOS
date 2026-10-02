@@ -603,7 +603,7 @@ pub async fn knowledge_query(
     let query_tags: Vec<String> = super::text::query_tag_tokens(query_text);
 
     let (mut results, stats) = match retrieve_relevant_knowledge(
-        db, session_name, &query_tags, query_text, retrieve_n, config
+        db, session_name, &query_tags, query_text, &[], retrieve_n, config
     ).await {
         Ok(rs) => rs,
         Err(e) => return format!("Error: retrieval failed: {}", e),
