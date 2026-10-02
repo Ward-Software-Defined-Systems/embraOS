@@ -1,6 +1,7 @@
-//! The enterprise web shell: top bar (status pills + role + takeover),
-//! left command nav, a per-command parameter modal, a guided
-//! provider-setup launcher, the live xterm.js console, and a ⌘K palette.
+//! The enterprise web shell: top bar (brand, the activity strip, role +
+//! takeover), left command nav, a per-command parameter modal, the live
+//! xterm.js console, and a ⌘K palette. The status pills sit on the strip
+//! above the terminal; guided provider setup is a Model-group entry.
 //!
 //! Every chrome action injects into the PTY — the embedded TUI stays
 //! authoritative (parity-safe). Commands that need a value open a modal
@@ -481,14 +482,10 @@ pub fn App() -> impl IntoView {
                             .unwrap_or_else(|| "console".into())}
                     </span>
                 </div>
-                <div class="wizard">
-                    <span class="lbl">"Guided setup:"</span>
-                    <button class="btn"
-                        title="Git & SSH setups (/git-setup, /github-token, /git-token, /ssh-keygen) are in the sidebar."
-                        on:click=move |_| {
-                            if let Some(i) = spec_idx("/provider --setup") { open_modal(i); }
-                        }>"Provider setup"</button>
-                </div>
+                // The activity strip owns the flexible middle; `.role`
+                // stays right-aligned. Guided provider setup is in the
+                // sidebar's Model group and the ⌘K palette.
+                <crate::activity::ActivityStrip />
                 <div class="role">
                     {move || {
                         let (r, o) = role.get();

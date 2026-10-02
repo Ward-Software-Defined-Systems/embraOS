@@ -139,9 +139,17 @@ button.btn.ghost:hover { border-color: var(--accent); color: var(--accent); }
    terminal (moved out of the 52 px top bar 2026-09-17; they wrap freely
    here instead of fighting the brand and the buttons for one row). */
 .main .pills.status-strip { flex: 0 0 auto; }
-/* Guided setup lives in the top bar now: compact, and it takes the
-   flexible middle so `.role` stays right-aligned. */
-.topbar .wizard { flex: 1; }
+/* ── Activity strip ─────────────────────────────────────── */
+/* The top bar's flexible middle: a canvas the brain's activity feed drives
+   (`src/activity.rs`, fed by /ws/activity). It takes the flex:1 the guided-
+   setup block used to carry, so `.role` stays right-aligned; its height is
+   fixed, so the 52 px row never moves and the terminal never resizes. */
+.activity-wrap { flex: 1; min-width: 0; height: 40px; position: relative; }
+.activity-wrap canvas { display: block; width: 100%; height: 100%; }
+.activity-tip { position: absolute; top: 44px; z-index: 40; pointer-events: none;
+  font-size: var(--text-xs); line-height: 1.45; color: var(--txt); background: var(--panel-2);
+  border: 1px solid var(--line); border-radius: 6px; padding: 6px 9px; white-space: pre;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, .45); }
 
 /* ── Main / terminal ───────────────────────────────────── */
 .main { grid-area: main; display: flex; flex-direction: column;
@@ -156,10 +164,6 @@ body.is-observer .term-wrap {
 }
 #embra-term { width: 100%; height: 100%; }
 .term-hint { font-size: var(--text-xs); color: var(--txt-dim); }
-.wizard { display: flex; gap: 8px; flex-wrap: wrap; align-items: center;
-  background: var(--panel); border: 1px solid var(--line);
-  border-radius: 8px; padding: 10px 12px; }
-.wizard .lbl { font-size: var(--text-xs); color: var(--txt-dim); margin-right: 4px; }
 
 /* ── Command palette ───────────────────────────────────── */
 .palette-bg { position: fixed; inset: 0; background: rgba(8, 5, 3, .68);
