@@ -2346,8 +2346,9 @@ mod native_args_tests {
 
     #[test]
     fn knowledge_dump_args_defaults() {
-        // Cron fires registry tools with json!({}), so the defaults ARE the
-        // cron behavior: full dump, all collections, all edge types.
+        // A job scheduled without arguments dispatches json!({}), so the
+        // defaults are what such a cron job does: full dump, all
+        // collections, all edge types.
         let a: KnowledgeDumpArgs = serde_json::from_value(serde_json::json!({})).unwrap();
         assert!(a.collections.is_none());
         assert!(a.edge_types.is_none());

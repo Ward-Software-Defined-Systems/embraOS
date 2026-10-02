@@ -600,7 +600,6 @@ impl WardsonDbClient {
     }
 
     pub async fn query_with_options(
-
         &self,
         collection: &str,
         query_body: &serde_json::Value,

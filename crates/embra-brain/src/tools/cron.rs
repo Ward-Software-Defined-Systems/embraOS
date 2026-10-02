@@ -75,7 +75,6 @@ fn parse_schedule(schedule: &str, config_tz: &str) -> Option<(u64, String)> {
     None
 }
 
-/// Calculate the next run time from now given an interval in seconds.
 /// What one job dispatches, read from its stored document in either shape.
 #[derive(Debug, PartialEq)]
 pub(crate) struct CronPlan {
@@ -183,6 +182,7 @@ pub(crate) fn cron_dispatch_plan(doc: &serde_json::Value) -> Option<CronPlan> {
     Some(CronPlan { display, name, args, note })
 }
 
+/// The next run time from now, given an interval in seconds.
 fn next_run_from_now(interval_secs: u64) -> String {
     let next = Utc::now() + chrono::Duration::seconds(interval_secs as i64);
     next.to_rfc3339()
@@ -537,10 +537,8 @@ mod daily_next_tests {
 
 // ── Native tool-use registrations (NATIVE-TOOLS-01) ──
 //
-// Tool DEFINITIONS only — Stage 6 rewrites the executor at the top of this
-// file to invoke the registry directly instead of synthesizing ...
-// strings. During Stages 2-5 the legacy executor still synthesizes and
-// calls into the old string dispatcher.
+// Tool definitions only. `check_crons` above runs a job through the same
+// registry these register into (`registry::dispatch`).
 
 use embra_tool_macro::embra_tool;
 use embra_tools_core::DispatchError;

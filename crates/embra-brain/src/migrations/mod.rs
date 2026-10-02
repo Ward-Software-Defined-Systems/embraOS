@@ -291,7 +291,6 @@ async fn sweep_reaped_sessions(db: &WardsonDbClient) {
                 break; // the collection and its policy stay together
             }
             if let Err(e) = db.drop_collection(target).await {
-
                 warn!("Reaped-session sweep: drop {} failed (retrying next boot): {}", target, e);
                 all_dropped = false;
                 break; // keep .meta alive as the retry key
@@ -1284,9 +1283,10 @@ async fn run_v6_expression_panel(db: &WardsonDbClient) -> Result<()> {
 ///    gets `command_name` + `command_args` fields. Naked tool names
 ///    ("system_status") map to `command_args: {}`. Legacy strings with
 ///    args ("recall alerts") are parsed as name + space-joined rest and
-///    stored as `command_args: {"_legacy_raw": "<rest>"}` for the operator
-///    to re-schedule after inspecting. Already-migrated docs
-///    (command_name present) are skipped.
+///    stored as `command_args: {"_legacy_raw": "<rest>"}`;
+///    `cron_dispatch_plan` reads it at each fire — a JSON object is
+///    passed, any other text is not and the job's report says so.
+///    Already-migrated docs (command_name present) are skipped.
 ///
 /// 2. `sessions.*.history` collections: every doc without a
 ///    `format_version` field gets stamped with `format_version: 1`. This
