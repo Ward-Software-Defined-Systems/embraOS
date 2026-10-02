@@ -374,6 +374,12 @@ pub struct RankedNode {
     pub node: GraphNode,
     pub score: f64,
     pub source: String,
+    /// The relevance term the score was built from, in [0, 1]: the best of
+    /// the tag match, the rescaled cosine and the lexical strength
+    /// (`retrieval::relevance_one`). Enrichment requires
+    /// `enrichment::MIN_RELEVANCE` of it besides the score.
+    #[serde(default)]
+    pub relevance: f64,
 }
 
 /// Truncate a string to at most `max_chars` Unicode scalar values, appending

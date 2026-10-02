@@ -90,7 +90,7 @@ const EMBEDDING_MIN_SIMILARITY: f32 = 0.5;
 /// compresses every similarity hit into a thin slice of the relevance budget
 /// and hands the decision to recency — the exact defect the scoring wave was
 /// fixing. Mapping [floor, 1.0] onto [0, 1] restores the discrimination.
-fn similarity_strength(cosine: f32) -> f64 {
+pub(crate) fn similarity_strength(cosine: f32) -> f64 {
     let floor = EMBEDDING_MIN_SIMILARITY;
     (((cosine - floor) / (1.0 - floor)) as f64).clamp(0.0, 1.0)
 }
@@ -654,7 +654,10 @@ fn build_score_ctx(items: &[&Collected], input_tags: &[String]) -> ScoreCtx {
     }
 }
 
-fn score_one(c: &Collected, ctx: &ScoreCtx, input_tags: &[String]) -> f64 {
+/// The relevance term of the score, in [0, 1]. Enrichment reads it on its
+/// own as well: a node with none of it can still score 0.40 on recency and
+/// access alone (`enrichment::MIN_RELEVANCE`).
+fn relevance_one(c: &Collected, ctx: &ScoreCtx, input_tags: &[String]) -> f64 {
     let matching_tags = c.tags.iter()
         .filter(|t| input_tags.iter().any(|it| it.eq_ignore_ascii_case(t)))
         .count() as f64;
@@ -671,7 +674,11 @@ fn score_one(c: &Collected, ctx: &ScoreCtx, input_tags: &[String]) -> f64 {
     // Tags are kept in the max: they are operator- or model-authored and
     // high-precision, not a proxy for anything.
     let content_signal = c.similarity.unwrap_or(c.content_strength);
-    let relevance = tag_relevance.max(content_signal.clamp(0.0, 1.0));
+    tag_relevance.max(content_signal.clamp(0.0, 1.0))
+}
+
+fn score_one(c: &Collected, ctx: &ScoreCtx, input_tags: &[String]) -> f64 {
+    let relevance = relevance_one(c, ctx, input_tags);
 
     // Degenerate sets (2026-07-31 fix): with <2 distinct timestamps the
     // signal carries no ordering — neutral 0.5 keeps absolute comparisons
@@ -725,6 +732,7 @@ fn score_and_rank(
 
     let mut scored: Vec<RankedNode> = items.into_iter().map(|c| {
         let score = score_one(&c, &ctx, input_tags);
+        let relevance = relevance_one(&c, &ctx, input_tags);
         let node = GraphNode {
             id: c.id,
             collection: c.collection,
@@ -732,7 +740,7 @@ fn score_and_rank(
             node_type: c.node_type,
             depth: 0,
         };
-        RankedNode { node, score, source: c.source }
+        RankedNode { node, score, source: c.source, relevance }
     }).collect();
 
     scored.sort_by(|a, b| {
@@ -1078,6 +1086,45 @@ mod scoring_tests {
             s < crate::knowledge::enrichment::SCORE_THRESHOLD,
             "must not clear the enrichment threshold on recency alone"
         );
+        // With access as well the same node reaches 0.40 (next test); the
+        // relevance floor at the enrichment edge is what keeps it out.
+    }
+
+    /// The gap the enrichment floor closes: on score alone, a node with
+    /// no relevance that is the newest AND the most accessed of its set
+    /// clears the threshold — observed in production as off-topic nodes
+    /// injected at 0.35–0.47 on conversational turns.
+    #[test]
+    fn a_relevance_free_node_that_is_newest_and_most_accessed_scores_0_40_on_score_alone() {
+        let input_tags: Vec<String> = vec![];
+        let newest = item("new", &[], "2026-07-04T00:00:00Z", 10, "direct_query");
+        let oldest = item("old", &[], "2026-07-01T00:00:00Z", 0, "direct_query");
+        let refs = vec![&newest, &oldest];
+        let ctx = build_score_ctx(&refs, &input_tags);
+        let s = score_one(&newest, &ctx, &input_tags);
+        assert!((s - 0.40).abs() < 1e-9, "got {s}");
+        assert!(s >= crate::knowledge::enrichment::SCORE_THRESHOLD);
+        assert!((relevance_one(&newest, &ctx, &input_tags)).abs() < 1e-9);
+        assert!(
+            relevance_one(&newest, &ctx, &input_tags) < crate::knowledge::enrichment::MIN_RELEVANCE,
+            "the floor keeps it out of the injected block"
+        );
+    }
+
+    /// The ranked result carries the relevance it was scored with, so the
+    /// enrichment gate reads the same number the formula used.
+    #[test]
+    fn score_and_rank_carries_the_relevance_it_scored_with() {
+        let input_tags = vec!["kg".to_string()];
+        let tagged = item("t", &["kg"], "2026-07-01T00:00:00Z", 0, "direct_query");
+        let mut similar = item("s", &[], "2026-07-02T00:00:00Z", 0, "direct_query");
+        similar.similarity = Some(0.3);
+        let bare = item("b", &[], "2026-07-03T00:00:00Z", 0, "session_based");
+        let ranked = score_and_rank(vec![tagged, similar, bare], &input_tags, 10);
+        let relevance = |id: &str| ranked.iter().find(|r| r.node.id == id).unwrap().relevance;
+        assert!((relevance("t") - 1.0).abs() < 1e-9);
+        assert!((relevance("s") - 0.3).abs() < 1e-9);
+        assert!(relevance("b").abs() < 1e-9);
     }
 
     #[test]

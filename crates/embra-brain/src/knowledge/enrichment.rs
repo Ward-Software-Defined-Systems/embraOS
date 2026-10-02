@@ -12,6 +12,7 @@ use crate::config::SystemConfig;
 use crate::db::WardsonDbClient;
 
 use super::retrieval::retrieve_relevant_knowledge;
+use super::types::RankedNode;
 
 /// Minimum score a retrieval result must reach to be injected. Below this,
 /// the graph is reaching too far and the noise outweighs the signal.
@@ -20,8 +21,28 @@ use super::retrieval::retrieve_relevant_knowledge;
 /// (`retrieval::score_one`). A weight that changes moves what this value
 /// lets through; retrieval's guard
 /// `a_relevance_free_recent_node_cannot_clear_the_enrichment_threshold`
-/// reads the constant for that reason.
+/// reads the constant for that reason. It is one of two gates: a result
+/// must also carry `MIN_RELEVANCE`.
 pub(crate) const SCORE_THRESHOLD: f64 = 0.3;
+
+/// Relevance a result must carry to be injected, besides the score.
+///
+/// The score is relevance*0.6 + recency*0.2 + access*0.2, so a node with NO
+/// relevance that is the newest and the most accessed of its candidate set
+/// scores 0.40 and clears `SCORE_THRESHOLD`. On a conversational turn whose
+/// raw query is about nothing in particular, that was the top-5: recent,
+/// often-read nodes at cosines just over the 0.5 admission floor, injected
+/// at scores of 0.35–0.47 with relevance around 0.12 (Embra#16). 0.2 is
+/// `retrieval::similarity_strength` of cosine 0.60; two matched tags pass
+/// on any message, one matched tag passes on a message of up to five tag
+/// tokens. `knowledge_query` is not gated: the model sees the scores.
+/// Guards in `injection_gate_tests`.
+pub(crate) const MIN_RELEVANCE: f64 = 0.2;
+
+/// Both gates: the score threshold and the relevance floor.
+fn qualifies(r: &RankedNode) -> bool {
+    r.score >= SCORE_THRESHOLD && r.relevance >= MIN_RELEVANCE
+}
 
 /// Maximum number of retrieved nodes to inject per turn.
 const MAX_INJECTED: usize = 5;
@@ -72,7 +93,7 @@ pub async fn build_turn_context(
 
     let qualifying: Vec<_> = results
         .iter()
-        .filter(|r| r.score >= SCORE_THRESHOLD)
+        .filter(|r| qualifies(r))
         .take(MAX_INJECTED)
         .collect();
 
@@ -219,5 +240,55 @@ mod resumption_context_tests {
         assert!(s.ends_with("</session_resumption>"), "{s}");
         assert!(s.contains("while the user was away"), "{s}");
         assert!(s.contains(block), "{s}");
+    }
+}
+
+#[cfg(test)]
+mod injection_gate_tests {
+    //! The two gates a retrieved node passes before it is injected: the
+    //! score threshold and the relevance floor.
+    use super::*;
+    use crate::knowledge::retrieval::similarity_strength;
+    use crate::knowledge::types::{GraphNode, NodeType};
+
+    fn ranked(score: f64, relevance: f64) -> RankedNode {
+        RankedNode {
+            node: GraphNode {
+                id: "n".to_string(),
+                collection: "memory.semantic".to_string(),
+                content_preview: String::new(),
+                node_type: NodeType::Episodic,
+                depth: 0,
+            },
+            score,
+            source: "direct_query".to_string(),
+            relevance,
+        }
+    }
+
+    #[test]
+    fn a_candidate_without_a_relevance_signal_is_never_injected_whatever_its_score() {
+        assert!(!qualifies(&ranked(0.40, 0.0)), "newest and most accessed, about nothing");
+        assert!(!qualifies(&ranked(1.0, 0.0)));
+        assert!(qualifies(&ranked(0.40, MIN_RELEVANCE)));
+    }
+
+    #[test]
+    fn a_candidate_at_the_cosine_floor_is_not_injected_and_one_at_0_60_is() {
+        let at_the_admission_floor = similarity_strength(0.5);
+        let at_0_60 = similarity_strength(0.60);
+        assert!(!qualifies(&ranked(0.45, at_the_admission_floor)));
+        assert!(qualifies(&ranked(0.45, at_0_60)));
+    }
+
+    #[test]
+    fn min_relevance_is_the_rescaled_cosine_of_0_60() {
+        assert!((similarity_strength(0.60) - MIN_RELEVANCE).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_score_threshold_still_applies() {
+        assert!(!qualifies(&ranked(SCORE_THRESHOLD - 0.01, 1.0)));
+        assert!(qualifies(&ranked(SCORE_THRESHOLD, 1.0)));
     }
 }
