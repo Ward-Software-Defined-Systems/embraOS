@@ -308,3 +308,224 @@ mod tests {
         assert!(a > b, "paraphrase {a} must outrank unrelated {b}");
     }
 }
+
+#[cfg(test)]
+mod measure {
+    //! The measurement harness behind the embedding-model decision: two or
+    //! more models over one graph and one query set, through tract and CLS
+    //! pooling exactly as the OS runs them, with the vector width read from
+    //! the model's output instead of the compile-time constant, and the
+    //! expansion of a weak query applied by the production rule. Ignored;
+    //! run by hand in release — the recipe (a scratch WardSONDB on a copy of
+    //! a backup, the config shape) is in `docs/KNOWLEDGE-GRAPH.md`,
+    //! "Measuring an embedding model":
+    //!
+    //! `EMBRA_MEASURE=<config.json> cargo test -p embra-brain --release -- \
+    //!    --ignored measure_models_over_the_graph --nocapture`
+    //!
+    //! Config: `{"db": "http://127.0.0.1:18090", "out": "<report.json>",
+    //! "models": [{"name": "bge-small-en-v1.5", "dir": "<model dir>"}, …],
+    //! "queries": [{"text": "…", "kind": "crafted|conversational",
+    //! "truth": ["<node id or prefix>"], "context": ["<previous user turn>", …]}]}`.
+    //! The report carries, per model and query, the top-10 with cosines, the
+    //! rank of every truth node, the expansion terms and the expanded top-10
+    //! when the rule fired, and the inference times.
+    use super::*;
+    use std::collections::HashSet;
+    use std::time::Instant;
+
+    /// `Inner::embed_blocking` with the width taken from the output.
+    fn embed_any(inner: &Inner, text: &str) -> Result<Vec<f32>, EmbeddingError> {
+        let enc = inner
+            .tokenizer
+            .encode(text, true)
+            .map_err(|e| EmbeddingError::Tokenize(e.to_string()))?;
+        let take = |v: &[u32]| -> Vec<i64> { v.iter().take(MAX_TOKENS).map(|&x| x as i64).collect() };
+        let ids = take(enc.get_ids());
+        let mask = take(enc.get_attention_mask());
+        let types = take(enc.get_type_ids());
+        let n = ids.len();
+        let tensor = |v: Vec<i64>| -> TValue {
+            tract_ndarray::Array2::from_shape_vec((1, n), v).expect("shape").into_tensor().into()
+        };
+        let mut inputs: Vec<TValue> = Vec::with_capacity(inner.input_names.len());
+        for name in &inner.input_names {
+            inputs.push(match name.as_str() {
+                s if s.contains("attention") => tensor(mask.clone()),
+                s if s.contains("token_type") => tensor(types.clone()),
+                _ => tensor(ids.clone()),
+            });
+        }
+        let out = inner
+            .plan
+            .run(inputs.into())
+            .map_err(|e: TractError| EmbeddingError::Inference(e.to_string()))?;
+        let arr = out[0]
+            .to_plain_array_view::<f32>()
+            .map_err(|e| EmbeddingError::Inference(e.to_string()))?;
+        let width = arr.shape()[2];
+        let mut v: Vec<f32> = (0..width).map(|d| arr[[0, 0, d]]).collect();
+        super::super::l2_normalize(&mut v);
+        Ok(v)
+    }
+
+    fn pct(sorted: &[f64], p: f64) -> f64 {
+        if sorted.is_empty() {
+            return 0.0;
+        }
+        sorted[((sorted.len() - 1) as f64 * p).round() as usize]
+    }
+
+    fn sorted(mut v: Vec<f64>) -> Vec<f64> {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn measure_models_over_the_graph() {
+        let cfg_path = std::env::var("EMBRA_MEASURE").expect("EMBRA_MEASURE=<config.json>");
+        let cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg_path).expect("read config")).expect("json");
+        let db = crate::db::WardsonDbClient::from_url(cfg["db"].as_str().expect("db"));
+
+        // The corpus: every node the OS embeds, with the text the OS embeds,
+        // and the tag vocabulary the expansion draws from.
+        let mut corpus: Vec<(String, String, String)> = Vec::new(); // (coll, id, text)
+        let mut tag_vocab: HashSet<String> = HashSet::new();
+        for coll in crate::embedding::cache::EMBEDDED_COLLECTIONS {
+            let docs = db.fetch_recent(coll, crate::db::MEMORY_FETCH_WINDOW).await.expect("fetch");
+            tag_vocab.extend(crate::knowledge::retrieval::tag_vocabulary(docs.iter()));
+            for d in &docs {
+                let id = d.get("_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let text = crate::embedding::write::embed_text(d, coll);
+                if !text.trim().is_empty() {
+                    corpus.push((coll.to_string(), id, text));
+                }
+            }
+        }
+        let token_sets: Vec<HashSet<String>> =
+            corpus.iter().map(|(_, _, t)| crate::knowledge::text::content_tokens(t)).collect();
+        eprintln!("corpus: {} nodes, tag vocabulary {} tokens", corpus.len(), tag_vocab.len());
+
+        let queries = cfg["queries"].as_array().expect("queries").clone();
+        let mut report = serde_json::json!({"corpus": corpus.len(), "models": []});
+
+        for m in cfg["models"].as_array().expect("models") {
+            let name = m["name"].as_str().expect("name").to_string();
+            let dir = std::path::PathBuf::from(m["dir"].as_str().expect("dir"));
+            let t0 = Instant::now();
+            let provider = LocalEmbeddingProvider::load(&dir, &name).expect("load");
+            let load_ms = t0.elapsed().as_millis();
+            let inner = provider.inner.clone();
+
+            let mut vecs: Vec<Vec<f32>> = Vec::with_capacity(corpus.len());
+            let mut doc_ms: Vec<f64> = Vec::with_capacity(corpus.len());
+            for (_, _, text) in &corpus {
+                let t = Instant::now();
+                vecs.push(embed_any(&inner, text).expect("embed doc"));
+                doc_ms.push(t.elapsed().as_secs_f64() * 1000.0);
+            }
+            let width = vecs.first().map(|v| v.len()).unwrap_or(0);
+            let mean_ms = doc_ms.iter().sum::<f64>() / doc_ms.len().max(1) as f64;
+            let doc_sorted = sorted(doc_ms);
+
+            let mut qreports = Vec::new();
+            let mut query_ms: Vec<f64> = Vec::new();
+            for q in &queries {
+                let text = q["text"].as_str().expect("text").to_string();
+                let truth: Vec<String> = q["truth"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                let context: Vec<&str> = q["context"]
+                    .as_array()
+                    .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                    .unwrap_or_default();
+
+                let run = |qtext: &str| -> (Vec<(usize, f32)>, f64) {
+                    let t = Instant::now();
+                    let qv = embed_any(&inner, &format!("{QUERY_PREFIX}{qtext}")).expect("embed query");
+                    let ms = t.elapsed().as_secs_f64() * 1000.0;
+                    let mut scored: Vec<(usize, f32)> =
+                        vecs.iter().enumerate().map(|(i, v)| (i, crate::embedding::cosine(&qv, v))).collect();
+                    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+                    (scored, ms)
+                };
+                let (raw, ms) = run(&text);
+                query_ms.push(ms);
+
+                // The expansion exactly as retrieval applies it.
+                let query_tokens = crate::knowledge::text::content_tokens(&text);
+                let ctx_tokens = crate::knowledge::retrieval::context_tokens(&context, &query_tokens);
+                let df_tokens: HashSet<String> = query_tokens.union(&ctx_tokens).cloned().collect();
+                let df = crate::knowledge::idf::DocFreq::build(&df_tokens, token_sets.iter().cloned());
+                let terms = crate::knowledge::retrieval::expansion_terms(&ctx_tokens, &df, &tag_vocab);
+                let top_raw = raw.first().map(|h| h.1);
+                let expanded = if crate::knowledge::retrieval::should_expand(top_raw, !terms.is_empty()) {
+                    Some(run(&crate::knowledge::retrieval::embedding_query_text(&text, &terms)).0)
+                } else {
+                    None
+                };
+
+                let describe = |scored: &[(usize, f32)]| -> serde_json::Value {
+                    let top: Vec<serde_json::Value> = scored
+                        .iter()
+                        .take(10)
+                        .map(|(i, c)| {
+                            let (coll, id, text) = &corpus[*i];
+                            serde_json::json!({
+                                "coll": coll, "id": id,
+                                "cos": (*c as f64 * 1000.0).round() / 1000.0,
+                                "rel": (crate::knowledge::retrieval::similarity_strength(*c) * 1000.0).round() / 1000.0,
+                                "text": text.chars().take(110).collect::<String>(),
+                            })
+                        })
+                        .collect();
+                    let truth_ranks: Vec<serde_json::Value> = truth
+                        .iter()
+                        .map(|tid| {
+                            let pos = scored.iter().position(|(i, _)| corpus[*i].1.starts_with(tid.as_str()));
+                            serde_json::json!({
+                                "id": tid,
+                                "rank": pos.map(|p| p + 1),
+                                "cos": pos.map(|p| (scored[p].1 as f64 * 1000.0).round() / 1000.0),
+                            })
+                        })
+                        .collect();
+                    let cos: Vec<f64> = scored.iter().map(|(_, c)| *c as f64).collect();
+                    let median_all = pct(&sorted(cos.clone()), 0.5);
+                    serde_json::json!({
+                        "top": top,
+                        "truth": truth_ranks,
+                        "top1": cos.first().copied().unwrap_or(0.0),
+                        "top5_mean": cos.iter().take(5).sum::<f64>() / 5.0,
+                        "top10_min": cos.get(9).copied().unwrap_or(0.0),
+                        "n_ge_070": cos.iter().filter(|c| **c >= 0.70).count(),
+                        "n_ge_050": cos.iter().filter(|c| **c >= 0.50).count(),
+                        "median_all": median_all,
+                    })
+                };
+                qreports.push(serde_json::json!({
+                    "text": text, "kind": q["kind"], "context_turns": context.len(),
+                    "raw": describe(&raw),
+                    "expansion_terms": terms,
+                    "expanded": expanded.as_deref().map(describe),
+                }));
+            }
+            let q_sorted = sorted(query_ms);
+            report["models"].as_array_mut().unwrap().push(serde_json::json!({
+                "name": name, "width": width, "load_ms": load_ms,
+                "doc_ms": {"mean": mean_ms, "p50": pct(&doc_sorted, 0.5), "p95": pct(&doc_sorted, 0.95)},
+                "query_ms": {"p50": pct(&q_sorted, 0.5), "p95": pct(&q_sorted, 0.95)},
+                "queries": qreports,
+            }));
+            eprintln!(
+                "{name}: width {width}, load {load_ms} ms, doc mean {mean_ms:.1} ms, query p50 {:.1} ms",
+                pct(&q_sorted, 0.5)
+            );
+        }
+        std::fs::write(cfg["out"].as_str().expect("out"), serde_json::to_string_pretty(&report).unwrap())
+            .expect("write report");
+    }
+}

@@ -446,7 +446,7 @@ pub async fn retrieve_relevant_knowledge(
 /// The recent turns' tokens a weak query may be expanded with: the content
 /// tokens of `context`, less the query's own, which an expansion must never
 /// repeat.
-fn context_tokens(context: &[&str], query_tokens: &HashSet<String>) -> HashSet<String> {
+pub(crate) fn context_tokens(context: &[&str], query_tokens: &HashSet<String>) -> HashSet<String> {
     context
         .iter()
         .flat_map(|turn| content_tokens(turn))
@@ -458,7 +458,7 @@ fn context_tokens(context: &[&str], query_tokens: &HashSet<String>) -> HashSet<S
 /// gives `seed` and `packs`), from the documents retrieval has prefetched.
 /// Tags are operator- or model-authored topical words — the one vocabulary
 /// in the graph that cannot contain conversational filler.
-fn tag_vocabulary<'a>(docs: impl Iterator<Item = &'a serde_json::Value>) -> HashSet<String> {
+pub(crate) fn tag_vocabulary<'a>(docs: impl Iterator<Item = &'a serde_json::Value>) -> HashSet<String> {
     let mut vocab = HashSet::new();
     for doc in docs {
         if let Some(tags) = doc.get("tags").and_then(|v| v.as_array()) {
@@ -479,7 +479,7 @@ fn tag_vocabulary<'a>(docs: impl Iterator<Item = &'a serde_json::Value>) -> Hash
 /// (measured 2026-10-02). The tag vocabulary is the graph's own topical
 /// words: restricted to it, the expansion improved 4 of 10 measured turns
 /// and worsened 2.
-fn expansion_terms(
+pub(crate) fn expansion_terms(
     context_tokens: &HashSet<String>,
     doc_freq: &DocFreq,
     tag_vocab: &HashSet<String>,
@@ -500,7 +500,7 @@ fn expansion_terms(
 /// The text the expanded query embeds: the message first, so the
 /// tokenizer's right truncation (`embedding::MAX_TOKENS`) cuts the expansion
 /// and never the message.
-fn embedding_query_text(query_text: &str, terms: &[String]) -> String {
+pub(crate) fn embedding_query_text(query_text: &str, terms: &[String]) -> String {
     if terms.is_empty() {
         query_text.to_string()
     } else {
@@ -510,7 +510,7 @@ fn embedding_query_text(query_text: &str, terms: &[String]) -> String {
 
 /// Whether to embed again: there are terms to append, and no raw hit reached
 /// `EXPANSION_TRIGGER_COSINE` (or there was no hit at all).
-fn should_expand(top_cosine: Option<f32>, has_terms: bool) -> bool {
+pub(crate) fn should_expand(top_cosine: Option<f32>, has_terms: bool) -> bool {
     has_terms && top_cosine.is_none_or(|c| c < EXPANSION_TRIGGER_COSINE)
 }
 
