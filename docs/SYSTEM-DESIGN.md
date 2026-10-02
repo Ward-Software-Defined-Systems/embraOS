@@ -18,9 +18,9 @@ The runtime services that implement those layers:
 |---|---|---|
 | `wardsondb` | 8090 | Rust JSON document database. Holds soul, memory, knowledge graph, sessions, schedules, and Guardian tool definitions. |
 | `embra-trustd` | 50001 | Soul SHA-256 verification + PKI (Root CA 10y, service certs 1y). |
-| `embra-apid` | 50000 / 8443 | gRPC + REST gateway, proxies brain RPCs. REST: `GET /health`, `/version`, `/status` — `/status` is the brain's `GetSystemStatus` (2 s timeout, 503 when the brain is away) and carries the LLM provider probe as `llm-provider` / `llm-provider.detail`. |
+| `embra-apid` | 50000 / 8443 | gRPC + REST gateway, proxies brain RPCs. REST: `GET /health`, `/version`, `/status` — `/status` is the brain's `GetSystemStatus` (2 s timeout, 503 when the brain is away) and carries the LLM provider probe as `llm-provider` / `llm-provider.detail`. gRPC `WatchActivity` streams the brain's activity feed: a snapshot, then a tick every 200 ms while something happens; names and numbers only. |
 | `embra-brain` | 50002 | LLM runtime — provider abstraction, 115 tools, session manager, knowledge graph, Learning Mode. |
-| `embra-web` | 3345 | HTTPS web console (default UI); wraps embra-console in xterm.js over a PTY→WebSocket bridge. |
+| `embra-web` | 3345 | HTTPS web console (default UI); wraps embra-console in xterm.js over a PTY→WebSocket bridge. `/ws/activity` fans the brain's activity feed out to every browser for the top bar's activity strip. |
 | `embra-console` | — | Conversational TUI (serial; PTY-child of embra-web in default mode). |
 | `embrad` | PID 1 | Init, service supervisor, soul verification gate, 5-second reconciliation loop. |
 | `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for dynamic tools — both authoring paths (operator paste, intelligence proposal) gated by a soul-spec replicant check; intelligence proposals additionally operator-approved; capability-broker host imports. |
