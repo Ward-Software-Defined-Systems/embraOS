@@ -363,6 +363,17 @@ fn hot_path_index_specs() -> Vec<(&'static str, serde_json::Value)> {
             "memory.procedural",
             serde_json::json!({"name": "idx_procedural_origin", "field": "origin"}),
         ),
+        // The turn-trace reads — `turn_trace`'s `{session, turn_index}` and
+        // the session search's `{session}`, both sorted with a limit —
+        // scanned the whole collection (E2E 27 after Embra#15: slow-query
+        // lines on a tool collection that grows with every tool call).
+        // `session` sorts before `turn_index`, so one single-field index
+        // serves both. The collection is created on the first dispatch;
+        // `ensure_hot_path_indexes` creates it first when it is missing.
+        (
+            "tools.turn_trace",
+            serde_json::json!({"name": "idx_turn_trace_session", "field": "session"}),
+        ),
     ]
 }
 
@@ -380,6 +391,18 @@ fn hot_path_index_specs() -> Vec<(&'static str, serde_json::Value)> {
 async fn ensure_hot_path_indexes(db: &WardsonDbClient) {
     for (collection, body) in hot_path_index_specs() {
         let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+        // A collection that is created lazily (tools.turn_trace, on the
+        // first dispatch) is created here first, so a fresh instance gets
+        // its index at boot rather than a warning at every boot until then.
+        if !db.collection_exists(collection).await.unwrap_or(true)
+            && let Err(e) = db.create_collection(collection).await
+        {
+            warn!(
+                "Hot-path index {} on {}: the collection could not be created (continuing without it): {}",
+                name, collection, e
+            );
+            continue;
+        }
         match db.create_index(collection, &body).await {
             Ok(_) => info!("Hot-path index {} on {} ensured", name, collection),
             Err(e) => warn!(
@@ -683,6 +706,25 @@ mod hot_path_index_tests {
         let key = first_key(&crate::knowledge::seed::seed_node_count_filter("a-pack"));
         assert_eq!(key, "origin");
         assert!(indexed("memory.semantic", &key) && indexed("memory.procedural", &key));
+    }
+
+    /// Both turn-trace reads lead with `session`, the key the list indexes.
+    #[test]
+    fn the_turn_trace_reads_lead_with_the_indexed_key() {
+        fn first_key(filter: &serde_json::Value) -> String {
+            let mut keys: Vec<&String> = filter.as_object().expect("an object").keys().collect();
+            keys.sort();
+            (*keys.first().expect("a key")).clone()
+        }
+        let indexed = hot_path_index_specs()
+            .iter()
+            .any(|(c, b)| *c == "tools.turn_trace" && b["field"] == "session" && b.get("fields").is_none());
+        assert!(indexed, "a single-field session index on tools.turn_trace");
+        let search = crate::tools::sessions::trace_search_body("x");
+        assert_eq!(first_key(&search["filter"]), "session");
+        // The `turn_trace` tool's filter, mirrored from its call site.
+        let tool_filter = serde_json::json!({"session": "x", "turn_index": 0usize});
+        assert_eq!(first_key(&tool_filter), "session");
     }
 
     /// The alphabetical-planner tripwire (see the comment on

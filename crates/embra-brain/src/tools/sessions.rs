@@ -671,7 +671,7 @@ const TRACE_SEARCH_WINDOW: usize = 500;
 /// session. The order is stated because a body with a limit and no sort is
 /// answered in key order, oldest first: a session with more traces than the
 /// window would never have its recent tool calls searched.
-fn trace_search_body(session: &str) -> serde_json::Value {
+pub(crate) fn trace_search_body(session: &str) -> serde_json::Value {
     let mut body = crate::db::client::recent_query_body(TRACE_SEARCH_WINDOW, None);
     body["filter"] = serde_json::json!({"session": session});
     body
