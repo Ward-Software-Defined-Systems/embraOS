@@ -262,11 +262,7 @@ pub async fn cron_list(db: &WardsonDbClient) -> String {
 
     let mut output = format!("=== embraCRON Jobs ({}) ===\n", crons.len());
     for doc in &crons {
-        let id = doc
-            .get("_id")
-            .or(doc.get("id"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("?");
+        let id = doc_id(doc).unwrap_or("?");
         let schedule = doc.get("schedule").and_then(|v| v.as_str()).unwrap_or("?");
         let command = doc.get("command").and_then(|v| v.as_str()).unwrap_or("?");
         let enabled = doc.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -285,16 +281,95 @@ pub async fn cron_list(db: &WardsonDbClient) -> String {
     output
 }
 
-/// Remove a cron job by ID.
+/// The id of a stored job, as WardSONDB returns it.
+fn doc_id(doc: &serde_json::Value) -> Option<&str> {
+    doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str())
+}
+
+/// Shortest prefix of an id that `cron_remove` resolves, in characters.
+///
+/// A job's id is the UUIDv7 WardSONDB minted for its document,
+/// `tttttttt-tttt-7rrr-vrrr-rrrrrrrrrrrr`, whose first twelve hex digits
+/// are a 48-bit millisecond timestamp. Eight characters are the top 32
+/// bits of that timestamp, one value per 65.5 s: jobs created more than a
+/// minute apart always differ within them, and jobs created in the same
+/// minute collide and are named as ambiguous. Shorter prefixes collapse by
+/// construction (seven characters cover 17.5 minutes, six almost five
+/// hours). Eight is also the first block of the id as `cron_list` prints
+/// it. Guards in `id_prefix_tests`.
+pub(crate) const MIN_ID_PREFIX: usize = 8;
+
+/// What an id, or a prefix of one, resolves to among the stored jobs.
+#[derive(Debug, PartialEq)]
+pub(crate) enum IdMatch {
+    /// Exactly one job: its full id.
+    One(String),
+    /// A prefix of several jobs: their full ids, sorted.
+    Several(Vec<String>),
+    /// No job has this id or prefix.
+    None,
+    /// Fewer than `MIN_ID_PREFIX` characters, and not an exact id.
+    TooShort,
+}
+
+/// Resolve `wanted` against the ids of the stored jobs: an exact id at any
+/// length (a UUID compares without case), otherwise a prefix of at least
+/// `MIN_ID_PREFIX` characters.
+pub(crate) fn resolve_id_prefix(ids: &[String], wanted: &str) -> IdMatch {
+    let wanted = wanted.trim();
+    if let Some(exact) = ids.iter().find(|id| id.eq_ignore_ascii_case(wanted)) {
+        return IdMatch::One(exact.clone());
+    }
+    if wanted.chars().count() < MIN_ID_PREFIX {
+        return IdMatch::TooShort;
+    }
+    let prefix = wanted.to_ascii_lowercase();
+    let mut hits: Vec<String> = ids
+        .iter()
+        .filter(|id| id.to_ascii_lowercase().starts_with(&prefix))
+        .cloned()
+        .collect();
+    match hits.len() {
+        0 => IdMatch::None,
+        1 => IdMatch::One(hits.remove(0)),
+        _ => {
+            hits.sort();
+            IdMatch::Several(hits)
+        }
+    }
+}
+
+/// Remove a cron job by its id, or by a unique prefix of it
+/// (`resolve_id_prefix`). The full-id case takes the same read of the
+/// collection, so one path answers every miss with the same text.
 pub async fn cron_remove(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
         return "Usage: cron_remove <id>".into();
     }
 
-    let id = param.trim();
-    match db.delete("crons", id).await {
-        Ok(()) => format!("Cron job {} removed.", id),
-        Err(e) => format!("Failed to remove cron job: {}", e),
+    let wanted = param.trim();
+    ensure_collection(db).await;
+    let crons = match db.fetch_collection("crons").await {
+        Ok(docs) => docs,
+        Err(e) => return format!("Failed to read cron jobs: {}", e),
+    };
+    let ids: Vec<String> = crons.iter().filter_map(doc_id).map(str::to_string).collect();
+    match resolve_id_prefix(&ids, wanted) {
+        IdMatch::One(id) => match db.delete("crons", &id).await {
+            Ok(()) => format!("Cron job {} removed.", id),
+            Err(e) => format!("Failed to remove cron job: {}", e),
+        },
+        IdMatch::Several(ids) => format!(
+            "{} is a prefix of {} cron jobs: {}; nothing removed. Give more of the id; cron_list shows ids.",
+            wanted,
+            ids.len(),
+            ids.join(", ")
+        ),
+        IdMatch::None => format!("no cron job has id or prefix {}; cron_list shows ids", wanted),
+        IdMatch::TooShort => format!(
+            "{} is too short; give at least {} characters of the id, or the full id; cron_list shows ids",
+            wanted, MIN_ID_PREFIX
+        ),
     }
 }
 
@@ -594,6 +669,84 @@ mod command_tests {
         let plan = cron_dispatch_plan(&json!({"command": "time"})).unwrap();
         assert_eq!((plan.name.as_str(), plan.args.clone(), plan.note.clone()), ("time", json!({}), None));
         assert!(cron_dispatch_plan(&json!({"command": ""})).is_none());
+    }
+}
+
+#[cfg(test)]
+mod id_prefix_tests {
+    use super::{IdMatch, MIN_ID_PREFIX, resolve_id_prefix};
+
+    /// A UUIDv7-shaped id whose timestamp is `ts_ms`.
+    fn id_at(ts_ms: u64, tail: &str) -> String {
+        let hex = format!("{:012x}", ts_ms);
+        format!("{}-{}-7000-8000-{tail:0>12}", &hex[..8], &hex[8..])
+    }
+
+    fn ids(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    const A: &str = "01a0edf5-4316-7a2b-8c3d-000000000001";
+    const B: &str = "01a0edf5-9999-7a2b-8c3d-000000000002";
+    const C: &str = "01b1ffff-0000-7a2b-8c3d-000000000003";
+
+    #[test]
+    fn a_full_id_resolves_to_itself() {
+        assert_eq!(resolve_id_prefix(&ids(&[A, B, C]), A), IdMatch::One(A.to_string()));
+    }
+
+    #[test]
+    fn a_unique_prefix_resolves_to_the_one_job_with_its_full_id() {
+        assert_eq!(resolve_id_prefix(&ids(&[A, B, C]), "01b1ffff"), IdMatch::One(C.to_string()));
+        assert_eq!(resolve_id_prefix(&ids(&[A, B, C]), "01a0edf5-43"), IdMatch::One(A.to_string()));
+    }
+
+    /// Two jobs created in the same minute share their first eight
+    /// characters: the prefix names both and removes neither.
+    #[test]
+    fn an_ambiguous_prefix_names_every_matching_job_and_resolves_none() {
+        assert_eq!(
+            resolve_id_prefix(&ids(&[B, A, C]), "01a0edf5"),
+            IdMatch::Several(ids(&[A, B]))
+        );
+    }
+
+    /// Short prefixes are refused before matching, unique or not: seven
+    /// characters would cover every job of a 17-minute window.
+    #[test]
+    fn a_prefix_shorter_than_eight_characters_is_refused_before_it_is_matched() {
+        assert_eq!(resolve_id_prefix(&ids(&[C]), "01b1fff"), IdMatch::TooShort);
+        assert_eq!(resolve_id_prefix(&ids(&[C]), ""), IdMatch::TooShort);
+    }
+
+    #[test]
+    fn an_unknown_id_or_prefix_resolves_to_nothing() {
+        assert_eq!(resolve_id_prefix(&ids(&[A, B]), "ffffffff"), IdMatch::None);
+        assert_eq!(resolve_id_prefix(&ids(&[A, B]), C), IdMatch::None);
+        assert_eq!(resolve_id_prefix(&[], "01a0edf5"), IdMatch::None);
+    }
+
+    #[test]
+    fn matching_ignores_ascii_case() {
+        assert_eq!(resolve_id_prefix(&ids(&[A, C]), "01B1FFFF"), IdMatch::One(C.to_string()));
+        assert_eq!(resolve_id_prefix(&ids(&[A, C]), &C.to_uppercase()), IdMatch::One(C.to_string()));
+    }
+
+    /// Why eight: the first eight hex digits are the top 32 bits of the
+    /// 48-bit millisecond timestamp, one value per 65,536 ms.
+    #[test]
+    fn eight_characters_separate_jobs_created_more_than_a_minute_apart() {
+        let t0 = 1_700_000_000_000u64;
+        let a = id_at(t0, "a");
+        let later = id_at(t0 + 65_536, "b");
+        let same_minute = id_at(t0 + 1, "c");
+        assert_eq!(MIN_ID_PREFIX, 8);
+        assert_ne!(&a[..MIN_ID_PREFIX], &later[..MIN_ID_PREFIX]);
+        assert_eq!(&a[..MIN_ID_PREFIX], &same_minute[..MIN_ID_PREFIX]);
+        assert_eq!(
+            resolve_id_prefix(&[a.clone(), later.clone(), same_minute.clone()], &later[..8]),
+            IdMatch::One(later)
+        );
     }
 }
 
