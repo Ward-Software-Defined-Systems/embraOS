@@ -579,7 +579,28 @@ impl WardsonDbClient {
         Ok(())
     }
 
+    /// Remove a collection's TTL policy. 404 is success: the policy, or the
+    /// collection, is already gone. The reaped-session sweep calls this
+    /// BEFORE `drop_collection`: the server keeps a dropped collection's
+    /// policy and refuses this route once the collection is gone, and its
+    /// TTL worker then logs an error for the ghost on every tick, forever
+    /// (Embra#15).
+    pub async fn delete_ttl(&self, collection: &str) -> Result<()> {
+        let resp = self
+            .http_client
+            .delete(format!("{}/{}/ttl", self.base_url, collection))
+            .send()
+            .await?;
+        if resp.status().is_success() || resp.status().as_u16() == 404 {
+            return Ok(());
+        }
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        Err(WardsonDbError::Api { status, body }.into())
+    }
+
     pub async fn query_with_options(
+
         &self,
         collection: &str,
         query_body: &serde_json::Value,
@@ -1094,5 +1115,44 @@ mod activity_tap_tests {
             1
         );
         assert!(after.db_ops - before.db_ops >= 2, "totals count every request");
+    }
+}
+
+#[cfg(test)]
+mod ttl_policy_tests {
+    use super::*;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A policy that is already gone, or a collection that is, is not an
+    /// error for the sweep; anything else is surfaced with its status.
+    #[tokio::test]
+    async fn delete_ttl_treats_404_as_success_and_surfaces_other_errors() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/gone/ttl"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/kept/ttl"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"ok": true, "data": {"deleted": true}, "meta": {}})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/broken/ttl"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+            .mount(&server)
+            .await;
+        let db = WardsonDbClient::from_url(&server.uri());
+
+        assert!(db.delete_ttl("gone").await.is_ok(), "404 is success");
+        assert!(db.delete_ttl("kept").await.is_ok());
+        let err = db.delete_ttl("broken").await.unwrap_err().to_string();
+        assert!(err.contains("500"), "the status is in the error: {err}");
     }
 }

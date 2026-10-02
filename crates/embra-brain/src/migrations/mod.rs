@@ -246,6 +246,13 @@ fn session_is_reaped(meta_doc_present: bool, history_doc_present: bool) -> bool 
 /// order is summary → history → meta LAST: the loop keys on `.meta`
 /// collections, so a crash mid-sweep leaves the meta collection behind
 /// and the next boot retries (meta-first would strand the siblings).
+///
+/// Each collection's TTL policy is deleted BEFORE the collection: the
+/// server keeps a dropped collection's policy and refuses to delete it
+/// once the collection is gone, and its TTL worker then errors on the
+/// ghost every tick (Embra#15: ~130 lines a minute from the policies of
+/// reaped sessions). A failed policy delete keeps the collection, and the
+/// `.meta` retry key, for the next boot. Guards in `reaped_sweep_tests`.
 async fn sweep_reaped_sessions(db: &WardsonDbClient) {
     let collections = match db.list_collections().await {
         Ok(c) => c,
@@ -275,7 +282,16 @@ async fn sweep_reaped_sessions(db: &WardsonDbClient) {
         let summary_coll = format!("sessions.{}.summary", name);
         let mut all_dropped = true;
         for target in [&summary_coll, &history_coll, &coll] {
+            if let Err(e) = db.delete_ttl(target).await {
+                warn!(
+                    "Reaped-session sweep: TTL policy delete on {} failed (retrying next boot): {}",
+                    target, e
+                );
+                all_dropped = false;
+                break; // the collection and its policy stay together
+            }
             if let Err(e) = db.drop_collection(target).await {
+
                 warn!("Reaped-session sweep: drop {} failed (retrying next boot): {}", target, e);
                 all_dropped = false;
                 break; // keep .meta alive as the retry key
@@ -450,7 +466,110 @@ mod dedupe_tests {
 
 #[cfg(test)]
 mod reaped_sweep_tests {
-    use super::session_is_reaped;
+    use super::{session_is_reaped, sweep_reaped_sessions};
+    use crate::db::WardsonDbClient;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn collections(names: &[&str]) -> serde_json::Value {
+        let data: Vec<serde_json::Value> =
+            names.iter().map(|n| json!({"name": n, "doc_count": 0})).collect();
+        json!({"ok": true, "data": data, "meta": {}})
+    }
+
+    fn no_docs() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": [], "meta": {}}))
+    }
+
+    fn done() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": {}, "meta": {}}))
+    }
+
+    /// A stub server holding one reaped session `x` (both canonical docs
+    /// gone, no summary collection); `history_ttl` answers the history
+    /// policy delete.
+    async fn reaped_session_server(history_ttl: ResponseTemplate) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/_collections"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(collections(&["sessions.x.meta", "sessions.x.history"])),
+            )
+            .mount(&server)
+            .await;
+        for coll in ["/sessions.x.meta/query", "/sessions.x.history/query"] {
+            Mock::given(method("POST")).and(path(coll)).respond_with(no_docs()).mount(&server).await;
+        }
+        // The summary never existed: both of its calls answer 404.
+        for gone in ["/sessions.x.summary/ttl", "/sessions.x.summary"] {
+            Mock::given(method("DELETE"))
+                .and(path(gone))
+                .respond_with(ResponseTemplate::new(404))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("DELETE"))
+            .and(path("/sessions.x.history/ttl"))
+            .respond_with(history_ttl)
+            .mount(&server)
+            .await;
+        for ok in ["/sessions.x.history", "/sessions.x.meta/ttl", "/sessions.x.meta"] {
+            Mock::given(method("DELETE")).and(path(ok)).respond_with(done()).mount(&server).await;
+        }
+        server
+    }
+
+    /// The DELETE requests the server saw, in order, as "METHOD /path".
+    async fn deletes_seen(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method == "DELETE")
+            .map(|r| format!("{} {}", r.method, r.url.path()))
+            .collect()
+    }
+
+    /// Every collection's policy goes before the collection, summary first
+    /// and meta last; a 404 on either call of a summary that never existed
+    /// is not a failure.
+    #[tokio::test]
+    async fn a_reaped_session_loses_its_ttl_policies_before_its_collections_are_dropped() {
+        let server = reaped_session_server(done()).await;
+        sweep_reaped_sessions(&WardsonDbClient::from_url(&server.uri())).await;
+        assert_eq!(
+            deletes_seen(&server).await,
+            [
+                "DELETE /sessions.x.summary/ttl",
+                "DELETE /sessions.x.summary",
+                "DELETE /sessions.x.history/ttl",
+                "DELETE /sessions.x.history",
+                "DELETE /sessions.x.meta/ttl",
+                "DELETE /sessions.x.meta",
+            ]
+        );
+    }
+
+    /// A policy delete that fails stops the sweep there: the collection is
+    /// not dropped with its policy still registered, and `.meta` stays as
+    /// the retry key for the next boot.
+    #[tokio::test]
+    async fn a_failed_ttl_delete_keeps_the_collections_for_the_next_boot() {
+        let server = reaped_session_server(ResponseTemplate::new(500)).await;
+        sweep_reaped_sessions(&WardsonDbClient::from_url(&server.uri())).await;
+        assert_eq!(
+            deletes_seen(&server).await,
+            [
+                "DELETE /sessions.x.summary/ttl",
+                "DELETE /sessions.x.summary",
+                "DELETE /sessions.x.history/ttl",
+            ]
+        );
+    }
+
 
     /// Only the both-gone state is reap residue; either doc present means
     /// live / mid-create / grace period — never droppable.
