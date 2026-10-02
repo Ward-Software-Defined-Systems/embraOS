@@ -25,6 +25,21 @@ The runtime services that implement those layers:
 | `embrad` | PID 1 | Init, service supervisor, soul verification gate, 5-second reconciliation loop. |
 | `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for dynamic tools — both authoring paths (operator paste, intelligence proposal) gated by a soul-spec replicant check; intelligence proposals additionally operator-approved; capability-broker host imports. |
 
+### Network exposure
+
+What each port answers to, as the code binds it and as `scripts/run-qemu.sh` forwards it. Every port is a literal in embrad's `register_services` (`crates/embrad/src/supervisor.rs`), and every service binds the literal `0.0.0.0`; neither is configurable.
+
+| Port | Service | Protocol | TLS | Authentication | Binds in the guest | From the host (QEMU) | From the host's network |
+|---|---|---|---|---|---|---|---|
+| 8090 | `wardsondb` | HTTP REST | no | none (embrad passes no `--api-key`) | every interface | no | no |
+| 50001 | `embra-trustd` | gRPC, plaintext h2c | no | none (`GenerateCertificate` answers any caller) | every interface | no | no |
+| 50000 | `embra-apid` | gRPC, plaintext h2c | no | none | every interface | loopback only (`hostfwd=tcp:127.0.0.1:50000`) | no |
+| 8443 | `embra-apid` | HTTP REST | no | none | every interface | loopback only (`hostfwd=tcp:127.0.0.1:8443`) | no |
+| 50002 | `embra-brain` | gRPC, plaintext h2c | no | none | every interface | no | no |
+| 3345 | `embra-web` (web mode only) | HTTPS + WebSocket | yes: a certificate from the embraOS CA, minted by `embra-trustd` at every start | no login; the arbiter (one writer, read-only observers, explicit take-over) is the only gate | every interface | every host interface (`hostfwd=tcp::3345`) | yes |
+
+The image has no firewall; QEMU's user-mode network is the only isolation. A port QEMU does not forward is reachable from inside the guest only: the brain's own `port_scan` and `ssh_*` tools included, Guardian tools excluded (`crates/embra-guardian/src/caps.rs` refuses loopback and private addresses). Outside QEMU's user-mode network, on a bridged VM or on hardware, all six ports are reachable on the guest's address. Transport security between the services is Phase 5 work ([ROADMAP.md](ROADMAP.md)).
+
 **Persistence:** [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a high-performance Rust JSON document database. It is the single durable store for runtime state: soul, memory entries, the knowledge graph, sessions, schedules, and Guardian dynamic-tool definitions.
 
 **Supervision:** `embrad` (PID 1) runs a 5-second reconciliation loop (`crates/embrad/src/reconcile.rs`) over every service in `crates/embrad/src/supervisor.rs`. Any exit — a clean status 0 included — is logged and restarted: a supervised service is meant to outlive the boot. Restarts back off exponentially, `1 s · 2^n` capped at 30 s (`RestartPolicy::default()`: `backoff_base` 1 s, `backoff_max` 30 s). `max_restarts` (10) is a burst limit, not a per-boot total: a restarted service that runs continuously for `stable_after` (60 s — pinned above `backoff_max`, so a crash loop pacing itself at the cap can never reset its own budget) gets its `restart_count` back to 0. Ten exits inside that window exhaust the budget and the service goes `Halted` for the rest of the boot. The soul gate is separate: `Supervisor::verify_soul` calls `halt_system` on a hash mismatch; a first boot with no soul continues into Learning Mode.

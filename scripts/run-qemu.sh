@@ -114,11 +114,11 @@ fi
 echo "  Serial console: this terminal"
 if [ -n "$WEB_CMDLINE" ]; then
     echo "  UI mode: web console (default) — set EMBRA_TUI=1 for the serial TUI"
-    echo "  Port forwards: 50000→50000 (gRPC), 8443→8443 (REST), 3345→3345 (HTTPS web)"
+    echo "  Port forwards: 127.0.0.1:50000→50000 (gRPC), 127.0.0.1:8443→8443 (REST), *:3345→3345 (HTTPS web)"
     echo "  Web console: https://localhost:3345/embraOS  (accept the embraOS-CA cert)"
 else
     echo "  UI mode: serial TUI (EMBRA_TUI=1) — embra-web not started"
-    echo "  Port forwards: 50000→50000 (gRPC), 8443→8443 (REST)"
+    echo "  Port forwards: 127.0.0.1:50000→50000 (gRPC), 127.0.0.1:8443→8443 (REST)"
 fi
 echo ""
 echo "Press Ctrl-A X to exit QEMU"
@@ -140,5 +140,5 @@ qemu-system-x86_64 \
     -append "console=ttyS0 root=/dev/vda2 ro quiet embra.cols=$HOST_COLS embra.rows=$HOST_ROWS $WEB_CMDLINE $DBLOG_CMDLINE $LOGLEVEL_CMDLINE $GRAPHICS_CMDLINE" \
     -nographic \
     -serial mon:stdio \
-    -nic user,hostfwd=tcp::50000-:50000,hostfwd=tcp::8443-:8443,hostfwd=tcp::3345-:3345 \
+    -nic user,hostfwd=tcp:127.0.0.1:50000-:50000,hostfwd=tcp:127.0.0.1:8443-:8443,hostfwd=tcp::3345-:3345 \
     -no-reboot

@@ -139,7 +139,7 @@ The following apply once the image is built. They are not part of the build pipe
 > Partition geometry is read from the GPT at run time, so this stays correct as partitions
 > shift between builds.
 
-> **Port Forwarding:** QEMU forwards 50000 (gRPC), 8443 (REST) and 3345 (the HTTPS web console — https://localhost:3345/embraOS) in both UI modes; only the launch banner differs. apid's REST surface is `/health`, `/version` and `/status` — `/status` proxies the brain's `GetSystemStatus` (2-second timeout, HTTP 503 while the brain is away) and carries the active LLM provider's last endpoint probe as `llm-provider` / `llm-provider.detail`. Test with:
+> **Port Forwarding:** QEMU forwards 50000 (gRPC) and 8443 (REST) on the host's loopback only, and 3345 (the HTTPS web console — https://localhost:3345/embraOS) on every host interface, in both UI modes; only the launch banner differs. Other machines on the host's network reach the web console and nothing else; the per-port table is in [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md#network-exposure). apid's REST surface is `/health`, `/version` and `/status` — `/status` proxies the brain's `GetSystemStatus` (2-second timeout, HTTP 503 while the brain is away) and carries the active LLM provider's last endpoint probe as `llm-provider` / `llm-provider.detail`. Test with:
 > ```bash
 > curl http://localhost:8443/health
 > curl http://localhost:8443/status

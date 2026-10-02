@@ -186,8 +186,9 @@ backfilled (see `docs/QUICK-START.md`).
 > **skipped on macOS** and run by the Docker Buildroot pass instead. The build fails if the model is
 > missing from the rootfs rather than shipping keyword-only retrieval.
 
-> **Port forwarding:** QEMU forwards 50000 (gRPC), 8443 (REST) and 3345 (HTTPS —
-> https://localhost:3345/embraOS) in both UI modes. apid's REST routes are `/health`,
+> **Port forwarding:** QEMU forwards 50000 (gRPC) and 8443 (REST) on the host's loopback only,
+> and 3345 (HTTPS — https://localhost:3345/embraOS) on every host interface, in both UI modes;
+> other machines on the host's network reach the web console and nothing else. apid's REST routes are `/health`,
 > `/version` and `/status` (the brain's status incl. the LLM provider probe; 503 while
 > the brain is away). Test:
 > ```bash
@@ -423,7 +424,7 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Kernel image | `bzImage` | `Image` |
 | Serial console | `console=ttyS0` | `console=ttyAMA0` |
 | Default UI | embra-web console; `EMBRA_TUI=1` → serial TUI | identical |
-| Port forwards | 50000 / 8443 / 3345 (web mode) | identical |
+| Port forwards | 127.0.0.1:50000 / 127.0.0.1:8443 / *:3345 (both UI modes) | identical |
 
 ### Backup & Restore
 
