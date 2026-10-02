@@ -203,8 +203,44 @@ pub async fn stats(db: &WardsonDbClient, provider: &dyn EmbeddingProvider) -> (u
 mod tests {
     use super::*;
 
+    /// The index is one process-wide static; every test that writes it
+    /// holds this lock so two of them never interleave.
+    static INDEX_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// `knowledge_unlink_node` and the merge forget the vector of a node they
+    /// deleted: the key is gone and the collection's count moves down with
+    /// it, so the next `ensure_current` sees no divergence to reload over.
+    #[tokio::test]
+    async fn forgetting_a_node_drops_its_vector_and_moves_the_collection_count_down() {
+        let _guard = INDEX_TEST_LOCK.lock().await;
+        {
+            let mut idx = index().await.write().await;
+            idx.loaded = true;
+            idx.model = "m".into();
+            idx.vecs.insert(("unlink-test".into(), "gone".into()), vec![0.0, 0.0, 1.0]);
+            idx.counts.insert("unlink-test".into(), 1);
+        }
+        let key = ("unlink-test".to_string(), "gone".to_string());
+        let q = [0.0f32, 0.0, 1.0];
+        assert_eq!(score_keys(&q, std::slice::from_ref(&key)).await.len(), 1);
+
+        remove("unlink-test", "gone").await;
+        assert!(score_keys(&q, std::slice::from_ref(&key)).await.is_empty());
+        assert_eq!(index().await.read().await.counts.get("unlink-test").copied(), Some(0));
+
+        // Forgetting a node twice is harmless: nothing to drop, nothing to count.
+        remove("unlink-test", "gone").await;
+        assert_eq!(index().await.read().await.counts.get("unlink-test").copied(), Some(0));
+
+        let mut idx = index().await.write().await;
+        idx.counts.remove("unlink-test");
+        idx.loaded = false;
+        idx.model.clear();
+    }
+
     #[tokio::test]
     async fn search_ranks_by_cosine_and_respects_threshold_and_cap() {
+        let _guard = INDEX_TEST_LOCK.lock().await;
         {
             let mut idx = index().await.write().await;
             idx.loaded = true;

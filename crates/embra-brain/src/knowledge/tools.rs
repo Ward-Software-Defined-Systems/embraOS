@@ -327,6 +327,11 @@ pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String
             cleared_entries, edge_count, coll, id, e
         );
     }
+    // The node is gone — drop its vector, as the merge does for its loser.
+    // Left in the index, the key could not resolve, took a search slot, and
+    // the count divergence reloaded the whole index on the next retrieval
+    // (Embra#16).
+    crate::embedding::write::forget_node(coll, id).await;
 
     format!(
         "Removed node {}:{} (\"{}\"), {} referencing edge(s), cleared promoted_to on {} source entry(ies)",
