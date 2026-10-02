@@ -1767,6 +1767,11 @@ async fn handle_request(
                                     (msg, Vec::new(), Vec::new(), true)
                                 }
                             };
+                            // `bytes` is what the model receives: the text
+                            // after the dispatcher's cap. A continuation
+                            // that overflows the context names its
+                            // results below; this line is the per-call
+                            // record (Embra#13, finding 3).
                             info!(
                                 target: "dispatch",
                                 session = %session_name,
@@ -1774,6 +1779,8 @@ async fn handle_request(
                                 tool_use_id = %id,
                                 elapsed_ms,
                                 is_error,
+                                bytes = content.len(),
+                                images = tool_images.len(),
                                 "dispatch:end"
                             );
 
@@ -1908,8 +1915,16 @@ async fn handle_request(
                             )
                             .await
                             .map_err(|e| {
+                                // A prompt too long for the model is the
+                                // usual cause; name the results that were
+                                // just appended, with their sizes, so the
+                                // culprit is in the log (Embra#13).
+                                let sizes = tool_result_sizes(
+                                    &current_turn.content,
+                                    api_messages.last().map(ApiMessage::content).unwrap_or(&[]),
+                                );
                                 anyhow::anyhow!(
-                                    "Brain continuation failed (iter {tool_iter}): {e}"
+                                    "Brain continuation failed (iter {tool_iter}; tool results this iteration: {sizes}): {e}"
                                 )
                             })?;
                         let Some(resp) = collect_response(stream, tx, &config_name, Some(&mut stop_check)).await? else {
@@ -6551,6 +6566,31 @@ fn preview_str(s: &str, max: usize) -> String {
 /// Extract the plain-text portion of an assistant turn for session
 /// persistence. Concatenates all `Text` blocks; thinking signatures and
 /// tool calls are dropped.
+/// The tool results of one loop iteration with their sizes, for the
+/// continuation failure that carries them: `file_read 1048576 B, git_log
+/// 2048 B (2 results, 1050624 B total)`. A result whose call is not in
+/// `calls` is named by its call id.
+fn tool_result_sizes(calls: &[Block], results: &[Block]) -> String {
+    let name_of = |call_id: &str| -> String {
+        calls
+            .iter()
+            .find_map(|b| match b {
+                Block::ToolCall { id, name, .. } if id == call_id => Some(name.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| call_id.to_string())
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    for block in results {
+        if let Block::ToolResult { call_id, content, .. } = block {
+            total += content.len();
+            parts.push(format!("{} {} B", name_of(call_id), content.len()));
+        }
+    }
+    format!("{} ({} results, {} B total)", parts.join(", "), parts.len(), total)
+}
+
 fn turn_text(turn: &AssistantTurn) -> String {
     turn.content
         .iter()
@@ -7555,6 +7595,36 @@ mod native_loop_tests {
         assert!(path.exists());
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir_all(&tmpdir);
+    }
+
+    /// The continuation failure names each appended result by its tool,
+    /// with its byte size and the total; a result whose call is unknown
+    /// keeps its call id.
+    #[test]
+    fn the_continuation_failure_names_each_tool_result_and_its_size() {
+        let call = |id: &str, name: &str| Block::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            args: serde_json::json!({}),
+            provider_opaque: None,
+        };
+        let result = |id: &str, content: String| Block::ToolResult {
+            call_id: id.into(),
+            content,
+            is_error: false,
+            images: Vec::new(),
+        };
+        let calls = vec![call("c1", "file_read"), call("c2", "git_log")];
+        let results = vec![
+            result("c1", "x".repeat(1_048_576)),
+            result("c2", "y".repeat(2048)),
+            result("orphan", "z".into()),
+        ];
+        assert_eq!(
+            tool_result_sizes(&calls, &results),
+            "file_read 1048576 B, git_log 2048 B, orphan 1 B (3 results, 1050625 B total)"
+        );
+        assert_eq!(tool_result_sizes(&calls, &[]), " (0 results, 0 B total)");
     }
 
     #[test]
