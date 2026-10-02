@@ -31,6 +31,14 @@ service BrainService {
   // anything sent on the stream parks behind the running turn.
   rpc StopTurn(StopTurnRequest) returns (StopTurnResponse);
 
+  // Activity feed — what the brain is doing, as names and numbers, for the
+  // web console's top-bar strip. A snapshot opens the stream and recurs
+  // every ten seconds; a tick carries what happened since the last frame
+  // and is sent only when something did. One subscriber per embra-web
+  // process. No frame carries content: no message text, no tool input or
+  // result, no memory content, no reasoning.
+  rpc WatchActivity(WatchActivityRequest) returns (stream ActivityFrame);
+
   // Media — operator-attached / tool-produced images in the MEDIA store.
   // Unary on purpose (bytes never ride the Converse stream): an upload
   // normalizes + stores and returns the ref; a download serves the stored
@@ -205,6 +213,101 @@ message StopTurnResponse {
   // True when a turn was in flight and the stop signal was raised;
   // false = nothing to stop (the request was a no-op).
   bool was_in_turn = 1;
+}
+
+// --- Activity feed ---
+
+message WatchActivityRequest {}
+
+message ActivityFrame {
+  oneof frame {
+    ActivitySnapshot snapshot = 1;
+    ActivityTick tick = 2;
+  }
+}
+
+// The state of the brain at one moment, plus the totals since it started.
+message ActivitySnapshot {
+  string provider = 1;         // from the last provider probe; empty before the first one
+  string model = 2;
+  OperatingMode mode = 3;
+  bool in_turn = 4;
+  string active_session = 5;
+  uint64 uptime_seconds = 6;
+  ActivityTotals totals = 7;
+  // The knowledge-graph collections, the identity graph and the Guardian
+  // tools, with their document counts. Empty until the first sample.
+  repeated CollectionCount collections = 8;
+  DbLifetime db = 9;           // WardSONDB's own lifetime counters; absent until the first sample
+  string probe_state = 10;     // up | down | unknown
+  uint64 probe_latency_ms = 11; // 0 when the probe has no latency to report
+}
+
+message ActivityTotals {
+  uint64 turns = 1;
+  uint64 model_calls = 2;
+  uint64 model_errors = 3;
+  uint64 text_chars = 4;
+  uint64 reasoning_chars = 5;
+  uint64 tool_calls = 6;
+  uint64 tool_errors = 7;
+  uint64 db_ops = 8;
+  uint64 retrievals = 9;
+  uint64 embeddings = 10;
+  uint64 notifications = 11;
+  repeated DbOpCount db_by_collection = 12;
+}
+
+message DbOpCount {
+  string collection = 1;
+  string verb = 2;             // read | query | write | delete
+  uint64 count = 3;
+  uint64 total_ms = 4;
+}
+
+message CollectionCount {
+  string name = 1;
+  uint64 doc_count = 2;
+}
+
+message DbLifetime {
+  uint64 requests = 1;
+  uint64 inserts = 2;
+  uint64 queries = 3;
+  uint64 deletes = 4;
+}
+
+// What happened since the previous frame.
+message ActivityTick {
+  uint32 span_ms = 1;
+  uint32 text_chars = 2;
+  uint32 reasoning_chars = 3;
+  uint32 model_calls = 4;
+  uint32 model_errors = 5;
+  repeated ToolEvent tools = 6;      // in the order they happened
+  repeated DbOpCount db_ops = 7;     // folded by collection and verb
+  repeated RetrievalEvent retrievals = 8;
+  uint32 embeddings = 9;
+  uint32 notifications = 10;
+  uint32 turns_started = 11;
+  uint32 turns_ended = 12;
+  bool in_turn = 13;
+  uint32 dropped = 14;               // events a lagging subscriber lost; the totals stay exact
+  string session = 15;               // set when a session was attached during the tick
+}
+
+message ToolEvent {
+  string name = 1;
+  string origin = 2;     // turn | cron
+  bool finished = 3;     // false: the tool started
+  uint32 elapsed_ms = 4; // finished only
+  bool is_error = 5;     // finished only; also when the dispatch was abandoned
+}
+
+message RetrievalEvent {
+  uint32 candidates = 1;
+  uint32 results = 2;
+  float top_score = 3;
 }
 
 // --- Sessions ---

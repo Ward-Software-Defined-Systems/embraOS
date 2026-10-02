@@ -130,6 +130,8 @@ struct WardsonEnvelope<T> {
 #[derive(Debug, Deserialize)]
 struct CollectionInfo {
     name: String,
+    #[serde(default)]
+    doc_count: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -177,6 +179,21 @@ impl WardsonDbClient {
     }
 
     pub async fn list_collections(&self) -> Result<Vec<String>> {
+        Ok(self.fetch_collections().await?.into_iter().map(|c| c.name).collect())
+    }
+
+    /// Every collection with its document count, from `GET /_collections`.
+    /// The activity feed's sampler reads it; no query body is involved.
+    pub async fn list_collections_with_counts(&self) -> Result<Vec<(String, u64)>> {
+        Ok(self
+            .fetch_collections()
+            .await?
+            .into_iter()
+            .map(|c| (c.name, c.doc_count))
+            .collect())
+    }
+
+    async fn fetch_collections(&self) -> Result<Vec<CollectionInfo>> {
         let resp = self
             .http_client
             .get(format!("{}/_collections", self.base_url))
@@ -188,8 +205,7 @@ impl WardsonDbClient {
             return Err(WardsonDbError::Api { status, body }.into());
         }
         let envelope: WardsonEnvelope<Vec<CollectionInfo>> = resp.json().await?;
-        let collections = envelope.data;
-        Ok(collections.into_iter().map(|c| c.name).collect())
+        Ok(envelope.data)
     }
 
     pub async fn create_collection(&self, name: &str) -> Result<()> {
@@ -243,12 +259,14 @@ impl WardsonDbClient {
         collection: &str,
         doc: &serde_json::Value,
     ) -> Result<String> {
+        let started = std::time::Instant::now();
         let resp = self
             .http_client
             .post(format!("{}/{}/docs", self.base_url, collection))
             .json(doc)
             .send()
             .await?;
+        crate::activity::db_op(collection, crate::activity::DbVerb::Write, started);
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
@@ -269,11 +287,13 @@ impl WardsonDbClient {
         collection: &str,
         id: &str,
     ) -> Result<serde_json::Value> {
+        let started = std::time::Instant::now();
         let resp = self
             .http_client
             .get(format!("{}/{}/docs/{}", self.base_url, collection, id))
             .send()
             .await?;
+        crate::activity::db_op(collection, crate::activity::DbVerb::Read, started);
         if resp.status().as_u16() == 404 {
             return Err(WardsonDbError::DocumentNotFound {
                 collection: collection.into(),
@@ -307,12 +327,14 @@ impl WardsonDbClient {
         collection: &str,
         query: &serde_json::Value,
     ) -> Result<(Vec<serde_json::Value>, serde_json::Value)> {
+        let started = std::time::Instant::now();
         let resp = self
             .http_client
             .post(format!("{}/{}/query", self.base_url, collection))
             .json(query)
             .send()
             .await?;
+        crate::activity::db_op(collection, crate::activity::DbVerb::Query, started);
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
@@ -402,12 +424,14 @@ impl WardsonDbClient {
         id: &str,
         doc: &serde_json::Value,
     ) -> Result<()> {
+        let started = std::time::Instant::now();
         let resp = self
             .http_client
             .put(format!("{}/{}/docs/{}", self.base_url, collection, id))
             .json(doc)
             .send()
             .await?;
+        crate::activity::db_op(collection, crate::activity::DbVerb::Write, started);
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
@@ -417,11 +441,13 @@ impl WardsonDbClient {
     }
 
     pub async fn delete(&self, collection: &str, id: &str) -> Result<()> {
+        let started = std::time::Instant::now();
         let resp = self
             .http_client
             .delete(format!("{}/{}/docs/{}", self.base_url, collection, id))
             .send()
             .await?;
+        crate::activity::db_op(collection, crate::activity::DbVerb::Delete, started);
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
@@ -480,12 +506,14 @@ impl WardsonDbClient {
         id: &str,
         patch: &serde_json::Value,
     ) -> Result<()> {
+        let started = std::time::Instant::now();
         let resp = self
             .http_client
             .patch(format!("{}/{}/docs/{}", self.base_url, collection, id))
             .json(patch)
             .send()
             .await?;
+        crate::activity::db_op(collection, crate::activity::DbVerb::Write, started);
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
@@ -506,6 +534,7 @@ impl WardsonDbClient {
         collection: &str,
         filter: &serde_json::Value,
     ) -> Result<u64> {
+        let started = std::time::Instant::now();
         let url = format!("{}/{}/docs/_delete_by_query", self.base_url, collection);
         let body = serde_json::json!({"filter": filter});
         let resp = self
@@ -514,6 +543,7 @@ impl WardsonDbClient {
             .json(&body)
             .send()
             .await?;
+        crate::activity::db_op(collection, crate::activity::DbVerb::Delete, started);
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body_text = resp.text().await.unwrap_or_default();
@@ -554,12 +584,14 @@ impl WardsonDbClient {
         collection: &str,
         query_body: &serde_json::Value,
     ) -> Result<serde_json::Value> {
+        let started = std::time::Instant::now();
         let resp = self
             .http_client
             .post(format!("{}/{}/query", self.base_url, collection))
             .json(query_body)
             .send()
             .await?;
+        crate::activity::db_op(collection, crate::activity::DbVerb::Query, started);
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
@@ -602,12 +634,14 @@ impl WardsonDbClient {
         collection: &str,
         documents: &[serde_json::Value],
     ) -> Result<u64> {
+        let started = std::time::Instant::now();
         let resp = self
             .http_client
             .post(format!("{}/{}/docs/_bulk", self.base_url, collection))
             .json(&serde_json::json!({ "documents": documents }))
             .send()
             .await?;
+        crate::activity::db_op(collection, crate::activity::DbVerb::Write, started);
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
@@ -629,12 +663,14 @@ impl WardsonDbClient {
         collection: &str,
         pipeline: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>> {
+        let started = std::time::Instant::now();
         let resp = self
             .http_client
             .post(format!("{}/{}/aggregate", self.base_url, collection))
             .json(&serde_json::json!({ "pipeline": pipeline }))
             .send()
             .await?;
+        crate::activity::db_op(collection, crate::activity::DbVerb::Query, started);
         if !resp.status().is_success() {
             let status = resp.status().as_u16();
             let body = resp.text().await.unwrap_or_default();
@@ -1000,5 +1036,63 @@ mod slow_query_tests {
     #[test]
     fn slow_query_reason_silent_when_meta_absent() {
         assert_eq!(slow_query_reason(None, None, 0), None);
+    }
+}
+
+#[cfg(test)]
+mod activity_tap_tests {
+    //! The first test that points `WardsonDbClient` at a stub server: the
+    //! activity feed counts what the client does, per collection and verb.
+    use super::*;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn count_of(
+        totals: &embra_common::proto::brain::ActivityTotals,
+        collection: &str,
+        verb: &str,
+    ) -> u64 {
+        totals
+            .db_by_collection
+            .iter()
+            .find(|d| d.collection == collection && d.verb == verb)
+            .map(|d| d.count)
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn a_write_and_a_query_are_counted_per_collection_and_verb() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/activity.tap/docs"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": {"_id": "x"}})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/activity.tap/query"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": [], "meta": {}})),
+            )
+            .mount(&server)
+            .await;
+        let db = WardsonDbClient::from_url(&server.uri());
+
+        let before = crate::activity::totals();
+        db.write("activity.tap", &json!({"a": 1})).await.unwrap();
+        db.query("activity.tap", &recent_query_body(1, None)).await.unwrap();
+        let after = crate::activity::totals();
+
+        assert_eq!(
+            count_of(&after, "activity.tap", "write") - count_of(&before, "activity.tap", "write"),
+            1
+        );
+        assert_eq!(
+            count_of(&after, "activity.tap", "query") - count_of(&before, "activity.tap", "query"),
+            1
+        );
+        assert!(after.db_ops - before.db_ops >= 2, "totals count every request");
     }
 }

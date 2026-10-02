@@ -186,8 +186,64 @@ pub async fn dispatch(
     let Some(desc) = REGISTRY.get(name) else {
         return Err(DispatchError::Unknown(name.into()));
     };
-    let raw = enforce_timeout((desc.handler)(input, ctx), name, MAX_TOOL_DURATION).await?;
-    Ok(apply_caps(raw))
+    // The activity feed sees every dispatch, a cron's included. The span
+    // reports an error when this future is dropped: an operator stop
+    // abandons it (`grpc_service.rs`).
+    let origin = crate::activity::ToolOrigin::from_session(ctx.session_name);
+    let span = crate::activity::ToolSpan::start(name, origin);
+    let raw = enforce_timeout((desc.handler)(input, ctx), name, MAX_TOOL_DURATION).await;
+    span.finish(raw.is_err());
+    Ok(apply_caps(raw?))
+}
+
+#[cfg(test)]
+mod activity_tests {
+    use super::*;
+    use crate::activity::{Event, ToolOrigin};
+
+    /// A dispatch is announced with its name and origin and finished with
+    /// its error state, the cron loop's dispatches included.
+    #[tokio::test]
+    async fn a_dispatch_reports_its_tool_name_origin_and_error_state() {
+        let config: SystemConfig = serde_json::from_value(serde_json::json!({
+            "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase1",
+            "created_at": "", "version": "test", "kg_temporal_window_secs": 1800,
+            "kg_max_traversal_depth": 3, "kg_traversal_depth_ceiling": 5,
+            "kg_edge_candidate_limit": 50, "api_provider": "anthropic",
+        }))
+        .unwrap();
+        let db = WardsonDbClient::from_url("http://127.0.0.1:1");
+        let trace = embra_tools_core::new_turn_trace_handle();
+        let mut events = crate::activity::subscribe();
+
+        let ctx = DispatchContext {
+            db: &db,
+            config: &config,
+            session_name: "cron",
+            config_tz: "UTC",
+            trace: &trace,
+            turn_index: 0,
+        };
+        let out = dispatch("time", serde_json::json!({}), ctx).await;
+        assert!(out.is_ok(), "{out:?}");
+
+        let mine: Vec<Event> = std::iter::from_fn(|| events.try_recv().ok())
+            .filter(|e| {
+                matches!(e, Event::ToolStarted { name, .. } | Event::ToolFinished { name, .. } if name == "time")
+            })
+            .collect();
+        assert!(
+            matches!(mine.first(), Some(Event::ToolStarted { origin: ToolOrigin::Cron, .. })),
+            "{mine:?}"
+        );
+        assert!(
+            matches!(
+                mine.last(),
+                Some(Event::ToolFinished { origin: ToolOrigin::Cron, is_error: false, .. })
+            ),
+            "{mine:?}"
+        );
+    }
 }
 
 #[cfg(test)]

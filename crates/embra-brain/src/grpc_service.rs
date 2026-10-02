@@ -2,6 +2,7 @@
 //!
 //! Bridges Phase 0 Brain + tools + sessions into a gRPC streaming interface.
 
+use crate::activity;
 use crate::brain::Message;
 use crate::config;
 use crate::db::WardsonDbClient;
@@ -515,6 +516,9 @@ impl BrainService for BrainGrpcService {
                         }
                     } => {
                         if let Some(notif) = notif {
+                            activity::emit(activity::Event::Notification {
+                                priority: notif.priority_label().to_string(),
+                            });
                             let _ = tx.send(Ok(ConversationResponse {
                                 response_type: Some(conversation_response::ResponseType::System(
                                     SystemMessage {
@@ -531,6 +535,74 @@ impl BrainService for BrainGrpcService {
 
         let output_stream = ReceiverStream::new(rx);
         Ok(Response::new(Box::pin(output_stream)))
+    }
+
+    type WatchActivityStream = Pin<Box<dyn Stream<Item = Result<ActivityFrame, Status>> + Send>>;
+
+    /// The activity feed (`activity.rs`): a snapshot first, then a tick
+    /// every `TICK_INTERVAL` while something happens and a snapshot every
+    /// `SNAPSHOT_INTERVAL`. embra-web holds the one production subscription
+    /// and fans it out to the browsers.
+    async fn watch_activity(
+        &self,
+        _req: Request<WatchActivityRequest>,
+    ) -> Result<Response<Self::WatchActivityStream>, Status> {
+        let mut events = activity::subscribe();
+        let mut sample_rx = activity::db_sample(&self.db);
+        // The first snapshot is worth a short wait for the first sample.
+        if sample_rx.borrow().is_none() {
+            let _ = tokio::time::timeout(activity::FIRST_SAMPLE_WAIT, sample_rx.changed()).await;
+        }
+
+        let (tx, rx) = mpsc::channel::<Result<ActivityFrame, Status>>(64);
+        let session_mgr = self.session_manager.clone();
+        let in_turn = self.in_turn.clone();
+        let stage = self.onboarding_stage.clone();
+        let start_time = self.start_time;
+
+        tokio::spawn(async move {
+            let first = activity_snapshot_frame(&session_mgr, &in_turn, &stage, start_time, &sample_rx).await;
+            if tx.send(Ok(first)).await.is_err() {
+                return;
+            }
+            let mut tick = tokio::time::interval(activity::TICK_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            let mut snapshot = tokio::time::interval(activity::SNAPSHOT_INTERVAL);
+            snapshot.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            // An interval's first tick is immediate; the snapshot went out above.
+            tick.tick().await;
+            snapshot.tick().await;
+            let mut builder = activity::TickBuilder::default();
+            let mut last_frame = std::time::Instant::now();
+            loop {
+                tokio::select! {
+                    ev = events.recv() => match ev {
+                        Ok(ev) => builder.fold(ev),
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => builder.lagged(n),
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    },
+                    _ = tick.tick() => {
+                        if builder.is_empty() {
+                            continue;
+                        }
+                        let tick = builder.take(last_frame.elapsed(), in_turn.load(Ordering::SeqCst));
+                        last_frame = std::time::Instant::now();
+                        let frame = ActivityFrame { frame: Some(activity_frame::Frame::Tick(tick)) };
+                        if tx.send(Ok(frame)).await.is_err() {
+                            break;
+                        }
+                    }
+                    _ = snapshot.tick() => {
+                        let frame = activity_snapshot_frame(&session_mgr, &in_turn, &stage, start_time, &sample_rx).await;
+                        if tx.send(Ok(frame)).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
     }
 
     // --- Session RPCs ---
@@ -1091,7 +1163,7 @@ async fn handle_request(
             // the flag never sticks if this future is cancelled.
             // Per-turn operator-stop observer: snapshots the generation
             // now, so only a StopTurn fired DURING this turn trips it.
-            let (in_turn_guard, mut stop_check) = begin_turn(&self_in_turn, stop_rx);
+            let (in_turn_guard, mut stop_check) = begin_turn(&self_in_turn, stop_rx, &session_name);
 
             // Load session history
             let history = {
@@ -2195,6 +2267,7 @@ async fn handle_request(
 
             // Mark active only after the cross-provider check passes.
             session_mgr.write().await.active_session = Some(session_name.clone());
+            activity::emit(activity::Event::SessionAttached { name: session_name.clone() });
 
             // Load and send session history so console displays prior
             // conversation. Capture `history.len()` here so the
@@ -5993,7 +6066,7 @@ async fn run_learning_loop(
             .collect();
         // A turn of the learning loop is a turn: marked as running from
         // here to the end of its stream, so that an operator stop reaches it.
-        let (in_turn_guard, mut stop_check) = stop.begin();
+        let (in_turn_guard, mut stop_check) = stop.begin("learning");
         let mut brain_rx = provider
             .stream_turn(
                 &messages,
@@ -6133,7 +6206,7 @@ async fn run_learning_loop(
                                 .iter()
                                 .map(legacy_message_to_api)
                                 .collect();
-                            let (in_turn_guard, mut stop_check) = stop.begin();
+                            let (in_turn_guard, mut stop_check) = stop.begin("learning");
                             let mut brain_rx = provider
                                 .stream_turn(
                                     &messages,
@@ -6389,18 +6462,22 @@ struct InTurnGuard(Arc<AtomicBool>);
 /// observer. Both belong to the start of a turn, in the operational loop
 /// and in the learning loop alike: a loop that takes the observer and does
 /// not set the mark cannot be stopped. The guard clears the mark when it is
-/// dropped, also when the turn's future is cancelled.
+/// dropped, also when the turn's future is cancelled. The activity feed
+/// hears the turn start here and its end from the guard.
 fn begin_turn(
     in_turn: &Arc<AtomicBool>,
     stop_rx: &watch::Receiver<u64>,
+    session: &str,
 ) -> (InTurnGuard, StopCheck) {
     in_turn.store(true, Ordering::SeqCst);
+    activity::emit(activity::Event::TurnStarted { session: session.to_string() });
     (InTurnGuard(in_turn.clone()), StopCheck::new(stop_rx.clone()))
 }
 
 impl Drop for InTurnGuard {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
+        activity::emit(activity::Event::TurnEnded);
     }
 }
 
@@ -6413,10 +6490,31 @@ struct TurnStop<'a> {
 }
 
 impl TurnStop<'_> {
-    /// [`begin_turn`] with both halves.
-    fn begin(self) -> (InTurnGuard, StopCheck) {
-        begin_turn(self.in_turn, self.stop_rx)
+    /// [`begin_turn`] with both halves, for a turn of `session`.
+    fn begin(self, session: &str) -> (InTurnGuard, StopCheck) {
+        begin_turn(self.in_turn, self.stop_rx, session)
     }
+}
+
+/// The snapshot frame of the activity feed: the service's part is read
+/// here, the rest comes from `activity::snapshot`.
+async fn activity_snapshot_frame(
+    session_mgr: &Arc<RwLock<SessionManager>>,
+    in_turn: &AtomicBool,
+    stage: &watch::Sender<i32>,
+    start_time: std::time::Instant,
+    sample_rx: &watch::Receiver<Option<activity::DbSample>>,
+) -> ActivityFrame {
+    let active_session = session_mgr.read().await.active_session.clone();
+    let sample = sample_rx.borrow().clone();
+    let snapshot = activity::snapshot(activity::SnapshotInput {
+        stage: *stage.borrow(),
+        in_turn: in_turn.load(Ordering::SeqCst),
+        active_session,
+        uptime_seconds: start_time.elapsed().as_secs(),
+        sample: sample.as_ref(),
+    });
+    ActivityFrame { frame: Some(activity_frame::Frame::Snapshot(snapshot)) }
 }
 
 /// Convert a legacy on-disk `Message` (role + String content) to the
@@ -7034,6 +7132,7 @@ async fn collect_response(
     config_name: &str,
     mut stop: Option<&mut StopCheck>,
 ) -> anyhow::Result<Option<AssistantTurn>> {
+    activity::emit(activity::Event::ModelCallStarted);
     let mut first_token = true;
     let mut full_turn: Option<AssistantTurn> = None;
     let mut accum_text = String::new();
@@ -7051,6 +7150,7 @@ async fn collect_response(
                 tokio::select! {
                     ev = brain_rx.next() => ev,
                     _ = check.triggered() => {
+                        activity::emit(activity::Event::ModelCallEnded { error: false });
                         let mut content = Vec::new();
                         if !accum_text.is_empty() {
                             content.push(Block::Text(std::mem::take(&mut accum_text)));
@@ -7068,6 +7168,9 @@ async fn collect_response(
         let Some(event) = event else { break };
         match event {
             StreamEvent::TextDelta(text) => {
+                activity::emit(activity::Event::TextDelta {
+                    chars: u32::try_from(text.chars().count()).unwrap_or(u32::MAX),
+                });
                 if first_token {
                     let _ = tx
                         .send(Ok(ConversationResponse {
@@ -7110,6 +7213,9 @@ async fn collect_response(
             }
             StreamEvent::BlockComplete => {}
             StreamEvent::ReasoningDelta(text) => {
+                activity::emit(activity::Event::ReasoningDelta {
+                    chars: u32::try_from(text.chars().count()).unwrap_or(u32::MAX),
+                });
                 // Forward to the expression panel via the dedicated
                 // ReasoningDelta proto frame. CRITICAL: must NOT append
                 // to `accum_text` (would persist to session history via
@@ -7149,6 +7255,9 @@ async fn collect_response(
         }
     }
 
+    // A stream that ended without `Complete` is a failed call: a provider
+    // error, or the connection gone.
+    activity::emit(activity::Event::ModelCallEnded { error: full_turn.is_none() });
     Ok(full_turn)
 }
 
@@ -8872,7 +8981,7 @@ mod operator_stop_tests {
         let in_turn = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (tx, rx) = watch::channel(0u64);
 
-        let (guard, check) = begin_turn(&in_turn, &rx);
+        let (guard, check) = begin_turn(&in_turn, &rx, "main");
         assert!(in_turn.load(std::sync::atomic::Ordering::SeqCst));
         assert!(!check.stopped());
         tx.send_modify(|v| *v += 1);
@@ -8880,6 +8989,33 @@ mod operator_stop_tests {
 
         drop(guard);
         assert!(!in_turn.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    /// The activity feed hears a turn begin and end from the same mark.
+    #[test]
+    fn the_turn_guard_announces_the_turn_start_and_end() {
+        let in_turn = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (_tx, rx) = watch::channel(0u64);
+        let mut events = crate::activity::subscribe();
+
+        let (guard, _check) = begin_turn(&in_turn, &rx, "activity-guard-test");
+        drop(guard);
+
+        let mut saw_start = false;
+        let mut saw_end_after_start = false;
+        while let Ok(ev) = events.try_recv() {
+            match ev {
+                crate::activity::Event::TurnStarted { session }
+                    if session == "activity-guard-test" =>
+                {
+                    saw_start = true;
+                }
+                crate::activity::Event::TurnEnded if saw_start => saw_end_after_start = true,
+                _ => {}
+            }
+        }
+        assert!(saw_start, "the start carries the session");
+        assert!(saw_end_after_start, "the guard's drop ends the turn");
     }
 
     #[tokio::test]

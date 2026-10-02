@@ -290,6 +290,9 @@ pub async fn retrieve_relevant_knowledge(
             crate::embedding::cache::ensure_current(db, provider.as_ref()).await;
             match provider.embed_query(query_text).await {
                 Ok(qv) => {
+                    crate::activity::emit(crate::activity::Event::Embedding {
+                        kind: crate::activity::EmbeddingKind::Query,
+                    });
                     let hits = crate::embedding::cache::search(
                         &qv,
                         EMBEDDING_TOP_K,
@@ -339,6 +342,11 @@ pub async fn retrieve_relevant_knowledge(
     // Score and rank; access-touch ONLY what is returned (the 2026-07-04
     // semantics change: access_count = retrieval hits, not BFS sweeps).
     let ranked = score_and_rank(collected.into_values().collect(), tags, max_results);
+    crate::activity::emit(crate::activity::Event::Retrieval {
+        candidates: u32::try_from(stats.candidates_total).unwrap_or(u32::MAX),
+        results: u32::try_from(ranked.len()).unwrap_or(u32::MAX),
+        top_score: ranked.first().map(|r| r.score as f32).unwrap_or(0.0),
+    });
     spawn_access_touches(
         db.clone(),
         ranked.iter().map(|r| (r.node.collection.clone(), r.node.id.clone())).collect(),

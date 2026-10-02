@@ -94,7 +94,11 @@ pub trait EmbeddingProvider: Send + Sync {
     /// wrapper over `embed_documents` for the one-at-a-time write path.
     async fn embed_query_or_document(&self, text: &str) -> Result<Vec<f32>, EmbeddingError> {
         let mut v = self.embed_documents(std::slice::from_ref(&text.to_string())).await?;
-        v.pop().ok_or_else(|| EmbeddingError::Inference("no vector returned".into()))
+        let vector = v.pop().ok_or_else(|| EmbeddingError::Inference("no vector returned".into()))?;
+        crate::activity::emit(crate::activity::Event::Embedding {
+            kind: crate::activity::EmbeddingKind::Document,
+        });
+        Ok(vector)
     }
 }
 
