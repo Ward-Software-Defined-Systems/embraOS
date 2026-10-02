@@ -352,7 +352,8 @@ fn dirs_to_scan(env_val: Option<&str>) -> Vec<PathBuf> {
 }
 
 /// Duplicate pack NAMES across distinct files would conflate the per-pack
-/// count fast-paths — first file (BTreeMap filename order) wins.
+/// count fast-paths — the first file in scan order (directory by directory,
+/// file names in order) wins.
 fn dedupe_pack_names(files: Vec<SeedPackFile>) -> (Vec<SeedPackFile>, Vec<String>) {
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::new();
@@ -1435,7 +1436,7 @@ mod tests {
         assert_eq!(
             dirs,
             vec![PathBuf::from(ROOTFS_SEED_DIR), PathBuf::from(STATE_SEED_DIR)],
-            "rootfs first so STATE overwrites in the BTreeMap"
+            "the image's directory first: scan_dirs takes its packs as shipped"
         );
     }
 
