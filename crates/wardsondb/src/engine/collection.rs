@@ -169,7 +169,14 @@ impl Storage {
         }
 
         batch.remove(&self.meta, meta_key.as_bytes())?;
+        // The TTL policy goes with the collection. Left behind, the TTL
+        // worker finds it on every tick and fails on a collection that no
+        // longer exists, and the policy cannot be deleted over the API once
+        // the collection is gone (embraOS Embra#15).
+        let ttl_key = format!("ttl:{name}");
+        batch.remove(&self.meta, ttl_key.as_bytes())?;
         // Uncache BEFORE the commit (re-cache if it fails): once the commit
+
         // lands, no writer may slip a doc into the dropped collection via a
         // stale existence hit. NOTE the partition itself is never dropped —
         // only emptied — which is what keeps Storage::partitions and every

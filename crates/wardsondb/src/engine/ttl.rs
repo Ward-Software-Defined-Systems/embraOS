@@ -61,7 +61,21 @@ impl Storage {
         Ok(())
     }
 
+    /// Remove a policy whose collection no longer exists. `delete_ttl` is
+    /// the API route and requires the collection; this is for the TTL
+    /// worker, which meets such a policy only when a drop on an older build
+    /// left it behind.
+    pub fn discard_ttl(&self, collection: &str) -> Result<(), AppError> {
+        self.check_not_poisoned()?;
+        let meta_key = format!("ttl:{collection}");
+        let mut batch = self.write_batch();
+        batch.remove(&self.meta, meta_key.as_bytes())?;
+        self.commit_batch(batch)?;
+        Ok(())
+    }
+
     pub fn get_all_ttl_configs(&self) -> Result<Vec<(String, TtlConfig)>, AppError> {
+
         let mut results = Vec::new();
         let mut item_err: Option<AppError> = None;
         self.engine

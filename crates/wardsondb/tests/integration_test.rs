@@ -2179,6 +2179,49 @@ async fn test_ttl_in_stats() {
     assert_eq!(body["data"]["ttl"]["active_policies"], 1);
 }
 
+/// A dropped collection takes its TTL policy with it: the policy count
+/// falls, and a collection re-created under the same name starts without
+/// one. The policy used to outlive the collection, and the TTL worker
+/// failed on it every tick (embraOS Embra#15).
+#[tokio::test]
+async fn test_ttl_policy_goes_with_its_collection() {
+    let (base_url, _tmp) = start_test_server().await;
+    let client = Client::new();
+
+    client
+        .post(format!("{base_url}/_collections"))
+        .json(&json!({"name": "events"}))
+        .send()
+        .await
+        .unwrap();
+    client
+        .put(format!("{base_url}/events/ttl"))
+        .json(&json!({"retention_days": 7}))
+        .send()
+        .await
+        .unwrap();
+    let resp = client.get(format!("{base_url}/_stats")).send().await.unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["data"]["ttl"]["active_policies"], 1);
+
+    let resp = client.delete(format!("{base_url}/events")).send().await.unwrap();
+    assert!(resp.status().is_success());
+    let resp = client.get(format!("{base_url}/_stats")).send().await.unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["data"]["ttl"]["active_policies"], 0);
+
+    client
+        .post(format!("{base_url}/_collections"))
+        .json(&json!({"name": "events"}))
+        .send()
+        .await
+        .unwrap();
+    let resp = client.get(format!("{base_url}/events/ttl")).send().await.unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["data"]["enabled"], false);
+}
+
+
 #[tokio::test]
 async fn test_api_key_auth() {
     let keys = vec!["test-key-123".to_string(), "another-key".to_string()];
