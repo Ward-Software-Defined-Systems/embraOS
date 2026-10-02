@@ -76,6 +76,8 @@ pub async fn embed_node(
                 target: "kg::embedding",
                 "embedding {collection}:{id} failed (node saved, backfill will retry): {e}"
             );
+            cache::record_failure(cache::FailureKind::Write, &format!("{collection}:{id}"), &e.to_string())
+                .await;
             return;
         }
     };
@@ -87,6 +89,8 @@ pub async fn embed_node(
     });
     if let Err(e) = db.patch_document(collection, id, &patch).await {
         tracing::warn!(target: "kg::embedding", "storing embedding for {collection}:{id} failed: {e}");
+        cache::record_failure(cache::FailureKind::Write, &format!("{collection}:{id}"), &e.to_string())
+            .await;
         return;
     }
     cache::upsert(collection, id, vector, &model, new_document).await;

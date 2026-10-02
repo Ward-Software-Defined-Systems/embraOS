@@ -106,6 +106,18 @@ impl From<crate::provider::health::ProviderProbe> for ProviderStatus {
     }
 }
 
+/// Embedding failures since boot (`embedding::cache::failures`). A failure
+/// never fails a write — the node is saved without a vector and backfill
+/// retries it — so this block, and `/embeddings`, are where a broken model
+/// or missing weights show.
+#[derive(Debug, Serialize)]
+pub struct EmbeddingHealth {
+    pub failures_write: u64,
+    pub failures_query: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_failure: Option<crate::embedding::cache::EmbeddingFailure>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct SystemStatus {
     pub version: String,
@@ -120,6 +132,7 @@ pub struct SystemStatus {
     /// See [`ProviderStatus`]; omitted before the first probe.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderStatus>,
+    pub embedding: EmbeddingHealth,
 }
 
 /// Collections covered by the FIX-6 parity check — the three windowed-search
@@ -180,6 +193,7 @@ pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
     }
     let search_window_saturated = memory_collections.iter().any(|m| m.saturated);
 
+    let failures = crate::embedding::cache::failures().await;
     SystemStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_seconds: process_uptime_secs(),
@@ -194,6 +208,11 @@ pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
             memory_collections,
         },
         provider: crate::provider::health::latest().map(ProviderStatus::from),
+        embedding: EmbeddingHealth {
+            failures_write: failures.write,
+            failures_query: failures.query,
+            last_failure: failures.last,
+        },
     }
 }
 
@@ -2126,6 +2145,26 @@ mod native_args_tests {
         assert_eq!(c.query, "");
     }
 
+    /// The embedding failure counters ride `system_status` under
+    /// `embedding`, with the last failure only when there is one.
+    #[test]
+    fn system_status_carries_the_embedding_failure_counters() {
+        let health = EmbeddingHealth {
+            failures_write: 2,
+            failures_query: 1,
+            last_failure: Some(crate::embedding::cache::EmbeddingFailure {
+                at: "2026-10-02T00:00:00Z".into(),
+                subject: "memory.semantic:n1".into(),
+                reason: "model not loaded".into(),
+            }),
+        };
+        let v = serde_json::to_value(&health).unwrap();
+        assert_eq!(v["failures_write"], 2);
+        assert_eq!(v["failures_query"], 1);
+        assert_eq!(v["last_failure"]["subject"], "memory.semantic:n1");
+        assert_eq!(v["last_failure"]["reason"], "model not loaded");
+    }
+
     #[test]
     fn system_status_nests_lifetime_under_wardsondb() {
         // Closes #42: lifetime_* fields no longer appear at top level — they
@@ -2154,9 +2193,13 @@ mod native_args_tests {
                 }],
             },
             provider: None,
+            embedding: EmbeddingHealth { failures_write: 0, failures_query: 0, last_failure: None },
         };
         let v = serde_json::to_value(&s).unwrap();
         assert!(v.get("provider").is_none(), "no probe yet → no provider block");
+        assert_eq!(v["embedding"]["failures_write"], 0);
+        assert_eq!(v["embedding"]["failures_query"], 0);
+        assert!(v["embedding"].get("last_failure").is_none(), "no failure → no last_failure");
         assert!(v.get("lifetime_requests").is_none(), "flat field leaked");
         assert!(v.get("lifetime_inserts").is_none(), "flat field leaked");
         assert!(v.get("lifetime_queries").is_none(), "flat field leaked");

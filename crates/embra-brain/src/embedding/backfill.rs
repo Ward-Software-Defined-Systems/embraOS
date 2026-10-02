@@ -122,6 +122,8 @@ where
                     });
                     if let Err(e) = db.patch_document(coll, id, &patch).await {
                         tracing::warn!(target: "kg::embedding", "backfill store {coll}:{id}: {e}");
+                        cache::record_failure(cache::FailureKind::Write, &format!("{coll}:{id}"), &e.to_string())
+                            .await;
                         report.failed += 1;
                     } else {
                         cache::upsert(coll, id, vector, &model, false).await;
@@ -130,6 +132,8 @@ where
                 }
                 Err(e) => {
                     tracing::warn!(target: "kg::embedding", "backfill embed {coll}:{id}: {e}");
+                    cache::record_failure(cache::FailureKind::Write, &format!("{coll}:{id}"), &e.to_string())
+                        .await;
                     report.failed += 1;
                 }
             }

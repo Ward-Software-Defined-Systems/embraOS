@@ -30,9 +30,45 @@ pub const EMBEDDED_COLLECTIONS: [&str; 2] = ["memory.semantic", "memory.procedur
 /// and the model that produced it, never the document body.
 const VECTOR_FIELDS: [&str; 2] = ["embedding", "embedding_model"];
 
+/// What a failed embedding leaves behind for the status surfaces.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EmbeddingFailure {
+    /// RFC 3339.
+    pub at: String,
+    /// `<collection>:<id>` for a document, `query` for a turn's query.
+    pub subject: String,
+    pub reason: String,
+}
+
+/// Embedding failures since boot, for `/embeddings` and `system_status`.
+/// A failure never fails a write — the node is saved without a vector and
+/// backfill retries it — and a query failure degrades the turn to lexical
+/// retrieval; both were WARN or debug lines only, and a broken model or
+/// missing weights shipped unembedded nodes with nothing on any status
+/// surface (Embra#16, 2b).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct EmbeddingFailures {
+    pub write: u64,
+    pub query: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last: Option<EmbeddingFailure>,
+}
+
+/// Which counter a failure moves.
+#[derive(Debug, Clone, Copy)]
+pub enum FailureKind {
+    /// Embedding or storing a document's vector.
+    Write,
+    /// Embedding a retrieval query.
+    Query,
+}
+
 #[derive(Default)]
 pub struct VectorIndex {
     vecs: HashMap<(String, String), Vec<f32>>,
+    /// Process memory, never reloaded: `ensure_current` assigns the other
+    /// fields in place and leaves these.
+    failures: EmbeddingFailures,
     /// Model the loaded vectors were produced by. A change means every vector
     /// on disk is stale, so the index empties rather than mixing spaces.
     model: String,
@@ -164,6 +200,26 @@ pub async fn upsert(collection: &str, id: &str, vector: Vec<f32>, model: &str, n
     }
 }
 
+/// Count a failed embedding and keep it as the last one seen.
+pub async fn record_failure(kind: FailureKind, subject: &str, reason: &str) {
+    let mut idx = index().await.write().await;
+    match kind {
+        FailureKind::Write => idx.failures.write += 1,
+        FailureKind::Query => idx.failures.query += 1,
+    }
+    idx.failures.last = Some(EmbeddingFailure {
+        at: chrono::Utc::now().to_rfc3339(),
+        subject: subject.to_string(),
+        reason: reason.to_string(),
+    });
+}
+
+/// The failures since boot. No loader and no database: this reads process
+/// memory, so a status surface can show it before the index has loaded.
+pub async fn failures() -> EmbeddingFailures {
+    index().await.read().await.failures.clone()
+}
+
 /// Drop a vector whose node is gone (merge loser, deletion).
 pub async fn remove(collection: &str, id: &str) {
     let mut idx = index().await.write().await;
@@ -236,6 +292,36 @@ mod tests {
         idx.counts.remove("unlink-test");
         idx.loaded = false;
         idx.model.clear();
+    }
+
+    /// Each failure moves its counter once and becomes the last one shown.
+    /// Deltas, because the counters are process-wide.
+    #[tokio::test]
+    async fn a_recorded_failure_counts_once_and_is_the_last_one_shown() {
+        let _guard = INDEX_TEST_LOCK.lock().await;
+        let before = failures().await;
+        record_failure(FailureKind::Write, "memory.semantic:n1", "model not loaded").await;
+        let after = failures().await;
+        assert_eq!(after.write - before.write, 1);
+        assert_eq!(after.query, before.query);
+        let last = after.last.expect("the failure is kept");
+        assert_eq!(last.subject, "memory.semantic:n1");
+        assert_eq!(last.reason, "model not loaded");
+        assert!(chrono::DateTime::parse_from_rfc3339(&last.at).is_ok(), "{}", last.at);
+    }
+
+    /// A query that could not be embedded is a different remedy from a
+    /// document that could not: the two are counted apart.
+    #[tokio::test]
+    async fn write_and_query_failures_are_counted_apart() {
+        let _guard = INDEX_TEST_LOCK.lock().await;
+        let before = failures().await;
+        record_failure(FailureKind::Query, "query", "inference failed").await;
+        record_failure(FailureKind::Query, "query", "inference failed").await;
+        let after = failures().await;
+        assert_eq!(after.query - before.query, 2);
+        assert_eq!(after.write, before.write);
+        assert_eq!(after.last.map(|l| l.subject), Some("query".to_string()));
     }
 
     #[tokio::test]

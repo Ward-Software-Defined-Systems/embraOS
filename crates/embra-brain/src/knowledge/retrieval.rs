@@ -330,7 +330,15 @@ pub async fn retrieve_relevant_knowledge(
                         }
                     }
                 }
-                Err(e) => tracing::debug!(target: "kg::embedding", "query embedding failed: {e}"),
+                Err(e) => {
+                    tracing::debug!(target: "kg::embedding", "query embedding failed: {e}");
+                    crate::embedding::cache::record_failure(
+                        crate::embedding::cache::FailureKind::Query,
+                        "query",
+                        &e.to_string(),
+                    )
+                    .await;
+                }
             }
         }
     }

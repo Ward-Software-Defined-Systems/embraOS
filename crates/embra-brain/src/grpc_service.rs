@@ -5178,6 +5178,16 @@ async fn handle_embeddings_command(
                     out.push_str("  loaded:   no — retrieval is lexical-only");
                 }
             }
+            // Failures never fail a write and were WARN lines only; this is
+            // where a broken model or missing weights shows (Embra#16).
+            let failures = crate::embedding::cache::failures().await;
+            out.push_str(&format!(
+                "\n  failures: {} write, {} query since boot",
+                failures.write, failures.query
+            ));
+            if let Some(last) = failures.last {
+                out.push_str(&format!(" — last {} at {}: {}", last.subject, last.at, last.reason));
+            }
             send(out, SystemMessageType::Info).await;
         }
         ["on"] | ["off"] => {
