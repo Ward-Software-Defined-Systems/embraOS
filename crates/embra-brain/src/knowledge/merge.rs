@@ -355,6 +355,13 @@ fn classify_and_resolve(
     disp
 }
 
+/// Whether the merge changed the target's embeddable text: only
+/// `merge_content` does, by appending the loser's body. The tags the target
+/// absorbs are not part of that text (`embedding::write::embed_text`).
+fn merge_moves_the_embeddable_text(plan: &MergePlan) -> bool {
+    plan.new_content.is_some()
+}
+
 struct MergePlan {
     redirects: Vec<(String, serde_json::Value)>,
     delete_conflict_target: Vec<String>,
@@ -720,10 +727,15 @@ async fn execute_merge_plan(
     // node that no longer resolves.
     crate::embedding::write::forget_node(src.0, src.1).await;
 
-    // The winner absorbed the loser's tags and, under merge_content, its body
-    // — so its embeddable text changed and the stored vector now describes the
-    // pre-merge node. Re-embed from what is actually on disk.
-    if let Ok(merged) = db.read(tgt.0, tgt.1).await {
+    // The winner's embeddable text — a semantic node's content; a procedural
+    // node's title, description, preconditions and step actions
+    // (`embed_text`) — moves only when merge_content appended the loser's
+    // body; absorbed tags are not embedded. Re-embed from what is on disk
+    // then, and only then. A target that never had a vector is backfill's
+    // job, as everywhere else.
+    if merge_moves_the_embeddable_text(plan)
+        && let Ok(merged) = db.read(tgt.0, tgt.1).await
+    {
         crate::embedding::write::embed_node(db, config, tgt.0, tgt.1, &merged, false).await;
     }
 
@@ -1131,5 +1143,32 @@ mod tests {
         assert!(v.get("allOf").is_none());
         assert!(v.get("anyOf").is_none());
         assert_eq!(v.get("type").and_then(|t| t.as_str()), Some("object"));
+    }
+}
+
+#[cfg(test)]
+mod re_embed_tests {
+    use super::*;
+
+    /// A merge that only unions tags leaves the target's vector alone; one
+    /// that appended the loser's body re-embeds it.
+    #[test]
+    fn a_merge_re_embeds_the_target_only_when_its_content_moved() {
+        let mut plan = MergePlan {
+            redirects: Vec::new(),
+            delete_conflict_target: Vec::new(),
+            drop_ids: Vec::new(),
+            drop_auto: 0,
+            drop_self_pair: 0,
+            drop_conflict_source: 0,
+            repairs: Vec::new(),
+            tags_to_add: vec!["absorbed".to_string()],
+            unioned_tags: vec!["absorbed".to_string()],
+            new_content: None,
+            warnings: Vec::new(),
+        };
+        assert!(!merge_moves_the_embeddable_text(&plan), "absorbed tags are not embedded");
+        plan.new_content = Some("the loser's body, appended".to_string());
+        assert!(merge_moves_the_embeddable_text(&plan));
     }
 }
