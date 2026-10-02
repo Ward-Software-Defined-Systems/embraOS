@@ -11,11 +11,11 @@
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20673525.svg)](https://doi.org/10.5281/zenodo.20673525)
 
 <p align="center">
-  <img src="assets/embra-web.png" alt="embraOS web console (embra-web) — the conversational TUI in the browser over a PTY→WebSocket bridge" width="100%">
+  <img src="assets/embra-web.png" alt="embraOS web console (embra-web) — the conversational TUI in the browser over a PTY→WebSocket bridge, with the service and meter pills and the activity strip showing the model, the brain and the knowledge graph live" width="100%">
 </p>
 
 <p align="center">
-  <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — dense multigraph with auto-derived edges" width="100%">
+  <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — the sealed identity graph and the memory collections in one multigraph, with the production instance's measured numbers" width="100%">
 </p>
 
 **Current Status:** Phase 1 — Stable. Sprint 6, the final Phase 1 sprint, closed with `v0.15.0-phase1` (2026-09-18); the code-review pit stop is in progress on branch `code-review`.
