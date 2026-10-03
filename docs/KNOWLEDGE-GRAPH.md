@@ -1,6 +1,6 @@
 # Knowledge Graph
 
-The embraOS knowledge graph (KG) is the cross-session memory layer. It lives in `crates/embra-brain/src/knowledge/` and is backed by five WardSONDB collections (`memory.entries`, `memory.semantic`, `memory.procedural`, `identity.graph`, `memory.edges`). Schema introduced in migration v5; `CURRENT_SCHEMA_VERSION = 13` (`crates/embra-brain/src/migrations/mod.rs:7`) — v13 added the `identity.graph` projection collection (kg-native-identity, 2026-07-24); the memory collections themselves are unchanged since v5.
+The embraOS knowledge graph (KG) is the cross-session memory layer. It lives in `crates/embra-brain/src/knowledge/` and is backed by five WardSONDB collections (`memory.entries`, `memory.semantic`, `memory.procedural`, `identity.graph`, `memory.edges`). Schema introduced in migration v5; `CURRENT_SCHEMA_VERSION = 13` (`crates/embra-brain/src/migrations/mod.rs`) — v13 added the `identity.graph` projection collection (kg-native-identity, 2026-07-24); the memory collections themselves are unchanged since v5.
 
 This doc covers the write-side (auto-derived edges, promotion), the read-side (auto-enrichment, retrieval ranking, traversal), the twelve `knowledge_*` tools, and the design rationale behind a deliberately dense edge layer.
 
@@ -37,7 +37,7 @@ The engine takes the new document's `(session, tags, created_at)` and queries al
 | temporal | `{created_at: {$gte: now-1800s, $lte: now+1800s}}` | 50 |
 | tag-overlap (one query per tag on the new doc) | `{tags: {$contains: <tag>}}` | 50 |
 
-The limit (50) and the temporal window (1800s) come from `config.system` — `kg_edge_candidate_limit` and `kg_temporal_window_secs` respectively. Rust defaults in the `default_kg_*` block of `crates/embra-brain/src/config/mod.rs` (~:191-196); the v5 migration writes the same values into `config.system` at first boot (`crates/embra-brain/src/migrations/mod.rs:602-605`).
+The limit (50) and the temporal window (1800s) come from `config.system` — `kg_edge_candidate_limit` and `kg_temporal_window_secs` respectively. Rust defaults in the `default_kg_*` functions of `crates/embra-brain/src/config/mod.rs`; the v5 migration writes the same values into `config.system` at first boot (`run_v5_knowledge_graph` in `crates/embra-brain/src/migrations/mod.rs`).
 
 For an active session with two tags on the new doc, the candidate pools could each be the full 50 across each of the 3 collections. The engine then dedupes within each pool and emits edge documents bidirectionally (`push_bidirectional`, `edges.rs` — two records per logical edge):
 
@@ -176,7 +176,7 @@ The only edge-removing maintenance tool is `knowledge_sweep_orphans` (`tools.rs`
 
 `knowledge_query` fetches up to 100 docs (`tools.rs`: `max_results` clamped to `[1, 100]`, with internal `retrieve_n = (max_results * 3).clamp(20, 100)` when category filtering is active), runs the 4-signal ranker, then truncates to `max_results` (default 20). The user-facing answer set is always tiny regardless of graph size.
 
-Auto-enrichment is even more aggressive: `MAX_INJECTED = 5` (`crates/embra-brain/src/knowledge/enrichment.rs:21`) with a `SCORE_THRESHOLD = 0.3` floor (`enrichment.rs:18, 70`). The graph can hold millions of edges; only five high-scoring nodes per turn ever reach the model.
+Auto-enrichment is even more aggressive: `MAX_INJECTED = 5`, behind two gates — `SCORE_THRESHOLD = 0.3` and the relevance floor `MIN_RELEVANCE = 0.4` (`qualifies` in `crates/embra-brain/src/knowledge/enrichment.rs`). The graph can hold millions of edges; at most five nodes per turn ever reach the model.
 
 ### ~~Depth-2 expansion needs the density~~ (retired 2026-09-08)
 
@@ -257,20 +257,20 @@ Half of the linked pairs (687 of 1,347) connect two nodes of one session. Those 
 
 ## Auto-enrichment (read path on every user turn)
 
-This is where the KG actually reaches the model. `build_turn_context` (`crates/embra-brain/src/knowledge/enrichment.rs:86-186`) is called from `grpc_service.rs` on every user message turn (except resume-briefing turns, which substitute `build_resumption_context` at `enrichment.rs:197`).
+This is where the KG actually reaches the model. `build_turn_context` (`crates/embra-brain/src/knowledge/enrichment.rs`) is called from `grpc_service.rs` on every user message turn (except resume-briefing turns, which substitute `build_resumption_context`).
 
 ### Gates
 
-Two skip conditions (`enrichment.rs:98`):
+Two skip conditions (`enrichment.rs`):
 
-1. `trimmed.len() < 15` → return the raw message unchanged (`MIN_MESSAGE_LEN`, `enrichment.rs:53`)
+1. `trimmed.len() < 15` → return the raw message unchanged (`MIN_MESSAGE_LEN`)
 2. `is_chatty_filler(trimmed)` → return the raw message unchanged. List in `enrichment.rs::is_chatty_filler` (lowercased, trailing punctuation + whitespace stripped): `ok`, `okay`, `yes`, `no`, `sure`, `thanks`, `thx`, `ty`, `hi`, `hello`, `hey`, `got it`, `understood`, `cool`.
 
-**Note for readers coming from CLAUDE.md:** an earlier doc revision listed a `[TOOL:` prefix gate. That gate was deleted post-NATIVE-TOOLS-01 (`enrichment.rs:94-97`): the user-message channel is plain prose only — tool calls arrive as structured `tool_use` blocks, never as `[TOOL:...]` strings — so the legacy guard came out with the parser.
+**Note for readers coming from CLAUDE.md:** an earlier doc revision listed a `[TOOL:` prefix gate. That gate was deleted post-NATIVE-TOOLS-01 (`enrichment.rs`): the user-message channel is plain prose only — tool calls arrive as structured `tool_use` blocks, never as `[TOOL:...]` strings — so the legacy guard came out with the parser.
 
 ### Retrieval and threshold
 
-Past the gates, the message becomes a query-tag list through the shared tokenizer (`query_tag_tokens`: punctuation-trimmed, lowercased, deduped, hyphens kept — `enrichment.rs:105`), and the last three operator turns of the session become the context a weak query may be expanded with (`recent_user_turns`, `:63`; the resume marker and the image-only placeholder are skipped). `retrieve_relevant_knowledge` runs with `max_results = MAX_INJECTED = 5` (`:49`). A result is injected when it passes two gates (`qualifies`, `:44`): `score >= SCORE_THRESHOLD = 0.3` (`:27`) and `relevance >= MIN_RELEVANCE = 0.4` (`:41`), then the list is truncated to 5. The floor exists because the score is relevance×0.6 + recency×0.2 + access×0.2: a node with no relevance that is the newest and the most accessed of its candidate set scores 0.40, and on conversational turns that was the injected top-5 (scores 0.35–0.47 at relevance ≈ 0.12, observed 2026-10-02). 0.4 is the rescaled cosine of 0.70, measured on 2026-10-02 over 19 operator turns against a copy of a production graph: under bge-small the best hit of a turn that said nothing in particular sat at cosine 0.65–0.70 and the best hit of a turn about something at 0.71–0.82, so a floor at 0.70 kept 9 of 10 relevant top hits and dropped 6 of 9 noise injections (0.60 dropped none). A tag hit alone carries a node past the floor only on a short message (one tag on up to two tag tokens, two on up to five); its cosine usually does. `knowledge_query` is not gated: the model sees the scores.
+Past the gates, the message becomes a query-tag list through the shared tokenizer (`query_tag_tokens`: punctuation-trimmed, lowercased, deduped, hyphens kept — `enrichment.rs`), and the last three operator turns of the session become the context a weak query may be expanded with (`recent_user_turns`; the resume marker and the image-only placeholder are skipped). `retrieve_relevant_knowledge` runs with `max_results = MAX_INJECTED = 5`. A result is injected when it passes two gates (`qualifies`): `score >= SCORE_THRESHOLD = 0.3` and `relevance >= MIN_RELEVANCE = 0.4`, then the list is truncated to 5. The floor exists because the score is relevance×0.6 + recency×0.2 + access×0.2: a node with no relevance that is the newest and the most accessed of its candidate set scores 0.40, and on conversational turns that was the injected top-5 (scores 0.35–0.47 at relevance ≈ 0.12, observed 2026-10-02). 0.4 is the rescaled cosine of 0.70, measured on 2026-10-02 over 19 operator turns against a copy of a production graph: under bge-small the best hit of a turn that said nothing in particular sat at cosine 0.65–0.70 and the best hit of a turn about something at 0.71–0.82, so a floor at 0.70 kept 9 of 10 relevant top hits and dropped 6 of 9 noise injections (0.60 dropped none). A tag hit alone carries a node past the floor only on a short message (one tag on up to two tag tokens, two on up to five); its cosine usually does. `knowledge_query` is not gated: the model sees the scores.
 
 **A weak query is embedded twice.** Step 3c embeds the raw message; when no hit reaches cosine 0.70 (`EXPANSION_TRIGGER_COSINE` — the cosine of the relevance floor, so below it no similarity hit could be injected anyway) and the session has recent operator turns, it embeds once more with the salient terms of those turns appended: their content tokens, less the message's own, that the graph uses as tags (`tag_vocabulary`, from the prefetched documents), has seen and that are not stopwords, rarest first, at most eight (`retrieval::expansion_terms`). The tag restriction is measured: by IDF alone the picker chose conversational filler, rare in a corpus of technical notes; restricted to the tag vocabulary it improved 4 of 10 measured turns and worsened 2. The message comes first in the text, so the tokenizer's right truncation cuts the terms and never the message. The second vector then serves admission and the cosines of the lexical candidates. One extra in-OS inference, on those turns only; `knowledge_query` passes no context. The journal line below says whether it ran and with what.
 
@@ -278,7 +278,7 @@ If zero results pass the floor, the raw message is returned unchanged.
 
 ### Wrapper format
 
-When at least one result qualifies, the in-flight user message is rewritten as (`:167-184`, verbatim):
+When at least one result qualifies, the in-flight user message is rewritten as (verbatim):
 
 ```
 <retrieved_context source="auto-enrichment">
@@ -305,7 +305,7 @@ The wrapped message is used for the in-flight provider call only. `grpc_service.
 
 ### Resume briefing variant
 
-When a session resumes (`SessionManager.pending_resume_briefing` is set), `build_resumption_context` (`enrichment.rs:113-125`) substitutes a different wrapper that instructs the model to recap the prior session in 2-4 sentences. The raw user message in this case is the synthetic `[Session resumed]` marker — not operator-typed input — so it never surfaces back through history. Since the session-ux-fixes wave (2026-07-11), `SessionAttach` sets the flag only when the session has been idle ≥ 30 minutes (`RESUME_BRIEFING_MIN_IDLE_SECS`, vs `meta.last_active`) and no briefing started in the last 120 s — transport reconnects (mobile WS flaps) resume silently; `/switch` sets it unconditionally. (See `~/.claude/projects/-home-william-projects-embraOS/memory/project_session_resume_briefing.md` for the dispatch-site wiring across `SessionAttach` and `/switch`.)
+When a session resumes (`SessionManager.pending_resume_briefing` is set), `build_resumption_context` (`enrichment.rs`) substitutes a different wrapper that instructs the model to recap the prior session in 2-4 sentences. The raw user message in this case is the synthetic `[Session resumed]` marker — not operator-typed input — so it never surfaces back through history. Since the session-ux-fixes wave (2026-07-11), `SessionAttach` sets the flag only when the session has been idle ≥ 30 minutes (`RESUME_BRIEFING_MIN_IDLE_SECS`, vs `meta.last_active`) and no briefing started in the last 120 s — transport reconnects (mobile WS flaps) resume silently; `/switch` sets it unconditionally. (See `~/.claude/projects/-home-william-projects-embraOS/memory/project_session_resume_briefing.md` for the dispatch-site wiring across `SessionAttach` and `/switch`.)
 
 ---
 
@@ -564,7 +564,7 @@ Edges referencing the forgotten documents from all three types — auto-derived 
 
 ## Configuration knobs
 
-Six kg_* config fields tunable per-instance. The first four are set up by migration v5 (first-boot writes into `config.system` at `crates/embra-brain/src/migrations/mod.rs:602-605`); the two traversal knobs (2026-07-02 search-freeze fix, locked decision D3) are serde-additive with Rust defaults — pre-existing config docs simply lack them and deserialize to the defaults, no migration needed. Rust default constants in the `default_kg_*` block of `crates/embra-brain/src/config/mod.rs` (~:191-196).
+Six kg_* config fields tunable per-instance. The first four are set up by migration v5 (first-boot writes into `config.system` by `run_v5_knowledge_graph`, `crates/embra-brain/src/migrations/mod.rs`); the two traversal knobs (2026-07-02 search-freeze fix, locked decision D3) are serde-additive with Rust defaults — pre-existing config docs simply lack them and deserialize to the defaults, no migration needed. Rust defaults: the `default_kg_*` functions of `crates/embra-brain/src/config/mod.rs`.
 
 | Field | Default | Used by |
 |---|---|---|
@@ -582,7 +582,7 @@ Tuning notes:
 - **Lower `kg_max_traversal_depth`** if traversal output is too verbose. The ceiling stays the upper bound; the default just sets what the brain reaches for when not specified.
 - **Saturation logging since the type partition (2026-07-31):** auto-window saturation is expected on dense hubs and logs at `debug` — it prunes only structural noise, and meaningful edges ride their own window. A `kg::traversal` **warn** now means the MEANINGFUL window (2000) filled — which should not happen below several thousand meaningful edges; if it fires, inspect that hub before touching anything. Raising `kg_traversal_edge_limit` is still **not** the default response to anything. The debug tier sits below the brain's INFO log floor — boot with `EMBRA_LOG_LEVEL=info,kg::traversal=debug` (→ the `embra.loglevel=` kernel flag) to make it land in the log, then read it via `system_logs`.
 
-Schema lineage: v5 introduced the 3 KG collections + 7 indexes + the 4 original config fields (`run_v5_knowledge_graph` in `crates/embra-brain/src/migrations/mod.rs:490`, called from `:51`). v12 added `guardian.tools` for embra-guardian-v1; v13 (current) added the `identity.graph` projection collection (kg-native-identity); the memory collections' shapes have been stable since v5. Serde-additive fields can be added to the config struct without bumping the schema (precedent: `max_tool_iterations`, `show_reasoning`, and now the two `kg_traversal_*` knobs).
+Schema lineage: v5 introduced the 3 KG collections + 7 indexes + the 4 original config fields (`run_v5_knowledge_graph` in `crates/embra-brain/src/migrations/mod.rs`). v12 added `guardian.tools` for embra-guardian-v1; v13 (current) added the `identity.graph` projection collection (kg-native-identity); the memory collections' shapes have been stable since v5. Serde-additive fields can be added to the config struct without bumping the schema (precedent: `max_tool_iterations`, `show_reasoning`, and now the two `kg_traversal_*` knobs).
 
 ---
 
@@ -627,7 +627,7 @@ Everything below is a conversation with the intelligence — the operator types 
 
 6. **Verify cascade cleanup.** Ask the intelligence to forget one of the two memories — *"forget the first one and show me what cascades"*. It calls `forget`, which reports the entry, the node and the cascaded edge count. A follow-up stats ask should show one fewer entry, one fewer semantic node and no orphan edges. `knowledge_unlink_node` on the other node removes the node only and names the entry it left unpromoted.
 
-7. **Verify the doc's claims against HEAD** (regression-time only): grep each file:line reference in this doc against `crates/embra-brain/src/knowledge/`. Anything that doesn't resolve means the code has moved and the doc is stale.
+7. **Verify the doc's claims against HEAD** (regression-time only): grep each file and function this doc names against `crates/embra-brain/src/`. Anything that doesn't resolve means the code has moved and the doc is stale. The doc names functions and constants, not line numbers: those went stale with every change.
 
 If any step diverges from what the code claims here, the code is right and the doc is wrong — file an issue, or update the doc.
 

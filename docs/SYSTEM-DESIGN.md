@@ -10,7 +10,7 @@ embraOS is built on a 7-layer continuity architecture (descended from the OpenCl
 | **Influence & Propagation** | Tool dispatch, LLM provider routing, Guardian dynamic-tool gateway. | `crates/embra-brain/src/{tools,provider,guardian}/`; 115 tools, 4 providers |
 | **Action Layer** | Tool calls that touch the world — filesystem, git, HTTP, SSH, cron. | `crates/embra-brain/src/tools/registry.rs` |
 | **Governance & Guardrails** | Soul injection into the system prompt, workspace path restriction, RFC 1918 SSH constraint, Guardian capability broker. | `crates/embra-brain/src/brain/prompts.rs`; tool-layer enforcement |
-| **Memory & Knowledge** | Session history + cross-session knowledge graph (entries / semantic / procedural / typed edges) with auto-enrichment on retrieval ≥0.3. | `crates/embra-brain/src/knowledge/` |
+| **Memory & Knowledge** | Session history + cross-session knowledge graph (entries / semantic / procedural / typed edges) with auto-enrichment on every turn (score ≥ 0.3 and a relevance floor). | `crates/embra-brain/src/knowledge/` |
 
 The runtime services that implement those layers:
 

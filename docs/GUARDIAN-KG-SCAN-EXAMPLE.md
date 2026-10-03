@@ -76,7 +76,7 @@ noise to this scanner) and drops node payloads the matchers never read.
 One subtlety: `temporal_gating` requires the *target node record* to be
 present in the dump, so a `depends_on` edge pointing at a raw episodic
 entry will not fire under this profile — add `"entries"` to `collections`
-if your graph links `depends_on` edges to unpromoted entries.
+if your graph links `depends_on` edges to entries.
 
 ## Feeding the dump to the guest — `data_file`
 
