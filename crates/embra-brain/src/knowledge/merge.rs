@@ -10,6 +10,17 @@
 //! marker-guarded). The dry_run preview renders the SAME plan the executor
 //! walks — preview == execution plan by construction.
 //!
+//! The source exists until the last step, so an edge can reach it after the
+//! plan was built. The refresh of the target's automatic edges (step 5)
+//! would write one itself: the two nodes of a merge share tags, and often a
+//! session, so the source is a candidate, and step 4 has just dropped the
+//! edges between the pair that `edge_exists` would have found. The refresh
+//! leaves the source out (`derive_edges_except`). A derivation that another
+//! write started in the meantime knows nothing of the merge, so step 6
+//! reads the source's arms once more and removes what it finds before step
+//! 7 deletes the node. Without the two, every merge left edges that name a
+//! node which no longer exists (Embra#9).
+//!
 //! Spec: `knowledge_audit_merge_spec.md`; detection side:
 //! `knowledge/audit.rs` (its `dedup_candidates` paste directly into these
 //! args).
@@ -28,7 +39,7 @@ use crate::db::WardsonDbClient;
 use crate::tools::registry::DispatchContext;
 
 use super::audit::resolve_kg_collection;
-use super::edges::derive_edges;
+use super::edges::derive_edges_except;
 use super::traversal::{edge_query_body, parse_edge, source_arm_filter, target_arm_filter};
 use super::types::{EdgeType, KnowledgeEdge};
 
@@ -362,6 +373,39 @@ fn merge_moves_the_embeddable_text(plan: &MergePlan) -> bool {
     plan.new_content.is_some()
 }
 
+/// The edges on the source's arms at step 6. The plan redirected or dropped
+/// every edge it saw, so these were written after it was built.
+#[derive(Debug, Default, PartialEq)]
+struct LateEdges {
+    /// Automatic edges, and any edge between the pair: removed with the
+    /// source, as the plan removes them.
+    drop_ids: Vec<String>,
+    /// Edges the plan would have redirected: a link made while the merge
+    /// ran. The merge stops rather than delete one; a re-run plans it.
+    to_redirect: usize,
+}
+
+/// Sort what reached the source since the plan, by the plan's own rules
+/// (`classify_and_resolve`).
+fn late_edges(edges: &[KnowledgeEdge], src: (&str, &str), tgt: (&str, &str)) -> LateEdges {
+    let is = |coll: &str, id: &str, key: (&str, &str)| coll == key.0 && id == key.1;
+    let mut late = LateEdges::default();
+    for e in edges {
+        let Some(eid) = e._id.clone() else { continue };
+        let (oc, oi) = if is(&e.source_collection, &e.source_id, src) {
+            (&e.target_collection, &e.target_id)
+        } else {
+            (&e.source_collection, &e.source_id)
+        };
+        if is(oc, oi, tgt) || e.edge_type.is_auto_derived() {
+            late.drop_ids.push(eid);
+        } else {
+            late.to_redirect += 1;
+        }
+    }
+    late
+}
+
 struct MergePlan {
     redirects: Vec<(String, serde_json::Value)>,
     delete_conflict_target: Vec<String>,
@@ -532,6 +576,7 @@ struct ExecCounters {
     edges_redirected: u64,
     source_edges_deleted: u64,
     edges_regenerated: usize,
+    edges_swept_post_derive: u64,
 }
 
 impl ExecCounters {
@@ -542,6 +587,7 @@ impl ExecCounters {
             "edges_redirected": self.edges_redirected,
             "source_edges_deleted": self.source_edges_deleted,
             "edges_regenerated": self.edges_regenerated,
+            "edges_swept_post_derive": self.edges_swept_post_derive,
         })
     }
 }
@@ -578,6 +624,7 @@ fn render_success(
         "edges_dropped_self_pair": plan.drop_self_pair,
         "target_edges_deleted_conflict": counters.target_edges_deleted_conflict,
         "edges_regenerated": counters.edges_regenerated,
+        "edges_swept_post_derive": counters.edges_swept_post_derive,
         "entries_repointed": counters.entries_repointed,
         "tags_added_to_target": plan.tags_to_add,
         "content_appended": plan.new_content.is_some(),
@@ -700,7 +747,10 @@ async fn execute_merge_plan(
 
     // Step 5 — auto-edge refresh over the unioned tags, anchored to the
     // target's own session/timestamp (fills tag_overlap for newly-unioned
-    // tags; edge_exists dedupes). derive_edges never hard-fails.
+    // tags; edge_exists dedupes). The source is left out: it still exists,
+    // it shares tags with the target, and step 4 has just dropped the edges
+    // between the pair, so the refresh would write them again and step 7
+    // would leave them without their node. derive_edges never hard-fails.
     let session = tgt_doc
         .get("source_session")
         .and_then(|v| v.as_str())
@@ -709,15 +759,60 @@ async fn execute_merge_plan(
         .get("created_at")
         .and_then(|v| v.as_str())
         .unwrap_or("");
-    counters.edges_regenerated =
-        derive_edges(db, tgt.1, tgt.0, session, &plan.unioned_tags, created_at, config)
-            .await
-            .unwrap_or(0);
+    counters.edges_regenerated = derive_edges_except(
+        db,
+        (tgt.0, tgt.1),
+        session,
+        &plan.unioned_tags,
+        created_at,
+        config,
+        Some((src.0, src.1)),
+    )
+    .await
+    .unwrap_or(0);
 
-    // Step 6 — delete the source node LAST (the one irreversible write).
+    // Step 6 — remove what reached the source since the plan was built.
+    // Every edge the plan saw is redirected or dropped by now, so an edge on
+    // the source's arms was written in the meantime, by a derivation that
+    // another write started. Left in place it would name a node that step 7
+    // deletes. A link made in the meantime is not deleted: the merge stops,
+    // and the re-run plans it.
+    let late = match fetch_node_edges(db, src.0, src.1).await {
+        Ok(edges) => late_edges(&edges, src, tgt),
+        Err(e) => return abort_json("step_6_post_derive_sweep", &counters, e, RERUN_ACTION),
+    };
+    if late.to_redirect > 0 {
+        return abort_json(
+            "step_6_post_derive_sweep",
+            &counters,
+            format!(
+                "{} edge(s) were linked to the source after the merge was planned",
+                late.to_redirect
+            ),
+            RERUN_ACTION,
+        );
+    }
+    for chunk in late.drop_ids.chunks(MERGE_DELETE_CHUNK) {
+        match db
+            .delete_by_query("memory.edges", &edge_ids_delete_filter(chunk))
+            .await
+        {
+            Ok(n) => counters.edges_swept_post_derive += n,
+            Err(e) => {
+                return abort_json(
+                    "step_6_post_derive_sweep",
+                    &counters,
+                    format!("removing the edges that reached the source failed: {}", e),
+                    RERUN_ACTION,
+                );
+            }
+        }
+    }
+
+    // Step 7 — delete the source node LAST (the one irreversible write).
     if let Err(e) = db.delete(src.0, src.1).await {
         return abort_json(
-            "step_6_source_delete",
+            "step_7_source_delete",
             &counters,
             format!("source node delete failed: {}", e),
             "all edges are redirected — re-run knowledge_merge (converges), or knowledge_unlink_node the source",
@@ -1102,6 +1197,7 @@ mod tests {
             edges_redirected: 2,
             source_edges_deleted: 4,
             edges_regenerated: 3,
+            edges_swept_post_derive: 2,
         };
         let ok: serde_json::Value =
             serde_json::from_str(&render_success(&plan, &counters, SRC, TGT, MergeStrategy::KeepTarget))
@@ -1114,6 +1210,7 @@ mod tests {
         assert_eq!(ok["edges_dropped_duplicate"], 1);
         assert_eq!(ok["target_edges_deleted_conflict"], 1);
         assert_eq!(ok["edges_regenerated"], 3);
+        assert_eq!(ok["edges_swept_post_derive"], 2);
         assert_eq!(ok["entries_repointed"], 1);
         assert_eq!(ok["source"]["id"], "src");
         assert_eq!(ok["target"]["id"], "tgt");
@@ -1170,5 +1267,250 @@ mod re_embed_tests {
         assert!(!merge_moves_the_embeddable_text(&plan), "absorbed tags are not embedded");
         plan.new_content = Some("the loser's body, appended".to_string());
         assert!(merge_moves_the_embeddable_text(&plan));
+    }
+}
+
+/// Embra#9: every merge left edges that named the deleted source.
+#[cfg(test)]
+mod late_edge_tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    const SEM: &str = "memory.semantic";
+    const SRC: (&str, &str) = (SEM, "src");
+    const TGT: (&str, &str) = (SEM, "tgt");
+
+    fn edge(id: &str, from: (&str, &str), to: (&str, &str), etype: EdgeType) -> KnowledgeEdge {
+        KnowledgeEdge {
+            _id: Some(id.to_string()),
+            source_id: from.1.to_string(),
+            source_collection: from.0.to_string(),
+            target_id: to.1.to_string(),
+            target_collection: to.0.to_string(),
+            edge_type: etype,
+            weight: 1.0,
+            metadata: serde_json::Value::Null,
+            created_at: "2026-10-02T21:43:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn an_automatic_edge_that_reached_the_source_late_goes_with_it() {
+        let entry = ("memory.entries", "e9");
+        let late = late_edges(
+            &[
+                edge("a1", SRC, entry, EdgeType::SameSession),
+                edge("a2", entry, SRC, EdgeType::SameSession),
+                edge("a3", (SEM, "other"), SRC, EdgeType::TagOverlap),
+                edge("a4", SRC, (SEM, "other"), EdgeType::Temporal),
+            ],
+            SRC,
+            TGT,
+        );
+        assert_eq!(late.drop_ids, ["a1", "a2", "a3", "a4"]);
+        assert_eq!(late.to_redirect, 0);
+    }
+
+    #[test]
+    fn an_edge_between_the_pair_is_dropped_whatever_its_type() {
+        // A redirect would turn it into a loop on the target.
+        let late = late_edges(
+            &[
+                edge("p1", SRC, TGT, EdgeType::TagOverlap),
+                edge("p2", TGT, SRC, EdgeType::RelatedTo),
+            ],
+            SRC,
+            TGT,
+        );
+        assert_eq!(late.drop_ids, ["p1", "p2"]);
+        assert_eq!(late.to_redirect, 0);
+    }
+
+    #[test]
+    fn a_link_made_while_the_merge_ran_is_counted_and_not_dropped() {
+        let late = late_edges(
+            &[
+                edge("l1", SRC, (SEM, "other"), EdgeType::Refines),
+                edge("l2", (SEM, "other"), SRC, EdgeType::RelatedTo),
+                edge("a1", SRC, (SEM, "other"), EdgeType::TagOverlap),
+            ],
+            SRC,
+            TGT,
+        );
+        assert_eq!(late.drop_ids, ["a1"]);
+        assert_eq!(late.to_redirect, 2);
+    }
+
+    // ── against a stub server ────────────────────────────────────────────
+
+    fn data(v: serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": v, "meta": {}}))
+    }
+
+    // Deserialized, not a struct literal: see `learning::phases` tests.
+    fn config() -> SystemConfig {
+        serde_json::from_value(json!({
+            "name": "Embra",
+            "api_key": "k",
+            "timezone": "UTC",
+            "deployment_mode": "phase1",
+            "created_at": "",
+            "version": "test"
+        }))
+        .expect("minimal config deserializes")
+    }
+
+    fn node(id: &str) -> serde_json::Value {
+        json!({
+            "_id": id, "content": "the cert refresh works", "category": "fact",
+            "tags": ["pki"], "source_session": "s", "created_at": "2026-10-02T21:43:00+00:00",
+        })
+    }
+
+    /// A plan with nothing left to move: the target already carries the tag.
+    fn settled_plan() -> MergePlan {
+        MergePlan {
+            redirects: Vec::new(),
+            delete_conflict_target: Vec::new(),
+            drop_ids: Vec::new(),
+            drop_auto: 0,
+            drop_self_pair: 0,
+            drop_conflict_source: 0,
+            repairs: Vec::new(),
+            tags_to_add: Vec::new(),
+            unioned_tags: vec!["pki".to_string()],
+            new_content: None,
+            warnings: Vec::new(),
+        }
+    }
+
+    /// A stub where the three node collections answer every candidate query
+    /// with `semantic` (for `memory.semantic`) or nothing, and the source's
+    /// outgoing arm answers `source_arm`.
+    async fn stub(semantic: serde_json::Value, source_arm: serde_json::Value) -> MockServer {
+        let server = MockServer::start().await;
+        for empty in ["/memory.entries/query", "/memory.procedural/query"] {
+            Mock::given(method("POST")).and(path(empty)).respond_with(data(json!([]))).mount(&server).await;
+        }
+        Mock::given(method("POST")).and(path("/memory.semantic/query")).respond_with(data(semantic)).mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/memory.edges/query"))
+            .and(|req: &Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                body["filter"]["source_id"] == "src" && body["filter"]["source_collection"] == SEM
+            })
+            .respond_with(data(source_arm))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST")).and(path("/memory.edges/query")).respond_with(data(json!([]))).mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/memory.edges/docs/_bulk"))
+            .respond_with(data(json!({"inserted": 6, "errors": []})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/memory.edges/docs/_delete_by_query"))
+            .respond_with(data(json!({"deleted": 1})))
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE")).and(path("/memory.semantic/docs/src")).respond_with(data(json!({}))).mount(&server).await;
+        server
+    }
+
+    async fn run(server: &MockServer) -> serde_json::Value {
+        let db = WardsonDbClient::from_url(&server.uri());
+        let out = execute_merge_plan(
+            &db,
+            &config(),
+            &settled_plan(),
+            SRC,
+            TGT,
+            &node("tgt"),
+            MergeStrategy::KeepTarget,
+        )
+        .await;
+        serde_json::from_str(&out).expect("the merge report is JSON")
+    }
+
+    /// Every write the server was asked for, in order, as "METHOD /path".
+    async fn writes_seen(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "DELETE" || !r.url.path().ends_with("/query"))
+            .map(|r| format!("{} {}", r.method, r.url.path()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn the_refresh_links_the_target_to_its_neighbours_and_never_to_the_source() {
+        // The source shares the target's tag, session and minute: it is a
+        // candidate of all three derivations.
+        let server = stub(json!([node("tgt"), node("src"), node("other")]), json!([])).await;
+        let report = run(&server).await;
+        assert_eq!(report["merged"], true, "{report}");
+        assert_eq!(report["edges_swept_post_derive"], 0);
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        let written: Vec<serde_json::Value> = requests
+            .iter()
+            .filter(|r| r.url.path() == "/memory.edges/docs/_bulk")
+            .flat_map(|r| {
+                let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+                body["documents"].as_array().cloned().unwrap_or_default()
+            })
+            .collect();
+        let ends = |d: &serde_json::Value| {
+            (d["source_id"].as_str().unwrap().to_string(), d["target_id"].as_str().unwrap().to_string())
+        };
+        assert!(
+            written.iter().all(|d| { let (s, t) = ends(d); s != "src" && t != "src" }),
+            "an edge to the source was written: {written:?}"
+        );
+        // same_session, temporal and tag_overlap, each in both directions.
+        assert_eq!(written.len(), 6, "{written:?}");
+        assert!(written.iter().all(|d| { let (s, t) = ends(d); s == "other" || t == "other" }));
+        assert_eq!(writes_seen(&server).await.last().map(String::as_str), Some("DELETE /memory.semantic/docs/src"));
+    }
+
+    #[tokio::test]
+    async fn an_edge_that_reached_the_source_during_the_merge_is_removed_before_the_delete() {
+        let late = json!([{
+            "_id": "late1", "source_id": "src", "source_collection": SEM,
+            "target_id": "e9", "target_collection": "memory.entries",
+            "edge_type": "same_session", "weight": 1.0, "created_at": "2026-10-02T21:43:05+00:00",
+        }]);
+        let server = stub(json!([]), late).await;
+        let report = run(&server).await;
+        assert_eq!(report["merged"], true, "{report}");
+        assert_eq!(report["edges_swept_post_derive"], 1);
+        assert_eq!(
+            writes_seen(&server).await,
+            ["POST /memory.edges/docs/_delete_by_query", "DELETE /memory.semantic/docs/src"]
+        );
+        let requests = server.received_requests().await.unwrap_or_default();
+        let sweep = requests.iter().find(|r| r.url.path().ends_with("_delete_by_query")).unwrap();
+        let body: serde_json::Value = serde_json::from_slice(&sweep.body).unwrap();
+        assert_eq!(body["filter"], json!({"_id": {"$in": ["late1"]}}));
+    }
+
+    #[tokio::test]
+    async fn a_link_made_during_the_merge_stops_it_and_the_source_stays() {
+        let late = json!([{
+            "_id": "link1", "source_id": "src", "source_collection": SEM,
+            "target_id": "other", "target_collection": SEM,
+            "edge_type": "refines", "weight": 0.8, "created_at": "2026-10-02T21:43:05+00:00",
+        }]);
+        let server = stub(json!([]), late).await;
+        let report = run(&server).await;
+        assert_eq!(report["merged"], false, "{report}");
+        assert_eq!(report["aborted_at"], "step_6_post_derive_sweep");
+        assert!(report["error"].as_str().unwrap().starts_with("1 edge(s) were linked to the source"), "{report}");
+        assert!(report["action"].as_str().unwrap().contains("re-run"));
+        assert!(writes_seen(&server).await.is_empty(), "nothing is deleted: {:?}", writes_seen(&server).await);
     }
 }
