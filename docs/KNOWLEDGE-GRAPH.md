@@ -6,7 +6,7 @@ This doc covers the write-side (auto-derived edges, promotion), the read-side (a
 
 The shorter inventory of KG tools (as part of the broader 115-tool catalog) lives in [TOOL-REFERENCE.md](TOOL-REFERENCE.md). The architectural placement (the 7-layer model's *Memory & Knowledge* row) is in [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md).
 
-> **How operators interact with the KG.** Every `knowledge_*` reference below is a *tool the intelligence calls during conversation*, not a command the operator types. The intelligence owns KG management — it decides when to `remember`, when to `knowledge_promote`, when to `knowledge_query` for context before answering, when to `knowledge_unlink_edge` after a tag rename. Operators participate by talking to the intelligence in natural language ("remember that the cert refresh works after manual generation", "promote that as a semantic observation", "what do we know about embra-web cert failures?", "looks like there are orphan edges — sweep them"). Tool names appear throughout this doc as references to the intelligence's capabilities, not as operator command syntax.
+> **How operators interact with the KG.** Every `knowledge_*` reference below is a *tool the intelligence calls during conversation*, not a command the operator types. The intelligence owns KG management — it decides when to `remember`, which category a memory gets and what it is linked to, when to `knowledge_query` for context before answering, when to `knowledge_unlink_edge` after a tag rename. Operators participate by talking to the intelligence in natural language ("remember that the cert refresh works after manual generation", "save that as a decision", "what do we know about embra-web cert failures?", "looks like there are orphan edges — sweep them"). Tool names appear throughout this doc as references to the intelligence's capabilities, not as operator command syntax.
 
 ---
 
@@ -14,7 +14,7 @@ The shorter inventory of KG tools (as part of the broader 115-tool catalog) live
 
 If the intelligence has reported `knowledge_graph_stats` output showing something like *"Graph density: 7.3 edges/node"* with thousands of edges on a young instance, you may have wondered whether the graph needs pruning. It doesn't. Four things to know:
 
-1. **The graph is dense by design.** A single `remember` into an active session writes 50–500+ edge documents through three independent auto-derivation paths. This is the intended behavior.
+1. **The graph is dense by design.** A single `remember` into an active session writes 50–500+ edge documents for the entry, and as many again for the node it is promoted to, through three independent auto-derivation paths. This is the intended behavior.
 2. **Auto-derived edges are cheap stateless formulas.** Recomputing one is free, so the engine doesn't buffer or pre-prune; it writes everything that passes the candidate filter.
 3. **`knowledge_query` truncates at read time, not write time.** Ranking-then-truncating to top-K runs per query (default 20, max 100). The graph can be enormous; the answer set is always small.
 4. **`knowledge_sweep_orphans` only removes dangling refs.** It cleans up edges whose source or target node was deleted (typically by `forget` calls predating the cascade fix, or by direct deletes that bypassed `knowledge_unlink_node`). It is not a density-management tool.
@@ -27,9 +27,9 @@ If you want to see the per-write math, the **Worked example** below traces one `
 
 ## Worked example: one `remember` insert
 
-An operator says to the intelligence — in natural conversation — something like *"remember the embra-web cert refresh failure, tag it embra-web and cert"*. The intelligence calls `remember` with the content and tags it parsed from the request, which writes one document to `memory.entries`. Immediately after the write returns, `derive_edges` (`crates/embra-brain/src/knowledge/edges.rs:32`) fires. Here is what that single insert produces.
+An operator says to the intelligence — in natural conversation — something like *"remember the embra-web cert refresh failure, tag it embra-web and cert"*. The intelligence calls `remember` with the content and tags it parsed from the request, which writes one document to `memory.entries` and, in the same call, the node it is promoted to (see **Promotion path**). `derive_edges` (`crates/embra-brain/src/knowledge/edges.rs`) then runs in the background, once for each of the two documents. Here is what the derivation of one of them produces.
 
-The engine takes the new document's `(session, tags, created_at)` and queries all three memory collections (`memory.entries`, `memory.semantic`, `memory.procedural`) for three independent candidate pools (`edges.rs:69-107`):
+The engine takes the new document's `(session, tags, created_at)` and queries all three memory collections (`memory.entries`, `memory.semantic`, `memory.procedural`) for three independent candidate pools (`edges.rs`):
 
 | Candidate type | Query | Per-collection limit |
 |---|---|---|
@@ -39,15 +39,15 @@ The engine takes the new document's `(session, tags, created_at)` and queries al
 
 The limit (50) and the temporal window (1800s) come from `config.system` — `kg_edge_candidate_limit` and `kg_temporal_window_secs` respectively. Rust defaults in the `default_kg_*` block of `crates/embra-brain/src/config/mod.rs` (~:191-196); the v5 migration writes the same values into `config.system` at first boot (`crates/embra-brain/src/migrations/mod.rs:602-605`).
 
-For an active session with two tags on the new doc, the candidate pools could each be the full 50 across each of the 3 collections. The engine then dedupes within each pool and emits edge documents bidirectionally (`push_bidirectional`, `edges.rs:222-251` — two records per logical edge):
+For an active session with two tags on the new doc, the candidate pools could each be the full 50 across each of the 3 collections. The engine then dedupes within each pool and emits edge documents bidirectionally (`push_bidirectional`, `edges.rs` — two records per logical edge):
 
 | Edge type | Candidates × collections | Bidirectional records | Notes |
 |---|---|---|---|
-| `same_session` | 50 × 3 = 150 | up to 300 | weight = `1.0` (`edges.rs:123`) |
+| `same_session` | 50 × 3 = 150 | up to 300 | weight = `1.0` (`edges.rs`) |
 | `temporal` | 50 × 3 = 150 | up to 300 | weight = `1.0 - dist_secs / 1800`; rejected when `dist >= window` or weight ≤ 0 |
-| `tag_overlap` (per tag) | 50 × 3 × 2 = 300 | up to 600 | weight = `overlap / max(\|A\|, \|B\|)` (`edges.rs:164-165`); skipped when `overlap == 0` |
+| `tag_overlap` (per tag) | 50 × 3 × 2 = 300 | up to 600 | weight = `overlap / max(\|A\|, \|B\|)` (`edges.rs`); skipped when `overlap == 0` |
 
-Before bulk-write, `edge_exists` (`edges.rs:253-266`) checks each candidate against `memory.edges` — repeat inserts of the same `(source_id, target_id, edge_type)` triple are skipped so the graph doesn't compound on every `remember`.
+Before bulk-write, `edge_exists` (`edges.rs`) checks each candidate against `memory.edges` — repeat inserts of the same `(source_id, target_id, edge_type)` triple are skipped so the graph doesn't compound on every `remember`.
 
 A first-time `remember` like this can emit several hundred edge documents. A `remember` into a stale session with no overlapping tags emits zero. The engine never re-derives existing pairs and never erases existing edges. The actual graph density rises quickly during active sessions and plateaus when most candidate pairs already exist.
 
@@ -61,17 +61,17 @@ Five WardSONDB collections, four node kinds and one edge layer. Memory collectio
 
 | Collection | Struct | Created by | Promoted/auto |
 |---|---|---|---|
-| `memory.entries` | (DB-only — no Rust struct) | `remember` tool; conversation persistence | episodic |
-| `memory.semantic` | (DB-only — built field by field in `promotion.rs::promote_to_semantic`) | `knowledge_promote` | one-way irreversible |
-| `memory.procedural` | (DB-only — built in `promotion.rs::promote_to_procedural`) | `knowledge_promote` | one-way irreversible |
+| `memory.entries` | (DB-only — built in `tools/mod.rs::entry_doc`) | `remember`, its only writer | episodic |
+| `memory.semantic` | (DB-only — built in `promotion.rs::semantic_doc`) | `remember`, at creation; `knowledge_promote` for an entry without a node | promoted from an entry |
+| `memory.procedural` | (DB-only — built in `promotion.rs::procedural_doc`) | `remember` with `procedure`; `knowledge_promote` for an entry without a node | promoted from an entry |
 | `identity.graph` | (DB-only — projection docs) | the identity-graph projection (seal/import + boot reconcile) | derived from the sealed doc — see [IDENTITY-GRAPH.md](IDENTITY-GRAPH.md) |
-| `memory.edges` | `KnowledgeEdge` (`crates/embra-brain/src/knowledge/types.rs`) | `derive_edges` + `knowledge_promote` + `knowledge_link` + the identity projection | mixed |
+| `memory.edges` | `KnowledgeEdge` (`crates/embra-brain/src/knowledge/types.rs`) | `derive_edges` + promotion (`derived_from`) + `knowledge_link` + the identity projection | mixed |
 
 Identity nodes (`_id` = graph node id, `content`/`node_type`/`origin` fields) are full graph citizens — traversable, dumpable, linkable from memories — but deliberately absent from enrichment's bulk prefetch (the sealed graph rides the system prompt) and untouchable by `knowledge_update`/`knowledge_unlink_node` (collection restriction). Their edges carry free-form per-intelligence relations via `EdgeType::Other` and provenance under `metadata.origin`; the every-boot reconcile restores any deleted projection doc from the sealed source.
 
 ### Node identity
 
-There is no unified `NodeId` enum. Nodes are addressed everywhere as the tuple `(collection, id)` — see the visited-set keying at `crates/embra-brain/src/knowledge/edges.rs:114, 130, 154` and the traversal visited set in `traversal.rs::traverse_multi`. WardSONDB issues the `_id` per write; the collection comes from the caller.
+There is no unified `NodeId` enum. Nodes are addressed everywhere as the tuple `(collection, id)` — see the `seen` set in `edges.rs::derive_edges_inner` and the traversal visited set in `traversal.rs::traverse_multi`. WardSONDB issues the `_id` per write; the collection comes from the caller.
 
 ### Semantic nodes (`memory.semantic`)
 
@@ -88,7 +88,7 @@ Structured how-to knowledge with `title`, `description`, `preconditions`, `steps
 
 ### Episodic entries (`memory.entries`)
 
-Schema-by-convention (no Rust struct). Conversation-memory writes set `content`, `tags`, `session`, `created_at`. After promotion, `promoted_to: {collection, id}` is PATCHed in by `promote_to_semantic` / `promote_to_procedural` (`crates/embra-brain/src/knowledge/promotion.rs:47-49, 126-128`) — a forward pointer used by retrieval's `redirect_if_promoted` to avoid surfacing both an entry and its promoted target.
+Schema-by-convention (no Rust struct). `remember` writes `content`, `tags`, `session`, `promoted_to: null` and `created_at` (`tools/mod.rs::entry_doc`); it is the only writer of the collection. The promotion that follows in the same call PATCHes `promoted_to: {collection, id}` in (`crates/embra-brain/src/knowledge/promotion.rs::write_node`) — a forward pointer, the maintained record of a promotion, used by retrieval's `redirect_if_promoted` to avoid surfacing both an entry and its promoted target. A promotion whose pointer cannot be written takes its node back.
 
 ### `KnowledgeEdge` (`memory.edges`)
 
@@ -116,25 +116,25 @@ Nine built-in `EdgeType` variants (`types.rs`) split into three creation paths, 
 
 ### Auto-derived at write time (3 types)
 
-Written by `derive_edges` (`edges.rs:32`) immediately after any insert into `memory.entries`, `memory.semantic`, or `memory.procedural`. All three are symmetric (stored bidirectionally via `push_bidirectional`).
+Written by `derive_edges` (`edges.rs`) immediately after any insert into `memory.entries`, `memory.semantic`, or `memory.procedural`. All three are symmetric (stored bidirectionally via `push_bidirectional`).
 
 | Type | Weight formula | Bound | Symmetric |
 |---|---|---|---|
-| `same_session` | constant `1.0` (`edges.rs:123`) | same session string across all 3 collections | yes — bidirectional records |
-| `temporal` | `1.0 − distance_secs / window_secs` (`edges.rs:139`) | `kg_temporal_window_secs` (default 1800 / 30 min) | yes |
-| `tag_overlap` | `overlap_count / max(\|A\|, \|B\|)` (`edges.rs:164-165`) — **not standard Jaccard** | each tag of the new doc queries with `$contains` | yes |
+| `same_session` | constant `1.0` (`edges.rs`) | same session string across all 3 collections | yes — bidirectional records |
+| `temporal` | `1.0 − distance_secs / window_secs` (`edges.rs`) | `kg_temporal_window_secs` (default 1800 / 30 min) | yes |
+| `tag_overlap` | `overlap_count / max(\|A\|, \|B\|)` (`edges.rs`) — **not standard Jaccard** | each tag of the new doc queries with `$contains` | yes |
 
-Unit-tested formulas at `edges.rs:289-308` (`test_edge_weight_temporal`, `test_edge_weight_tag_overlap`). Note that `temporal` is rejected when `distance_secs >= window_secs` or weight ≤ 0 (`edges.rs:138, 140`); `tag_overlap` is rejected when `overlap == 0` (`edges.rs:163`). The candidate limit (`kg_edge_candidate_limit`, default 50) is per *query*, not per node — multiple queries (one per collection × per edge type × per tag) contribute to a single write.
+Unit-tested formulas in `edges.rs` (`test_edge_weight_temporal`, `test_edge_weight_tag_overlap`). Note that `temporal` is rejected when `distance_secs >= window_secs` or weight ≤ 0 (`edges.rs`); `tag_overlap` is rejected when `overlap == 0` (`edges.rs`). The candidate limit (`kg_edge_candidate_limit`, default 50) is per *query*, not per node — multiple queries (one per collection × per edge type × per tag) contribute to a single write.
 
-`derive_edges` is best-effort: failures log a warning and return `Ok(0)` without blocking the memory write (`edges.rs:42-47`). And `edge_exists` (`edges.rs:253-266`) checks before bulk-write so repeat inserts of the same triple don't compound.
+`derive_edges` is best-effort: failures log a warning and return `Ok(0)` without blocking the memory write (`edges.rs`). And `edge_exists` (`edges.rs`) checks before bulk-write so repeat inserts of the same triple don't compound.
 
 ### Auto-inserted by promotion (1 type)
 
 | Type | Weight | Direction | Created when |
 |---|---|---|---|
-| `derived_from` | `1.0` (`promotion.rs:204`) | semantic/procedural → source entry | every `knowledge_promote` call |
+| `derived_from` | `1.0` | semantic/procedural → source entry | every promotion: `remember`, and `knowledge_promote` on an entry without a node |
 
-Inserted by `insert_derived_from_edge` (`promotion.rs:189-209`). Directional (not symmetric) — verified by `directional_types_not_symmetric` (`types.rs`). `knowledge_unlink_edge` in triple form will NOT bidirectional-delete it.
+Inserted by `insert_derived_from_edge` (`promotion.rs`). Directional (not symmetric) — verified by `directional_types_not_symmetric` (`types.rs`). `knowledge_unlink_edge` in triple form will NOT bidirectional-delete it.
 
 This is the type whose categorization is commonly misread. `is_brain_created()` excludes it — the brain cannot create it via `knowledge_link`. It is purely a provenance edge written by the promotion path.
 
@@ -144,13 +144,13 @@ This is the type whose categorization is commonly misread. `is_brain_created()` 
 |---|---|---|
 | `enables` | no | A makes B possible |
 | `contradicts` | no | A and B can't both hold |
-| `refines` | no | B is a more-specific version of A |
+| `refines` | no | A is a more-specific version of B |
 | `depends_on` | no | A requires B |
 | `related_to` | yes (documented same-scope, non-hierarchical) | same topic / system area |
 
-`knowledge_link` (`crates/embra-brain/src/knowledge/tools.rs:55-127`) rejects any other edge type with: *"Brain-created types: enables, contradicts, refines, depends_on, related_to"* (`tools.rs:65, 68`). Self-loops (`tools.rs:73-75`) and weights outside `(0.0, 1.0]` (`tools.rs:80-82`) are also rejected. Duplicate `(source_id, target_id, edge_type)` triples are rejected (`tools.rs:93-109`).
+`knowledge_link` (`crates/embra-brain/src/knowledge/tools.rs`) rejects any other edge type with: *"Brain-created types: enables, contradicts, refines, depends_on, related_to"* (`tools.rs`). Self-loops (`tools.rs`) and weights outside `(0.0, 1.0]` (`tools.rs`) are also rejected. Duplicate `(source_id, target_id, edge_type)` triples are rejected (`tools.rs`).
 
-`EdgeType::is_symmetric()` (`types.rs`) — `same_session`, `temporal`, `tag_overlap`, `related_to` are symmetric; everything else is directional. The triple form of `knowledge_unlink_edge` (`tools.rs:160-173`) consults this to decide whether to issue a bidirectional `$or` delete or a forward-only delete (Embra_Debug #63 regression test: `directional_types_not_symmetric` in `types.rs`).
+`EdgeType::is_symmetric()` (`types.rs`) — `same_session`, `temporal`, `tag_overlap`, `related_to` are symmetric; everything else is directional. The triple form of `knowledge_unlink_edge` (`tools.rs`) consults this to decide whether to issue a bidirectional `$or` delete or a forward-only delete (Embra_Debug #63 regression test: `directional_types_not_symmetric` in `types.rs`).
 
 ---
 
@@ -170,11 +170,11 @@ There is no density cap, no TTL, no eviction, no background reaper — nothing e
 
 Read paths, by contrast, are deliberately **ranked, bounded, and observable** (the two-layer doctrine, locked decision D1 of the 2026-07-02 search-freeze fix): traversal fetches at most `kg_traversal_edge_limit` (500) edges per hop ranked `weight desc, created_at desc`, walks at most `kg_traversal_node_budget` (1000) nodes per BFS, and logs a `kg::traversal` warning whenever a window saturates. Ranked pruning at a read-window boundary is design behavior — the *comprehensive* layer is server-side filtered queries over all documents, while the graph is the associative/ranked layer.
 
-The only edge-removing maintenance tool is `knowledge_sweep_orphans` (`tools.rs:744-773`), and it only removes edges whose endpoints (source or target node) fail to resolve in their declared collection — see **`knowledge_sweep_orphans`** under **Tool reference** below.
+The only edge-removing maintenance tool is `knowledge_sweep_orphans` (`tools.rs`), and it only removes edges whose endpoints (source or target node) fail to resolve in their declared collection — see **`knowledge_sweep_orphans`** under **Tool reference** below.
 
 ### Truncation happens at read time
 
-`knowledge_query` fetches up to 100 docs (`tools.rs:495-504`: `max_results` clamped to `[1, 100]`, with internal `retrieve_n = (max_results * 3).clamp(20, 100)` when category filtering is active), runs the 4-signal ranker, then truncates to `max_results` (default 20). The user-facing answer set is always tiny regardless of graph size.
+`knowledge_query` fetches up to 100 docs (`tools.rs`: `max_results` clamped to `[1, 100]`, with internal `retrieve_n = (max_results * 3).clamp(20, 100)` when category filtering is active), runs the 4-signal ranker, then truncates to `max_results` (default 20). The user-facing answer set is always tiny regardless of graph size.
 
 Auto-enrichment is even more aggressive: `MAX_INJECTED = 5` (`crates/embra-brain/src/knowledge/enrichment.rs:21`) with a `SCORE_THRESHOLD = 0.3` floor (`enrichment.rs:18, 70`). The graph can hold millions of edges; only five high-scoring nodes per turn ever reach the model.
 
@@ -188,7 +188,7 @@ The auto-derived layer is now justified by `knowledge_traverse` alone, which the
 
 It scans `memory.edges` up to a limit (default 10k, clamp `[1, 1000000]`) in paginated 20k-edge pages; per page it collects `(collection, id)` endpoints into per-collection HashSets, batch-resolves each via `{"_id": {"$in": [...]}}`, and set-diffs to find missing endpoints. Edges with a dangling source or target are reported (and optionally deleted in chunks of 100).
 
-It runs when the intelligence reports `knowledge_graph_stats` output with `Orphan edges: N of M scanned` and `N > 0`, and the operator asks for a sweep (the intelligence then calls `knowledge_sweep_orphans`). Orphan detection is also called passively by `graph_stats` (`tools.rs:639-651`) so the drift surfaces in the report without an explicit sweep. It is not a density-management tool. There is no analogous "edges with low weight" or "edges older than X" sweep.
+It runs when the intelligence reports `knowledge_graph_stats` output with `Orphan edges: N of M scanned` and `N > 0`, and the operator asks for a sweep (the intelligence then calls `knowledge_sweep_orphans`). Orphan detection is also called passively by `graph_stats` (`tools.rs`) so the drift surfaces in the report without an explicit sweep. It is not a density-management tool. There is no analogous "edges with low weight" or "edges older than X" sweep.
 
 ### What does scale poorly
 
@@ -203,24 +203,55 @@ Both are query-time costs, not write-time costs. Neither is on a hot path. The a
 
 ## Promotion path (episodic → semantic/procedural)
 
-Promotion is one conversation-driven path that side-effects the edge layer — the operator asks the intelligence to consolidate a memory ("promote that as a semantic observation" / "save that as a procedure"), and the intelligence calls `knowledge_promote`. Implemented in `crates/embra-brain/src/knowledge/promotion.rs`. Two entry points:
+Promotion gives an entry its node. `remember` does it in the call that writes the entry; `knowledge_promote` does it afterwards, for an entry that has none. Both go through `crates/embra-brain/src/knowledge/promotion.rs`.
 
-- `promote_to_semantic` (`:22-77`) — requires a category (`fact` / `preference` / `decision` / `observation` / `pattern`); writes a `memory.semantic` document with `confidence: 0.9`.
-- `promote_to_procedural` (`:80-153`) — requires a JSON object with `title`, `description`, `preconditions`, `steps`, `outcomes.{success, failure}` (schema validated at `:91-106`).
+**At creation (`tools/mod.rs::remember`).** The arguments decide the node. `category` (`fact` / `preference` / `decision` / `observation` / `pattern`, an enum in the tool schema; `observation` when omitted) makes a `memory.semantic` node with `confidence: 0.9`. `procedure` (a JSON object with `title`, `description`, `preconditions`, `steps`, `outcomes.{success, failure}`, checked by `parse_procedure` before anything is written) makes a `memory.procedural` node. The call, in order:
 
-Both share `load_source_entry` (`:157-187`) which rejects an already-promoted entry unless the target was deleted (in which case the stale `promoted_to` is cleared and promotion proceeds — `:172-176`).
+1. Write the entry (`entry_doc`).
+2. `write_semantic_node` / `write_procedural_node` → `write_node`: the node, carrying `source_entry_id` + `source_session`; the entry's `promoted_to: {collection, id}`; the vector (`embed_node`); the directed `derived_from` edge (node → entry, weight `1.0`, `insert_derived_from_edge`).
+3. Read the link candidates (next section) into the reply.
+4. Spawn one background task that derives the automatic edges of both documents at once. The entry's derivation leaves its own node out (`edges.rs::derive_edges_except`); the node's plans the entry↔node pair. Without that exception both would plan the pair, each `edge_exists` check would miss the other's unwritten batch, and the pair's edges would be written twice.
 
-The promotion flow, in order:
+When the node cannot be written, the entry stays, unpromoted, and the reply says so. There is no argument that saves an entry only: a memory is promoted, or its promotion failed.
 
-1. Validate + read source entry.
-2. Write the new semantic/procedural node carrying `source_entry_id` + `source_session`.
-3. PATCH `promoted_to: {collection, id}` onto the source `memory.entries` doc (`:47-49, 126-128`).
-4. Insert the directed `derived_from` edge (semantic/procedural → source entry, weight `1.0`) via `insert_derived_from_edge` (`:189-209`).
-5. Trigger `derive_edges` on the new node (`:63-71, 140-148`) — auto-derives `same_session`, `temporal`, `tag_overlap` edges for it from the current pool.
+**Afterwards (`knowledge_promote`).** For an entry without a node: one saved before 2026-10-03, one whose promotion failed, one whose node was removed. `recall` with `unpromoted_only=true` lists them. `promote_to_semantic` and `promote_to_procedural` write the node as above and derive its automatic edges inline.
 
-Promotion is one-way. There is no demote tool. To reverse a promotion, the operator asks the intelligence to unlink the semantic/procedural node; the intelligence calls `knowledge_unlink_node`, which cascades the `derived_from` edge plus every other edge referencing the node, then clears the source entry's `promoted_to` pointer (`tools.rs:253-272`).
+On an entry that already has a node (`knowledge/tools.rs::already_promoted`), a semantic promotion sets the node's category when it differs and answers "nothing to do" when it does not; a procedure is refused. The two-step habit — `remember`, then `knowledge_promote` with a category — therefore ends with the node in that category.
+
+Two guards. A pointer that cannot be written deletes the node again (`write_node`), so no node stands without one. And a pointer is treated as stale, and cleared, only when the node it names answers 404 (`unpromoted_source`, `db/error.rs::is_not_found`); any other failure of that read is returned and nothing is promoted — clearing the pointer on a timeout would write a second node next to a live one.
+
+Promotion is one-way. There is no demote tool. `knowledge_unlink_node` removes a node, cascades every edge that references it and clears the source entry's `promoted_to` pointer; the entry stays, without a node, and the reply names it. `forget` removes the whole memory — the entry, its node and the edges of both; see the FAQ.
 
 `retrieve_relevant_knowledge` uses `redirect_if_promoted` (`retrieval.rs`, store-backed since 2026-07-04 — the target resolves from the per-call `NodeStore` prefetch, with a point-read fallback for window misses) to short-circuit the indirection: when Step 3 (content-substring on `memory.entries`) finds a doc with a non-null `promoted_to`, it loads the target node instead and adds *that* to the result set, keyed by the target's `(collection, id)`. Effect: a promoted entry and its target never both surface in the same retrieval result.
+
+---
+
+## Link candidates (what `remember` returns)
+
+The five relations of `knowledge_link` need a judgement — which relation, in which direction — and they need the target's id. Retrieval and enrichment show the intelligence nodes without ids, which is one reason links were made only when the operator asked. `remember` and `knowledge_promote` therefore return, with the new node, its nearest existing nodes in `collection:id` form (`crates/embra-brain/src/knowledge/neighbors.rs`):
+
+- `embedding/cache.rs::neighbors` scores the node's own stored vector against the rest of the index, itself left out. No second inference; a brute-force scan, ranked as `search` ranks.
+- Up to `LINK_CANDIDATE_TOP_K` (5) nodes at or above `LINK_CANDIDATE_MIN_COSINE` (0.75), each read for its category and a 100-character preview.
+- A candidate of the same collection that the audit's dedup rule pairs with the new node (`audit::near_duplicate`: `dedup_score` ≥ 0.75, without the audit's grouping by category) is marked `near-duplicate`, and the reply points at `knowledge_merge`.
+- Below the floor the reply says that no node is close enough. Without a vector (no model, embeddings off, a failed embedding) it says that there are no candidates, never that nothing is near.
+- No edge is written. `knowledge_link` remains the only way a brain-created edge comes to exist, and the orphan check of `knowledge_audit` keeps its meaning.
+
+**Measured 2026-10-03** on the instance's graph (1,247 embedded nodes; 1,347 pairs the intelligence had linked with `knowledge_link`: 889 `related_to`, 287 `refines`, 118 `enables`, 46 `depends_on`, 19 `contradicts`), with `embedding/local.rs::measure_link_candidate_cosines`. The harness reads the vectors the nodes carry and runs no model; a candidate list is computed for each node against the nodes older than it, as `remember` would have seen them.
+
+- A linked pair has a median cosine of 0.710 (p25 0.643, p75 0.771). `refines` and `contradicts` sit higher (0.757, 0.758) than `depends_on`, `related_to` and `enables` (0.715, 0.701, 0.694). A relation is not a similarity.
+- Every node has near neighbours: the nearest older node has a median cosine of 0.789 (p05 0.679). The floor a query has to clear, 0.70, filters almost nothing between nodes.
+
+| Floor (top 5) | Linked pairs the list names | Candidates per node | Candidates that were linked | Nodes with none |
+|---|---|---|---|---|
+| 0.60 | 38% | 4.93 | 8% | 0% |
+| 0.70 | 34% | 3.95 | 9% | 9% |
+| **0.75** | **25%** | **2.40** | **11%** | **27%** |
+| 0.80 | 16% | 1.03 | 16% | 56% |
+| 0.85 | 7% | 0.31 | 23% | 79% |
+
+The fourth column is a lower bound: the instance was linked on request, so many related pairs were never linked.
+
+Half of the linked pairs (687 of 1,347) connect two nodes of one session. Those ids are in the conversation now, because every `remember` reply names its node. Together with the list at 0.75, 63% of the pairs the intelligence linked by hand are within reach without a lookup (65% at 0.70; the top 10 instead of the top 5 adds two to four points and lengthens the list by half). The rest connect nodes of different sessions that are not near each other in the vector space; those still take a `recall`, or the operator.
 
 ---
 
@@ -377,13 +408,13 @@ Retrieval's fifth candidate source, and the answer to a gap the decision doc mea
 | index | process-wide, loaded once, ~1.5 KB/node (~3.5 MB for 2,300 nodes); reloads when a collection's document count diverges, and write paths update it in place |
 | search | brute-force cosine over the whole index. Vectors are L2-normalized so cosine **is** the dot product. Sub-millisecond at this scale — an ANN index would optimize the cheapest step in the pipeline and cost a WardSONDB fork divergence, so the spec's §9.2 is descoped |
 
-**`memory.entries` is deliberately unembedded** (spec §4.3): high volume, noisy, and the entries that matter get promoted — and embedded — as semantic or procedural nodes.
+**`memory.entries` is deliberately unembedded** (spec §4.3): an entry is promoted when it is written, and its text is embedded once, on its semantic or procedural node.
 
 **Embed-at-write-time, and an embedding failure never fails the write.** The document is saved first, then embedded, then patched (`embedding/write.rs`). A model that is absent, disabled or erroring leaves the node fully usable through lexical retrieval. Write sites: promotion, `knowledge_update` (only when `content`/`title`/`description`/`preconditions`/`steps` changed — editing tags must not pay for an inference pass), `knowledge_merge` (the loser's vector is dropped; the winner is re-embedded only when `merge_content` appended the loser's text — absorbed tags are not embedded), and seed-pack insertion. The three fields are on `knowledge_update`'s IMMUTABLE denylist: the model cannot compute a vector, and a forged one would silently poison every future search.
 
 **Operator surface:** `/embeddings` reports the model, where it was found, index size, how many nodes are embedded per collection, and the embedding failures since boot — write and query apart, with the last one (also under `embedding` in `system_status`; a failure never fails a write, so this is where a broken model or missing weights show); `/embeddings on|off`; `/embeddings backfill [--force]` embeds what needs it (~55 ms/node measured, ~1 minute per thousand nodes), reports progress, and is resumable because the work set is re-derived from disk each run. Backfill is never automatic.
 
-**Measuring an embedding model** (the harness behind the model-size decision of 2026-10-02): `embedding/local.rs::measure_models_over_the_graph`, an ignored test that runs any number of model directories through tract and CLS pooling exactly as the OS does, with the vector width read from the model's output, over the nodes of a WardSONDB and a query set, applying the expansion of a weak query by the production rule. Recipe: copy a backup's database (`cp -a ~/embraOS_BACKUPS/<stamp>/data/wardsondb <scratch>/`) and serve it (`./target/debug/wardsondb --storage-engine fjall --data-dir <scratch>/wardsondb --port 18090 --log-file <scratch>/wardsondb.log`); write a config `{"db": "http://127.0.0.1:18090", "out": "<report.json>", "models": [{"name": "bge-small-en-v1.5", "dir": "vendor/embedding-model"}, …], "queries": [{"text": "…", "kind": "crafted|conversational", "truth": ["<node id or prefix>"], "context": ["<previous user turn>", …]}]}`; run `EMBRA_MEASURE=<config> cargo test -p embra-brain --release -- --ignored measure_models_over_the_graph --nocapture`. The report carries, per model and query, the top-10 with cosines and rescaled relevance, the rank of every truth node, the expansion terms and the expanded top-10 when the rule fired, and the inference times. Real operator turns come from the backup's `sessions.<name>.history` documents. **Result of 2026-10-02** (1,246 nodes; 7 crafted queries, 5 with truth nodes; 19 operator turns of two debug sessions): `bge-base-en-v1.5` (768-d, 436 MB) placed every known answer at rank 1–2 like `bge-small`, ranked the secondary truth nodes worse (112→189, 35→178), cost 3.2× per embedding (doc mean 154 vs 48 ms, query p50 50 vs 14 ms, load 711 vs 337 ms), shifted the whole cosine scale down ~0.09 (corpus median 0.44 vs 0.53) with the same top-1−top-10 spread (0.064 vs 0.069), and returned top-5 sets judged equally on topic (overlap 0.33). The model stays `bge-small`; what the turns did show was the floor (above).
+**Measuring an embedding model** (the harness behind the model-size decision of 2026-10-02): `embedding/local.rs::measure_models_over_the_graph`, an ignored test that runs any number of model directories through tract and CLS pooling exactly as the OS does, with the vector width read from the model's output, over the nodes of a WardSONDB and a query set, applying the expansion of a weak query by the production rule. Recipe: copy a backup's database (`cp -a ~/embraOS_BACKUPS/<stamp>/data/wardsondb <scratch>/`) and serve it (`./target/debug/wardsondb --storage-engine fjall --data-dir <scratch>/wardsondb --port 18090 --log-file <scratch>/wardsondb.log`); write a config `{"db": "http://127.0.0.1:18090", "out": "<report.json>", "models": [{"name": "bge-small-en-v1.5", "dir": "vendor/embedding-model"}, …], "queries": [{"text": "…", "kind": "crafted|conversational", "truth": ["<node id or prefix>"], "context": ["<previous user turn>", …]}]}`; run `EMBRA_MEASURE=<config> cargo test -p embra-brain --release -- --ignored measure_models_over_the_graph --nocapture`. The report carries, per model and query, the top-10 with cosines and rescaled relevance, the rank of every truth node, the expansion terms and the expanded top-10 when the rule fired, and the inference times. Real operator turns come from the backup's `sessions.<name>.history` documents. **Result of 2026-10-02** (1,246 nodes; 7 crafted queries, 5 with truth nodes; 19 operator turns of two debug sessions): `bge-base-en-v1.5` (768-d, 436 MB) placed every known answer at rank 1–2 like `bge-small`, ranked the secondary truth nodes worse (112→189, 35→178), cost 3.2× per embedding (doc mean 154 vs 48 ms, query p50 50 vs 14 ms, load 711 vs 337 ms), shifted the whole cosine scale down ~0.09 (corpus median 0.44 vs 0.53) with the same top-1−top-10 spread (0.064 vs 0.069), and returned top-5 sets judged equally on topic (overlap 0.33). The model stays `bge-small`; what the turns did show was the floor (above). A second ignored harness in the same module, `measure_link_candidate_cosines`, needs the scratch database only (config `{"db": "http://127.0.0.1:18090"}`, no `--release`): it is the measurement behind **Link candidates**.
 
 **Measured on a production copy (1,153 semantic + procedural nodes):** backfill 42.7 s, zero failures; retrieval 106–160 ms end to end including the query embedding (~12 ms) and the full index scan; vector index 1.7 MB.
 
@@ -443,15 +474,15 @@ Twelve `knowledge_*` tools registered via `#[embra_tool(...)]` macros — ten in
 
 ### Mutation tools
 
-**`knowledge_promote`** — episodic → semantic or procedural. `kind = semantic | procedural`; `data` is a category string for semantic or a JSON procedure object for procedural. Irreversible (no demote tool). Triggers `derive_edges` on the new node, so a single promotion can write many edges.
+**`knowledge_promote`** — gives a node to an entry that has none; `remember` promotes at creation (see **Promotion path**). `kind = semantic | procedural`; `data` is a category string for semantic or a JSON procedure object for procedural. Irreversible (no demote tool). Triggers `derive_edges` on the new node, so a single promotion can write many edges; the reply lists the link candidates. On an entry that already has a semantic node, a semantic promotion sets that node's category; a procedure is refused.
 
-**`knowledge_link`** — brain-creates an edge between any two nodes. `edge_type` is one of `enables | contradicts | refines | depends_on | related_to` — any other type is rejected (`tools.rs:64-68`). `weight` in `(0.0, 1.0]`. Self-loops rejected (`tools.rs:73-75`). Duplicate `(source_id, target_id, edge_type)` rejected (`tools.rs:93-109`).
+**`knowledge_link`** — brain-creates an edge between any two nodes. `edge_type` is one of `enables | contradicts | refines | depends_on | related_to` — any other type is rejected (`tools.rs`). `weight` in `(0.0, 1.0]`. Self-loops rejected (`tools.rs`). Duplicate `(source_id, target_id, edge_type)` rejected (`tools.rs`).
 
 **`knowledge_unlink_edge`** — by `edge_id` or by `(source_id, edge_type, target_id)` triple; since 2026-07-30 the endpoint collections are **optional** (they were required but display-only — the delete filter has always matched by id + type, and requiring them produced spurious "missing arguments" rejections; omitted collections render as "any" in the result message). `edge_id` takes precedence. Free-form identity relations are addressable via `parse_lossy` (deleting a projection edge is safe — the next boot reconcile restores it). Triple form respects `is_symmetric()`: symmetric types (`same_session`, `temporal`, `tag_overlap`, `related_to`) delete bidirectionally via `$or`; directional types (`enables`, `contradicts`, `refines`, `depends_on`, `derived_from`, and free-form relations) delete only the forward direction. The directional-only behavior is a regression-guarded fix (Embra_Debug #63, test `directional_types_not_symmetric` in `types.rs`).
 
-**`knowledge_unlink_node`** — cascade-deletes a `memory.semantic` or `memory.procedural` node. Workflow (`tools.rs:255-345`): read node → clear `promoted_to` on every source entry the node `derived_from`-points back to → delete all edges referencing the node (source OR target) via `$or` query → delete the node → drop its vector from the index (`forget_node`, as the merge does for its loser). Reports cleared-entry count and cascaded-edge count. `memory.entries` is rejected — for episodic cleanup the intelligence uses `forget` instead, which has its own cascade per the post-Sprint-2 fix (see CHANGE-LOG or ARCHITECTURE.md commit log #33).
+**`knowledge_unlink_node`** — cascade-deletes a `memory.semantic` or `memory.procedural` node. Workflow (`tools.rs`): read node → clear `promoted_to` on every source entry the node `derived_from`-points back to → delete all edges referencing the node (source OR target) via `$or` query → delete the node → drop its vector from the index (`forget_node`, as the merge does for its loser). Reports the cascaded-edge count and names the entries it left unpromoted. `memory.entries` is rejected — `forget` is the tool for a memory as a whole: it removes the entry, its node and the edges of both (see the FAQ).
 
-**`knowledge_update`** — in-place JSON-patch on a `memory.semantic` or `memory.procedural` node. Immutable fields rejected (`tools.rs:345-353`): `_id`, `source_entry_id`, `source_session`, `created_at`, `access_count`, `last_accessed`, `updated_at`. `updated_at` is auto-refreshed (`tools.rs:369-372`). Referencing edges are preserved automatically — `memory.edges` keys by id, not by content. **Auto-derived edges are NOT re-derived** — if a tag change makes `tag_overlap` edges stale, the intelligence follows up with `knowledge_unlink_edge` to remove them (the tool's own description at `tools.rs:927` carries this prompt-level guidance for the brain).
+**`knowledge_update`** — in-place JSON-patch on a `memory.semantic` or `memory.procedural` node. Immutable fields rejected (`tools.rs`): `_id`, `source_entry_id`, `source_session`, `created_at`, `access_count`, `last_accessed`, `updated_at`. `updated_at` is auto-refreshed (`tools.rs`). Referencing edges are preserved automatically — `memory.edges` keys by id, not by content. **Auto-derived edges are NOT re-derived** — if a tag change makes `tag_overlap` edges stale, the intelligence follows up with `knowledge_unlink_edge` to remove them (the tool's own description at `tools.rs` carries this prompt-level guidance for the brain).
 
 **`knowledge_merge`** — consolidate two same-collection nodes (2026-07-30): the source node is **deleted** and its meaningful edges are redirected to the target. WardSONDB has no transactions, so the executor is ordered idempotent steps — target tag-union (+ optional content append) first, promotion-pointer repairs (entries whose `promoted_to` points at the source are re-pointed at the target — repaired, never cleared), conflict-losing target edges deleted *before* winners redirect (loser-first converges after a crash; redirect-first would leave an undetectable duplicate pair), the source's auto-derived edges dropped (both twin docs), one `derive_edges` refresh over the unioned tags anchored to the target's own session/timestamp (fills `tag_overlap` for newly-unioned tags; `edge_exists` dedupes — this is what "regenerate" means given derivation is insert-time-only), and the source delete **LAST**. Conflict rule: same (direction, counterpart, type) keeps the higher weight; ties keep the target's existing edge. The plan comes from four indexed arm fetches (the traversal builders); any window at its 10k/direction limit hard-aborts — a destructive merge never plans on silently-partial data (`knowledge_unlink_node` is the escape hatch for pathological hubs). A mid-run failure returns honest partial-state JSON and a re-run with the same arguments converges (`merge_content` is guarded by its `## Merged from <id>` marker). `strategy`: `keep_target` (default; `merge_tags` is an alias) or `merge_content` (`memory.semantic` only — appending a procedural description would silently discard structured steps). **Irreversible — always `dry_run=true` first**; the preview renders the exact plan the executor walks. Same-kind only; `identity.graph` and `memory.entries` rejected.
 
@@ -494,7 +525,7 @@ No. Density is the design (see **Why the density isn't bloat** above). Auto-deri
 
 ### "After tag-renaming via `knowledge_update`, my `tag_overlap` edges look wrong"
 
-Correct — they're not re-derived (`tools.rs:307-308, 927`). Two options:
+Correct — they're not re-derived (`tools.rs`). Two options:
 
 - **Accept the stale weight.** It just affects edge ranking inside `knowledge_traverse`'s windows; retrieval no longer reads edge weights at all.
 - **Clean up specifically.** Ask the intelligence to remove the stale edges; it calls `knowledge_unlink_edge` on each affected triple. The brain has system-prompt guidance pointing at this exact case (per ARCHITECTURE.md Sprint-2 follow-up), so it will often volunteer the cleanup on its own after a substantive tag change.
@@ -503,7 +534,7 @@ The reason `knowledge_update` doesn't re-derive is that doing so would require e
 
 ### "Why are there two records per relationship?"
 
-Historical write-path design: under the original outgoing-only graph walk (a single `{source_id: <start>}` filter, Sprint-2 → 2026-07-03), double-writing symmetric edges was what made them reachable from either endpoint. The walk has since changed twice — undirected (2026-07-03: both endpoints queried) and arm-split (2026-07-04: two indexed arm queries merged client-side, with the visited check / `_id` dedupe collapsing a twin pair to one hop) — so the double-write is no longer load-bearing for reachability. It persists as the storage convention: the twin records are written together by `push_bidirectional` (`edges.rs:222-251`), deleted together by the symmetric branch of `knowledge_unlink_edge` (`tools.rs:160-173`), and cost doubled storage for the symmetric types (`same_session`, `temporal`, `tag_overlap`, `related_to`) plus two slots of the per-hop ranked window (see **Traversal**). Rewriting stored data to collapse the twins was considered and rejected with the same reasoning as every other stored-data prune: deleted edges are unrecoverable, and the read path already handles both shapes.
+Historical write-path design: under the original outgoing-only graph walk (a single `{source_id: <start>}` filter, Sprint-2 → 2026-07-03), double-writing symmetric edges was what made them reachable from either endpoint. The walk has since changed twice — undirected (2026-07-03: both endpoints queried) and arm-split (2026-07-04: two indexed arm queries merged client-side, with the visited check / `_id` dedupe collapsing a twin pair to one hop) — so the double-write is no longer load-bearing for reachability. It persists as the storage convention: the twin records are written together by `push_bidirectional` (`edges.rs`), deleted together by the symmetric branch of `knowledge_unlink_edge` (`tools.rs`), and cost doubled storage for the symmetric types (`same_session`, `temporal`, `tag_overlap`, `related_to`) plus two slots of the per-hop ranked window (see **Traversal**). Rewriting stored data to collapse the twins was considered and rejected with the same reasoning as every other stored-data prune: deleted edges are unrecoverable, and the read path already handles both shapes.
 
 Directional edges (`enables`, `contradicts`, `refines`, `depends_on`, `derived_from`) are stored as a single record, reachable from both endpoints since the undirected fix.
 
@@ -523,9 +554,11 @@ If a graph ever does grow large enough that `knowledge_graph_stats` feels slow, 
 
 ### "Does `forget` clean up edges?"
 
-Yes. `forget` (`tools/mod.rs`, ARCHITECTURE.md commit log #33) cascades exactly like `knowledge_unlink_node`: it `delete_by_query`s `memory.edges` with an `$or` filter over `source_id` and `target_id` of the forgotten entry, then reports the cascaded count.
+Yes, and since 2026-10-03 it removes the node as well: `forget` is the inverse of `remember`. It takes the id of an entry — or of a node with exactly one entry behind it — and removes the memory (`tools/mod.rs::forget_entry`): one `delete_by_query` over `memory.edges` with an `$or` filter over `source_id` and `target_id` of the entry and of its node, then the node and its vector, then the entry. It reports what it removed and the cascaded count.
 
-Edges referencing the forgotten entry from all three types — auto-derived (`same_session`, `temporal`, `tag_overlap`), provenance (`derived_from` from any promoted target), and brain-created (`enables`, etc.) — are all removed in the same pass.
+The node stays, and the reply says why, in three cases (`node_fate`): another entry's `promoted_to` points at it too (a `knowledge_merge` re-pointed it), it is a seed-pack node (it would come back at the next boot), or the check itself could not be read. A node that cannot be read, other than a 404, stops the call with nothing removed. The order — edges, node, entry — leaves the entry in place whatever fails, so a second `forget` finishes.
+
+Edges referencing the forgotten documents from all three types — auto-derived (`same_session`, `temporal`, `tag_overlap`), provenance (`derived_from`), and brain-created (`enables`, etc.) — are all removed in the same pass. On a large graph the pass is a full scan of `memory.edges` and takes seconds; it is a cold, operator-confirmed path. To remove a node and keep its entry, the intelligence uses `knowledge_unlink_node`.
 
 ---
 
@@ -535,8 +568,8 @@ Six kg_* config fields tunable per-instance. The first four are set up by migrat
 
 | Field | Default | Used by |
 |---|---|---|
-| `kg_temporal_window_secs` | 1800 (30 min) | `derive_edges` temporal candidate window + weight denominator (`edges.rs:60, 83-84, 139`) |
-| `kg_edge_candidate_limit` | 50 | per-query candidate cap in `derive_edges` (`edges.rs:59, 75, 88, 101`) |
+| `kg_temporal_window_secs` | 1800 (30 min) | `derive_edges` temporal candidate window + weight denominator (`edges.rs`) |
+| `kg_edge_candidate_limit` | 50 | per-query candidate cap in `derive_edges` (`edges.rs`) |
 | `kg_traversal_depth_ceiling` | 5 | hard cap on `knowledge_traverse` depth (`traverse_multi`) |
 | `kg_max_traversal_depth` | 3 | default depth when `knowledge_traverse` omits it (`tools.rs::knowledge_traverse`) |
 | `kg_traversal_edge_limit` | 500 | per-hop ranked window of the AUTO partition in `traverse_multi` (`weight desc, created_at desc`; saturation → `kg::traversal` debug — working as designed since the type partition; the meaningful partition rides its own 2000 module const, saturation there → warn) |
@@ -567,12 +600,12 @@ Everything below is a conversation with the intelligence — the operator types 
 
 2. **Establish a baseline.** Ask the intelligence to show the knowledge graph stats — anything like *"what does the knowledge graph look like right now?"* will route to `knowledge_graph_stats`. On a fresh DATA partition the reported numbers should be zero or near zero.
 
-3. **Trigger auto-derivation.** Ask the intelligence to remember two distinct things in the same session with overlapping tags — e.g. *"remember that the embra-web cert refresh works after manual generation, tag it embra-web and cert"* and *"now remember the trustd CA expiry pipeline issues, same tags"*. The intelligence calls `remember` for each, which fires `derive_edges` (`edges.rs:32`) on every insert. Then ask for the graph stats again. The intelligence's report should show:
+3. **Trigger auto-derivation.** Ask the intelligence to remember two distinct things in the same session with overlapping tags — e.g. *"remember that the embra-web cert refresh works after manual generation, tag it embra-web and cert"* and *"now remember the trustd CA expiry pipeline issues, same tags"*. The intelligence calls `remember` for each, which writes the entry and its node and fires `derive_edges` (`edges.rs`) for both. Each reply names the new node; the second lists the first as a link candidate when the two statements are close. Then ask for the graph stats again. Against the baseline, the intelligence's report should show:
 
-   - `memory.entries: 2 total, 0 promoted, 2 unpromoted`
-   - `memory.edges: ~6` (the same_session + temporal + tag_overlap edges from `derive_edges`, bidirectional).
-   - `Graph density: 3.0 edges/node` (rough; depends on bidirectional counts).
-   - `Orphan edges: 0 of 6 scanned`.
+   - `memory.entries`: two more, both promoted, none unpromoted.
+   - `memory.semantic`: two more.
+   - `derived_from`: two more in the edge-type distribution, next to the same_session + temporal + tag_overlap edges from `derive_edges`, bidirectional.
+   - `Orphan edges: 0`.
 
 4. **Trigger auto-enrichment.** Send a substantial user message (≥15 chars, not on the chatty-filler list) that mentions `cert refresh`. Auto-enrichment fires before the model call — it doesn't go through a `knowledge_*` tool, so the trigger is just the operator typing. Watch the tracing output (or `journalctl` if you've wired it through) for the info-level `auto-enrichment` log line:
 
@@ -590,9 +623,9 @@ Everything below is a conversation with the intelligence — the operator types 
    session via the `system_logs` tool (`service=embra-brain
    filter=auto-enrichment`) — no server-side access needed.
 
-5. **Promote and inspect provenance.** Ask the intelligence to promote one of the entries — *"promote that first one as a semantic observation"* — then ask it to trace what's connected to the new node — *"now show me what's linked to that new semantic node, depth 2"*. The intelligence calls `knowledge_promote` then `knowledge_traverse`. The traversal output should include the `derived_from` edge back to the source entry plus the auto-derived edges to the second entry / any in-session adjacents.
+5. **Inspect provenance.** Ask the intelligence to trace what's connected to one of the new nodes — *"show me what's linked to that first node, depth 2"*. The intelligence calls `knowledge_traverse`. The traversal output should include the `derived_from` edge back to the source entry plus the auto-derived edges to the second memory / any in-session adjacents, and any edge the intelligence made from the link candidates.
 
-6. **Verify cascade cleanup.** Ask the intelligence to unlink the semantic node — *"unlink that semantic node and show me what cascades"*. It calls `knowledge_unlink_node`, which reports the cascaded edge count plus the cleared-entry count (the source entry's `promoted_to` field is reset). A follow-up stats ask should show one fewer semantic node and no orphan edges.
+6. **Verify cascade cleanup.** Ask the intelligence to forget one of the two memories — *"forget the first one and show me what cascades"*. It calls `forget`, which reports the entry, the node and the cascaded edge count. A follow-up stats ask should show one fewer entry, one fewer semantic node and no orphan edges. `knowledge_unlink_node` on the other node removes the node only and names the entry it left unpromoted.
 
 7. **Verify the doc's claims against HEAD** (regression-time only): grep each file:line reference in this doc against `crates/embra-brain/src/knowledge/`. Anything that doesn't resolve means the code has moved and the doc is stale.
 
