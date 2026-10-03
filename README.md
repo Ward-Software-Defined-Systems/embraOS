@@ -52,8 +52,10 @@ Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` 
 
 > **Memory & knowledge graph today.** ***Writing*** memories is still operator-driven,
 > by conversation: ask the intelligence to remember something, or whether anything from
-> this session is worth promoting — it has `remember` and twelve `knowledge_*` tools and
-> writes the entries itself. Automation is on the near-term roadmap. ***Reading*** is
+> this session is worth keeping — it has `remember` and twelve `knowledge_*` tools.
+> `remember` writes the memory into the knowledge graph in the same call and names the
+> nearest existing nodes, so the intelligence links what is related without being asked.
+> Automation is on the near-term roadmap. ***Reading*** is
 > automatic on every turn, and it is **semantic, not just lexical**: alongside tag and
 > IDF-weighted content matching over recency-ranked windows, a **sentence-embedding
 > model runs inside the OS** and ranks memories by meaning rather than wording. Measured
