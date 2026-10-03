@@ -1,6 +1,6 @@
 # embraOS Feedback Loop — Self-Evaluation Protocol
 
-**Spec version:** v2.2 (operational backbone — steps only)
+**Spec version:** v2.3 (operational backbone — steps only)
 
 ---
 
@@ -39,7 +39,7 @@ session_search "<query>"    // for each query in the search set
 session_read <name> [range]
 ```
 
-### 1.6 — Session Extract: Promote Learnings
+### 1.6 — Session Extract: Save Learnings
 
 ```
 session_extract <name>    // for every session since last feedback loop
@@ -121,12 +121,10 @@ session_summarize <feedback-loop-session-name>
 remember Feedback Loop Run <date>: <count> sessions reviewed, <count> memory entries scanned. Alignment confirmed in: <list>. Tensions found: <count> (S0: <n>, S1: <n>, S2: <n>, S3: <n>). Actions taken: <summary>. #feedback-loop #evaluation
 ```
 
-### 5.3 — Promote Findings to Knowledge Graph
+### 5.3 — Record Practices and Link
 
 ```
-knowledge_promote <findings_entry_id> | semantic | evaluation
-knowledge_promote <practice_entry_id> | procedural | <procedure_json>
-knowledge_promote <practice_entry_id> | semantic | practice
-knowledge_promote <protocol_update_entry_id> | semantic | practice
-knowledge_promote <rewrite_entry_id> | semantic | <category>
+remember <practice, one line> #feedback-loop #practice    // category: pattern
+remember <procedure summary, one line> #feedback-loop #practice    // procedure: <procedure_json>
+knowledge_link <new node> | <edge_type> | <related node> | <weight>    // for each related node remember listed
 ```

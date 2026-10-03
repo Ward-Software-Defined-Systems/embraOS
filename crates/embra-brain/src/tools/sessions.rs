@@ -1843,19 +1843,47 @@ pub async fn session_extract(db: &WardsonDbClient, param: &str) -> String {
          Session: {} | Turns shown: {} (of {} in range {}-{})\n\
          Transcript:\n\
          {}\n\n\
-         Identify durable learnings from this session. For each:\n\
-         - Content (the fact, preference, decision, or action item)\n\
-         - Suggested #tags\n\
-         - Category: factual / preference / decision / action-item\n\n\
-         Present the proposed extractions for approval. After approval, save each with:\n\
-         remember <content> #tags",
+         {}",
         name,
         selected.len(),
         end - start,
         start + 1,
         end,
-        formatted
+        formatted,
+        EXTRACT_INSTRUCTION
     )
+}
+
+/// What `session_extract` asks for after the transcript. The categories are
+/// the ones `remember` takes; `remember` promotes each learning as it saves
+/// it, so no promotion step is named, and the linking is asked for here.
+const EXTRACT_INSTRUCTION: &str = "Identify durable learnings from this session. For each:\n\
+     - Content: one self-contained statement, on a single line\n\
+     - Suggested #tags\n\
+     - Category: fact / preference / decision / observation / pattern\n\n\
+     Present the proposed extractions for approval. After approval, save each with remember: \
+     the content with its #tags, and the category. remember writes the memory into the \
+     knowledge graph in the same call. Link each new node to the related nodes remember \
+     lists, with knowledge_link.";
+
+#[cfg(test)]
+mod extract_instruction_tests {
+    use super::EXTRACT_INSTRUCTION;
+    use crate::knowledge::types::SemanticCategory;
+
+    #[test]
+    fn the_extract_instruction_names_the_five_categories_and_no_promote_step() {
+        let categories = EXTRACT_INSTRUCTION
+            .lines()
+            .find(|l| l.starts_with("- Category: "))
+            .expect("a category line");
+        let named: Vec<&str> = categories.trim_start_matches("- Category: ").split(" / ").collect();
+        let known: Vec<&str> = SemanticCategory::ALL.iter().map(SemanticCategory::as_str).collect();
+        assert_eq!(named, known, "the categories remember takes, and no other");
+        assert!(EXTRACT_INSTRUCTION.contains("save each with remember"));
+        assert!(EXTRACT_INSTRUCTION.contains("knowledge_link"));
+        assert!(!EXTRACT_INSTRUCTION.contains("knowledge_promote"));
+    }
 }
 
 // ── Native tool-use registrations (NATIVE-TOOLS-01) ──

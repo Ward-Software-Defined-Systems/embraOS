@@ -263,8 +263,8 @@ pub(crate) fn build_delete_memorize_prompt(name: &str, reason: &str) -> String {
          If that reply declines, cancels, or clearly is not a reason to proceed, do not \
          save anything and end your response with {SESSION_DELETE_ABORT_MARKER} on its own line.\n\
          Otherwise treat it as the deletion reason and preserve the session's value before it is removed:\n\
-         1. Call session_extract with name \"{name}\" and follow its instructions — save the \
-         durable learnings with remember (and knowledge_promote what is worth keeping across sessions).\n\
+         1. Call session_extract with name \"{name}\" and follow its instructions — save each \
+         durable learning with remember and its category; remember writes it into the knowledge graph.\n\
          2. Also save one memory recording that session '{name}' was deleted and the operator's reason.\n\
          3. Tell the operator what you preserved, then end your response with \
          {SESSION_DELETE_READY_MARKER} on its own line.\n\
@@ -5799,7 +5799,7 @@ Will has invoked /feedback-loop. Work through the embedded spec sequentially,\n\
 starting at Step 1.1. Governance boundary: S0/S1 actions auto-execute; S2/S3\n\
 actions pause at Step 4.2 for Will's approval.\n\
 \n\
-=== FEEDBACK LOOP SPEC v2.2 (read-only, embedded in binary) ===\n\
+=== FEEDBACK LOOP SPEC v2.3 (read-only, embedded in binary) ===\n\
 \n\
 {}\n\
 \n\
@@ -8956,13 +8956,32 @@ mod session_delete_flow_tests {
         assert!(!p.contains(SESSION_DELETE_ABORT_MARKER));
     }
 
+    /// The protocol saves with `remember`, which promotes; a
+    /// `knowledge_promote` line in it would be the two-step workflow again
+    /// (v2.2 carried five, two of them with categories that do not exist).
+    /// The banner names the version the file declares.
+    #[test]
+    fn the_feedback_loop_spec_promotes_nothing_by_hand() {
+        assert!(!FEEDBACK_LOOP_SPEC_V2.contains("knowledge_promote"));
+        let version = FEEDBACK_LOOP_SPEC_V2
+            .lines()
+            .find_map(|l| l.strip_prefix("**Spec version:** "))
+            .and_then(|l| l.split_whitespace().next())
+            .expect("the spec declares its version");
+        assert!(
+            build_feedback_loop_prompt().contains(&format!("FEEDBACK LOOP SPEC {version} ")),
+            "{version}"
+        );
+    }
+
     #[test]
     fn memorize_prompt_embeds_reason_and_both_markers() {
         let p = build_delete_memorize_prompt("old-proj", "superseded by the v2 rewrite");
         assert!(p.contains("superseded by the v2 rewrite"));
         assert!(p.contains("session_extract"));
         assert!(p.contains("remember"));
-        assert!(p.contains("knowledge_promote"));
+        // `remember` promotes what it saves; the prompt names no second step.
+        assert!(!p.contains("knowledge_promote"));
         assert!(p.contains(SESSION_DELETE_READY_MARKER));
         assert!(p.contains(SESSION_DELETE_ABORT_MARKER));
         // Grace-period wording rides the shared const.
