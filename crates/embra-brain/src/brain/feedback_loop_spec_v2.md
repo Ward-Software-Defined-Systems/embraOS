@@ -45,10 +45,11 @@ session_read <name> [range]
 session_extract <name>    // for every session since last feedback loop
 ```
 
-### 1.7 — Memory Dedup: Clean
+### 1.7 — Knowledge Audit: Clean
 
 ```
-memory_dedup
+knowledge_audit    // duplicate, orphaned, superseded and contradicting nodes
+knowledge_merge <source node> | <target node>    // for each duplicate pair the operator agrees to; dry_run first
 ```
 
 ### 1.8 — Memory Scan: Inventory
@@ -98,12 +99,21 @@ recall infrastructure
 ### 4.1 — First Pass: Auto-Execute S0/S1
 
 ```
+Accept        // no memory of its own: named in the 5.2 findings record
+Reclassify    knowledge_update <collection>:<id> | {"tags": [...]} or {"category": "<category>"}
+Rewrite       knowledge_update <collection>:<id> | {"content": "<rewritten>"}    // in place, links kept; forget + remember only for an entry that has no node
+Remove        forget <entry or node id>    // S2/S3 only, after approval: the entry, its node and their edges
+Add practice  remember <practice, one line> #operational-practice    // category: pattern; procedure: <procedure_json> when it has steps
 recall <key terms from each modified entry>
 ```
 
 ### 4.2 — Second Pass: Present S2/S3 for Approval
 
 ### 4.3 — Update Protocol
+
+```
+remember <protocol update, one line> #feedback-loop-protocol    // category: decision
+```
 
 ---
 
@@ -118,13 +128,11 @@ session_summarize <feedback-loop-session-name>
 ### 5.2 — Findings Record
 
 ```
-remember Feedback Loop Run <date>: <count> sessions reviewed, <count> memory entries scanned. Alignment confirmed in: <list>. Tensions found: <count> (S0: <n>, S1: <n>, S2: <n>, S3: <n>). Actions taken: <summary>. #feedback-loop #evaluation
+remember Feedback Loop Run <date>: <count> sessions reviewed, <count> memory entries scanned. Alignment confirmed in: <list>. Tensions found: <count> (S0: <n>, S1: <n>, S2: <n>, S3: <n>). Accepted: <each accepted tension, named>. Actions taken: <summary>. #feedback-loop #evaluation    // category: observation
 ```
 
-### 5.3 — Record Practices and Link
+### 5.3 — Link What Was Saved
 
 ```
-remember <practice, one line> #feedback-loop #practice    // category: pattern
-remember <procedure summary, one line> #feedback-loop #practice    // procedure: <procedure_json>
-knowledge_link <new node> | <edge_type> | <related node> | <weight>    // for each related node remember listed
+knowledge_link <node saved in this run> | <edge_type> | <related node> | <weight>    // for each related node its remember listed
 ```

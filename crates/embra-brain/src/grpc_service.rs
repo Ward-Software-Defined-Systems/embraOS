@@ -8974,6 +8974,33 @@ mod session_delete_flow_tests {
         );
     }
 
+    /// Since v2.2 the spec is steps only, and the map from an action to its
+    /// tool lived in what the intelligence remembered of v2.1: "Rewrite =
+    /// forget then remember". `forget` removes a memory's node with its
+    /// links now, so the map is in the spec again, and a rewrite is done in
+    /// place. An accepted tension gets no memory of its own.
+    #[test]
+    fn the_feedback_loop_action_map_rewrites_in_place() {
+        let action = |name: &str| {
+            FEEDBACK_LOOP_SPEC_V2
+                .lines()
+                .find(|l| l.starts_with(name))
+                .unwrap_or_else(|| panic!("the action map names {name}"))
+        };
+        assert!(action("Rewrite").contains("knowledge_update"));
+        assert!(action("Reclassify").contains("knowledge_update"));
+        assert!(action("Remove").contains("forget"));
+        assert!(action("Add practice").contains("remember"));
+        let accept = action("Accept");
+        assert!(!accept.contains("remember") && !accept.contains("knowledge_"), "{accept}");
+        // Duplicates live in nodes: the audit finds them, and step 5.3 only
+        // links — nothing is saved a second time.
+        assert!(FEEDBACK_LOOP_SPEC_V2.contains("knowledge_audit"));
+        assert!(!FEEDBACK_LOOP_SPEC_V2.contains("memory_dedup"));
+        let step_5_3 = FEEDBACK_LOOP_SPEC_V2.split("### 5.3").nth(1).expect("step 5.3");
+        assert!(step_5_3.contains("knowledge_link") && !step_5_3.contains("remember <"), "{step_5_3}");
+    }
+
     #[test]
     fn memorize_prompt_embeds_reason_and_both_markers() {
         let p = build_delete_memorize_prompt("old-proj", "superseded by the v2 rewrite");

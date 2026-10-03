@@ -545,7 +545,7 @@ pub async fn knowledge_update(params: &str, db: &WardsonDbClient, config: &Syste
     // would stay and disagree with the seal.
     if coll != "memory.semantic" && coll != "memory.procedural" {
         return format!(
-            "knowledge_update rejected (collection '{}' not supported — only memory.semantic or memory.procedural). Use forget + remember for memory.entries.",
+            "knowledge_update rejected (collection '{}' not supported — only memory.semantic or memory.procedural). An entry is corrected through its node: update the node it was promoted to. Only an entry that has no node is replaced with forget + remember.",
             coll
         );
     }
