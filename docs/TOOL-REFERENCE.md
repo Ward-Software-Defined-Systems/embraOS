@@ -129,13 +129,13 @@ For the data model, edge taxonomy, density rationale, promotion path, auto-enric
 | **gl_issue_create** | Create an issue on a self-hosted GitLab instance (title + optional Markdown description) |
 | **gl_mr_create** | Create a merge request on a self-hosted GitLab instance (`source_branch` → `target_branch`) |
 | **gl_issue_view** | View one GitLab issue in full — description plus the comment thread, with GitLab's *system* notes ("changed the description") filtered out |
-| **gl_mr_view** | View one GitLab merge request in full — branches, state, `detailed_merge_status`, draft flag, description, comment thread |
+| **gl_mr_view** | View one GitLab merge request in full — branches, the head commit of the source branch, state, `detailed_merge_status`, draft flag, description, comment thread |
 | **gl_issue_close** | Close a GitLab issue (`state_event: close`) |
 | **gl_issue_reopen** | Reopen a closed GitLab issue (`state_event: reopen`) |
 | **gl_mr_close** | Close a GitLab merge request **without** merging it — use `gl_mr_merge` to merge |
 | **gl_issue_comment** | Post a comment (GitLab "note") on an issue |
 | **gl_mr_comment** | Post a comment on a merge request |
-| **gl_mr_merge** | Merge a merge request. GitLab's options are not GitHub's `merge_method`: `squash` is a boolean, `when_pipeline_succeeds` queues the merge behind a green pipeline, `remove_source_branch` deletes the branch after |
+| **gl_mr_merge** | Merge a merge request. GitLab's options are not GitHub's `merge_method`: `squash` is a boolean, `when_pipeline_succeeds` queues the merge behind a green pipeline, `remove_source_branch` deletes the branch after. The tool reads the merge request first and sends the head of its source branch as `sha` — a namespace can require one, and GitLab answers 400 without it. Pass `sha`, the head commit `gl_mr_view` shows (7 characters or more), to merge only what was reviewed: when the branch has moved, nothing is merged |
 | **gl_boards** | List a project's issue boards — GitLab's equivalent of GitHub Projects |
 | **gl_board_view** | View one issue board: its lists in position order with the label backing each |
 | **plan** | Create or list project plans (stored in WardSONDB `plans` collection) |

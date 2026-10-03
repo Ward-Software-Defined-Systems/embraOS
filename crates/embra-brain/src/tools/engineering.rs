@@ -654,7 +654,7 @@ pub async fn gl_mr_view(
     .unwrap_or_else(|_| serde_json::Value::Array(vec![]));
     let s = |k: &str| mr.get(k).and_then(|v| v.as_str()).unwrap_or("?").to_string();
     format!(
-        "=== MR !{}: {} ===\nState: {} (merge_status: {}, draft: {})\nAuthor: {}\nBranches: {} \u{2192} {}\nCreated: {}\nURL: {}\n\n{}\n{}",
+        "=== MR !{}: {} ===\nState: {} (merge_status: {}, draft: {})\nAuthor: {}\nBranches: {} \u{2192} {}\nHead: {}\nCreated: {}\nURL: {}\n\n{}\n{}",
         iid,
         s("title"),
         s("state"),
@@ -666,6 +666,8 @@ pub async fn gl_mr_view(
             .unwrap_or("?"),
         s("source_branch"),
         s("target_branch"),
+        // The head of the source branch: what `gl_mr_merge` takes as `sha`.
+        s("sha"),
         s("created_at"),
         mr.get("web_url").and_then(|v| v.as_str()).unwrap_or(""),
         mr.get("description").and_then(|v| v.as_str()).unwrap_or("(no description)"),
@@ -771,46 +773,124 @@ pub async fn gl_mr_comment(
     gl_note_create(db, host, project, "merge_requests", iid, body).await
 }
 
+/// How `gl_mr_merge` is asked to merge.
+pub struct GlMergeOptions<'a> {
+    pub squash: bool,
+    pub when_pipeline_succeeds: bool,
+    pub remove_source_branch: bool,
+    /// The commit the caller reviewed. `None` merges the branch as it stands.
+    pub sha: Option<&'a str>,
+}
+
+/// A git object name short enough to type and long enough to mean one
+/// commit: what `git log --oneline` prints.
+const MIN_SHA_PREFIX: usize = 7;
+
+/// The `sha` a merge request is merged at: the head of its source branch.
+///
+/// GitLab documents `sha` as optional — "if present, this SHA must match the
+/// HEAD of the source branch" — and answers 400 "SHA must be provided when
+/// merging" to a merge without it when the project's namespace requires one
+/// (`require_sha_for_merge?`, `lib/api/merge_requests.rb`). The tool sent
+/// none, so on such a namespace it could merge nothing (Embra#4). It always
+/// sends one now.
+///
+/// A caller that names the commit it reviewed gets the check the parameter
+/// exists for: when the branch has moved past that commit, nothing is
+/// merged and no request is made. A prefix is accepted and completed.
+fn merge_sha(iid: u64, given: Option<&str>, head: &str) -> Result<String, String> {
+    if head.is_empty() {
+        return Err(format!("MR !{} has no head commit to merge.", iid));
+    }
+    let Some(given) = given.map(str::trim).filter(|g| !g.is_empty()) else {
+        return Ok(head.to_string());
+    };
+    if given.len() < MIN_SHA_PREFIX || !given.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err(format!(
+            "sha must be the head commit gl_mr_view shows, at least {} hex characters of it; got '{}'. Nothing was merged.",
+            MIN_SHA_PREFIX, given
+        ));
+    }
+    if head.to_ascii_lowercase().starts_with(&given.to_ascii_lowercase()) {
+        Ok(head.to_string())
+    } else {
+        Err(format!(
+            "MR !{} was not merged: its source branch is at {}, not at {}. Commits were pushed after the one that was reviewed; read them with gl_mr_view and merge with the new sha.",
+            iid, head, given
+        ))
+    }
+}
+
+/// The body of the merge request. `merge_when_pipeline_succeeds` has been
+/// deprecated since GitLab 17.11 in favour of `auto_merge`, and a server
+/// reads either; both are sent, so the flag works on a server older than
+/// 17.11 and on one that has dropped the old name.
+fn merge_payload(opts: &GlMergeOptions<'_>, sha: &str) -> serde_json::Value {
+    serde_json::json!({
+        "squash": opts.squash,
+        "merge_when_pipeline_succeeds": opts.when_pipeline_succeeds,
+        "auto_merge": opts.when_pipeline_succeeds,
+        "should_remove_source_branch": opts.remove_source_branch,
+        "sha": sha,
+    })
+}
+
+/// What the tool says about a merge the server accepted. A merge queued
+/// behind a pipeline leaves the merge request open; saying "opened" there
+/// read as if nothing had happened.
+fn merge_reply(iid: u64, sha: &str, mr: &serde_json::Value) -> String {
+    let state = mr.get("state").and_then(|x| x.as_str()).unwrap_or("?");
+    let queued = mr.get("merge_when_pipeline_succeeds").and_then(|x| x.as_bool()).unwrap_or(false);
+    let short = sha.get(..8).unwrap_or(sha);
+    let what = if state == "merged" {
+        format!("merged at {}", short)
+    } else if queued {
+        format!("set to merge at {} when its pipeline passes", short)
+    } else {
+        state.to_string()
+    };
+    format!(
+        "MR !{} {}: {}\n{}",
+        iid,
+        what,
+        mr.get("title").and_then(|x| x.as_str()).unwrap_or("?"),
+        mr.get("web_url").and_then(|x| x.as_str()).unwrap_or("")
+    )
+}
+
 /// Merge a GitLab merge request.
 ///
 /// GitLab's merge params are not GitHub's `merge_method`: squashing is a
 /// boolean, and "merge when the pipeline passes" is a separate flag rather
 /// than a method. Both are exposed as-is instead of being forced into the
 /// GitHub vocabulary.
+///
+/// The merge request is read first, for the head of its source branch
+/// (`merge_sha`).
 pub async fn gl_mr_merge(
     db: &WardsonDbClient,
     host: Option<&str>,
     project: &str,
     iid: u64,
-    squash: bool,
-    when_pipeline_succeeds: bool,
-    remove_source_branch: bool,
+    opts: GlMergeOptions<'_>,
 ) -> String {
     let (host, token) = match gitlab_host_token(db, host).await {
         Ok(t) => t,
         Err(e) => return e,
     };
-    let path = format!(
-        "projects/{}/merge_requests/{}/merge",
-        encode_gitlab_project(project),
-        iid
-    );
-    let payload = serde_json::json!({
-        "squash": squash,
-        "merge_when_pipeline_succeeds": when_pipeline_succeeds,
-        "should_remove_source_branch": remove_source_branch,
-    });
-    match gl_send(reqwest::Method::PUT, &host, &token, &path, &payload).await {
-        Ok(v) => {
-            let state = v.get("state").and_then(|x| x.as_str()).unwrap_or("?");
-            format!(
-                "MR !{} {}: {}\n{}",
-                iid,
-                if state == "merged" { "merged" } else { state },
-                v.get("title").and_then(|x| x.as_str()).unwrap_or("?"),
-                v.get("web_url").and_then(|x| x.as_str()).unwrap_or("")
-            )
-        }
+    let proj = encode_gitlab_project(project);
+    let mr = match gl_get(&host, &token, &format!("projects/{}/merge_requests/{}", proj, iid)).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let head = mr.get("sha").and_then(|v| v.as_str()).unwrap_or("");
+    let sha = match merge_sha(iid, opts.sha, head) {
+        Ok(sha) => sha,
+        Err(why) => return why,
+    };
+    let path = format!("projects/{}/merge_requests/{}/merge", proj, iid);
+    match gl_send(reqwest::Method::PUT, &host, &token, &path, &merge_payload(&opts, &sha)).await {
+        Ok(v) => merge_reply(iid, &sha, &v),
         Err(e) => e,
     }
 }
@@ -3834,7 +3914,7 @@ impl GlIssueViewArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "gl_mr_view",
-    description = "View one merge request on a self-hosted GitLab instance, with branches, merge status, description, and comment thread. iid is the per-project MR number shown as !N. host/token via /git-token, project is the full path e.g. `group/repo`."
+    description = "View one merge request on a self-hosted GitLab instance, with branches, head commit, merge status, description, and comment thread. iid is the per-project MR number shown as !N. host/token via /git-token, project is the full path e.g. `group/repo`."
 )]
 pub struct GlMrViewArgs {
     /// GitLab hostname, e.g. `gitlab.example.com`. Optional when exactly one
@@ -3976,7 +4056,7 @@ impl GlMrCommentArgs {
 #[embra_tool(
     name = "gl_mr_merge",
     is_side_effectful = true,
-    description = "Merge a merge request on a self-hosted GitLab instance. GitLab's options are not GitHub's merge_method: squash is a boolean, and when_pipeline_succeeds queues the merge behind a green pipeline instead of merging now. iid is the per-project MR number. host/token via /git-token, project is the full path e.g. `group/repo`."
+    description = "Merge a merge request on a self-hosted GitLab instance. GitLab's options are not GitHub's merge_method: squash is a boolean, and when_pipeline_succeeds queues the merge behind a green pipeline instead of merging now. Pass sha, the head commit gl_mr_view shows, to merge only what was reviewed: when the source branch has moved, nothing is merged. iid is the per-project MR number. host/token via /git-token, project is the full path e.g. `group/repo`."
 )]
 pub struct GlMrMergeArgs {
     /// GitLab hostname, e.g. `gitlab.example.com`. Optional when exactly one
@@ -3996,20 +4076,22 @@ pub struct GlMrMergeArgs {
     /// Delete the source branch after merging. Default false.
     #[serde(default)]
     pub remove_source_branch: bool,
+    /// Head commit of the source branch that was reviewed, as gl_mr_view
+    /// shows it (at least 7 characters). The merge is refused when the
+    /// branch has moved past it. Omit to merge the branch as it stands.
+    #[serde(default)]
+    pub sha: Option<String>,
 }
 
 impl GlMrMergeArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        Ok(gl_mr_merge(
-            ctx.db,
-            self.host.as_deref(),
-            &self.project,
-            self.iid,
-            self.squash,
-            self.when_pipeline_succeeds,
-            self.remove_source_branch,
-        )
-        .await)
+        let opts = GlMergeOptions {
+            squash: self.squash,
+            when_pipeline_succeeds: self.when_pipeline_succeeds,
+            remove_source_branch: self.remove_source_branch,
+            sha: self.sha.as_deref(),
+        };
+        Ok(gl_mr_merge(ctx.db, self.host.as_deref(), &self.project, self.iid, opts).await)
     }
 }
 
@@ -5294,6 +5376,90 @@ mod git_token_tests {
                 assert!(d.is_side_effectful, "{} must be side-effectful", d.name);
             }
         }
+    }
+
+    const HEAD: &str = "35a8fcfb4f7eb630b541c8a4f0e476621bb621ce";
+
+    fn merge_opts(sha: Option<&str>) -> GlMergeOptions<'_> {
+        GlMergeOptions { squash: false, when_pipeline_succeeds: false, remove_source_branch: true, sha }
+    }
+
+    /// Embra#4: the namespace requires a sha, the tool sent none, and every
+    /// merge answered 400. Without an argument the head of the source
+    /// branch is sent.
+    #[test]
+    fn a_merge_always_carries_the_head_of_the_source_branch() {
+        let sha = merge_sha(29, None, HEAD).expect("the head");
+        assert_eq!(sha, HEAD);
+        assert_eq!(merge_sha(29, Some("  "), HEAD).as_deref(), Ok(HEAD), "an empty argument is none");
+        let body = merge_payload(&merge_opts(None), &sha);
+        assert_eq!(body["sha"], HEAD);
+        assert_eq!(body["should_remove_source_branch"], true);
+        assert_eq!(body["squash"], false);
+    }
+
+    #[test]
+    fn a_reviewed_commit_merges_only_while_it_is_the_head() {
+        // The full name and a prefix of it, in either case.
+        assert_eq!(merge_sha(29, Some(HEAD), HEAD).as_deref(), Ok(HEAD));
+        assert_eq!(merge_sha(29, Some("35a8fcf"), HEAD).as_deref(), Ok(HEAD));
+        assert_eq!(merge_sha(29, Some("35A8FCFB4F"), HEAD).as_deref(), Ok(HEAD));
+        // The branch moved: no merge, and both commits are named.
+        let moved = merge_sha(29, Some("1111111aaaa"), HEAD).expect_err("refused");
+        assert!(moved.starts_with("MR !29 was not merged"), "{moved}");
+        assert!(moved.contains(HEAD) && moved.contains("1111111aaaa"), "{moved}");
+        assert!(moved.contains("gl_mr_view"), "{moved}");
+    }
+
+    #[test]
+    fn a_sha_that_names_no_commit_is_refused_before_any_request() {
+        for bad in ["35a8fc", "main", "HEAD", "35a8fcfz"] {
+            let why = merge_sha(29, Some(bad), HEAD).expect_err("refused");
+            assert!(why.contains("at least 7 hex characters"), "{bad}: {why}");
+            assert!(why.contains("Nothing was merged"), "{bad}: {why}");
+        }
+        let empty = merge_sha(29, None, "").expect_err("refused");
+        assert!(empty.contains("no head commit"), "{empty}");
+    }
+
+    /// `merge_when_pipeline_succeeds` is the deprecated name of `auto_merge`
+    /// (GitLab 17.11). Both travel with one value.
+    #[test]
+    fn the_pipeline_flag_is_sent_under_both_of_its_names() {
+        let mut opts = merge_opts(None);
+        opts.when_pipeline_succeeds = true;
+        let body = merge_payload(&opts, HEAD);
+        assert_eq!(body["merge_when_pipeline_succeeds"], true);
+        assert_eq!(body["auto_merge"], true);
+        let now = merge_payload(&merge_opts(None), HEAD);
+        assert_eq!(now["merge_when_pipeline_succeeds"], false);
+        assert_eq!(now["auto_merge"], false);
+    }
+
+    #[test]
+    fn the_reply_says_merged_queued_or_the_state() {
+        let mr = |state: &str, queued: bool| {
+            serde_json::json!({
+                "state": state, "merge_when_pipeline_succeeds": queued,
+                "title": "test: a merge", "web_url": "https://gitlab.example.com/g/r/-/merge_requests/29",
+            })
+        };
+        assert_eq!(
+            merge_reply(29, HEAD, &mr("merged", false)),
+            "MR !29 merged at 35a8fcfb: test: a merge\nhttps://gitlab.example.com/g/r/-/merge_requests/29"
+        );
+        assert!(merge_reply(29, HEAD, &mr("opened", true))
+            .starts_with("MR !29 set to merge at 35a8fcfb when its pipeline passes: "));
+        assert!(merge_reply(29, HEAD, &mr("opened", false)).starts_with("MR !29 opened: "));
+    }
+
+    #[test]
+    fn gl_mr_merge_takes_an_optional_sha() {
+        let d = crate::tools::registry::all_descriptors().find(|d| d.name == "gl_mr_merge").expect("registered");
+        let schema = (d.input_schema)();
+        assert_eq!(schema["required"], serde_json::json!(["iid", "project"]));
+        assert!(schema["properties"]["sha"].is_object(), "{schema}");
+        assert!(d.description.contains("gl_mr_view"), "the description says where the sha comes from");
     }
 
     #[test]
