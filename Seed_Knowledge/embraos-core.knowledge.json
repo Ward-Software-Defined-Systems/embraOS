@@ -176,7 +176,7 @@
         "Start from retrieved knowledge: this pack and its siblings (embraos-kg for memory, embraos-git for self-hosted git, embraos-guardian for tool authoring) surface automatically through enrichment.",
         "For current state, use the live tools: system_status for health/soul/database parity, system_logs for recent service behavior.",
         "For implementation-level detail or anything volatile (versions, counts, exact behavior), clone the public repo into the workspace — git_clone https://github.com/Ward-Software-Defined-Systems/embraOS.git repos/embraOS — and read the relevant crate or doc (the source map and docs map nodes say where to look).",
-        "Prefer code and docs truth over remembered numbers, and promote durable new findings so the next session starts ahead."
+        "Prefer code and docs truth over remembered numbers, and remember durable new findings so the next session starts ahead."
       ],
       "outcomes": {
         "success": "The answer is grounded in the cheapest layer that is actually authoritative for the question.",

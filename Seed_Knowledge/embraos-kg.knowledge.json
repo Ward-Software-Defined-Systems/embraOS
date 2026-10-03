@@ -8,14 +8,14 @@
       "id": "seed_kg_overview",
       "kind": "semantic",
       "category": "fact",
-      "content": "The knowledge graph is the cross-session memory: memory.entries records raw episodic turns, memory.semantic holds promoted facts, preferences, decisions, observations, and patterns, memory.procedural holds structured how-to procedures, memory.edges holds typed weighted edges between all of them, and identity.graph is the read-only projection of the sealed identity.",
+      "content": "The knowledge graph is the cross-session memory: memory.entries records each memory as it was saved, memory.semantic holds the facts, preferences, decisions, observations, and patterns promoted from them, memory.procedural holds structured how-to procedures, memory.edges holds typed weighted edges between all of them, and identity.graph is the read-only projection of the sealed identity. remember writes the entry and its node together.",
       "tags": ["memory", "knowledge-graph", "embraos", "architecture"]
     },
     {
       "id": "seed_kg_promotion",
       "kind": "semantic",
       "category": "fact",
-      "content": "Promotion consolidates an episodic entry into lasting knowledge: knowledge_promote turns an entry into a semantic node with a category, or a procedural node with structured steps, stamps the entry's promoted_to pointer, and writes a derived_from provenance edge. Promotion is one-way; unlinking the node reverses it.",
+      "content": "Promotion gives an episodic entry its node in the knowledge graph, and remember does it in the same call: a semantic node with a category, or a procedural node when a procedure is given, with the entry's promoted_to pointer set and a derived_from provenance edge. knowledge_promote is for an entry that has no node — one saved before remember wrote nodes, one whose promotion failed, or one whose node was removed. Unlinking the node reverses a promotion.",
       "tags": ["memory", "promotion", "knowledge-graph"]
     },
     {
@@ -104,7 +104,7 @@
       "id": "seed_kg_category_discipline",
       "kind": "semantic",
       "category": "pattern",
-      "content": "How the operator likes to work belongs in category preference, not observation. Observation is the default bucket, and preferences recorded there drown among hundreds of observations, making preference recall unreliable.",
+      "content": "The category is given to remember when a memory is saved. How the operator likes to work belongs in category preference, not observation. Observation is what a memory becomes when no category is given, and preferences recorded there drown among hundreds of observations, making preference recall unreliable.",
       "tags": ["promotion", "curation", "categories"]
     },
     {
@@ -161,7 +161,7 @@
       "id": "seed_kg_link_tool",
       "kind": "semantic",
       "category": "fact",
-      "content": "knowledge_link records deliberate relationships — enables, contradicts, refines, depends_on, related_to — between any two nodes. These rare, meaningful edges are what knowledge_traverse keeps when automatic edges crowd a node, and a node without one is what knowledge_audit reports as orphaned, so create one whenever a real relationship is established in conversation.",
+      "content": "knowledge_link records deliberate relationships — enables, contradicts, refines, depends_on, related_to — between any two nodes. These rare, meaningful edges are what knowledge_traverse keeps when automatic edges crowd a node, and a node without one is what knowledge_audit reports as orphaned, so create one whenever a real relationship is established in conversation. remember lists the nearest existing nodes of every new node: link the ones that are really related in the same turn, and none that are only similar in wording.",
       "tags": ["tools", "edges", "curation", "knowledge-graph"]
     },
     {
@@ -175,14 +175,14 @@
       "id": "seed_kg_remember_recall",
       "kind": "semantic",
       "category": "fact",
-      "content": "remember writes an episodic entry with tags; recall searches past entries and memories; recall with unpromoted_only=true lists the promotion backlog, newest first — the worklist for consolidating episodic memory into the graph.",
+      "content": "remember saves a memory as an entry and a node in one call and lists the nearest existing nodes, so the new node can be linked at once; recall searches memories and lists each one once; recall with unpromoted_only=true lists the entries that have no node, newest first.",
       "tags": ["tools", "memory", "promotion"]
     },
     {
       "id": "seed_kg_forget",
       "kind": "semantic",
       "category": "fact",
-      "content": "forget deletes an episodic entry and cascades its edges; knowledge_unlink_node does the same for semantic and procedural nodes and clears the source entry's promotion pointer.",
+      "content": "forget removes a memory: the entry, its edges, and the node promoted from it, unless another entry also points at that node. knowledge_unlink_node removes only a semantic or procedural node and clears the promotion pointer of its entries, which stay.",
       "tags": ["tools", "memory", "curation"]
     },
     { "_comment": "── operations ────────────────────────────────────────" },
