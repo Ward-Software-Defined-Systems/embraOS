@@ -2,7 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+// No doc comments on the variants: schemars would turn the plain string
+// enum of `remember`'s `category` argument into a `oneOf` of constants.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticCategory {
     Fact,
@@ -13,15 +15,13 @@ pub enum SemanticCategory {
 }
 
 impl SemanticCategory {
+    /// Every category, in the order the tool descriptions name them.
+    pub const ALL: [SemanticCategory; 5] =
+        [Self::Fact, Self::Preference, Self::Decision, Self::Observation, Self::Pattern];
+
     pub fn from_str(s: &str) -> Option<Self> {
-        match s.trim().to_lowercase().as_str() {
-            "fact" => Some(Self::Fact),
-            "preference" => Some(Self::Preference),
-            "decision" => Some(Self::Decision),
-            "observation" => Some(Self::Observation),
-            "pattern" => Some(Self::Pattern),
-            _ => None,
-        }
+        let name = s.trim().to_lowercase();
+        Self::ALL.into_iter().find(|category| category.as_str() == name)
     }
 
     pub fn as_str(&self) -> &'static str {

@@ -225,9 +225,10 @@ async fn ensure_collection(db: &WardsonDbClient, name: &str) {
 }
 
 /// Canonical is-promoted predicate: `promoted_to` present and non-null.
-/// `promoted_to` is the maintained pointer — set by `knowledge_promote`,
-/// cleared by `knowledge_unlink_node`'s cascade and the dangling-pointer
-/// repair in `knowledge/promotion.rs`. (The `derived_from` edge also exists
+/// `promoted_to` is the maintained pointer — set by promotion (`remember`
+/// at creation, `knowledge_promote` afterwards), cleared by
+/// `knowledge_unlink_node`'s cascade and the dangling-pointer repair in
+/// `knowledge/promotion.rs`. (The `derived_from` edge also exists
 /// per promotion but can drift via unlink_edge/sweep_orphans, so it is NOT
 /// used as the promotion signal.) Missing and null are both "unpromoted" —
 /// entries predating the field lack the key entirely.
@@ -237,7 +238,7 @@ fn entry_is_promoted(doc: &serde_json::Value) -> bool {
 
 /// Display caps: recall shows the newest matches (fetches are recency-
 /// sorted). The unpromoted worklist mode shows more because its purpose is
-/// enumerating what still needs promotion, not answering a lookup.
+/// enumerating the entries that have no node, not answering a lookup.
 const RECALL_DISPLAY_CAP: usize = 10;
 const RECALL_UNPROMOTED_DISPLAY_CAP: usize = 200;
 
@@ -586,15 +587,10 @@ fn is_tag_token(word: &str) -> bool {
     )
 }
 
-async fn remember(db: &WardsonDbClient, content: &str, session: &str, config: &SystemConfig) -> String {
-    if content.is_empty() {
-        return "Nothing to remember. Provide content after remember ....".into();
-    }
-
-    ensure_collection(db, "memory.entries").await;
-
-    // Parse optional tags: "content text #tag1 #tag2". GitHub-style issue
-    // references like `#5` stay in content (is_tag_token requires letter start).
+/// Split the `#tags` from the text: "content text #tag1 #tag2". GitHub-style
+/// issue references like `#5` stay in the text (`is_tag_token` requires a
+/// letter start).
+fn split_tags(content: &str) -> (String, Vec<String>) {
     let mut tags: Vec<String> = Vec::new();
     let mut text_parts = Vec::new();
     for word in content.split_whitespace() {
@@ -604,40 +600,401 @@ async fn remember(db: &WardsonDbClient, content: &str, session: &str, config: &S
             text_parts.push(word);
         }
     }
-    let text = text_parts.join(" ");
-    let created_at = Utc::now().to_rfc3339();
+    (text_parts.join(" "), tags)
+}
 
-    let doc = serde_json::json!({
+/// The episodic entry of a memory. `promoted_to` is written as null, not
+/// left out: the promotion that follows sets it, and the server's `$ne`
+/// does not match a document that lacks the field.
+fn entry_doc(text: &str, tags: &[String], session: &str, created_at: &str) -> serde_json::Value {
+    serde_json::json!({
         "content": text,
         "tags": tags,
         "session": session,
         "promoted_to": serde_json::Value::Null,
         "created_at": created_at,
+    })
+}
+
+/// The node `remember` gives a memory.
+#[derive(Debug)]
+enum Promotion {
+    Semantic(knowledge::types::SemanticCategory),
+    Procedural(knowledge::promotion::Procedure),
+}
+
+/// The promotion the arguments ask for, checked before anything is written.
+/// A procedure argument that is empty, `null` or `{}` is none: a model that
+/// fills every optional argument by reflex still saves a semantic memory.
+fn remember_plan(
+    category: knowledge::types::SemanticCategory,
+    procedure: Option<&str>,
+) -> Result<Promotion, String> {
+    match procedure.map(str::trim).filter(|p| !matches!(*p, "" | "null" | "{}")) {
+        None => Ok(Promotion::Semantic(category)),
+        Some(json) => knowledge::promotion::parse_procedure(json)
+            .map(Promotion::Procedural)
+            .map_err(|e| format!("Nothing saved: {}", e)),
+    }
+}
+
+fn remember_reply(entry_id: &str, node: &knowledge::promotion::NewNode, candidates: &str) -> String {
+    let what = if node.collection == "memory.procedural" { "procedure" } else { "category" };
+    format!(
+        "Remembered as {}:{} ({}: {}). Entry ID: {}\n{}",
+        node.collection, node.id, what, node.label, entry_id, candidates
+    )
+}
+
+/// The entry is saved and the node is not. The answer has to keep the model
+/// from saving the memory a second time.
+fn remember_unpromoted_reply(entry_id: &str, error: &str) -> String {
+    format!(
+        "Remembered as an entry only: writing the node failed ({}). Entry ID: {}. The entry is saved; do not call remember again. Give it its node with knowledge_promote.",
+        error, entry_id
+    )
+}
+
+/// Save a memory: the episodic entry, and the node it is promoted to in the
+/// same call. The entry is written first and stays when the node cannot be
+/// written; `recall` with `unpromoted_only` lists such an entry.
+async fn remember(
+    db: &WardsonDbClient,
+    content: &str,
+    promotion: Promotion,
+    session: &str,
+    config: &SystemConfig,
+) -> String {
+    if content.is_empty() {
+        return "Nothing to remember. Provide content after remember ....".into();
+    }
+    let (text, tags) = split_tags(content);
+    if text.is_empty() {
+        return "Nothing to remember: give content besides the tags.".into();
+    }
+
+    ensure_collection(db, "memory.entries").await;
+
+    let created_at = Utc::now().to_rfc3339();
+    let entry_id = match db.write("memory.entries", &entry_doc(&text, &tags, session, &created_at)).await {
+        Ok(id) => id,
+        Err(e) => return format!("Failed to save memory: {}", e),
+    };
+
+    let written = match &promotion {
+        Promotion::Semantic(category) => {
+            knowledge::promotion::write_semantic_node(db, &entry_id, category, config).await
+        }
+        Promotion::Procedural(procedure) => {
+            knowledge::promotion::write_procedural_node(db, &entry_id, procedure, config).await
+        }
+    };
+    let (reply, node) = match written {
+        Ok(node) => {
+            let candidates = knowledge::neighbors::candidates_block(
+                &knowledge::neighbors::link_candidates(db, config, node.collection, &node.id).await,
+            );
+            (remember_reply(&entry_id, &node, &candidates), Some(node))
+        }
+        Err(e) => (remember_unpromoted_reply(&entry_id, &e.to_string()), None),
+    };
+
+    // Background edge derivation (spec §4.8), for the entry and its node in
+    // one task. Both gather their candidates at once, as the entry's always
+    // did; the entry's leaves its own node out, and the node's plans the
+    // pair (`derive_edges_except`).
+    let db = db.clone();
+    let config = config.clone();
+    let session = session.to_string();
+    tokio::spawn(async move {
+        let entry = ("memory.entries", entry_id.as_str());
+        match &node {
+            Some(node) => {
+                let _ = tokio::join!(
+                    knowledge::edges::derive_edges_except(
+                        &db,
+                        entry,
+                        &session,
+                        &tags,
+                        &created_at,
+                        &config,
+                        Some((node.collection, node.id.as_str())),
+                    ),
+                    knowledge::edges::derive_edges(
+                        &db,
+                        &node.id,
+                        node.collection,
+                        &node.session,
+                        &node.tags,
+                        &node.created_at,
+                        &config,
+                    ),
+                );
+            }
+            None => {
+                let _ = knowledge::edges::derive_edges_except(
+                    &db, entry, &session, &tags, &created_at, &config, None,
+                )
+                .await;
+            }
+        }
     });
 
-    match db.write("memory.entries", &doc).await {
-        Ok(id) => {
-            // Background edge derivation (spec §4.8)
-            let db_clone = db.clone();
-            let id_clone = id.clone();
-            let session_clone = session.to_string();
-            let tags_clone = tags.clone();
-            let created_at_clone = created_at.clone();
-            let config_clone = config.clone();
-            tokio::spawn(async move {
-                let _ = knowledge::edges::derive_edges(
-                    &db_clone,
-                    &id_clone,
-                    "memory.entries",
-                    &session_clone,
-                    &tags_clone,
-                    &created_at_clone,
-                    &config_clone,
-                ).await;
-            });
-            format!("Remembered. Entry ID: {}", id)
+    reply
+}
+
+#[cfg(test)]
+mod remember_tests {
+    use super::*;
+    use knowledge::types::SemanticCategory;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const PROCEDURE: &str = r#"{"title": "Rotate the cert", "description": "when trustd complains",
+        "steps": [{"order": 1, "action": "stop embra-web"}],
+        "outcomes": {"success": "a new cert", "failure": "the old one stays"}}"#;
+
+    #[test]
+    fn tags_are_split_from_the_content_and_issue_numbers_stay() {
+        let (text, tags) = split_tags("fixed  in #5 by the  retry #networking #embra-web");
+        assert_eq!(text, "fixed in #5 by the retry");
+        assert_eq!(tags, ["networking", "embra-web"]);
+        assert_eq!(split_tags("#only #tags"), (String::new(), vec!["only".to_string(), "tags".to_string()]));
+    }
+
+    #[test]
+    fn the_entry_document_has_five_fields_and_a_null_pointer() {
+        let doc = entry_doc("the text", &["t".to_string()], "ops", "2026-10-03T00:00:00Z");
+        assert_eq!(
+            doc,
+            json!({
+                "content": "the text", "tags": ["t"], "session": "ops",
+                "promoted_to": null, "created_at": "2026-10-03T00:00:00Z",
+            })
+        );
+        assert!(doc.as_object().unwrap().contains_key("promoted_to"), "null, not absent");
+    }
+
+    #[test]
+    fn remember_requires_content_alone_and_names_the_five_categories() {
+        let d = registry::all_descriptors().find(|d| d.name == "remember").expect("registered");
+        let schema = (d.input_schema)();
+        assert_eq!(schema["required"], json!(["content"]), "a stored cron job gives content alone");
+        let category_doc = schema["properties"]["category"]["description"].as_str().unwrap_or_default().to_string();
+        for category in SemanticCategory::ALL {
+            assert!(category_doc.contains(&format!("{}:", category.as_str())), "{}", category.as_str());
         }
-        Err(e) => format!("Failed to save memory: {}", e),
+        assert!(d.description.contains("knowledge_link"), "linking is part of saving");
+        assert!(d.description.contains("No knowledge_promote call follows"));
+    }
+
+    #[test]
+    fn the_category_defaults_to_observation_and_an_unknown_one_is_refused() {
+        let args: RememberArgs = serde_json::from_value(json!({"content": "x"})).expect("content alone");
+        assert_eq!(args.category, SemanticCategory::Observation);
+        assert!(args.procedure.is_none());
+        let named: RememberArgs =
+            serde_json::from_value(json!({"content": "x", "category": "preference"})).expect("a category");
+        assert_eq!(named.category, SemanticCategory::Preference);
+        // The categories the feedback-loop spec used to promote with.
+        for unknown in ["evaluation", "practice", "Fact"] {
+            assert!(
+                serde_json::from_value::<RememberArgs>(json!({"content": "x", "category": unknown})).is_err(),
+                "{unknown}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_procedure_argument_means_a_semantic_node() {
+        for empty in [None, Some(""), Some("  "), Some("null"), Some("{}")] {
+            let plan = remember_plan(SemanticCategory::Decision, empty).expect("a plan");
+            assert!(matches!(plan, Promotion::Semantic(SemanticCategory::Decision)), "{empty:?}: {plan:?}");
+        }
+        let plan = remember_plan(SemanticCategory::Observation, Some(PROCEDURE)).expect("a plan");
+        assert!(matches!(&plan, Promotion::Procedural(p) if p.title == "Rotate the cert"), "{plan:?}");
+    }
+
+    #[test]
+    fn an_invalid_procedure_is_refused_before_anything_is_written() {
+        let why = remember_plan(SemanticCategory::Observation, Some(r#"{"title": "t"}"#)).expect_err("refused");
+        assert!(why.starts_with("Nothing saved: "), "{why}");
+        assert!(why.contains("missing field 'description'"), "{why}");
+        assert!(why.contains("Expected schema"), "{why}");
+    }
+
+    fn new_node(collection: &'static str, id: &str, label: &str) -> knowledge::promotion::NewNode {
+        knowledge::promotion::NewNode {
+            collection,
+            id: id.into(),
+            label: label.into(),
+            session: "ops".into(),
+            tags: Vec::new(),
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_reply_names_the_node_then_the_entry() {
+        let semantic = remember_reply("e1", &new_node("memory.semantic", "n1", "decision"), "CANDIDATES");
+        assert_eq!(semantic, "Remembered as memory.semantic:n1 (category: decision). Entry ID: e1\nCANDIDATES");
+        let procedure = remember_reply("e2", &new_node("memory.procedural", "p1", "Rotate the cert"), "CANDIDATES");
+        assert_eq!(
+            procedure,
+            "Remembered as memory.procedural:p1 (procedure: Rotate the cert). Entry ID: e2\nCANDIDATES"
+        );
+    }
+
+    #[test]
+    fn a_failed_promotion_says_the_entry_is_saved_and_names_knowledge_promote() {
+        let reply = remember_unpromoted_reply("e1", "WardSONDB returned error 500: ");
+        assert!(reply.starts_with("Remembered as an entry only"), "{reply}");
+        assert!(reply.contains("Entry ID: e1"), "{reply}");
+        assert!(reply.contains("do not call remember again"), "{reply}");
+        assert!(reply.contains("knowledge_promote"), "{reply}");
+    }
+
+    // ── against a stub server ────────────────────────────────────────────
+
+    fn test_config() -> SystemConfig {
+        serde_json::from_value(json!({
+            "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase1",
+            "created_at": "", "version": "test", "embedding_enabled": false
+        }))
+        .expect("minimal config deserializes")
+    }
+
+    fn data(v: serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": v, "meta": {}}))
+    }
+
+    /// A server that takes an entry (`e1`) and answers the node write with
+    /// `node_write`.
+    async fn server(node_collection: &str, node_write: ResponseTemplate) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/memory.entries/docs")).respond_with(data(json!({"_id": "e1"}))).mount(&server).await;
+        let entry = json!({
+            "_id": "e1", "content": "the cert refresh works", "tags": ["certs"], "session": "ops", "promoted_to": null,
+        });
+        Mock::given(method("GET")).and(path("/memory.entries/docs/e1")).respond_with(data(entry)).mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path(format!("/{node_collection}/docs")))
+            .respond_with(node_write)
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH")).and(path("/memory.entries/docs/e1")).respond_with(data(json!({}))).mount(&server).await;
+        Mock::given(method("POST")).and(path("/memory.edges/docs")).respond_with(data(json!({"_id": "edge1"}))).mount(&server).await;
+        server
+    }
+
+    /// The document writes the call made, in order, as "METHOD /path" with
+    /// the body. The background derivation's queries are left out.
+    async fn writes_seen(server: &MockServer) -> Vec<(String, serde_json::Value)> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "PATCH" || (r.method.as_str() == "POST" && r.url.path().ends_with("/docs")))
+            .map(|r| {
+                (
+                    format!("{} {}", r.method, r.url.path()),
+                    serde_json::from_slice(&r.body).unwrap_or(serde_json::Value::Null),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn remember_writes_the_entry_the_node_the_pointer_and_the_provenance_edge() {
+        let server = server("memory.semantic", data(json!({"_id": "n1"}))).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let reply = remember(
+            &db,
+            "the cert refresh works #certs",
+            Promotion::Semantic(SemanticCategory::Decision),
+            "ops",
+            &test_config(),
+        )
+        .await;
+        assert!(
+            reply.starts_with("Remembered as memory.semantic:n1 (category: decision). Entry ID: e1\n"),
+            "{reply}"
+        );
+        // No model in a test: the node has no vector, and the reply says so
+        // instead of claiming that nothing is near.
+        assert!(reply.ends_with("No link candidates: the node has no embedding (see /embeddings)."), "{reply}");
+
+        let writes = writes_seen(&server).await;
+        let order: Vec<&str> = writes.iter().map(|w| w.0.as_str()).collect();
+        assert_eq!(
+            order,
+            [
+                "POST /memory.entries/docs",
+                "POST /memory.semantic/docs",
+                "PATCH /memory.entries/docs/e1",
+                "POST /memory.edges/docs",
+            ]
+        );
+        assert_eq!(writes[0].1["content"], "the cert refresh works");
+        assert_eq!(writes[0].1["tags"], json!(["certs"]));
+        assert_eq!(writes[0].1["session"], "ops");
+        assert_eq!(writes[1].1["category"], "decision");
+        assert_eq!(writes[1].1["source_entry_id"], "e1");
+        assert_eq!(writes[2].1, json!({"promoted_to": {"collection": "memory.semantic", "id": "n1"}}));
+        assert_eq!(writes[3].1["edge_type"], "derived_from");
+    }
+
+    #[tokio::test]
+    async fn remember_with_a_procedure_writes_a_procedural_node() {
+        let server = server("memory.procedural", data(json!({"_id": "p1"}))).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let plan = remember_plan(SemanticCategory::Observation, Some(PROCEDURE)).expect("a plan");
+        let reply = remember(&db, "how to rotate the cert #certs", plan, "ops", &test_config()).await;
+        assert!(
+            reply.starts_with("Remembered as memory.procedural:p1 (procedure: Rotate the cert). Entry ID: e1\n"),
+            "{reply}"
+        );
+        let writes = writes_seen(&server).await;
+        assert_eq!(writes[1].0, "POST /memory.procedural/docs");
+        assert_eq!(writes[1].1["title"], "Rotate the cert");
+        assert!(writes[1].1.get("category").is_none());
+        assert_eq!(writes[2].1, json!({"promoted_to": {"collection": "memory.procedural", "id": "p1"}}));
+    }
+
+    #[tokio::test]
+    async fn a_node_that_cannot_be_written_leaves_the_entry_and_says_so() {
+        let server = server("memory.semantic", ResponseTemplate::new(500)).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let reply = remember(
+            &db,
+            "the cert refresh works",
+            Promotion::Semantic(SemanticCategory::Observation),
+            "ops",
+            &test_config(),
+        )
+        .await;
+        assert!(reply.starts_with("Remembered as an entry only: writing the node failed ("), "{reply}");
+        assert!(reply.contains("Entry ID: e1."), "{reply}");
+        let order: Vec<String> = writes_seen(&server).await.into_iter().map(|w| w.0).collect();
+        assert_eq!(order, ["POST /memory.entries/docs", "POST /memory.semantic/docs"], "no pointer, no edge");
+    }
+
+    #[tokio::test]
+    async fn content_that_is_only_tags_saves_nothing() {
+        let server = server("memory.semantic", data(json!({"_id": "n1"}))).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let reply = remember(
+            &db,
+            "#certs #ops",
+            Promotion::Semantic(SemanticCategory::Observation),
+            "ops",
+            &test_config(),
+        )
+        .await;
+        assert_eq!(reply, "Nothing to remember: give content besides the tags.");
+        assert!(writes_seen(&server).await.is_empty());
     }
 }
 
@@ -2327,14 +2684,16 @@ impl SessionSummaryArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "recall",
-    description = "Search past conversations and saved memories. Free-text query; unquoted terms AND-match (all must appear); hashtags supported; empty query lists recent entries. Set unpromoted_only=true for a worklist of memory.entries not yet promoted to the knowledge graph (up to 200 shown, newest first; query still narrows it)."
+    description = "Search past conversations and saved memories. Free-text query; unquoted terms AND-match (all must appear); hashtags supported; empty query lists recent entries. A memory that is in the knowledge graph is listed once, as its node. Set unpromoted_only=true to list the memory.entries that are not in the knowledge graph (up to 200 shown, newest first; query still narrows it)."
 )]
 pub struct RecallArgs {
     /// Search query. Free-text; hashtags supported; empty to list all.
     #[serde(default)]
     pub query: String,
     /// When true, list only memory.entries that have NOT been promoted to
-    /// the knowledge graph (no promoted_to pointer) — a promotion worklist.
+    /// the knowledge graph (no promoted_to pointer): saved before remember
+    /// wrote nodes, left by a failed promotion, or un-promoted when their
+    /// node was removed.
     #[serde(default)]
     pub unpromoted_only: bool,
 }
@@ -2381,16 +2740,39 @@ impl SearchMemoryArgs {
 #[embra_tool(
     name = "remember",
     is_side_effectful = true,
-    description = "Save a note or fact to persistent memory. Hashtag tokens (e.g. #architecture, #soul) are extracted into the tags array; the remaining words become the content. Keep content to a single line. For durable, reusable knowledge worth keeping across sessions, follow up with knowledge_promote."
+    description = "Save a memory worth keeping across sessions. One call writes the episodic entry and its node in the knowledge graph: a semantic node with the category you give, or a procedural node when procedure is given. No knowledge_promote call follows. Hashtag tokens (e.g. #architecture, #soul) are extracted into the tags array; the remaining words become the content. Keep content to a single line. The result names the new node and lists the nearest existing nodes: in the same turn, without being asked, link the new node with knowledge_link to each one it has a real relation to, and to none that is only similar in wording."
 )]
 pub struct RememberArgs {
     /// Content to save. Letter-start `#tag` tokens are extracted into tags.
     pub content: String,
+    /// Category of the semantic node. fact: something that is the case.
+    /// preference: how the operator likes to work. decision: a choice that
+    /// was made, with its reason. observation: something noticed and not
+    /// yet established. pattern: something that recurs. Give it on every
+    /// call; without it the node is an observation. Not used when procedure
+    /// is given.
+    #[serde(default = "default_remember_category")]
+    pub category: knowledge::types::SemanticCategory,
+    /// A how-to with steps, as a JSON object serialized to a string:
+    /// {"title": "...", "description": "...", "preconditions": ["..."],
+    /// "steps": [{"order": 1, "action": "...", "notes": "..."}], "outcomes":
+    /// {"success": "...", "failure": "..."}}. When given, the node is
+    /// procedural.
+    #[serde(default)]
+    pub procedure: Option<String>,
+}
+
+fn default_remember_category() -> knowledge::types::SemanticCategory {
+    knowledge::types::SemanticCategory::Observation
 }
 
 impl RememberArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        Ok(remember(ctx.db, &self.content, ctx.session_name, ctx.config).await)
+        let promotion = match remember_plan(self.category, self.procedure.as_deref()) {
+            Ok(promotion) => promotion,
+            Err(refusal) => return Ok(refusal),
+        };
+        Ok(remember(ctx.db, &self.content, promotion, ctx.session_name, ctx.config).await)
     }
 }
 

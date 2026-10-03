@@ -38,10 +38,31 @@ pub async fn derive_edges(
     created_at: &str,
     config: &SystemConfig,
 ) -> Result<usize> {
-    match derive_edges_inner(db, new_doc_id, new_doc_collection, session, tags, created_at, config).await {
+    derive_edges_except(db, (new_doc_collection, new_doc_id), session, tags, created_at, config, None).await
+}
+
+/// `derive_edges` with one other document left out, both as
+/// `(collection, id)`.
+///
+/// `remember` writes an entry and its node together and derives for both at
+/// once. Each derivation would plan the entry↔node pair, and each checks
+/// `edge_exists` before either has written its batch, so the pair's edges
+/// would be written twice. The entry's derivation leaves its own node out;
+/// the node's plans the pair, as it does when `knowledge_promote` promotes
+/// an older entry.
+pub async fn derive_edges_except(
+    db: &WardsonDbClient,
+    new_doc: (&str, &str),
+    session: &str,
+    tags: &[String],
+    created_at: &str,
+    config: &SystemConfig,
+    except: Option<(&str, &str)>,
+) -> Result<usize> {
+    match derive_edges_inner(db, new_doc, session, tags, created_at, config, except).await {
         Ok(n) => Ok(n),
         Err(e) => {
-            warn!("edge derivation failed for {}:{}: {}", new_doc_collection, new_doc_id, e);
+            warn!("edge derivation failed for {}:{}: {}", new_doc.0, new_doc.1, e);
             Ok(0)
         }
     }
@@ -49,13 +70,14 @@ pub async fn derive_edges(
 
 async fn derive_edges_inner(
     db: &WardsonDbClient,
-    new_doc_id: &str,
-    new_doc_collection: &str,
+    new_doc: (&str, &str),
     session: &str,
     tags: &[String],
     created_at: &str,
     config: &SystemConfig,
+    except: Option<(&str, &str)>,
 ) -> Result<usize> {
+    let (new_doc_collection, new_doc_id) = new_doc;
     // How many candidates one insert looks at, per collection and per kind,
     // newest first. It bounds the edges an insert creates; it is not a
     // search window. In a busy session it is full on most inserts, and
@@ -117,7 +139,7 @@ async fn derive_edges_inner(
     // same_session — weight = 1.0
     let mut seen: HashSet<(String, String)> = HashSet::new();
     for c in &session_candidates {
-        if is_self(&c.id, &c.collection, new_doc_id, new_doc_collection) { continue; }
+        if skips(c, new_doc, except) { continue; }
         let key = (c.collection.clone(), c.id.clone());
         if !seen.insert(key) { continue; }
         push_bidirectional(
@@ -134,7 +156,7 @@ async fn derive_edges_inner(
     seen.clear();
     if let Some(ts) = new_ts {
         for c in &temporal_candidates {
-            if is_self(&c.id, &c.collection, new_doc_id, new_doc_collection) { continue; }
+            if skips(c, new_doc, except) { continue; }
             let key = (c.collection.clone(), c.id.clone());
             if !seen.insert(key) { continue; }
             let Some(other_ts) = parse_ts(&c.created_at) else { continue; };
@@ -158,7 +180,7 @@ async fn derive_edges_inner(
     if !tags.is_empty() {
         let new_set: HashSet<&str> = tags.iter().map(|s| s.as_str()).collect();
         for c in &tag_candidates {
-            if is_self(&c.id, &c.collection, new_doc_id, new_doc_collection) { continue; }
+            if skips(c, new_doc, except) { continue; }
             let key = (c.collection.clone(), c.id.clone());
             if !seen.insert(key) { continue; }
             if c.tags.is_empty() { continue; }
@@ -207,8 +229,11 @@ fn parse_ts(s: &str) -> Option<DateTime<Utc>> {
     DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
 }
 
-fn is_self(id: &str, coll: &str, self_id: &str, self_coll: &str) -> bool {
-    id == self_id && coll == self_coll
+/// A candidate that gets no edge: the new document itself, and the one
+/// document the caller left out. Both are `(collection, id)`.
+fn skips(candidate: &Candidate, new_doc: (&str, &str), except: Option<(&str, &str)>) -> bool {
+    let is = |doc: (&str, &str)| candidate.collection == doc.0 && candidate.id == doc.1;
+    is(new_doc) || except.is_some_and(is)
 }
 
 fn doc_to_candidate(doc: &serde_json::Value, collection: &str) -> Option<Candidate> {
@@ -271,6 +296,26 @@ async fn edge_exists(db: &WardsonDbClient, source_id: &str, target_id: &str, edg
 
 #[cfg(test)]
 mod tests {
+    use super::{skips, Candidate};
+
+    #[test]
+    fn the_excepted_document_is_skipped_like_the_document_itself() {
+        let candidate = |collection: &str, id: &str| Candidate {
+            id: id.into(),
+            collection: collection.into(),
+            created_at: String::new(),
+            tags: Vec::new(),
+        };
+        let entry = ("memory.entries", "e1");
+        let node = Some(("memory.semantic", "n1"));
+        assert!(skips(&candidate("memory.entries", "e1"), entry, None), "the document itself");
+        assert!(skips(&candidate("memory.semantic", "n1"), entry, node), "the one left out");
+        assert!(!skips(&candidate("memory.semantic", "n1"), entry, None), "nothing left out");
+        assert!(!skips(&candidate("memory.semantic", "n2"), entry, node));
+        // An id is only the same document in the same collection.
+        assert!(!skips(&candidate("memory.procedural", "n1"), entry, node));
+    }
+
     // Weight formulas — pure unit tests that don't need the DB.
 
     fn temporal_weight(distance_secs: i64, window_secs: i64) -> Option<f64> {

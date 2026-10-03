@@ -340,4 +340,21 @@ mod tests {
         assert_eq!(out["properties"]["x"]["type"], "integer");
         assert!(out.get("$defs").is_none());
     }
+
+    /// `remember`'s category is a closed set for an OpenAI-compatible
+    /// server too: the definition is inlined, in the shape
+    /// `knowledge_merge.strategy` ships, and content stays the one required
+    /// argument.
+    #[test]
+    fn the_remember_category_keeps_its_five_values() {
+        let d = registry::all_descriptors().find(|d| d.name == "remember").expect("registered");
+        let schema = translate_schema(d.name, (d.input_schema)()).expect("translates");
+        let category = &schema["properties"]["category"];
+        assert_eq!(
+            category["allOf"][0]["enum"],
+            json!(["fact", "preference", "decision", "observation", "pattern"])
+        );
+        assert!(category.pointer("/allOf/0/$ref").is_none(), "{category}");
+        assert_eq!(schema["required"], json!(["content"]));
+    }
 }

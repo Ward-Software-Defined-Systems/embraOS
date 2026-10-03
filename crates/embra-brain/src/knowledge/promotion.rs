@@ -23,11 +23,14 @@ use super::types::{EdgeType, SemanticCategory};
 
 const PROCEDURAL_SCHEMA_HINT: &str = r#"{"title": "...", "description": "...", "preconditions": [...], "steps": [{"order": N, "action": "...", "notes": "..."}], "outcomes": {"success": "...", "failure": "..."}}"#;
 
-/// What a promotion wrote: enough to derive the node's automatic edges.
+/// What a promotion wrote: enough to name the node and to derive its
+/// automatic edges.
 #[derive(Debug)]
 pub(crate) struct NewNode {
     pub collection: &'static str,
     pub id: String,
+    /// The category of a semantic node, the title of a procedure.
+    pub label: String,
     pub session: String,
     pub tags: Vec<String>,
     pub created_at: String,
@@ -44,6 +47,7 @@ struct SourceEntry {
 /// `derived_from` edge, and the one timestamp both carry.
 struct Draft {
     collection: &'static str,
+    label: String,
     doc: serde_json::Value,
     provenance: serde_json::Value,
     now: String,
@@ -148,11 +152,23 @@ pub(crate) async fn write_semantic_node(
     let now = Utc::now().to_rfc3339();
     let draft = Draft {
         collection: "memory.semantic",
+        label: category.as_str().to_string(),
         doc: semantic_doc(&source, entry_id, category, &now),
         provenance: json!({ "promotion_type": "semantic", "category": category.as_str() }),
         now,
     };
     write_node(db, entry_id, draft, source, config).await
+}
+
+/// Write the procedural node of an entry; see `write_semantic_node`.
+pub(crate) async fn write_procedural_node(
+    db: &WardsonDbClient,
+    entry_id: &str,
+    procedure: &Procedure,
+    config: &SystemConfig,
+) -> Result<NewNode> {
+    let source = unpromoted_source(db, entry_id).await?;
+    write_procedure(db, entry_id, procedure, source, config).await
 }
 
 async fn write_procedure(
@@ -165,6 +181,7 @@ async fn write_procedure(
     let now = Utc::now().to_rfc3339();
     let draft = Draft {
         collection: "memory.procedural",
+        label: procedure.title.clone(),
         doc: procedural_doc(&source, entry_id, procedure, &now),
         provenance: json!({ "promotion_type": "procedural" }),
         now,
@@ -227,7 +244,7 @@ async fn write_node(
     source: SourceEntry,
     config: &SystemConfig,
 ) -> Result<NewNode> {
-    let Draft { collection, doc, provenance, now } = draft;
+    let Draft { collection, label, doc, provenance, now } = draft;
     let new_id = db.write(collection, &doc).await?;
 
     if let Err(e) = db.patch_document("memory.entries", entry_id, &pointer_patch(collection, &new_id)).await {
@@ -246,7 +263,7 @@ async fn write_node(
     // Directed derived_from edge.
     insert_derived_from_edge(db, &new_id, collection, entry_id, "memory.entries", provenance, &now).await;
 
-    Ok(NewNode { collection, id: new_id, session: source.session, tags: source.tags, created_at: now })
+    Ok(NewNode { collection, id: new_id, label, session: source.session, tags: source.tags, created_at: now })
 }
 
 /// Load a source entry that has no live node. Errors if it is not found or
@@ -257,30 +274,11 @@ async fn write_node(
 /// node — clearing the pointer on it would write a second node next to a
 /// live one — so it is returned.
 async fn unpromoted_source(db: &WardsonDbClient, entry_id: &str) -> Result<SourceEntry> {
-    let doc = db.read("memory.entries", entry_id).await.map_err(|e| {
-        if is_not_found(&e) {
-            anyhow!("Entry {} not found in memory.entries", entry_id)
-        } else {
-            anyhow!("Entry {} could not be read: {}", entry_id, e)
-        }
-    })?;
+    let doc = read_entry(db, entry_id).await?;
 
-    if let Some(promoted) = doc.get("promoted_to")
-        && !promoted.is_null()
-    {
-        let coll = promoted.get("collection").and_then(|v| v.as_str());
-        let pid = promoted.get("id").and_then(|v| v.as_str());
-        if let (Some(c), Some(i)) = (coll, pid) {
-            match db.read(c, i).await {
-                Ok(_) => return Err(anyhow!("Entry {} already promoted to {}:{}", entry_id, c, i)),
-                Err(e) if is_not_found(&e) => {}
-                Err(e) => {
-                    return Err(anyhow!(
-                        "Entry {} points at {}:{}, which could not be read ({}); nothing was promoted",
-                        entry_id, c, i, e
-                    ))
-                }
-            }
+    if doc.get("promoted_to").is_some_and(|p| !p.is_null()) {
+        if let Some((collection, id, _)) = live_node(db, entry_id, &doc).await? {
+            return Err(anyhow!("Entry {} already promoted to {}:{}", entry_id, collection, id));
         }
         let _ = db.patch_document("memory.entries", entry_id, &json!({"promoted_to": null})).await;
     }
@@ -293,6 +291,55 @@ async fn unpromoted_source(db: &WardsonDbClient, entry_id: &str) -> Result<Sourc
     let session = doc.get("session").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
     Ok(SourceEntry { content, tags, session })
+}
+
+async fn read_entry(db: &WardsonDbClient, entry_id: &str) -> Result<serde_json::Value> {
+    db.read("memory.entries", entry_id).await.map_err(|e| {
+        if is_not_found(&e) {
+            anyhow!("Entry {} not found in memory.entries", entry_id)
+        } else {
+            anyhow!("Entry {} could not be read: {}", entry_id, e)
+        }
+    })
+}
+
+/// The node an entry's pointer names, when that node is there:
+/// `(collection, id, document)`. `None` for a pointer that names nothing
+/// readable as a node, and for a node that is gone (404). Any other failure
+/// of the read is returned: it says nothing about the node.
+async fn live_node(
+    db: &WardsonDbClient,
+    entry_id: &str,
+    entry: &serde_json::Value,
+) -> Result<Option<(String, String, serde_json::Value)>> {
+    let Some(pointer) = entry.get("promoted_to").filter(|p| !p.is_null()) else {
+        return Ok(None);
+    };
+    let (Some(collection), Some(id)) = (
+        pointer.get("collection").and_then(|v| v.as_str()),
+        pointer.get("id").and_then(|v| v.as_str()),
+    ) else {
+        return Ok(None);
+    };
+    match db.read(collection, id).await {
+        Ok(node) => Ok(Some((collection.to_string(), id.to_string(), node))),
+        Err(e) if is_not_found(&e) => Ok(None),
+        Err(e) => Err(anyhow!(
+            "Entry {} points at {}:{}, which could not be read ({}); nothing was promoted",
+            entry_id, collection, id, e
+        )),
+    }
+}
+
+/// The node an entry already has, for the caller that decides what a second
+/// promotion means. Reads only; a stale pointer is left for the promotion
+/// to clear.
+pub(crate) async fn node_of_entry(
+    db: &WardsonDbClient,
+    entry_id: &str,
+) -> Result<Option<(String, String, serde_json::Value)>> {
+    let entry = read_entry(db, entry_id).await?;
+    live_node(db, entry_id, &entry).await
 }
 
 async fn insert_derived_from_edge(

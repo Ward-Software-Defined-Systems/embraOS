@@ -13,6 +13,7 @@ pub mod edges;
 pub mod enrichment;
 pub(crate) mod idf;
 pub mod merge;
+pub(crate) mod neighbors;
 pub(crate) mod node_store;
 pub mod promotion;
 pub mod retrieval;

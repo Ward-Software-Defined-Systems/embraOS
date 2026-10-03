@@ -1624,3 +1624,38 @@ mod expansion_tests {
         assert!((at_trigger - crate::knowledge::enrichment::MIN_RELEVANCE).abs() < 1e-6);
     }
 }
+
+#[cfg(test)]
+mod redirect_tests {
+    use super::redirect_if_promoted;
+    use crate::db::WardsonDbClient;
+    use crate::knowledge::node_store::NodeStore;
+    use serde_json::json;
+
+    /// `remember` promotes every entry, so every lexical hit on an entry
+    /// goes through this redirect: the node answers in the entry's place.
+    /// The store holds the node; the client points nowhere and is never
+    /// asked.
+    #[tokio::test]
+    async fn a_promoted_entry_is_answered_by_its_node() {
+        let db = WardsonDbClient::from_url("http://127.0.0.1:9");
+        let mut store = NodeStore::new();
+        store.insert_docs("memory.semantic", vec![json!({"_id": "n1", "content": "the node's text"})]);
+        let entry = json!({
+            "_id": "e1", "content": "the entry's text",
+            "promoted_to": {"collection": "memory.semantic", "id": "n1"},
+        });
+
+        let (doc, collection) =
+            redirect_if_promoted(&mut store, &db, &entry, "memory.entries").await.expect("redirected");
+        assert_eq!(collection, "memory.semantic");
+        assert_eq!(doc["_id"], "n1");
+        assert_eq!(doc["content"], "the node's text");
+
+        // An entry without a node, and a document that is no entry, are
+        // answered as they are.
+        let unpromoted = json!({"_id": "e2", "content": "x", "promoted_to": null});
+        assert!(redirect_if_promoted(&mut store, &db, &unpromoted, "memory.entries").await.is_none());
+        assert!(redirect_if_promoted(&mut store, &db, &entry, "memory.semantic").await.is_none());
+    }
+}

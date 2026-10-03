@@ -556,4 +556,18 @@ mod tests {
         assert!(out.get("examples").is_none());
         assert_eq!(out["type"], "OBJECT");
     }
+
+    /// `remember` takes its category as an enum with a default — the
+    /// declaration `knowledge_merge.strategy` has. Gemini gets it as a plain
+    /// string enum, and content stays the one required argument.
+    #[test]
+    fn the_remember_category_reaches_gemini_as_a_string_enum() {
+        let d = registry::all_descriptors().find(|d| d.name == "remember").expect("registered");
+        let schema = translate_schema(d.name, (d.input_schema)()).expect("translates");
+        let category = &schema["properties"]["category"];
+        assert_eq!(category["type"], "STRING");
+        assert_eq!(category["enum"], json!(["fact", "preference", "decision", "observation", "pattern"]));
+        assert!(category.get("allOf").is_none() && category.get("anyOf").is_none(), "{category}");
+        assert_eq!(schema["required"], json!(["content"]));
+    }
 }

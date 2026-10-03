@@ -7,7 +7,8 @@ use serde_json::json;
 use crate::config::SystemConfig;
 use crate::db::WardsonDbClient;
 
-use super::promotion::{promote_to_procedural, promote_to_semantic};
+use super::neighbors::{candidates_block, link_candidates};
+use super::promotion::{node_of_entry, promote_to_procedural, promote_to_semantic};
 use super::node_store::NodeStore;
 use super::retrieval::retrieve_relevant_knowledge;
 use super::traversal::{spawn_access_touches, traverse_multi};
@@ -32,24 +33,159 @@ pub async fn knowledge_promote(
             let Some(category) = SemanticCategory::from_str(data) else {
                 return format!("Error: Invalid category '{}'. Must be one of: fact, preference, decision, observation, pattern", data);
             };
+            if let Some(answer) = answer_for_an_existing_node(db, entry_id, Some(&category)).await {
+                return answer;
+            }
             match promote_to_semantic(db, entry_id, category.clone(), config).await {
                 Ok(new_id) => format!(
-                    "Promoted entry {} to memory.semantic\nNew node ID: {}\nCategory: {}",
-                    entry_id, new_id, category.as_str()
+                    "Promoted entry {} to memory.semantic\nNew node ID: {}\nCategory: {}\n{}",
+                    entry_id,
+                    new_id,
+                    category.as_str(),
+                    candidates_block(&link_candidates(db, config, "memory.semantic", &new_id).await)
                 ),
                 Err(e) => format!("Error: {}", e),
             }
         }
         "procedural" => {
+            if let Some(answer) = answer_for_an_existing_node(db, entry_id, None).await {
+                return answer;
+            }
             match promote_to_procedural(db, entry_id, data, config).await {
                 Ok(new_id) => format!(
-                    "Promoted entry {} to memory.procedural\nNew node ID: {}",
-                    entry_id, new_id
+                    "Promoted entry {} to memory.procedural\nNew node ID: {}\n{}",
+                    entry_id,
+                    new_id,
+                    candidates_block(&link_candidates(db, config, "memory.procedural", &new_id).await)
                 ),
                 Err(e) => format!("Error: {}", e),
             }
         }
         _ => "Error: Type must be 'semantic' or 'procedural'".into(),
+    }
+}
+
+/// What a promotion means for an entry that already has a node.
+#[derive(Debug, PartialEq)]
+enum AlreadyPromoted {
+    /// A semantic promotion that names another category: the node takes it.
+    SetCategory { from: String, to: &'static str },
+    /// A semantic promotion that names the category the node has.
+    Nothing,
+    Refused(String),
+}
+
+/// `remember` writes the node itself, so a `knowledge_promote` after it —
+/// the habit of the two-step workflow — finds the entry promoted. A
+/// semantic promotion then carries one thing the node may lack, the
+/// category: it is set, and the old habit ends where it meant to. A
+/// procedure cannot be laid over a node that exists.
+fn already_promoted(
+    semantic: Option<&SemanticCategory>,
+    entry_id: &str,
+    node: (&str, &str),
+    node_doc: &serde_json::Value,
+) -> AlreadyPromoted {
+    let (collection, id) = node;
+    match (collection == "memory.semantic", semantic) {
+        (true, Some(category)) => {
+            let current = node_doc.get("category").and_then(|v| v.as_str()).unwrap_or("");
+            if current == category.as_str() {
+                AlreadyPromoted::Nothing
+            } else {
+                AlreadyPromoted::SetCategory { from: current.to_string(), to: category.as_str() }
+            }
+        }
+        (true, None) => AlreadyPromoted::Refused(format!(
+            "Entry {} already has the semantic node {}:{}. A procedure is saved in one call: remember with procedure. To replace this node, remove it with knowledge_unlink_node first.",
+            entry_id, collection, id
+        )),
+        (false, Some(_)) => AlreadyPromoted::Refused(format!(
+            "Entry {} already has the procedural node {}:{}; a procedure has no category.",
+            entry_id, collection, id
+        )),
+        (false, None) => AlreadyPromoted::Refused(format!(
+            "Entry {} already has the procedural node {}:{}. Change it with knowledge_update.",
+            entry_id, collection, id
+        )),
+    }
+}
+
+/// `None` when the entry has no node and the promotion goes ahead.
+async fn answer_for_an_existing_node(
+    db: &WardsonDbClient,
+    entry_id: &str,
+    semantic: Option<&SemanticCategory>,
+) -> Option<String> {
+    let (collection, id, node_doc) = match node_of_entry(db, entry_id).await {
+        Ok(Some(node)) => node,
+        Ok(None) => return None,
+        Err(e) => return Some(format!("Error: {}", e)),
+    };
+    Some(match already_promoted(semantic, entry_id, (&collection, &id), &node_doc) {
+        AlreadyPromoted::Refused(why) => format!("Error: {}", why),
+        AlreadyPromoted::Nothing => format!(
+            "Entry {} already has the semantic node {}:{} (category {}). Nothing to do: remember writes the node itself.",
+            entry_id,
+            collection,
+            id,
+            semantic.map(SemanticCategory::as_str).unwrap_or("")
+        ),
+        AlreadyPromoted::SetCategory { from, to } => {
+            let patch = json!({ "category": to, "updated_at": chrono::Utc::now().to_rfc3339() });
+            match db.patch_document(&collection, &id, &patch).await {
+                Ok(()) => format!(
+                    "Entry {} already has the semantic node {}:{}; its category is now {} (was {}).",
+                    entry_id, collection, id, to, from
+                ),
+                Err(e) => format!(
+                    "Error: Entry {} already has the semantic node {}:{}, and its category could not be set: {}",
+                    entry_id, collection, id, e
+                ),
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod already_promoted_tests {
+    use super::{already_promoted, AlreadyPromoted};
+    use crate::knowledge::types::SemanticCategory;
+    use serde_json::json;
+
+    #[test]
+    fn a_semantic_promote_on_a_semantic_node_sets_its_category() {
+        // `remember` without a category, then the old `knowledge_promote`.
+        let node = json!({"_id": "n1", "content": "x", "category": "observation"});
+        assert_eq!(
+            already_promoted(Some(&SemanticCategory::Decision), "e1", ("memory.semantic", "n1"), &node),
+            AlreadyPromoted::SetCategory { from: "observation".into(), to: "decision" }
+        );
+        // The category the node has: nothing is written.
+        assert_eq!(
+            already_promoted(Some(&SemanticCategory::Observation), "e1", ("memory.semantic", "n1"), &node),
+            AlreadyPromoted::Nothing
+        );
+    }
+
+    #[test]
+    fn a_procedural_promote_on_a_semantic_node_names_the_way_out() {
+        let node = json!({"_id": "n1", "content": "x", "category": "fact"});
+        let AlreadyPromoted::Refused(why) = already_promoted(None, "e1", ("memory.semantic", "n1"), &node) else {
+            panic!("a procedure over a node is refused");
+        };
+        assert!(why.contains("memory.semantic:n1"), "{why}");
+        assert!(why.contains("remember with procedure"), "{why}");
+        assert!(why.contains("knowledge_unlink_node"), "{why}");
+    }
+
+    #[test]
+    fn a_procedural_node_takes_neither_a_category_nor_a_second_procedure() {
+        let node = json!({"_id": "p1", "title": "t"});
+        let category = already_promoted(Some(&SemanticCategory::Fact), "e1", ("memory.procedural", "p1"), &node);
+        assert!(matches!(&category, AlreadyPromoted::Refused(why) if why.contains("no category")), "{category:?}");
+        let again = already_promoted(None, "e1", ("memory.procedural", "p1"), &node);
+        assert!(matches!(&again, AlreadyPromoted::Refused(why) if why.contains("knowledge_update")), "{again:?}");
     }
 }
 
@@ -1937,7 +2073,7 @@ pub enum KnowledgePromoteKind {
 #[embra_tool(
     name = "knowledge_promote",
     is_side_effectful = true,
-    description = "Promote an episodic memory entry to a semantic or procedural knowledge node. For kind=semantic, data is one of: fact, preference, decision, observation, pattern. For kind=procedural, data is a JSON object describing the procedure (preconditions, steps, outcomes). Promote only durable, reusable knowledge worth keeping across sessions — not every memory."
+    description = "Give a node to a memory entry that has none (recall with unpromoted_only=true lists them): one saved before remember wrote nodes, one whose promotion failed, or one whose node was removed. Never needed after remember, which writes the node itself. For kind=semantic, data is one of: fact, preference, decision, observation, pattern; when the entry already has a semantic node, its category is set to data. For kind=procedural, data is a JSON object describing the procedure (title, description, preconditions, steps, outcomes); an entry that already has a node is refused."
 )]
 pub struct KnowledgePromoteArgs {
     pub entry_id: String,

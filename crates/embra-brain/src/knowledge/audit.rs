@@ -322,6 +322,19 @@ fn dedup_score(a: &NodeMeta, b: &NodeMeta) -> (f64, bool) {
     }
 }
 
+/// Whether two nodes of one collection say the same thing by the audit's
+/// own measure: `dedup_score` at the default threshold. The audit groups by
+/// category before it pairs; this does not, because a duplicate filed under
+/// another category is a duplicate still. `remember` marks such a link
+/// candidate, so that a memory the graph already holds is merged rather
+/// than linked.
+pub(crate) fn near_duplicate(a: &serde_json::Value, b: &serde_json::Value, collection: &'static str) -> bool {
+    match (parse_node_meta(a, collection), parse_node_meta(b, collection)) {
+        (Some(a), Some(b)) => dedup_score(&a, &b).0 >= AUDIT_MIN_SIMILARITY_DEFAULT,
+        _ => false,
+    }
+}
+
 /// Order-independent pair key.
 fn pair_key(a: &NodeKey, b: &NodeKey) -> (NodeKey, NodeKey) {
     if a <= b {
@@ -1220,6 +1233,29 @@ mod tests {
         let empty: HashSet<String> = HashSet::new();
         assert_eq!(jaccard(&a, &empty), 0.0);
         assert_eq!(overlap_max(&empty, &b), 0.0);
+    }
+
+    #[test]
+    fn near_duplicate_is_the_dedup_score_at_the_audit_threshold() {
+        let a = serde_json::json!({
+            "_id": "a", "content": "the cert refresh works after manual generation",
+            "category": "fact", "tags": ["cert"],
+        });
+        // The same statement with a sentence added, filed under another
+        // category: the containment floor carries it over the threshold,
+        // and the category is not asked.
+        let b = serde_json::json!({
+            "_id": "b", "content": "the cert refresh works after manual generation and one more detail sentence",
+            "category": "observation", "tags": ["cert"],
+        });
+        assert!(near_duplicate(&a, &b, "memory.semantic"));
+        let c = serde_json::json!({
+            "_id": "c", "content": "wardsondb keeps a bitmap index per collection",
+            "category": "fact", "tags": ["db"],
+        });
+        assert!(!near_duplicate(&a, &c, "memory.semantic"));
+        // A document without an id is no node.
+        assert!(!near_duplicate(&serde_json::json!({"content": "x"}), &a, "memory.semantic"));
     }
 
     #[test]

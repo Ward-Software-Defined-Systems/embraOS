@@ -22,8 +22,8 @@ use crate::db::WardsonDbClient;
 use super::{decode_vector, EmbeddingProvider};
 
 /// Collections carrying embeddings. `memory.entries` is deliberately absent
-/// (KG-02 spec §4.3): high volume, noisy, and the entries that matter are
-/// promoted — and embedded — as semantic or procedural nodes.
+/// (KG-02 spec §4.3): an entry is promoted when it is written, and its text
+/// is embedded once, on its semantic or procedural node.
 pub const EMBEDDED_COLLECTIONS: [&str; 2] = ["memory.semantic", "memory.procedural"];
 
 /// Stored-vector fields. Nothing else is fetched: the index needs the vector
@@ -161,7 +161,7 @@ pub async fn ensure_current(db: &WardsonDbClient, provider: &dyn EmbeddingProvid
 /// above `min_similarity`, best first, capped at `top_k`.
 pub async fn search(query: &[f32], top_k: usize, min_similarity: f32) -> Vec<(String, String, f32)> {
     let idx = index().await.read().await;
-    let mut hits: Vec<(String, String, f32)> = idx
+    let hits: Vec<(String, String, f32)> = idx
         .vecs
         .iter()
         .filter_map(|((coll, id), v)| {
@@ -169,6 +169,11 @@ pub async fn search(query: &[f32], top_k: usize, min_similarity: f32) -> Vec<(St
             (s >= min_similarity).then(|| (coll.clone(), id.clone(), s))
         })
         .collect();
+    ranked(hits, top_k)
+}
+
+/// Best first, capped at `top_k`.
+fn ranked(mut hits: Vec<(String, String, f32)>, top_k: usize) -> Vec<(String, String, f32)> {
     hits.sort_by(|a, b| {
         b.2.partial_cmp(&a.2)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -177,6 +182,31 @@ pub async fn search(query: &[f32], top_k: usize, min_similarity: f32) -> Vec<(St
     });
     hits.truncate(top_k);
     hits
+}
+
+/// The nearest nodes of one node: its own vector against the rest of the
+/// index, itself left out, ranked as `search` ranks. No inference — the
+/// vector is the one the write path just stored. `None` when the node has no
+/// vector here: it was not embedded, or the index is not loaded.
+pub async fn neighbors(
+    collection: &str,
+    id: &str,
+    top_k: usize,
+    min_similarity: f32,
+) -> Option<Vec<(String, String, f32)>> {
+    let idx = index().await.read().await;
+    let key = (collection.to_string(), id.to_string());
+    let own = idx.vecs.get(&key)?;
+    let hits: Vec<(String, String, f32)> = idx
+        .vecs
+        .iter()
+        .filter(|(other, _)| **other != key)
+        .filter_map(|((coll, id), v)| {
+            let s = super::cosine(own, v);
+            (s >= min_similarity).then(|| (coll.clone(), id.clone(), s))
+        })
+        .collect();
+    Some(ranked(hits, top_k))
 }
 
 /// Write-through from the embed-on-write paths, so a freshly embedded node is
@@ -357,5 +387,40 @@ mod tests {
         idx.vecs.clear();
         idx.loaded = false;
         idx.model.clear();
+    }
+
+    #[tokio::test]
+    async fn neighbors_leave_the_node_itself_out_and_rank_like_search() {
+        let _guard = INDEX_TEST_LOCK.lock().await;
+        {
+            let mut idx = index().await.write().await;
+            idx.loaded = true;
+            idx.model = "m".into();
+            idx.vecs.insert(("c".into(), "new".into()), vec![1.0, 0.0]);
+            idx.vecs.insert(("c".into(), "twin".into()), vec![1.0, 0.0]);
+            idx.vecs.insert(("c".into(), "half".into()), vec![0.6, 0.8]);
+            idx.vecs.insert(("d".into(), "orth".into()), vec![0.0, 1.0]);
+        }
+
+        let near = neighbors("c", "new", 10, 0.5).await.expect("the node has a vector");
+        let ids: Vec<&str> = near.iter().map(|(_, id, _)| id.as_str()).collect();
+        assert_eq!(ids, vec!["twin", "half"], "itself is left out; orthogonal is below the floor");
+        assert!((near[0].2 - 1.0).abs() < 1e-6);
+        assert!((near[1].2 - 0.6).abs() < 1e-6);
+        // The cap applies after ranking.
+        assert_eq!(neighbors("c", "new", 1, 0.0).await.expect("a vector")[0].1, "twin");
+        // A node with a vector and nothing near it: an empty list, not `None`.
+        assert_eq!(neighbors("d", "orth", 10, 0.9).await, Some(Vec::new()));
+
+        let mut idx = index().await.write().await;
+        idx.vecs.clear();
+        idx.loaded = false;
+        idx.model.clear();
+    }
+
+    #[tokio::test]
+    async fn a_node_without_a_vector_has_no_neighbors() {
+        let _guard = INDEX_TEST_LOCK.lock().await;
+        assert_eq!(neighbors("c", "never-embedded", 10, 0.0).await, None);
     }
 }
