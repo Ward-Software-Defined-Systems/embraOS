@@ -641,34 +641,452 @@ async fn remember(db: &WardsonDbClient, content: &str, session: &str, config: &S
     }
 }
 
+/// The node an entry was promoted to, as `(collection, id)`. Only the two
+/// node collections count; anything else in the pointer is not a node
+/// `forget` may remove.
+fn promoted_pointer(entry: &serde_json::Value) -> Option<(&'static str, String)> {
+    let pointer = entry.get("promoted_to").filter(|v| !v.is_null())?;
+    let collection = match pointer.get("collection").and_then(|v| v.as_str())? {
+        "memory.semantic" => "memory.semantic",
+        "memory.procedural" => "memory.procedural",
+        _ => return None,
+    };
+    Some((collection, pointer.get("id").and_then(|v| v.as_str())?.to_string()))
+}
+
+/// The entries whose `promoted_to` points at a node, newest first. The
+/// pointer is the maintained record of a promotion (`entry_is_promoted`);
+/// `derived_from` edges drift. No index serves the nested key, so this
+/// scans `memory.entries`: a cold path, behind an operator's confirmation.
+/// Eleven is ten ids to show and one to know there are more.
+fn entries_of_node_query_body(collection: &str, node_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "filter": { "promoted_to.collection": collection, "promoted_to.id": node_id },
+        "sort": [{ "created_at": "desc" }],
+        "limit": 11,
+    })
+}
+
+/// What `forget` does with the node its entry was promoted to.
+#[derive(Debug, PartialEq)]
+enum NodeFate {
+    /// The entry has no live node.
+    None,
+    /// The node goes with its only entry.
+    Remove,
+    /// Other entries point at it too: a merge re-pointed them.
+    KeepShared(Vec<String>),
+    /// A seed-pack node comes back at the next boot; removing it is noise.
+    KeepSeed,
+    /// Whether another entry points at it could not be read. It stays.
+    KeepUnread(String),
+}
+
+/// `entries` is what `entries_of_node_query_body` returned: the ids of
+/// every entry that points at the node, the forgotten one included.
+fn node_fate(entry_id: &str, node: Option<&serde_json::Value>, entries: Result<&[String], &str>) -> NodeFate {
+    let Some(node) = node else { return NodeFate::None };
+    if node.get("origin").and_then(|v| v.as_str()) == Some("knowledge_seed") {
+        return NodeFate::KeepSeed;
+    }
+    match entries {
+        Err(e) => NodeFate::KeepUnread(e.to_string()),
+        Ok(ids) => {
+            let others: Vec<String> = ids.iter().filter(|i| i.as_str() != entry_id).cloned().collect();
+            if others.is_empty() { NodeFate::Remove } else { NodeFate::KeepShared(others) }
+        }
+    }
+}
+
+/// The cascade over `memory.edges` for an entry, and for its node when the
+/// node goes too: one scan for both documents.
+///
+/// Cold path: `$or` forces a WardSONDB full scan — acceptable for an
+/// operator-invoked one-off. NEVER copy this shape into a `query()` hot
+/// path; hot paths arm-split for the indexes (knowledge/traversal.rs,
+/// 2026-07-04).
+fn forget_edge_filter(entry_id: &str, node: Option<(&str, &str)>) -> serde_json::Value {
+    let mut arms = vec![
+        serde_json::json!({"source_id": entry_id, "source_collection": "memory.entries"}),
+        serde_json::json!({"target_id": entry_id, "target_collection": "memory.entries"}),
+    ];
+    if let Some((collection, node_id)) = node {
+        arms.push(serde_json::json!({"source_id": node_id, "source_collection": collection}));
+        arms.push(serde_json::json!({"target_id": node_id, "target_collection": collection}));
+    }
+    serde_json::json!({ "$or": arms })
+}
+
+/// Why a node outlived its entry, appended to the entry's removal line.
+fn kept_node_note(collection: &str, node_id: &str, fate: &NodeFate) -> String {
+    match fate {
+        NodeFate::None | NodeFate::Remove => String::new(),
+        NodeFate::KeepShared(others) => format!(
+            " Its node {}:{} stays: {} other {} point at it ({}). knowledge_unlink_node removes the node.",
+            collection,
+            node_id,
+            others.len(),
+            if others.len() == 1 { "entry" } else { "entries" },
+            others.join(", ")
+        ),
+        NodeFate::KeepSeed => format!(" Its node {}:{} stays: it is a seed-pack node.", collection, node_id),
+        NodeFate::KeepUnread(e) => format!(
+            " Its node {}:{} stays: whether another entry points at it could not be read ({}).",
+            collection, node_id, e
+        ),
+    }
+}
+
+fn doc_ids(docs: &[serde_json::Value]) -> Vec<String> {
+    docs.iter()
+        .filter_map(|d| d.get("_id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect()
+}
+
+/// Remove a memory: the entry, the node it was promoted to, and every edge
+/// that touches either. The inverse of `remember`. `id` is the entry's id,
+/// or the node's when exactly one entry stands behind it.
 async fn forget(db: &WardsonDbClient, id: &str) -> String {
     if id.is_empty() {
         return "Provide the entry ID to forget: forget <id>".into();
     }
     let id = id.trim();
 
+    match db.read("memory.entries", id).await {
+        Ok(entry) => forget_entry(db, id, &entry).await,
+        Err(e) if crate::db::error::is_not_found(&e) => forget_by_node(db, id).await,
+        Err(e) => format!("Failed to remove entry: {}", e),
+    }
+}
+
+/// `id` is no entry. When it is a node with one entry behind it, that
+/// memory is forgotten; otherwise the answer says what the id is.
+async fn forget_by_node(db: &WardsonDbClient, id: &str) -> String {
+    for collection in ["memory.semantic", "memory.procedural"] {
+        match db.read(collection, id).await {
+            Ok(_) => {}
+            Err(e) if crate::db::error::is_not_found(&e) => continue,
+            Err(e) => return format!("Failed to remove entry: {}", e),
+        }
+        let entries = match db.query("memory.entries", &entries_of_node_query_body(collection, id)).await {
+            Ok(docs) => docs,
+            Err(e) => {
+                return format!(
+                    "Error: {} is a node ({}), and its entries could not be read ({}); nothing was removed. Run forget again.",
+                    id, collection, e
+                )
+            }
+        };
+        let ids = doc_ids(&entries);
+        return match ids.as_slice() {
+            [] => format!(
+                "{} is a node ({}) with no entry behind it. knowledge_unlink_node removes it.",
+                id, collection
+            ),
+            [entry_id] => forget_entry(db, entry_id, &entries[0]).await,
+            _ => format!(
+                "{} is a node ({}) that {} entries point at ({}). forget one of them to drop that record, or knowledge_unlink_node to remove the node.",
+                id,
+                collection,
+                ids.len(),
+                ids.join(", ")
+            ),
+        };
+    }
+    format!("No memory entry or node with id {}.", id)
+}
+
+async fn forget_entry(db: &WardsonDbClient, id: &str, entry: &serde_json::Value) -> String {
+    // The node the entry was promoted to, when it is still there. A read
+    // that fails for another reason than "not there" stops the call: what
+    // cannot be read is neither removed nor orphaned.
+    let pointer = promoted_pointer(entry);
+    let node = match &pointer {
+        Some((collection, node_id)) => match db.read(collection, node_id).await {
+            Ok(doc) => Some(doc),
+            Err(e) if crate::db::error::is_not_found(&e) => None,
+            Err(e) => {
+                return format!(
+                    "Error: the node {}:{} could not be read ({}); nothing was removed. Run forget again.",
+                    collection, node_id, e
+                )
+            }
+        },
+        None => None,
+    };
+    let fate = match (&pointer, &node) {
+        (Some((collection, node_id)), Some(doc)) => {
+            let entries = db
+                .query("memory.entries", &entries_of_node_query_body(collection, node_id))
+                .await
+                .map(|docs| doc_ids(&docs))
+                .map_err(|e| e.to_string());
+            node_fate(id, Some(doc), entries.as_deref().map_err(|e| e.as_str()))
+        }
+        _ => NodeFate::None,
+    };
+
+    if let (NodeFate::Remove, Some((collection, node_id)), Some(doc)) = (&fate, &pointer, &node) {
+        // Edges first, the node next, the entry last: whatever fails, the
+        // entry is still there for a second `forget` to finish from.
+        let edge_count = db
+            .delete_by_query("memory.edges", &forget_edge_filter(id, Some((collection, node_id.as_str()))))
+            .await
+            .unwrap_or(0);
+        if let Err(e) = db.delete(collection, node_id).await
+            && !crate::db::error::is_not_found(&e)
+        {
+            return format!(
+                "Error: the node {}:{} could not be removed ({}); entry {} was left in place. Run forget again.",
+                collection, node_id, e, id
+            );
+        }
+        // The node is gone — drop its vector, as `knowledge_unlink_node` does.
+        crate::embedding::write::forget_node(collection, node_id).await;
+        if let Err(e) = db.delete("memory.entries", id).await {
+            return format!(
+                "Error: the node {}:{} was removed, and entry {} could not be ({}). Run forget again.",
+                collection, node_id, id, e
+            );
+        }
+        let preview_src = doc
+            .get("content")
+            .or_else(|| doc.get("title"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("(no preview)");
+        return format!(
+            "Memory removed: entry {} and its node {}:{} (\"{}\"). {} edge(s) cascaded.",
+            id,
+            collection,
+            node_id,
+            knowledge::types::content_preview(preview_src, 80),
+            edge_count
+        );
+    }
+
+    // The entry alone: it has no live node, or the node stays.
     if let Err(e) = db.delete("memory.entries", id).await {
         return format!("Failed to remove entry: {}", e);
     }
-
-    // Cold-path cascade delete: `$or` forces a WardSONDB full scan —
-    // acceptable for an operator-invoked one-off. NEVER copy this shape into
-    // a `query()` hot path; hot paths arm-split for the indexes
-    // (knowledge/traversal.rs, 2026-07-04).
-    let edge_filter = serde_json::json!({
-        "$or": [
-            {"source_id": id, "source_collection": "memory.entries"},
-            {"target_id": id, "target_collection": "memory.entries"},
-        ]
-    });
     let edge_count = db
-        .delete_by_query("memory.edges", &edge_filter)
+        .delete_by_query("memory.edges", &forget_edge_filter(id, None))
         .await
         .unwrap_or(0);
+    let note = match &pointer {
+        Some((collection, node_id)) => kept_node_note(collection, node_id, &fate),
+        None => String::new(),
+    };
     format!(
-        "Memory entry {} removed; {} referencing edge(s) cascaded.",
-        id, edge_count
+        "Memory entry {} removed; {} referencing edge(s) cascaded.{}",
+        id, edge_count, note
     )
+}
+
+#[cfg(test)]
+mod forget_tests {
+    use super::*;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn ids(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn the_node_goes_with_its_only_entry() {
+        let node = json!({"_id": "n1", "content": "x", "category": "fact"});
+        assert_eq!(node_fate("e1", Some(&node), Ok(&ids(&["e1"]))), NodeFate::Remove);
+        // A pointer query that came back empty (the entry's own pointer is
+        // read before it): nothing else points there either.
+        assert_eq!(node_fate("e1", Some(&node), Ok(&[])), NodeFate::Remove);
+        assert_eq!(node_fate("e1", None, Ok(&[])), NodeFate::None);
+    }
+
+    #[test]
+    fn a_node_other_entries_point_at_stays() {
+        let node = json!({"_id": "n1", "content": "x", "category": "fact"});
+        assert_eq!(
+            node_fate("e1", Some(&node), Ok(&ids(&["e2", "e1", "e3"]))),
+            NodeFate::KeepShared(ids(&["e2", "e3"]))
+        );
+    }
+
+    #[test]
+    fn a_seed_node_stays() {
+        let node = json!({"_id": "seed_kg_overview", "content": "x", "origin": "knowledge_seed"});
+        assert_eq!(node_fate("e1", Some(&node), Ok(&ids(&["e1"]))), NodeFate::KeepSeed);
+    }
+
+    #[test]
+    fn an_unread_pointer_scan_keeps_the_node() {
+        let node = json!({"_id": "n1", "content": "x"});
+        assert_eq!(
+            node_fate("e1", Some(&node), Err("timeout")),
+            NodeFate::KeepUnread("timeout".into())
+        );
+    }
+
+    #[test]
+    fn the_entries_of_a_node_are_read_from_the_pointer_under_a_window() {
+        let body = entries_of_node_query_body("memory.semantic", "n1");
+        assert_eq!(
+            body["filter"],
+            json!({"promoted_to.collection": "memory.semantic", "promoted_to.id": "n1"})
+        );
+        assert_eq!(body["sort"], json!([{"created_at": "desc"}]));
+        assert_eq!(body["limit"], json!(11));
+    }
+
+    #[test]
+    fn the_forget_cascade_names_the_entry_and_the_node_on_both_sides() {
+        let entry_only = forget_edge_filter("e1", None);
+        assert_eq!(entry_only["$or"].as_array().unwrap().len(), 2);
+        let both = forget_edge_filter("e1", Some(("memory.semantic", "n1")));
+        assert_eq!(
+            both["$or"],
+            json!([
+                {"source_id": "e1", "source_collection": "memory.entries"},
+                {"target_id": "e1", "target_collection": "memory.entries"},
+                {"source_id": "n1", "source_collection": "memory.semantic"},
+                {"target_id": "n1", "target_collection": "memory.semantic"},
+            ])
+        );
+    }
+
+    #[test]
+    fn only_a_node_collection_counts_as_a_pointer() {
+        let semantic = json!({"promoted_to": {"collection": "memory.semantic", "id": "n1"}});
+        assert_eq!(promoted_pointer(&semantic), Some(("memory.semantic", "n1".to_string())));
+        assert_eq!(promoted_pointer(&json!({"promoted_to": null})), None);
+        assert_eq!(promoted_pointer(&json!({})), None);
+        let identity = json!({"promoted_to": {"collection": "identity.graph", "id": "operator"}});
+        assert_eq!(promoted_pointer(&identity), None);
+    }
+
+    #[test]
+    fn a_kept_node_is_named_with_its_reason() {
+        let shared = kept_node_note("memory.semantic", "n1", &NodeFate::KeepShared(ids(&["e2"])));
+        assert!(shared.contains("memory.semantic:n1 stays: 1 other entry point at it (e2)"), "{shared}");
+        assert!(shared.contains("knowledge_unlink_node"), "{shared}");
+        let seed = kept_node_note("memory.semantic", "seed_x", &NodeFate::KeepSeed);
+        assert!(seed.contains("seed-pack node"), "{seed}");
+        assert_eq!(kept_node_note("memory.semantic", "n1", &NodeFate::Remove), "");
+    }
+
+    // ── against a stub server ────────────────────────────────────────────
+
+    fn doc(v: serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": v, "meta": {}}))
+    }
+
+    fn entry_e1() -> serde_json::Value {
+        json!({
+            "_id": "e1", "content": "the cert refresh works", "tags": [], "session": "s",
+            "promoted_to": {"collection": "memory.semantic", "id": "n1"},
+        })
+    }
+
+    /// One promoted memory: entry `e1`, node `n1`. `node_read` answers the
+    /// node's read; `entries` is what the pointer scan returns.
+    async fn one_memory(node_read: ResponseTemplate, entries: serde_json::Value) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/memory.entries/docs/e1")).respond_with(doc(entry_e1())).mount(&server).await;
+        Mock::given(method("GET")).and(path("/memory.entries/docs/n1")).respond_with(ResponseTemplate::new(404)).mount(&server).await;
+        Mock::given(method("GET")).and(path("/memory.semantic/docs/n1")).respond_with(node_read).mount(&server).await;
+        Mock::given(method("POST")).and(path("/memory.entries/query")).respond_with(doc(entries)).mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/memory.edges/docs/_delete_by_query"))
+            .respond_with(doc(json!({"deleted": 7})))
+            .mount(&server)
+            .await;
+        for gone in ["/memory.semantic/docs/n1", "/memory.entries/docs/e1"] {
+            Mock::given(method("DELETE")).and(path(gone)).respond_with(doc(json!({}))).mount(&server).await;
+        }
+        server
+    }
+
+    fn live_node() -> ResponseTemplate {
+        doc(json!({"_id": "n1", "content": "the cert refresh works", "category": "fact"}))
+    }
+
+    /// What the server was asked to change, in order, as "METHOD /path".
+    async fn writes_seen(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "DELETE" || r.url.path().ends_with("_delete_by_query"))
+            .map(|r| format!("{} {}", r.method, r.url.path()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn forget_removes_the_edges_the_node_and_then_the_entry() {
+        let server = one_memory(live_node(), json!([entry_e1()])).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let out = forget(&db, "e1").await;
+        assert_eq!(
+            out,
+            "Memory removed: entry e1 and its node memory.semantic:n1 (\"the cert refresh works\"). 7 edge(s) cascaded."
+        );
+        assert_eq!(
+            writes_seen(&server).await,
+            [
+                "POST /memory.edges/docs/_delete_by_query",
+                "DELETE /memory.semantic/docs/n1",
+                "DELETE /memory.entries/docs/e1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_node_id_with_one_entry_is_forgotten_as_that_entry() {
+        let server = one_memory(live_node(), json!([entry_e1()])).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let out = forget(&db, "n1").await;
+        assert!(out.starts_with("Memory removed: entry e1 and its node memory.semantic:n1"), "{out}");
+        assert_eq!(writes_seen(&server).await.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn a_shared_node_outlives_the_entry() {
+        let other = json!({"_id": "e2", "promoted_to": {"collection": "memory.semantic", "id": "n1"}});
+        let server = one_memory(live_node(), json!([other, entry_e1()])).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let out = forget(&db, "e1").await;
+        assert!(out.starts_with("Memory entry e1 removed; 7 referencing edge(s) cascaded."), "{out}");
+        assert!(out.contains("memory.semantic:n1 stays: 1 other entry point at it (e2)"), "{out}");
+        assert_eq!(
+            writes_seen(&server).await,
+            ["DELETE /memory.entries/docs/e1", "POST /memory.edges/docs/_delete_by_query"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_node_that_cannot_be_read_stops_forget_with_nothing_removed() {
+        let server = one_memory(ResponseTemplate::new(500), json!([entry_e1()])).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let out = forget(&db, "e1").await;
+        assert!(out.starts_with("Error: the node memory.semantic:n1 could not be read"), "{out}");
+        assert!(out.contains("nothing was removed"), "{out}");
+        assert!(writes_seen(&server).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_entry_whose_node_is_gone_is_removed_alone() {
+        let server = one_memory(ResponseTemplate::new(404), json!([])).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        assert_eq!(forget(&db, "e1").await, "Memory entry e1 removed; 7 referencing edge(s) cascaded.");
+    }
+
+    #[tokio::test]
+    async fn an_id_that_is_nothing_says_so() {
+        let server = MockServer::start().await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        assert_eq!(forget(&db, "zzz").await, "No memory entry or node with id zzz.");
+    }
 }
 
 // ── Self-Awareness Tools ──
@@ -1980,10 +2398,10 @@ impl RememberArgs {
 #[embra_tool(
     name = "forget",
     is_side_effectful = true,
-    description = "Remove a specific memory entry by its id. Destructive; confirm with the user first."
+    description = "Remove a memory: its entry, the node promoted from it, and every edge that touches either. id is the entry id or the node id. The node stays when another entry also points at it or when it comes from a seed pack; the result says so. To remove a node and keep its entry, use knowledge_unlink_node. Destructive; confirm with the user first."
 )]
 pub struct ForgetArgs {
-    /// WardSONDB document id of the memory entry to delete.
+    /// Entry id or node id of the memory to remove.
     pub id: String,
 }
 

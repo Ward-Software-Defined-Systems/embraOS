@@ -295,7 +295,7 @@ pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String
         },
         "limit": 50,
     });
-    let mut cleared_entries = 0usize;
+    let mut cleared_entries: Vec<String> = Vec::new();
     if let Ok(derived_edges) = db.query("memory.edges", &derived_filter).await {
         for edge in derived_edges {
             let (Some(tgt_id), Some(tgt_coll)) = (
@@ -304,7 +304,7 @@ pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String
             ) else { continue };
             if tgt_coll != "memory.entries" { continue; }
             if db.patch_document("memory.entries", tgt_id, &json!({"promoted_to": null})).await.is_ok() {
-                cleared_entries += 1;
+                cleared_entries.push(tgt_id.to_string());
             }
         }
     }
@@ -324,7 +324,7 @@ pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String
     if let Err(e) = db.delete(coll, id).await {
         return format!(
             "Error: cleared {} source entry(ies) and removed {} referencing edge(s) but failed to delete node {}:{}: {}",
-            cleared_entries, edge_count, coll, id, e
+            cleared_entries.len(), edge_count, coll, id, e
         );
     }
     // The node is gone — drop its vector, as the merge does for its loser.
@@ -333,10 +333,44 @@ pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String
     // (Embra#16).
     crate::embedding::write::forget_node(coll, id).await;
 
+    unlink_summary(coll, id, &preview, edge_count, &cleared_entries)
+}
+
+/// What `knowledge_unlink_node` reports. The entries it left behind are
+/// named: each is unpromoted now, and `forget` is the call that removes one.
+fn unlink_summary(coll: &str, id: &str, preview: &str, edge_count: u64, cleared_entries: &[String]) -> String {
+    let named = if cleared_entries.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", cleared_entries.join(", "))
+    };
     format!(
-        "Removed node {}:{} (\"{}\"), {} referencing edge(s), cleared promoted_to on {} source entry(ies)",
-        coll, id, preview, edge_count, cleared_entries
+        "Removed node {}:{} (\"{}\"), {} referencing edge(s), cleared promoted_to on {} source entry(ies){}",
+        coll,
+        id,
+        preview,
+        edge_count,
+        cleared_entries.len(),
+        named
     )
+}
+
+#[cfg(test)]
+mod unlink_summary_tests {
+    use super::unlink_summary;
+
+    #[test]
+    fn unlink_node_names_the_entries_it_leaves() {
+        assert_eq!(
+            unlink_summary("memory.semantic", "n1", "the cert…", 12, &["e1".to_string()]),
+            "Removed node memory.semantic:n1 (\"the cert…\"), 12 referencing edge(s), cleared promoted_to on 1 source entry(ies): e1"
+        );
+        // A seed node, or one whose entry is gone: the line is the old one.
+        assert_eq!(
+            unlink_summary("memory.semantic", "n1", "x", 0, &[]),
+            "Removed node memory.semantic:n1 (\"x\"), 0 referencing edge(s), cleared promoted_to on 0 source entry(ies)"
+        );
+    }
 }
 
 /// `knowledge_update <collection>:<id> | <json_patch>` — update a semantic
@@ -2023,7 +2057,7 @@ impl KnowledgeUnlinkEdgeArgs {
 #[embra_tool(
     name = "knowledge_unlink_node",
     is_side_effectful = true,
-    description = "Delete a semantic or procedural node and cascade-remove all edges referencing it. Prefer this over manually deleting edges when the node itself should go. For episodic memory entries, use forget instead."
+    description = "Delete a semantic or procedural node and cascade-remove all edges referencing it. The entry it was promoted from stays, without a node, and the result names it. Prefer this over manually deleting edges when the node itself should go. To remove the whole memory, entry included, use forget."
 )]
 pub struct KnowledgeUnlinkNodeArgs {
     pub collection: String,
