@@ -1242,6 +1242,66 @@ pub async fn memory_scan(db: &WardsonDbClient, param: &str) -> String {
     output
 }
 
+/// One entry as `memory_dedup` compares it.
+struct NormalizedEntry {
+    id: String,
+    content: String,
+    normalized: String,
+    tags: String,
+    created_at: String,
+    /// The node the entry was promoted to, `(collection, id)`.
+    node: Option<(&'static str, String)>,
+}
+
+/// The entry a duplicate group keeps: one that has a node before one that
+/// has none, and the newest among those. `forget` removes an entry's node
+/// with it, so the plan never deletes the only entry of a group that is in
+/// the knowledge graph.
+fn keep_index(entries: &[NormalizedEntry], group: &[usize]) -> usize {
+    group
+        .iter()
+        .max_by_key(|&&i| (entries[i].node.is_some(), &entries[i].created_at))
+        .copied()
+        .unwrap_or(group[0])
+}
+
+/// Entries whose text repeats a semantic node's, or the reverse: at most ten
+/// lines. A promoted entry is left out — its own node carries its text, and
+/// its duplicates among the nodes are `knowledge_audit`'s to find.
+fn cross_collection_overlaps(entries: &[NormalizedEntry], semantic: &[serde_json::Value]) -> Vec<String> {
+    let mut cross_dupes: Vec<String> = Vec::new();
+    for entry in entries {
+        if entry.node.is_some() || entry.normalized.is_empty() {
+            continue;
+        }
+        for sem in semantic {
+            let sem_id = sem.get("_id").and_then(|v| v.as_str()).unwrap_or("");
+            let sem_content = sem.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let sem_norm: String = sem_content.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
+            if sem_norm.is_empty() { continue; }
+            let (shorter, longer) = if entry.normalized.len() <= sem_norm.len() {
+                (&entry.normalized, &sem_norm)
+            } else {
+                (&sem_norm, &entry.normalized)
+            };
+            if longer.contains(shorter.as_str()) {
+                cross_dupes.push(format!(
+                    "  Potential cross-collection duplicate: entry {} ≈ semantic node {}",
+                    entry.id, sem_id
+                ));
+                if cross_dupes.len() >= 10 { return cross_dupes; }
+            }
+        }
+    }
+    cross_dupes
+}
+
+/// How `memory_dedup` says to carry its plan out. `forget` takes an entry's
+/// node with it, so two duplicates that both have nodes are consolidated in
+/// the graph first; the merge leaves both entries pointing at the kept node,
+/// and that node then outlives the forgotten entry.
+const DEDUP_EXECUTION_NOTE: &str = "To execute this plan: where a DELETE entry and the KEEP entry both have nodes, merge the nodes first with knowledge_merge (source: the DELETE entry's node, target: the KEEP entry's node; dry_run first) — the links move to the kept node. Then forget the DELETE entries: forget removes an entry's node with it, unless another entry still points at that node.\n";
+
 /// Find duplicates and propose merges (read-only plan).
 /// Param: optional comma-separated IDs to check.
 pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
@@ -1285,14 +1345,6 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
     }
 
     // Normalize entries
-    struct NormalizedEntry {
-        id: String,
-        content: String,
-        normalized: String,
-        tags: String,
-        created_at: String,
-    }
-
     let normalized: Vec<NormalizedEntry> = entries
         .iter()
         .map(|doc| {
@@ -1329,6 +1381,7 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
                 normalized: norm,
                 tags,
                 created_at,
+                node: super::promoted_pointer(doc),
             }
         })
         .collect();
@@ -1404,32 +1457,30 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
     for (g_idx, (strategy, indices)) in groups.iter().enumerate() {
         output.push_str(&format!("Group {} — Strategy: {}\n", g_idx + 1, strategy));
 
-        // Find newest entry in group
-        let newest_idx = indices
-            .iter()
-            .max_by_key(|&&i| &normalized[i].created_at)
-            .copied()
-            .unwrap_or(indices[0]);
+        let keep_idx = keep_index(&normalized, indices);
 
         for &idx in indices {
             let e = &normalized[idx];
-            let action = if idx == newest_idx { "KEEP" } else { "DELETE" };
+            let action = if idx == keep_idx { "KEEP" } else { "DELETE" };
+            let node = e
+                .node
+                .as_ref()
+                .map(|(collection, id)| format!(" [node {}:{}]", collection, id))
+                .unwrap_or_default();
             let preview = if e.content.len() > 80 {
                 format!("{}...", truncate_str(&e.content, 80))
             } else {
                 e.content.clone()
             };
             output.push_str(&format!(
-                "  [{}] {} — \"{}\" (tags: {})\n    → {}\n",
-                e.id, action, preview, e.tags, action
+                "  [{}] {} — \"{}\" (tags: {}){}\n    → {}\n",
+                e.id, action, preview, e.tags, node, action
             ));
         }
         output.push('\n');
     }
 
-    output.push_str(
-        "To execute this plan, approve and I will use remember and forget to merge/delete entries.\n",
-    );
+    output.push_str(DEDUP_EXECUTION_NOTE);
 
     // Cross-collection duplicate detection (Sprint 2): flag unpromoted entries whose
     // normalized content is a subset/superset of an existing semantic node's content.
@@ -1442,30 +1493,7 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
         .unwrap_or_default();
     semantic.truncate(MEMORY_SCAN_DUPE_SCAN_CAP);
     if !semantic.is_empty() {
-        let mut cross_dupes: Vec<String> = Vec::new();
-        for entry in &normalized {
-            // Only flag unpromoted entries (we don't have promoted_to in NormalizedEntry,
-            // so re-scan entries for this; simple heuristic here).
-            for sem in &semantic {
-                let sem_id = sem.get("_id").and_then(|v| v.as_str()).unwrap_or("");
-                let sem_content = sem.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                let sem_norm: String = sem_content.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
-                if sem_norm.is_empty() || entry.normalized.is_empty() { continue; }
-                let (shorter, longer) = if entry.normalized.len() <= sem_norm.len() {
-                    (&entry.normalized, &sem_norm)
-                } else {
-                    (&sem_norm, &entry.normalized)
-                };
-                if longer.contains(shorter.as_str()) {
-                    cross_dupes.push(format!(
-                        "  Potential cross-collection duplicate: entry {} ≈ semantic node {}",
-                        entry.id, sem_id
-                    ));
-                    if cross_dupes.len() >= 10 { break; }
-                }
-            }
-            if cross_dupes.len() >= 10 { break; }
-        }
+        let cross_dupes = cross_collection_overlaps(&normalized, &semantic);
         if !cross_dupes.is_empty() {
             output.push_str(&format!("\nCross-collection overlap ({}):\n", cross_dupes.len()));
             for line in &cross_dupes {
@@ -1476,6 +1504,65 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
     }
 
     output
+}
+
+#[cfg(test)]
+mod memory_dedup_tests {
+    use super::{cross_collection_overlaps, keep_index, NormalizedEntry, DEDUP_EXECUTION_NOTE};
+    use serde_json::json;
+
+    fn entry(id: &str, text: &str, created_at: &str, node: Option<&str>) -> NormalizedEntry {
+        NormalizedEntry {
+            id: id.into(),
+            content: text.into(),
+            normalized: text.to_lowercase(),
+            tags: String::new(),
+            created_at: created_at.into(),
+            node: node.map(|n| ("memory.semantic", n.to_string())),
+        }
+    }
+
+    #[test]
+    fn a_promoted_entry_is_not_compared_with_nodes() {
+        // Its own node carries its text; flagging the pair says nothing.
+        let nodes = [json!({"_id": "n1", "content": "The cert refresh works"})];
+        let promoted = [entry("e1", "the cert refresh works", "2026-10-01", Some("n1"))];
+        assert!(cross_collection_overlaps(&promoted, &nodes).is_empty());
+    }
+
+    #[test]
+    fn an_unpromoted_entry_that_repeats_a_node_is_flagged() {
+        let nodes = [json!({"_id": "n1", "content": "The cert refresh works after manual generation"})];
+        let unpromoted = [entry("e2", "the cert refresh works", "2026-10-01", None)];
+        assert_eq!(
+            cross_collection_overlaps(&unpromoted, &nodes),
+            ["  Potential cross-collection duplicate: entry e2 ≈ semantic node n1"]
+        );
+    }
+
+    #[test]
+    fn the_entry_with_a_node_is_the_one_kept() {
+        // The newest entry has no node; the plan keeps the one that is in
+        // the knowledge graph, because forgetting it would remove the node.
+        let group = [
+            entry("old-promoted", "x", "2026-09-01", Some("n1")),
+            entry("new-unpromoted", "x", "2026-10-01", None),
+        ];
+        assert_eq!(keep_index(&group, &[0, 1]), 0);
+        // Among entries that all have nodes, the newest.
+        let both = [
+            entry("a", "x", "2026-09-01", Some("n1")),
+            entry("b", "x", "2026-10-01", Some("n2")),
+        ];
+        assert_eq!(keep_index(&both, &[0, 1]), 1);
+    }
+
+    #[test]
+    fn the_plan_sends_promoted_duplicates_to_the_merge_before_forget() {
+        let merge = DEDUP_EXECUTION_NOTE.find("knowledge_merge").expect("names the merge");
+        let forget = DEDUP_EXECUTION_NOTE.find("Then forget").expect("then forget");
+        assert!(merge < forget);
+    }
 }
 
 // ── Phase C: Session Consolidation Tools ──
