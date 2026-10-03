@@ -939,39 +939,33 @@ pub async fn knowledge_graph_stats(db: &WardsonDbClient) -> String {
         out.push_str(&format!("Graph density: {:.1} edges/node\n", density));
     }
 
-    // Orphan edges (endpoints that don't resolve) — surfaces the #40 issue
-    // passively so users don't have to call knowledge_sweep_orphans to know.
-    // Bounded work per stats call; coverage reported honestly against the
-    // exact edge total now that we have one.
-    let (scanned, orphans) = find_orphan_edges(db, PASSIVE_ORPHAN_SCAN_LIMIT).await;
-    if scanned > 0 {
-        let coverage = if (scanned as u64) < edge_total {
-            format!(
-                " (of {} total — raise knowledge_sweep_orphans limit for full coverage)",
-                edge_total
-            )
-        } else {
-            String::new()
-        };
-        out.push_str(&format!(
-            "Orphan edges: {} of {} scanned{}{}",
-            orphans.len(),
-            scanned,
-            coverage,
-            if !orphans.is_empty() {
-                " (run knowledge_sweep_orphans to clean up)"
-            } else {
-                ""
-            }
-        ));
-    }
+    // Orphan edges (an endpoint that no longer exists), so nobody has to
+    // call knowledge_sweep_orphans to know. Every edge is covered: the check
+    // reads the endpoint indexes, not a window of edge documents.
+    out.push_str(&orphan_line(&find_orphan_edges(db, STATS_ORPHAN_LIST_CAP).await));
 
     out
 }
 
-/// Edges scanned by graph_stats' passive orphan check — bounds the work a
-/// stats call does; the sweep tool's own `limit` goes higher for full runs.
-const PASSIVE_ORPHAN_SCAN_LIMIT: usize = 100_000;
+/// Orphan edges the stats report counts one by one. Past it the line says
+/// "at least".
+const STATS_ORPHAN_LIST_CAP: usize = 10_000;
+
+/// The stats report's orphan line. Empty for a graph without edges; a check
+/// that could not be read says so and gives no number.
+fn orphan_line(scan: &Result<OrphanScan, String>) -> String {
+    match scan {
+        Ok(scan) if scan.scanned == 0 => String::new(),
+        Ok(scan) => format!(
+            "Orphan edges: {}{} of {} scanned{}",
+            if scan.more { "at least " } else { "" },
+            scan.orphan_ids.len(),
+            scan.scanned,
+            if scan.orphan_ids.is_empty() { "" } else { " (run knowledge_sweep_orphans to clean up)" }
+        ),
+        Err(e) => format!("Orphan edges: not checked ({e})"),
+    }
+}
 
 /// Aggregate pipeline: count documents grouped by `field` (dot-paths reach
 /// nested fields, e.g. `metadata.origin`). Output row count is bounded by
@@ -1152,7 +1146,7 @@ mod windowless_stats_tests {
     //! (no DB mock in this crate — contracts are enforced at the builder
     //! level, same pattern as the FIX-1..8 query-body tests).
     use super::{
-        group_by_pipeline, group_counts, next_scan_page, orphan_page_query_body,
+        group_by_pipeline, group_counts, next_scan_page, scan_page_query_body,
         promoted_entries_filter, provenance_summary, ScanPage,
     };
     use serde_json::json;
@@ -1303,8 +1297,8 @@ mod windowless_stats_tests {
     }
 
     #[test]
-    fn orphan_page_body_paginates_key_order_no_sort() {
-        let body = orphan_page_query_body(20_000, &ScanPage::Offset(40_000));
+    fn scan_page_body_paginates_key_order_no_sort() {
+        let body = scan_page_query_body(&json!({}), 20_000, &ScanPage::Offset(40_000));
         assert_eq!(body["limit"], json!(20_000));
         assert_eq!(body["offset"], json!(40_000));
         // Deliberately unsorted (doctrine exception): exhaustive pagination
@@ -1317,7 +1311,7 @@ mod windowless_stats_tests {
 
     #[test]
     fn cursor_page_body_has_cursor_no_offset_no_sort() {
-        let body = orphan_page_query_body(20_000, &ScanPage::Cursor("tok123".into()));
+        let body = scan_page_query_body(&json!({}), 20_000, &ScanPage::Cursor("tok123".into()));
         assert_eq!(body["limit"], json!(20_000));
         assert_eq!(body["cursor"], json!("tok123"));
         // cursor+offset is a 400 on cursor-capable servers; the modes are
@@ -1373,8 +1367,8 @@ mod windowless_stats_tests {
     }
 }
 
-/// Page size for the exhaustive edge scan — well under WardSONDB's
-/// `--max-query-limit` (100k) and bounds per-page memory.
+/// Page size when the orphan check reads the edges of a missing node — well
+/// under WardSONDB's `--max-query-limit` (100k) and bounds per-page memory.
 const ORPHAN_SCAN_PAGE: usize = 20_000;
 
 /// Position of one exhaustive-scan page: classic offset tiling, or a server
@@ -1448,156 +1442,213 @@ pub(crate) fn next_scan_page(
     }
 }
 
-/// One page of the exhaustive edge scan (see `scan_page_query_body`).
-fn orphan_page_query_body(page_limit: usize, page: &ScanPage) -> serde_json::Value {
-    scan_page_query_body(&json!({}), page_limit, page)
+// ── orphan edges ─────────────────────────────────────────────────────────
+
+/// The collections an edge endpoint can live in: every dumpable collection
+/// except the edges. Guard `an_endpoint_can_live_in_every_node_collection`.
+const ENDPOINT_COLLECTIONS: [&str; 4] = [
+    "memory.entries",
+    "memory.semantic",
+    "memory.procedural",
+    crate::identity_graph::IDENTITY_COLLECTION,
+];
+
+/// How many edges name one id, on each side.
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct EndpointUse {
+    as_source: u64,
+    as_target: u64,
 }
 
-/// Scan up to `limit` edges and return `(scanned, orphan_edge_ids)` where
-/// orphans are edges whose source or target doc fails to resolve.
-/// Paginated (pages of `ORPHAN_SCAN_PAGE`), so coverage is bounded only by
-/// `limit` — not by any single query window; the old single-query version
-/// went silently partial past the server's 100k max-query-limit.
-async fn find_orphan_edges(db: &WardsonDbClient, limit: usize) -> (usize, Vec<String>) {
-    let mut scanned = 0usize;
-    let mut page = ScanPage::Offset(0);
-    let mut orphan_ids: Vec<String> = Vec::new();
+/// What the orphan check found.
+#[derive(Debug, Default, PartialEq)]
+struct OrphanScan {
+    /// Edges covered: all of them.
+    scanned: u64,
+    /// Endpoint ids that no node collection holds.
+    dangling: Vec<String>,
+    /// The edges that name one of them, up to the caller's cap.
+    orphan_ids: Vec<String>,
+    /// The cap was reached and more such edges exist.
+    more: bool,
+}
 
-    while scanned < limit {
-        let page_limit = ORPHAN_SCAN_PAGE.min(limit - scanned);
-        let Ok((edges, meta)) = db
-            .query_with_meta("memory.edges", &orphan_page_query_body(page_limit, &page))
+/// Every id an edge names, with how often on each side: the keys of two
+/// `$group` aggregates. `source_id` and `target_id` each carry a
+/// single-field index, so the server answers from the index and reads no
+/// edge document; without the index it scans, with the same answer. Either
+/// way every edge is covered, at any collection size.
+async fn edge_endpoints(
+    db: &WardsonDbClient,
+) -> Result<std::collections::BTreeMap<String, EndpointUse>, String> {
+    let mut endpoints: std::collections::BTreeMap<String, EndpointUse> = Default::default();
+    for field in ["source_id", "target_id"] {
+        let rows = db
+            .aggregate("memory.edges", &group_by_pipeline(field))
             .await
-        else {
-            break; // same stop-scanning behavior as the old unwrap_or_default
-        };
-        if edges.is_empty() {
-            break;
-        }
-        scanned += edges.len();
-        orphan_ids.extend(orphans_in_page(db, &edges).await);
-        match next_scan_page(&meta, &page, edges.len(), page_limit) {
-            Some(next) => page = next,
-            None => break, // collection exhausted (exact in cursor mode)
+            .map_err(|e| format!("grouping memory.edges by {field} failed: {e}"))?;
+        for (id, count) in group_counts(&rows) {
+            let entry = endpoints.entry(id).or_default();
+            if field == "source_id" {
+                entry.as_source = count;
+            } else {
+                entry.as_target = count;
+            }
         }
     }
-
-    (scanned, orphan_ids)
+    Ok(endpoints)
 }
 
-/// Orphan detection over one page of edges. Batches endpoint reads per
-/// collection via `{"_id": {"$in": [...]}}` so each page costs at most one
-/// extra query per endpoint collection.
-async fn orphans_in_page(db: &WardsonDbClient, edges: &[serde_json::Value]) -> Vec<String> {
-    use std::collections::{HashMap, HashSet};
-
-    if edges.is_empty() {
-        return Vec::new();
-    }
-
-    // Collect unique (collection, id) endpoints per collection.
-    let mut endpoints: HashMap<String, HashSet<String>> = HashMap::new();
-    for edge in edges {
-        for (coll_key, id_key) in [
-            ("source_collection", "source_id"),
-            ("target_collection", "target_id"),
-        ] {
-            let (Some(coll), Some(id)) = (
-                edge.get(coll_key).and_then(|v| v.as_str()),
-                edge.get(id_key).and_then(|v| v.as_str()),
-            ) else {
-                continue;
-            };
-            endpoints
-                .entry(coll.to_string())
-                .or_default()
-                .insert(id.to_string());
+/// The ids of every node: one `$group` by `_id` per node collection. An
+/// aggregate has no result window, so one request lists a collection of any
+/// size.
+///
+/// The sweep deletes by this list, so a list that may be short is an error
+/// and never an answer: a request that fails, and a list with fewer ids
+/// than the collection counted just before it. A collection the server does
+/// not have holds nothing.
+async fn node_ids(db: &WardsonDbClient) -> Result<std::collections::HashSet<String>, String> {
+    let mut ids: std::collections::HashSet<String> = Default::default();
+    for collection in ENDPOINT_COLLECTIONS {
+        let counted = match db.count(collection).await {
+            Ok(n) => n,
+            Err(e) if crate::db::error::is_not_found(&e) => continue,
+            Err(e) => return Err(format!("counting {collection} failed: {e}")),
+        };
+        let rows = db
+            .aggregate(collection, &group_by_pipeline("_id"))
+            .await
+            .map_err(|e| format!("listing the nodes of {collection} failed: {e}"))?;
+        let listed = group_counts(&rows);
+        if (listed.len() as u64) < counted {
+            return Err(format!(
+                "the node list of {collection} is incomplete: {} of {counted}",
+                listed.len()
+            ));
         }
+        ids.extend(listed.into_keys());
     }
+    Ok(ids)
+}
 
-    // For each collection, batch-resolve and set-diff to find missing ids.
-    let mut missing: HashMap<String, HashSet<String>> = HashMap::new();
-    for (coll, ids) in &endpoints {
-        if ids.is_empty() {
-            continue;
-        }
-        let id_list: Vec<String> = ids.iter().cloned().collect();
-        let filter = json!({
-            "filter": {"_id": {"$in": id_list}},
-            "limit": ids.len(),
-        });
-        let found = db.query(coll, &filter).await.unwrap_or_default();
-        let found_ids: HashSet<String> = found
-            .iter()
-            .filter_map(|d| d.get("_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
-            .collect();
-        let missing_ids: HashSet<String> = ids.difference(&found_ids).cloned().collect();
-        if !missing_ids.is_empty() {
-            missing.insert(coll.clone(), missing_ids);
-        }
-    }
-
-    // Identify edges whose source or target is missing.
+/// The edges that name one of `dangling`, at most `cap` of them, and
+/// whether more exist. One indexed read per id and side, paged like every
+/// maintenance scan; an edge whose two ends both dangle is listed once.
+async fn edges_naming(
+    db: &WardsonDbClient,
+    endpoints: &std::collections::BTreeMap<String, EndpointUse>,
+    dangling: &[String],
+    cap: usize,
+) -> Result<(Vec<String>, bool), String> {
+    let mut seen: std::collections::HashSet<String> = Default::default();
     let mut orphan_ids: Vec<String> = Vec::new();
-    for edge in edges {
-        let src_missing = match (
-            edge.get("source_collection").and_then(|v| v.as_str()),
-            edge.get("source_id").and_then(|v| v.as_str()),
-        ) {
-            (Some(c), Some(i)) => missing.get(c).map(|s| s.contains(i)).unwrap_or(false),
-            _ => false,
-        };
-        let tgt_missing = match (
-            edge.get("target_collection").and_then(|v| v.as_str()),
-            edge.get("target_id").and_then(|v| v.as_str()),
-        ) {
-            (Some(c), Some(i)) => missing.get(c).map(|s| s.contains(i)).unwrap_or(false),
-            _ => false,
-        };
-        if (src_missing || tgt_missing)
-            && let Some(eid) = edge.get("_id").and_then(|v| v.as_str())
-        {
-            orphan_ids.push(eid.to_string());
+    for id in dangling {
+        let used = endpoints.get(id).copied().unwrap_or_default();
+        for (field, count) in [("source_id", used.as_source), ("target_id", used.as_target)] {
+            if count == 0 {
+                continue;
+            }
+            let filter = json!({ field: id });
+            let mut page = ScanPage::Offset(0);
+            loop {
+                let body = scan_page_query_body(&filter, ORPHAN_SCAN_PAGE, &page);
+                let (edges, meta) = db
+                    .query_with_meta("memory.edges", &body)
+                    .await
+                    .map_err(|e| format!("reading the edges of {id} failed: {e}"))?;
+                for edge in &edges {
+                    let Some(edge_id) = edge.get("_id").and_then(|v| v.as_str()) else { continue };
+                    if !seen.insert(edge_id.to_string()) {
+                        continue;
+                    }
+                    if orphan_ids.len() == cap {
+                        return Ok((orphan_ids, true));
+                    }
+                    orphan_ids.push(edge_id.to_string());
+                }
+                match next_scan_page(&meta, &page, edges.len(), ORPHAN_SCAN_PAGE) {
+                    Some(next) => page = next,
+                    None => break,
+                }
+            }
         }
     }
-
-    orphan_ids
+    Ok((orphan_ids, false))
 }
 
-/// Scan `memory.edges` for edges whose endpoints no longer resolve. Used to
-/// clean up residue from historical `forget` calls (pre-cascade fix) or from
-/// any direct-delete that bypassed `knowledge_unlink_node`.
+/// The orphan check: the edges whose source or target no node collection
+/// holds, at most `cap` listed.
+///
+/// It covers every edge. The check it replaces read edge documents page by
+/// page from the oldest, and the stats report stopped it at 100,000: what a
+/// merge left at the newest end was never seen (Embra#10). Endpoints are
+/// compared by id; an id is unique across the node collections.
+async fn find_orphan_edges(db: &WardsonDbClient, cap: usize) -> Result<OrphanScan, String> {
+    // The edges first, the nodes second: an edge is written after its two
+    // nodes, so a node that an edge of the first reading names is in the
+    // second unless it was deleted. The other order would report the edges
+    // of a memory saved in between.
+    let endpoints = edge_endpoints(db).await?;
+    let scanned = endpoints.values().map(|u| u.as_source).sum();
+    let nodes = node_ids(db).await?;
+    let dangling: Vec<String> =
+        endpoints.keys().filter(|id| !nodes.contains(*id)).cloned().collect();
+    let (orphan_ids, more) = edges_naming(db, &endpoints, &dangling, cap).await?;
+    Ok(OrphanScan { scanned, dangling, orphan_ids, more })
+}
+
+/// Remove the edges whose endpoints no longer resolve: what a delete left
+/// that did not take the node's edges with it, or an edge written while its
+/// node was being removed. `limit` is the most one call removes; the check
+/// itself always covers every edge.
 pub async fn knowledge_sweep_orphans(
     db: &WardsonDbClient,
     dry_run: bool,
     limit: usize,
 ) -> String {
-    // The scan is paginated, so the ceiling is a work bound (the 600s global
-    // tool cap is the real backstop), not a query-window limit.
     let limit = limit.clamp(1, 1_000_000);
-    let (scanned, orphans) = find_orphan_edges(db, limit).await;
-    let orphan_count = orphans.len();
+    let scan = match find_orphan_edges(db, limit).await {
+        Ok(scan) => scan,
+        Err(e) => {
+            return format!(
+                "knowledge_sweep_orphans: the check could not be completed ({e}). Nothing was deleted."
+            );
+        }
+    };
 
-    if dry_run {
-        return format!(
-            "knowledge_sweep_orphans (dry_run):\n  scanned: {}\n  orphan_count: {}\n  deleted: 0",
-            scanned, orphan_count
-        );
-    }
-
+    // One delete per edge, by id. A `delete_by_query` reads the whole
+    // collection whatever its filter — about a second per call at 430,000
+    // edges — so the old chunks of a hundred ids cost more than a hundred
+    // deletes do, and the cost grew with the graph, not with the orphans.
     let mut deleted: u64 = 0;
-    for chunk in orphans.chunks(100) {
-        let id_list: Vec<&str> = chunk.iter().map(|s| s.as_str()).collect();
-        let filter = json!({"_id": {"$in": id_list}});
-        if let Ok(n) = db.delete_by_query("memory.edges", &filter).await {
-            deleted += n;
+    if !dry_run {
+        for id in &scan.orphan_ids {
+            if db.delete("memory.edges", id).await.is_ok() {
+                deleted += 1;
+            }
         }
     }
+    sweep_report(&scan, dry_run, deleted, limit)
+}
 
-    format!(
-        "knowledge_sweep_orphans:\n  scanned: {}\n  orphan_count: {}\n  deleted: {}",
-        scanned, orphan_count, deleted
-    )
+/// The sweep's reply. Its first four lines keep the shape they always had.
+fn sweep_report(scan: &OrphanScan, dry_run: bool, deleted: u64, limit: usize) -> String {
+    let mut out = format!(
+        "knowledge_sweep_orphans{}:\n  scanned: {}\n  orphan_count: {}\n  deleted: {}",
+        if dry_run { " (dry_run)" } else { "" },
+        scan.scanned,
+        scan.orphan_ids.len(),
+        deleted
+    );
+    if !scan.dangling.is_empty() {
+        out.push_str(&format!("\n  missing_nodes: {}", scan.dangling.len()));
+    }
+    if scan.more {
+        out.push_str(&format!(
+            "\n  more orphan edges exist than the limit of {limit}: run it again"
+        ));
+    }
+    out
 }
 
 // ── knowledge_dump — JSONL export of the knowledge graph ──
@@ -2318,9 +2369,9 @@ pub struct KnowledgeSweepOrphansArgs {
     /// Preview orphan edges without deleting.
     #[serde(default)]
     pub dry_run: bool,
-    /// Cap edges scanned per invocation; clamped to [1, 1000000]. The scan
-    /// is paginated, so full-graph coverage just needs limit >= the edge
-    /// total reported by knowledge_graph_stats.
+    /// Most orphan edges removed in one call; clamped to [1, 1000000].
+    /// Every edge is checked on every call, whatever the limit. When more
+    /// orphan edges exist than the limit, the result says so.
     #[serde(default = "default_sweep_limit")]
     pub limit: usize,
 }
@@ -2551,5 +2602,330 @@ mod native_args_tests {
         assert!(v.get("allOf").is_none());
         assert!(v.get("anyOf").is_none());
         assert_eq!(v["type"], "object");
+    }
+}
+
+/// Embra#10: the orphan check covers every edge, and it deletes nothing it
+/// could not look up.
+#[cfg(test)]
+mod orphan_tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    fn scan(orphans: &[&str], dangling: &[&str], more: bool) -> OrphanScan {
+        OrphanScan {
+            scanned: 433_546,
+            dangling: dangling.iter().map(|s| s.to_string()).collect(),
+            orphan_ids: orphans.iter().map(|s| s.to_string()).collect(),
+            more,
+        }
+    }
+
+    #[test]
+    fn the_stats_line_counts_against_every_edge() {
+        assert_eq!(orphan_line(&Ok(scan(&[], &[], false))), "Orphan edges: 0 of 433546 scanned");
+        assert_eq!(
+            orphan_line(&Ok(scan(&["e1", "e2"], &["gone"], false))),
+            "Orphan edges: 2 of 433546 scanned (run knowledge_sweep_orphans to clean up)"
+        );
+        assert_eq!(
+            orphan_line(&Ok(scan(&["e1", "e2"], &["gone"], true))),
+            "Orphan edges: at least 2 of 433546 scanned (run knowledge_sweep_orphans to clean up)"
+        );
+    }
+
+    #[test]
+    fn a_check_that_could_not_be_read_gives_no_number() {
+        assert_eq!(
+            orphan_line(&Err("looking up edge endpoints in memory.entries failed: timeout".into())),
+            "Orphan edges: not checked (looking up edge endpoints in memory.entries failed: timeout)"
+        );
+        // A graph without edges has no orphan line, as before.
+        assert_eq!(orphan_line(&Ok(OrphanScan::default())), "");
+    }
+
+    #[test]
+    fn the_sweep_reply_keeps_its_lines_and_adds_what_is_missing() {
+        assert_eq!(
+            sweep_report(&scan(&[], &[], false), true, 0, 10_000),
+            "knowledge_sweep_orphans (dry_run):\n  scanned: 433546\n  orphan_count: 0\n  deleted: 0"
+        );
+        assert_eq!(
+            sweep_report(&scan(&["e1", "e2"], &["gone"], false), false, 2, 10_000),
+            "knowledge_sweep_orphans:\n  scanned: 433546\n  orphan_count: 2\n  deleted: 2\n  missing_nodes: 1"
+        );
+        let capped = sweep_report(&scan(&["e1", "e2"], &["gone"], true), false, 2, 2);
+        assert!(capped.ends_with("\n  more orphan edges exist than the limit of 2: run it again"), "{capped}");
+    }
+
+    /// A node collection added to the dump is one an edge can point into.
+    #[test]
+    fn an_endpoint_can_live_in_every_node_collection() {
+        let nodes: Vec<&str> = DUMP_COLLECTIONS
+            .iter()
+            .map(|(_, collection)| *collection)
+            .filter(|collection| *collection != "memory.edges")
+            .collect();
+        assert_eq!(nodes, ENDPOINT_COLLECTIONS);
+    }
+
+    // ── against a stub server ────────────────────────────────────────────
+
+    fn data(v: serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": v, "meta": {}}))
+    }
+
+    fn body(req: &Request) -> serde_json::Value {
+        serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// The edge collection as the two groups see it: `(id, edges as source,
+    /// edges as target)`.
+    async fn edges_grouped(server: &MockServer, rows: &[(&str, u64, u64)]) {
+        for (field, pick) in [("source_id", 0usize), ("target_id", 1usize)] {
+            let groups: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|(id, s, t)| json!({"_id": id, "count": if pick == 0 { *s } else { *t }}))
+                .filter(|row| row["count"] != 0)
+                .collect();
+            Mock::given(method("POST"))
+                .and(path("/memory.edges/aggregate"))
+                .and(move |req: &Request| body(req)["pipeline"][0]["$group"]["_id"] == field)
+                .respond_with(data(json!(groups)))
+                .mount(server)
+                .await;
+        }
+    }
+
+    /// A node collection that holds `ids`: its count, and its ids grouped.
+    async fn collection_holds(server: &MockServer, collection: &str, ids: &[&str]) {
+        Mock::given(method("POST"))
+            .and(path(format!("/{collection}/query")))
+            .respond_with(data(json!({"count": ids.len()})))
+            .mount(server)
+            .await;
+        let rows: Vec<serde_json::Value> = ids.iter().map(|id| json!({"_id": id, "count": 1})).collect();
+        Mock::given(method("POST"))
+            .and(path(format!("/{collection}/aggregate")))
+            .respond_with(data(json!(rows)))
+            .mount(server)
+            .await;
+    }
+
+    /// The edges that name `id` on one side.
+    async fn arm(server: &MockServer, field: &'static str, id: &'static str, edge_ids: &[&str]) {
+        let docs: Vec<serde_json::Value> = edge_ids.iter().map(|e| json!({"_id": e})).collect();
+        Mock::given(method("POST"))
+            .and(path("/memory.edges/query"))
+            .and(move |req: &Request| body(req)["filter"][field] == id)
+            .respond_with(data(json!(docs)))
+            .mount(server)
+            .await;
+    }
+
+    /// The paths the server was asked to delete, in order.
+    async fn deletes_seen(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "DELETE" || r.url.path().ends_with("_delete_by_query"))
+            .map(|r| r.url.path().to_string())
+            .collect()
+    }
+
+    async fn graph_with_one_missing_node() -> MockServer {
+        let server = MockServer::start().await;
+        edges_grouped(&server, &[("e1", 2, 2), ("n1", 2, 1), ("gone", 1, 2)]).await;
+        collection_holds(&server, "memory.entries", &["e1"]).await;
+        collection_holds(&server, "memory.semantic", &["n1"]).await;
+        collection_holds(&server, "memory.procedural", &[]).await;
+        collection_holds(&server, "identity.graph", &[]).await;
+        arm(&server, "source_id", "gone", &["x1"]).await;
+        arm(&server, "target_id", "gone", &["x2", "x3"]).await;
+        Mock::given(method("DELETE")).respond_with(data(json!({}))).mount(&server).await;
+        server
+    }
+
+    #[tokio::test]
+    async fn the_check_reads_the_endpoints_of_every_edge_and_no_window_of_them() {
+        let server = graph_with_one_missing_node().await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let found = find_orphan_edges(&db, 10_000).await.expect("the check completes");
+        assert_eq!(
+            found,
+            OrphanScan {
+                scanned: 5,
+                dangling: vec!["gone".into()],
+                orphan_ids: vec!["x1".into(), "x2".into(), "x3".into()],
+                more: false,
+            }
+        );
+        // No page of edge documents is read: every edge query names the one
+        // missing id, on one side.
+        let requests = server.received_requests().await.unwrap_or_default();
+        let edge_queries: Vec<serde_json::Value> = requests
+            .iter()
+            .filter(|r| r.url.path() == "/memory.edges/query")
+            .map(|r| body(r)["filter"].clone())
+            .collect();
+        assert_eq!(edge_queries, [json!({"source_id": "gone"}), json!({"target_id": "gone"})]);
+        // The edges are read before the nodes.
+        let order: Vec<&str> = requests
+            .iter()
+            .filter(|r| r.url.path().ends_with("/aggregate"))
+            .map(|r| r.url.path())
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "/memory.edges/aggregate",
+                "/memory.edges/aggregate",
+                "/memory.entries/aggregate",
+                "/memory.semantic/aggregate",
+                "/memory.procedural/aggregate",
+                "/identity.graph/aggregate",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_sweep_removes_what_the_check_lists() {
+        let server = graph_with_one_missing_node().await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let out = knowledge_sweep_orphans(&db, false, 10_000).await;
+        assert_eq!(
+            out,
+            "knowledge_sweep_orphans:\n  scanned: 5\n  orphan_count: 3\n  deleted: 3\n  missing_nodes: 1"
+        );
+        assert_eq!(
+            deletes_seen(&server).await,
+            ["/memory.edges/docs/x1", "/memory.edges/docs/x2", "/memory.edges/docs/x3"]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_deletes_nothing() {
+        let server = graph_with_one_missing_node().await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let out = knowledge_sweep_orphans(&db, true, 10_000).await;
+        assert!(out.starts_with("knowledge_sweep_orphans (dry_run):\n  scanned: 5\n  orphan_count: 3\n  deleted: 0"), "{out}");
+        assert!(deletes_seen(&server).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_limit_is_what_one_call_removes_and_the_reply_says_more_exist() {
+        let server = graph_with_one_missing_node().await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let found = find_orphan_edges(&db, 2).await.expect("the check completes");
+        assert_eq!(found.orphan_ids, ["x1", "x2"]);
+        assert!(found.more);
+        // The check itself covered every edge.
+        assert_eq!(found.scanned, 5);
+        let out = knowledge_sweep_orphans(&db, true, 2).await;
+        assert!(out.ends_with("more orphan edges exist than the limit of 2: run it again"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn an_edge_with_two_missing_ends_is_listed_once() {
+        let server = MockServer::start().await;
+        edges_grouped(&server, &[("gone_a", 1, 0), ("gone_b", 0, 1)]).await;
+        for collection in ENDPOINT_COLLECTIONS {
+            collection_holds(&server, collection, &[]).await;
+        }
+        arm(&server, "source_id", "gone_a", &["x1"]).await;
+        arm(&server, "target_id", "gone_b", &["x1"]).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let found = find_orphan_edges(&db, 10_000).await.expect("the check completes");
+        assert_eq!(found.dangling, ["gone_a", "gone_b"]);
+        assert_eq!(found.orphan_ids, ["x1"]);
+        assert!(!found.more);
+    }
+
+    /// The check it replaces read a failed lookup as "no such node", and the
+    /// sweep then deleted every edge of the page.
+    #[tokio::test]
+    async fn a_node_list_that_could_not_be_read_is_an_error_and_never_a_missing_node() {
+        let server = MockServer::start().await;
+        edges_grouped(&server, &[("e1", 2, 2), ("n1", 2, 2)]).await;
+        Mock::given(method("POST"))
+            .and(path("/memory.entries/query"))
+            .respond_with(data(json!({"count": 1})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/memory.entries/aggregate"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("query timed out"))
+            .mount(&server)
+            .await;
+        for collection in ["memory.semantic", "memory.procedural", "identity.graph"] {
+            collection_holds(&server, collection, &["n1"]).await;
+        }
+        let db = WardsonDbClient::from_url(&server.uri());
+        let err = find_orphan_edges(&db, 10_000).await.expect_err("an unread collection is no answer");
+        assert!(err.starts_with("listing the nodes of memory.entries failed"), "{err}");
+
+        let out = knowledge_sweep_orphans(&db, false, 10_000).await;
+        assert!(out.starts_with("knowledge_sweep_orphans: the check could not be completed ("), "{out}");
+        assert!(out.ends_with("Nothing was deleted."), "{out}");
+        assert!(deletes_seen(&server).await.is_empty());
+        assert!(orphan_line(&Err(err)).starts_with("Orphan edges: not checked ("));
+    }
+
+    /// A list shorter than the collection would make its other nodes look
+    /// deleted.
+    #[tokio::test]
+    async fn a_node_list_shorter_than_the_collection_is_refused() {
+        let server = MockServer::start().await;
+        edges_grouped(&server, &[("e1", 1, 1), ("e2", 1, 1)]).await;
+        Mock::given(method("POST"))
+            .and(path("/memory.entries/query"))
+            .respond_with(data(json!({"count": 2})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/memory.entries/aggregate"))
+            .respond_with(data(json!([{"_id": "e1", "count": 1}])))
+            .mount(&server)
+            .await;
+        for collection in ["memory.semantic", "memory.procedural", "identity.graph"] {
+            collection_holds(&server, collection, &[]).await;
+        }
+        let db = WardsonDbClient::from_url(&server.uri());
+        let err = find_orphan_edges(&db, 10_000).await.expect_err("a short list is no answer");
+        assert_eq!(err, "the node list of memory.entries is incomplete: 1 of 2");
+        let out = knowledge_sweep_orphans(&db, false, 10_000).await;
+        assert!(out.ends_with("Nothing was deleted."), "{out}");
+        assert!(deletes_seen(&server).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_collection_the_server_does_not_have_holds_nothing() {
+        let server = MockServer::start().await;
+        edges_grouped(&server, &[("e1", 1, 1), ("old_identity", 1, 1)]).await;
+        collection_holds(&server, "memory.entries", &["e1"]).await;
+        collection_holds(&server, "memory.semantic", &[]).await;
+        collection_holds(&server, "memory.procedural", &[]).await;
+        Mock::given(method("POST"))
+            .and(path("/identity.graph/query"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("collection not found"))
+            .mount(&server)
+            .await;
+        arm(&server, "source_id", "old_identity", &["x1"]).await;
+        arm(&server, "target_id", "old_identity", &["x2"]).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let found = find_orphan_edges(&db, 10_000).await.expect("a missing collection is an answer");
+        assert_eq!(found.dangling, ["old_identity"]);
+        assert_eq!(found.orphan_ids, ["x1", "x2"]);
+    }
+
+    #[test]
+    fn the_limit_is_described_as_what_a_call_removes() {
+        let schema = serde_json::to_value(schemars::schema_for!(KnowledgeSweepOrphansArgs)).unwrap();
+        let limit = schema["properties"]["limit"]["description"].as_str().unwrap();
+        assert!(limit.starts_with("Most orphan edges removed in one call"), "{limit}");
+        assert!(limit.contains("Every edge is checked on every call"), "{limit}");
     }
 }
