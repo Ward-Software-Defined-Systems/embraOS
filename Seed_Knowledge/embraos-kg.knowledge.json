@@ -228,6 +228,10 @@
     { "src": "seed_kg_dump_tool", "dst": "seed_kg_stats_tool", "relation": "related_to" },
     { "src": "seed_kg_remember_recall", "dst": "seed_kg_promotion", "relation": "related_to" },
     { "src": "seed_kg_forget", "dst": "seed_kg_remember_recall", "relation": "related_to" },
-    { "src": "seed_kg_backup", "dst": "seed_kg_overview", "relation": "related_to" }
+    { "src": "seed_kg_backup", "dst": "seed_kg_overview", "relation": "related_to" },
+    { "_comment": "bridges: without them the curation, seed-pack and link-tool nodes are islands" },
+    { "src": "seed_kg_seed_packs", "dst": "seed_kg_overview", "relation": "related_to", "weight": 0.8 },
+    { "src": "seed_kg_correction", "dst": "seed_kg_promotion", "relation": "related_to", "weight": 0.8 },
+    { "src": "seed_kg_link_tool", "dst": "seed_kg_edge_types", "relation": "related_to", "weight": 0.8 }
   ]
 }

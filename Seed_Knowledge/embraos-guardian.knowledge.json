@@ -133,6 +133,8 @@
     { "src": "seed_guardian_lifecycle", "dst": "seed_guardian_contract", "relation": "related_to" },
     { "src": "seed_guardian_never_in_schema", "dst": "seed_guardian_lifecycle", "relation": "related_to" },
     { "src": "seed_guardian_authoring_procedure", "dst": "seed_guardian_lifecycle", "relation": "depends_on" },
-    { "src": "seed_guardian_authoring_procedure", "dst": "seed_guardian_training_conflicts", "relation": "depends_on" }
+    { "src": "seed_guardian_authoring_procedure", "dst": "seed_guardian_training_conflicts", "relation": "depends_on" },
+    { "_comment": "into the core pack" },
+    { "src": "seed_guardian_contract", "dst": "seed_core_guardian_gate", "relation": "related_to", "weight": 0.8 }
   ]
 }

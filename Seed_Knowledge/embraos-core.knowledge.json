@@ -207,6 +207,13 @@
     { "src": "seed_core_self_answer", "dst": "seed_core_observability", "relation": "depends_on", "weight": 0.8 },
     { "src": "seed_core_self_answer", "dst": "seed_core_docs_map", "relation": "depends_on", "weight": 0.7 },
     { "src": "seed_core_self_answer", "dst": "seed_core_source_map", "relation": "depends_on", "weight": 0.7 },
-    { "src": "seed_core_repo_origin", "dst": "seed_core_repo", "relation": "refines", "weight": 0.8 }
+    { "src": "seed_core_repo_origin", "dst": "seed_core_repo", "relation": "refines", "weight": 0.8 },
+    { "_comment": "bridges: without them the storage and constraint nodes, and the providers node, are islands" },
+    { "src": "seed_core_wardsondb", "dst": "seed_core_services", "relation": "related_to", "weight": 0.8 },
+    { "src": "seed_core_operator_actions", "dst": "seed_core_boot_chain", "relation": "related_to", "weight": 0.7 },
+    { "src": "seed_core_providers", "dst": "seed_core_services", "relation": "related_to", "weight": 0.8 },
+    { "_comment": "into the other packs" },
+    { "src": "seed_core_wardsondb", "dst": "seed_kg_overview", "relation": "related_to", "weight": 0.8 },
+    { "src": "seed_core_repo_origin", "dst": "seed_git_gl_tools", "relation": "related_to", "weight": 0.8 }
   ]
 }

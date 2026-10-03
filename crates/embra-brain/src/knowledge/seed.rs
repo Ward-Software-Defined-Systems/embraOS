@@ -18,7 +18,12 @@
 //!   (revise the pack instead); an edge the pack no longer lists is removed;
 //!   a node the pack no longer lists stays, for the operator to remove;
 //! - a pack the image ships loads from the image; a STATE copy of it is
-//!   skipped and named (`scan_dirs`) — STATE is for the operator's own packs.
+//!   skipped and named (`scan_dirs`) — STATE is for the operator's own packs;
+//! - an edge starts at a node of the pack that lists it and may end at a node
+//!   of another pack: the packs are one body of knowledge, and without such
+//!   edges each pack is an island of its own (Embra#5). The nodes of every
+//!   pack are reconciled before any edge; an edge whose far end no loaded
+//!   pack provides is not written, and the journal names it.
 //!
 //! Seed nodes are ORDINARY `memory.semantic`/`memory.procedural` citizens:
 //! retrieval, enrichment, traversal, audit, merge, and update all treat
@@ -316,13 +321,13 @@ fn validate_pack(pack: &SeedPack) -> Vec<String> {
     }
     let mut seen_triples: HashSet<(&str, &str, &str)> = HashSet::new();
     for edge in &pack.edges {
-        for end in [&edge.src, &edge.dst] {
-            if !seen_ids.contains(end.as_str()) {
-                errors.push(format!(
-                    "edge {} -> {}: '{end}' is not a node id in this pack (edges reference in-pack ids only)",
-                    edge.src, edge.dst
-                ));
-            }
+        // The far end may be a node of another pack; whether one provides it
+        // is known only when every pack is loaded (`resolvable_edges`).
+        if !seen_ids.contains(edge.src.as_str()) {
+            errors.push(format!(
+                "edge {} -> {}: '{}' is not a node id in this pack (an edge starts at a node of its own pack)",
+                edge.src, edge.dst, edge.src
+            ));
         }
         if !seen_triples.insert((&edge.src, &edge.dst, &edge.relation)) {
             errors.push(format!(
@@ -500,11 +505,27 @@ fn seed_node_doc(node: &SeedNode, pack: &str, now: &str) -> serde_json::Value {
     doc
 }
 
-fn node_collections(pack: &SeedPack) -> HashMap<&str, &'static str> {
-    pack.nodes
+/// Where each seed node lives, over every loaded pack: what an edge needs to
+/// name both of its ends. An id two packs list belongs to the first, whose
+/// document is the one that exists (ensure-present by `_id`).
+fn node_collections(packs: &[SeedPackFile]) -> HashMap<&str, &'static str> {
+    let mut homes: HashMap<&str, &'static str> = HashMap::new();
+    for node in packs.iter().flat_map(|file| &file.pack.nodes) {
+        homes.entry(node.id.as_str()).or_insert(node.collection());
+    }
+    homes
+}
+
+/// The pack's edges whose two ends are nodes of loaded packs, and the ones
+/// that name a node no loaded pack provides: the pack it lives in is not
+/// installed, or the id is misspelt.
+fn resolvable_edges<'a>(
+    pack: &'a SeedPack,
+    homes: &HashMap<&str, &'static str>,
+) -> (Vec<&'a SeedEdge>, Vec<&'a SeedEdge>) {
+    pack.edges
         .iter()
-        .map(|n| (n.id.as_str(), n.collection()))
-        .collect()
+        .partition(|e| homes.contains_key(e.src.as_str()) && homes.contains_key(e.dst.as_str()))
 }
 
 /// Edge doc: identity-projection pattern — no `_id` (server mints),
@@ -886,17 +907,33 @@ pub async fn ensure_seed_knowledge(db: &WardsonDbClient) {
     // derive_edges enrichment of fresh nodes is silently skipped;
     // `edge_exists` dedupes make a later re-derive harmless anyway.
     let config = crate::config::load_config(db).await.ok();
+    // The nodes of every pack, then the edges: an edge may end at a node of
+    // another pack, and an edge is written after both of its nodes.
+    let homes = node_collections(&packs);
+    let mut nodes_done = Vec::with_capacity(packs.len());
     for pack_file in &packs {
-        reconcile_pack(db, &pack_file.file_name, &pack_file.pack, config.as_ref()).await;
+        nodes_done.push(reconcile_nodes(db, &pack_file.pack, config.as_ref()).await);
+    }
+    for (pack_file, (healed_nodes, revised_nodes)) in packs.iter().zip(nodes_done) {
+        let pack = &pack_file.pack;
+        let (healed_edges, retired_edges) = reconcile_edges(db, pack, &homes).await;
+        if healed_nodes > 0 || healed_edges > 0 || revised_nodes > 0 || retired_edges > 0 {
+            info!(
+                target: "knowledge_seed",
+                "seed[{}] ({}): healed {} nodes, {} edges; revised {} nodes; retired {} edges",
+                pack.name, pack_file.file_name, healed_nodes, healed_edges, revised_nodes, retired_edges
+            );
+        }
     }
 }
 
-async fn reconcile_pack(
+/// One pack's nodes: the missing ones inserted, the changed ones revised.
+/// Returns `(inserted, revised)`.
+async fn reconcile_nodes(
     db: &WardsonDbClient,
-    file_name: &str,
     pack: &SeedPack,
     config: Option<&SystemConfig>,
-) {
+) -> (usize, usize) {
     let now = chrono::Utc::now().to_rfc3339();
     let sem_expected = pack
         .nodes
@@ -982,23 +1019,47 @@ async fn reconcile_pack(
         }
     }
 
+    (healed_nodes, revised_nodes)
+}
+
+/// One pack's edges, after the nodes of every pack. `homes` is
+/// `node_collections` over all of them. Returns `(written, retired)`.
+async fn reconcile_edges(
+    db: &WardsonDbClient,
+    pack: &SeedPack,
+    homes: &HashMap<&str, &'static str>,
+) -> (usize, usize) {
+    let now = chrono::Utc::now().to_rfc3339();
+
     // Edges the pack withdrew go first: the count below would otherwise
     // still cover the expectation and the edge that replaced one of them
     // would wait for the next boot.
     let retired_edges = retire_edges(db, pack).await;
 
+    let (edges, unresolved) = resolvable_edges(pack, homes);
+    for edge in &unresolved {
+        warn!(
+            target: "knowledge_seed",
+            "seed[{}]: edge {} -> {} [{}] not written: '{}' is not a node of any loaded pack",
+            pack.name, edge.src, edge.dst, edge.relation, edge.dst
+        );
+    }
+
     // Edges: filtered-count fast-path, then 3-eq probe walk (probe failure
-    // treated as exists — never double-insert; identity pattern).
+    // treated as exists — never double-insert; identity pattern). The
+    // expectation counts the edges that can be written. An instance where
+    // one of them was linked by hand before the pack listed it keeps that
+    // link, stays one short of the expectation, and walks at every boot:
+    // one indexed probe per edge.
     let mut healed_edges = 0usize;
-    if !pack.edges.is_empty() {
-        let expected = pack.edges.len() as u64;
+    if !edges.is_empty() {
+        let expected = edges.len() as u64;
         let actual = db
             .count_filtered("memory.edges", &seed_edge_count_filter(&pack.name))
             .await
             .unwrap_or(0);
         if actual < expected {
-            let colls = node_collections(pack);
-            for edge in &pack.edges {
+            for edge in &edges {
                 let exists = db
                     .query(
                         "memory.edges",
@@ -1011,7 +1072,7 @@ async fn reconcile_pack(
                     continue;
                 }
                 match db
-                    .write("memory.edges", &seed_edge_doc(edge, &colls, &pack.name, &now))
+                    .write("memory.edges", &seed_edge_doc(edge, homes, &pack.name, &now))
                     .await
                 {
                     Ok(_) => healed_edges += 1,
@@ -1025,13 +1086,7 @@ async fn reconcile_pack(
         }
     }
 
-    if healed_nodes > 0 || healed_edges > 0 || revised_nodes > 0 || retired_edges > 0 {
-        info!(
-            target: "knowledge_seed",
-            "seed[{}] ({}): healed {} nodes, {} edges; revised {} nodes; retired {} edges",
-            pack.name, file_name, healed_nodes, healed_edges, revised_nodes, retired_edges
-        );
-    }
+    (healed_edges, retired_edges)
 }
 
 #[cfg(test)]
@@ -1181,13 +1236,23 @@ mod tests {
     }
 
     #[test]
-    fn edges_reference_in_pack_ids_only() {
+    fn an_edge_starts_in_its_own_pack_and_may_end_in_another() {
+        // The far end is another pack's node: nothing to refuse here.
         let raw = minimal_pack(
             json!([sem_node("seed_a")]),
-            json!([{"src": "seed_a", "dst": "elsewhere", "relation": "related_to"}]),
+            json!([{"src": "seed_a", "dst": "seed_elsewhere", "relation": "related_to"}]),
+        );
+        let pack = parse_pack(&raw).expect("an edge may leave its pack");
+        assert_eq!(pack.edges[0].dst, "seed_elsewhere");
+
+        // A pack does not link the nodes of other packs to anything.
+        let raw = minimal_pack(
+            json!([sem_node("seed_a")]),
+            json!([{"src": "seed_elsewhere", "dst": "seed_a", "relation": "related_to"}]),
         );
         let errs = parse_pack(&raw).unwrap_err();
-        assert!(errs.iter().any(|e| e.contains("in-pack ids only")));
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("'seed_elsewhere' is not a node id in this pack"), "{errs:?}");
     }
 
     #[test]
@@ -1293,7 +1358,8 @@ mod tests {
             ],
             edges: vec![],
         };
-        let colls = node_collections(&pack);
+        let packs = [SeedPackFile { file_name: "p.knowledge.json".into(), pack }];
+        let colls = node_collections(&packs);
         let edge = SeedEdge {
             src: "s".into(),
             dst: "pr".into(),
@@ -1456,6 +1522,211 @@ mod tests {
         assert_eq!(kept[0].file_name, "a.knowledge.json");
         assert_eq!(issues.len(), 1);
         assert!(issues[0].contains("b.knowledge.json"));
+    }
+
+    fn pack_file(name: &str, nodes: serde_json::Value, edges: serde_json::Value) -> SeedPackFile {
+        let raw = json!({"format": "knowledge.v1", "name": name, "nodes": nodes, "edges": edges}).to_string();
+        SeedPackFile {
+            file_name: format!("{name}.knowledge.json"),
+            pack: parse_pack(&raw).expect("a valid pack"),
+        }
+    }
+
+    fn proc_node(id: &str) -> serde_json::Value {
+        json!({"id": id, "kind": "procedural", "title": "t", "description": "d",
+               "steps": ["one"], "tags": ["kg"]})
+    }
+
+    /// Two packs: `core` links into `kg`, and names one node nobody has.
+    fn two_packs() -> Vec<SeedPackFile> {
+        vec![
+            pack_file(
+                "core",
+                json!([sem_node("seed_core_a"), sem_node("seed_core_b")]),
+                json!([
+                    {"src": "seed_core_a", "dst": "seed_core_b", "relation": "refines"},
+                    {"src": "seed_core_a", "dst": "seed_kg_howto", "relation": "related_to", "weight": 0.8},
+                    {"src": "seed_core_b", "dst": "seed_gone", "relation": "related_to"},
+                ]),
+            ),
+            pack_file("kg", json!([proc_node("seed_kg_howto")]), json!([])),
+        ]
+    }
+
+    #[test]
+    fn an_edge_resolves_its_far_end_in_any_loaded_pack() {
+        let packs = two_packs();
+        let homes = node_collections(&packs);
+        let (edges, unresolved) = resolvable_edges(&packs[0].pack, &homes);
+        let dsts = |v: &[&SeedEdge]| v.iter().map(|e| e.dst.clone()).collect::<Vec<_>>();
+        assert_eq!(dsts(&edges), ["seed_core_b", "seed_kg_howto"]);
+        assert_eq!(dsts(&unresolved), ["seed_gone"]);
+        // The far end is named in the collection its own pack puts it in.
+        let doc = seed_edge_doc(edges[1], &homes, "core", "2026-10-03T00:00:00Z");
+        assert_eq!(doc["source_collection"], json!("memory.semantic"));
+        assert_eq!(doc["target_collection"], json!("memory.procedural"));
+        assert_eq!(doc["metadata"], json!({"origin": "knowledge_seed", "pack": "core"}));
+    }
+
+    #[test]
+    fn a_pack_loaded_alone_keeps_its_own_edges_and_names_the_rest() {
+        let packs = two_packs();
+        let alone = &packs[..1];
+        let (edges, unresolved) = resolvable_edges(&alone[0].pack, &node_collections(alone));
+        assert_eq!(edges.len(), 1);
+        assert_eq!(unresolved.len(), 2);
+    }
+
+    #[test]
+    fn an_id_two_packs_list_belongs_to_the_first() {
+        let packs = vec![
+            pack_file("first", json!([sem_node("seed_shared")]), json!([])),
+            pack_file("second", json!([proc_node("seed_shared")]), json!([])),
+        ];
+        assert_eq!(node_collections(&packs)["seed_shared"], "memory.semantic");
+    }
+
+    /// The edge store as the loader sees it: none of the pack's own edges
+    /// stored yet, and one triple that was linked by hand.
+    async fn edge_store(hand_linked: (&'static str, &'static str)) -> wiremock::MockServer {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+        let data = |v: serde_json::Value| {
+            ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": v, "meta": {}}))
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory.edges/query"))
+            .respond_with(move |req: &Request| {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
+                if body["count_only"] == json!(true) {
+                    return data(json!({"count": 0}));
+                }
+                let probe = &body["filter"];
+                if probe["source_id"] == hand_linked.0 && probe["target_id"] == hand_linked.1 {
+                    return data(json!([{"_id": "made-by-hand"}]));
+                }
+                data(json!([]))
+            })
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/memory.edges/docs"))
+            .respond_with(data(json!({"_id": "minted"})))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    #[tokio::test]
+    async fn an_edge_into_another_pack_is_written_and_one_into_no_pack_is_not() {
+        let packs = two_packs();
+        let homes = node_collections(&packs);
+        let server = edge_store(("nothing", "linked by hand")).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+
+        let (written, retired) = reconcile_edges(&db, &packs[0].pack, &homes).await;
+        assert_eq!((written, retired), (2, 0));
+        let requests = server.received_requests().await.unwrap_or_default();
+        let docs: Vec<serde_json::Value> = requests
+            .iter()
+            .filter(|r| r.url.path() == "/memory.edges/docs")
+            .map(|r| serde_json::from_slice(&r.body).unwrap())
+            .collect();
+        let ends: Vec<(&str, &str, &str)> = docs
+            .iter()
+            .map(|d| {
+                (
+                    d["target_id"].as_str().unwrap(),
+                    d["target_collection"].as_str().unwrap(),
+                    d["metadata"]["pack"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            ends,
+            [
+                ("seed_core_b", "memory.semantic", "core"),
+                ("seed_kg_howto", "memory.procedural", "core"),
+            ]
+        );
+        // The edge to a node no pack provides is neither probed nor written.
+        assert!(requests.iter().all(|r| !String::from_utf8_lossy(&r.body).contains("seed_gone")));
+    }
+
+    #[tokio::test]
+    async fn a_link_made_by_hand_stands_in_for_the_packs_edge() {
+        let packs = two_packs();
+        let homes = node_collections(&packs);
+        let server = edge_store(("seed_core_a", "seed_kg_howto")).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+
+        let (written, _) = reconcile_edges(&db, &packs[0].pack, &homes).await;
+        assert_eq!(written, 1, "the in-pack edge alone");
+        let requests = server.received_requests().await.unwrap_or_default();
+        let targets: Vec<String> = requests
+            .iter()
+            .filter(|r| r.url.path() == "/memory.edges/docs")
+            .map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()["target_id"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(targets, ["seed_core_b"]);
+    }
+
+    /// The committed packs, as the image loads them.
+    fn committed_packs() -> Vec<SeedPackFile> {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Seed_Knowledge");
+        let (packs, issues) = scan_dirs(&[dir]);
+        assert!(issues.is_empty(), "{issues:?}");
+        packs
+    }
+
+    /// A far end that no committed pack provides is a misspelt id: the
+    /// loader would skip the edge at every boot of every instance.
+    #[test]
+    fn every_edge_of_the_committed_packs_ends_at_a_committed_node() {
+        let packs = committed_packs();
+        let homes = node_collections(&packs);
+        for file in &packs {
+            let (_, unresolved) = resolvable_edges(&file.pack, &homes);
+            let named: Vec<String> =
+                unresolved.iter().map(|e| format!("{} -> {}", e.src, e.dst)).collect();
+            assert!(named.is_empty(), "{}: no pack provides the far end of {named:?}", file.file_name);
+        }
+    }
+
+    /// Embra#5: a fresh instance boots with its seed knowledge in one piece.
+    /// The edges a pack lists are deliberate links (`knowledge_traverse`
+    /// keeps them when automatic edges crowd a node); a seed node none of
+    /// them reaches is an island on every fresh instance.
+    #[test]
+    fn the_committed_packs_are_one_connected_graph() {
+        let packs = committed_packs();
+        let ids: Vec<&str> =
+            packs.iter().flat_map(|f| &f.pack.nodes).map(|n| n.id.as_str()).collect();
+        let mut group: HashMap<&str, &str> = ids.iter().map(|id| (*id, *id)).collect();
+        fn root<'a>(group: &HashMap<&'a str, &'a str>, mut id: &'a str) -> &'a str {
+            while group[id] != id {
+                id = group[id];
+            }
+            id
+        }
+        for edge in packs.iter().flat_map(|f| &f.pack.edges) {
+            let (a, b) = (root(&group, edge.src.as_str()), root(&group, edge.dst.as_str()));
+            group.insert(a, b);
+        }
+        let mut islands: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for id in &ids {
+            islands.entry(root(&group, id)).or_default().push(id);
+        }
+        let mut pieces: Vec<&Vec<&str>> = islands.values().collect();
+        pieces.sort_by_key(|piece| std::cmp::Reverse(piece.len()));
+        assert_eq!(
+            pieces.len(),
+            1,
+            "the seed packs fall into {} pieces; the small ones: {:?}",
+            pieces.len(),
+            &pieces[1..]
+        );
     }
 
     #[test]

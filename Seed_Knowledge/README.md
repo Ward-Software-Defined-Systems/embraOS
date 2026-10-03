@@ -120,7 +120,12 @@ applied):
 - `tags` is required on every node (an empty array is allowed). Lowercase,
   single-word, reusing the instance's established vocabulary — exact
   lowercase match is what makes seeded knowledge retrievable.
-- **Edges** reference in-pack ids only; `relation` is free-form
+- **Edges** start at a node of the pack that lists them (`src`). `dst` is a
+  node of the same pack or of another pack that is loaded: the four
+  committed packs link into one another this way. An edge whose `dst` no
+  loaded pack provides is not written, and the boot journal names it at
+  every boot — the pack it points into is not installed, or the id is
+  misspelt. `relation` is free-form
   (the built-in vocabulary — `enables`, `contradicts`, `refines`,
   `depends_on`, `related_to` — is recommended so the edges read uniformly
   next to brain-authored ones); `weight` optional, default `1.0`, must be
@@ -132,8 +137,18 @@ Per boot, per pack: two filtered counts + one spot-probe on the healthy
 path; on mismatch, an insert-missing walk writes absent nodes (and gives
 each **freshly inserted** node one auto-edge derivation pass, wiring its
 tags into the operator's existing knowledge), then probe-inserts absent
-edges. Everything is warn-don't-fail — a broken pack never blocks boot.
+edges. The nodes of every pack come before any edge, so an edge into
+another pack finds its node. An edge that already exists is left alone,
+whoever made it: a link the intelligence made by hand before a pack listed
+it stands in for the pack's edge. Everything is warn-don't-fail — a broken
+pack never blocks boot.
 
 Every committed pack in this folder is parsed and validated by the test
 `committed_seed_packs_validate` (`crates/embra-brain/src/knowledge/seed.rs`),
-so `cargo test` fails before an invalid pack can ship in an image.
+so `cargo test` fails before an invalid pack can ship in an image. Two more
+tests read the committed packs together:
+`every_edge_of_the_committed_packs_ends_at_a_committed_node`, and
+`the_committed_packs_are_one_connected_graph` — every node of the four
+packs is reachable from every other through the edges the packs list, so a
+fresh instance boots with its seed knowledge in one piece. A node added
+without an edge to the rest fails that test.
