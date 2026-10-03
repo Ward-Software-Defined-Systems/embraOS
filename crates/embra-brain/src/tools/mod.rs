@@ -271,56 +271,7 @@ async fn recall(db: &WardsonDbClient, query: &str, unpromoted_only: bool) -> Str
         .map(str::to_string)
         .collect();
 
-    fn tags_to_str(doc: &serde_json::Value) -> String {
-        match doc.get("tags") {
-            Some(v) if v.is_array() => v.as_array().unwrap().iter()
-                .filter_map(|t| t.as_str()).collect::<Vec<_>>().join(", "),
-            Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
-            _ => String::new(),
-        }
-    }
-
-    let matches_query = |content: &str, tags: &str| -> bool {
-        if query_tokens.is_empty() { return true; }
-        let hay = format!("{} {}", content.to_lowercase(), tags.to_lowercase());
-        tokens_all_match(&hay, &query_tokens)
-    };
-
-    // Promoted entries: content-bearing fields come from the promoted node, not the episodic entry.
-    // Mark entries with [promoted → collection] suffix.
-    let mut output_lines: Vec<String> = Vec::new();
-
-    // Promoted collections first (ranked higher)
-    for doc in semantic.iter().chain(procedural.iter()) {
-        let id = doc.get("_id").and_then(|v| v.as_str()).unwrap_or("?");
-        let collection = if doc.get("category").is_some() { "memory.semantic" } else { "memory.procedural" };
-        let content = doc.get("content").and_then(|v| v.as_str())
-            .or_else(|| doc.get("description").and_then(|v| v.as_str()))
-            .unwrap_or("");
-        let title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("");
-        let tags = tags_to_str(doc);
-        let searchable = format!("{} {} {}", title, content, tags);
-        if !matches_query(&searchable, &tags) { continue; }
-        let ts = doc.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
-        let display = if !title.is_empty() { format!("{}: {}", title, content) } else { content.to_string() };
-        output_lines.push(format!("  [{}] [{}] {} (tags: {}) — {}", collection, id, display, tags, ts));
-    }
-
-    // Episodic entries
-    for doc in entries.iter() {
-        if unpromoted_only && entry_is_promoted(doc) { continue; }
-        let content = doc.get("content").and_then(|v| v.as_str()).unwrap_or("");
-        let tags = tags_to_str(doc);
-        if !matches_query(content, &tags) { continue; }
-        let id = doc.get("_id").and_then(|v| v.as_str()).unwrap_or("?");
-        let ts = doc.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
-        let promoted_marker = doc.get("promoted_to")
-            .and_then(|v| if v.is_null() { None } else { v.get("collection") })
-            .and_then(|v| v.as_str())
-            .map(|c| format!(" [promoted → {}]", c))
-            .unwrap_or_default();
-        output_lines.push(format!("  [memory.entries] [{}] {}{} (tags: {}) — {}", id, content, promoted_marker, tags, ts));
-    }
+    let mut output_lines = recall_lines(&entries, &semantic, &procedural, &query_tokens, unpromoted_only);
 
     if output_lines.is_empty() {
         if unpromoted_only {
@@ -345,6 +296,148 @@ async fn recall(db: &WardsonDbClient, query: &str, unpromoted_only: bool) -> Str
     } else {
         output_lines.truncate(RECALL_DISPLAY_CAP);
         format!("Found {} matching entries:\n{}", total, output_lines.join("\n"))
+    }
+}
+
+/// The lines `recall` prints, before its display cap: the matching nodes
+/// first, then the matching entries. A memory is listed once: an entry whose
+/// node is already in the listing is left out, because the node line carries
+/// the same memory; an entry whose node did not match (its text was changed
+/// since) keeps its line and its `[promoted → …]` marker. In the worklist
+/// mode the nodes are not passed in, and a promoted entry is skipped.
+fn recall_lines(
+    entries: &[serde_json::Value],
+    semantic: &[serde_json::Value],
+    procedural: &[serde_json::Value],
+    query_tokens: &[String],
+    unpromoted_only: bool,
+) -> Vec<String> {
+    fn tags_to_str(doc: &serde_json::Value) -> String {
+        match doc.get("tags") {
+            Some(v) if v.is_array() => v.as_array().unwrap().iter()
+                .filter_map(|t| t.as_str()).collect::<Vec<_>>().join(", "),
+            Some(v) if v.is_string() => v.as_str().unwrap_or("").to_string(),
+            _ => String::new(),
+        }
+    }
+
+    let matches_query = |content: &str, tags: &str| -> bool {
+        if query_tokens.is_empty() { return true; }
+        let hay = format!("{} {}", content.to_lowercase(), tags.to_lowercase());
+        tokens_all_match(&hay, query_tokens)
+    };
+
+    let mut output_lines: Vec<String> = Vec::new();
+    let mut listed_nodes: std::collections::HashSet<(&str, &str)> = std::collections::HashSet::new();
+
+    // Promoted collections first (ranked higher)
+    for (collection, docs) in [("memory.semantic", semantic), ("memory.procedural", procedural)] {
+        for doc in docs {
+            let id = doc.get("_id").and_then(|v| v.as_str()).unwrap_or("?");
+            let content = doc.get("content").and_then(|v| v.as_str())
+                .or_else(|| doc.get("description").and_then(|v| v.as_str()))
+                .unwrap_or("");
+            let title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("");
+            let tags = tags_to_str(doc);
+            let searchable = format!("{} {} {}", title, content, tags);
+            if !matches_query(&searchable, &tags) { continue; }
+            let ts = doc.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+            let display = if !title.is_empty() { format!("{}: {}", title, content) } else { content.to_string() };
+            output_lines.push(format!("  [{}] [{}] {} (tags: {}) — {}", collection, id, display, tags, ts));
+            listed_nodes.insert((collection, id));
+        }
+    }
+
+    // Episodic entries
+    for doc in entries.iter() {
+        if unpromoted_only && entry_is_promoted(doc) { continue; }
+        let pointer = doc.get("promoted_to").filter(|v| !v.is_null());
+        let promoted_collection = pointer.and_then(|v| v.get("collection")).and_then(|v| v.as_str());
+        let promoted_id = pointer.and_then(|v| v.get("id")).and_then(|v| v.as_str());
+        if let (Some(c), Some(i)) = (promoted_collection, promoted_id)
+            && listed_nodes.contains(&(c, i))
+        {
+            continue;
+        }
+        let content = doc.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        let tags = tags_to_str(doc);
+        if !matches_query(content, &tags) { continue; }
+        let id = doc.get("_id").and_then(|v| v.as_str()).unwrap_or("?");
+        let ts = doc.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
+        let promoted_marker = promoted_collection
+            .map(|c| format!(" [promoted → {}]", c))
+            .unwrap_or_default();
+        output_lines.push(format!("  [memory.entries] [{}] {}{} (tags: {}) — {}", id, content, promoted_marker, tags, ts));
+    }
+
+    output_lines
+}
+
+#[cfg(test)]
+mod recall_listing_tests {
+    use super::recall_lines;
+    use serde_json::json;
+
+    fn tokens(q: &str) -> Vec<String> {
+        q.split_whitespace().map(str::to_string).collect()
+    }
+
+    fn promoted_entry() -> serde_json::Value {
+        json!({
+            "_id": "e1", "content": "the cert refresh works after manual generation", "tags": ["certs"],
+            "promoted_to": {"collection": "memory.semantic", "id": "n1"}, "created_at": "2026-10-01T00:00:00Z",
+        })
+    }
+
+    #[test]
+    fn a_promoted_memory_is_listed_once_as_its_node() {
+        let node = json!({
+            "_id": "n1", "content": "the cert refresh works after manual generation", "category": "fact",
+            "tags": ["certs"], "created_at": "2026-10-01T00:00:01Z",
+        });
+        let lines = recall_lines(&[promoted_entry()], &[node], &[], &tokens("refresh"), false);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("[memory.semantic] [n1]"), "{lines:?}");
+    }
+
+    #[test]
+    fn an_entry_whose_node_did_not_match_keeps_its_marker() {
+        // The node's text was changed since the promotion; the query only
+        // finds the entry's original wording.
+        let node = json!({
+            "_id": "n1", "content": "certificates rotate by hand", "category": "fact",
+            "tags": ["certs"], "created_at": "2026-10-01T00:00:01Z",
+        });
+        let lines = recall_lines(&[promoted_entry()], &[node], &[], &tokens("refresh"), false);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("[memory.entries] [e1]"), "{lines:?}");
+        assert!(lines[0].contains("[promoted → memory.semantic]"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_procedure_keeps_its_entry_out_of_the_listing_too() {
+        let entry = json!({
+            "_id": "e2", "content": "how to rotate the cert", "tags": [],
+            "promoted_to": {"collection": "memory.procedural", "id": "p1"}, "created_at": "2026-10-01T00:00:00Z",
+        });
+        let procedure = json!({
+            "_id": "p1", "title": "Rotate the cert", "description": "how to rotate the cert by hand",
+            "tags": [], "created_at": "2026-10-01T00:00:01Z",
+        });
+        let lines = recall_lines(&[entry], &[], &[procedure], &tokens("rotate"), false);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("[memory.procedural] [p1] Rotate the cert: "), "{lines:?}");
+    }
+
+    #[test]
+    fn the_worklist_lists_unpromoted_entries_only() {
+        let unpromoted = json!({
+            "_id": "e3", "content": "refresh the docs", "tags": [], "promoted_to": null,
+            "created_at": "2026-10-01T00:00:00Z",
+        });
+        let lines = recall_lines(&[promoted_entry(), unpromoted], &[], &[], &tokens("refresh"), true);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].contains("[memory.entries] [e3]"), "{lines:?}");
     }
 }
 
