@@ -528,4 +528,154 @@ mod measure {
         std::fs::write(cfg["out"].as_str().expect("out"), serde_json::to_string_pretty(&report).unwrap())
             .expect("write report");
     }
+
+    /// Not a test: the measurement behind the floor of `remember`'s link
+    /// candidates. What cosine do two nodes have that the intelligence
+    /// itself linked with `knowledge_link`, and would the newer node's
+    /// nearest five have named the older one? No model runs: the vectors are
+    /// the ones the nodes carry. The config needs `{"db": "<url>"}` only:
+    ///
+    /// `EMBRA_MEASURE=<config.json> cargo test -p embra-brain -- \
+    ///    --ignored measure_link_candidate_cosines --nocapture`
+    #[tokio::test]
+    #[ignore]
+    async fn measure_link_candidate_cosines() {
+        use base64::Engine as _;
+        let cfg_path = std::env::var("EMBRA_MEASURE").expect("EMBRA_MEASURE=<config.json>");
+        let cfg: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cfg_path).expect("read config")).expect("json");
+        let db = crate::db::WardsonDbClient::from_url(cfg["db"].as_str().expect("db"));
+
+        // Every node with a vector, oldest first: (session, id, created_at, vector).
+        let mut nodes: Vec<(String, String, String, Vec<f32>)> = Vec::new();
+        for coll in crate::embedding::cache::EMBEDDED_COLLECTIONS {
+            let docs = db
+                .fetch_recent_with_fields(coll, crate::db::MEMORY_FETCH_WINDOW, Some(&["embedding", "created_at", "source_session"]))
+                .await
+                .expect("fetch");
+            for d in &docs {
+                let (Some(id), Some(b64)) =
+                    (d.get("_id").and_then(|v| v.as_str()), d.get("embedding").and_then(|v| v.as_str()))
+                else {
+                    continue;
+                };
+                let width =
+                    base64::engine::general_purpose::STANDARD.decode(b64).map(|b| b.len() / 4).unwrap_or(0);
+                let Some(v) = super::super::decode_vector(b64, width) else { continue };
+                let text = |key: &str| d.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                nodes.push((text("source_session"), id.to_string(), text("created_at"), v));
+            }
+        }
+        nodes.sort_by(|a, b| a.2.cmp(&b.2));
+        let index: std::collections::HashMap<&str, usize> =
+            nodes.iter().enumerate().map(|(i, n)| (n.1.as_str(), i)).collect();
+        let cos = |i: usize, j: usize| super::super::cosine(&nodes[i].3, &nodes[j].3) as f64;
+
+        // The edges the intelligence created: the five types, without the
+        // origin stamp that the seed packs and the identity projection carry.
+        // Keyed (newer, older), with the types that link the pair.
+        const TYPES: [&str; 5] = ["enables", "contradicts", "refines", "depends_on", "related_to"];
+        let mut pairs: std::collections::HashMap<(usize, usize), Vec<&str>> = std::collections::HashMap::new();
+        for edge_type in TYPES {
+            let body = serde_json::json!({
+                "filter": { "edge_type": edge_type },
+                "sort": [{ "created_at": "desc" }],
+                "limit": 100_000,
+            });
+            for e in &db.query("memory.edges", &body).await.expect("edges") {
+                if e.pointer("/metadata/origin").is_some_and(|o| o.is_string()) {
+                    continue;
+                }
+                let end = |key: &str| e.get(key).and_then(|v| v.as_str()).and_then(|id| index.get(id).copied());
+                if let (Some(a), Some(b)) = (end("source_id"), end("target_id"))
+                    && a != b
+                {
+                    pairs.entry((a.max(b), a.min(b))).or_default().push(edge_type);
+                }
+            }
+        }
+
+        // Per linked pair: its cosine, the rank the older node has among the
+        // nodes that existed when the newer one was written, its types, and
+        // whether both were promoted in one session — then the older node's
+        // id was in the conversation when the newer one was saved.
+        let linked: Vec<(f64, usize, &Vec<&str>, bool)> = pairs
+            .iter()
+            .map(|(&(new, old), types)| {
+                let c = cos(new, old);
+                let rank = 1 + (0..new).filter(|&x| x != old && cos(new, x) > c).count();
+                (c, rank, types, !nodes[new].0.is_empty() && nodes[new].0 == nodes[old].0)
+            })
+            .collect();
+        let quantiles = |v: Vec<f64>| {
+            let v = sorted(v);
+            format!(
+                "p05 {:.3}  p25 {:.3}  p50 {:.3}  p75 {:.3}  p95 {:.3}",
+                pct(&v, 0.05),
+                pct(&v, 0.25),
+                pct(&v, 0.50),
+                pct(&v, 0.75),
+                pct(&v, 0.95)
+            )
+        };
+        eprintln!("nodes with a vector: {}", nodes.len());
+        eprintln!(
+            "pairs the intelligence linked: {} — cosine {}",
+            linked.len(),
+            quantiles(linked.iter().map(|l| l.0).collect())
+        );
+        eprintln!(
+            "  both nodes from one session: {} of {}",
+            linked.iter().filter(|l| l.3).count(),
+            linked.len()
+        );
+        for edge_type in TYPES {
+            let of_type: Vec<&(f64, usize, &Vec<&str>, bool)> =
+                linked.iter().filter(|l| l.2.contains(&edge_type)).collect();
+            eprintln!(
+                "  {edge_type:<12} {:>4} pairs — cosine {} — older node among the nearest 5: {}",
+                of_type.len(),
+                quantiles(of_type.iter().map(|l| l.0).collect()),
+                of_type.iter().filter(|l| l.1 <= 5).count(),
+            );
+        }
+
+        // Per node: the nearest ten among the nodes older than it.
+        let nearest: Vec<Vec<(f64, usize)>> = (1..nodes.len())
+            .map(|i| {
+                let mut all: Vec<(f64, usize)> = (0..i).map(|x| (cos(i, x), x)).collect();
+                all.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+                all.truncate(10);
+                all
+            })
+            .collect();
+        eprintln!(
+            "nearest older node — cosine {}",
+            quantiles(nearest.iter().map(|n| n[0].0).collect())
+        );
+        for top_k in [5usize, 10] {
+            eprintln!("top {top_k}: floor | linked pairs it names | …or from one session | candidates per node | candidates that were linked | nodes with none");
+            for floor in [0.60, 0.65, 0.70, 0.75, 0.80, 0.85] {
+                let named = linked.iter().filter(|l| l.0 >= floor && l.1 <= top_k).count();
+                let reach = linked.iter().filter(|l| l.3 || (l.0 >= floor && l.1 <= top_k)).count();
+                let mut listed = 0usize;
+                let mut hits = 0usize;
+                let mut none = 0usize;
+                for (i, near) in nearest.iter().enumerate() {
+                    let shown: Vec<&(f64, usize)> = near.iter().take(top_k).filter(|c| c.0 >= floor).collect();
+                    listed += shown.len();
+                    hits += shown.iter().filter(|c| pairs.contains_key(&(i + 1, c.1))).count();
+                    none += usize::from(shown.is_empty());
+                }
+                eprintln!(
+                    "  {floor:.2} | {named:>4} ({:>2.0}%) | {reach:>4} ({:>2.0}%) | {:.2} | {hits:>4} of {listed:>5} ({:>2.0}%) | {none:>4} ({:>2.0}%)",
+                    100.0 * named as f64 / linked.len().max(1) as f64,
+                    100.0 * reach as f64 / linked.len().max(1) as f64,
+                    listed as f64 / nearest.len().max(1) as f64,
+                    100.0 * hits as f64 / listed.max(1) as f64,
+                    100.0 * none as f64 / nearest.len().max(1) as f64,
+                );
+            }
+        }
+    }
 }
