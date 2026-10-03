@@ -2,13 +2,15 @@
 
 Unresolved design questions tracked at the architecture level rather than as code comments. Each is something that will need a decision during Phase 1–3 implementation. Implementation bugs go in the Embra_Debug tracker — this list is design-state tracking, not defects.
 
-Extracted from `ARCHITECTURE.md` — `### Architectural Tensions (Known Open Problems)` — on 2026-05-23. Wording verbatim.
+Extracted from `ARCHITECTURE.md` — `### Architectural Tensions (Known Open Problems)` — on 2026-05-23. Wording verbatim. A dated note under an entry says what has happened since; the entry itself is left as it was written.
 
 ---
 
 ## Module trust escalation
 
 Operator-authored modules start sandboxed. How do they earn broader access? A trust ladder is needed: sandbox → internal-only → governed-egress → full-egress. Each step requires governance approval plus operational history. The ladder design is not yet specified.
+
+**2026-10-03.** The first rungs exist for dynamic tools (`embra-guardian`). A tool runs in a `wasmtime` sandbox with no ambient authority and reaches out only through the host imports it declares: `http_get` (https, public addresses only) and `web_search` (`KNOWN_CAPS` in `crates/embra-guardian/src/abi.rs`; the rules in `caps.rs`). A declaration is granted when the tool passes the replicant check and, for a proposal of the intelligence, the operator's `/guardian approve`. That is approval per definition, not a ladder: nothing is earned from operating history, and there is no internal-only rung — a private or loopback address is refused outright. The ladder is still not specified.
 
 ## Resource contention: LLM vs modules
 
@@ -18,9 +20,13 @@ Local LLM inference is resource-intensive. Module containers also need CPU and m
 
 Every governed operation goes through embra-guardian. If governance evaluation involves LLM reasoning, this adds latency to the hot path. Proposed dual-path: deterministic rule-engine for hot-path governance (fast), LLM-based evaluation for complex or novel requests (slow but thorough). The threshold between paths is not yet defined.
 
+**2026-10-03.** Dynamic tools settled on the dual path, split by time instead of by request. The evaluation that needs a model, the replicant check, runs when a tool is defined, proposed or rebuilt (`run_replicant_check` in `crates/embra-brain/src/guardian/mod.rs`) and never when it is called. A call meets deterministic limits only: the sandbox's epoch timeout and memory cap, and the capability broker's rules. The threshold between the paths is still undefined for an operation that is governed at the moment it runs, as a proxied MCP call would be.
+
 ## WardSONDB as single point of failure
 
 WardSONDB is a core OS service. If it fails, the brain can't read state and the feedback loop halts. Mitigations: WAL-based crash recovery (fjall's built-in durability), read replica for continuity during recovery, snapshot-based restore as last resort. The replica architecture is not yet designed.
+
+**2026-10-03.** Two of the three mitigations exist. Crash recovery is the storage engine's — fjall or rocksdb, chosen when the image is built (`--storage-engine`) — and `embrad` restarts the database with backoff under a burst budget (`crates/embrad/src/supervisor.rs`). Snapshot restore is `scripts/embraos-backup.sh` (`backup`, `restore`, `list`, `verify` of STATE and DATA), a file-level copy taken from the host with the VM stopped. There is still no replica, and no design for one.
 
 ## Bare metal vs K8s isolation parity
 
@@ -29,6 +35,8 @@ In bare metal mode, module containers share the same kernel as embraOS. In K8s m
 ## Module image provenance
 
 If module source originates inside the OS (operator-authored via Guardian, or — under future governance design — brain-proposed), the provenance chain must be auditable end-to-end: source code → `modules.source` → sandboxed build → image signing → governance review → allowlist → deploy. Each step must be logged and verifiable. The sandboxed build pipeline is not yet designed.
+
+**2026-10-03.** Part of the chain exists for dynamic tools, and the source this entry calls future — a proposal of the intelligence — has existed since `guardian_propose`. The record of a tool (`ToolDoc` in `crates/embra-guardian/src/store.rs`, collection `guardian.tools`) keeps its source and the SHA-256 of it, the verdict of the replicant check with the model that judged and the time, the toolchain version it was built with, and the tail of the build log. A tool has no third-party dependency, so its build runs no code but the compiler's. Not kept: a record of the operator's approval (building a proposal is the approval), a hash or a signature of the built artifact, and a log of each step that can be verified afterwards. Modules as images, with signing and an allowlist, are still not designed.
 
 ## Does the auto-derived edge layer still earn its cost?
 
