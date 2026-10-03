@@ -49,9 +49,11 @@ async fn start_test_server_with_bitmap(bitmap_fields: &str) -> (String, TempDir)
     let tmp = TempDir::new().unwrap();
     let storage = Storage::open(tmp.path()).unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    // The listener is kept and handed to tokio below. Dropping it and
+    // binding the port again gave a parallel test the window to take the
+    // port, and this test then talked to that test's server.
+    let std_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = std_listener.local_addr().unwrap().port();
 
     let mut config = test_config(&tmp, port);
     config.bitmap_fields = bitmap_fields.to_string();
@@ -77,7 +79,8 @@ async fn start_test_server_with_bitmap(bitmap_fields: &str) -> (String, TempDir)
 
     let app = build_router(state);
     let addr = format!("127.0.0.1:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
     let base_url = format!("http://{addr}");
 
     tokio::spawn(async move {
@@ -93,9 +96,11 @@ async fn start_test_server_with_keys(api_keys: Vec<String>) -> (String, TempDir)
     let storage = Storage::open(tmp.path()).unwrap();
 
     // Find a free port
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    // The listener is kept and handed to tokio below. Dropping it and
+    // binding the port again gave a parallel test the window to take the
+    // port, and this test then talked to that test's server.
+    let std_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = std_listener.local_addr().unwrap().port();
 
     let config = test_config(&tmp, port);
 
@@ -109,7 +114,8 @@ async fn start_test_server_with_keys(api_keys: Vec<String>) -> (String, TempDir)
 
     let app = build_router(state);
     let addr = format!("127.0.0.1:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
     let base_url = format!("http://{addr}");
 
     tokio::spawn(async move {
@@ -126,9 +132,11 @@ async fn start_test_server_with_max_query_limit(max: u64) -> (String, TempDir) {
     let tmp = TempDir::new().unwrap();
     let storage = Storage::open(tmp.path()).unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    // The listener is kept and handed to tokio below. Dropping it and
+    // binding the port again gave a parallel test the window to take the
+    // port, and this test then talked to that test's server.
+    let std_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = std_listener.local_addr().unwrap().port();
 
     let mut config = test_config(&tmp, port);
     config.max_query_limit = max;
@@ -143,7 +151,8 @@ async fn start_test_server_with_max_query_limit(max: u64) -> (String, TempDir) {
 
     let app = build_router(state);
     let addr = format!("127.0.0.1:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
     let base_url = format!("http://{addr}");
 
     tokio::spawn(async move {
@@ -3766,9 +3775,11 @@ async fn test_bitmap_auto_detection() {
     let storage = Storage::open(tmp.path()).unwrap();
     storage.scan_accelerator.set_sample_size(100);
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    // The listener is kept and handed to tokio below. Dropping it and
+    // binding the port again gave a parallel test the window to take the
+    // port, and this test then talked to that test's server.
+    let std_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = std_listener.local_addr().unwrap().port();
     let state = Arc::new(AppState {
         storage,
         config: test_config(&tmp, port),
@@ -3778,7 +3789,8 @@ async fn test_bitmap_auto_detection() {
     });
     let app = build_router(state);
     let addr = format!("127.0.0.1:{port}");
-    let tcp = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+    let tcp = tokio::net::TcpListener::from_std(std_listener).unwrap();
     tokio::spawn(async move {
         axum::serve(tcp, app).await.unwrap();
     });
@@ -6369,9 +6381,11 @@ async fn start_test_server_with_engine(engine: &str) -> (String, TempDir) {
     let tmp = TempDir::new().unwrap();
     let storage = Storage::open_with_config(tmp.path(), engine, MemoryConfig::default()).unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    // The listener is kept and handed to tokio below. Dropping it and
+    // binding the port again gave a parallel test the window to take the
+    // port, and this test then talked to that test's server.
+    let std_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = std_listener.local_addr().unwrap().port();
 
     let mut config = test_config(&tmp, port);
     config.storage_engine = engine.to_string();
@@ -6386,7 +6400,8 @@ async fn start_test_server_with_engine(engine: &str) -> (String, TempDir) {
 
     let app = build_router(state);
     let addr = format!("127.0.0.1:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
     let base_url = format!("http://{addr}");
 
     tokio::spawn(async move {
@@ -6954,9 +6969,11 @@ async fn test_request_body_limit() {
     // Low-limit server: a 2 MB body against a 1 MiB cap → 413.
     let tmp = TempDir::new().unwrap();
     let storage = Storage::open(tmp.path()).unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    // The listener is kept and handed to tokio below. Dropping it and
+    // binding the port again gave a parallel test the window to take the
+    // port, and this test then talked to that test's server.
+    let std_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = std_listener.local_addr().unwrap().port();
     let mut config = test_config(&tmp, port);
     config.max_body_mb = 1;
     let state = Arc::new(AppState {
@@ -6968,7 +6985,8 @@ async fn test_request_body_limit() {
     });
     let app = build_router(state);
     let addr = format!("127.0.0.1:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
     tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();
     });
@@ -8932,9 +8950,11 @@ async fn start_test_server_with_engine_and_bitmap(
     let tmp = TempDir::new().unwrap();
     let storage = Storage::open_with_config(tmp.path(), engine, MemoryConfig::default()).unwrap();
 
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
+    // The listener is kept and handed to tokio below. Dropping it and
+    // binding the port again gave a parallel test the window to take the
+    // port, and this test then talked to that test's server.
+    let std_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = std_listener.local_addr().unwrap().port();
 
     let mut config = test_config(&tmp, port);
     config.storage_engine = engine.to_string();
@@ -8960,7 +8980,8 @@ async fn start_test_server_with_engine_and_bitmap(
 
     let app = build_router(state);
     let addr = format!("127.0.0.1:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    std_listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
     let base_url = format!("http://{addr}");
 
     tokio::spawn(async move {
