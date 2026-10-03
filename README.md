@@ -18,7 +18,7 @@
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — the sealed identity graph and the memory collections in one multigraph, with the production instance's measured numbers" width="100%">
 </p>
 
-**Current Status:** Phase 1 — Stable. Sprint 6, the final Phase 1 sprint, closed with `v0.15.0-phase1` (2026-09-18); the code-review pit stop is in progress on branch `code-review`.
+**Current Status:** Phase 1 — Stable (code review in progress). Sprint 6, the final Phase 1 sprint, closed with `v0.15.0-phase1` (2026-09-18); the code-review pit stop is on branch `code-review`.
 
 Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` management CLI, an image factory targeting bare metal and Kubernetes, and a sovereign-intelligence tier — A/B partitioned rollback, LUKS, mTLS, and fully offline local inference. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
