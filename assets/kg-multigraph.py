@@ -215,7 +215,7 @@ def draw(ctx):
          "One multigraph in WardSONDB: the sealed identity graph, episodic entries and promoted knowledge "
          "— retrieval by tags, text, in-OS vectors and structure",
          11.5, DIM)
-    badge = "PHASE 1 · STABLE · v0.15.0-phase1"
+    badge = "PHASE 1 · STABLE (CODE REVIEW IN PROGRESS)"
     bw = text_width(ctx, badge, 9.5, True, 1.0) + 24
     rounded_rect(ctx, W - 40 - bw, 30, bw, 22, 11)
     ctx.set_source_rgba(*ORANGE, 0.10)
@@ -231,7 +231,7 @@ def draw(ctx):
         "identity": (90, 86),
         "procedural": (184, 78),
         "semantic": (270, 112),
-        "entries": (390, 106),
+        "entries": (390, 118),
     }
     lane(ctx, LX, lanes["identity"][0], LW, lanes["identity"][1], "IDENTITY.GRAPH  ·  the sealed IDENTITY+SOUL graph, projected")
     lane(ctx, LX, lanes["procedural"][0], LW, lanes["procedural"][1], "MEMORY.PROCEDURAL")
@@ -257,62 +257,66 @@ def draw(ctx):
 
     # Procedural nodes.
     py = lanes["procedural"][0] + 28
-    p_qemu = node(ctx, 420, py, 250, 42, "PROCEDURAL", "Debugging QEMU boot failures", BURNT, "▮ 384-d")
+    p_qemu = node(ctx, 440, py, 230, 42, "PROCEDURAL", "QEMU boot debugging", BURNT, "▮ 384-d")
     p_img = node(ctx, 700, py, 155, 42, "PROCEDURAL", "Rebuilding the image", BURNT, "▮ 384-d")
 
     # Semantic nodes.
     sy = lanes["semantic"][0] + 44
-    s_pref = node(ctx, 60, sy, 150, 42, "PREFERENCE", "dark mode UI", ORANGE, "▮ 384-d")
-    s_fact = node(ctx, 240, sy, 200, 42, "FACT", "Rust async requires tokio", ORANGE, "▮ 384-d")
-    s_dec = node(ctx, 460, sy, 180, 42, "DECISION", "SquashFS immutable rootfs", ORANGE, "▮ 384-d")
-    s_seed = node(ctx, 700, sy, 155, 42, "SEED", "how my memory works", TEAL, "▮ 384-d")
+    s_pref = node(ctx, 46, sy, 172, 42, "PREFERENCE", "User prefers dark mode", ORANGE, "▮ 384-d")
+    s_fact = node(ctx, 243, sy, 183, 42, "FACT", "Rust async requires tokio", ORANGE, "▮ 384-d")
+    s_dec = node(ctx, 451, sy, 196, 42, "DECISION", "SquashFS immutable rootfs", ORANGE, "▮ 384-d")
+    s_seed = node(ctx, 690, sy, 165, 42, "SEED", "how my memory works", TEAL, "▮ 384-d")
     text(ctx, 855, sy + 54, "seed pack · ensured at every boot", 7.5, TEAL, False, 0.1, align="right")
 
-    # Entries: one column per promotion, so no arrow crosses a box.
+    # Entries: each one under the node `remember` wrote with it, carrying the
+    # same text. A seed node has no entry.
     ey = lanes["entries"][0] + 30
-    e1 = node(ctx, 60, ey, 190, 38, None, "User prefers dark mode", GREY)
-    e2 = node(ctx, 280, ey, 200, 38, None, "Discussed Rust async patterns", GREY)
-    e5 = node(ctx, 505, ey, 175, 38, None, "WardSONDB index design", GREY)
-    e3 = node(ctx, 695, ey, 160, 38, None, "QEMU boot debugging", GREY)
-    e4 = node(ctx, 60, ey + 50, 190, 38, None, "Phase 1 architecture review", GREY)
-    text(ctx, 280, ey + 62, "one entry per remembered moment, per session", 7.5, GREY, False, 0.1)
-    text(ctx, 280, ey + 75, "same_session · temporal · tag_overlap: derived at write time, double-written —", 7.5, AUTO, False, 0.1)
-    text(ctx, 280, ey + 88, "99.3 % of the edges; retrieval reads none of them per turn, a traversal reads 500 per node", 7.5, AUTO, False, 0.1)
+    e_pref = node(ctx, 46, ey, 172, 38, None, "User prefers dark mode", GREY)
+    e_fact = node(ctx, 243, ey, 183, 38, None, "Rust async requires tokio", GREY)
+    e_dec = node(ctx, 451, ey, 196, 38, None, "SquashFS immutable rootfs", GREY)
+    e_qemu = node(ctx, 670, ey, 185, 38, None, "QEMU boot debugging", GREY)
+    text(ctx, 46, ey + 54, "one entry per memory, per session — remember writes the entry and its node in one call",
+         7.5, GREY, False, 0.1)
+    text(ctx, 46, ey + 66, "same_session · temporal · tag_overlap: derived at write time, double-written —", 7.5, AUTO, False, 0.1)
+    text(ctx, 46, ey + 78, "99.3 % of the edges; retrieval reads none of them per turn, a traversal reads 500 per node", 7.5, AUTO, False, 0.1)
 
     # Auto-derived edges among entries (thin, dashed).
     dash = [3, 3]
-    edge(ctx, e1["right"], e2["left"], AUTO, 1.0, dash, False, bend=-10, alpha=0.8)
-    edge(ctx, e2["right"], e5["left"], AUTO, 1.0, dash, False, bend=-10, alpha=0.8)
-    edge(ctx, e5["right"], e3["left"], AUTO, 1.0, dash, False, bend=-10, alpha=0.8)
-    edge(ctx, e1["bottom"], e4["top"], AUTO, 1.0, dash, False, bend=0, alpha=0.6)
-    edge(ctx, e4["right"], e2["bottom"], AUTO, 1.0, dash, False, bend=-10, alpha=0.6)
+    edge(ctx, e_pref["right"], e_fact["left"], AUTO, 1.0, dash, False, bend=-10, alpha=0.8)
+    edge(ctx, e_fact["right"], e_dec["left"], AUTO, 1.0, dash, False, bend=-10, alpha=0.8)
+    edge(ctx, e_dec["right"], e_qemu["left"], AUTO, 1.0, dash, False, bend=-10, alpha=0.8)
     # Auto-derived edges among semantic nodes too.
     edge(ctx, s_pref["right"], s_fact["left"], AUTO, 1.0, dash, False, bend=-14, alpha=0.7)
     edge(ctx, s_fact["right"], s_dec["left"], AUTO, 1.0, dash, False, bend=14, alpha=0.7)
 
-    # Promotion: derived_from, entry -> node (and the promoted_to pointer back).
-    edge(ctx, e1["top"], s_pref["bottom"], DERIVED, 1.8, None, True, bend=-10)
-    edge(ctx, e2["top"], s_fact["bottom"], DERIVED, 1.8, None, True, bend=-10)
-    edge(ctx, e5["top"], s_dec["bottom"], DERIVED, 1.8, None, True, bend=-10)
-    edge(ctx, e3["left"], p_qemu["br"], DERIVED, 1.8, None, True, bend=20)
-    text(ctx, 182, ey - 8, "derived_from", 7.5, DERIVED, False, 0.2)
-    text(ctx, 612, ey - 8, "promoted_to ↑", 7.5, DERIVED, False, 0.2)
+    # Promotion: derived_from runs node -> entry; the entry's promoted_to
+    # pointer runs back up. The procedure's edge comes down through the gap
+    # between the decision and the seed node.
+    # The first one runs right of the lane title.
+    edge(ctx, s_pref["br"], e_pref["tr"], DERIVED, 1.8, None, True)
+    edge(ctx, s_fact["bottom"], e_fact["top"], DERIVED, 1.8, None, True)
+    edge(ctx, s_dec["bottom"], e_dec["top"], DERIVED, 1.8, None, True)
+    edge(ctx, (658, py + 42), (684, ey), DERIVED, 1.8, None, True)
+    text(ctx, 183, sy + 58, "promoted_to ↑ (the entry's pointer)", 7.5, DERIVED, False, 0.2)
+    text(ctx, 342, sy + 58, "derived_from", 7.5, DERIVED, False, 0.2)
 
     # Brain-created edges among knowledge nodes.
     edge(ctx, s_fact["top"], p_qemu["left"], BRAIN, 1.5, None, True, bend=-22)
-    text(ctx, 300, py + 62, "enables", 7.5, BRAIN, False, 0.2)
+    text(ctx, 392, sy - 22, "enables", 7.5, BRAIN, False, 0.2)
+    text(ctx, 392, sy - 12, "from remember's candidates", 7.5, BRAIN, False, 0.2)
     edge(ctx, s_dec["top"], p_img["bottom"], BRAIN, 1.5, None, True, bend=-12)
-    text(ctx, 668, sy - 14, "depends_on", 7.5, BRAIN, False, 0.2)
+    text(ctx, 706, sy - 18, "depends_on", 7.5, BRAIN, False, 0.2)
     edge(ctx, p_qemu["right"], p_img["left"], BRAIN, 1.5, None, True, bend=-8)
     text(ctx, 672, py - 4, "refines", 7.5, BRAIN, False, 0.2)
     edge(ctx, s_seed["left"], s_dec["right"], CONTRA, 1.3, [5, 4], True, bend=-14)
-    text(ctx, 645, sy + 52, "contradicts", 7.5, CONTRA, False, 0.2)
+    text(ctx, 646, sy + 54, "contradicts", 7.5, CONTRA, False, 0.2, align="right")
     # A memory linked into the identity graph.
-    edge(ctx, s_pref["tl"], i_soul["bl"], BRAIN, 1.3, None, True, bend=-40, alpha=0.8)
+    # It leaves the node right of the lane title, which it used to cross.
+    edge(ctx, (200, sy), i_soul["bl"], BRAIN, 1.3, None, True, bend=-40, alpha=0.8)
     text(ctx, 150, py + 44, "related_to → identity", 7.5, BRAIN, False, 0.2)
 
     # Right panel: measured numbers.
-    PX, PY, PW, PH = 880, 90, 290, 406
+    PX, PY, PW, PH = 880, 90, 290, 418
     rounded_rect(ctx, PX, PY, PW, PH, 12)
     rgba(ctx, PANEL)
     ctx.fill_preserve()
@@ -358,7 +362,7 @@ def draw(ctx):
         text(ctx, PX + PW - 16, y, v, 8.5, TEXT, True, align="right")
 
     # Legend.
-    ly = 518
+    ly = 526
     items = [
         (AUTO, [3, 3], False, "same_session · temporal · tag_overlap"),
         (DERIVED, None, True, "derived_from"),
@@ -374,7 +378,11 @@ def draw(ctx):
     text(ctx, x, ly + 3.5, "▮ 384-d", 8, TEAL, True, 0.3)
     x += text_width(ctx, "▮ 384-d", 8, True, 0.3) + 6
     text(ctx, x, ly + 3.5, "vector on the node", 8.5, GREY)
-    text(ctx, 40, ly + 20,
+    text(ctx, 40, ly + 19,
+         "Writing: remember saves the entry and its node in one call, embeds the node, and returns its nearest nodes "
+         "(cosine ≥ 0.75) for the intelligence to link.",
+         8.5, DIM)
+    text(ctx, 40, ly + 32,
          "Retrieval on every turn: tag match, IDF-weighted text match, cosine over the vector index, session adjacency — "
          "then relevance·0.6 + recency·0.2 + access·0.2, a relevance floor, and at most five nodes injected.",
          8.5, DIM)
