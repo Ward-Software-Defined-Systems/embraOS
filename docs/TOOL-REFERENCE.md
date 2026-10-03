@@ -33,7 +33,7 @@ Every dispatch runs under three registry-wide limits (`crates/embra-brain/src/to
 | **memory_scan** | Memory inventory — total count, tag frequency, per-session breakdown, age buckets, duplicate candidates. Stats cover the 10,000 most-recent entries (recency-sorted window, saturation-warned); the duplicate scan is bounded to the newest 500 (noted in the report when it truncates). Includes a Knowledge Graph summary section (semantic/procedural/edge counts, promoted ratio) |
 | **memory_dedup** | Find duplicate memory groups (identical, near-duplicate, subset) with merge strategy proposals over the 10,000 most-recent entries; the pairwise scan is bounded to the newest 500 when no explicit IDs are given (noted in the report). A group keeps an entry that has a node before one that has none; the plan names each entry's node and merges two nodes with `knowledge_merge` before the duplicate entry is forgotten. Also flags cross-collection overlap between unpromoted entries and semantic nodes |
 
-**Knowledge Graph** *(Sprint 2 — EXPERIMENTAL)*
+**Knowledge Graph** *(Sprint 2)*
 
 For the data model, edge taxonomy, density rationale, promotion path, auto-enrichment behavior, and retrieval ranking, see [KNOWLEDGE-GRAPH.md](KNOWLEDGE-GRAPH.md).
 

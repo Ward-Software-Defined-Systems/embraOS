@@ -126,7 +126,7 @@ embraOS is built on a 7-layer continuity architecture (descended from the OpenCl
 | **Influence & Propagation** | Tool dispatch, LLM provider routing, Guardian dynamic-tool gateway. | `crates/embra-brain/src/{tools,provider,guardian}/`; 115 tools, 4 providers |
 | **Action Layer** | Tool calls that touch the world — filesystem, git, HTTP, SSH, cron. | `crates/embra-brain/src/tools/registry.rs` |
 | **Governance & Guardrails** | Soul injection into the system prompt, workspace path restriction, RFC 1918 SSH constraint, Guardian capability broker. | `crates/embra-brain/src/brain/prompts.rs`; tool-layer enforcement |
-| **Memory & Knowledge** | Session history + cross-session knowledge graph (entries / semantic / procedural / typed edges) with auto-enrichment on retrieval ≥0.3. | `crates/embra-brain/src/knowledge/` |
+| **Memory & Knowledge** | Session history + cross-session knowledge graph (entries / semantic / procedural / typed edges) with auto-enrichment on every turn (score ≥ 0.3 and a relevance floor). | `crates/embra-brain/src/knowledge/` |
 
 The runtime services that implement those layers:
 
@@ -171,11 +171,14 @@ The full embraOS manual lives in [docs/](docs/).
 |---|---|
 | **[Quick Start](docs/QUICK-START.md)** | Build the QEMU image from source (Ubuntu 24.04 / 26.04); first-boot Config Wizard; operational notes |
 | **[Roadmap](docs/ROADMAP.md)** | Phase 0–5 delivery status, the post-Sprint-5 embra-web / embra-guardian v1 increments, and Sprint 6 — the final Phase 1 sprint |
+| **[Change Log](docs/CHANGE-LOG.md)** | Merge log, anchored on tagged releases |
 | **[Operation](docs/OPERATION.md)** | Run lifecycle, the session model, keyboard shortcuts, current limitations |
 | **[Command Reference](docs/COMMAND-REFERENCE.md)** | Every slash command |
 | **[Tool Reference](docs/TOOL-REFERENCE.md)** | All 115 built-in tools by category, plus workspace / GitHub / SSH safety notes |
 | **[System Design](docs/SYSTEM-DESIGN.md)** | The 7-layer continuity architecture, the four LLM providers, reasoning controls, prompt caching |
+| **[Knowledge Graph](docs/KNOWLEDGE-GRAPH.md)** | The cross-session memory graph — promotion at creation, link candidates, auto-derived edges, auto-enrichment, retrieval ranking, in-OS embeddings, the twelve `knowledge_*` tools |
 | **[Identity Graph](docs/IDENTITY-GRAPH.md)** | The sealed IDENTITY+SOUL graph — format, the Learning-Mode import, KG projection, prompt rendering, and the re-seal migration ceremony |
+| **[Open Problems](docs/OPEN-PROBLEMS.md)** | Unresolved design questions tracked at the architecture level |
 | **[Recommended Local Models](docs/RECOMMENDED-LOCAL-MODELS.md)** | Vetted models and server configuration for the Ollama / LM Studio backends |
 | **[Replicant Check](docs/REPLICANT-CHECK.md)** | The soul-spec gate every dynamic tool passes before it compiles — how it works, both authoring paths, and how to test it |
 | **[Guardian Tool Examples](docs/GUARDIAN-TOOL-EXAMPLES.md)** | Paste-ready dynamic-tool modules (embra-guardian-v1) |
