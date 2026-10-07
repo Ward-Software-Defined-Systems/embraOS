@@ -20,6 +20,8 @@
 //! 4. Recursively strip fields outside the documented subset
 //!    (`$schema`, `additionalProperties`, `examples`, schemars-specific
 //!    keys). Preserve only what Gemini documents as accepted.
+//! 5. Send a nested object that lists no properties without a type
+//!    (`untype_open_nested_objects`).
 
 use serde_json::Value as JsonValue;
 
@@ -94,6 +96,7 @@ pub fn translate_schema(tool_name: &str, mut schema: JsonValue) -> Result<JsonVa
     reject_combinators(tool_name, &schema)?;
     uppercase_types(&mut schema);
     strip_unsupported(&mut schema);
+    untype_open_nested_objects(&mut schema);
     Ok(schema)
 }
 
@@ -291,6 +294,43 @@ fn strip_unsupported(schema: &mut JsonValue) {
             }
         }
         _ => {}
+    }
+}
+
+/// Send a nested object schema that lists no properties without a type.
+/// In the OpenAPI subset of `parameters`, Gemini has answered 400 to an
+/// OBJECT without properties ("should be non-empty for OBJECT type") and
+/// is reported to fill one with `{}`; untyped, the model writes the
+/// object itself. `guardian_call.input` is such a parameter: an open
+/// object whose shape is the dynamic tool's own schema. The root is never
+/// touched: a tool without parameters is an OBJECT without properties,
+/// and Gemini accepts that.
+fn untype_open_nested_objects(schema: &mut JsonValue) {
+    let JsonValue::Object(map) = schema else {
+        return;
+    };
+    let mut nested: Vec<&mut JsonValue> = Vec::new();
+    for (key, value) in map.iter_mut() {
+        match (key.as_str(), value) {
+            ("properties", JsonValue::Object(props)) => nested.extend(props.values_mut()),
+            ("items", items @ JsonValue::Object(_)) => nested.push(items),
+            ("anyOf", JsonValue::Array(branches)) => nested.extend(branches.iter_mut()),
+            _ => {}
+        }
+    }
+    for child in nested {
+        if let JsonValue::Object(child_map) = child {
+            let is_object = child_map.get("type").and_then(|t| t.as_str()) == Some("OBJECT");
+            let lists_properties = child_map
+                .get("properties")
+                .and_then(|p| p.as_object())
+                .is_some_and(|p| !p.is_empty());
+            if is_object && !lists_properties {
+                child_map.remove("type");
+                child_map.remove("properties");
+            }
+        }
+        untype_open_nested_objects(child);
     }
 }
 
@@ -569,5 +609,77 @@ mod tests {
         assert_eq!(category["enum"], json!(["fact", "preference", "decision", "observation", "pattern"]));
         assert!(category.get("allOf").is_none() && category.get("anyOf").is_none(), "{category}");
         assert_eq!(schema["required"], json!(["content"]));
+    }
+
+    /// An open object (`guardian_call.input`) reaches Gemini without a
+    /// type, whatever form schemars or a change gives it.
+    #[test]
+    fn a_nested_object_without_properties_reaches_gemini_untyped() {
+        for input in [
+            json!({"type": "object", "description": "d"}),
+            json!({"type": ["object", "null"], "description": "d"}),
+            json!({"type": "object", "properties": {}, "description": "d"}),
+            json!({"type": "object", "additionalProperties": true, "description": "d"}),
+        ] {
+            let schema = json!({"type": "object", "properties": {"input": input}});
+            let out = translate_schema("synthetic", schema).unwrap();
+            assert_eq!(out["properties"]["input"], json!({"description": "d"}), "{input}");
+        }
+    }
+
+    #[test]
+    fn a_parameterless_root_keeps_its_object_type_for_gemini() {
+        let schema = json!({"type": "object", "title": "SystemStatusArgs"});
+        let out = translate_schema("synthetic", schema).unwrap();
+        assert_eq!(out["type"], "OBJECT");
+    }
+
+    #[test]
+    fn a_nested_object_with_properties_keeps_its_type_for_gemini() {
+        let schema = json!({
+            "type": "object",
+            "properties": {"edits": {"type": "array", "items": {
+                "type": "object",
+                "properties": {"old": {"type": "string"}, "meta": {"type": "object"}}
+            }}}
+        });
+        let out = translate_schema("synthetic", schema).unwrap();
+        let item = &out["properties"]["edits"]["items"];
+        assert_eq!(item["type"], "OBJECT");
+        // The rule reaches through items: an open object inside loses its type.
+        assert!(item["properties"]["meta"].get("type").is_none(), "{item}");
+    }
+
+    /// Every parameter Gemini gets carries a type, except
+    /// `guardian_call.input`, an open object Gemini would fill with `{}`.
+    #[test]
+    fn the_guardian_input_is_the_one_untyped_gemini_parameter() {
+        fn untyped(path: &str, schema: &JsonValue, found: &mut Vec<String>) {
+            if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+                for (name, prop) in props {
+                    let at = format!("{path}.{name}");
+                    if prop.get("type").is_none() {
+                        found.push(at.clone());
+                    }
+                    untyped(&at, prop, found);
+                }
+            }
+            if let Some(items) = schema.get("items") {
+                let at = format!("{path}[]");
+                if items.get("type").is_none() {
+                    found.push(at.clone());
+                }
+                untyped(&at, items, found);
+            }
+        }
+        let descriptors: Vec<&'static ToolDescriptor> = registry::all_descriptors().collect();
+        let tools = translate(&descriptors).unwrap();
+        let mut found = Vec::new();
+        for decl in tools[0]["functionDeclarations"].as_array().unwrap() {
+            let name = decl["name"].as_str().unwrap();
+            assert_eq!(decl["parameters"]["type"], "OBJECT", "{name}");
+            untyped(name, &decl["parameters"], &mut found);
+        }
+        assert_eq!(found, ["guardian_call.input"]);
     }
 }
