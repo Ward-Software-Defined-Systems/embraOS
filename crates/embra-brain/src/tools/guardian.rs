@@ -119,10 +119,72 @@ fn inject_data_file_content(
     Ok(input)
 }
 
+/// How many layers of JSON text an invoke's input may carry: an object
+/// sent as a string, or as a string of that string (a model that quoted
+/// its JSON inside an XML tool-call tag).
+const INPUT_DECODE_LEVELS: usize = 2;
+
+/// The input an invoke hands the guest. Every dynamic tool's
+/// `GUARDIAN_SCHEMA` has an object root (the validator's
+/// `normalize_schema`), so an input is an object or absent; an absent one
+/// is null and reaches the guest as the text `null`. Some servers deliver
+/// the object as JSON text: Ollama's Qwen3-Coder parser (parsers `qwen3.5`
+/// and `glm-4.7`) keeps an argument as a string when its schema declares
+/// no type, and a model can write one. A string that decodes to an object
+/// becomes that object. Any other input can never be valid and is refused
+/// rather than passed on. `status` ignores the input.
+fn normalize_invoke_input(
+    action: &str,
+    input: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    use serde_json::Value;
+    if action != "invoke" {
+        return Ok(input);
+    }
+    let mut text = match input {
+        Value::Null | Value::Object(_) => return Ok(input),
+        Value::String(s) => s,
+        Value::Bool(_) => return Err(input_is_not_an_object("a boolean")),
+        Value::Number(_) => return Err(input_is_not_an_object("a number")),
+        Value::Array(_) => return Err(input_is_not_an_object("an array")),
+    };
+    for _ in 0..INPUT_DECODE_LEVELS {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Ok(Value::Null);
+        }
+        match serde_json::from_str::<Value>(trimmed) {
+            Ok(v @ (Value::Object(_) | Value::Null)) => return Ok(v),
+            Ok(Value::String(inner)) => text = inner,
+            _ => break,
+        }
+    }
+    Err(input_is_not_an_object("a string that is not a JSON object"))
+}
+
+/// The refusal names the contract in its own words: an OpenAI-compatible
+/// server never sees `is_error`, only this text.
+fn input_is_not_an_object(got: &str) -> String {
+    format!(
+        "guardian_call: input must be a JSON object matching the tool's input schema \
+         (see guardian_list); got {got}"
+    )
+}
+
 impl GuardianCallArgs {
     pub async fn run(mut self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        // Only this branch touches the input. Without `data_file` a null
-        // input reaches the guest as the text `null`, as it always has.
+        let arrived_as_text = self.input.is_string();
+        self.input =
+            normalize_invoke_input(&self.action, self.input).map_err(DispatchError::Handler)?;
+        if arrived_as_text && self.input.is_object() {
+            tracing::warn!(
+                target: "guardian",
+                tool = %self.tool,
+                "guardian_call: input arrived as JSON text; decoded to an object"
+            );
+        }
+        // An invoke's input is now an object or null. Without `data_file` a
+        // null input reaches the guest as the text `null`, as it always has.
         if let Some(path) = self.data_file.as_deref() {
             let resolved =
                 validate_data_file_request(&self.action, path).map_err(DispatchError::Handler)?;
@@ -333,6 +395,145 @@ mod tests {
         assert!(
             desc.contains(embra_guardian::GUARDIAN_TEMPLATE),
             "guardian_propose description must embed GUARDIAN_TEMPLATE verbatim"
+        );
+    }
+
+    #[test]
+    fn an_object_input_passes_unchanged() {
+        for input in [
+            serde_json::json!({}),
+            serde_json::json!({"query": "x", "opts": {"n": 3, "tags": ["a"]}}),
+        ] {
+            assert_eq!(normalize_invoke_input("invoke", input.clone()).unwrap(), input);
+        }
+    }
+
+    #[test]
+    fn a_json_object_sent_as_a_string_reaches_the_tool_as_an_object() {
+        for text in ["{\"query\":\"x\"}", "  {\"query\": \"x\"}\n"] {
+            assert_eq!(
+                normalize_invoke_input("invoke", serde_json::json!(text)).unwrap(),
+                serde_json::json!({"query": "x"})
+            );
+        }
+    }
+
+    #[test]
+    fn an_object_encoded_twice_is_decoded_and_no_further() {
+        let once = serde_json::json!({"query": "x"}).to_string();
+        let twice = serde_json::Value::String(once).to_string();
+        let thrice = serde_json::Value::String(twice.clone()).to_string();
+        assert_eq!(
+            normalize_invoke_input("invoke", serde_json::json!(twice)).unwrap(),
+            serde_json::json!({"query": "x"})
+        );
+        let err = normalize_invoke_input("invoke", serde_json::json!(thrice)).unwrap_err();
+        assert!(err.contains("must be a JSON object"), "{err}");
+    }
+
+    #[test]
+    fn a_null_input_still_reaches_the_tool_as_null() {
+        for input in [
+            serde_json::Value::Null,
+            serde_json::json!("null"),
+            serde_json::json!(""),
+            serde_json::json!("  "),
+        ] {
+            let out = normalize_invoke_input("invoke", input.clone()).unwrap();
+            assert!(out.is_null(), "{input} gave {out}");
+        }
+    }
+
+    #[test]
+    fn an_input_that_is_not_an_object_is_refused() {
+        for input in [
+            serde_json::json!(5),
+            serde_json::json!(true),
+            serde_json::json!([1]),
+            serde_json::json!("embraOS"),
+            serde_json::json!("[1]"),
+            serde_json::json!("5"),
+        ] {
+            let err = normalize_invoke_input("invoke", input.clone()).unwrap_err();
+            assert!(
+                err.starts_with("guardian_call: input must be a JSON object")
+                    && err.contains("guardian_list"),
+                "{input}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_status_call_keeps_its_input_as_given() {
+        for input in [
+            serde_json::json!(5),
+            serde_json::json!("{\"a\":1}"),
+            serde_json::json!([1]),
+        ] {
+            assert_eq!(normalize_invoke_input("status", input.clone()).unwrap(), input);
+        }
+    }
+
+    #[test]
+    fn a_stringified_input_takes_data_file_content() {
+        let input =
+            normalize_invoke_input("invoke", serde_json::json!("{\"action\":\"scan\"}")).unwrap();
+        let out = inject_data_file_content(input, "x".into()).unwrap();
+        assert_eq!(out, serde_json::json!({"action": "scan", "data": "x"}));
+    }
+
+    /// The committed probe module (`embra-guardian/examples/gen_fixture.rs`):
+    /// `{a, b, url?}` -> `{sum, fetched}`.
+    const PROBE_WASM: &[u8] = include_bytes!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../embra-guardian/tests/fixtures/probe.wasm"
+    ));
+    /// The probe's name in the process-wide overlay; no other test uses it.
+    const PROBE: &str = "probe_input_shapes";
+
+    /// Invoke the probe through the registry, the way the turn loop and the
+    /// cron loop reach `guardian_call`, and return the sum it computed.
+    async fn probe_sum(input: serde_json::Value) -> Result<f64, DispatchError> {
+        let rt = embra_guardian::overlay::init("test").expect("guardian runtime");
+        rt.compile_insert(PROBE, "probe", serde_json::json!({"type": "object"}), Vec::new(), PROBE_WASM)
+            .expect("the probe compiles");
+        let config: crate::config::SystemConfig = serde_json::from_value(serde_json::json!({
+            "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase1",
+            "created_at": "", "version": "test", "kg_temporal_window_secs": 1800,
+            "kg_max_traversal_depth": 3, "kg_traversal_depth_ceiling": 5,
+            "kg_edge_candidate_limit": 50, "api_provider": "anthropic",
+        }))
+        .unwrap();
+        let db = crate::db::WardsonDbClient::from_url("http://127.0.0.1:1");
+        let trace = embra_tools_core::new_turn_trace_handle();
+        let ctx = DispatchContext {
+            db: &db,
+            config: &config,
+            session_name: "test",
+            config_tz: "UTC",
+            trace: &trace,
+            turn_index: 0,
+        };
+        let args = serde_json::json!({"action": "invoke", "tool": PROBE, "input": input});
+        let out = crate::tools::registry::dispatch("guardian_call", args, ctx).await?;
+        let v: serde_json::Value = serde_json::from_str(&out.text).expect("the probe answers JSON");
+        Ok(v["sum"].as_f64().expect("the probe answers a sum"))
+    }
+
+    /// The bug, end to end. An OpenAI-compatible server that keeps an
+    /// argument without a declared type as text (Ollama's Qwen3-Coder
+    /// parser) hands guardian_call the object as JSON text. It reached the
+    /// guest as a JSON string, the probe found neither field, and `sum 0`
+    /// came back as a success.
+    #[tokio::test]
+    async fn a_stringified_input_reaches_the_guest_as_an_object() {
+        let object = serde_json::json!({"a": 2, "b": 40});
+        assert_eq!(probe_sum(object.clone()).await.unwrap(), 42.0);
+        assert_eq!(probe_sum(serde_json::Value::String(object.to_string())).await.unwrap(), 42.0);
+        let refused = probe_sum(serde_json::json!([1])).await.unwrap_err();
+        assert!(
+            matches!(&refused, DispatchError::Handler(m) if m.contains("must be a JSON object")),
+            "{refused:?}"
         );
     }
 }
