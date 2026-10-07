@@ -52,6 +52,13 @@ mod tests {
         }
     }
 
+    fn sha256_hex(s: &str) -> String {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(s.as_bytes());
+        format!("{:x}", h.finalize())
+    }
+
     #[test]
     fn tools_snapshot_is_sorted_and_last_has_cache_control() {
         let snapshot = snapshot();
@@ -128,13 +135,6 @@ mod tests {
     /// before and after the change and compared tool by tool.
     #[test]
     fn tools_snapshot_bytes_are_frozen() {
-        use sha2::{Digest, Sha256};
-        fn sha256_hex(s: &str) -> String {
-            let mut h = Sha256::new();
-            h.update(s.as_bytes());
-            format!("{:x}", h.finalize())
-        }
-
         let snapshot = snapshot();
         assert_eq!(snapshot.len(), 115, "registered tool count moved");
 
@@ -157,6 +157,56 @@ mod tests {
              the tool surface was changed on purpose.\n---\n{}",
             per_tool.join("\n")
         );
+    }
+
+    /// Writes the proof a re-pin records: each provider's manifest as the
+    /// provider sends it, one `name<TAB>json` line per tool, then the
+    /// SHA-256 of the whole manifest (Anthropic's equals the pin). Write
+    /// it before and after a change and diff the two directories:
+    ///
+    /// `EMBRA_MANIFEST_DUMP_DIR=<dir> cargo test -p embra-brain the_three_manifests -- --ignored`
+    #[test]
+    #[ignore = "writes files; run by hand for a re-pin proof"]
+    fn the_three_manifests_can_be_written_out_for_a_re_pin_proof() {
+        let dir = std::env::var("EMBRA_MANIFEST_DUMP_DIR")
+            .expect("EMBRA_MANIFEST_DUMP_DIR names the directory to write into");
+        std::fs::create_dir_all(&dir).expect("create the dump directory");
+        let descriptors: Vec<&'static ToolDescriptor> = registry::all_descriptors().collect();
+        // (file, manifest, pointer to its list of tools, pointer to a tool's name)
+        let manifests = [
+            ("anthropic", build_tools_snapshot(&descriptors), "", "/name"),
+            (
+                "gemini",
+                crate::provider::gemini::tool_schema::translate(&descriptors)
+                    .expect("the Gemini translator accepts every tool"),
+                "/0/functionDeclarations",
+                "/name",
+            ),
+            (
+                "openai_compat",
+                crate::provider::openai_compat::tool_schema::translate(&descriptors)
+                    .expect("the OpenAI-compat translator accepts every tool"),
+                "",
+                "/function/name",
+            ),
+        ];
+        for (provider, manifest, list_at, name_at) in manifests {
+            let tools = manifest
+                .pointer(list_at)
+                .and_then(|v| v.as_array())
+                .expect("a list of tools");
+            let mut out = String::new();
+            for tool in tools {
+                let name = tool
+                    .pointer(name_at)
+                    .and_then(|v| v.as_str())
+                    .expect("a tool name");
+                out.push_str(&format!("{name}\t{tool}\n"));
+            }
+            let whole = serde_json::to_string(&manifest).expect("the manifest serializes");
+            out.push_str(&format!("sha256\t{}\n", sha256_hex(&whole)));
+            std::fs::write(format!("{dir}/{provider}.tsv"), out).expect("write the dump");
+        }
     }
 
     #[test]
