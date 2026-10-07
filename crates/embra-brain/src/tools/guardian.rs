@@ -33,14 +33,26 @@ impl GuardianListArgs {
     is_side_effectful = true,
     description = "Invoke a Guardian-defined dynamic tool by name with a JSON input object (action=\"invoke\"), or check a tool's build status (action=\"status\"). Use guardian_list first to see available tools and their input schemas. A tool only runs once its status is \"ready\". Optional data_file: a path under /embra/workspace read host-side and injected as the input.data string before dispatch — the bridge for feeding files (e.g. knowledge_dump JSONL) to sandboxed tools, which cannot read the filesystem. Max 2 MiB; only valid with action=\"invoke\"; rejected if input.data is already set."
 )]
+#[serde(deny_unknown_fields)]
 pub struct GuardianCallArgs {
     /// "invoke" to run the tool, or "status" to poll its build state.
     pub action: String,
     /// The dynamic tool's name (as shown by guardian_list).
     pub tool: String,
-    /// JSON input object for the tool. Used by action="invoke"; ignored
-    /// by action="status". Defaults to an empty object.
+    /// The tool's input: a JSON object matching its input schema (see
+    /// guardian_list), given as an object, not as a string of JSON. The
+    /// tool's own fields go here, never beside action and tool. Used by
+    /// action="invoke"; ignored by action="status".
+    // The manifest declares an open object (`object_input_schema`) and no
+    // default: an omitted input reaches the guest as the text `null`, and
+    // `skip_serializing_if` keeps schemars from advertising that null.
+    // The Rust type stays `Value`: `normalize_invoke_input` decides what
+    // an input that is not an object means.
     #[serde(default)]
+    #[schemars(
+        schema_with = "object_input_schema",
+        skip_serializing_if = "serde_json::Value::is_null"
+    )]
     pub input: serde_json::Value,
     /// Optional path under /embra/workspace whose contents are read
     /// host-side and injected as the input.data string before dispatch —
@@ -49,6 +61,19 @@ pub struct GuardianCallArgs {
     /// action="invoke"; rejected if input.data is already set.
     #[serde(default)]
     pub data_file: Option<String>,
+}
+
+/// `input`'s schema in the manifest: an object, open to any fields. A
+/// declared type is what makes Ollama's Qwen3-Coder parser decode the
+/// argument instead of keeping its text. No `properties` key: llama.cpp
+/// compiles `"properties": {}` into a grammar that accepts only `{}`.
+/// Gemini gets the property without a type (`untype_open_nested_objects`).
+fn object_input_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+    schemars::schema::SchemaObject {
+        instance_type: Some(schemars::schema::InstanceType::Object.into()),
+        ..Default::default()
+    }
+    .into()
 }
 
 /// Byte ceiling for `data_file` reads — 2 MiB, deliberately independent of
@@ -480,6 +505,38 @@ mod tests {
             normalize_invoke_input("invoke", serde_json::json!("{\"action\":\"scan\"}")).unwrap();
         let out = inject_data_file_content(input, "x".into()).unwrap();
         assert_eq!(out, serde_json::json!({"action": "scan", "data": "x"}));
+    }
+
+    /// The manifest tells every provider that `input` is an object, the
+    /// type Ollama's parser needs to decode the argument. It carries no
+    /// default and is not required, and the root refuses an argument it
+    /// does not know.
+    #[test]
+    fn the_guardian_input_is_declared_an_object_without_a_default() {
+        let d = crate::tools::registry::all_descriptors()
+            .find(|d| d.name == "guardian_call")
+            .expect("guardian_call registered");
+        let schema = (d.input_schema)();
+        let input = &schema["properties"]["input"];
+        assert_eq!(input["type"], "object", "{input}");
+        assert!(input.get("default").is_none() && input.get("properties").is_none(), "{input}");
+        let description = input["description"].as_str().unwrap_or_default();
+        assert!(description.contains("not as a string of JSON"), "{description}");
+        assert_eq!(schema["required"], serde_json::json!(["action", "tool"]));
+        assert_eq!(schema["additionalProperties"], false);
+    }
+
+    /// A flattened call puts the tool's fields beside action and tool.
+    /// They were dropped and the guest got `null`, which a tool with a
+    /// required field answers as if the model had given nothing. Now the
+    /// call is refused and the field is named.
+    #[test]
+    fn an_argument_guardian_call_does_not_know_is_refused() {
+        let err = serde_json::from_value::<GuardianCallArgs>(serde_json::json!({
+            "action": "invoke", "tool": "web_search", "query": "embraOS"
+        }))
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown field `query`"), "{err}");
     }
 
     /// The committed probe module (`embra-guardian/examples/gen_fixture.rs`):

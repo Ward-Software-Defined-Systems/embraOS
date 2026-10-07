@@ -357,4 +357,20 @@ mod tests {
         assert!(category.pointer("/allOf/0/$ref").is_none(), "{category}");
         assert_eq!(schema["required"], json!(["content"]));
     }
+
+    /// `guardian_call.input` declares its type, which makes Ollama's
+    /// Qwen3-Coder parser decode the argument instead of keeping its text.
+    /// It is an open object: no `properties` (llama.cpp compiles
+    /// `"properties": {}` into a grammar that accepts only `{}`) and no
+    /// default.
+    #[test]
+    fn the_guardian_input_reaches_an_openai_compatible_server_as_an_open_object() {
+        let d = registry::all_descriptors().find(|d| d.name == "guardian_call").expect("registered");
+        let schema = translate_schema(d.name, (d.input_schema)()).expect("translates");
+        let input = &schema["properties"]["input"];
+        assert_eq!(input["type"], "object", "{input}");
+        for key in ["properties", "default", "additionalProperties"] {
+            assert!(input.get(key).is_none(), "{key} in {input}");
+        }
+    }
 }
