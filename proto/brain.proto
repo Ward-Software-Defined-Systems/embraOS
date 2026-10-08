@@ -68,6 +68,11 @@ message UserMessage {
   // them with anything staged by `/attach` for the session; unknown ids
   // abort the turn with an Error frame (nothing persisted).
   repeated string attachment_ids = 3;
+  // Paths of text files attached to this message, relative to the
+  // workspace (`uploads/notes.md`, from PutMedia's file answer). Each is
+  // jailed to the workspace, read, and inlined for the model under a cap;
+  // an unreadable one aborts the turn like an unknown attachment id.
+  repeated string file_paths = 4;
 }
 
 message SlashCommand {
@@ -90,6 +95,7 @@ message ConversationResponse {
     SetupPrompt setup = 7;           // Config wizard prompt (first run)
     ReasoningDelta reasoning_delta = 8;  // Live reasoning/CoT shard for the expression panel
     MediaRef media = 9;              // An image became visible (attached / tool-produced / replayed)
+    FileRef file = 10;               // A file became visible (attached / offered / replayed)
   }
 }
 
@@ -110,6 +116,22 @@ message MediaRef {
   bool replay = 11;         // true when re-emitted from session history on attach
 }
 
+// Reference to a workspace file that is not an image: a text file the
+// operator attached (`origin: attached`, under `/embra/workspace/uploads/`)
+// or a file the intelligence or the operator offered for download
+// (`origin: offered`). Clients fetch the bytes through GetFile (or
+// embra-web's /api/files/<path>); the frame itself never carries data.
+message FileRef {
+  string path = 1;          // absolute path inside the workspace
+  string name = 2;          // operator-facing name (the basename)
+  uint64 byte_size = 3;
+  string media_type = 4;    // text/markdown | text/plain | application/json | …
+  string origin = 5;        // attached | offered
+  string caption = 6;       // optional one-liner (an offer's note)
+  string tool_use_id = 7;   // set when a tool offered it
+  bool replay = 8;          // true when re-emitted from session history on attach
+}
+
 // --- Media store ---
 
 message PutMediaRequest {
@@ -119,7 +141,8 @@ message PutMediaRequest {
   bytes data = 4;              // raw image file bytes (≤ MEDIA_UPLOAD_MAX)
 }
 message PutMediaResponse {
-  MediaRef media = 1;
+  MediaRef media = 1;  // an image: normalized and stored in MEDIA/
+  FileRef file = 2;    // a text file: written to uploads/ (one of the two is set)
 }
 message GetMediaRequest {
   string id = 1;

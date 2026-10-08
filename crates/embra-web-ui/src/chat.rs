@@ -38,9 +38,11 @@ use crate::status::{StatusData, use_status};
 #[derive(Debug, Serialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 enum ClientMsg {
-    /// `attachment_ids` = media ids from `PUT /api/media` (empty for a
-    /// plain text turn; the bridge defaults it, so older bridges parse).
-    Msg { text: String, attachment_ids: Vec<String> },
+    /// `attachment_ids` = media ids from `PUT /api/media`; `file_paths` =
+    /// the workspace-relative paths of text uploads (the same route's file
+    /// answer). Both empty for a plain text turn; the bridge defaults
+    /// them, so older bridges parse.
+    Msg { text: String, attachment_ids: Vec<String>, file_paths: Vec<String> },
     Slash { command: String, args: String },
     Attach { session: String },
 }
@@ -114,6 +116,29 @@ enum ServerMsg {
         caption: String,
         #[serde(default)]
         replay: bool,
+        url: String,
+    },
+    /// A workspace file that is not an image became visible (attached by
+    /// the operator, offered for download, or replayed). `url` is the
+    /// download route, empty when the file cannot be fetched.
+    File {
+        #[serde(default)]
+        path: String,
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        byte_size: u64,
+        #[serde(default)]
+        media_type: String,
+        #[serde(default)]
+        origin: String,
+        #[serde(default)]
+        caption: String,
+        #[serde(default)]
+        tool_use_id: String,
+        #[serde(default)]
+        replay: bool,
+        #[serde(default)]
         url: String,
     },
     Error { message: String },
@@ -673,6 +698,7 @@ pub fn ChatApp() -> impl IntoView {
             ClientMsg::Msg {
                 text: trimmed.to_string(),
                 attachment_ids: sent_images.iter().map(|c| c.id.clone()).collect(),
+                file_paths: Vec::new(),
             }
         };
         if !is_slash {
@@ -729,7 +755,7 @@ pub fn ChatApp() -> impl IntoView {
         }
         messages.update(|m| m.push(Bubble::User { text: text.clone(), images: Vec::new() }));
         if let Some(tx) = outbound.get_untracked() {
-            let _ = tx.unbounded_send(ClientMsg::Msg { text, attachment_ids: Vec::new() });
+            let _ = tx.unbounded_send(ClientMsg::Msg { text, attachment_ids: Vec::new(), file_paths: Vec::new() });
         }
         reasoning.set(String::new());
     };
@@ -1319,6 +1345,9 @@ fn handle_server_msg(
                 m.push(Bubble::Media(MediaCard { id, url, name, width, height, byte_size, origin, caption }));
             });
         }
+        // The file card lands with the text-upload wave; until then the
+        // frame is read and dropped.
+        ServerMsg::File { .. } => {}
         ServerMsg::Error { message } => {
             messages.update(|m| {
                 m.push(Bubble::System {

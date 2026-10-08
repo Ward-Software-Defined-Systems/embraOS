@@ -57,6 +57,7 @@ impl EmbraApi for EmbraApiImpl {
                                         content: um.content,
                                         timestamp: None,
                                         attachment_ids: um.attachment_ids,
+                                        file_paths: um.file_paths,
                                     }
                                 )
                             }

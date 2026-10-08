@@ -27,12 +27,16 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "t", rename_all = "lowercase")]
 pub enum ClientMsg {
     /// User text turn — becomes a `UserMessage` on the Converse stream.
-    /// `attachment_ids` are media ids from `PUT /api/media` (default
-    /// empty, so pre-media clients keep parsing).
+    /// `attachment_ids` are media ids from `PUT /api/media`;
+    /// `file_paths` are the workspace-relative paths of text uploads
+    /// (the same route's file answer). Both default empty, so older
+    /// clients keep parsing.
     Msg {
         text: String,
         #[serde(default)]
         attachment_ids: Vec<String>,
+        #[serde(default)]
+        file_paths: Vec<String>,
     },
     /// Slash command — becomes a `SlashCommand`. The brain parses the
     /// command name + args server-side; `args` may be empty.
@@ -112,6 +116,21 @@ pub enum ServerMsg {
         replay: bool,
         url: String,
     },
+    /// A workspace file that is not an image became visible: a text file
+    /// the operator attached, a file offered for download, or a replay of
+    /// either. `url` is the download route when the file can be fetched
+    /// (`/api/files/<path>`), empty otherwise.
+    File {
+        path: String,
+        name: String,
+        byte_size: u64,
+        media_type: String,
+        origin: String,
+        caption: String,
+        tool_use_id: String,
+        replay: bool,
+        url: String,
+    },
     /// Transport / decode error originating from this bridge.
     Error { message: String },
 }
@@ -123,10 +142,11 @@ impl ClientMsg {
     pub fn into_proto(self) -> apid::ConversationRequest {
         use conversation_request::RequestType;
         let request_type = match self {
-            ClientMsg::Msg { text, attachment_ids } => {
+            ClientMsg::Msg { text, attachment_ids, file_paths } => {
                 RequestType::UserMessage(apid::UserMessage {
                     content: text,
                     attachment_ids,
+                    file_paths,
                 })
             }
             ClientMsg::Slash { command, args } => {
@@ -215,7 +235,24 @@ pub fn brain_to_server_msg(resp: brain::ConversationResponse) -> Option<ServerMs
         },
         ResponseType::ReasoningDelta(r) => ServerMsg::Reasoning { text: r.text },
         ResponseType::Media(m) => media_server_msg(m),
+        ResponseType::File(f) => file_server_msg(f),
     })
+}
+
+/// `FileRef` → `ServerMsg::File`. The download route is not served yet;
+/// `url` stays empty until it is, and the UI shows a card without a link.
+pub fn file_server_msg(f: brain::FileRef) -> ServerMsg {
+    ServerMsg::File {
+        url: String::new(),
+        path: f.path,
+        name: f.name,
+        byte_size: f.byte_size,
+        media_type: f.media_type,
+        origin: f.origin,
+        caption: f.caption,
+        tool_use_id: f.tool_use_id,
+        replay: f.replay,
+    }
 }
 
 /// `MediaRef` → `ServerMsg::Media` with the serving URL filled in.
@@ -245,9 +282,10 @@ mod media_bridge_tests {
         // Pre-media clients send `{"t":"msg","text":...}` — must keep parsing.
         let m: ClientMsg = serde_json::from_str(r#"{"t":"msg","text":"hi"}"#).unwrap();
         match m {
-            ClientMsg::Msg { text, attachment_ids } => {
+            ClientMsg::Msg { text, attachment_ids, file_paths } => {
                 assert_eq!(text, "hi");
                 assert!(attachment_ids.is_empty());
+                assert!(file_paths.is_empty());
             }
             other => panic!("expected Msg, got {other:?}"),
         }
@@ -288,5 +326,54 @@ mod media_bridge_tests {
         assert_eq!(v["origin"], "generated");
         assert_eq!(v["width"], 1024);
         assert_eq!(v["replay"], false);
+    }
+
+    #[test]
+    fn a_message_with_file_paths_reaches_the_brain_field() {
+        let m: ClientMsg = serde_json::from_str(
+            r#"{"t":"msg","text":"read this","file_paths":["uploads/notes.md"]}"#,
+        )
+        .unwrap();
+        match m.into_proto().request_type {
+            Some(conversation_request::RequestType::UserMessage(um)) => {
+                assert_eq!(um.content, "read this");
+                assert!(um.attachment_ids.is_empty());
+                assert_eq!(um.file_paths, vec!["uploads/notes.md"]);
+            }
+            other => panic!("expected UserMessage, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_file_ref_maps_to_a_file_server_msg_and_its_json_is_pinned() {
+        let resp = brain::ConversationResponse {
+            response_type: Some(brain::conversation_response::ResponseType::File(brain::FileRef {
+                path: "/embra/workspace/uploads/notes.md".into(),
+                name: "notes.md".into(),
+                byte_size: 12_300,
+                media_type: "text/markdown".into(),
+                origin: "attached".into(),
+                caption: String::new(),
+                tool_use_id: String::new(),
+                replay: true,
+            })),
+        };
+        let msg = brain_to_server_msg(resp).unwrap();
+        let v = serde_json::to_value(&msg).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({
+                "t": "file",
+                "path": "/embra/workspace/uploads/notes.md",
+                "name": "notes.md",
+                "byte_size": 12_300,
+                "media_type": "text/markdown",
+                "origin": "attached",
+                "caption": "",
+                "tool_use_id": "",
+                "replay": true,
+                "url": ""
+            })
+        );
     }
 }

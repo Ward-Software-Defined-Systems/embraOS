@@ -115,6 +115,31 @@ impl DisplayMessage {
         )
     }
 
+    /// File card: the text row every surface gets for a `FileRef`; no
+    /// pane and nothing to fetch. Timeline row:
+    /// `[file attached] notes.md (12 KB) — /embra/workspace/uploads/notes.md`
+    pub fn file_with_tz(f: &embra_common::proto::brain::FileRef, tz_str: &str) -> Self {
+        let replay = if f.replay { " (history)" } else { "" };
+        let caption = if f.caption.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", f.caption)
+        };
+        Self::new_with_tz(
+            "system",
+            format!(
+                "[file {}]{} {} ({} KB){} — {}",
+                f.origin,
+                replay,
+                f.name,
+                f.byte_size / 1024,
+                caption,
+                f.path
+            ),
+            tz_str,
+        )
+    }
+
     /// Native-tool-use render (NATIVE-TOOLS-01 Stage 7). Includes the
     /// typed input JSON inline when non-empty and flags errors with an
     /// explicit "ERR" marker. Timeline row:
@@ -460,5 +485,43 @@ mod native_render_tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod file_card_tests {
+    use super::DisplayMessage;
+    use embra_common::proto::brain::FileRef;
+
+    fn a_file(origin: &str, replay: bool, caption: &str) -> FileRef {
+        FileRef {
+            path: "/embra/workspace/uploads/notes.md".into(),
+            name: "notes.md".into(),
+            byte_size: 12 * 1024 + 300,
+            media_type: "text/markdown".into(),
+            origin: origin.into(),
+            caption: caption.into(),
+            tool_use_id: String::new(),
+            replay,
+        }
+    }
+
+    #[test]
+    fn a_file_frame_renders_one_system_row_with_its_origin_size_and_path() {
+        let row = DisplayMessage::file_with_tz(&a_file("attached", false, ""), "UTC");
+        assert_eq!(row.role, "system");
+        assert_eq!(
+            row.content,
+            "[file attached] notes.md (12 KB) — /embra/workspace/uploads/notes.md"
+        );
+    }
+
+    #[test]
+    fn a_replayed_offer_says_history_and_carries_its_note() {
+        let row = DisplayMessage::file_with_tz(&a_file("offered", true, "the report"), "UTC");
+        assert_eq!(
+            row.content,
+            "[file offered] (history) notes.md (12 KB) — the report — /embra/workspace/uploads/notes.md"
+        );
     }
 }

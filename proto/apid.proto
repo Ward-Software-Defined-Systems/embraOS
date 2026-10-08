@@ -43,6 +43,7 @@ message ConversationRequest {
 message UserMessage {
   string content = 1;
   repeated string attachment_ids = 2;  // hand-mapped to brain UserMessage.attachment_ids
+  repeated string file_paths = 3;      // hand-mapped to brain UserMessage.file_paths
 }
 message SlashCommand { string command = 1; string args = 2; }
 message SessionAttach { string session_name = 1; }

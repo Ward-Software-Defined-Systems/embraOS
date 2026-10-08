@@ -676,6 +676,7 @@ impl BrainService for BrainGrpcService {
         );
         Ok(Response::new(PutMediaResponse {
             media: Some(media::media_ref_frame(&meta, store.dir(), false, "", "")),
+            file: None,
         }))
     }
 
@@ -2191,7 +2192,7 @@ async fn handle_request(
                 // Slash command requested a synthetic user turn — feed it through the Brain.
                 let synthetic = ConversationRequest {
                     request_type: Some(conversation_request::RequestType::UserMessage(
-                        UserMessage { content: synthetic_prompt, timestamp: None, attachment_ids: Vec::new() }
+                        UserMessage { content: synthetic_prompt, timestamp: None, attachment_ids: Vec::new(), file_paths: Vec::new() }
                     )),
                 };
                 Box::pin(handle_request(
@@ -2404,6 +2405,7 @@ async fn handle_request(
                                 content: "[Session resumed]".to_string(),
                                 timestamp: None,
                                 attachment_ids: Vec::new(),
+                                file_paths: Vec::new(),
                             }
                         )),
                     };

@@ -39,6 +39,11 @@ pub enum ConsoleEvent {
     /// (`replay == true`). The frame carries only the reference — bytes
     /// come from `BrainClient::get_media` when the pane renders.
     Media(brain::MediaRef),
+    /// A workspace file that is not an image became visible: a text file
+    /// the operator attached, a file offered for download, or a replay of
+    /// either on attach (`replay == true`). The frame carries only the
+    /// reference.
+    File(brain::FileRef),
 }
 
 impl BrainClient {
@@ -152,6 +157,9 @@ impl BrainClient {
                                 }
                                 brain::conversation_response::ResponseType::Media(m) => {
                                     ConsoleEvent::Media(m)
+                                }
+                                brain::conversation_response::ResponseType::File(f) => {
+                                    ConsoleEvent::File(f)
                                 }
                             };
                             if out_tx.send(event).await.is_err() {

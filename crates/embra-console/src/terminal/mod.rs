@@ -470,6 +470,11 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
                 app.pending_media_fetch = Some(m);
             }
         }
+        ConsoleEvent::File(f) => {
+            // A text card only: there are no bytes to fetch and no pane.
+            app.messages.push(DisplayMessage::file_with_tz(&f, &app.config_tz));
+            app.scroll_offset = 0;
+        }
     }
 }
 
@@ -540,7 +545,7 @@ async fn handle_key_event(
                 app.clear_live_reasoning();
                 let _ = in_tx.send(ConversationRequest {
                     request_type: Some(conversation_request::RequestType::UserMessage(
-                        UserMessage { content: choice, attachment_ids: Vec::new() }
+                        UserMessage { content: choice, attachment_ids: Vec::new(), file_paths: Vec::new() }
                     )),
                 }).await;
             } else if let Some(pasted) = app.pasted_lines.take() {
@@ -563,7 +568,7 @@ async fn handle_key_event(
                     app.clear_live_reasoning();
                     let _ = in_tx.send(ConversationRequest {
                         request_type: Some(conversation_request::RequestType::UserMessage(
-                            UserMessage { content, attachment_ids: Vec::new() }
+                            UserMessage { content, attachment_ids: Vec::new(), file_paths: Vec::new() }
                         )),
                     }).await;
                 }
@@ -609,7 +614,7 @@ async fn handle_key_event(
                             app.clear_live_reasoning();
                             let _ = in_tx.send(ConversationRequest {
                                 request_type: Some(conversation_request::RequestType::UserMessage(
-                                    UserMessage { content: input, attachment_ids: Vec::new() }
+                                    UserMessage { content: input, attachment_ids: Vec::new(), file_paths: Vec::new() }
                                 )),
                             }).await;
                         }
@@ -723,7 +728,7 @@ async fn handle_key_event(
                     app.clear_live_reasoning();
                     let _ = in_tx.send(ConversationRequest {
                         request_type: Some(conversation_request::RequestType::UserMessage(
-                            UserMessage { content: input, attachment_ids: Vec::new() }
+                            UserMessage { content: input, attachment_ids: Vec::new(), file_paths: Vec::new() }
                         )),
                     }).await;
                 }
