@@ -1851,8 +1851,8 @@ async fn handle_request(
                                 )),
                             })).await;
                             let elapsed_ms = started.elapsed().as_millis() as u64;
-                            let (content, tool_images, tool_media_refs, is_error) = match outcome {
-                                Ok(out) => (out.text, out.images, out.media_refs, false),
+                            let (content, tool_images, tool_media_refs, tool_files, is_error) = match outcome {
+                                Ok(out) => (out.text, out.images, out.media_refs, out.files, false),
                                 Err(err) => {
                                     let msg = match err {
                                         embra_tools_core::DispatchError::Unknown(n) => format!(
@@ -1876,7 +1876,7 @@ async fn handle_request(
                                     // tool result with `is_error`, a timeout
                                     // included: a tool call left without a
                                     // result is a 400 on the next request.
-                                    (msg, Vec::new(), Vec::new(), true)
+                                    (msg, Vec::new(), Vec::new(), Vec::new(), true)
                                 }
                             };
                             // `bytes` is what the model receives: the text
@@ -1990,6 +1990,18 @@ async fn handle_request(
                                     )),
                                 })).await;
                                 turn_assistant_refs.push(media::attachment_ref_from_tool(m));
+                            }
+                            // The same for files the tool offered for
+                            // download (`file_offer`): a card for the
+                            // operator, a ref on the assistant turn so the
+                            // offer replays on attach.
+                            for f in &tool_files {
+                                let _ = tx.send(Ok(ConversationResponse {
+                                    response_type: Some(conversation_response::ResponseType::File(
+                                        media::offer::file_ref_from_tool(f, id),
+                                    )),
+                                })).await;
+                                turn_assistant_refs.push(media::offer::attachment_ref_from_tool(f));
                             }
                             // Images ride the structured ToolResult (never the
                             // text — the byte cap would cut base64 silently);

@@ -31,12 +31,14 @@ pub enum OfferError {
     Io(String),
 }
 
-/// A workspace file that may be served: `path` is the canonical file,
-/// `rel` the workspace-relative path as it was asked for (what the
+/// A workspace file that may be served: `path` is the canonical file
+/// (what is read), `shown` the absolute path as it was asked for (what
+/// the frame carries), `rel` its workspace-relative form (what the
 /// download URL names), `name` its basename.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OfferedFile {
     pub path: PathBuf,
+    pub shown: PathBuf,
     pub rel: String,
     pub name: String,
     pub bytes: u64,
@@ -111,10 +113,49 @@ pub async fn resolve_offer_in(root: &Path, path: &str, cap: u64) -> Result<Offer
     Ok(OfferedFile {
         media_type: download_media_type(&name).to_string(),
         path: canonical,
+        shown: joined,
         rel,
         name,
         bytes: md.len(),
     })
+}
+
+/// What a tool hands the loop for an offer it made.
+pub fn to_ref_meta(f: &OfferedFile, caption: &str) -> embra_tools_core::FileRefMeta {
+    embra_tools_core::FileRefMeta {
+        path: f.shown.display().to_string(),
+        name: f.name.clone(),
+        byte_size: f.bytes,
+        media_type: f.media_type.clone(),
+        caption: caption.to_string(),
+    }
+}
+
+/// Proto `FileRef` from a tool's `FileRefMeta` (tool loop emit).
+pub fn file_ref_from_tool(m: &embra_tools_core::FileRefMeta, tool_use_id: &str) -> FileRef {
+    FileRef {
+        path: m.path.clone(),
+        name: m.name.clone(),
+        byte_size: m.byte_size,
+        media_type: m.media_type.clone(),
+        origin: "offered".to_string(),
+        caption: m.caption.clone(),
+        tool_use_id: tool_use_id.to_string(),
+        replay: false,
+    }
+}
+
+/// Persisted ref for a file a tool offered: no id, no dimensions.
+pub fn attachment_ref_from_tool(m: &embra_tools_core::FileRefMeta) -> crate::brain::AttachmentRef {
+    crate::brain::AttachmentRef {
+        id: String::new(),
+        name: m.name.clone(),
+        media_type: m.media_type.clone(),
+        width: 0,
+        height: 0,
+        bytes: m.byte_size,
+        path: m.path.clone(),
+    }
 }
 
 /// The type a download is labelled with, by extension; a type nobody
@@ -145,7 +186,7 @@ pub fn download_media_type(name: &str) -> &'static str {
 /// The operator-facing frame for an offered file.
 pub fn file_ref_frame(f: &OfferedFile, replay: bool, tool_use_id: &str, caption: &str) -> FileRef {
     FileRef {
-        path: f.path.display().to_string(),
+        path: f.shown.display().to_string(),
         name: f.name.clone(),
         byte_size: f.bytes,
         media_type: f.media_type.clone(),
@@ -196,6 +237,7 @@ mod tests {
         assert_eq!(f.bytes, 8);
         assert_eq!(f.media_type, "text/markdown");
         assert_eq!(f.path, std::fs::canonicalize(root.join("uploads/notes.md")).unwrap());
+        assert_eq!(f.shown, root.join("uploads/notes.md"));
         // Absolute under the root, and `./`, say the same.
         let abs = root.join("uploads/notes.md").display().to_string();
         assert_eq!(resolve_offer_in(&root, &abs, FILE_DOWNLOAD_MAX).await.unwrap().rel, "uploads/notes.md");
@@ -205,6 +247,17 @@ mod tests {
         assert_eq!(frame.tool_use_id, "toolu_1");
         assert_eq!(frame.caption, "the notes");
         assert_eq!(frame.name, "notes.md");
+        assert_eq!(frame.path, root.join("uploads/notes.md").display().to_string());
+        let meta = to_ref_meta(&f, "the notes");
+        assert_eq!(meta.path, frame.path);
+        let from_tool = file_ref_from_tool(&meta, "toolu_2");
+        assert_eq!(from_tool.origin, "offered");
+        assert_eq!(from_tool.tool_use_id, "toolu_2");
+        assert_eq!(from_tool.caption, "the notes");
+        let r = attachment_ref_from_tool(&meta);
+        assert_eq!(r.id, "");
+        assert!(!r.is_image());
+        assert_eq!(r.bytes, 8);
     }
 
     #[tokio::test]

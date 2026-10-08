@@ -11,6 +11,7 @@ pub mod cron;
 pub mod engineering;
 pub mod express;
 pub mod file_copy;
+pub mod file_offer;
 pub mod file_patch;
 pub mod guardian;
 pub mod media;

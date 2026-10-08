@@ -51,6 +51,11 @@ pub struct ToolOutput {
     /// with `return_image=false`). Images in `images` with a `media_ref`
     /// are announced the same way — don't list them here too.
     pub media_refs: Vec<MediaRefMeta>,
+    /// Display-only references to workspace files offered to the operator
+    /// for download (`file_offer`): the loop emits a `FileRef` frame per
+    /// entry and persists it on the assistant turn. Nothing of it reaches
+    /// the model beyond `text`.
+    pub files: Vec<FileRefMeta>,
 }
 
 impl ToolOutput {
@@ -59,7 +64,13 @@ impl ToolOutput {
             text: text.into(),
             images: Vec::new(),
             media_refs: Vec::new(),
+            files: Vec::new(),
         }
+    }
+
+    pub fn with_file(mut self, file: FileRefMeta) -> Self {
+        self.files.push(file);
+        self
     }
 
     pub fn with_image(mut self, image: ToolImage) -> Self {
@@ -124,6 +135,18 @@ pub struct MediaRefMeta {
     pub caption: String,
 }
 
+/// Display metadata for a workspace file offered for download — the
+/// wire-neutral twin of the proto `FileRef` (embra-brain converts).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileRefMeta {
+    pub path: String,
+    pub name: String,
+    pub byte_size: u64,
+    pub media_type: String,
+    #[serde(default)]
+    pub caption: String,
+}
+
 /// One tool invocation recorded in the current turn's trace.
 ///
 /// `input_preview` and `result_preview` are bounded (≤2 KiB, byte-capped
@@ -152,4 +175,28 @@ pub type TurnTraceHandle = Arc<Mutex<TurnTrace>>;
 /// Construct an empty trace handle with a reasonable default capacity.
 pub fn new_turn_trace_handle() -> TurnTraceHandle {
     Arc::new(Mutex::new(VecDeque::with_capacity(32)))
+}
+
+#[cfg(test)]
+mod output_tests {
+    use super::*;
+
+    #[test]
+    fn a_text_only_output_carries_no_files_and_with_file_adds_one() {
+        let out = ToolOutput::text("done");
+        assert!(out.files.is_empty());
+        assert!(out.images.is_empty());
+        assert!(out.media_refs.is_empty());
+        let out = out.with_file(FileRefMeta {
+            path: "/embra/workspace/report.md".into(),
+            name: "report.md".into(),
+            byte_size: 10,
+            media_type: "text/markdown".into(),
+            caption: "the report".into(),
+        });
+        assert_eq!(out.files.len(), 1);
+        assert_eq!(out.files[0].name, "report.md");
+        let from_string: ToolOutput = String::from("x").into();
+        assert!(from_string.files.is_empty());
+    }
 }

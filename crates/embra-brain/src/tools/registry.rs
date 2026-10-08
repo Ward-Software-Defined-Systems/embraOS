@@ -315,6 +315,7 @@ mod result_cap_tests {
             text: "x".repeat(MAX_TOOL_RESULT_SIZE + 10),
             images: vec![px("a.png")],
             media_refs: Vec::new(),
+            files: Vec::new(),
         });
         assert!(out.text.contains("[truncated:"));
         assert_eq!(out.images.len(), 1);
@@ -327,6 +328,7 @@ mod result_cap_tests {
             text: "six".into(),
             images: (0..6).map(|i| px(&format!("{i}.png"))).collect(),
             media_refs: Vec::new(),
+            files: Vec::new(),
         });
         assert_eq!(out.images.len(), MAX_TOOL_RESULT_IMAGES);
         assert!(out.text.ends_with("[2 image(s) dropped: at most 4 images per tool result]"), "{}", out.text);
@@ -335,6 +337,7 @@ mod result_cap_tests {
             text: "ok".into(),
             images: vec![px("a.png")],
             media_refs: Vec::new(),
+            files: Vec::new(),
         });
         assert_eq!(out.text, "ok");
     }
