@@ -183,7 +183,9 @@ mod tests {
         assert_eq!(MEDIA_HISTORY_MAX_BYTES, 16 * 1024 * 1024);
         assert_eq!(text::TEXT_UPLOAD_MAX, 2 * 1024 * 1024);
         assert_eq!(text::TEXT_INLINE_MAX, 48 * 1024);
+        assert_eq!(text::TEXT_HISTORY_MAX_BYTES, 256 * 1024);
         const { assert!(text::TEXT_INLINE_MAX <= text::TEXT_UPLOAD_MAX) };
+        const { assert!(text::TEXT_INLINE_MAX as u64 <= text::TEXT_HISTORY_MAX_BYTES) };
         // A text upload is checked after the image gate: its cap sits
         // under the upload gate, or the gate's message would be the one
         // the operator reads.

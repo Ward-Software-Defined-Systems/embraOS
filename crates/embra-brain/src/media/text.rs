@@ -26,6 +26,10 @@ pub const TEXT_UPLOAD_MAX: usize = 2 * 1024 * 1024;
 /// Most of one file's text handed to the model inline on a turn; the rest
 /// is a `file_read` away.
 pub const TEXT_INLINE_MAX: usize = 48 * 1024;
+/// Inline-replay byte ceiling for text attachments over the session
+/// history, newest first, counting what goes inline (at most
+/// [`TEXT_INLINE_MAX`] per file).
+pub const TEXT_HISTORY_MAX_BYTES: u64 = 256 * 1024;
 /// Model-facing text of a message that carries files and no words.
 pub const FILE_ONLY_PLACEHOLDER: &str = "(see attached file)";
 /// Name used when the upload names nothing usable.
