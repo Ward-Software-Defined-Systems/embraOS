@@ -1224,6 +1224,9 @@ async fn handle_request(
             // persistence step at the end of this handler writes to
             // history, mirroring the auto-enrichment pattern below.
             let pending_briefing = session_mgr.write().await.pending_resume_briefing.take();
+            // Where the next events block starts: this turn's start, stamped
+            // on the session once the turn is saved (`sessions::events`).
+            let turn_started = chrono::Utc::now();
 
             // Auto-KG-enrichment: wrap the user message in a <retrieved_context>
             // block when the knowledge graph has relevant prior knowledge. The
@@ -1434,11 +1437,38 @@ async fn handle_request(
             // operator's words, inside the turn's one text block. What is
             // persisted stays `msg.content` plus the refs.
             let files_block = media::text::render_attached_files(&turn_files);
-            let model_text = if files_block.is_empty() {
-                enriched
+            // What happened since this session's last turn — fired
+            // reminders, cron runs — ahead of the files and the words,
+            // rendered once and never persisted. A briefing carries
+            // <while_away> instead, and the delete flow carries nothing.
+            let events_block = if synthetic_turn {
+                None
             } else {
-                format!("{files_block}\n{enriched}")
+                let cutoff = session_mgr
+                    .read()
+                    .await
+                    .get_meta(&session_name)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|m| crate::sessions::events::cutoff(&m));
+                match cutoff {
+                    Some(since) => {
+                        let digest = crate::sessions::events::gather(db.as_ref(), since).await;
+                        crate::sessions::events::render(&digest, since, &loaded_config.timezone)
+                    }
+                    None => None,
+                }
             };
+            let mut parts: Vec<String> = Vec::new();
+            if let Some(events) = events_block {
+                parts.push(events);
+            }
+            if !files_block.is_empty() {
+                parts.push(files_block);
+            }
+            parts.push(enriched);
+            let model_text = parts.join("\n");
             api_messages.push(if turn_images.is_empty() {
                 ApiMessage::user_text(&model_text)
             } else {
@@ -2196,6 +2226,12 @@ async fn handle_request(
                         &Message::assistant_with_attachments(&final_text, turn_assistant_refs.clone()),
                     )
                     .await;
+                // The events watermark moves to this turn's start, after
+                // both appends (each rewrites the meta from storage), so
+                // what happened during the turn is shown next time.
+                if let Err(e) = mgr.stamp_events_seen(&session_name, turn_started).await {
+                    warn!(target: "sessions", session = %session_name, "events watermark not stamped: {e}");
+                }
             }
 
             // Guided-delete execution — AFTER persistence, deliberately:

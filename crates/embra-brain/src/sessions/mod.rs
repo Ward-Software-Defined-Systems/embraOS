@@ -7,6 +7,7 @@ use crate::db::WardsonDbClient;
 
 pub(crate) mod away;
 
+pub(crate) mod events;
 /// Session document format version.
 ///
 /// Set to `CURRENT_SESSION_FORMAT` on every session created post-v7
@@ -79,6 +80,11 @@ pub struct SessionMeta {
     /// grace period alongside the data it explains.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted_reason: Option<String>,
+    /// Where the next turn's events block starts (`sessions::events`): the
+    /// start of the last turn that was saved. `None` until a turn stamps
+    /// it, when `last_active` stands in. Serde-additive, no schema bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events_seen_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,6 +231,13 @@ impl SessionManager {
         self.pending_files.remove(session).unwrap_or_default()
     }
 
+    /// Move the session's events watermark to `at`: the next turn's block
+    /// starts there. Called after a turn is saved, so what happened during
+    /// the turn is shown next time.
+    pub async fn stamp_events_seen(&self, name: &str, at: DateTime<Utc>) -> Result<bool> {
+        self.rewrite_meta(name, |m| m.events_seen_at = Some(at)).await
+    }
+
     /// True when a resume briefing was started for `name` less than
     /// `cooldown` ago. `Instant` is monotonic, so wall-clock jumps can't
     /// spoof the window.
@@ -310,6 +323,7 @@ impl SessionManager {
             turn_count: Some(0),
             deleted_at: None,
             deleted_reason: None,
+            events_seen_at: None,
         };
 
         let history = SessionHistory {

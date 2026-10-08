@@ -31,9 +31,9 @@ pub(crate) struct AwayDigest {
     pub memories_at_limit: bool,
     pub sessions_created: Vec<String>,
     pub sessions_deleted: Vec<String>,
-    /// Cron jobs whose last run falls in the absence: command, schedule,
-    /// last run. A job records its last run only, not a count.
-    pub crons_ran: Vec<(String, String, DateTime<Utc>)>,
+    /// Cron jobs whose last run falls in the absence, latest first, each
+    /// with its latest recorded result when one was recorded.
+    pub crons_ran: Vec<CronRan>,
     /// Reminders that fired: message and when they were due.
     pub reminders_fired: Vec<(String, DateTime<Utc>)>,
 }
@@ -48,18 +48,28 @@ impl AwayDigest {
     }
 }
 
-fn time_field(doc: &serde_json::Value, field: &str) -> Option<DateTime<Utc>> {
+/// A cron job that ran in the absence.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct CronRan {
+    pub command: String,
+    pub schedule: String,
+    pub last_run: DateTime<Utc>,
+    /// A preview of the latest recorded run's result (`cron_runs`).
+    pub result: Option<String>,
+}
+
+pub(super) fn time_field(doc: &serde_json::Value, field: &str) -> Option<DateTime<Utc>> {
     let text = doc.get(field)?.as_str()?;
     DateTime::parse_from_rfc3339(text)
         .ok()
         .map(|t| t.with_timezone(&Utc))
 }
 
-fn str_field<'a>(doc: &'a serde_json::Value, field: &str) -> &'a str {
+pub(super) fn str_field<'a>(doc: &'a serde_json::Value, field: &str) -> &'a str {
     doc.get(field).and_then(|v| v.as_str()).unwrap_or("")
 }
 
-fn preview(text: &str) -> String {
+pub(super) fn preview(text: &str) -> String {
     let text = text.trim();
     if text.len() > ITEM_PREVIEW_MAX {
         format!("{}…", truncate_str(text, ITEM_PREVIEW_MAX))
@@ -118,11 +128,25 @@ fn session_changes(
     (created, deleted)
 }
 
-/// Cron jobs whose last run falls after `since`, latest first.
+/// The latest recorded result per job, from runs sorted newest first.
+fn latest_results(runs: &[serde_json::Value]) -> std::collections::HashMap<String, String> {
+    let mut latest = std::collections::HashMap::new();
+    for run in runs {
+        let job = str_field(run, "job_id");
+        if !job.is_empty() && !latest.contains_key(job) {
+            latest.insert(job.to_string(), preview(str_field(run, "result")));
+        }
+    }
+    latest
+}
+
+/// Cron jobs whose last run falls after `since`, latest first, with the
+/// latest recorded result of each when `results` has one.
 fn crons_ran_since(
     docs: &[serde_json::Value],
     since: DateTime<Utc>,
-) -> Vec<(String, String, DateTime<Utc>)> {
+    results: &std::collections::HashMap<String, String>,
+) -> Vec<CronRan> {
     let mut ran: Vec<_> = docs
         .iter()
         .filter_map(|doc| {
@@ -131,10 +155,16 @@ fn crons_ran_since(
                 "" => str_field(doc, "command_name"),
                 command => command,
             };
-            (last > since).then(|| (command.to_string(), str_field(doc, "schedule").to_string(), last))
+            let id = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()).unwrap_or("");
+            (last > since).then(|| CronRan {
+                command: command.to_string(),
+                schedule: str_field(doc, "schedule").to_string(),
+                last_run: last,
+                result: results.get(id).cloned(),
+            })
         })
         .collect();
-    ran.sort_by_key(|r| std::cmp::Reverse(r.2));
+    ran.sort_by_key(|r| std::cmp::Reverse(r.last_run));
     ran
 }
 
@@ -172,6 +202,13 @@ pub(crate) async fn gather(
         .await
         .unwrap_or_default();
     let crons = db.fetch_collection("crons").await.unwrap_or_default();
+    let runs = db
+        .query(
+            crate::tools::cron::CRON_RUNS,
+            &super::events::cron_runs_since_body(&since.to_rfc3339()),
+        )
+        .await
+        .unwrap_or_default();
     let reminders = db.fetch_collection("reminders").await.unwrap_or_default();
     let (sessions_created, sessions_deleted) = session_changes(metas, since, current);
     let memories_at_limit = crate::db::client::window_saturated(entries.len(), MEMORY_LIMIT);
@@ -188,7 +225,7 @@ pub(crate) async fn gather(
         memories_at_limit,
         sessions_created,
         sessions_deleted,
-        crons_ran: crons_ran_since(&crons, since),
+        crons_ran: crons_ran_since(&crons, since, &latest_results(&runs)),
         reminders_fired: reminders_fired_since(&reminders, since, now),
     }
 }
@@ -243,7 +280,10 @@ pub(crate) fn render(digest: &AwayDigest, since: DateTime<Utc>, tz: &str) -> Opt
         let items = digest
             .crons_ran
             .iter()
-            .map(|(command, schedule, last)| format!("{command} ({schedule}), last run {}", at(*last)))
+            .map(|r| {
+                let result = r.result.as_deref().map(|p| format!(": {p}")).unwrap_or_default();
+                format!("{} ({}), last run {}{}", r.command, r.schedule, at(r.last_run), result)
+            })
             .collect();
         section("Cron jobs that ran:".to_string(), items, digest.crons_ran.len());
     }
@@ -333,9 +373,29 @@ mod tests {
             json!({"command": "old", "schedule": "daily 09:00", "last_run": "2026-09-29T09:00:00+00:00"}),
             json!({"command": "never", "schedule": "every 1h", "last_run": null}),
         ];
-        let ran = crons_ran_since(&docs, t(SINCE));
-        let commands: Vec<_> = ran.iter().map(|r| r.0.as_str()).collect();
+        let ran = crons_ran_since(&docs, t(SINCE), &std::collections::HashMap::new());
+        let commands: Vec<_> = ran.iter().map(|r| r.command.as_str()).collect();
         assert_eq!(commands, ["time", "system_status"]);
+        assert!(ran.iter().all(|r| r.result.is_none()));
+    }
+
+    #[test]
+    fn a_cron_result_rides_the_away_digest_when_one_was_recorded() {
+        let docs = [
+            json!({"_id": "job-a", "command": "time", "schedule": "every 5m", "last_run": "2026-09-29T14:55:00+00:00"}),
+            json!({"_id": "job-b", "command": "system_status", "schedule": "every 1h", "last_run": "2026-09-29T13:00:00+00:00"}),
+        ];
+        let runs = [
+            json!({"job_id": "job-a", "started_at": "2026-09-29T14:55:00+00:00", "result": "14:55 UTC"}),
+            json!({"job_id": "job-a", "started_at": "2026-09-29T14:50:00+00:00", "result": "14:50 UTC"}),
+        ];
+        let ran = crons_ran_since(&docs, t(SINCE), &latest_results(&runs));
+        assert_eq!(ran[0].result.as_deref(), Some("14:55 UTC"));
+        assert_eq!(ran[1].result, None);
+        let digest = AwayDigest { crons_ran: ran, ..Default::default() };
+        let block = render(&digest, t(SINCE), "UTC").unwrap();
+        assert!(block.contains("- time (every 5m), last run 2026-09-29 14:55 UTC: 14:55 UTC\n"), "{block}");
+        assert!(block.contains("- system_status (every 1h), last run 2026-09-29 13:00 UTC\n"), "{block}");
     }
 
     #[test]
@@ -362,7 +422,7 @@ mod tests {
             memories_at_limit: false,
             sessions_created: vec!["new-one".into()],
             sessions_deleted: vec!["gone-now".into()],
-            crons_ran: vec![("time".into(), "every 5m".into(), t("2026-09-29T14:55:00Z"))],
+            crons_ran: vec![CronRan { command: "time".into(), schedule: "every 5m".into(), last_run: t("2026-09-29T14:55:00Z"), result: None }],
             reminders_fired: vec![("call back".into(), t("2026-09-29T13:00:00Z"))],
         };
         let block = render(&digest, t(SINCE), "America/Los_Angeles").unwrap();
