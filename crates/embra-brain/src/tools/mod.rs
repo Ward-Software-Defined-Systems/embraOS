@@ -1979,15 +1979,24 @@ pub async fn check_reminders(db: &WardsonDbClient, max: usize) -> Vec<String> {
 
         fired.push(format!("Reminder: {}", message));
 
-        // Mark as fired
+        // Mark as fired, and when.
         if let Some(id) = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()) {
-            let mut updated = doc.clone();
-            updated["fired"] = serde_json::json!(true);
-            let _ = db.update("reminders", id, &updated).await;
+            let _ = db.update("reminders", id, &mark_fired(doc, &now)).await;
         }
     }
 
     fired
+}
+
+/// The reminder as it is stored once it fired: `fired` and the time it
+/// fired (`fired_at`), which the events block of the next turn and
+/// `reminder_list` read. A record from before `fired_at` existed still
+/// reads as fired, without a time.
+fn mark_fired(doc: &serde_json::Value, now: &str) -> serde_json::Value {
+    let mut updated = doc.clone();
+    updated["fired"] = serde_json::json!(true);
+    updated["fired_at"] = serde_json::json!(now);
+    updated
 }
 
 /// Byte cap for `session_summary` transcript-line previews. Boundary-safe:
@@ -3262,6 +3271,19 @@ mod system_logs_tests {
 
 #[cfg(test)]
 mod reminder_tests {
+    #[test]
+    fn a_fired_reminder_is_stamped_with_when_it_fired() {
+        let doc = serde_json::json!({
+            "_id": "r1", "message": "check the build",
+            "trigger_at": "2026-10-08T12:00:00+00:00", "created_at": "2026-10-08T11:55:00+00:00",
+            "fired": false,
+        });
+        let fired = mark_fired(&doc, "2026-10-08T12:00:07+00:00");
+        assert_eq!(fired["fired"], true);
+        assert_eq!(fired["fired_at"], "2026-10-08T12:00:07+00:00");
+        assert_eq!(fired["message"], "check the build");
+        assert_eq!(fired["trigger_at"], "2026-10-08T12:00:00+00:00");
+    }
     use super::*;
     use serde_json::json;
 

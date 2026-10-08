@@ -374,6 +374,14 @@ fn hot_path_index_specs() -> Vec<(&'static str, serde_json::Value)> {
             "tools.turn_trace",
             serde_json::json!({"name": "idx_turn_trace_session", "field": "session"}),
         ),
+        // Every operator turn asks for the cron runs since its watermark
+        // (`sessions::events`), sorted by `started_at` with a limit, and
+        // `cron_list runs=N` reads per job. The collection is created on
+        // the first fire; the boot creates it first when it is missing.
+        (
+            crate::tools::cron::CRON_RUNS,
+            serde_json::json!({"name": "idx_cron_runs_started_at", "field": "started_at"}),
+        ),
     ]
 }
 
@@ -416,11 +424,18 @@ async fn ensure_hot_path_indexes(db: &WardsonDbClient) {
 /// Retention policies asserted on every boot: (collection, days, field).
 /// A document is removed once `field` is older than `days`.
 fn ttl_policy_specs() -> Vec<(&'static str, u64, &'static str)> {
-    vec![(
-        "reminders",
-        crate::tools::REMINDER_RETENTION_DAYS,
-        crate::tools::REMINDER_TTL_FIELD,
-    )]
+    vec![
+        (
+            "reminders",
+            crate::tools::REMINDER_RETENTION_DAYS,
+            crate::tools::REMINDER_TTL_FIELD,
+        ),
+        (
+            crate::tools::cron::CRON_RUNS,
+            crate::tools::cron::CRON_RUN_RETENTION_DAYS,
+            crate::tools::cron::CRON_RUN_TTL_FIELD,
+        ),
+    ]
 }
 
 /// Assert the retention policies — warn-don't-fail, runs on every boot.
@@ -491,6 +506,16 @@ mod ttl_policy_tests {
         // The database refuses a retention of zero days.
         assert!(*days >= 1);
         assert_eq!(*days, 7);
+    }
+
+    #[test]
+    fn cron_runs_are_kept_thirty_days_after_they_started() {
+        let specs = ttl_policy_specs();
+        let runs: Vec<_> = specs.iter().filter(|(c, _, _)| *c == "cron_runs").collect();
+        assert_eq!(runs.len(), 1, "one policy per collection");
+        let (_, days, field) = runs[0];
+        assert_eq!(*field, "started_at");
+        assert_eq!(*days, 30);
     }
 }
 
@@ -650,6 +675,18 @@ mod hot_path_index_tests {
     /// index (`field`, not `fields`) on memory.edges.source_id. A compound
     /// here would be refused for single-field lookups by post-F2 WardSONDB
     /// planners and the arm would silently fall back to a full scan.
+    #[test]
+    fn the_cron_runs_index_is_single_field_on_started_at() {
+        let specs = hot_path_index_specs();
+        let (collection, body) = specs
+            .iter()
+            .find(|(_, b)| b["name"] == "idx_cron_runs_started_at")
+            .expect("idx_cron_runs_started_at spec present");
+        assert_eq!(*collection, "cron_runs");
+        assert_eq!(body["field"], "started_at");
+        assert!(body.get("fields").is_none());
+    }
+
     #[test]
     fn source_id_index_is_single_field_on_edges() {
         let specs = hot_path_index_specs();

@@ -3,6 +3,20 @@ use chrono_tz::Tz;
 
 use crate::db::WardsonDbClient;
 use super::parse_duration;
+use super::sessions::truncate_str;
+
+/// Where every run is recorded: `{job_id, command, started_at, elapsed_ms,
+/// is_error, result, truncated}`, one document per fire. The report the
+/// console shows is built from the same text, so what the operator read
+/// and what the intelligence reads back later (`cron_list runs=N`, the
+/// events block of its next turn) agree.
+pub(crate) const CRON_RUNS: &str = "cron_runs";
+/// Most of a run's result kept, in bytes, cut on a character boundary.
+pub(crate) const CRON_RESULT_MAX: usize = 4096;
+/// A run is removed this many days after it started; asserted on every
+/// boot (`migrations::ensure_ttl_policies`).
+pub(crate) const CRON_RUN_RETENTION_DAYS: u64 = 30;
+pub(crate) const CRON_RUN_TTL_FIELD: &str = "started_at";
 
 /// Compute the next UTC fire time for `daily HH:MM` expressed in the operator's
 /// timezone. Scans forward up to 7 local days to skip any DST spring-forward
@@ -192,6 +206,37 @@ async fn ensure_collection(db: &WardsonDbClient) {
     if !db.collection_exists("crons").await.unwrap_or(true) {
         let _ = db.create_collection("crons").await;
     }
+}
+
+/// The runs collection, for a brain upgraded in place: the boot creates
+/// it with its index, this covers the first fire before the next boot.
+async fn ensure_runs_collection(db: &WardsonDbClient) {
+    if !db.collection_exists(CRON_RUNS).await.unwrap_or(true) {
+        let _ = db.create_collection(CRON_RUNS).await;
+    }
+}
+
+/// One run as it is recorded. `is_error` is a dispatch error (an unknown
+/// tool, bad arguments, a timeout); a tool that reports a problem in its
+/// own text is a run that worked, by house style, and reads as one here.
+pub(crate) fn cron_run_doc(
+    job_id: &str,
+    display: &str,
+    started_at: DateTime<Utc>,
+    elapsed_ms: u64,
+    is_error: bool,
+    result: &str,
+) -> serde_json::Value {
+    let kept = truncate_str(result, CRON_RESULT_MAX);
+    serde_json::json!({
+        "job_id": job_id,
+        "command": display,
+        "started_at": started_at.to_rfc3339(),
+        "elapsed_ms": elapsed_ms,
+        "is_error": is_error,
+        "result": kept,
+        "truncated": kept.len() < result.len(),
+    })
 }
 
 /// Add a cron job.
@@ -453,14 +498,26 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
             trace: &cron_trace,
             turn_index: 0,
         };
-        let result_text = match super::registry::dispatch(&plan.name, plan.args.clone(), ctx)
+        let started = std::time::Instant::now();
+        let started_at = Utc::now();
+        let (result_text, is_error) = match super::registry::dispatch(&plan.name, plan.args.clone(), ctx)
         .await
         {
             // Cron consumes the text only — a cron-fired media tool's images
             // have no operator stream to land on.
-            Ok(out) => out.text,
-            Err(e) => format!("cron dispatch failed: {e}"),
+            Ok(out) => (out.text, false),
+            Err(e) => (format!("cron dispatch failed: {e}"), true),
         };
+        let elapsed_ms = started.elapsed().as_millis() as u64;
+        // The run is recorded whatever happens to its report: the channel
+        // may drop the report, the record stays.
+        if let Some(id) = doc_id(doc) {
+            ensure_runs_collection(db).await;
+            let run = cron_run_doc(id, &plan.display, started_at, elapsed_ms, is_error, &result_text);
+            if let Err(e) = db.write(CRON_RUNS, &run).await {
+                tracing::warn!(target: "cron", command = %plan.display, "cron run not recorded: {e}");
+            }
+        }
         let note = plan.note.as_ref().map(|n| format!(" ({n})")).unwrap_or_default();
         results.push(format!("embraCRON [{}]: {}{}", plan.display, result_text, note));
 
@@ -474,6 +531,45 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
     }
 
     results
+}
+
+#[cfg(test)]
+mod run_record_tests {
+    use super::*;
+
+    #[test]
+    fn a_run_document_carries_the_job_its_timing_and_a_capped_result() {
+        let at: DateTime<Utc> = "2026-10-08T12:00:00Z".parse().unwrap();
+        let doc = cron_run_doc("0199abcd-0000-7000-8000-000000000000", "system_status", at, 42, false, "ok");
+        assert_eq!(doc["job_id"], "0199abcd-0000-7000-8000-000000000000");
+        assert_eq!(doc["command"], "system_status");
+        assert_eq!(doc["started_at"], "2026-10-08T12:00:00+00:00");
+        assert_eq!(doc["elapsed_ms"], 42);
+        assert_eq!(doc["is_error"], false);
+        assert_eq!(doc["result"], "ok");
+        assert_eq!(doc["truncated"], false);
+        let long = "x".repeat(CRON_RESULT_MAX + 1);
+        let doc = cron_run_doc("j", "time", at, 1, true, &long);
+        assert_eq!(doc["result"].as_str().unwrap().len(), CRON_RESULT_MAX);
+        assert_eq!(doc["truncated"], true);
+        assert_eq!(doc["is_error"], true);
+        assert_eq!(CRON_RESULT_MAX, 4096);
+        assert_eq!(CRON_RUN_RETENTION_DAYS, 30);
+        assert_eq!(CRON_RUN_TTL_FIELD, "started_at");
+    }
+
+    #[test]
+    fn a_result_is_cut_on_a_character_boundary() {
+        let at: DateTime<Utc> = "2026-10-08T12:00:00Z".parse().unwrap();
+        // Three-byte characters: the cap falls inside one.
+        let text = "日".repeat(CRON_RESULT_MAX / 3 + 10);
+        let doc = cron_run_doc("j", "time", at, 1, false, &text);
+        let kept = doc["result"].as_str().unwrap();
+        assert!(kept.len() <= CRON_RESULT_MAX);
+        assert!(kept.len() > CRON_RESULT_MAX - 3);
+        assert!(text.starts_with(kept));
+        assert_eq!(doc["truncated"], true);
+    }
 }
 
 #[cfg(test)]
