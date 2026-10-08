@@ -47,6 +47,11 @@ service BrainService {
   rpc PutMedia(PutMediaRequest) returns (PutMediaResponse);
   rpc GetMedia(GetMediaRequest) returns (GetMediaResponse);
 
+  // A workspace file for the browser to download (`file_offer`,
+  // `/download`). Jailed to the workspace through any symlink, regular
+  // files only, under FILE_DOWNLOAD_MAX. Unary, like the media RPCs.
+  rpc GetFile(GetFileRequest) returns (GetFileResponse);
+
   // Health
   rpc HealthCheck(embra.common.HealthCheckRequest) returns (embra.common.HealthCheckResponse);
 }
@@ -150,6 +155,14 @@ message GetMediaRequest {
 message GetMediaResponse {
   MediaRef media = 1;
   bytes data = 2;  // stored (normalized) bytes, re-sniffed before serving
+}
+
+message GetFileRequest {
+  string path = 1;  // absolute under /embra/workspace, or relative to it
+}
+message GetFileResponse {
+  FileRef file = 1;  // origin: offered
+  bytes data = 2;
 }
 
 message StreamToken {

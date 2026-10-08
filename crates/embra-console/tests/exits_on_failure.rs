@@ -130,6 +130,9 @@ impl EmbraApi for Gateway {
     async fn get_media(&self, _: Request<GetMediaRequest>) -> Result<Response<GetMediaResponse>, Status> {
         Err(not_here())
     }
+    async fn get_file(&self, _: Request<GetFileRequest>) -> Result<Response<GetFileResponse>, Status> {
+        Err(not_here())
+    }
     async fn verify_soul(&self, _: Request<VerifySoulRequest>) -> Result<Response<VerifySoulResponse>, Status> {
         Err(not_here())
     }

@@ -703,6 +703,27 @@ impl BrainService for BrainGrpcService {
         }))
     }
 
+    /// A workspace file for download. The resolver is the jail: through
+    /// any symlink, regular files only, under `FILE_DOWNLOAD_MAX`.
+    async fn get_file(&self, request: Request<GetFileRequest>) -> Result<Response<GetFileResponse>, Status> {
+        let path = request.into_inner().path;
+        let offered = media::offer::resolve_offer(&path).await.map_err(offer_status)?;
+        let data = tokio::fs::read(&offered.path)
+            .await
+            .map_err(|e| Status::internal(format!("read {}: {e}", offered.path.display())))?;
+        if data.len() as u64 > media::offer::FILE_DOWNLOAD_MAX {
+            // The file grew between the check and the read.
+            return Err(Status::resource_exhausted(
+                media::offer::OfferError::TooLarge(data.len() as u64, media::offer::FILE_DOWNLOAD_MAX).to_string(),
+            ));
+        }
+        info!(target: "media", path = %offered.path.display(), bytes = data.len(), "file served for download");
+        Ok(Response::new(GetFileResponse {
+            file: Some(media::offer::file_ref_frame(&offered, false, "", "")),
+            data,
+        }))
+    }
+
     async fn get_media(&self, request: Request<GetMediaRequest>) -> Result<Response<GetMediaResponse>, Status> {
         let id = request.into_inner().id;
         let store = media::MediaStore::default_store();
@@ -6908,6 +6929,17 @@ fn final_assistant_text(
 }
 
 /// gRPC status mapping for the media RPCs.
+/// An offer's refusal, in the words the operator reads back.
+fn offer_status(e: media::offer::OfferError) -> Status {
+    use media::offer::OfferError;
+    match e {
+        OfferError::Denied(_) | OfferError::NotAFile(_) => Status::invalid_argument(e.to_string()),
+        OfferError::NotFound(_) => Status::not_found(e.to_string()),
+        OfferError::TooLarge(..) => Status::resource_exhausted(e.to_string()),
+        OfferError::Io(_) => Status::internal(e.to_string()),
+    }
+}
+
 /// A text upload's refusal, in the words the operator reads back.
 fn text_status(e: media::text::TextError) -> Status {
     use media::text::TextError;

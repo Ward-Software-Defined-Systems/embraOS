@@ -175,6 +175,16 @@ impl EmbraApi for EmbraApiImpl {
         Ok(Response::new(GetMediaResponse { payload }))
     }
 
+    async fn get_file(&self, request: Request<GetFileRequest>) -> Result<Response<GetFileResponse>, Status> {
+        let req = request.into_inner();
+        let mut brain = self.backends.brain_client().await?;
+        let resp = brain
+            .get_file(embra_common::proto::brain::GetFileRequest { path: req.path })
+            .await?;
+        let payload = resp.into_inner().encode_to_vec();
+        Ok(Response::new(GetFileResponse { payload }))
+    }
+
     async fn create_session(&self, request: Request<CreateSessionRequest>) -> Result<Response<CreateSessionResponse>, Status> {
         let req = request.into_inner();
         let mut brain = self.backends.brain_client().await?;

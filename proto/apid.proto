@@ -18,6 +18,7 @@ service EmbraAPI {
   // Media store pass-through (unary; bytes never ride the Converse stream).
   rpc PutMedia(PutMediaRequest) returns (PutMediaResponse);
   rpc GetMedia(GetMediaRequest) returns (GetMediaResponse);
+  rpc GetFile(GetFileRequest) returns (GetFileResponse);
 
   // --- Proxied Trust methods ---
   rpc VerifySoul(VerifySoulRequest) returns (VerifySoulResponse);
@@ -74,6 +75,8 @@ message PutMediaRequest {
 message PutMediaResponse { bytes payload = 1; }  // Serialized embra.brain.PutMediaResponse
 message GetMediaRequest { string id = 1; }
 message GetMediaResponse { bytes payload = 1; }  // Serialized embra.brain.GetMediaResponse
+message GetFileRequest { string path = 1; }
+message GetFileResponse { bytes payload = 1; }  // Serialized embra.brain.GetFileResponse
 
 message GetExpressionRequest {}
 message ExpressionState {

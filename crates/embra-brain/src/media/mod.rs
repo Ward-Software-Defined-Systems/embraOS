@@ -8,6 +8,8 @@
 //! - `replay`: session history → IR with the inline-image ceiling.
 //! - `text`: the uploads that are not images — plain files under
 //!   `/embra/workspace/uploads/`, handled by path.
+//! - `offer`: a workspace file handed to the operator as a download
+//!   (`file_offer`, `/download`, the `GetFile` RPC).
 //!
 //! Images NEVER ride a `String` path: not the tool-result text (the 2 MiB
 //! byte cap would cut a base64 payload silently), not the persisted turn
@@ -17,6 +19,7 @@
 //! the store.
 
 pub mod ingest;
+pub mod offer;
 pub mod replay;
 pub mod store;
 pub mod text;
