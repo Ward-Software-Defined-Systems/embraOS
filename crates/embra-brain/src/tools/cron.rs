@@ -17,6 +17,10 @@ pub(crate) const CRON_RESULT_MAX: usize = 4096;
 /// boot (`migrations::ensure_ttl_policies`).
 pub(crate) const CRON_RUN_RETENTION_DAYS: u64 = 30;
 pub(crate) const CRON_RUN_TTL_FIELD: &str = "started_at";
+/// Most runs `cron_list` shows per job.
+pub(crate) const CRON_LIST_RUNS_MAX: usize = 20;
+/// Bytes of a run's result shown on its line, cut on a character boundary.
+const RUN_PREVIEW_MAX: usize = 160;
 
 /// Compute the next UTC fire time for `daily HH:MM` expressed in the operator's
 /// timezone. Scans forward up to 7 local days to skip any DST spring-forward
@@ -291,22 +295,45 @@ pub async fn cron_add(db: &WardsonDbClient, param: &str, config_tz: &str) -> Str
     }
 }
 
-/// List all cron jobs.
-pub async fn cron_list(db: &WardsonDbClient) -> String {
-    ensure_collection(db).await;
+/// The query for a job's last `limit` recorded runs, newest first
+/// (`idx_cron_runs_started_at` serves the sort).
+pub(crate) fn runs_query_body(job_id: &str, limit: usize) -> serde_json::Value {
+    serde_json::json!({
+        "filter": {"job_id": job_id},
+        "sort": [{"started_at": "desc"}, {"_id": "desc"}],
+        "limit": limit,
+    })
+}
 
-    let crons = db
-        .fetch_collection("crons")
-        .await
-        .unwrap_or_default();
+/// A stored time in the operator's zone, or the text as stored when it
+/// does not parse.
+fn local_time(rfc3339: &str, tz: &str) -> String {
+    let Ok(t) = DateTime::parse_from_rfc3339(rfc3339) else {
+        return rfc3339.to_string();
+    };
+    let zone: Tz = tz.parse().unwrap_or(chrono_tz::UTC);
+    t.with_timezone(&zone).format("%Y-%m-%d %H:%M:%S %Z").to_string()
+}
 
-    if crons.is_empty() {
-        return "No cron jobs configured. Add one with: cron_add <schedule> | <command>"
-            .into();
+/// A run's result on one line.
+fn run_preview(result: &str) -> String {
+    let one_line: String = result.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.len() > RUN_PREVIEW_MAX {
+        format!("{}…", truncate_str(&one_line, RUN_PREVIEW_MAX))
+    } else {
+        one_line
     }
+}
 
+/// `cron_list`'s text: the jobs as before, and under each job its recorded
+/// runs when `runs_by_job` has them (newest first, as queried).
+pub(crate) fn render_cron_list(
+    crons: &[serde_json::Value],
+    runs_by_job: &std::collections::HashMap<String, Vec<serde_json::Value>>,
+    tz: &str,
+) -> String {
     let mut output = format!("=== embraCRON Jobs ({}) ===\n", crons.len());
-    for doc in &crons {
+    for doc in crons {
         let id = doc_id(doc).unwrap_or("?");
         let schedule = doc.get("schedule").and_then(|v| v.as_str()).unwrap_or("?");
         let command = doc.get("command").and_then(|v| v.as_str()).unwrap_or("?");
@@ -322,8 +349,57 @@ pub async fn cron_list(db: &WardsonDbClient) -> String {
             "  [{}] [{}] {} → {}\n    Next: {} | Last: {}\n",
             id, status, schedule, command, next_run, last_run
         ));
+        if let Some(runs) = runs_by_job.get(id) {
+            if runs.is_empty() {
+                output.push_str("    runs: none recorded\n");
+            }
+            for run in runs {
+                let started = run.get("started_at").and_then(|v| v.as_str()).unwrap_or("?");
+                let elapsed = run.get("elapsed_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                let is_error = run.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
+                let result = run.get("result").and_then(|v| v.as_str()).unwrap_or("");
+                let marker = if is_error { "ERR" } else { "ok" };
+                output.push_str(&format!(
+                    "    run {} {} {}ms: {}\n",
+                    local_time(started, tz),
+                    marker,
+                    elapsed,
+                    run_preview(result)
+                ));
+            }
+        }
     }
     output
+}
+
+/// List all cron jobs; with `runs` above zero, each job's last `runs`
+/// recorded runs under it.
+pub async fn cron_list(db: &WardsonDbClient, runs: usize, config_tz: &str) -> String {
+    ensure_collection(db).await;
+
+    let crons = db
+        .fetch_collection("crons")
+        .await
+        .unwrap_or_default();
+
+    if crons.is_empty() {
+        return "No cron jobs configured. Add one with: cron_add <schedule> | <command>"
+            .into();
+    }
+
+    let mut runs_by_job = std::collections::HashMap::new();
+    if runs > 0 {
+        for doc in &crons {
+            if let Some(id) = doc_id(doc) {
+                let found = db
+                    .query(CRON_RUNS, &runs_query_body(id, runs))
+                    .await
+                    .unwrap_or_default();
+                runs_by_job.insert(id.to_string(), found);
+            }
+        }
+    }
+    render_cron_list(&crons, &runs_by_job, config_tz)
 }
 
 /// The id of a stored job, as WardSONDB returns it.
@@ -573,6 +649,62 @@ mod run_record_tests {
 }
 
 #[cfg(test)]
+mod list_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn job() -> serde_json::Value {
+        json!({
+            "_id": "0199abcd-0000-7000-8000-000000000000", "schedule": "every 5m",
+            "command": "system_status", "enabled": true,
+            "next_run": "2026-10-08T12:05:00+00:00", "last_run": "2026-10-08T12:00:00+00:00",
+        })
+    }
+
+    #[test]
+    fn the_runs_query_is_per_job_sorted_newest_first_under_a_limit() {
+        let body = runs_query_body("0199abcd-0000-7000-8000-000000000000", 3);
+        assert_eq!(body["filter"], json!({"job_id": "0199abcd-0000-7000-8000-000000000000"}));
+        assert_eq!(body["sort"], json!([{"started_at": "desc"}, {"_id": "desc"}]));
+        assert_eq!(body["limit"], json!(3));
+        assert_eq!(CRON_LIST_RUNS_MAX, 20);
+    }
+
+    #[test]
+    fn cron_list_without_runs_prints_as_before() {
+        let out = render_cron_list(&[job()], &std::collections::HashMap::new(), "UTC");
+        assert_eq!(
+            out,
+            "=== embraCRON Jobs (1) ===\n  [0199abcd-0000-7000-8000-000000000000] [ON] every 5m → system_status\n    Next: 2026-10-08T12:05:00+00:00 | Last: 2026-10-08T12:00:00+00:00\n"
+        );
+    }
+
+    #[test]
+    fn cron_list_with_runs_shows_each_jobs_runs_under_it() {
+        let mut runs_by_job = std::collections::HashMap::new();
+        runs_by_job.insert(
+            "0199abcd-0000-7000-8000-000000000000".to_string(),
+            vec![
+                json!({"started_at": "2026-10-08T12:00:00+00:00", "elapsed_ms": 42, "is_error": false,
+                       "result": "uptime 3h\nmemory 177 MB"}),
+                json!({"started_at": "2026-10-08T11:55:00+00:00", "elapsed_ms": 7, "is_error": true,
+                       "result": format!("cron dispatch failed: {}", "x".repeat(300))}),
+            ],
+        );
+        let out = render_cron_list(&[job()], &runs_by_job, "America/Los_Angeles");
+        assert!(out.contains("    run 2026-10-08 05:00:00 PDT ok 42ms: uptime 3h memory 177 MB\n"), "{out}");
+        assert!(out.contains("    run 2026-10-08 04:55:00 PDT ERR 7ms: cron dispatch failed: xxx"), "{out}");
+        let err_line = out.lines().find(|l| l.contains("ERR 7ms")).unwrap();
+        assert!(err_line.ends_with('…'), "{err_line}");
+        assert!(err_line.len() < RUN_PREVIEW_MAX + 60);
+        // A job with no recorded runs says so when runs were asked for.
+        let mut empty = std::collections::HashMap::new();
+        empty.insert("0199abcd-0000-7000-8000-000000000000".to_string(), Vec::new());
+        assert!(render_cron_list(&[job()], &empty, "UTC").contains("    runs: none recorded\n"));
+    }
+}
+
+#[cfg(test)]
 mod daily_next_tests {
     use super::daily_next;
     use chrono::TimeZone;
@@ -665,13 +797,18 @@ impl CronAddArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "cron_list",
-    description = "List all scheduled cron jobs with their id, schedule, command, enabled flag, and next-run timestamp."
+    description = "List all scheduled cron jobs with their id, schedule, command, enabled flag, and next-run timestamp. With runs=N, each job's last N recorded runs are listed under it: when each started, whether the dispatch failed, how long it took, and a preview of its result. Runs are kept for thirty days."
 )]
-pub struct CronListArgs {}
+pub struct CronListArgs {
+    /// Recorded runs to show per job, newest first (default 0, at most 20).
+    #[serde(default)]
+    pub runs: Option<u32>,
+}
 
 impl CronListArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        Ok(cron_list(ctx.db).await)
+        let runs = (self.runs.unwrap_or(0) as usize).min(CRON_LIST_RUNS_MAX);
+        Ok(cron_list(ctx.db, runs, ctx.config_tz).await)
     }
 }
 

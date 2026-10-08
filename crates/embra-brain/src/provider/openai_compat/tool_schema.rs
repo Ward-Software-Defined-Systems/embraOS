@@ -372,17 +372,18 @@ mod tests {
 
     /// schemars wraps an enum field with a doc comment in a single-element
     /// `allOf`, and an enum whose variants carry doc comments in a `oneOf`
-    /// of constants. Ollama keeps neither, so these five reached its models
+    /// of constants. Ollama keeps neither, so these reached its models
     /// with no type and no allowed values. Each now arrives as a plain
-    /// string enum.
+    /// string enum; `reminder_list.filter` joined the five on 2026-10-08.
     #[test]
-    fn the_five_enum_parameters_reach_an_openai_compatible_server_as_string_enums() {
+    fn the_six_enum_parameters_reach_an_openai_compatible_server_as_string_enums() {
         for (tool, param, values) in [
             ("define", "action", json!(["get", "save", "delete"])),
             ("draft", "action", json!(["save", "delete"])),
             ("git_branch", "action", json!(["list", "create", "delete"])),
             ("knowledge_merge", "strategy", json!(["keep_target", "merge_tags", "merge_content"])),
             ("remember", "category", json!(["fact", "preference", "decision", "observation", "pattern"])),
+            ("reminder_list", "filter", json!(["pending", "fired", "all"])),
         ] {
             let d = registry::all_descriptors().find(|d| d.name == tool).expect("registered");
             let schema = translate_schema(d.name, (d.input_schema)()).expect("translates");

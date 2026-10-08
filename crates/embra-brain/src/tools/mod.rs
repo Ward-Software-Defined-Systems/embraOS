@@ -1894,6 +1894,126 @@ fn reminder_doc(
     })
 }
 
+/// Which reminders `reminder_list` shows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ReminderFilter {
+    #[default]
+    Pending,
+    Fired,
+    All,
+}
+
+impl ReminderFilter {
+    fn label(self) -> &'static str {
+        match self {
+            ReminderFilter::Pending => "pending",
+            ReminderFilter::Fired => "fired",
+            ReminderFilter::All => "all",
+        }
+    }
+}
+
+/// `reminder_list`'s default and most.
+pub(crate) const REMINDER_LIST_DEFAULT: usize = 20;
+pub(crate) const REMINDER_LIST_MAX: usize = 100;
+
+/// The limit a call asked for, within bounds.
+pub(crate) fn reminder_list_limit(limit: Option<u32>) -> usize {
+    (limit.map(|n| n as usize).unwrap_or(REMINDER_LIST_DEFAULT)).clamp(1, REMINDER_LIST_MAX)
+}
+
+/// The query behind a filter: pending reminders soonest first (a record
+/// without `fired` is pending, hence the `$or`, as in
+/// `due_reminders_query_body`), fired ones newest first. `All` reads the
+/// whole collection instead (`fetch_collection`); there is no query.
+pub(crate) fn reminder_list_query_body(filter: ReminderFilter, limit: usize) -> Option<serde_json::Value> {
+    match filter {
+        ReminderFilter::Pending => Some(serde_json::json!({
+            "filter": {"$or": [{"fired": false}, {"fired": {"$exists": false}}]},
+            "sort": [{"trigger_at": "asc"}, {"_id": "asc"}],
+            "limit": limit,
+        })),
+        ReminderFilter::Fired => Some(serde_json::json!({
+            "filter": {"fired": true},
+            "sort": [{"trigger_at": "desc"}, {"_id": "desc"}],
+            "limit": limit,
+        })),
+        ReminderFilter::All => None,
+    }
+}
+
+/// A stored time in the operator's zone, or the text as stored.
+fn reminder_local_time(rfc3339: &str, tz: &str) -> String {
+    let Ok(t) = chrono::DateTime::parse_from_rfc3339(rfc3339) else {
+        return rfc3339.to_string();
+    };
+    let zone: chrono_tz::Tz = tz.parse().unwrap_or(chrono_tz::UTC);
+    t.with_timezone(&zone).format("%Y-%m-%d %H:%M %Z").to_string()
+}
+
+/// `reminder_list`'s text: the short id, the message, when it is or was
+/// due, and for a fired one when it fired.
+pub(crate) fn render_reminder_list(
+    docs: &[serde_json::Value],
+    filter: ReminderFilter,
+    limit: usize,
+    tz: &str,
+) -> String {
+    if docs.is_empty() {
+        return match filter {
+            ReminderFilter::Pending => "No pending reminders. Set one with countdown.".to_string(),
+            ReminderFilter::Fired => "No fired reminders in the last seven days.".to_string(),
+            ReminderFilter::All => "No reminders.".to_string(),
+        };
+    }
+    let more = if docs.len() >= limit {
+        format!(" (the first {limit}; raise limit for more)")
+    } else {
+        String::new()
+    };
+    let mut out = format!("=== Reminders ({}: {}{}) ===\n", filter.label(), docs.len(), more);
+    for doc in docs {
+        let id = doc
+            .get("_id")
+            .or(doc.get("id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("?");
+        let short: String = id.chars().take(8).collect();
+        let message = doc.get("message").and_then(|v| v.as_str()).unwrap_or("Reminder");
+        let due = doc.get("trigger_at").and_then(|v| v.as_str()).unwrap_or("?");
+        let fired = doc.get("fired").and_then(|v| v.as_bool()).unwrap_or(false);
+        let mut line = format!("  {}  {}  due {}", short, message, reminder_local_time(due, tz));
+        if fired {
+            match doc.get("fired_at").and_then(|v| v.as_str()) {
+                Some(at) => line.push_str(&format!("  fired {}", reminder_local_time(at, tz))),
+                None => line.push_str("  fired"),
+            }
+        }
+        line.push('\n');
+        out.push_str(&line);
+    }
+    out
+}
+
+async fn reminder_list(db: &WardsonDbClient, filter: ReminderFilter, limit: usize, tz: &str) -> String {
+    ensure_collection(db, "reminders").await;
+    let docs = match reminder_list_query_body(filter, limit) {
+        Some(body) => db.query("reminders", &body).await.unwrap_or_default(),
+        None => {
+            let mut all = db.fetch_collection("reminders").await.unwrap_or_default();
+            all.sort_by(|a, b| {
+                let ta = a.get("trigger_at").and_then(|v| v.as_str()).unwrap_or("");
+                let tb = b.get("trigger_at").and_then(|v| v.as_str()).unwrap_or("");
+                tb.cmp(ta)
+            });
+            all.truncate(limit);
+            all
+        }
+    };
+    render_reminder_list(&docs, filter, limit, tz)
+}
+
 /// What a reminder's lifetime is counted from, and for how long: it is
 /// removed `REMINDER_RETENTION_DAYS` after it was DUE. Counted from
 /// `created_at`, as migration v4 set it up, a reminder for more than seven
@@ -2899,6 +3019,26 @@ fn default_countdown_message() -> String {
     "Reminder".into()
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
+    name = "reminder_list",
+    description = "List the reminders set with countdown: pending ones soonest first (the default), fired ones newest first with when they fired, or all. Each line gives the reminder's short id, its message and when it is or was due. A fired reminder is kept seven days past its due time."
+)]
+pub struct ReminderListArgs {
+    /// Which reminders: pending (default), fired, or all.
+    #[serde(default)]
+    pub filter: ReminderFilter,
+    /// How many to show (default 20, at most 100).
+    #[serde(default)]
+    pub limit: Option<u32>,
+}
+
+impl ReminderListArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(reminder_list(ctx.db, self.filter, reminder_list_limit(self.limit), ctx.config_tz).await)
+    }
+}
+
 impl CountdownArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
         let joined = if self.message.is_empty() {
@@ -3271,6 +3411,51 @@ mod system_logs_tests {
 
 #[cfg(test)]
 mod reminder_tests {
+    #[test]
+    fn the_pending_filter_matches_records_without_the_fired_field() {
+        let body = super::reminder_list_query_body(super::ReminderFilter::Pending, 7).unwrap();
+        assert_eq!(
+            body["filter"],
+            serde_json::json!({"$or": [{"fired": false}, {"fired": {"$exists": false}}]})
+        );
+        assert_eq!(body["sort"], serde_json::json!([{"trigger_at": "asc"}, {"_id": "asc"}]));
+        assert_eq!(body["limit"], serde_json::json!(7));
+        let fired = super::reminder_list_query_body(super::ReminderFilter::Fired, 7).unwrap();
+        assert_eq!(fired["filter"], serde_json::json!({"fired": true}));
+        assert_eq!(fired["sort"], serde_json::json!([{"trigger_at": "desc"}, {"_id": "desc"}]));
+        assert!(super::reminder_list_query_body(super::ReminderFilter::All, 7).is_none());
+    }
+
+    #[test]
+    fn reminder_list_caps_its_limit() {
+        assert_eq!(super::reminder_list_limit(None), 20);
+        assert_eq!(super::reminder_list_limit(Some(0)), 1);
+        assert_eq!(super::reminder_list_limit(Some(5)), 5);
+        assert_eq!(super::reminder_list_limit(Some(1000)), 100);
+    }
+
+    #[test]
+    fn reminder_list_renders_id_message_due_and_fired() {
+        let docs = vec![
+            serde_json::json!({"_id": "0199abcd-aaaa-7000-8000-000000000001", "message": "check the build",
+                               "trigger_at": "2026-10-08T12:00:00+00:00", "fired": true,
+                               "fired_at": "2026-10-08T12:00:07+00:00"}),
+            serde_json::json!({"_id": "0199abce-bbbb-7000-8000-000000000002", "message": "stand up",
+                               "trigger_at": "2026-10-08T13:00:00+00:00"}),
+        ];
+        let out = super::render_reminder_list(&docs, super::ReminderFilter::All, 20, "America/Los_Angeles");
+        assert_eq!(
+            out,
+            "=== Reminders (all: 2) ===\n  0199abcd  check the build  due 2026-10-08 05:00 PDT  fired 2026-10-08 05:00 PDT\n  0199abce  stand up  due 2026-10-08 06:00 PDT\n"
+        );
+        let full = super::render_reminder_list(&docs, super::ReminderFilter::Pending, 2, "UTC");
+        assert!(full.starts_with("=== Reminders (pending: 2 (the first 2; raise limit for more)) ===\n"), "{full}");
+        assert_eq!(
+            super::render_reminder_list(&[], super::ReminderFilter::Pending, 20, "UTC"),
+            "No pending reminders. Set one with countdown."
+        );
+    }
+
     #[test]
     fn a_fired_reminder_is_stamped_with_when_it_fired() {
         let doc = serde_json::json!({

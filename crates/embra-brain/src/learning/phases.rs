@@ -175,7 +175,8 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 // GitHub whether upstream WardSONDB had a release other than a hardcoded
 // "0.1.0", for a database that is vendored into an immutable rootfs. The
 // first tool ever REMOVED — the count fell, 116 → 115. `file_offer`
-// (2026-10-08) hands the operator a workspace file as a download: 116.
+// (2026-10-08) hands the operator a workspace file as a download: 116;
+// `reminder_list` the same day: 117.
 const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
     ("system", "System", 3),
     ("memory_knowledge", "Memory & Knowledge", 7),
@@ -185,7 +186,7 @@ const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
     ("security", "Security", 6),
     ("engineering", "Engineering", 47),
     ("filesystem", "Filesystem", 13),
-    ("scheduling", "Scheduling", 3),
+    ("scheduling", "Scheduling", 4),
     ("sessions", "Sessions", 10),
     ("knowledge_graph", "Knowledge Graph", 12),
     ("guardian", "Guardian (dynamic tools)", 3),
