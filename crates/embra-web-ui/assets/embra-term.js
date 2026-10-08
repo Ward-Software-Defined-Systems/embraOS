@@ -133,6 +133,37 @@
     // wrapped in try/catch so a missing/incompatible addon degrades to
     // the DOM renderer rather than a blank terminal.
     try { term.loadAddon(new CanvasAddon.CanvasAddon()); } catch (e) {}
+    // Download links. The console prints `web: /api/files/<path>` (a file
+    // card) and `web: /api/media/<id>` (an image card) on a row of its
+    // own; the provider underlines the route and a click fetches it as a
+    // download — same origin, so the `download` attribute is honoured.
+    // Both routes are ASCII (percent-encoded), so column equals index.
+    try {
+      const LINK = /\/api\/(files|media)\/[^\s]+/g;
+      term.registerLinkProvider({
+        provideLinks(y, cb) {
+          const line = term.buffer.active.getLine(y - 1);
+          if (!line) { cb(undefined); return; }
+          const text = line.translateToString(true);
+          const links = [];
+          let m;
+          LINK.lastIndex = 0;
+          while ((m = LINK.exec(text)) !== null) {
+            const url = m[0];
+            links.push({
+              text: url,
+              range: { start: { x: m.index + 1, y }, end: { x: m.index + url.length, y } },
+              activate: (_e, u) => {
+                const a = document.createElement("a");
+                a.href = u; a.download = ""; a.style.display = "none";
+                document.body.appendChild(a); a.click(); a.remove();
+              },
+            });
+          }
+          cb(links.length ? links : undefined);
+        },
+      });
+    } catch (e) { console.warn("embra-web: link provider unavailable", e); }
     try { fit.fit(); } catch (e) {}
     term.onData((d) => {
       if (writable && ws && ws.readyState === 1) ws.send(new TextEncoder().encode(d));

@@ -115,9 +115,13 @@ impl DisplayMessage {
         )
     }
 
-    /// File card: the text row every surface gets for a `FileRef`; no
-    /// pane and nothing to fetch. Timeline row:
+    /// File card: the text rows every surface gets for a `FileRef`; no
+    /// pane and nothing to fetch. The download path sits on a row of its
+    /// own, so the web terminal's link provider finds it whole (ratatui
+    /// never marks a wrapped row, and a path split across two rows would
+    /// not match). Timeline rows:
     /// `[file attached] notes.md (12 KB) — /embra/workspace/uploads/notes.md`
+    /// `web: /api/files/uploads/notes.md`
     pub fn file_with_tz(f: &embra_common::proto::brain::FileRef, tz_str: &str) -> Self {
         let replay = if f.replay { " (history)" } else { "" };
         let caption = if f.caption.is_empty() {
@@ -125,16 +129,20 @@ impl DisplayMessage {
         } else {
             format!(" — {}", f.caption)
         };
+        let web = embra_common::file_download_route(&f.path)
+            .map(|route| format!("\nweb: {route}"))
+            .unwrap_or_default();
         Self::new_with_tz(
             "system",
             format!(
-                "[file {}]{} {} ({} KB){} — {}",
+                "[file {}]{} {} ({} KB){} — {}{}",
                 f.origin,
                 replay,
                 f.name,
                 f.byte_size / 1024,
                 caption,
-                f.path
+                f.path,
+                web
             ),
             tz_str,
         )
@@ -507,13 +515,16 @@ mod file_card_tests {
     }
 
     #[test]
-    fn a_file_frame_renders_one_system_row_with_its_origin_size_and_path() {
+    fn a_file_frame_renders_its_origin_size_and_path_and_its_web_path_on_its_own_row() {
         let row = DisplayMessage::file_with_tz(&a_file("attached", false, ""), "UTC");
         assert_eq!(row.role, "system");
         assert_eq!(
             row.content,
-            "[file attached] notes.md (12 KB) — /embra/workspace/uploads/notes.md"
+            "[file attached] notes.md (12 KB) — /embra/workspace/uploads/notes.md\nweb: /api/files/uploads/notes.md"
         );
+        let lines: Vec<&str> = row.content.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(lines[1].starts_with("web: /api/files/"));
     }
 
     #[test]
@@ -521,7 +532,15 @@ mod file_card_tests {
         let row = DisplayMessage::file_with_tz(&a_file("offered", true, "the report"), "UTC");
         assert_eq!(
             row.content,
-            "[file offered] (history) notes.md (12 KB) — the report — /embra/workspace/uploads/notes.md"
+            "[file offered] (history) notes.md (12 KB) — the report — /embra/workspace/uploads/notes.md\nweb: /api/files/uploads/notes.md"
         );
+    }
+
+    #[test]
+    fn a_file_outside_the_workspace_gets_no_web_row() {
+        let mut f = a_file("offered", false, "");
+        f.path = "/etc/motd".into();
+        let row = DisplayMessage::file_with_tz(&f, "UTC");
+        assert_eq!(row.content, "[file offered] notes.md (12 KB) — /etc/motd");
     }
 }
