@@ -313,6 +313,15 @@ mod tests {
     }
 
     #[test]
+    fn the_workspace_root_is_the_one_the_download_route_strips() {
+        assert_eq!(WORKSPACE_ROOT, embra_common::WORKSPACE_ROOT);
+        assert_eq!(
+            embra_common::file_download_route(&format!("{WORKSPACE_ROOT}/uploads/notes.md")).as_deref(),
+            Some("/api/files/uploads/notes.md")
+        );
+    }
+
+    #[test]
     fn the_download_media_type_follows_the_extension_and_defaults_to_octet_stream() {
         assert_eq!(download_media_type("notes.md"), "text/markdown");
         assert_eq!(download_media_type("REPORT.TXT"), "text/plain");

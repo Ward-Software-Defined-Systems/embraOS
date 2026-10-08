@@ -38,3 +38,56 @@ pub use proto::common::{HealthCheckRequest, HealthCheckResponse, HealthStatus, S
 /// embra-console→apid client — sets `.max_decoding_message_size(..)` to
 /// this. Encoding limits default to unbounded and are left alone.
 pub const GRPC_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
+/// The workspace root the brain jails its writes to. The brain pins its
+/// own `WORKSPACE_ROOT` to this one; the console and embra-web derive a
+/// download path from it.
+pub const WORKSPACE_ROOT: &str = "/embra/workspace";
+
+/// The embra-web route that serves a workspace file for download:
+/// `/api/files/<path under the workspace>`, percent-encoded with the
+/// RFC 3986 unreserved characters and `/` left as they are. `None` for a
+/// path that is not under the workspace.
+pub fn file_download_route(path: &str) -> Option<String> {
+    let rel = path
+        .strip_prefix(WORKSPACE_ROOT)?
+        .strip_prefix('/')
+        .filter(|r| !r.is_empty())?;
+    Some(format!("/api/files/{}", percent_encode_path(rel)))
+}
+
+/// Percent-encode a path for a URL: unreserved characters and `/` pass
+/// through, every other byte of the UTF-8 form becomes `%XX`.
+pub fn percent_encode_path(rel: &str) -> String {
+    let mut out = String::with_capacity(rel.len());
+    for b in rel.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => out.push(b as char),
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod download_route_tests {
+    use super::*;
+
+    #[test]
+    fn the_file_url_is_workspace_relative_and_percent_encoded() {
+        assert_eq!(
+            file_download_route("/embra/workspace/uploads/notes.md").as_deref(),
+            Some("/api/files/uploads/notes.md")
+        );
+        assert_eq!(
+            file_download_route("/embra/workspace/reports/weekly report (ü).md").as_deref(),
+            Some("/api/files/reports/weekly%20report%20%28%C3%BC%29.md")
+        );
+        assert_eq!(file_download_route("/embra/workspace"), None);
+        assert_eq!(file_download_route("/embra/workspace/"), None);
+        assert_eq!(file_download_route("/embra/workspace-evil/x"), None);
+        assert_eq!(file_download_route("/etc/passwd"), None);
+        assert_eq!(file_download_route(""), None);
+        assert_eq!(percent_encode_path("a b/c?d#e&f"), "a%20b/c%3Fd%23e%26f");
+    }
+}

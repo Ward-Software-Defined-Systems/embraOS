@@ -19,6 +19,7 @@ use tokio_rustls::server::TlsStream;
 use crate::assets::static_handler;
 use crate::config::WebConfig;
 use crate::media::{MEDIA_BODY_LIMIT, api_media_get, api_media_put};
+use crate::files::api_file_get;
 use crate::sessions::api_sessions_list;
 use crate::stop::api_stop;
 use crate::state::AppState;
@@ -83,6 +84,8 @@ pub async fn serve(
             put(api_media_put).layer(DefaultBodyLimit::max(MEDIA_BODY_LIMIT)),
         )
         .route("/api/media/{id}", get(api_media_get))
+        // A workspace file as a download (`file_offer`, `/download`).
+        .route("/api/files/{*path}", get(api_file_get))
         .fallback(static_handler)
         .with_state(state);
 

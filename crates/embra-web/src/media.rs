@@ -48,7 +48,7 @@ const NAME_MAX: usize = 120;
 /// One of the hops that receive image bytes. Each of them raises tonic's
 /// 4 MiB default to `GRPC_MAX_MESSAGE_BYTES`; left at the default, an image
 /// above it fails on its way back to the browser.
-fn client(apid_addr: &str) -> Result<EmbraApiClient<Channel>, String> {
+pub(crate) fn client(apid_addr: &str) -> Result<EmbraApiClient<Channel>, String> {
     let endpoint = Channel::from_shared(apid_addr.to_string())
         .map_err(|e| format!("invalid apid endpoint: {e}"))?;
     Ok(EmbraApiClient::new(endpoint.connect_lazy())
@@ -112,18 +112,18 @@ fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> &'a str {
 }
 
 /// Strip anything that would break a `Content-Disposition` quoted string.
-fn disposition_name(name: &str) -> String {
+pub(crate) fn disposition_name(name: &str) -> String {
     name.chars()
         .filter(|c| !c.is_control() && *c != '"' && *c != '\\')
         .take(NAME_MAX)
         .collect()
 }
 
-fn json_error(status: StatusCode, msg: String) -> Response {
+pub(crate) fn json_error(status: StatusCode, msg: String) -> Response {
     (status, Json(json!({ "error": msg }))).into_response()
 }
 
-fn status_from_tonic(code: tonic::Code) -> StatusCode {
+pub(crate) fn status_from_tonic(code: tonic::Code) -> StatusCode {
     match code {
         tonic::Code::InvalidArgument => StatusCode::BAD_REQUEST,
         tonic::Code::NotFound => StatusCode::NOT_FOUND,

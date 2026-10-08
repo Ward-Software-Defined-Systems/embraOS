@@ -14,6 +14,7 @@ mod activity_feed;
 mod arbiter;
 mod assets;
 mod chat_bridge;
+mod files;
 mod media;
 mod config;
 mod metrics;

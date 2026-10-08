@@ -239,11 +239,12 @@ pub fn brain_to_server_msg(resp: brain::ConversationResponse) -> Option<ServerMs
     })
 }
 
-/// `FileRef` → `ServerMsg::File`. The download route is not served yet;
-/// `url` stays empty until it is, and the UI shows a card without a link.
+/// `FileRef` → `ServerMsg::File` with the download route filled in
+/// (`/api/files/<path under the workspace>`); empty for a path the route
+/// would not serve, and the UI then shows a card without a link.
 pub fn file_server_msg(f: brain::FileRef) -> ServerMsg {
     ServerMsg::File {
-        url: String::new(),
+        url: embra_common::file_download_route(&f.path).unwrap_or_default(),
         path: f.path,
         name: f.name,
         byte_size: f.byte_size,
@@ -372,7 +373,7 @@ mod media_bridge_tests {
                 "caption": "",
                 "tool_use_id": "",
                 "replay": true,
-                "url": ""
+                "url": "/api/files/uploads/notes.md"
             })
         );
     }
