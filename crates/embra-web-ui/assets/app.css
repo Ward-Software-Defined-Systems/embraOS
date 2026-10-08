@@ -866,6 +866,37 @@ body.is-observer .term-wrap {
 .bubble.media .m-meta { flex-shrink: 0; }
 .bubble.media .media-caption { padding: 0 6px 4px; font-size: 14px; color: var(--txt); }
 
+/* Text files: a chip on the strip and in the user bubble, a card for a
+   file that became visible (attached, offered, replayed). */
+.pending-thumb.pending-file { width: auto; min-width: 64px; max-width: 160px; padding: 0 6px; }
+.pending-thumb .pt-file {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  height: 100%; gap: 2px; font-size: 11px; color: var(--txt);
+}
+.pending-thumb .pt-icon { font-size: 20px; }
+.pending-thumb .pt-name { max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bubble.user .user-files { display: flex; flex-wrap: wrap; gap: 4px; padding: 4px 6px 2px; }
+.bubble.user.has-files { padding: 6px; }
+.bubble.user .user-file {
+  font-size: 12px; border-radius: 8px; padding: 2px 8px;
+  background: rgba(0,0,0,.18); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+}
+.bubble.file {
+  align-self: flex-start;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-bottom-left-radius: 4px;
+  padding: 8px 10px;
+  white-space: normal;
+}
+.bubble.file .f-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.bubble.file .f-icon { font-size: 20px; flex-shrink: 0; }
+.bubble.file .f-name { color: var(--txt); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bubble.file .f-meta { font-size: 12px; color: var(--txt-dim); flex-shrink: 0; }
+.bubble.file .file-link { display: inline-block; margin-top: 6px; font-size: 13px; color: var(--accent); text-decoration: underline; }
+.bubble.file .file-caption { padding-top: 4px; font-size: 14px; color: var(--txt); }
+
 .lightbox {
   position: fixed; inset: 0; z-index: 60;
   background: rgba(0,0,0,.92);

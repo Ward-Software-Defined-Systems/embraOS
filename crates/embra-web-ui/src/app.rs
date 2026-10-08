@@ -37,7 +37,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/embeddings", "embeddings"), ("/embeddings backfill", "embed backfill"),
     ]),
     ("Media", &[
-        ("/attach", "attach image"), ("/media", "media pane"),
+        ("/attach", "attach file"), ("/media", "media pane"),
         ("/image-provider", "image gen"), ("/image-provider model", "image model"),
         ("/image-provider key", "image key"),
     ]),
@@ -100,6 +100,11 @@ const fn sel(label: &'static str, choices: &'static [&'static str], req: bool) -
 
 // Choices beginning with '(' are sentinels → treated as "no argument"
 // (e.g. show current status) rather than a literal value.
+/// What the pickers offer: images, text by type, and the text extensions
+/// browsers leave untyped (`.md` comes with an empty type). Mirrored by
+/// `embra-term.js` for drops and pastes and by the chat composer.
+pub const ACCEPT: &str = "image/*,text/*,application/json,.md,.markdown,.txt,.csv,.json,.yaml,.yml,.toml";
+
 const SPECS: &[Spec] = &[
     Spec { cmd: "/new", title: "New session", note: "Creates and switches to it.",
         join: " ", guided: false,
@@ -138,10 +143,10 @@ const SPECS: &[Spec] = &[
         join: " ", guided: false,
         fields: &[sel("Model",
             &["(show current)", "opus-5.5", "opus-5", "opus-4.8", "fable-5.1", "fable-5"], false)] },
-    Spec { cmd: "/attach", title: "Attach an image",
-        note: "Stage an image for your next message: an uploaded media id (📎 / drop / paste does this for you) or a workspace path. Blank = list staged; 'clear' = drop them.",
+    Spec { cmd: "/attach", title: "Attach an image or a text file",
+        note: "Stage an image or a text file for your next message: an uploaded media id or uploads/ path (📎 / drop / paste does this for you), or any workspace path. Blank = list staged; 'clear' = drop them.",
         join: " ", guided: false,
-        fields: &[t("Id or path", "att-… | /embra/workspace/repos/x/shot.png | list | clear", false)] },
+        fields: &[t("Id or path", "att-… | uploads/notes.md | /embra/workspace/repos/x/shot.png | list | clear", false)] },
     Spec { cmd: "/media", title: "Media pane",
         note: "Console-local: show the last image in the TUI media pane, or hide it.",
         join: " ", guided: false,
@@ -510,11 +515,11 @@ pub fn App() -> impl IntoView {
                         on:click=move |_| palette_open.update(|b| *b = !*b)>
                         "⌘ Commands"
                     </button>
-                    // Media wave: pick an image → upload → `/attach <id>`
-                    // typed into the console. Drop/paste on the terminal
-                    // do the same (embra-term.js).
+                    // Media wave: pick an image or a text file → upload →
+                    // `/attach <id|path>` typed into the console. Drop/paste
+                    // on the terminal do the same (embra-term.js).
                     <button class="btn ghost"
-                        title="Attach an image (or drop / paste one on the terminal)"
+                        title="Attach an image or a text file (or drop / paste one on the terminal)"
                         on:click=move |_| {
                             if let Some(el) = attach_input.get() {
                                 el.click();
@@ -522,7 +527,7 @@ pub fn App() -> impl IntoView {
                         }>
                         "📎 Attach"
                     </button>
-                    <input node_ref=attach_input type="file" accept="image/*" multiple
+                    <input node_ref=attach_input type="file" accept=ACCEPT multiple
                         style="display:none"
                         on:change=move |_| {
                             if let Some(el) = attach_input.get() {

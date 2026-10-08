@@ -140,10 +140,11 @@
     const ro = new ResizeObserver(() => { try { fit.fit(); } catch (e) {} sendResize(); });
     ro.observe(document.getElementById(elId));
     window.addEventListener("resize", () => { try { fit.fit(); } catch (e) {} sendResize(); });
-    // Media wave: drop an image on the terminal, or paste image data,
-    // to attach it — upload to the store, then type `/attach <id>` into
-    // the console for the operator (the brain stages it for the next
-    // message). Plain-text pastes are left to xterm.
+    // Media wave: drop a file on the terminal, or paste one, to attach
+    // it — upload it, then type `/attach <id|path>` into the console for
+    // the operator (the brain stages it for the next message). An image
+    // gets a media id, a text file lands in uploads/ and is named by its
+    // path. Plain-text pastes are left to xterm.
     const host = document.getElementById(elId);
     host.addEventListener("dragover", (e) => { e.preventDefault(); });
     host.addEventListener("drop", (e) => {
@@ -153,7 +154,7 @@
     });
     document.addEventListener("paste", (e) => {
       const files = e.clipboardData && e.clipboardData.files;
-      if (files && files.length && [...files].some((f) => f.type.startsWith("image/"))) {
+      if (files && files.length) {
         e.preventDefault();
         window.embraUploadFiles(files);
       }
@@ -161,12 +162,25 @@
     connect();
   };
 
-  // Upload one or more images to the MEDIA store and inject `/attach <id>`
-  // per success. Errors surface as a terminal line (bracketed, dim) so the
-  // operator sees them where they are looking.
+  // What the picker, a drop or a paste may upload: an image, a text file
+  // by type or by extension, or a file the browser cannot type (the brain
+  // then decides). Anything else is said so and skipped.
+  const TEXT_EXT = /\.(md|markdown|txt|csv|json|ya?ml|toml)$/i;
+  function embraAcceptsFile(f) {
+    return f.type.startsWith("image/") || f.type.startsWith("text/") ||
+      f.type === "application/json" || f.type === "" || TEXT_EXT.test(f.name);
+  }
+
+  // Upload one or more files and inject `/attach <id|path>` per success:
+  // an image answers with a media id, a text file with its uploads/ path.
+  // Errors surface as a terminal line (bracketed, dim) so the operator
+  // sees them where they are looking.
   window.embraUploadFiles = async function (files) {
     for (const f of Array.from(files)) {
-      if (!f.type.startsWith("image/") && f.type !== "") continue;
+      if (!embraAcceptsFile(f)) {
+        if (term) term.write("\r\n\x1b[2m[embra-web] attach skipped: " + f.name + " is not an image or a text file\x1b[0m\r\n");
+        continue;
+      }
       try {
         const resp = await fetch("/api/media", {
           method: "PUT",
@@ -177,13 +191,14 @@
           body: f,
         });
         const body = await resp.json().catch(() => ({}));
-        if (!resp.ok || !body.id) {
+        const handle = body.id || body.path;
+        if (!resp.ok || !handle) {
           const msg = body.error || ("upload rejected (" + resp.status + ")");
           if (term) term.write("\r\n\x1b[2m[embra-web] attach failed: " + msg + "\x1b[0m\r\n");
           continue;
         }
-        if (writable) window.embraTermInject("/attach " + body.id + "\r");
-        else if (term) term.write("\r\n\x1b[2m[embra-web] uploaded " + body.id + " — take control to attach it\x1b[0m\r\n");
+        if (writable) window.embraTermInject("/attach " + handle + "\r");
+        else if (term) term.write("\r\n\x1b[2m[embra-web] uploaded " + handle + " — take control to attach it\x1b[0m\r\n");
       } catch (err) {
         if (term) term.write("\r\n\x1b[2m[embra-web] attach failed: " + err + "\x1b[0m\r\n");
       }

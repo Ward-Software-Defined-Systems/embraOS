@@ -159,10 +159,18 @@ struct MediaCard {
     caption: String,
 }
 
-/// `PUT /api/media` response shape.
+/// `PUT /api/media` response shape: `kind:"image"` with an id, or
+/// `kind:"file"` with a path (a text upload, named by where it landed).
 #[derive(Debug, Deserialize)]
 struct UploadResponse {
+    #[serde(default)]
     id: String,
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    path: String,
+    #[serde(default)]
+    media_type: String,
     #[serde(default)]
     name: String,
     #[serde(default)]
@@ -177,22 +185,57 @@ struct UploadResponse {
     error: String,
 }
 
-/// An image picked/pasted/dropped into the composer, awaiting send.
-/// `preview` is an object URL (revoked when the strip clears); `media`
-/// is set once the upload returns; `error` keeps a failed pick visible
-/// (the operator removes it explicitly).
+/// A file picked/pasted/dropped into the composer, awaiting send.
+/// `preview` is an object URL for an image (revoked when the strip
+/// clears) and empty for a text file; `media` or `file` is set once the
+/// upload returns; `error` keeps a failed pick visible (the operator
+/// removes it explicitly).
 #[derive(Debug, Clone, PartialEq)]
 struct PendingAttachment {
     local_id: u32,
     name: String,
     preview: String,
     media: Option<MediaCard>,
+    file: Option<FileCard>,
     error: Option<String>,
+}
+
+/// One text file the operator attached or a file offered for download.
+/// `url` is the download route, empty when there is none.
+#[derive(Debug, Clone, PartialEq)]
+struct FileCard {
+    path: String,
+    name: String,
+    byte_size: u64,
+    media_type: String,
+    origin: String,
+    caption: String,
+    url: String,
+}
+
+/// What an upload came back as.
+enum Uploaded {
+    Image(MediaCard),
+    File(FileCard),
+}
+
+/// The text extensions browsers leave untyped; with the types in
+/// `app::ACCEPT`, what the picker, a drop or a paste may upload.
+const TEXT_EXTENSIONS: &[&str] = &[".md", ".markdown", ".txt", ".csv", ".json", ".yaml", ".yml", ".toml"];
+
+fn accepts_file(file: &web_sys::File) -> bool {
+    let t = file.type_();
+    let name = file.name().to_ascii_lowercase();
+    t.starts_with("image/")
+        || t.starts_with("text/")
+        || t == "application/json"
+        || t.is_empty()
+        || TEXT_EXTENSIONS.iter().any(|ext| name.ends_with(ext))
 }
 
 /// Upload one picked file to the store. Raw body (the browser streams the
 /// Blob), type + name + session as headers — see embra-web `media.rs`.
-async fn upload_file(file: web_sys::File, session: String) -> Result<MediaCard, String> {
+async fn upload_file(file: web_sys::File, session: String) -> Result<Uploaded, String> {
     let name = file.name();
     let encoded = js_sys::encode_uri_component(&name)
         .as_string()
@@ -217,7 +260,8 @@ async fn upload_file(file: web_sys::File, session: String) -> Result<MediaCard, 
         .json()
         .await
         .map_err(|e| format!("upload response ({status}): {e}"))?;
-    if status >= 400 || parsed.id.is_empty() {
+    let is_file = parsed.kind == "file" || (parsed.id.is_empty() && !parsed.path.is_empty());
+    if status >= 400 || (parsed.id.is_empty() && !is_file) {
         let msg = if parsed.error.is_empty() {
             format!("upload rejected ({status})")
         } else {
@@ -225,20 +269,34 @@ async fn upload_file(file: web_sys::File, session: String) -> Result<MediaCard, 
         };
         return Err(msg);
     }
-    Ok(MediaCard {
+    let name = if parsed.name.is_empty() { name } else { parsed.name };
+    if is_file {
+        return Ok(Uploaded::File(FileCard {
+            path: parsed.path,
+            name,
+            byte_size: parsed.bytes,
+            media_type: parsed.media_type,
+            origin: "attached".into(),
+            caption: String::new(),
+            url: String::new(),
+        }));
+    }
+    Ok(Uploaded::Image(MediaCard {
         url: if parsed.url.is_empty() { format!("/api/media/{}", parsed.id) } else { parsed.url },
         id: parsed.id,
-        name: if parsed.name.is_empty() { name } else { parsed.name },
+        name,
         width: parsed.width,
         height: parsed.height,
         byte_size: parsed.bytes,
         origin: "attached".into(),
         caption: String::new(),
-    })
+    }))
 }
 
-/// Queue every image in `files` for upload: preview immediately, swap in
-/// the stored card when the upload returns.
+/// Queue every file in `files` for upload: an image previews at once, a
+/// text file shows as a chip; the stored card lands when the upload
+/// returns. A file that is neither stays on the strip with the reason,
+/// so nothing is dropped without a word.
 fn queue_files(
     files: Option<web_sys::FileList>,
     pending: RwSignal<Vec<PendingAttachment>>,
@@ -248,18 +306,33 @@ fn queue_files(
     let Some(files) = files else { return };
     for i in 0..files.length() {
         let Some(file) = files.get(i) else { continue };
-        if !file.type_().starts_with("image/") && !file.type_().is_empty() {
-            continue;
-        }
         let local_id = next_local_id.get_untracked();
         next_local_id.set(local_id + 1);
-        let preview = web_sys::Url::create_object_url_with_blob(&file).unwrap_or_default();
+        if !accepts_file(&file) {
+            pending.update(|p| {
+                p.push(PendingAttachment {
+                    local_id,
+                    name: file.name(),
+                    preview: String::new(),
+                    media: None,
+                    file: None,
+                    error: Some("not an image or a text file".into()),
+                })
+            });
+            continue;
+        }
+        let preview = if file.type_().starts_with("image/") {
+            web_sys::Url::create_object_url_with_blob(&file).unwrap_or_default()
+        } else {
+            String::new()
+        };
         pending.update(|p| {
             p.push(PendingAttachment {
                 local_id,
                 name: file.name(),
                 preview,
                 media: None,
+                file: None,
                 error: None,
             })
         });
@@ -269,7 +342,8 @@ fn queue_files(
             pending.update(|p| {
                 if let Some(item) = p.iter_mut().find(|a| a.local_id == local_id) {
                     match result {
-                        Ok(card) => item.media = Some(card),
+                        Ok(Uploaded::Image(card)) => item.media = Some(card),
+                        Ok(Uploaded::File(card)) => item.file = Some(card),
                         Err(e) => item.error = Some(e),
                     }
                 }
@@ -279,19 +353,23 @@ fn queue_files(
 }
 
 fn revoke_previews(items: &[PendingAttachment]) {
-    for a in items {
+    for a in items.iter().filter(|a| !a.preview.is_empty()) {
         let _ = web_sys::Url::revoke_object_url(&a.preview);
     }
 }
 
 #[derive(Debug, Clone)]
 enum Bubble {
-    /// Operator turn: text plus the images sent with it (thumbnails).
-    User { text: String, images: Vec<MediaCard> },
+    /// Operator turn: text plus the images (thumbnails) and text files
+    /// (chips) sent with it.
+    User { text: String, images: Vec<MediaCard>, files: Vec<FileCard> },
     Assistant(String),
     /// An image that became visible mid-conversation — produced or viewed
     /// by a tool, attached via `/attach`, or replayed from history.
     Media(MediaCard),
+    /// A file that became visible: a text file the operator attached, a
+    /// file offered for download, or a replay of either.
+    File(FileCard),
     /// `kind` ∈ info / warning / error / notification / reconnection /
     /// unspecified — colored accordingly. Mode transitions land here too.
     System { content: String, kind: String },
@@ -532,7 +610,7 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/embeddings backfill", "embed nodes that need it"),
     ]),
     ("Media", &[
-        ("/attach", "attach a workspace image to your next message (needs id or path)"),
+        ("/attach", "attach a workspace image or text file to your next message (needs id or path)"),
         ("/image-provider", "image-generation backend: status / gemini / clear"),
         ("/image-provider model", "pick the image model (needs id)"),
         ("/image-provider key", "set / show the image-generation key"),
@@ -680,17 +758,21 @@ pub fn ChatApp() -> impl IntoView {
     let send_msg = move || {
         let text = input.get();
         let trimmed = text.trim();
-        // Uploaded (stored) images ride with this message; a failed or
-        // still-uploading pick blocks the send until removed/finished.
+        // Uploaded images and text files ride with this message; a failed
+        // or still-uploading pick blocks the send until removed/finished.
         let ready: Vec<MediaCard> = pending.with_untracked(|p| {
             p.iter().filter_map(|a| a.media.clone()).collect()
         });
-        let blocked = pending.with_untracked(|p| p.iter().any(|a| a.media.is_none()));
-        if blocked || (trimmed.is_empty() && ready.is_empty()) {
+        let ready_files: Vec<FileCard> = pending.with_untracked(|p| {
+            p.iter().filter_map(|a| a.file.clone()).collect()
+        });
+        let blocked = pending.with_untracked(|p| p.iter().any(|a| a.media.is_none() && a.file.is_none()));
+        if blocked || (trimmed.is_empty() && ready.is_empty() && ready_files.is_empty()) {
             return;
         }
         let is_slash = trimmed.starts_with('/');
         let sent_images: Vec<MediaCard> = if is_slash { Vec::new() } else { ready };
+        let sent_files: Vec<FileCard> = if is_slash { Vec::new() } else { ready_files };
         let msg = if let Some(rest) = trimmed.strip_prefix('/') {
             let (cmd, args) = parse_slash(&format!("/{rest}"));
             ClientMsg::Slash { command: cmd, args }
@@ -698,7 +780,7 @@ pub fn ChatApp() -> impl IntoView {
             ClientMsg::Msg {
                 text: trimmed.to_string(),
                 attachment_ids: sent_images.iter().map(|c| c.id.clone()).collect(),
-                file_paths: Vec::new(),
+                file_paths: sent_files.iter().map(|f| f.path.clone()).collect(),
             }
         };
         if !is_slash {
@@ -711,14 +793,14 @@ pub fn ChatApp() -> impl IntoView {
         // the user turn back on the Converse stream, so the timeline
         // would otherwise skip what the operator typed.
         if let ClientMsg::Msg { text, .. } = &msg {
-            messages.update(|m| m.push(Bubble::User { text: text.clone(), images: sent_images.clone() }));
+            messages.update(|m| m.push(Bubble::User { text: text.clone(), images: sent_images.clone(), files: sent_files.clone() }));
         } else if let ClientMsg::Slash { command, args } = &msg {
             let display = if args.is_empty() {
                 command.clone()
             } else {
                 format!("{command} {args}")
             };
-            messages.update(|m| m.push(Bubble::User { text: display, images: Vec::new() }));
+            messages.update(|m| m.push(Bubble::User { text: display, images: Vec::new(), files: Vec::new() }));
         }
         if let Some(tx) = outbound.get_untracked() {
             let _ = tx.unbounded_send(msg);
@@ -738,7 +820,7 @@ pub fn ChatApp() -> impl IntoView {
         } else {
             format!("{command} {args}")
         };
-        messages.update(|m| m.push(Bubble::User { text: display, images: Vec::new() }));
+        messages.update(|m| m.push(Bubble::User { text: display, images: Vec::new(), files: Vec::new() }));
         if let Some(tx) = outbound.get_untracked() {
             let _ = tx.unbounded_send(ClientMsg::Slash { command, args });
         }
@@ -753,7 +835,7 @@ pub fn ChatApp() -> impl IntoView {
         if text.is_empty() {
             return;
         }
-        messages.update(|m| m.push(Bubble::User { text: text.clone(), images: Vec::new() }));
+        messages.update(|m| m.push(Bubble::User { text: text.clone(), images: Vec::new(), files: Vec::new() }));
         if let Some(tx) = outbound.get_untracked() {
             let _ = tx.unbounded_send(ClientMsg::Msg { text, attachment_ids: Vec::new(), file_paths: Vec::new() });
         }
@@ -1345,9 +1427,15 @@ fn handle_server_msg(
                 m.push(Bubble::Media(MediaCard { id, url, name, width, height, byte_size, origin, caption }));
             });
         }
-        // The file card lands with the text-upload wave; until then the
-        // frame is read and dropped.
-        ServerMsg::File { .. } => {}
+        ServerMsg::File { path, name, byte_size, media_type, origin, caption, replay, url, .. } => {
+            // Same replay rule as the media card.
+            if replay && had_content_at_connect {
+                return;
+            }
+            messages.update(|m| {
+                m.push(Bubble::File(FileCard { path, name, byte_size, media_type, origin, caption, url }));
+            });
+        }
         ServerMsg::Error { message } => {
             messages.update(|m| {
                 m.push(Bubble::System {
@@ -1500,9 +1588,27 @@ fn BubbleView(idx: usize, bubble: Bubble) -> impl IntoView {
     let _ = idx;
     let lightbox = use_context::<RwSignal<Option<MediaCard>>>();
     match bubble {
-        Bubble::User { text, images } => {
-            if images.is_empty() {
+        Bubble::User { text, images, files } => {
+            if images.is_empty() && files.is_empty() {
                 view! { <div class="bubble user">{text}</div> }.into_any()
+            } else if images.is_empty() {
+                let chips = files
+                    .into_iter()
+                    .map(|f| {
+                        view! {
+                            <span class="user-file" title=f.path.clone()>
+                                {format!("📄 {} ({} KB)", f.name, f.byte_size / 1024)}
+                            </span>
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                view! {
+                    <div class="bubble user has-files">
+                        {(!text.is_empty()).then(|| view! { <div class="user-text">{text}</div> })}
+                        <div class="user-files">{chips}</div>
+                    </div>
+                }
+                .into_any()
             } else {
                 let thumbs = images
                     .into_iter()
@@ -1514,14 +1620,44 @@ fn BubbleView(idx: usize, bubble: Bubble) -> impl IntoView {
                         }
                     })
                     .collect::<Vec<_>>();
+                let chips = files
+                    .into_iter()
+                    .map(|f| {
+                        view! {
+                            <span class="user-file" title=f.path.clone()>
+                                {format!("📄 {} ({} KB)", f.name, f.byte_size / 1024)}
+                            </span>
+                        }
+                    })
+                    .collect::<Vec<_>>();
                 view! {
                     <div class="bubble user has-images">
                         <div class="user-images">{thumbs}</div>
+                        {(!chips.is_empty()).then(|| view! { <div class="user-files">{chips}</div> })}
                         {(!text.is_empty()).then(|| view! { <div class="user-text">{text}</div> })}
                     </div>
                 }
                 .into_any()
             }
+        }
+        Bubble::File(card) => {
+            let meta = format!("{} · {} · {} KB", card.origin, card.media_type, card.byte_size / 1024);
+            let caption = card.caption.clone();
+            let link = (!card.url.is_empty()).then(|| {
+                view! { <a class="file-link" href=card.url.clone() download=card.name.clone()>"Download"</a> }
+            });
+            view! {
+                <div class="bubble file" title=card.path.clone()>
+                    <div class="f-row">
+                        <span class="f-icon">"📄"</span>
+                        <span class="f-name">{card.name.clone()}</span>
+                        <span class="f-meta">{meta}</span>
+                    </div>
+                    {link}
+                    {(!caption.is_empty()).then(|| view! { <div class="file-caption">{caption}</div> })}
+                </div>
+            }
+            .into_any()
         }
         Bubble::Media(card) => {
             let open = card.clone();
@@ -1719,8 +1855,9 @@ where
             input_el.set_value("");
         }
     };
-    // Paste with image data (screenshots) attaches instead of inserting
-    // text; plain-text pastes fall through to the textarea.
+    // Paste with files (screenshots, a file from a file manager) attaches
+    // instead of inserting text; plain-text pastes fall through to the
+    // textarea.
     let on_paste = move |e: web_sys::Event| {
         // leptos types `paste` as a plain Event; narrow to the clipboard
         // event to reach the pasted files.
@@ -1741,8 +1878,8 @@ where
             }
         });
     };
-    let has_ready = move || pending.with(|p| p.iter().any(|a| a.media.is_some()));
-    let has_blocking = move || pending.with(|p| p.iter().any(|a| a.media.is_none()));
+    let has_ready = move || pending.with(|p| p.iter().any(|a| a.media.is_some() || a.file.is_some()));
+    let has_blocking = move || pending.with(|p| p.iter().any(|a| a.media.is_none() && a.file.is_none()));
 
     let keydown = move |e: KeyboardEvent| {
         // On mobile, Enter = newline (soft keyboard convention); Send
@@ -1782,15 +1919,31 @@ where
                 } else {
                     let thumbs = items.into_iter().map(|a| {
                         let id = a.local_id;
-                        let state_cls = if a.error.is_some() { "failed" } else if a.media.is_some() { "ready" } else { "uploading" };
-                        let title = match (&a.error, &a.media) {
-                            (Some(e), _) => format!("{}: {}", a.name, e),
-                            (None, Some(m)) => format!("{} · {}×{} · {} KB", m.name, m.width, m.height, m.byte_size / 1024),
+                        let ready = a.media.is_some() || a.file.is_some();
+                        let state_cls = if a.error.is_some() { "failed" } else if ready { "ready" } else { "uploading" };
+                        let title = match (&a.error, &a.media, &a.file) {
+                            (Some(e), _, _) => format!("{}: {}", a.name, e),
+                            (None, Some(m), _) => format!("{} · {}×{} · {} KB", m.name, m.width, m.height, m.byte_size / 1024),
+                            (None, None, Some(f)) => format!("{} · {} · {} KB", f.name, f.media_type, f.byte_size / 1024),
                             _ => format!("{} · uploading…", a.name),
                         };
+                        // An image previews; anything else is a chip with its name.
+                        let is_file = a.preview.is_empty();
+                        let face = if is_file {
+                            view! {
+                                <div class="pt-file">
+                                    <span class="pt-icon">"📄"</span>
+                                    <span class="pt-name">{a.name.clone()}</span>
+                                </div>
+                            }
+                            .into_any()
+                        } else {
+                            view! { <img src=a.preview.clone() alt=a.name.clone() /> }.into_any()
+                        };
+                        let cls = if is_file { format!("pending-thumb pending-file {state_cls}") } else { format!("pending-thumb {state_cls}") };
                         view! {
-                            <div class=format!("pending-thumb {state_cls}") title=title.clone()>
-                                <img src=a.preview.clone() alt=a.name.clone() />
+                            <div class=cls title=title.clone()>
+                                {face}
                                 <button class="pt-remove" title="Remove" on:click=move |_| remove_pending(id)>"×"</button>
                                 {a.error.map(|e| view! { <div class="pt-err">{e}</div> })}
                             </div>
@@ -1804,10 +1957,10 @@ where
                 title="Slash commands"
                 on:click=move |_| slashes_open.set(true)>"/"</button>
             <button class="ci-attach"
-                title="Attach an image"
+                title="Attach an image or a text file"
                 disabled=move || !connected.get()
                 on:click=open_picker>"📎"</button>
-            <input node_ref=file_ref type="file" accept="image/*" multiple class="ci-file" on:change=on_files />
+            <input node_ref=file_ref type="file" accept=crate::app::ACCEPT multiple class="ci-file" on:change=on_files />
             <textarea
                 node_ref=textarea_ref
                 class="ci-textarea"
