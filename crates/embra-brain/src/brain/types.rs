@@ -20,8 +20,11 @@ pub struct Message {
     pub attachments: Option<Vec<AttachmentRef>>,
 }
 
-/// Persisted pointer to one stored image. `bytes` is the stored
-/// (normalized) size — the replay budget uses it without touching disk.
+/// Persisted pointer to one attachment. An image: `id` names it in the
+/// MEDIA store and `bytes` is the stored (normalized) size, which the
+/// replay budget uses without touching disk. A text file (`media_type`
+/// outside `image/`): `id` is empty, the dimensions are zero and `path`
+/// is the handle.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttachmentRef {
     pub id: String,

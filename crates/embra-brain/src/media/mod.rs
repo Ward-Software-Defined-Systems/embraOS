@@ -6,6 +6,8 @@
 //! - `store`: the `/embra/workspace/MEDIA/` file store — id grammar,
 //!   atomic writes, sidecars, reads that re-sniff before serving.
 //! - `replay`: session history → IR with the inline-image ceiling.
+//! - `text`: the uploads that are not images — plain files under
+//!   `/embra/workspace/uploads/`, handled by path.
 //!
 //! Images NEVER ride a `String` path: not the tool-result text (the 2 MiB
 //! byte cap would cut a base64 payload silently), not the persisted turn
@@ -17,6 +19,7 @@
 pub mod ingest;
 pub mod replay;
 pub mod store;
+pub mod text;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use embra_tools_core::ToolImage;
@@ -178,6 +181,11 @@ mod tests {
         assert_eq!(MEDIA_MAX_PER_MESSAGE, 10);
         assert_eq!(MEDIA_HISTORY_MAX_IMAGES, 20);
         assert_eq!(MEDIA_HISTORY_MAX_BYTES, 16 * 1024 * 1024);
+        assert_eq!(text::TEXT_UPLOAD_MAX, 2 * 1024 * 1024);
+        // A text upload is checked after the image gate: its cap sits
+        // under the upload gate, or the gate's message would be the one
+        // the operator reads.
+        const { assert!(text::TEXT_UPLOAD_MAX <= MEDIA_UPLOAD_MAX) };
         // Relations between constants are checked when this test is
         // compiled, not when it runs: breaking one stops the build.
         // The replay ceiling must stay under the vision API's 32 MB

@@ -653,6 +653,29 @@ impl BrainService for BrainGrpcService {
                 media::MEDIA_UPLOAD_MAX
             )));
         }
+        if media::ingest::sniff(&req.data).is_none() {
+            // Not an image: a text file lands in uploads/ under its name,
+            // or the upload is refused with the reason.
+            let dir = media::text::UploadsDir::default_dir();
+            let name = if req.name.trim().is_empty() {
+                media::text::FALLBACK_NAME
+            } else {
+                req.name.as_str()
+            };
+            let upload = dir.store_text(name, &req.data).await.map_err(text_status)?;
+            info!(
+                target: "media",
+                path = %upload.path.display(),
+                session = %req.session_name,
+                bytes = upload.bytes,
+                media_type = %upload.media_type,
+                "text upload stored"
+            );
+            return Ok(Response::new(PutMediaResponse {
+                media: None,
+                file: Some(media::text::file_ref_frame(&upload, "attached", false, "", "")),
+            }));
+        }
         let store = media::MediaStore::default_store();
         let normalized = media::ingest::normalize(req.data)
             .await
@@ -6767,6 +6790,18 @@ fn final_assistant_text(
 }
 
 /// gRPC status mapping for the media RPCs.
+/// A text upload's refusal, in the words the operator reads back.
+fn text_status(e: media::text::TextError) -> Status {
+    use media::text::TextError;
+    match e {
+        TextError::TooLarge(..) => Status::resource_exhausted(e.to_string()),
+        TextError::NotText => Status::invalid_argument(
+            "not an image (PNG, JPEG, GIF, WebP) and not UTF-8 text; binaries are refused",
+        ),
+        TextError::Io(_) => Status::internal(e.to_string()),
+    }
+}
+
 fn media_status(e: media::store::MediaError) -> Status {
     use media::ingest::IngestError;
     use media::store::MediaError;

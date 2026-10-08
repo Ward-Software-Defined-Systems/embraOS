@@ -7,7 +7,11 @@
 //!   headers `Content-Type: image/*` (a hint; the brain sniffs bytes),
 //!           `X-Embra-Name: <percent-encoded filename>`,
 //!           `X-Embra-Session: <session name>` (staging owner, optional).
-//! Response JSON `{id, media_type, width, height, bytes, name, url}`.
+//! Response JSON for an image: `{kind:"image", id, media_type, width,
+//! height, bytes, name, origin, path, url}`; for a text file, which the
+//! brain writes to `uploads/` by name: `{kind:"file", id:"", path, name,
+//! media_type, bytes}`. The path is the handle a later message carries in
+//! `file_paths`.
 //!
 //! Serving sets `Content-Type` from the store's sidecar, `nosniff`, an
 //! immutable cache policy (ids are content-stable) and an inline
@@ -131,6 +135,7 @@ fn status_from_tonic(code: tonic::Code) -> StatusCode {
 
 pub fn media_json(m: &brain::MediaRef) -> Value {
     json!({
+        "kind": "image",
         "id": m.id,
         "media_type": m.media_type,
         "width": m.width,
@@ -140,6 +145,19 @@ pub fn media_json(m: &brain::MediaRef) -> Value {
         "origin": m.origin,
         "path": m.path,
         "url": format!("/api/media/{}", m.id),
+    })
+}
+
+/// The answer for a text upload: no id and no serving URL, the path is
+/// what the next message names.
+pub fn file_json(f: &brain::FileRef) -> Value {
+    json!({
+        "kind": "file",
+        "id": "",
+        "path": f.path,
+        "name": f.name,
+        "media_type": f.media_type,
+        "bytes": f.byte_size,
     })
 }
 
@@ -174,9 +192,10 @@ pub async fn api_media_put(State(st): State<AppState>, headers: HeaderMap, body:
         .await;
     match resp {
         Ok(r) => match brain::PutMediaResponse::decode(r.into_inner().payload.as_slice()) {
-            Ok(decoded) => match decoded.media {
-                Some(m) => Json(media_json(&m)).into_response(),
-                None => json_error(StatusCode::BAD_GATEWAY, "brain returned no media meta".into()),
+            Ok(decoded) => match (decoded.media, decoded.file) {
+                (Some(m), _) => Json(media_json(&m)).into_response(),
+                (None, Some(f)) => Json(file_json(&f)).into_response(),
+                (None, None) => json_error(StatusCode::BAD_GATEWAY, "brain returned no media meta".into()),
             },
             Err(e) => json_error(StatusCode::BAD_GATEWAY, format!("decode brain response: {e}")),
         },
@@ -234,6 +253,46 @@ pub fn media_response(meta: &brain::MediaRef, data: Vec<u8>) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_text_upload_answer_carries_its_path_and_kind_and_an_image_answer_says_image() {
+        let f = file_json(&brain::FileRef {
+            path: "/embra/workspace/uploads/notes.md".into(),
+            name: "notes.md".into(),
+            byte_size: 1234,
+            media_type: "text/markdown".into(),
+            origin: "attached".into(),
+            caption: String::new(),
+            tool_use_id: String::new(),
+            replay: false,
+        });
+        assert_eq!(
+            f,
+            json!({
+                "kind": "file",
+                "id": "",
+                "path": "/embra/workspace/uploads/notes.md",
+                "name": "notes.md",
+                "media_type": "text/markdown",
+                "bytes": 1234
+            })
+        );
+        let m = media_json(&brain::MediaRef {
+            id: "att-20260820T153012Z-1a2b3c4d".into(),
+            media_type: "image/png".into(),
+            width: 2,
+            height: 2,
+            byte_size: 70,
+            name: "px.png".into(),
+            origin: "attached".into(),
+            path: "/embra/workspace/MEDIA/att-20260820T153012Z-1a2b3c4d.png".into(),
+            caption: String::new(),
+            tool_use_id: String::new(),
+            replay: false,
+        });
+        assert_eq!(m["kind"], "image");
+        assert_eq!(m["url"], "/api/media/att-20260820T153012Z-1a2b3c4d");
+    }
 
     #[test]
     fn media_id_grammar_mirrors_the_brain() {
