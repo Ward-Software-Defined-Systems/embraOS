@@ -49,8 +49,9 @@ Model:
   /embeddings backfill [--force]         Embed nodes that need it (local, ~55ms/node)
 
 Media:
-  /attach <id|path>              Attach an image (uploaded id or workspace path) to your next message
-  /attach list | clear           Show or drop the staged images
+  /attach <id|path>              Attach an image or a text file (uploaded id, uploads/ path or any workspace path) to your next message
+  /attach list | clear           Show or drop the staged attachments
+  /download <path>               Hand a workspace file to your browser as a download
   /media                         Show the last image in the media pane (console-local)
   /media off | <id>              Hide the pane, or fetch a specific media id
   /image-provider                Show the image-generation backend, model, key status

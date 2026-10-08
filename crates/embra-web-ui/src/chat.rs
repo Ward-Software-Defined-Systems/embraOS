@@ -611,6 +611,7 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
     ]),
     ("Media", &[
         ("/attach", "attach a workspace image or text file to your next message (needs id or path)"),
+        ("/download", "download a workspace file to this device (needs path)"),
         ("/image-provider", "image-generation backend: status / gemini / clear"),
         ("/image-provider model", "pick the image model (needs id)"),
         ("/image-provider key", "set / show the image-generation key"),
