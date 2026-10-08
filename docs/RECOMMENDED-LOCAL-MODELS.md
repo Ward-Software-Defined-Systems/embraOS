@@ -7,30 +7,38 @@ The wizard's selector reads `GET /v1/models` from the configured server, so any 
 Hardware mapping for the test fleet:
 
 - **Ollama** runs on an **M1 Mac Mini, 16 GB unified memory**
-- **LM Studio** runs on a **Mac Studio M4 Max, 128 GB unified memory**
+- **LM Studio and Ollama** run on a **Mac Studio M4 Max, 128 GB unified memory**
 
 ---
 
 ## Vetted Models
 
-The list is deliberately short. MoE models need a minimum active-parameter threshold for honest instruction-following: below ~27–49B active they become confabulation-prone under complex multi-step protocols — enough stored knowledge to sound authoritative, not enough working memory to track what they've actually done. Dense models have no total/active split, so their parameter count is honest. Both picks below clear the threshold: Qwen3.6 27B and Qwen3.8 27B are dense (27B = 27B active).
+The list is deliberately short. MoE models need a minimum active-parameter threshold for honest instruction-following: below ~27–49B active they become confabulation-prone under complex multi-step protocols — enough stored knowledge to sound authoritative, not enough working memory to track what they've actually done. Dense models have no total/active split, so their parameter count is honest. Both vetted picks clear the threshold: Qwen3.6 27B and Qwen3.8 27B are dense (27B = 27B active).
 
-**Qwen3.8 27B** is the current recommendation; **Qwen3.6 27B** remains vetted and fully supported — there is no need to migrate an instance that is working. Both were verified against the complete tool surface of their time (116 tools; 115 since `check_update` was removed), not a subset.
+**Qwen3.8 27B** is the current recommendation; **Qwen3.6 27B** remains vetted and fully supported — there is no need to migrate an instance that is working. Each was vetted against the complete tool surface of its date, not a subset: Qwen3.6 27B on 2026-07-10 (95 tools), Qwen3.8 27B on 2026-09-08 (116 tools; 115 since `check_update` was removed). Both vettings predate the `guardian_call` fix of 2026-10-07 ([CHANGE-LOG.md](CHANGE-LOG.md)): before it, on Ollama, the input of a dynamic-tool invoke arrived as JSON text and never reached the tool as an object. The invoke is re-checked per server on the fixed build: TBD.
 
 ### Local (Ollama / LM Studio)
 
-| Server | Model | Tag | Size | Context |
-|--------|-------|-----|------|---------|
-| Ollama | Qwen3.8 27B (dense) | `qwen3.8:27b` | 18 GB | 256K |
-| Ollama | Qwen3.6 27B (dense) | `qwen3.6:27b` | 18 GB | 256K |
-| LM Studio | Qwen3.8 27B (dense, 8-bit) | `qwen/qwen3.8-27b` | — | 256K |
-| LM Studio | Qwen3.6 27B (dense, 8-bit) | `qwen/qwen3.6-27b` | — | 256K |
+| Server | Model | Tag | Size | Context | Status |
+|--------|-------|-----|------|---------|--------|
+| Ollama | Qwen3.8 27B (dense) | `qwen3.8:27b` | 18GB | 256K | vetted |
+| Ollama | Qwen3.6 27B (dense) | `qwen3.6:27b` | 18–19GB | 256K | vetted |
+| Ollama | Gemma 4 12B (dense) | `gemma4:12b` | 7.7–8.0GB | 256K | under evaluation |
+| Ollama | Gemma 4 31B (dense) | `gemma4:31b` | 19–20GB | 256K | under evaluation |
+| LM Studio | Qwen3.8 27B (dense, 8-bit) | `qwen/qwen3.8-27b` | 30GB | 256K | vetted |
+| LM Studio | Qwen3.6 27B (dense, 8-bit) | `qwen/qwen3.6-27b` | 30GB | 256K | vetted |
 
-Sizes and context lengths are the Ollama library's own figures for the default
-`27b` tags. **Both models are ~18 GB**, so the Mac Mini's 16 GB of unified memory
-cannot hold either — on that host, pick a smaller model or point the wizard at the
-Mac Studio. The hardware mapping above says which *server* runs where, not that
-every vetted model fits on every host.
+Sizes and context lengths are the Ollama library's own figures for the tags
+listed, read 2026-10-08; a range is the library's, for a tag with more than one
+build. The LM Studio sizes are the weights of the 8-bit MLX builds
+(`lmstudio-community/Qwen3.8-27B-MLX-8bit` and `…/Qwen3.6-27B-MLX-8bit`, 29.5 GB
+each). Gemma 4 12B and 31B are dense; the family's MoE is the `gemma4:26b` tag
+(25.2B total, 3.8B active), below the active-parameter threshold above. The two
+Gemma 4 rows are under evaluation by the operator and not yet vetted against the
+tool surface. The 27B tags and `gemma4:31b` need more than the Mac Mini's 16 GB
+of unified memory and run on the Mac Studio; `gemma4:12b` fits the Mac Mini. The
+hardware mapping above says which *server* runs where, not that every model fits
+on every host.
 
 ---
 
@@ -51,7 +59,7 @@ embra-brain sends no sampling parameters and no chat-template settings. Its requ
 
 That is what the preset in [`LOCAL_MODEL_SETTINGS/LM-Studio-Examples/`](LOCAL_MODEL_SETTINGS/LM-Studio-Examples/) pins. `embraOS_Qwen3.8-27B` (import it in "My Models", then select it for the model) sets the three prediction settings that matter for a tool-calling session: `contextOverflowPolicy: stopAtLimit`, so the server stops at the context limit instead of truncating the prompt — a truncation drops part of the tool manifest or the history without a word; `repeatPenalty: 1`, which turns the penalty on repeated tokens off — tool-call JSON and code repeat tokens by nature; and `minPSampling: 0`, which turns min-p sampling off. It carries no load settings; the load configuration above stays as it is.
 
-### Ollama (Mac Mini)
+### Ollama (Mac Mini, Mac Studio)
 
 Set context size and KV cache via launchd env vars if needed — `OLLAMA_CONTEXT_LENGTH`, `OLLAMA_FLASH_ATTENTION`, `OLLAMA_KV_CACHE_TYPE`, set all three together (see Ollama's OpenAI-compat note: `"The OpenAI API does not have a way of setting the context size"`).
 
@@ -92,4 +100,4 @@ See [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md).
 
 ---
 
-*Last updated: 2026-09-18.*
+*Last updated: 2026-10-08.*
