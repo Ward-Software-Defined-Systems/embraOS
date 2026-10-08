@@ -70,8 +70,9 @@ const MIN_MESSAGE_LEN: usize = 15;
 const RECENT_USER_TURNS: usize = 3;
 
 /// The last `RECENT_USER_TURNS` operator turns, newest first, without the
-/// synthetic ones: the resume marker and the image-only placeholder carry
-/// no topic. The history never holds the current message.
+/// synthetic ones: the resume marker and the image-only and file-only
+/// placeholders carry no topic. The history never holds the current
+/// message.
 fn recent_user_turns(history: &[Message]) -> Vec<&str> {
     history
         .iter()
@@ -82,6 +83,7 @@ fn recent_user_turns(history: &[Message]) -> Vec<&str> {
             !c.is_empty()
                 && *c != "[Session resumed]"
                 && *c != crate::media::replay::IMAGE_ONLY_PLACEHOLDER
+                && *c != crate::media::text::FILE_ONLY_PLACEHOLDER
         })
         .take(RECENT_USER_TURNS)
         .collect()
@@ -369,6 +371,7 @@ mod recent_turns_tests {
             turn("user", "second, about guardian"),
             turn("user", "[Session resumed]"),
             turn("user", crate::media::replay::IMAGE_ONLY_PLACEHOLDER),
+            turn("user", crate::media::text::FILE_ONLY_PLACEHOLDER),
             turn("user", "   "),
             turn("user", "third, about the seed packs"),
             turn("assistant", "another answer"),

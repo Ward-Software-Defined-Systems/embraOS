@@ -36,6 +36,13 @@ pub struct AttachmentRef {
     pub path: String,
 }
 
+impl AttachmentRef {
+    /// An image ref, as opposed to a text file's.
+    pub fn is_image(&self) -> bool {
+        self.media_type.starts_with("image/")
+    }
+}
+
 impl Message {
     pub fn user(content: impl Into<String>) -> Self {
         Self {

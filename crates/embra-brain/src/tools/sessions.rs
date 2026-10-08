@@ -196,16 +196,24 @@ fn format_turn(index: usize, turn: &serde_json::Value, max_bytes: Option<usize>)
         Some(cap) if content.len() > cap => format!("{}...", truncate_str(content, cap)),
         _ => content.to_string(),
     };
-    // Attachment refs (media wave): one line per image so transcripts and
-    // corpora show what the turn carried. Always rendered in full — they
-    // are short and the content cap above applies to the text only.
+    // Attachment refs (media wave): one line per image or text file so
+    // transcripts and corpora show what the turn carried. Always rendered
+    // in full — they are short and the content cap above applies to the
+    // text only. A ref without a media type is an image (pre-text history).
     if let Some(refs) = turn.get("attachments").and_then(|a| a.as_array()) {
         for r in refs {
-            let name = r.get("name").and_then(|v| v.as_str()).unwrap_or("image");
-            let w = r.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
-            let h = r.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
             let path = r.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            rendered.push_str(&format!("\n    [image: {} ({}×{}) → {}]", name, w, h, path));
+            let media_type = r.get("media_type").and_then(|v| v.as_str()).unwrap_or("image/");
+            if media_type.starts_with("image/") {
+                let name = r.get("name").and_then(|v| v.as_str()).unwrap_or("image");
+                let w = r.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
+                let h = r.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+                rendered.push_str(&format!("\n    [image: {} ({}×{}) → {}]", name, w, h, path));
+            } else {
+                let name = r.get("name").and_then(|v| v.as_str()).unwrap_or("file");
+                let bytes = r.get("bytes").and_then(|v| v.as_u64()).unwrap_or(0);
+                rendered.push_str(&format!("\n    [file: {} ({} KB) → {}]", name, bytes / 1024, path));
+            }
         }
     }
     // 1-indexed for user display
@@ -371,6 +379,25 @@ mod format_turn_tests {
         // No attachments → byte-identical to the pre-media form.
         let plain = serde_json::json!({"role": "assistant", "content": "ok"});
         assert_eq!(format_turn(3, &plain, None), "[4] [assistant]: ok");
+    }
+
+    #[test]
+    fn a_text_attachment_renders_as_a_file_line_and_an_image_as_before() {
+        let turn = serde_json::json!({
+            "role": "user",
+            "content": "read these",
+            "attachments": [
+                {"id": "", "name": "notes.md", "media_type": "text/markdown",
+                 "width": 0, "height": 0, "bytes": 12_800, "path": "/embra/workspace/uploads/notes.md"},
+                {"id": "att-20260820T153012Z-1a2b3c4d", "name": "a.png", "media_type": "image/png",
+                 "width": 640, "height": 480, "bytes": 1234, "path": "/embra/workspace/MEDIA/att-20260820T153012Z-1a2b3c4d.png"}
+            ]
+        });
+        let line = format_turn(0, &turn, None);
+        assert_eq!(
+            line,
+            "[1] [user]: read these\n    [file: notes.md (12 KB) → /embra/workspace/uploads/notes.md]\n    [image: a.png (640×480) → /embra/workspace/MEDIA/att-20260820T153012Z-1a2b3c4d.png]"
+        );
     }
 
     #[test]

@@ -1217,6 +1217,11 @@ async fn handle_request(
             let media_store = media::MediaStore::default_store();
             let synthetic_turn = pending_briefing.is_some() || delete_exec.is_some();
             let mut turn_media: Vec<media::MediaMeta> = Vec::new();
+            // Text files on this turn, each with its text: the paths the
+            // client named (jailed to the workspace) ∪ those `/attach
+            // <path>` staged, read now and gated as text. One that cannot
+            // be read aborts the turn like an unknown image id.
+            let mut turn_files: Vec<(media::text::TextUpload, String)> = Vec::new();
             if !synthetic_turn {
                 let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                 for id in &msg.attachment_ids {
@@ -1245,15 +1250,49 @@ async fn handle_request(
                         turn_media.push(meta);
                     }
                 }
-                // One limit for the images named on the message and those
-                // staged with `/attach`, counted together.
-                if turn_media.len() > media::MEDIA_MAX_PER_MESSAGE {
+                let mut seen_paths: std::collections::HashSet<std::path::PathBuf> =
+                    std::collections::HashSet::new();
+                let staged_files = session_mgr.read().await.staged_files(&session_name).to_vec();
+                let named: Vec<(String, Result<std::path::PathBuf, String>)> = msg
+                    .file_paths
+                    .iter()
+                    .map(|p| (p.clone(), media::text::wire_upload_path(p)))
+                    .chain(staged_files.into_iter().map(|u| (u.path.display().to_string(), Ok(u.path))))
+                    .collect();
+                for (shown, resolved) in named {
+                    let outcome = match resolved {
+                        Ok(path) => {
+                            if !seen_paths.insert(path.clone()) {
+                                continue;
+                            }
+                            media::text::read_text_file(&path).await.map_err(|e| e.to_string())
+                        }
+                        Err(e) => Err(e),
+                    };
+                    match outcome {
+                        Ok(read) => turn_files.push(read),
+                        Err(e) => {
+                            let _ = tx.send(Ok(ConversationResponse {
+                                response_type: Some(conversation_response::ResponseType::System(
+                                    SystemMessage {
+                                        content: format!("Attached file '{}' is not available: {}. Nothing was sent.", shown, e),
+                                        msg_type: SystemMessageType::Error as i32,
+                                    }
+                                )),
+                            })).await;
+                            return Ok(());
+                        }
+                    }
+                }
+                // One limit for everything the message carries: images and
+                // text files, named on the message or staged with `/attach`.
+                if turn_media.len() + turn_files.len() > media::MEDIA_MAX_PER_MESSAGE {
                     let _ = tx.send(Ok(ConversationResponse {
                         response_type: Some(conversation_response::ResponseType::System(
                             SystemMessage {
                                 content: format!(
-                                    "{} images on one message; the limit is {}. Use `/attach clear` and send fewer. Nothing was sent.",
-                                    turn_media.len(),
+                                    "{} attachments on one message; the limit is {}. Use `/attach clear` and send fewer. Nothing was sent.",
+                                    turn_media.len() + turn_files.len(),
                                     media::MEDIA_MAX_PER_MESSAGE
                                 ),
                                 msg_type: SystemMessageType::Error as i32,
@@ -1264,6 +1303,9 @@ async fn handle_request(
                 }
                 if !turn_media.is_empty() {
                     let _ = session_mgr.write().await.take_staged_media(&session_name);
+                }
+                if !turn_files.is_empty() {
+                    let _ = session_mgr.write().await.take_staged_files(&session_name);
                 }
             }
             let mut turn_images: Vec<crate::provider::ir::ImageData> = Vec::with_capacity(turn_media.len());
@@ -1301,6 +1343,18 @@ async fn handle_request(
                     "attachments on user turn"
                 );
             }
+            for (u, _) in &turn_files {
+                turn_refs.push(media::text::to_attachment_ref(u));
+            }
+            if !turn_files.is_empty() {
+                info!(
+                    target: "media",
+                    session = %session_name,
+                    files = turn_files.len(),
+                    bytes = turn_files.iter().map(|(u, _)| u.bytes).sum::<u64>(),
+                    "text attachments on user turn"
+                );
+            }
 
             let enriched = if let Some(ref del) = delete_exec {
                 // Delete-flow reason turn: the brain-facing message is the
@@ -1331,6 +1385,9 @@ async fn handle_request(
                 // block exists (cache breakpoints, parts arrays), and the
                 // enrichment gate would skip an empty message anyway.
                 media::replay::IMAGE_ONLY_PLACEHOLDER.to_string()
+            } else if msg.content.trim().is_empty() && !turn_files.is_empty() {
+                // File-only message, for the same reasons.
+                media::text::FILE_ONLY_PLACEHOLDER.to_string()
             } else {
                 crate::knowledge::enrichment::build_turn_context(
                     db.as_ref(),
@@ -1352,11 +1409,20 @@ async fn handle_request(
             // verbatim between iterations — the API requires this.
             let mut api_messages: Vec<ApiMessage> =
                 media::replay::history_to_api(&media_store, &history).await;
-            api_messages.push(if turn_images.is_empty() {
-                ApiMessage::user_text(&enriched)
+            // Attached files ride the model-facing text ahead of the
+            // operator's words, inside the turn's one text block. What is
+            // persisted stays `msg.content` plus the refs.
+            let files_block = media::text::render_attached_files(&turn_files);
+            let model_text = if files_block.is_empty() {
+                enriched
             } else {
-                // Images first, then the (possibly enriched) text.
-                ApiMessage::user_with_images(turn_images, &enriched)
+                format!("{files_block}\n{enriched}")
+            };
+            api_messages.push(if turn_images.is_empty() {
+                ApiMessage::user_text(&model_text)
+            } else {
+                // Images first, then the files and the (possibly enriched) text.
+                ApiMessage::user_with_images(turn_images, &model_text)
             });
 
             // Send thinking indicator.
@@ -2332,11 +2398,13 @@ async fn handle_request(
                             // can re-render cards (and apply its
                             // reconnection-replay suppression uniformly).
                             for r in msg.attachment_refs() {
-                                let _ = tx.send(Ok(ConversationResponse {
-                                    response_type: Some(conversation_response::ResponseType::Media(
-                                        media::media_ref_from_attachment(r),
-                                    )),
-                                })).await;
+                                let frame = if r.is_image() {
+                                    conversation_response::ResponseType::Media(media::media_ref_from_attachment(r))
+                                } else {
+                                    let origin = if msg.role == "user" { "attached" } else { "offered" };
+                                    conversation_response::ResponseType::File(media::text::file_ref_from_attachment(r, origin))
+                                };
+                                let _ = tx.send(Ok(ConversationResponse { response_type: Some(frame) })).await;
                             }
                         }
                         history.len()
@@ -5055,17 +5123,21 @@ async fn handle_attach_command(
         "" | "list" => {
             let mgr = session_mgr.read().await;
             let staged = mgr.staged_media(&session);
+            let staged_files = mgr.staged_files(&session);
             let (files, bytes) = store.usage().await.unwrap_or((0, 0));
-            let mut out = if staged.is_empty() {
-                format!("No images staged for session '{}'.", session)
+            let mut out = if staged.is_empty() && staged_files.is_empty() {
+                format!("No attachments staged for session '{}'.", session)
             } else {
                 let mut lines = vec![format!(
-                    "{} image(s) staged for session '{}' (sent with your next message):",
-                    staged.len(),
+                    "{} attachment(s) staged for session '{}' (sent with your next message):",
+                    staged.len() + staged_files.len(),
                     session
                 )];
                 for m in staged {
                     lines.push(format!("  {}  {} ({}×{}, {} KB)", m.id, m.name, m.width, m.height, m.byte_size / 1024));
+                }
+                for u in staged_files {
+                    lines.push(format!("  {}  ({} KB, {})", u.path.display(), u.bytes / 1024, u.media_type));
                 }
                 lines.join("\n")
             };
@@ -5078,11 +5150,57 @@ async fn handle_attach_command(
             send(out, SystemMessageType::Info).await;
         }
         "clear" => {
-            let dropped = session_mgr.write().await.take_staged_media(&session).len();
-            send(format!("Dropped {} staged image(s) for session '{}'.", dropped, session), SystemMessageType::Info).await;
+            let (images, files) = {
+                let mut mgr = session_mgr.write().await;
+                (mgr.take_staged_media(&session).len(), mgr.take_staged_files(&session).len())
+            };
+            send(
+                format!("Dropped {} staged image(s) and {} file(s) for session '{}'.", images, files, session),
+                SystemMessageType::Info,
+            )
+            .await;
         }
         arg => {
-            let result = if media::store::parse_media_id(arg).is_ok() {
+            let is_id = media::store::parse_media_id(arg).is_ok();
+            // A path that does not start like an image is a text file:
+            // staged by its path, read again when the turn is sent. The
+            // read is not jailed, like an image path or `file_read`.
+            if !is_id {
+                let resolved = media::store::resolve_read_path(arg);
+                if !media::text::looks_like_an_image(&resolved).await {
+                    match media::text::read_text_file(&resolved).await {
+                        Ok((upload, _)) => {
+                            let (count, images) = {
+                                let mut mgr = session_mgr.write().await;
+                                let n = mgr.stage_file(&session, upload.clone());
+                                (n, mgr.staged_media(&session).len())
+                            };
+                            let _ = tx.send(Ok(ConversationResponse {
+                                response_type: Some(conversation_response::ResponseType::File(
+                                    media::text::file_ref_frame(&upload, "attached", false, "", ""),
+                                )),
+                            })).await;
+                            info!(target: "media", session = %session, path = %upload.path.display(), staged = count, "text file staged via /attach");
+                            send(
+                                format!(
+                                    "Attached {} ({} KB, {}) — {} attachment(s) will be sent with your next message. /attach list · /attach clear",
+                                    upload.name,
+                                    upload.bytes / 1024,
+                                    upload.media_type,
+                                    count + images
+                                ),
+                                SystemMessageType::Info,
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            send(format!("attach failed: {}", e), SystemMessageType::Error).await;
+                        }
+                    }
+                    return;
+                }
+            }
+            let result = if is_id {
                 store.meta(arg).await
             } else {
                 store.import_path(arg, &session).await

@@ -59,6 +59,9 @@ pub async fn history_to_api(store: &MediaStore, history: &[Message]) -> Vec<ApiM
             continue;
         }
         for (ri, r) in m.attachment_refs().iter().enumerate() {
+            if !r.is_image() {
+                continue;
+            }
             if count < MEDIA_HISTORY_MAX_IMAGES && bytes + r.bytes <= MEDIA_HISTORY_MAX_BYTES {
                 inline[ti][ri] = true;
                 count += 1;
@@ -76,6 +79,10 @@ pub async fn history_to_api(store: &MediaStore, history: &[Message]) -> Vec<ApiM
         let mut images: Vec<ImageData> = Vec::new();
         let mut placeholders: Vec<String> = Vec::new();
         for (ri, r) in m.attachment_refs().iter().enumerate() {
+            if !r.is_image() {
+                // A text file: its replay comes with the text wave.
+                continue;
+            }
             if inline[ti][ri] {
                 match store.get(&r.id).await {
                     Ok((meta, data)) => images.push(to_image_data(&meta, &data)),
@@ -214,5 +221,29 @@ mod tests {
         big.bytes = MEDIA_HISTORY_MAX_BYTES + 1;
         let out = history_to_api(&store, &[Message::user_with_attachments("x", vec![big])]).await;
         assert_eq!(count_images(&out[0]), 0);
+    }
+
+    #[tokio::test]
+    async fn history_to_api_a_text_ref_never_becomes_an_image_block() {
+        let tmp = TempDir::new();
+        let store = MediaStore::at(&tmp.0);
+        let text_ref = AttachmentRef {
+            id: String::new(),
+            name: "notes.md".into(),
+            media_type: "text/markdown".into(),
+            width: 0,
+            height: 0,
+            bytes: 12,
+            path: "/embra/workspace/uploads/notes.md".into(),
+        };
+        let out = history_to_api(&store, &[Message::user_with_attachments("read it", vec![text_ref])]).await;
+        assert_eq!(count_images(&out[0]), 0);
+        match &out[0] {
+            ApiMessage::User { content } => {
+                assert_eq!(content.len(), 1);
+                assert!(matches!(&content[0], Block::Text(t) if t == "read it"));
+            }
+            other => panic!("expected a user message, got {other:?}"),
+        }
     }
 }

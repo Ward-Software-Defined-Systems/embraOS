@@ -161,6 +161,10 @@ pub struct SessionManager {
     /// delete-flow synthetic turns. Runtime only; a brain restart drops
     /// the staging (the files stay in the MEDIA store).
     pending_media: std::collections::HashMap<String, Vec<crate::media::MediaMeta>>,
+    /// Text files staged by `/attach <path>` per session, drained with the
+    /// images by the next operator turn. Runtime only, like the images;
+    /// the files stay where they are.
+    pending_files: std::collections::HashMap<String, Vec<crate::media::text::TextUpload>>,
 }
 
 /// A resume briefing waiting for its turn.
@@ -181,6 +185,7 @@ impl SessionManager {
             pending_resume_briefing: None,
             briefing_attempts: std::collections::HashMap::new(),
             pending_media: std::collections::HashMap::new(),
+            pending_files: std::collections::HashMap::new(),
         }
     }
 
@@ -200,6 +205,24 @@ impl SessionManager {
     /// Drain the staging for `session`.
     pub fn take_staged_media(&mut self, session: &str) -> Vec<crate::media::MediaMeta> {
         self.pending_media.remove(session).unwrap_or_default()
+    }
+
+    /// Stage a text file for `session`'s next operator turn, once per
+    /// path. Returns the new staged count.
+    pub fn stage_file(&mut self, session: &str, upload: crate::media::text::TextUpload) -> usize {
+        let v = self.pending_files.entry(session.to_string()).or_default();
+        v.retain(|u| u.path != upload.path);
+        v.push(upload);
+        v.len()
+    }
+
+    pub fn staged_files(&self, session: &str) -> &[crate::media::text::TextUpload] {
+        self.pending_files.get(session).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Drain the staged files for `session`.
+    pub fn take_staged_files(&mut self, session: &str) -> Vec<crate::media::text::TextUpload> {
+        self.pending_files.remove(session).unwrap_or_default()
     }
 
     /// True when a resume briefing was started for `name` less than
@@ -909,6 +932,35 @@ mod pending_resume_briefing_tests {
             mgr.pending_resume_briefing.is_none(),
             "after take, subsequent turns are not briefings"
         );
+    }
+}
+
+#[cfg(test)]
+mod staged_file_tests {
+    use super::*;
+
+    fn upload(path: &str) -> crate::media::text::TextUpload {
+        crate::media::text::TextUpload {
+            name: path.rsplit('/').next().unwrap().to_string(),
+            path: std::path::PathBuf::from(path),
+            bytes: 3,
+            media_type: "text/plain".into(),
+        }
+    }
+
+    #[test]
+    fn a_staged_file_is_listed_once_and_drained_once() {
+        let mut mgr = SessionManager::new(WardsonDbClient::from_url("http://127.0.0.1:1"));
+        assert_eq!(mgr.stage_file("s", upload("/embra/workspace/uploads/a.txt")), 1);
+        assert_eq!(mgr.stage_file("s", upload("/embra/workspace/uploads/b.txt")), 2);
+        // The same path again replaces its entry instead of adding one.
+        assert_eq!(mgr.stage_file("s", upload("/embra/workspace/uploads/a.txt")), 2);
+        assert_eq!(mgr.staged_files("s").len(), 2);
+        assert!(mgr.staged_files("other").is_empty());
+        let taken = mgr.take_staged_files("s");
+        assert_eq!(taken.len(), 2);
+        assert!(mgr.staged_files("s").is_empty());
+        assert!(mgr.take_staged_files("s").is_empty());
     }
 }
 
