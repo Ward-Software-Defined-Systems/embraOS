@@ -91,116 +91,13 @@ pub fn translate(descriptors: &[&'static ToolDescriptor]) -> Result<JsonValue, T
 pub fn translate_schema(tool_name: &str, mut schema: JsonValue) -> Result<JsonValue, TranslateError> {
     let definitions = schema_util::extract_definitions(&mut schema);
     schema_util::inline_refs(tool_name, &mut schema, &definitions)?;
-    collapse_single_all_of(&mut schema);
-    collapse_literal_enum_oneof(&mut schema);
+    schema_util::collapse_single_all_of(&mut schema);
+    schema_util::collapse_literal_enum_oneof(&mut schema);
     reject_combinators(tool_name, &schema)?;
     uppercase_types(&mut schema);
     strip_unsupported(&mut schema);
     untype_open_nested_objects(&mut schema);
     Ok(schema)
-}
-
-/// Collapse single-element `allOf: [X]` into the parent. schemars 0.8
-/// emits this when a struct field carries a `description` attribute
-/// AND the field's schema is `$ref`-defined elsewhere — JSON Schema's
-/// `$ref` doesn't allow sibling keywords, so schemars wraps the ref:
-///
-/// ```json
-/// "action": {
-///   "description": "...",
-///   "allOf": [{"$ref": "#/definitions/DefineAction"}]
-/// }
-/// ```
-///
-/// After `inline_refs`, the inner `$ref` is resolved, leaving a
-/// single-element `allOf` whose semantics are identical to merging
-/// the child schema into the parent. We do exactly that — preferring
-/// existing parent keys (e.g. `description`) over child ones so the
-/// caller's annotations win.
-fn collapse_single_all_of(schema: &mut JsonValue) {
-    match schema {
-        JsonValue::Object(map) => {
-            // Recurse first so children are fully simplified before
-            // we examine this level's allOf.
-            for (_, v) in map.iter_mut() {
-                collapse_single_all_of(v);
-            }
-            let single = if let Some(JsonValue::Array(branches)) = map.get("allOf") {
-                if branches.len() == 1 {
-                    Some(branches[0].clone())
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            if let Some(JsonValue::Object(child_map)) = single {
-                map.remove("allOf");
-                for (k, v) in child_map {
-                    map.entry(k).or_insert(v);
-                }
-            }
-        }
-        JsonValue::Array(arr) => {
-            for v in arr.iter_mut() {
-                collapse_single_all_of(v);
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Collapse the schemars-emitted shape for unit-variant enums whose
-/// variants carry doc comments. schemars 0.8 emits these as
-/// `{"oneOf": [{"description": "...", "type": "string", "enum": ["x"]}, ...]}`
-/// because per-variant descriptions can't ride on a single `enum`
-/// array. Gemini's OpenAPI subset rejects `oneOf` but accepts `enum`,
-/// so we merge the variant strings into a single `enum` and drop the
-/// per-variant descriptions (the function description is enough).
-///
-/// Conservative: the collapse only fires when EVERY branch matches
-/// the literal-enum shape. Mixed-shape `oneOf`s (real variant
-/// schemas) fall through to the reject pass.
-fn collapse_literal_enum_oneof(schema: &mut JsonValue) {
-    match schema {
-        JsonValue::Object(map) => {
-            let collapsed = if let Some(JsonValue::Array(branches)) = map.get("oneOf") {
-                branches
-                    .iter()
-                    .map(|b| {
-                        let obj = b.as_object()?;
-                        let t = obj.get("type")?.as_str()?;
-                        if t != "string" {
-                            return None;
-                        }
-                        let en = obj.get("enum")?.as_array()?;
-                        if en.len() != 1 {
-                            return None;
-                        }
-                        Some(en[0].clone())
-                    })
-                    .collect::<Option<Vec<_>>>()
-            } else {
-                None
-            };
-            if let Some(values) = collapsed
-                && !values.is_empty()
-            {
-                map.remove("oneOf");
-                map.insert("type".into(), JsonValue::String("string".into()));
-                map.insert("enum".into(), JsonValue::Array(values));
-            }
-            for (_, v) in map.iter_mut() {
-                collapse_literal_enum_oneof(v);
-            }
-        }
-        JsonValue::Array(arr) => {
-            for v in arr.iter_mut() {
-                collapse_literal_enum_oneof(v);
-            }
-        }
-        _ => {}
-    }
 }
 
 /// Reject `oneOf` / `allOf` anywhere in the schema. `anyOf` is allowed

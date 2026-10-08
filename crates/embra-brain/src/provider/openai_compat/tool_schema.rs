@@ -2,17 +2,27 @@
 //!
 //! Transforms each registered tool's schemars JSON Schema output into
 //! the `tools[].function.parameters` shape OpenAI Chat Completions
-//! accepts. Both Ollama and LM Studio honor standard JSON Schema on
-//! this surface, so the pipeline is far lighter than Gemini's:
+//! accepts. The two servers read that schema differently. LM Studio
+//! validates only the root (`type: "object"` and a `properties` map) and
+//! hands the rest to the model. Ollama decodes each property into its
+//! `api.ToolProperty` and keeps `type`, `enum`, `items`, `properties`,
+//! `required`, `anyOf` and `description`; `allOf`, `oneOf`, `default`,
+//! `additionalProperties`, `$ref` and `title` are dropped. Its value
+//! parsers for XML-style tool calls (Qwen 3.5, GLM) also read a
+//! property's `type` to decide what an argument is: with no type, the
+//! raw text stays a string. The pipeline:
 //!
 //! 1. Extract `definitions` / `$defs` and inline `$ref` placeholders
 //!    via the shared `provider::schema_util::inline_refs` helper.
-//! 2. Strip `$schema` and `$id` from the root (these are JSON Schema
+//! 2. Collapse single-element `allOf` and `oneOf`s of string constants
+//!    into a plain `type` + `enum` (shared with Gemini), so an enum keeps
+//!    its type and values on Ollama.
+//! 3. Strip `$schema` and `$id` from the root (these are JSON Schema
 //!    metadata, harmless but noisy on the wire).
+//! 4. Give a parameterless root an empty `properties` map.
 //!
-//! Unlike Gemini, OpenAI accepts `oneOf`, `allOf`, `anyOf` at any
-//! level, lowercase type names, and permissive vocabulary. Light strip
-//! only.
+//! Lowercase type names stay as they are, and other `oneOf`/`anyOf`
+//! shapes pass through.
 
 use serde_json::Value as JsonValue;
 
@@ -64,6 +74,8 @@ pub fn translate_schema(
 ) -> Result<JsonValue, TranslateError> {
     let definitions = schema_util::extract_definitions(&mut schema);
     schema_util::inline_refs(tool_name, &mut schema, &definitions)?;
+    schema_util::collapse_single_all_of(&mut schema);
+    schema_util::collapse_literal_enum_oneof(&mut schema);
     strip_root_meta_keys(&mut schema);
     ensure_object_has_properties(&mut schema);
     Ok(schema)
@@ -342,20 +354,82 @@ mod tests {
     }
 
     /// `remember`'s category is a closed set for an OpenAI-compatible
-    /// server too: the definition is inlined, in the shape
-    /// `knowledge_merge.strategy` ships, and content stays the one required
-    /// argument.
+    /// server too: a plain string enum, the shape Ollama keeps, and content
+    /// stays the one required argument.
     #[test]
     fn the_remember_category_keeps_its_five_values() {
         let d = registry::all_descriptors().find(|d| d.name == "remember").expect("registered");
         let schema = translate_schema(d.name, (d.input_schema)()).expect("translates");
         let category = &schema["properties"]["category"];
+        assert_eq!(category["type"], "string", "{category}");
         assert_eq!(
-            category["allOf"][0]["enum"],
+            category["enum"],
             json!(["fact", "preference", "decision", "observation", "pattern"])
         );
-        assert!(category.pointer("/allOf/0/$ref").is_none(), "{category}");
+        assert!(category.get("allOf").is_none(), "{category}");
         assert_eq!(schema["required"], json!(["content"]));
+    }
+
+    /// schemars wraps an enum field with a doc comment in a single-element
+    /// `allOf`, and an enum whose variants carry doc comments in a `oneOf`
+    /// of constants. Ollama keeps neither, so these five reached its models
+    /// with no type and no allowed values. Each now arrives as a plain
+    /// string enum.
+    #[test]
+    fn the_five_enum_parameters_reach_an_openai_compatible_server_as_string_enums() {
+        for (tool, param, values) in [
+            ("define", "action", json!(["get", "save", "delete"])),
+            ("draft", "action", json!(["save", "delete"])),
+            ("git_branch", "action", json!(["list", "create", "delete"])),
+            ("knowledge_merge", "strategy", json!(["keep_target", "merge_tags", "merge_content"])),
+            ("remember", "category", json!(["fact", "preference", "decision", "observation", "pattern"])),
+        ] {
+            let d = registry::all_descriptors().find(|d| d.name == tool).expect("registered");
+            let schema = translate_schema(d.name, (d.input_schema)()).expect("translates");
+            let property = &schema["properties"][param];
+            assert_eq!(property["type"], "string", "{tool}.{param}: {property}");
+            assert_eq!(property["enum"], values, "{tool}.{param}");
+            for wrapper in ["allOf", "oneOf"] {
+                assert!(property.get(wrapper).is_none(), "{tool}.{param}: {property}");
+            }
+        }
+    }
+
+    /// Universal guard for the class of `guardian_call.input`: every
+    /// parameter an OpenAI-compatible server gets declares its type in the
+    /// keys Ollama keeps. A parameter without one is kept as raw text by
+    /// Ollama's XML-call parsers, and a `serde_json::Value` field emits
+    /// none unless it is given a schema (`object_input_schema`).
+    #[test]
+    fn every_parameter_reaches_an_openai_compatible_server_with_a_type() {
+        fn untyped(path: &str, schema: &JsonValue, found: &mut Vec<String>) {
+            if let Some(props) = schema.get("properties").and_then(|p| p.as_object()) {
+                for (name, prop) in props {
+                    let at = format!("{path}.{name}");
+                    if prop.get("type").is_none() {
+                        found.push(at.clone());
+                    }
+                    untyped(&at, prop, found);
+                }
+            }
+            if let Some(items) = schema.get("items") {
+                let at = format!("{path}[]");
+                if items.get("type").is_none() {
+                    found.push(at.clone());
+                }
+                untyped(&at, items, found);
+            }
+        }
+        let descriptors: Vec<&'static ToolDescriptor> = registry::all_descriptors().collect();
+        let JsonValue::Array(tools) = translate(&descriptors).unwrap() else {
+            panic!("expected array");
+        };
+        let mut found = Vec::new();
+        for tool in &tools {
+            let name = tool["function"]["name"].as_str().unwrap();
+            untyped(name, &tool["function"]["parameters"], &mut found);
+        }
+        assert!(found.is_empty(), "parameters without a type: {found:?}");
     }
 
     /// `guardian_call.input` declares its type, which makes Ollama's

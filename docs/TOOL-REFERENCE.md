@@ -1,6 +1,6 @@
 # Tool Reference
 
-Phase 1 includes 115 internal tools the intelligence invokes during conversation. All 115 work identically across all four LLM providers (Anthropic, Gemini, Ollama, LM Studio) via per-provider tool-schema translators that share a common JSON Schema cleanup pipeline (`provider/schema_util.rs::inline_refs`). They are organized below by category.
+Phase 1 includes 115 internal tools the intelligence invokes during conversation. All 115 work identically across all four LLM providers (Anthropic, Gemini, Ollama, LM Studio) via per-provider tool-schema translators that share a common JSON Schema cleanup pipeline (`provider/schema_util.rs`: `$ref` inlining, and enums collapsed to a plain `type` + `enum`, the shape both Gemini and Ollama keep). They are organized below by category.
 
 Every dispatch runs under three registry-wide limits (`crates/embra-brain/src/tools/registry.rs`): text results are cut at 2 MiB (`MAX_TOOL_RESULT_SIZE` — `file_read` and the session readers page under it), a result carries at most 4 images (`MAX_TOOL_RESULT_IMAGES`; extras are dropped and the text gains `[N image(s) dropped: at most 4 images per tool result]`), and no tool runs longer than 10 minutes (`MAX_TOOL_DURATION`, a backstop — tools with their own inner timeouts keep the tighter one).
 

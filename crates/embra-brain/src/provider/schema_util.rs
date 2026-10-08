@@ -2,10 +2,16 @@
 //!
 //! schemars-emitted schemas land in every provider's tool-schema
 //! translator with the same upstream shapes: `definitions` / `$defs`
-//! sidecar maps, `$ref` placeholders pointing into them. Each provider
-//! has its own downstream cleanup (Gemini uppercases types and rejects
-//! `oneOf`; OpenAI-compat passes most JSON Schema through), but the
-//! ref-inlining step is provider-agnostic and shared here.
+//! sidecar maps, `$ref` placeholders pointing into them, and enums
+//! wrapped in a single-element `allOf` or a `oneOf` of constants. Each
+//! provider has its own downstream cleanup (Gemini uppercases types and
+//! rejects `oneOf`; OpenAI-compat strips root metadata), but inlining the
+//! refs and collapsing the enum wrappers into a plain `type` + `enum` are
+//! provider-agnostic and shared here. Neither Gemini's OpenAPI subset nor
+//! Ollama keeps `allOf` or `oneOf`: Ollama decodes a property into `type`,
+//! `enum`, `items`, `properties`, `required`, `anyOf` and `description`
+//! and drops the rest, so a wrapped enum would reach its models with no
+//! type and no values.
 
 use serde_json::Value as JsonValue;
 
@@ -98,6 +104,110 @@ fn inline_refs_impl(
         _ => {}
     }
     Ok(())
+}
+
+/// Collapse single-element `allOf: [X]` into the parent. schemars 0.8
+/// emits this when a struct field carries a `description` attribute
+/// AND the field's schema is `$ref`-defined elsewhere — JSON Schema's
+/// `$ref` doesn't allow sibling keywords, so schemars wraps the ref:
+///
+/// ```json
+/// "action": {
+///   "description": "...",
+///   "allOf": [{"$ref": "#/definitions/DefineAction"}]
+/// }
+/// ```
+///
+/// After `inline_refs`, the inner `$ref` is resolved, leaving a
+/// single-element `allOf` whose semantics are identical to merging
+/// the child schema into the parent. We do exactly that — preferring
+/// existing parent keys (e.g. `description`) over child ones so the
+/// caller's annotations win.
+pub fn collapse_single_all_of(schema: &mut JsonValue) {
+    match schema {
+        JsonValue::Object(map) => {
+            // Recurse first so children are fully simplified before
+            // we examine this level's allOf.
+            for (_, v) in map.iter_mut() {
+                collapse_single_all_of(v);
+            }
+            let single = if let Some(JsonValue::Array(branches)) = map.get("allOf") {
+                if branches.len() == 1 {
+                    Some(branches[0].clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if let Some(JsonValue::Object(child_map)) = single {
+                map.remove("allOf");
+                for (k, v) in child_map {
+                    map.entry(k).or_insert(v);
+                }
+            }
+        }
+        JsonValue::Array(arr) => {
+            for v in arr.iter_mut() {
+                collapse_single_all_of(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collapse the schemars-emitted shape for unit-variant enums whose
+/// variants carry doc comments. schemars 0.8 emits these as
+/// `{"oneOf": [{"description": "...", "type": "string", "enum": ["x"]}, ...]}`
+/// because per-variant descriptions can't ride on a single `enum`
+/// array. Gemini's OpenAPI subset rejects `oneOf` and Ollama drops it;
+/// both read `enum`, so we merge the variant strings into a single
+/// `enum` and drop the per-variant descriptions (the function
+/// description is enough).
+///
+/// Conservative: the collapse only fires when EVERY branch matches
+/// the literal-enum shape. Mixed-shape `oneOf`s (real variant
+/// schemas) are left alone: Gemini's translator rejects them.
+pub fn collapse_literal_enum_oneof(schema: &mut JsonValue) {
+    match schema {
+        JsonValue::Object(map) => {
+            let collapsed = if let Some(JsonValue::Array(branches)) = map.get("oneOf") {
+                branches
+                    .iter()
+                    .map(|b| {
+                        let obj = b.as_object()?;
+                        let t = obj.get("type")?.as_str()?;
+                        if t != "string" {
+                            return None;
+                        }
+                        let en = obj.get("enum")?.as_array()?;
+                        if en.len() != 1 {
+                            return None;
+                        }
+                        Some(en[0].clone())
+                    })
+                    .collect::<Option<Vec<_>>>()
+            } else {
+                None
+            };
+            if let Some(values) = collapsed
+                && !values.is_empty()
+            {
+                map.remove("oneOf");
+                map.insert("type".into(), JsonValue::String("string".into()));
+                map.insert("enum".into(), JsonValue::Array(values));
+            }
+            for (_, v) in map.iter_mut() {
+                collapse_literal_enum_oneof(v);
+            }
+        }
+        JsonValue::Array(arr) => {
+            for v in arr.iter_mut() {
+                collapse_literal_enum_oneof(v);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -193,5 +303,38 @@ mod tests {
         let defs = extract_definitions(&mut schema);
         assert_eq!(defs.len(), 1);
         assert_eq!(defs["A"]["type"], "integer");
+    }
+
+    #[test]
+    fn a_single_all_of_is_merged_into_its_parent() {
+        let mut schema = json!({
+            "properties": {"mode": {
+                "description": "the field's own",
+                "allOf": [{"type": "string", "enum": ["a", "b"], "description": "the enum's"}]
+            }}
+        });
+        collapse_single_all_of(&mut schema);
+        assert_eq!(
+            schema["properties"]["mode"],
+            json!({"description": "the field's own", "type": "string", "enum": ["a", "b"]})
+        );
+        // Two branches are a real intersection and stay as they are.
+        let mut two = json!({"allOf": [{"type": "string"}, {"minLength": 1}]});
+        collapse_single_all_of(&mut two);
+        assert_eq!(two["allOf"].as_array().map(Vec::len), Some(2));
+    }
+
+    #[test]
+    fn a_one_of_of_string_constants_becomes_one_enum() {
+        let mut schema = json!({"oneOf": [
+            {"description": "List", "type": "string", "enum": ["list"]},
+            {"description": "Create", "type": "string", "enum": ["create"]}
+        ]});
+        collapse_literal_enum_oneof(&mut schema);
+        assert_eq!(schema, json!({"type": "string", "enum": ["list", "create"]}));
+        // A oneOf of real schemas is left alone.
+        let mut mixed = json!({"oneOf": [{"type": "string"}, {"type": "integer"}]});
+        collapse_literal_enum_oneof(&mut mixed);
+        assert_eq!(mixed["oneOf"].as_array().map(Vec::len), Some(2));
     }
 }
