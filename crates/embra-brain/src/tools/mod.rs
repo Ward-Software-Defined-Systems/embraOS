@@ -1844,7 +1844,7 @@ fn time_now(config_tz: &str) -> String {
     }
 }
 
-async fn countdown(db: &WardsonDbClient, param: &str) -> String {
+async fn countdown(db: &WardsonDbClient, param: &str, act: bool) -> String {
     if param.is_empty() {
         return "Usage: countdown <duration> <message>\nExample: countdown 5m Check the build".into();
     }
@@ -1867,30 +1867,34 @@ async fn countdown(db: &WardsonDbClient, param: &str) -> String {
 
     ensure_collection(db, "reminders").await;
 
-    let doc = reminder_doc(message, trigger_at, now);
+    let doc = reminder_doc(message, trigger_at, now, act);
 
     match db.write("reminders", &doc).await {
         Ok(id) => format!(
-            "Reminder set. Will fire at {} (in {}s).\nID: {}",
+            "Reminder set. Will fire at {} (in {}s).{}\nID: {}",
             trigger_at.format("%H:%M:%S UTC"),
             seconds,
+            if act { " You will be given a turn to act on it when it fires." } else { "" },
             id
         ),
         Err(e) => format!("Failed to set reminder: {}", e),
     }
 }
 
-/// A reminder as it is stored.
+/// A reminder as it is stored. `act` asks for a model turn when it fires
+/// (`proactive::ActTrigger`); a record without the field does not.
 fn reminder_doc(
     message: &str,
     trigger_at: chrono::DateTime<Utc>,
     now: chrono::DateTime<Utc>,
+    act: bool,
 ) -> serde_json::Value {
     serde_json::json!({
         "message": message,
         "trigger_at": trigger_at.to_rfc3339(),
         "created_at": now.to_rfc3339(),
         "fired": false,
+        "act": act,
     })
 }
 
@@ -3005,7 +3009,7 @@ impl SetNameArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "countdown",
-    description = "Set a reminder to fire after a duration. duration examples: \"5m\", \"30s\", \"1h\", \"20 minutes\". message defaults to \"Reminder\" if omitted."
+    description = "Set a reminder to fire after a duration. duration examples: \"5m\", \"30s\", \"1h\", \"20 minutes\". message defaults to \"Reminder\" if omitted. When it fires the operator is notified and your next turn carries it; with act=true you are also given a turn of your own when it fires, in the active session, to act on the message with your tools."
 )]
 pub struct CountdownArgs {
     /// Duration: "5m", "30s", "1h", "20 minutes".
@@ -3013,6 +3017,10 @@ pub struct CountdownArgs {
     /// Reminder message shown when the countdown fires.
     #[serde(default = "default_countdown_message")]
     pub message: String,
+    /// Start a model turn in the active session when this fires, so you
+    /// can act on it. Default false: the reminder is shown and listed only.
+    #[serde(default)]
+    pub act: Option<bool>,
 }
 
 fn default_countdown_message() -> String {
@@ -3046,7 +3054,7 @@ impl CountdownArgs {
         } else {
             format!("{} {}", self.duration, self.message)
         };
-        Ok(countdown(ctx.db, &joined).await)
+        Ok(countdown(ctx.db, &joined, self.act.unwrap_or(false)).await)
     }
 }
 
@@ -3412,6 +3420,22 @@ mod system_logs_tests {
 #[cfg(test)]
 mod reminder_tests {
     #[test]
+    fn act_defaults_to_false_and_round_trips_on_a_reminder() {
+        let now = chrono::Utc::now();
+        let plain = super::reminder_doc("m", now, now, false);
+        assert_eq!(plain["act"], false);
+        assert_eq!(plain["fired"], false);
+        let acting = super::reminder_doc("m", now, now, true);
+        assert_eq!(acting["act"], true);
+        // The tool's flag defaults to absent, read as false.
+        let args: super::CountdownArgs = serde_json::from_value(serde_json::json!({"duration": "5m"})).unwrap();
+        assert_eq!(args.act, None);
+        let args: super::CountdownArgs =
+            serde_json::from_value(serde_json::json!({"duration": "5m", "message": "x", "act": true})).unwrap();
+        assert_eq!(args.act, Some(true));
+    }
+
+    #[test]
     fn the_pending_filter_matches_records_without_the_fired_field() {
         let body = super::reminder_list_query_body(super::ReminderFilter::Pending, 7).unwrap();
         assert_eq!(
@@ -3491,7 +3515,7 @@ mod reminder_tests {
         // What the database compares is the stored string, as a string.
         let now = chrono::DateTime::parse_from_rfc3339(NOW).unwrap().with_timezone(&Utc);
         let hours = |h: i64| now + chrono::Duration::hours(h);
-        let doc = reminder_doc("the quarterly review", hours(200), now);
+        let doc = reminder_doc("the quarterly review", hours(200), now, false);
         let kept_from = doc[REMINDER_TTL_FIELD].as_str().expect("the lifetime field is written");
         assert_eq!(kept_from, hours(200).to_rfc3339());
         assert_eq!(doc["fired"], json!(false));

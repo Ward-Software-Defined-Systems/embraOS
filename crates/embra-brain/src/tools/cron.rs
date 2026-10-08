@@ -243,9 +243,36 @@ pub(crate) fn cron_run_doc(
     })
 }
 
+/// A job as it is stored. `act` asks for a model turn with the result at
+/// each fire (`proactive::ActTrigger`); a record without the field does
+/// not.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cron_job_doc(
+    schedule: &str,
+    interval_secs: u64,
+    command: &str,
+    command_name: &str,
+    command_args: serde_json::Value,
+    next_run: &str,
+    act: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "schedule": schedule,
+        "interval_secs": interval_secs,
+        "command": command,
+        "command_name": command_name,
+        "command_args": command_args,
+        "enabled": true,
+        "last_run": null,
+        "next_run": next_run,
+        "created_at": Utc::now().to_rfc3339(),
+        "act": act,
+    })
+}
+
 /// Add a cron job.
 /// Param format: `<schedule> | <command>`
-pub async fn cron_add(db: &WardsonDbClient, param: &str, config_tz: &str) -> String {
+pub async fn cron_add(db: &WardsonDbClient, param: &str, config_tz: &str, act: bool) -> String {
     if param.is_empty() {
         return "Usage: cron_add <schedule> | <command>\n\
                 Schedules: every 5m, every 1h, every 30s, hourly, daily 09:00\n\
@@ -274,22 +301,16 @@ pub async fn cron_add(db: &WardsonDbClient, param: &str, config_tz: &str) -> Str
 
     ensure_collection(db).await;
 
-    let doc = serde_json::json!({
-        "schedule": schedule_str,
-        "interval_secs": interval_secs,
-        "command": command,
-        "command_name": command_name,
-        "command_args": command_args,
-        "enabled": true,
-        "last_run": null,
-        "next_run": next_run,
-        "created_at": Utc::now().to_rfc3339(),
-    });
+    let doc = cron_job_doc(schedule_str, interval_secs, command, &command_name, command_args, &next_run, act);
 
     match db.write("crons", &doc).await {
         Ok(id) => format!(
-            "Cron job created (ID: {})\n  Schedule: {}\n  Command: {}\n  Next run: {}",
-            id, schedule_str, command, next_run
+            "Cron job created (ID: {})\n  Schedule: {}\n  Command: {}\n  Next run: {}{}",
+            id,
+            schedule_str,
+            command,
+            next_run,
+            if act { "\n  Each run hands you its result in a turn of your own." } else { "" }
         ),
         Err(e) => format!("Failed to create cron job: {}", e),
     }
@@ -649,6 +670,27 @@ mod run_record_tests {
 }
 
 #[cfg(test)]
+mod act_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn act_defaults_to_false_and_round_trips_on_a_job() {
+        let plain = cron_job_doc("every 5m", 300, "time", "time", json!({}), "2026-10-08T12:05:00+00:00", false);
+        assert_eq!(plain["act"], false);
+        assert_eq!(plain["enabled"], true);
+        assert_eq!(plain["command_name"], "time");
+        let acting = cron_job_doc("every 5m", 300, "time", "time", json!({}), "2026-10-08T12:05:00+00:00", true);
+        assert_eq!(acting["act"], true);
+        let args: CronAddArgs = serde_json::from_value(json!({"schedule": "every 5m", "command": "time"})).unwrap();
+        assert_eq!(args.act, None);
+        let args: CronAddArgs =
+            serde_json::from_value(json!({"schedule": "every 5m", "command": "time", "act": true})).unwrap();
+        assert_eq!(args.act, Some(true));
+    }
+}
+
+#[cfg(test)]
 mod list_tests {
     use super::*;
     use serde_json::json;
@@ -779,18 +821,22 @@ use crate::tools::registry::DispatchContext;
 #[embra_tool(
     name = "cron_add",
     is_side_effectful = true,
-    description = "Schedule recurring tool execution. schedule accepts \"every 5m\", \"every 1h\", \"every 30s\", \"hourly\", \"daily HH:MM\" (resolved in the configured timezone; avoid 02:00-03:00 on DST days). command is a tool name, optionally followed by a JSON object of arguments, e.g. system_logs {\"service\":\"embra-brain\"}; the tool must exist and its required arguments must be given, or the job is refused. Cron dispatches it at each fire."
+    description = "Schedule recurring tool execution. schedule accepts \"every 5m\", \"every 1h\", \"every 30s\", \"hourly\", \"daily HH:MM\" (resolved in the configured timezone; avoid 02:00-03:00 on DST days). command is a tool name, optionally followed by a JSON object of arguments, e.g. system_logs {\"service\":\"embra-brain\"}; the tool must exist and its required arguments must be given, or the job is refused. Cron dispatches it at each fire; every run is recorded (cron_list runs=N) and your next turn carries the results. With act=true each run also gives you a turn of your own with its result, in the active session, to act on it with your tools."
 )]
 pub struct CronAddArgs {
     pub schedule: String,
     /// A tool name, optionally followed by a JSON object of arguments.
     pub command: String,
+    /// Start a model turn with the result when this job fires, so you can
+    /// act on it. Default false: the result is shown and recorded only.
+    #[serde(default)]
+    pub act: Option<bool>,
 }
 
 impl CronAddArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
         let param = format!("{} | {}", self.schedule, self.command);
-        Ok(cron_add(ctx.db, &param, ctx.config_tz).await)
+        Ok(cron_add(ctx.db, &param, ctx.config_tz, self.act.unwrap_or(false)).await)
     }
 }
 
