@@ -515,9 +515,33 @@ pub async fn cron_remove(db: &WardsonDbClient, param: &str) -> String {
     }
 }
 
+/// A job that ran: the report the console shows, the command as shown,
+/// the result cut at `CRON_RESULT_MAX`, and whether the job asked for a
+/// turn (`act`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CronFired {
+    pub text: String,
+    pub display: String,
+    pub result: String,
+    pub act: bool,
+}
+
+impl CronFired {
+    /// `note` is the job's own note, already parenthesized, or empty.
+    pub(crate) fn new(display: &str, result: &str, act: bool, note: &str) -> Self {
+        CronFired {
+            text: format!("embraCRON [{}]: {}{}", display, result, note),
+            display: display.to_string(),
+            result: truncate_str(result, CRON_RESULT_MAX).to_string(),
+            act,
+        }
+    }
+}
+
 /// Check for due cron jobs and execute them. Called by the proactive engine.
-/// Returns a list of result messages for fired crons.
-pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
+/// Returns what fired: the report of each run, and its trigger when the
+/// job asked for one.
+pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<CronFired> {
     let crons = db
         .fetch_collection("crons")
         .await
@@ -616,7 +640,8 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<String> {
             }
         }
         let note = plan.note.as_ref().map(|n| format!(" ({n})")).unwrap_or_default();
-        results.push(format!("embraCRON [{}]: {}{}", plan.display, result_text, note));
+        let act = doc.get("act").and_then(|v| v.as_bool()).unwrap_or(false);
+        results.push(CronFired::new(&plan.display, &result_text, act, &note));
 
         // Update last_run and next_run
         if let Some(id) = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()) {
@@ -673,6 +698,15 @@ mod run_record_tests {
 mod act_tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_fire_carries_a_capped_result_and_the_whole_report() {
+        let long = "x".repeat(CRON_RESULT_MAX + 50);
+        let fired = CronFired::new("time", &long, true, "");
+        assert_eq!(fired.result.len(), CRON_RESULT_MAX);
+        assert_eq!(fired.text, format!("embraCRON [time]: {long}"));
+        assert!(fired.act);
+    }
 
     #[test]
     fn act_defaults_to_false_and_round_trips_on_a_job() {

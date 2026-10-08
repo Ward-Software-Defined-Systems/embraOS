@@ -2070,12 +2070,21 @@ fn due_reminders<'a>(
     due.into_iter().take(max).map(|(_, doc)| doc).collect()
 }
 
-/// Fire the reminders that are due, at most `max` of them, and return their
-/// messages. Called by the proactive engine, which passes the number of
+/// A reminder that fired: the line the console shows, the message, and
+/// whether the reminder asked for a turn (`act`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FiredReminder {
+    pub text: String,
+    pub message: String,
+    pub act: bool,
+}
+
+/// Fire the reminders that are due, at most `max` of them, and return them.
+/// Called by the proactive engine, which passes the number of
 /// notifications it can hand over right now: firing marks a reminder as
 /// fired, so one that fires without a place to go is lost. What does not
 /// fit stays in the store and fires on a later check.
-pub async fn check_reminders(db: &WardsonDbClient, max: usize) -> Vec<String> {
+pub async fn check_reminders(db: &WardsonDbClient, max: usize) -> Vec<FiredReminder> {
     if max == 0 {
         return Vec::new();
     }
@@ -2101,7 +2110,11 @@ pub async fn check_reminders(db: &WardsonDbClient, max: usize) -> Vec<String> {
             .and_then(|v| v.as_str())
             .unwrap_or("Reminder");
 
-        fired.push(format!("Reminder: {}", message));
+        fired.push(FiredReminder {
+            text: format!("Reminder: {}", message),
+            message: message.to_string(),
+            act: doc.get("act").and_then(|v| v.as_bool()).unwrap_or(false),
+        });
 
         // Mark as fired, and when.
         if let Some(id) = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()) {

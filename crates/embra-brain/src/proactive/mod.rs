@@ -29,14 +29,36 @@ impl Priority {
     }
 }
 
+/// What a reminder or a cron job set with `act=true` asks for when it
+/// fires: a turn of the intelligence's own, run by the Converse stream
+/// that holds the notification receiver (`grpc_service`), in its active
+/// session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActTrigger {
+    pub kind: TriggerKind,
+    /// What fired: the reminder's message, or the job's command as shown.
+    pub headline: String,
+    /// What the turn carries: the reminder's message, or the run's result
+    /// (already cut at `CRON_RESULT_MAX`).
+    pub body: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriggerKind {
+    Reminder,
+    Cron,
+}
+
 /// What the proactive loops hand to the Converse stream. It carries no
 /// id, timestamp or delivery flag: a notification is shown once, when the
 /// stream drains the channel, and nothing looks it up afterwards. What
 /// must not repeat is decided before it is built (`health::transition_events`).
+/// `act` is set when the reminder or job that fired asked for a turn.
 #[derive(Debug, Clone)]
 pub struct Notification {
     pub priority: Priority,
     pub message: String,
+    pub act: Option<ActTrigger>,
 }
 
 impl Notification {
@@ -44,11 +66,47 @@ impl Notification {
         Self {
             priority,
             message: message.into(),
+            act: None,
         }
+    }
+
+    pub fn with_act(mut self, act: ActTrigger) -> Self {
+        self.act = Some(act);
+        self
     }
 
     pub fn priority_label(&self) -> &str {
         self.priority.label()
+    }
+}
+
+/// The notification for a reminder that fired: the text the console shows,
+/// and the trigger when the reminder asked for a turn.
+pub(crate) fn reminder_notification(fired: &crate::tools::FiredReminder) -> Notification {
+    let notification = Notification::new(Priority::Normal, fired.text.clone());
+    if fired.act {
+        notification.with_act(ActTrigger {
+            kind: TriggerKind::Reminder,
+            headline: fired.message.clone(),
+            body: fired.message.clone(),
+        })
+    } else {
+        notification
+    }
+}
+
+/// The notification for a cron run: the report the console shows, and the
+/// trigger with the run's result when the job asked for a turn.
+pub(crate) fn cron_notification(fired: &crate::tools::cron::CronFired) -> Notification {
+    let notification = Notification::new(Priority::Normal, fired.text.clone());
+    if fired.act {
+        notification.with_act(ActTrigger {
+            kind: TriggerKind::Cron,
+            headline: fired.display.clone(),
+            body: fired.result.clone(),
+        })
+    } else {
+        notification
     }
 }
 
@@ -108,8 +166,8 @@ pub fn start_proactive_engine(
 
         loop {
             let fired = crate::tools::cron::check_crons(&db_cron, &config_tz_cron).await;
-            for msg in fired {
-                push_notification(&tx_cron, Notification::new(Priority::Normal, msg));
+            for run in fired {
+                push_notification(&tx_cron, cron_notification(&run));
             }
             tokio::time::sleep(Duration::from_secs(15)).await;
         }
@@ -163,8 +221,8 @@ async fn deliver_due_reminders(db: &WardsonDbClient, tx: &mpsc::Sender<Notificat
         return;
     };
     let fired = crate::tools::check_reminders(db, slots.len()).await;
-    for (slot, msg) in slots.zip(fired) {
-        slot.send(Notification::new(Priority::Normal, msg));
+    for (slot, reminder) in slots.zip(fired) {
+        slot.send(reminder_notification(&reminder));
     }
 }
 
@@ -339,6 +397,49 @@ mod tests {
             .map(|n| n.message)
             .collect();
         assert_eq!(got, ["health", "first", "second"]);
+    }
+
+    #[test]
+    fn a_reminder_with_act_carries_its_trigger_and_one_without_carries_none() {
+        let plain = reminder_notification(&crate::tools::FiredReminder {
+            text: "Reminder: check the build".into(),
+            message: "check the build".into(),
+            act: false,
+        });
+        assert_eq!(plain.message, "Reminder: check the build");
+        assert!(plain.act.is_none());
+        let acting = reminder_notification(&crate::tools::FiredReminder {
+            text: "Reminder: check the build".into(),
+            message: "check the build".into(),
+            act: true,
+        });
+        assert_eq!(acting.message, "Reminder: check the build");
+        assert_eq!(
+            acting.act,
+            Some(ActTrigger {
+                kind: TriggerKind::Reminder,
+                headline: "check the build".into(),
+                body: "check the build".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn a_cron_fire_with_act_carries_its_result() {
+        let run = crate::tools::cron::CronFired::new("system_status", "uptime 3h", true, "");
+        let n = cron_notification(&run);
+        assert_eq!(n.message, "embraCRON [system_status]: uptime 3h");
+        assert_eq!(
+            n.act,
+            Some(ActTrigger {
+                kind: TriggerKind::Cron,
+                headline: "system_status".into(),
+                body: "uptime 3h".into(),
+            })
+        );
+        let quiet = crate::tools::cron::CronFired::new("system_status", "uptime 3h", false, " (note)");
+        assert_eq!(quiet.text, "embraCRON [system_status]: uptime 3h (note)");
+        assert!(cron_notification(&quiet).act.is_none());
     }
 
     #[test]
