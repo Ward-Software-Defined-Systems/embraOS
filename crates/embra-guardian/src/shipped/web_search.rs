@@ -324,6 +324,9 @@ fn redact_directives(s: &str) -> (String, bool) {
         }
         match found {
             Some((k, oe)) => {
+                // A possessive on the object is part of the directive:
+                // "ignore the user's request" leaves no "'s request" stub.
+                let oe = possessive_end(s, oe);
                 spans.push((vs, oe));
                 w = k + 1;
             }
@@ -346,6 +349,19 @@ fn redact_directives(s: &str) -> (String, bool) {
 
 fn word_in(word: &str, set: &[&str]) -> bool {
     set.iter().any(|m| m.eq_ignore_ascii_case(word))
+}
+
+/// The end of a `'s` / `’s` that follows the word ending at `end`, else
+/// `end`. A prefix test, never a byte slice: the byte after the word may
+/// open a multi-byte character (a curly quote).
+fn possessive_end(s: &str, end: usize) -> usize {
+    let rest = &s[end..];
+    for suffix in ["'s", "'S", "\u{2019}s", "\u{2019}S"] {
+        if rest.starts_with(suffix) {
+            return end + suffix.len();
+        }
+    }
+    end
 }
 
 /// Whether one of the words (byte spans into `s`) is a DIRECTIVE_QUALIFIERS word.
@@ -420,7 +436,9 @@ fn overlap_score(query: &str, title: &str, description: &str) -> f64 {
     hay.push(' ');
     hay.push_str(description);
     let mut score = 0.0_f64;
-    for tok in query.split_whitespace() {
+    for raw in query.split_whitespace() {
+        // A quoted query carries its quotes on its first and last words.
+        let tok = raw.trim_matches(|c: char| !c.is_alphanumeric());
         if tok.len() < 2 {
             continue;
         }
