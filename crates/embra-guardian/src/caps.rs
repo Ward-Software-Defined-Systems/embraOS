@@ -367,7 +367,7 @@ pub fn guarded_web_search(caps: &Capabilities, input: &str) -> String {
                 .take(req.count.min(20))
                 .map(|r| {
                     let mut o = serde_json::Map::new();
-                    o.insert("title".into(), text_field(&r.title, 300).into());
+                    o.insert("title".into(), truncate(&r.title, 300).into());
                     o.insert("url".into(), r.url.into());
                     o.insert("description".into(), text_field(&r.description, 1000).into());
                     if let Some(age) = r.age.filter(|a| !a.is_empty()) {
@@ -378,7 +378,7 @@ pub fn guarded_web_search(caps: &Capabilities, input: &str) -> String {
                             .snippets
                             .iter()
                             .take(5)
-                            .map(|s| text_field(s, 500).into())
+                            .map(|s| truncate(s, 500).into())
                             .collect();
                         o.insert("snippets".into(), snips.into());
                     }
@@ -403,12 +403,14 @@ pub fn guarded_web_search(caps: &Capabilities, input: &str) -> String {
     }
 }
 
-/// A result's text field as the model should read it: reduced to text
-/// with the reducer every guest ships (Brave sends `description` with
-/// `<strong>` highlighting and HTML entities and `extra_snippets` as plain
-/// text; one rule covers both), then cut at `cap`. A tool's injection scan
-/// then runs over decoded text, where `you&#x27;re` and `you're` are the
-/// same words (Embra#17).
+/// The description as the model should read it: reduced to text with the
+/// reducer every guest ships, then cut at `cap`. Brave sends `description`
+/// HTML-escaped with `<strong>` highlighting; a tool's injection scan then
+/// runs over decoded text, where `you&#x27;re` and `you're` are the same
+/// words (Embra#17). `title` and `extra_snippets` arrive as plain text and
+/// are NOT reduced: a literal `MaybeUninit<u8>` or `#include <vector>` in
+/// plain text would be stripped as a tag, and `<<` would open a tag that
+/// never closes (the rerun of Embra#17).
 fn text_field(s: &str, cap: usize) -> String {
     truncate(&crate::html_text::to_text(s), cap)
 }
@@ -1026,20 +1028,27 @@ mod search_tests {
     }
 
     #[test]
-    fn title_description_and_snippets_are_reduced_to_text_before_the_cap() {
+    fn the_description_is_reduced_to_text_and_title_and_snippets_are_kept_as_sent() {
+        // Brave: the description HTML-escaped with <strong> markup; the
+        // title and the extra snippets plain text, angle brackets and all
+        // (the samples are from Embra#17 and its rerun).
         let hit = SearchResult {
-            title: "<strong>Brave</strong> Search".into(),
-            url: "https://search.brave.com".into(),
+            title: "std::vector<T,Allocator>::push_back - cppreference.com".into(),
+            url: "https://en.cppreference.com/w/cpp/container/vector/push_back".into(),
             description: "In May 2023, <strong>Brave</strong> announced it&#x27;s &quot;own&quot; index &lt;u8&gt;".into(),
             age: None,
-            snippets: vec!["plain &amp; simple".into()],
+            snippets: vec![
+                "#include <vector> int main() { std::vector<int> numbers; std::cout << 1 << '\\n'; }".into(),
+                "have a fixed static MaybeUninit<u8> array".into(),
+            ],
         };
         let long = SearchResult { description: format!("<b>{}</b>", "x".repeat(1200)), ..hit.clone() };
-        let caps = Capabilities::with_search(Arc::new(MockSearch(Ok(vec![hit, long]))));
-        let v = parse(&guarded_web_search(&caps, "brave"));
-        assert_eq!(v["results"][0]["title"], "Brave Search");
+        let caps = Capabilities::with_search(Arc::new(MockSearch(Ok(vec![hit.clone(), long]))));
+        let v = parse(&guarded_web_search(&caps, "vector"));
+        assert_eq!(v["results"][0]["title"], hit.title);
         assert_eq!(v["results"][0]["description"], "In May 2023, Brave announced it's \"own\" index <u8>");
-        assert_eq!(v["results"][0]["snippets"][0], "plain & simple");
+        assert_eq!(v["results"][0]["snippets"][0], hit.snippets[0]);
+        assert_eq!(v["results"][0]["snippets"][1], hit.snippets[1]);
         // Reduced first, then cut: the cut falls on text, never inside a tag.
         let d = v["results"][1]["description"].as_str().unwrap();
         assert!(d.starts_with("xxxx") && d.ends_with('…') && !d.contains('<'), "{d}");

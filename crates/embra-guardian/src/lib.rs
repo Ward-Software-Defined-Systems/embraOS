@@ -27,7 +27,7 @@ pub mod store;
 pub mod validator;
 
 // The vendored guest reducer, compiled on the host as well: the search
-// guard reduces a result's text fields with the very bytes every tool
+// guard reduces a result's description with the very bytes every tool
 // ships (`scaffold::HTML_TEXT_SRC`). `alloc` in the extern prelude is what
 // its `use alloc::…` lines resolve against here, as in tests/html_text.rs.
 extern crate alloc;
