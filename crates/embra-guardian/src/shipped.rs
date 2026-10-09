@@ -53,6 +53,8 @@ pub const KNOWN_WEB_SEARCH_SHA256: &[&str] = &[
     "8736930de5de53de04f64bcbd9315a6a65b200a86a9e6072aca253cd2df44b72",
     // 2026-10-09 (Embra#17): the widened redactor, flag-only "system prompt", min_score
     "e5ea961920f40dbeef580df521a8903f91cea1b64de2299db7962faa3f1a5958",
+    // 2026-10-09 (Embra#17, the rerun): weak objects need a qualifier; fetch_status, fetch_error
+    "dca702dfcdd5a789e960b1068bd583c22eac75670eb6ee650833202ce4f3bf8f",
 ];
 
 /// The hashes of every version ever shipped under `name`, oldest first.
