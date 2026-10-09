@@ -70,9 +70,9 @@ const MIN_MESSAGE_LEN: usize = 15;
 const RECENT_USER_TURNS: usize = 3;
 
 /// The last `RECENT_USER_TURNS` operator turns, newest first, without the
-/// synthetic ones: the resume marker and the image-only and file-only
-/// placeholders carry no topic. The history never holds the current
-/// message.
+/// synthetic ones: the resume marker, the image-only and file-only
+/// placeholders and the trigger turns carry no topic of the operator's.
+/// The history never holds the current message.
 fn recent_user_turns(history: &[Message]) -> Vec<&str> {
     history
         .iter()
@@ -84,6 +84,8 @@ fn recent_user_turns(history: &[Message]) -> Vec<&str> {
                 && *c != "[Session resumed]"
                 && *c != crate::media::replay::IMAGE_ONLY_PLACEHOLDER
                 && *c != crate::media::text::FILE_ONLY_PLACEHOLDER
+                && !c.starts_with(crate::proactive::TRIGGER_REMINDER_PREFIX)
+                && !c.starts_with(crate::proactive::TRIGGER_CRON_PREFIX)
         })
         .take(RECENT_USER_TURNS)
         .collect()
@@ -232,6 +234,40 @@ pub fn build_resumption_context(away: Option<&str>) -> String {
     s
 }
 
+/// Brain-facing wrapper for a trigger turn: a reminder or a cron job set
+/// with `act=true` fired and the operator typed nothing. The persisted
+/// text is the `[Reminder fired] …` or `[embraCRON acted] …` line
+/// (`grpc_service::trigger_turn_text`); this wrapper is per-turn only,
+/// and the system prompt is untouched.
+pub fn build_trigger_context(kind: crate::proactive::TriggerKind, headline: &str, body: &str) -> String {
+    use crate::proactive::TriggerKind;
+    let mut s = format!("<scheduled_trigger kind=\"{}\">\n", kind.as_str());
+    match kind {
+        TriggerKind::Reminder => {
+            s.push_str(
+                "The operator did not type anything: a reminder set with act=true fired. \
+                 Act on it with your tools if it asks for action; otherwise answer in a sentence.\n",
+            );
+            s.push_str("Reminder: ");
+            s.push_str(body);
+            s.push('\n');
+        }
+        TriggerKind::Cron => {
+            s.push_str(
+                "The operator did not type anything: a cron job set with act=true ran, and this is its result. \
+                 Act on it with your tools if it calls for action; otherwise answer in a sentence.\n",
+            );
+            s.push_str("Job: ");
+            s.push_str(headline);
+            s.push_str("\nResult:\n");
+            s.push_str(body);
+            s.push('\n');
+        }
+    }
+    s.push_str("</scheduled_trigger>");
+    s
+}
+
 fn is_chatty_filler(s: &str) -> bool {
     let lower = s.to_lowercase();
     let stripped = lower.trim_end_matches(|c: char| {
@@ -364,6 +400,21 @@ mod recent_turns_tests {
     /// the resume marker, the image-only placeholder and blank turns are
     /// not topic.
     #[test]
+    fn build_trigger_context_wraps_the_fire_and_says_the_operator_did_not_type() {
+        use crate::proactive::TriggerKind;
+        let r = build_trigger_context(TriggerKind::Reminder, "check the build", "check the build");
+        assert!(r.starts_with("<scheduled_trigger kind=\"reminder\">\n"), "{r}");
+        assert!(r.contains("The operator did not type anything: a reminder set with act=true fired."), "{r}");
+        assert!(r.contains("\nReminder: check the build\n"), "{r}");
+        assert!(r.ends_with("</scheduled_trigger>"), "{r}");
+        let c = build_trigger_context(TriggerKind::Cron, "system_status", "uptime 3h");
+        assert!(c.starts_with("<scheduled_trigger kind=\"cron\">\n"), "{c}");
+        assert!(c.contains("a cron job set with act=true ran, and this is its result."), "{c}");
+        assert!(c.contains("\nJob: system_status\nResult:\nuptime 3h\n"), "{c}");
+        assert!(c.ends_with("</scheduled_trigger>"), "{c}");
+    }
+
+    #[test]
     fn recent_user_turns_skip_the_synthetic_markers() {
         let history = vec![
             turn("user", "first question about cron"),
@@ -372,6 +423,8 @@ mod recent_turns_tests {
             turn("user", "[Session resumed]"),
             turn("user", crate::media::replay::IMAGE_ONLY_PLACEHOLDER),
             turn("user", crate::media::text::FILE_ONLY_PLACEHOLDER),
+            turn("user", "[Reminder fired] check the build"),
+            turn("user", "[embraCRON acted] system_status: uptime 3h"),
             turn("user", "   "),
             turn("user", "third, about the seed packs"),
             turn("assistant", "another answer"),

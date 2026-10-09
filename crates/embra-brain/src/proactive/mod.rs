@@ -49,6 +49,20 @@ pub enum TriggerKind {
     Cron,
 }
 
+impl TriggerKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TriggerKind::Reminder => "reminder",
+            TriggerKind::Cron => "cron",
+        }
+    }
+}
+
+/// What a trigger turn persists as its user text starts with; retrieval
+/// skips such turns like the other synthetic markers.
+pub const TRIGGER_REMINDER_PREFIX: &str = "[Reminder fired]";
+pub const TRIGGER_CRON_PREFIX: &str = "[embraCRON acted]";
+
 /// What the proactive loops hand to the Converse stream. It carries no
 /// id, timestamp or delivery flag: a notification is shown once, when the
 /// stream drains the channel, and nothing looks it up afterwards. What
@@ -422,6 +436,8 @@ mod tests {
                 body: "check the build".into(),
             })
         );
+        assert_eq!(TriggerKind::Reminder.as_str(), "reminder");
+        assert_eq!(TriggerKind::Cron.as_str(), "cron");
     }
 
     #[test]

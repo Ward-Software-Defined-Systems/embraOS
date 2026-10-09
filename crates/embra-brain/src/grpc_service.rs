@@ -69,6 +69,95 @@ fn resume_briefing_idle_ok(
     (idle >= RESUME_BRIEFING_MIN_IDLE_SECS, idle)
 }
 
+/// Most trigger turns (`proactive::ActTrigger`) one stream runs in an
+/// hour; past it a trigger is shown and logged, not run.
+pub(crate) const ACT_TURNS_PER_HOUR_MAX: usize = 12;
+const ACT_BUDGET_WINDOW: std::time::Duration = std::time::Duration::from_secs(3600);
+/// Bytes of a cron result a trigger turn persists in its user text; the
+/// model-facing wrapper carries the whole capped result.
+const TRIGGER_PERSIST_MAX: usize = 1024;
+
+/// The sliding count behind `ACT_TURNS_PER_HOUR_MAX`, one per Converse
+/// task (only the stream holding the notification receiver runs triggers).
+pub(crate) struct ActBudget {
+    stamps: std::collections::VecDeque<std::time::Instant>,
+}
+
+impl ActBudget {
+    pub(crate) fn new() -> Self {
+        Self { stamps: std::collections::VecDeque::new() }
+    }
+
+    /// Allow a trigger turn now, counting it, unless `ACT_TURNS_PER_HOUR_MAX`
+    /// ran in the last hour. `Instant` is monotonic, so a clock jump cannot
+    /// widen or narrow the window.
+    pub(crate) fn allow(&mut self, now: std::time::Instant) -> bool {
+        while let Some(&oldest) = self.stamps.front() {
+            if now.duration_since(oldest) >= ACT_BUDGET_WINDOW {
+                self.stamps.pop_front();
+            } else {
+                break;
+            }
+        }
+        if self.stamps.len() >= ACT_TURNS_PER_HOUR_MAX {
+            return false;
+        }
+        self.stamps.push_back(now);
+        true
+    }
+}
+
+/// What a trigger turn persists as its user text: the reminder's message,
+/// or the job and the first kilobyte of its result. The model-facing
+/// wrapper (`enrichment::build_trigger_context`) carries the whole body.
+pub(crate) fn trigger_turn_text(act: &crate::proactive::ActTrigger) -> String {
+    use crate::proactive::{TRIGGER_CRON_PREFIX, TRIGGER_REMINDER_PREFIX, TriggerKind};
+    match act.kind {
+        TriggerKind::Reminder => format!("{TRIGGER_REMINDER_PREFIX} {}", act.body),
+        TriggerKind::Cron => format!(
+            "{TRIGGER_CRON_PREFIX} {}: {}",
+            act.headline,
+            crate::tools::sessions::truncate_str(&act.body, TRIGGER_PERSIST_MAX)
+        ),
+    }
+}
+
+/// Why a trigger turn cannot run now, or `None` when it can: the soul is
+/// sealed, a session is active, no turn is running on any stream, no
+/// setup or delete flow is waiting for the operator's answer, and the
+/// hourly cap has room.
+async fn trigger_refusal(
+    db: &Arc<WardsonDbClient>,
+    session_mgr: &Arc<RwLock<SessionManager>>,
+    in_turn: &Arc<AtomicBool>,
+    pending_key_setup: &Arc<Mutex<Option<ProviderKind>>>,
+    pending_openai_compat_setup: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
+    pending_session_delete: &Arc<Mutex<Option<PendingSessionDelete>>>,
+    budget: &mut ActBudget,
+) -> Option<String> {
+    if !matches!(learning::is_soul_sealed(db).await, Ok(true)) {
+        return Some("the soul is not sealed yet".to_string());
+    }
+    if session_mgr.read().await.active_session.is_none() {
+        return Some("no session is active".to_string());
+    }
+    if in_turn.load(Ordering::SeqCst) {
+        return Some("a turn is running".to_string());
+    }
+    if pending_key_setup.lock().await.is_some() || pending_openai_compat_setup.lock().await.is_some() {
+        return Some("a provider setup is waiting for your answer".to_string());
+    }
+    if pending_session_delete.lock().await.is_some() {
+        return Some("a session delete is waiting for your answer".to_string());
+    }
+    if !budget.allow(std::time::Instant::now()) {
+        return Some(format!(
+            "the cap of {ACT_TURNS_PER_HOUR_MAX} trigger turns an hour is reached"
+        ));
+    }
+    None
+}
+
 pub struct BrainGrpcService {
     db: Arc<WardsonDbClient>,
     session_manager: Arc<RwLock<SessionManager>>,
@@ -476,6 +565,7 @@ impl BrainService for BrainGrpcService {
 
             // Try to get proactive notifications (only one Converse stream gets them)
             let mut proactive = proactive_rx.try_lock().ok();
+            let mut act_budget = ActBudget::new();
 
             // Stage 3: Main conversation loop (Operational mode)
             loop {
@@ -527,6 +617,63 @@ impl BrainService for BrainGrpcService {
                                     }
                                 )),
                             })).await;
+                            // A reminder or job that asked for a turn gets
+                            // one here, between turns, on the stream that
+                            // holds the receiver: the resume briefing's
+                            // re-entry, with `pending_trigger` as the marker.
+                            // A refused trigger is still the notice above,
+                            // plus the reason.
+                            if let Some(act) = notif.act {
+                                let refusal = trigger_refusal(
+                                    &db, &session_mgr, &in_turn, &pending_key_setup,
+                                    &pending_openai_compat_setup, &pending_session_delete, &mut act_budget,
+                                ).await;
+                                match refusal {
+                                    Some(why) => {
+                                        warn!(target: "proactive", kind = act.kind.as_str(), "trigger turn not run: {}", why);
+                                        let _ = tx.send(Ok(ConversationResponse {
+                                            response_type: Some(conversation_response::ResponseType::System(
+                                                SystemMessage {
+                                                    content: format!("[trigger not run] {}", why),
+                                                    msg_type: SystemMessageType::Info as i32,
+                                                }
+                                            )),
+                                        })).await;
+                                    }
+                                    None => {
+                                        info!(target: "proactive", kind = act.kind.as_str(), "trigger turn starting");
+                                        let content = trigger_turn_text(&act);
+                                        session_mgr.write().await.pending_trigger = Some(crate::sessions::TriggerTurn {
+                                            kind: act.kind,
+                                            headline: act.headline,
+                                            body: act.body,
+                                        });
+                                        let synthetic = ConversationRequest {
+                                            request_type: Some(conversation_request::RequestType::UserMessage(
+                                                UserMessage {
+                                                    content,
+                                                    timestamp: None,
+                                                    attachment_ids: Vec::new(),
+                                                    file_paths: Vec::new(),
+                                                }
+                                            )),
+                                        };
+                                        if let Err(e) = handle_request(
+                                            synthetic, &tx, &db, &session_mgr, &config_tz, &api_key, &in_turn, &pending_provider, &pending_key_setup, &pending_openai_compat_setup, &pending_session_delete, &stop_rx
+                                        ).await {
+                                            error!("Error handling trigger turn: {}", e);
+                                            let _ = tx.send(Ok(ConversationResponse {
+                                                response_type: Some(conversation_response::ResponseType::System(
+                                                    SystemMessage {
+                                                        content: format!("Error: {}", e),
+                                                        msg_type: SystemMessageType::Error as i32,
+                                                    }
+                                                )),
+                                            })).await;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
@@ -1224,6 +1371,10 @@ async fn handle_request(
             // persistence step at the end of this handler writes to
             // history, mirroring the auto-enrichment pattern below.
             let pending_briefing = session_mgr.write().await.pending_resume_briefing.take();
+            // A trigger turn (a reminder or job with act=true fired) carries
+            // the same kind of marker: synthetic for the attachments, an
+            // operator turn for the events block.
+            let pending_trigger = session_mgr.write().await.pending_trigger.take();
             // Where the next events block starts: this turn's start, stamped
             // on the session once the turn is saved (`sessions::events`).
             let turn_started = chrono::Utc::now();
@@ -1239,7 +1390,10 @@ async fn handle_request(
             // staging. An unknown id aborts the turn with an Error frame
             // and persists nothing; the staging is drained only on success.
             let media_store = media::MediaStore::default_store();
-            let synthetic_turn = pending_briefing.is_some() || delete_exec.is_some();
+            let synthetic_turn = pending_briefing.is_some() || delete_exec.is_some() || pending_trigger.is_some();
+            // The briefing carries <while_away> and the delete flow nothing;
+            // every other turn, a trigger turn included, carries the events.
+            let carries_events = pending_briefing.is_none() && delete_exec.is_none();
             let mut turn_media: Vec<media::MediaMeta> = Vec::new();
             // Text files on this turn, each with its text: the paths the
             // client named (jailed to the workspace) ∪ those `/attach
@@ -1404,6 +1558,9 @@ async fn handle_request(
                     None => None,
                 };
                 crate::knowledge::enrichment::build_resumption_context(away.as_deref())
+            } else if let Some(trigger) = pending_trigger {
+                // A trigger turn: the fire, wrapped with what to do with it.
+                crate::knowledge::enrichment::build_trigger_context(trigger.kind, &trigger.headline, &trigger.body)
             } else if msg.content.trim().is_empty() && !turn_images.is_empty() {
                 // Image-only message: every provider path assumes a text
                 // block exists (cache breakpoints, parts arrays), and the
@@ -1441,7 +1598,7 @@ async fn handle_request(
             // reminders, cron runs — ahead of the files and the words,
             // rendered once and never persisted. A briefing carries
             // <while_away> instead, and the delete flow carries nothing.
-            let events_block = if synthetic_turn {
+            let events_block = if !carries_events {
                 None
             } else {
                 let cutoff = session_mgr
@@ -9500,5 +9657,51 @@ mod operator_stop_tests {
             stopped: false,
         });
         assert_eq!((entry.as_str(), done), ("(phase complete)", true));
+    }
+}
+
+#[cfg(test)]
+mod trigger_turn_tests {
+    use super::*;
+    use crate::proactive::{ActTrigger, TriggerKind};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_act_budget_allows_twelve_an_hour_and_the_oldest_stamp_expires() {
+        assert_eq!(ACT_TURNS_PER_HOUR_MAX, 12);
+        let mut budget = ActBudget::new();
+        let start = Instant::now();
+        for i in 0..ACT_TURNS_PER_HOUR_MAX {
+            assert!(budget.allow(start + Duration::from_secs(i as u64 * 60)), "turn {i}");
+        }
+        // The thirteenth within the hour is refused, and refusing counts nothing.
+        assert!(!budget.allow(start + Duration::from_secs(30 * 60)));
+        assert!(!budget.allow(start + Duration::from_secs(59 * 60)));
+        // An hour after the first stamp, one slot is free again.
+        assert!(budget.allow(start + Duration::from_secs(60 * 60)));
+        assert!(!budget.allow(start + Duration::from_secs(60 * 60)));
+        // A second one frees a minute later.
+        assert!(budget.allow(start + Duration::from_secs(61 * 60)));
+    }
+
+    #[test]
+    fn trigger_turn_text_names_the_kind_and_caps_the_body() {
+        let reminder = ActTrigger {
+            kind: TriggerKind::Reminder,
+            headline: "check the build".into(),
+            body: "check the build".into(),
+        };
+        assert_eq!(trigger_turn_text(&reminder), "[Reminder fired] check the build");
+        let long = "日".repeat(1000);
+        let cron = ActTrigger {
+            kind: TriggerKind::Cron,
+            headline: "system_status".into(),
+            body: long.clone(),
+        };
+        let text = trigger_turn_text(&cron);
+        assert!(text.starts_with("[embraCRON acted] system_status: 日"), "{text}");
+        let body = text.strip_prefix("[embraCRON acted] system_status: ").unwrap();
+        assert!(body.len() <= TRIGGER_PERSIST_MAX && body.len() > TRIGGER_PERSIST_MAX - 3);
+        assert!(long.starts_with(body));
     }
 }

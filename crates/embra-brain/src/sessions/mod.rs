@@ -156,6 +156,8 @@ pub struct SessionManager {
     /// serialized, no schema bump. It carries since when the operator was
     /// away, for the digest of what happened meanwhile (`sessions::away`).
     pub pending_resume_briefing: Option<ResumeBriefing>,
+    /// A trigger turn waiting for its turn (runtime only, never serialized).
+    pub pending_trigger: Option<TriggerTurn>,
     /// When a resume briefing was last STARTED per session (runtime only,
     /// never serialized). Read/written by the briefing dispatch sites in
     /// grpc_service.rs to enforce `RESUME_BRIEFING_ATTEMPT_COOLDOWN_SECS`.
@@ -171,6 +173,17 @@ pub struct SessionManager {
     /// images by the next operator turn. Runtime only, like the images;
     /// the files stay where they are.
     pending_files: std::collections::HashMap<String, Vec<crate::media::text::TextUpload>>,
+}
+
+/// A trigger turn waiting for its turn: a reminder or a cron job set with
+/// `act=true` fired (`proactive::ActTrigger`). Set by the notification arm
+/// of the stream that holds the receiver, taken once by the UserMessage
+/// arm like `pending_resume_briefing`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriggerTurn {
+    pub kind: crate::proactive::TriggerKind,
+    pub headline: String,
+    pub body: String,
 }
 
 /// A resume briefing waiting for its turn.
@@ -189,6 +202,7 @@ impl SessionManager {
             db,
             active_session: None,
             pending_resume_briefing: None,
+            pending_trigger: None,
             briefing_attempts: std::collections::HashMap::new(),
             pending_media: std::collections::HashMap::new(),
             pending_files: std::collections::HashMap::new(),
@@ -946,6 +960,25 @@ mod pending_resume_briefing_tests {
             mgr.pending_resume_briefing.is_none(),
             "after take, subsequent turns are not briefings"
         );
+    }
+}
+
+#[cfg(test)]
+mod pending_trigger_tests {
+    use super::*;
+
+    #[test]
+    fn a_trigger_is_taken_once() {
+        let mut mgr = SessionManager::new(WardsonDbClient::from_url("http://127.0.0.1:1"));
+        assert!(mgr.pending_trigger.is_none());
+        let trigger = TriggerTurn {
+            kind: crate::proactive::TriggerKind::Reminder,
+            headline: "check the build".into(),
+            body: "check the build".into(),
+        };
+        mgr.pending_trigger = Some(trigger.clone());
+        assert_eq!(mgr.pending_trigger.take(), Some(trigger));
+        assert!(mgr.pending_trigger.is_none(), "after take, the next turn is an operator turn");
     }
 }
 
