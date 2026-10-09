@@ -49,6 +49,37 @@ fn malformed_input_never_panics() {
 }
 
 #[test]
+fn a_quoted_greater_than_inside_an_attribute_does_not_end_the_tag() {
+    // Embra#17: a `>` inside a quoted attribute leaked the rest of the tag
+    // as page text. Both samples are from fetched pages.
+    let discourse =
+        r#"<link media="(width >= 40rem)" rel="stylesheet" data-target="chat_desktop" />after"#;
+    assert_eq!(to_text(discourse), "after");
+    let alpine = r#"<div x-data :class="width >= 1280 ? 'wide' : 'narrow'" style="max-width: 125rem; margin: 0 auto" >body</div>"#;
+    assert_eq!(to_text(alpine), "body");
+    // Single quotes too, and the other kind of quote inside a quoted value.
+    assert_eq!(to_text(r#"<a title='a > b' data-x="it's">link</a>"#), "link");
+}
+
+#[test]
+fn an_unclosed_quote_falls_back_to_the_first_closing_bracket() {
+    // A stray quote must never swallow the document.
+    assert_eq!(to_text(r#"<a title="x>rest</a> more"#), "rest more");
+}
+
+#[test]
+fn a_comment_is_dropped_whole() {
+    assert_eq!(to_text("a<!-- b > c -->d"), "a d");
+    assert_eq!(to_text("a<!-- unterminated"), "a");
+    // A script element with a quoted `>` in its attributes is still
+    // dropped whole, body included.
+    assert_eq!(
+        to_text(r#"x<script type="text/x" data-x="a>b">var y = 1;</script>z"#),
+        "x z"
+    );
+}
+
+#[test]
 fn unknown_entity_kept_literal() {
     // `&` that is not a recognized entity stays as text.
     assert_eq!(to_text("AT&T and R&D"), "AT&T and R&D");

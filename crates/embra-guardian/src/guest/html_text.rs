@@ -6,9 +6,10 @@
 // without a parser crate (crates are banned in v1).
 //
 // This is a HEURISTIC stripper, NOT an HTML parser: it drops
-// <script>/<style> element bodies, removes tags, decodes a small entity
-// set, and collapses whitespace. Conservative by design. The result is
-// still attacker-controlled — the caller MUST injection-scrub it.
+// <script>/<style> element bodies and <!-- comments -->, removes tags
+// (a `>` inside a quoted attribute does not end one), decodes a small
+// entity set, and collapses whitespace. Conservative by design. The
+// result is still attacker-controlled — the caller MUST injection-scrub it.
 
 use alloc::string::String;
 
@@ -31,11 +32,8 @@ pub fn to_text(html: &str) -> String {
                 push_space(&mut out);
                 continue;
             }
-            // Any other tag: skip to the closing '>' (a soft space).
-            i = match memchr(b, b'>', i + 1) {
-                Some(k) => k + 1,
-                None => n,
-            };
+            // Any other tag, or a comment: skip to its end (a soft space).
+            i = tag_end(b, i);
             push_space(&mut out);
             continue;
         }
@@ -81,16 +79,59 @@ fn skip_element(lb: &[u8], at: usize, name: &[u8]) -> Option<usize> {
         Some(c) if c == b'>' || c == b'/' || c.is_ascii_whitespace() => {}
         _ => return None,
     }
-    // Find the end of the open tag, then the closing `</name`.
-    let open_end = memchr(lb, b'>', after + name.len())?;
+    // Find the end of the open tag, then the closing `</name`. An open
+    // tag that never closes takes the rest of the input with it.
+    let open_end = tag_end(lb, at);
+    if open_end >= lb.len() {
+        return Some(lb.len());
+    }
     let mut close_tag = alloc::vec::Vec::with_capacity(name.len() + 2);
     close_tag.push(b'<');
     close_tag.push(b'/');
     close_tag.extend_from_slice(name);
-    match find_sub(lb, &close_tag, open_end + 1) {
-        Some(p) => Some(memchr(lb, b'>', p).map(|g| g + 1).unwrap_or(lb.len())),
+    match find_sub(lb, &close_tag, open_end) {
+        Some(p) => Some(tag_end(lb, p)),
         None => Some(lb.len()),
     }
+}
+
+/// The index just past the end of the tag that opens at `at` (`b[at]` is
+/// `<`). A `>` inside a quoted attribute value does not end the tag:
+/// `media="(width >= 40rem)"` and Alpine's `:class="… >= 1280 …"` used to
+/// leak the rest of the tag as page text (Embra#17). A quote that never
+/// closes falls back to the first `>` after the opening, so a stray quote
+/// never swallows the document. A comment `<!--` ends at `-->`. End of
+/// input when the tag is unterminated.
+fn tag_end(b: &[u8], at: usize) -> usize {
+    let n = b.len();
+    if b[at..].starts_with(b"<!--") {
+        return match find_sub(b, b"-->", at + 4) {
+            Some(p) => p + 3,
+            None => n,
+        };
+    }
+    let mut i = at + 1;
+    while i < n {
+        let c = b[i];
+        if c == b'>' {
+            return i + 1;
+        }
+        if c == b'"' || c == b'\'' {
+            match memchr(b, c, i + 1) {
+                Some(close) => i = close + 1,
+                None => {
+                    // An unbalanced quote: the plain rule from the opening.
+                    return match memchr(b, b'>', at + 1) {
+                        Some(k) => k + 1,
+                        None => n,
+                    };
+                }
+            }
+            continue;
+        }
+        i += 1;
+    }
+    n
 }
 
 /// Decode one HTML entity at the start of `s` into `out`. Returns the
