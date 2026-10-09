@@ -37,6 +37,22 @@ Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` 
 > model is a hosted API.
 > **[Roster and server configuration →](docs/RECOMMENDED-LOCAL-MODELS.md)**
 
+> **Ollama Cloud — hosted models through the same preset.** A `:cloud` tag is served by
+> ollama.com through the local Ollama daemon, so it reaches embraOS through the Ollama
+> preset like any pulled model: nothing to fit in local memory, and nothing local about the
+> inference either (it is not the offline tier of the roadmap). The rule on active
+> parameters applies the same way. Operator-vetted for the full toolset and the preferred
+> pick: **`deepseek-v4-pro:cloud`**. Under evaluation: `glm-5.3:cloud` and `kimi-k3:cloud`.
+>
+> | Model | Tag | Parameters | Context | Input | Status |
+> |---|---|---|---|---|---|
+> | DeepSeek V4 Pro | `deepseek-v4-pro:cloud` | 1.6T total, 49B active (MoE) | 1M | text | vetted, preferred |
+> | GLM 5.3 | `glm-5.3:cloud` | 753B | 1M | text | under evaluation |
+> | Kimi K3 | `kimi-k3:cloud` | 2.8T (MoE) | 1M | text, image | under evaluation |
+>
+> Figures are the Ollama library's (2026-10-08). Only `kimi-k3:cloud` takes image input;
+> an image attached under the other two needs a vision-capable model.
+
 > **Soul-gated dynamic tools: the replicant check.** *(Experimental.)* The intelligence
 > proposes its own dynamic tools (`guardian_propose`); operators paste them
 > (`/guardian-define`). **Neither compiles until the draft clears the replicant

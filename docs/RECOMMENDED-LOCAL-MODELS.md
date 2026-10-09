@@ -40,6 +40,23 @@ of unified memory and run on the Mac Studio; `gemma4:12b` fits the Mac Mini. The
 hardware mapping above says which *server* runs where, not that every model fits
 on every host.
 
+### Ollama Cloud
+
+A `:cloud` tag is served by ollama.com through the local Ollama daemon, so it reaches
+embraOS through the Ollama preset like any pulled model: nothing to fit in local
+memory, and nothing local about the inference either. The active-parameter rule
+above applies the same way.
+
+| Model | Tag | Parameters | Context | Input | Status |
+|---|---|---|---|---|---|
+| DeepSeek V4 Pro | `deepseek-v4-pro:cloud` | 1.6T total, 49B active (MoE) | 1M | text | vetted, preferred |
+| GLM 5.3 | `glm-5.3:cloud` | 753B | 1M | text | under evaluation |
+| Kimi K3 | `kimi-k3:cloud` | 2.8T (MoE) | 1M | text, image | under evaluation |
+
+Figures are the Ollama library's, read 2026-10-08. Only `kimi-k3:cloud` takes image
+input. `deepseek-v4-pro:cloud` gets `reasoning_effort: max` from the brain unless
+`/effort` sets a level (see [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md)).
+
 ---
 
 ## Server Configuration
