@@ -1,4 +1,4 @@
-# Guardian Advanced Example — prompt-injection-hardened `web_search`
+# Guardian Advanced Example — the shipped `web_search`
 
 The flagship dynamic tool, in **one module** that declares **two
 capabilities**: search the web (Brave, via the Guardian `web_search`
@@ -8,9 +8,42 @@ before the model sees it. Read
 [GUARDIAN-TOOL-EXAMPLES.md](./GUARDIAN-TOOL-EXAMPLES.md) first for the
 contract and the `json` / `host` / `html_text` APIs.
 
-> The module below is checked against the real validator by
-> `crates/embra-guardian/tests/doc_examples_validate.rs` and is compiled
-> to `wasm32` during development, so it is known-good — not pseudocode.
+**It ships with embraOS.** The module below is the shipped source
+(`crates/embra-guardian/src/shipped/web_search.rs`, the same bytes as this
+page, pinned by a test). The brain installs it at boot and builds it in
+the background with the in-OS toolchain; `/guardian list` shows it as
+`web_search (shipped)` once it is ready. It stays inert until the operator
+sets a Brave key (below): until then every call answers
+`search capability not configured`.
+
+> The module is checked against the real validator by
+> `crates/embra-guardian/tests/doc_examples_validate.rs` and by
+> `embra_guardian::shipped`'s tests, and a wasm fixture built from it runs
+> end to end in `crates/embra-guardian/tests/web_search_roundtrip.rs` over
+> a mock search provider — the redactor, the empty result set and
+> `min_score` are tested on every build, not just read.
+
+## Shipped, updated, yours
+
+A shipped tool is project-reviewed: it passes the validator like any
+module and is installed without the replicant check (at boot there is no
+config and no provider to judge with). A rebuild (`/guardian rebuild`)
+goes through the check like any tool. At every boot the brain looks at
+the record under the name and does one of these:
+
+- **absent** → installs it, unless `/guardian delete web_search` was run
+  (the decline is recorded in `/embra/state/guardian_declined`, one name
+  per line; remove the line, or define the tool again, to have it back);
+- **shipped and unedited** → updates it when a new image carries a newer
+  module, and rebuilds it after a failed build or an in-OS toolchain
+  change (the `NOT LOADED` case no longer needs `/guardian rebuild` for
+  this tool);
+- **an operator copy of a version that was shipped** (an instance that
+  pasted this page before the tool shipped) → adopts it and brings it to
+  the current module;
+- **edited by the operator** (`/guardian-define` under the same name, any
+  change) → leaves it alone; `/guardian status web_search` says
+  `shipped: yes, edited by the operator`. The module is yours from then on.
 
 ## Setup — one-time Brave key
 
@@ -43,14 +76,23 @@ stack:
 2. **`http_get` guard** (host): the fetch of a chosen result URL goes
    through the same egress policy as any other fetch.
 3. **This tool's scrubber** (`fn run`): strips control / zero-width
-   chars, redacts injection-directive phrases, length-caps every field
-   (reporting *what* was cut and to what length), de-dupes by host,
-   ranks by query overlap, flags `injection_suspected`. Search text,
-   `extra_snippets`, **and** fetched page text all go through it.
+   chars, redacts injection directives (an imperative — ignore, disregard,
+   forget — followed within a few words by its object: instructions,
+   rules, prompts, the user, …) and the structural markers of an injected
+   turn (`you are now`, `</system>`, `assistant:`, …) as
+   `[redacted-directive]`, flags a page that merely *talks about* a system
+   prompt without rewriting it, length-caps every field (reporting *what*
+   was cut and to what length), de-dupes by host, ranks by query overlap
+   and drops hits under `min_score`, flags `injection_suspected`. Search
+   text, `extra_snippets`, **and** fetched page text all go through it.
+   The host guard has already reduced titles, descriptions and snippets
+   to text (Brave sends descriptions with `<strong>` and entities), so the
+   scrubber sees the words a reader would.
 
 ## Input / output
 
-Input (`query` required; everything else optional):
+Input (`query` required; everything else optional; `min_score` drops the
+score-0 hits a nonsense query brings back):
 
 ```json
 { "query": "tokio cancellation safety", "max": 5, "recency": "year",
@@ -452,7 +494,13 @@ fn overlap_score(query: &str, title: &str, description: &str) -> f64 {
 
 - **Never panics:** every accessor uses `unwrap_or`; a search/fetch
   error or bad input yields `{"error":…}`. A panic becomes a sandbox
-  trap surfaced as a tool error.
+  trap surfaced as a tool error. A query with no results is
+  `{"count":0,"results":[]}`, not an error.
+- **The redactor is lexical and says so.** A directive with a verb and an
+  object within five words is rewritten; a typoglycemia, spaced-out or
+  base64 directive passes, and `injection_suspected` is the signal the
+  model should weigh. "System prompt" on a page about prompt injection
+  sets the flag and keeps the text (Embra#17).
 - **No third-party crates** (v1 rule): `#![no_std]` + the vendored
   `json` and `html_text` helpers only. `html_text::to_text` is a
   **heuristic** HTML→text reducer (drops `<script>/<style>`, strips
@@ -480,15 +528,16 @@ fn overlap_score(query: &str, title: &str, description: &str) -> f64 {
 
 ```text
 /guardian key brave <your-brave-api-key>   # one-time, host-side
-/guardian-define
-<paste the module above>
-.                                 # serial terminator (web: just Enter)
-/guardian status web_search       # → ready
+/guardian status web_search       # → ready (built at boot; "shipped: yes")
 # then just ask the intelligence in plain language, e.g.:
 #   "use the web_search guardian tool to find recent material on tokio
 #    cancellation safety and fetch the top result"
 # → real Brave results ranked by overlap, de-duped by host, the top
 #   result's page fetched + reduced to text; any injection directive in
 #   any field becomes [redacted-directive] with injection_suspected:true.
-/guardian delete web_search
 ```
+
+To change the tool, `/guardian-define` with your version of the module
+under the same name: it replaces the shipped record, and the boot step
+leaves it alone from then on. To be rid of it, `/guardian delete
+web_search`: it stays deleted at boot.

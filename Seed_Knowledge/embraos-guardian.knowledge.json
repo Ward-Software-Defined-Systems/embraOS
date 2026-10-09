@@ -88,7 +88,7 @@
       "id": "seed_guardian_lifecycle",
       "kind": "semantic",
       "category": "fact",
-      "content": "Tool lifecycle: a draft goes through guardian_propose (the known-good template is embedded in that tool's description — start from it), then syn static validation, then the replicant check — an independent soul-verdict call that returns allow, escalate, or refuse and FAILS CLOSED. allow/escalate store the draft as Proposed for the operator; refuse blocks it and is not waivable, not even for an operator paste. The operator runs /guardian approve <name> to trigger the wasm32 build (or /guardian reject <name>); poll guardian_call action=\"status\" until the tool reads ready, then invoke it with schema-shaped JSON input.",
+      "content": "Tool lifecycle: a draft goes through guardian_propose (the known-good template is embedded in that tool's description — start from it), then syn static validation, then the replicant check — an independent soul-verdict call that returns allow, escalate, or refuse and FAILS CLOSED. allow/escalate store the draft as Proposed for the operator; refuse blocks it and is not waivable, not even for an operator paste. The operator runs /guardian approve <name> to trigger the wasm32 build (or /guardian reject <name>); poll guardian_call action=\"status\" until the tool reads ready, then invoke it with schema-shaped JSON input. One tool takes neither path: web_search ships with embraOS and the brain installs it at boot (/guardian list marks it shipped); it stays inert until the operator sets a Brave key with /guardian key brave, and the operator may edit it (/guardian-define, same name) or delete it for good (/guardian delete).",
       "tags": ["guardian", "lifecycle", "replicant-check", "authoring"]
     },
     {

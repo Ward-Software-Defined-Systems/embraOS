@@ -32,10 +32,10 @@ so what's here is exactly what the gate accepts.
 
 You paste **only** these items — the scaffold owns everything else
 (`#![no_std]`, the allocator, the panic handler, the ABI exports, and the
-`json` / `host` modules):
+`json` / `host` / `html_text` modules):
 
 - A first marker line: `// guardian-tool: <name>`
-  (`name` is `^[a-z][a-z0-9_]{2,40}$`, ≥3 chars, and must not collide
+  (`name` is `^[a-z][a-z0-9_]{2,39}$`, ≥3 chars, and must not collide
   with a built-in tool name nor `guardian_call`/`guardian_list` — the
   validator rejects with a precise message if it does).
 - `const GUARDIAN_NAME: &str = "<name>";` (must equal the marker)
@@ -276,5 +276,5 @@ fn run(input: &str) -> String {
 
 ## See also
 
-- [GUARDIAN-ADVANCED-EXAMPLE.md](./GUARDIAN-ADVANCED-EXAMPLE.md) — the flagship: prompt-injection-hardened `web_search` declaring two capabilities.
+- [GUARDIAN-ADVANCED-EXAMPLE.md](./GUARDIAN-ADVANCED-EXAMPLE.md) — the flagship: prompt-injection-hardened `web_search` declaring two capabilities, shipped with the image and installed at boot.
 - [GUARDIAN-KG-SCAN-EXAMPLE.md](./GUARDIAN-KG-SCAN-EXAMPLE.md) — `kg_scan`, the first intelligence-proposed tool: pure-compute structural scanning over a `knowledge_dump` JSONL, fed in via `guardian_call`'s `data_file` bridge.

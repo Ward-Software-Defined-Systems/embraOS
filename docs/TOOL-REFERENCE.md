@@ -175,9 +175,11 @@ Guardian dynamic tools are authored along two paths, both `syn`-validated → so
 
 The replicant check is an independent soul-verdict model call returning **allow / refuse / escalate**; it **fails closed** (if it cannot run, nothing compiles) and is skipped only before the soul is sealed (nothing to evaluate against).
 
+One tool ships with the image and takes neither path: `web_search`, installed by the brain at boot, project-reviewed and validated but not soul-checked at install (a rebuild or an operator edit is gated like any tool). It is inert until the operator sets a Brave key with `/guardian key brave`; `/guardian delete` keeps it deleted across boots ([REPLICANT-CHECK.md](REPLICANT-CHECK.md), [GUARDIAN-ADVANCED-EXAMPLE.md](GUARDIAN-ADVANCED-EXAMPLE.md)).
+
 Dynamic tools are **never** injected into the provider tool schema — they are reachable only through the static meta-tools below, so the tool snapshot stays prompt-cache-stable.
 
-Worked examples: [GUARDIAN-TOOL-EXAMPLES.md](GUARDIAN-TOOL-EXAMPLES.md) (contract + starter modules), [GUARDIAN-ADVANCED-EXAMPLE.md](GUARDIAN-ADVANCED-EXAMPLE.md) (prompt-injection-hardened `web_search`), and [GUARDIAN-KG-SCAN-EXAMPLE.md](GUARDIAN-KG-SCAN-EXAMPLE.md) (`kg_scan`, the first intelligence-proposed tool — scans a `knowledge_dump` JSONL for structural patterns).
+Worked examples: [GUARDIAN-TOOL-EXAMPLES.md](GUARDIAN-TOOL-EXAMPLES.md) (contract + starter modules), [GUARDIAN-ADVANCED-EXAMPLE.md](GUARDIAN-ADVANCED-EXAMPLE.md) (the shipped, prompt-injection-hardened `web_search`), and [GUARDIAN-KG-SCAN-EXAMPLE.md](GUARDIAN-KG-SCAN-EXAMPLE.md) (`kg_scan`, the first intelligence-proposed tool — scans a `knowledge_dump` JSONL for structural patterns).
 
 | Tool | Description |
 |---|---|

@@ -36,6 +36,10 @@ intelligence drafts a module                 operator pastes a module
 
 The difference between the paths is the *approval* step, not the *soul check*. An intelligence draft that passes becomes a **proposal** an operator must approve before it builds — the authoring intelligence never rules on its own draft and never approves it. An operator paste that passes compiles directly, because the operator's paste *is* their approval.
 
+## Shipped tools
+
+One tool is neither drafted nor pasted: the image ships `web_search` ([GUARDIAN-ADVANCED-EXAMPLE.md](./GUARDIAN-ADVANCED-EXAMPLE.md)) and the brain installs it at boot. It is project-reviewed, in the repository, under the same validator; it is installed **without** the replicant check, because at boot there is no config and no provider to judge with, and nothing of the sealed soul is read. Everything after the install is gated like any tool: a `/guardian rebuild` passes the check again, and an operator who edits the module (`/guardian-define` under the same name) owns an operator paste from then on, checked as one. `/guardian delete` keeps a shipped tool deleted across boots (`/embra/state/guardian_declined`). The tool stays inert until the operator sets a Brave key with `/guardian key brave`.
+
 ---
 
 ## How the check works

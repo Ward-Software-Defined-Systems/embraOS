@@ -60,7 +60,9 @@ Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` 
 > returns *allow / refuse / escalate*, and fails closed. A **refuse** blocks both
 > paths: the soul outranks even an operator paste and is not waivable. A passing
 > proposal still needs an operator's `/guardian approve` — the intelligence never
-> approves its own draft. This is the first landing of *soul-as-enforced-runtime*: the
+> approves its own draft. One tool ships ready: the prompt-injection-hardened
+> `web_search`, installed at boot and inert until an operator sets a Brave key with
+> `/guardian key brave`. This is the first landing of *soul-as-enforced-runtime*: the
 > soul moving from text the model is asked to honor to a gate the OS enforces.
 > **[How the check works →](docs/REPLICANT-CHECK.md)** ·
 > [worked example](docs/GUARDIAN-KG-SCAN-EXAMPLE.md) ·
@@ -198,7 +200,7 @@ The full embraOS manual lives in [docs/](docs/).
 | **[Recommended Local Models](docs/RECOMMENDED-LOCAL-MODELS.md)** | Vetted models and server configuration for the Ollama / LM Studio backends |
 | **[Replicant Check](docs/REPLICANT-CHECK.md)** | The soul-spec gate every dynamic tool passes before it compiles — how it works, both authoring paths, and how to test it |
 | **[Guardian Tool Examples](docs/GUARDIAN-TOOL-EXAMPLES.md)** | Paste-ready dynamic-tool modules (embra-guardian-v1) |
-| **[Guardian Advanced Example](docs/GUARDIAN-ADVANCED-EXAMPLE.md)** | A worked end-to-end Guardian tool |
+| **[Guardian Advanced Example](docs/GUARDIAN-ADVANCED-EXAMPLE.md)** | The shipped flagship: a worked end-to-end Guardian tool |
 | **[Guardian KG-Scan Example](docs/GUARDIAN-KG-SCAN-EXAMPLE.md)** | `kg_scan`, the first intelligence-proposed tool — structural pattern scans over a `knowledge_dump` JSONL |
 
 ---

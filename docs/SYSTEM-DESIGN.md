@@ -23,7 +23,7 @@ The runtime services that implement those layers:
 | `embra-web` | 3345 | HTTPS web console (default UI); wraps embra-console in xterm.js over a PTY→WebSocket bridge. `/ws/activity` fans the brain's activity feed out to every browser for the top bar's activity strip. |
 | `embra-console` | — | Conversational TUI (serial; PTY-child of embra-web in default mode). |
 | `embrad` | PID 1 | Init, service supervisor, soul verification gate, 5-second reconciliation loop. |
-| `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for dynamic tools — both authoring paths (operator paste, intelligence proposal) gated by a soul-spec replicant check; intelligence proposals additionally operator-approved; capability-broker host imports. |
+| `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for dynamic tools — both authoring paths (operator paste, intelligence proposal) gated by a soul-spec replicant check; intelligence proposals additionally operator-approved; one tool (`web_search`) ships with the image and is installed at boot; capability-broker host imports. |
 
 ### Network exposure
 
