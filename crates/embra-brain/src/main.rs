@@ -231,6 +231,12 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // The tools the image ships (`embra_guardian::shipped`): installed,
+    // updated or adopted in the background, one build at a time. After
+    // the set_var calls above, which assume a single thread; never blocks
+    // boot.
+    guardian::ensure_shipped_tools(db.clone());
+
     // Start proactive engine
     let proactive_rx = proactive::start_proactive_engine(&db, &config_tz, &api_key);
 

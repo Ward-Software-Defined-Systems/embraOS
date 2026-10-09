@@ -54,6 +54,18 @@ pub struct ReplicantRecord {
     pub judged_at: String,
 }
 
+/// Set on a tool the image ships and the brain installed at boot
+/// (`crate::shipped`). `sha256` is the shipped source the record was
+/// installed or last updated from; a `source_sha256` that differs from it
+/// is an operator edit, which the brain then leaves alone. Additive and
+/// optional like `replicant`; does NOT bump `TOOL_DOC_FORMAT`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShippedRecord {
+    pub sha256: String,
+    /// RFC3339 timestamp of the install or the last update.
+    pub installed_at: String,
+}
+
 fn default_format() -> u32 {
     TOOL_DOC_FORMAT
 }
@@ -79,6 +91,10 @@ pub struct ToolDoc {
     /// `TOOL_DOC_FORMAT`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replicant: Option<ReplicantRecord>,
+    /// Present on a shipped tool; absent on an operator define and on a
+    /// proposal. See [`ShippedRecord`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shipped: Option<ShippedRecord>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -106,6 +122,7 @@ impl ToolDoc {
             source_sha256: sha256_hex(source),
             build_log_tail: String::new(),
             replicant: None,
+            shipped: None,
             created_at: now_rfc3339.to_string(),
             updated_at: now_rfc3339.to_string(),
         }

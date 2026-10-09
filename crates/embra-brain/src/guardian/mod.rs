@@ -9,7 +9,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use embra_guardian::build::{self, BuildEnv};
-use embra_guardian::store::{ReplicantRecord, ToolDoc, ToolStatus};
+use embra_guardian::shipped::ShippedTool;
+use embra_guardian::store::{ReplicantRecord, ShippedRecord, ToolDoc, ToolStatus};
 use embra_guardian::ValidatedModule;
 use embra_tools_core::DispatchError;
 use serde_json::Value;
@@ -31,6 +32,10 @@ const COLLECTION: &str = "guardian.tools";
 /// manifest, or the returned envelope — it only ever lives here + in the
 /// host-side `BraveSearch` provider.
 const BRAVE_KEY_PATH: &str = "/embra/state/api_key_brave";
+/// Shipped tools the operator deleted, one name per line. STATE, so the
+/// decline survives an image rebuild. `ensure_shipped_tools` skips a name
+/// listed here; a record under that name always wins over the list.
+const DECLINED_PATH: &str = "/embra/state/guardian_declined";
 
 fn base() -> &'static Path {
     Path::new(GUARDIAN_BASE)
@@ -979,7 +984,234 @@ async fn delete(db: &Arc<WardsonDbClient>, name: &str) -> String {
     let _ = db.delete(COLLECTION, name).await;
     let _ = std::fs::remove_dir_all(base().join("tools").join(name));
     let _ = std::fs::remove_file(artifact_path(name));
-    format!("guardian: '{name}' deleted (manifest, overlay, project, artifact).")
+    if !is_shipped_name(name) {
+        return format!("guardian: '{name}' deleted (manifest, overlay, project, artifact).");
+    }
+    // A shipped tool would be installed again at the next boot: the
+    // decline keeps it deleted.
+    match record_decline_at(Path::new(DECLINED_PATH), name) {
+        Ok(()) => format!(
+            "guardian: '{name}' deleted (manifest, overlay, project, artifact). It is a tool \
+             the image ships, so it stays deleted at boot, recorded in {DECLINED_PATH}. To \
+             have it back: /guardian-define with its source, or remove its line there."
+        ),
+        Err(e) => format!(
+            "guardian: '{name}' deleted (manifest, overlay, project, artifact), but the \
+             decline could not be recorded in {DECLINED_PATH} ({e}): the image ships this \
+             tool and the next boot installs it again."
+        ),
+    }
+}
+
+// ── shipped tools ──
+//
+// The image carries a few tools (`embra_guardian::shipped`); the brain
+// installs them at boot. A shipped tool is project-reviewed: it passes
+// the validator and skips the replicant check (there is no config and no
+// provider at boot); a rebuild or an operator edit goes through the gates
+// like any tool.
+
+/// What the boot step does about one shipped tool, from the record it
+/// finds. Pure, like `rebuild_decision`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShippedDecision {
+    /// No record and no decline: install it.
+    Install,
+    /// The operator deleted it (`/guardian delete`): leave it absent.
+    Declined,
+    /// A shipped record, unedited, at the current source, built and loaded.
+    UpToDate,
+    /// A shipped record the operator never edited that needs a build: the
+    /// shipped source moved, the last build failed, or the artifact is
+    /// not loaded (a toolchain bump).
+    Update,
+    /// An operator-defined record whose source is a version the project
+    /// shipped: adopt it, then treat it as shipped.
+    Adopt,
+    /// A shipped record the operator edited: theirs now.
+    LeaveEdited,
+    /// An operator-defined record with a source of its own.
+    LeaveOperator,
+}
+
+fn shipped_decision(
+    existing: Option<&ToolDoc>,
+    current_sha: &str,
+    known: &[&str],
+    declined: bool,
+    loaded: bool,
+) -> ShippedDecision {
+    let Some(doc) = existing else {
+        return if declined {
+            ShippedDecision::Declined
+        } else {
+            ShippedDecision::Install
+        };
+    };
+    match &doc.shipped {
+        Some(rec) if doc.source_sha256 != rec.sha256 => ShippedDecision::LeaveEdited,
+        Some(rec) => {
+            if rec.sha256 != current_sha || doc.status != ToolStatus::Ready || !loaded {
+                ShippedDecision::Update
+            } else {
+                ShippedDecision::UpToDate
+            }
+        }
+        None if known.contains(&doc.source_sha256.as_str()) => ShippedDecision::Adopt,
+        None => ShippedDecision::LeaveOperator,
+    }
+}
+
+fn is_shipped_name(name: &str) -> bool {
+    embra_guardian::shipped::SHIPPED.iter().any(|t| t.name == name)
+}
+
+/// The names in the decline file; an unreadable or missing file is empty.
+fn declined_names_at(path: &Path) -> Vec<String> {
+    std::fs::read_to_string(path)
+        .map(|s| {
+            s.lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Add `name` to the decline file, once.
+fn record_decline_at(path: &Path, name: &str) -> Result<(), String> {
+    let mut names = declined_names_at(path);
+    if !names.iter().any(|n| n == name) {
+        names.push(name.to_string());
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut body = names.join("\n");
+    body.push('\n');
+    std::fs::write(path, body).map_err(|e| e.to_string())
+}
+
+fn short_sha(sha: &str) -> &str {
+    &sha[..sha.len().min(12)]
+}
+
+/// Install the tools the image ships, in the background: never blocks
+/// boot. Spawned from main.rs after the single-threaded setup (the cargo
+/// build is a child process). Holds `REBUILD_BATCH` so it never runs
+/// beside an operator rebuild, and builds one tool at a time.
+pub fn ensure_shipped_tools(db: WardsonDbClient) {
+    if REBUILD_BATCH
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        warn!("guardian: shipped tools not checked this boot: a rebuild batch is running");
+        return;
+    }
+    let db = Arc::new(db);
+    tokio::spawn(async move {
+        let _batch = BatchGuard;
+        let declined = declined_names_at(Path::new(DECLINED_PATH));
+        for tool in embra_guardian::shipped::SHIPPED {
+            ensure_shipped_tool(&db, tool, &declined).await;
+        }
+    });
+}
+
+async fn ensure_shipped_tool(db: &Arc<WardsonDbClient>, tool: &ShippedTool, declined: &[String]) {
+    let module = match embra_guardian::validate(tool.stored_source(), &reserved_names()) {
+        Ok(m) => m,
+        Err(e) => {
+            error!("guardian: shipped tool '{}' fails validation; not installed: {e}", tool.name);
+            return;
+        }
+    };
+    let current = tool.source_sha256();
+    let existing = load_doc(db, tool.name).await;
+    let decision = shipped_decision(
+        existing.as_ref(),
+        &current,
+        embra_guardian::shipped::known_sha256s(tool.name),
+        declined.iter().any(|n| n == tool.name),
+        is_loaded(tool.name),
+    );
+    let now = chrono::Utc::now().to_rfc3339();
+    match decision {
+        ShippedDecision::UpToDate => {}
+        ShippedDecision::Declined => info!(
+            "guardian: shipped tool '{}' was deleted by the operator ({DECLINED_PATH}); not installed",
+            tool.name
+        ),
+        ShippedDecision::LeaveEdited => info!(
+            "guardian: '{}' was edited by the operator; the shipped version {} is not installed over it",
+            tool.name,
+            short_sha(&current)
+        ),
+        ShippedDecision::LeaveOperator => info!(
+            "guardian: '{}' is an operator-defined tool; the shipped one is not installed",
+            tool.name
+        ),
+        ShippedDecision::Install => {
+            let mut doc = ToolDoc::building(
+                &module.name,
+                &module.description,
+                module.input_schema.clone(),
+                &module.source,
+                module.caps.clone(),
+                &toolchain_version(),
+                &now,
+            );
+            doc.shipped = Some(ShippedRecord { sha256: current.clone(), installed_at: now });
+            if let Err(e) = upsert(db, &doc).await {
+                error!("guardian: could not record the shipped tool '{}': {e}", tool.name);
+                return;
+            }
+            info!("guardian: installing shipped tool '{}' ({})", tool.name, short_sha(&current));
+            build_and_register(db.clone(), module).await;
+        }
+        ShippedDecision::Adopt | ShippedDecision::Update => {
+            let Some(mut doc) = existing else { return };
+            if decision == ShippedDecision::Adopt {
+                info!(
+                    "guardian: '{}' is a copy of a shipped version ({}); adopted",
+                    tool.name,
+                    short_sha(&doc.source_sha256)
+                );
+                doc.shipped = Some(ShippedRecord {
+                    sha256: doc.source_sha256.clone(),
+                    installed_at: now.clone(),
+                });
+            }
+            let needs_build = doc.source_sha256 != current
+                || doc.status != ToolStatus::Ready
+                || !is_loaded(tool.name);
+            if !needs_build {
+                if let Err(e) = upsert(db, &doc).await {
+                    error!("guardian: could not record '{}' as shipped: {e}", tool.name);
+                }
+                return;
+            }
+            info!(
+                "guardian: updating shipped tool '{}' to {} and building it",
+                tool.name,
+                short_sha(&current)
+            );
+            doc.description = module.description.clone();
+            doc.input_schema = module.input_schema.clone();
+            doc.source = module.source.clone();
+            doc.caps = module.caps.clone();
+            doc.source_sha256 = current.clone();
+            doc.status = ToolStatus::Building;
+            doc.build_log_tail = String::new();
+            doc.updated_at = now.clone();
+            doc.shipped = Some(ShippedRecord { sha256: current, installed_at: now });
+            if let Err(e) = upsert(db, &doc).await {
+                error!("guardian: could not update the shipped tool '{}': {e}", tool.name);
+                return;
+            }
+            build_and_register(db.clone(), module).await;
+        }
+    }
 }
 
 /// `/guardian status <name>`: the record, whether the tool can run, the
@@ -992,6 +1224,15 @@ fn status_human(d: &ToolDoc, avail: &Availability) -> String {
     match avail.note(&d.name) {
         Some(note) => out.push_str(&format!("callable: no — {note}\n")),
         None => out.push_str("callable: yes\n"),
+    }
+    match &d.shipped {
+        Some(rec) if rec.sha256 == d.source_sha256 => out.push_str(&format!(
+            "shipped: yes, version {} (installed {})\n",
+            short_sha(&rec.sha256),
+            rec.installed_at
+        )),
+        Some(_) => out.push_str("shipped: yes, edited by the operator (not updated at boot)\n"),
+        None => {}
     }
     if let Some(r) = &d.replicant {
         out.push_str(&format!(
@@ -1018,7 +1259,12 @@ fn list_row(d: &ToolDoc, avail: &Availability) -> String {
             format!("{:?}, NOT LOADED: artifact missing", d.status)
         }
     };
-    format!("  {} [{state}] caps={:?} — {}\n", d.name, d.caps, d.description)
+    let origin = match &d.shipped {
+        Some(rec) if rec.sha256 == d.source_sha256 => " (shipped)",
+        Some(_) => " (shipped, edited)",
+        None => "",
+    };
+    format!("  {}{origin} [{state}] caps={:?} — {}\n", d.name, d.caps, d.description)
 }
 
 async fn list_human(db: &WardsonDbClient) -> String {
@@ -1140,6 +1386,7 @@ pub async fn list_for_model(db: &WardsonDbClient) -> Result<String, String> {
                 "capabilities": d.caps,
                 "status": format!("{:?}", d.status).to_lowercase(),
                 "input_schema": d.input_schema,
+                "shipped": d.shipped.is_some(),
             });
             stamp_availability(&mut v, d, &availability_now(d));
             v
@@ -1275,6 +1522,100 @@ pub async fn guardian_call(
         other => Err(DispatchError::Handler(format!(
             "guardian: action must be \"invoke\" or \"status\", got \"{other}\""
         ))),
+    }
+}
+
+#[cfg(test)]
+mod shipped_tests {
+    use super::*;
+
+    fn shipped_doc(source_sha: &str, shipped_sha: &str, status: ToolStatus) -> ToolDoc {
+        let mut d = ToolDoc::building("web_search", "d", serde_json::json!({}), "src", vec![], "1.98.1", "t");
+        d.source_sha256 = source_sha.to_string();
+        d.status = status;
+        d.shipped = Some(ShippedRecord { sha256: shipped_sha.to_string(), installed_at: "t".into() });
+        d
+    }
+
+    fn operator_doc(source_sha: &str) -> ToolDoc {
+        let mut d = ToolDoc::building("web_search", "d", serde_json::json!({}), "src", vec![], "1.98.1", "t");
+        d.source_sha256 = source_sha.to_string();
+        d.status = ToolStatus::Ready;
+        d
+    }
+
+    const KNOWN: &[&str] = &["old", "cur"];
+
+    #[test]
+    fn a_missing_shipped_tool_is_installed_unless_declined() {
+        assert_eq!(shipped_decision(None, "cur", KNOWN, false, false), ShippedDecision::Install);
+        assert_eq!(shipped_decision(None, "cur", KNOWN, true, false), ShippedDecision::Declined);
+    }
+
+    #[test]
+    fn an_up_to_date_shipped_tool_needs_nothing() {
+        let d = shipped_doc("cur", "cur", ToolStatus::Ready);
+        assert_eq!(shipped_decision(Some(&d), "cur", KNOWN, false, true), ShippedDecision::UpToDate);
+        // A decline on file changes nothing once a record exists.
+        assert_eq!(shipped_decision(Some(&d), "cur", KNOWN, true, true), ShippedDecision::UpToDate);
+    }
+
+    #[test]
+    fn an_unedited_shipped_tool_is_updated_when_it_needs_a_build() {
+        // The shipped source moved.
+        let d = shipped_doc("old", "old", ToolStatus::Ready);
+        assert_eq!(shipped_decision(Some(&d), "cur", KNOWN, false, true), ShippedDecision::Update);
+        // The last build failed.
+        let d = shipped_doc("cur", "cur", ToolStatus::Failed);
+        assert_eq!(shipped_decision(Some(&d), "cur", KNOWN, false, false), ShippedDecision::Update);
+        // Built, but not loaded (a toolchain bump).
+        let d = shipped_doc("cur", "cur", ToolStatus::Ready);
+        assert_eq!(shipped_decision(Some(&d), "cur", KNOWN, false, false), ShippedDecision::Update);
+    }
+
+    #[test]
+    fn an_edited_shipped_tool_is_left_alone() {
+        let d = shipped_doc("mine", "old", ToolStatus::Ready);
+        assert_eq!(shipped_decision(Some(&d), "cur", KNOWN, false, true), ShippedDecision::LeaveEdited);
+        assert_eq!(shipped_decision(Some(&d), "cur", KNOWN, false, false), ShippedDecision::LeaveEdited);
+    }
+
+    #[test]
+    fn an_operator_copy_of_a_shipped_version_is_adopted() {
+        assert_eq!(shipped_decision(Some(&operator_doc("old")), "cur", KNOWN, false, true), ShippedDecision::Adopt);
+        assert_eq!(shipped_decision(Some(&operator_doc("cur")), "cur", KNOWN, false, true), ShippedDecision::Adopt);
+    }
+
+    #[test]
+    fn an_unrelated_tool_of_the_same_name_is_left_alone() {
+        assert_eq!(shipped_decision(Some(&operator_doc("theirs")), "cur", KNOWN, false, true), ShippedDecision::LeaveOperator);
+    }
+
+    #[test]
+    fn a_shipped_delete_records_the_decline_once() {
+        let dir = std::env::temp_dir().join(format!("embra-guardian-declined-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("state").join("guardian_declined");
+        assert!(declined_names_at(&path).is_empty(), "missing file reads as empty");
+        record_decline_at(&path, "web_search").unwrap();
+        record_decline_at(&path, "web_search").unwrap();
+        record_decline_at(&path, "other").unwrap();
+        assert_eq!(declined_names_at(&path), vec!["web_search".to_string(), "other".to_string()]);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "web_search\nother\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_list_and_status_name_a_shipped_tool() {
+        let d = shipped_doc("cur", "cur", ToolStatus::Ready);
+        assert!(list_row(&d, &Availability::Callable).contains("web_search (shipped) [Ready]"));
+        assert!(status_human(&d, &Availability::Callable).contains("shipped: yes, version cur"));
+        let e = shipped_doc("mine", "cur", ToolStatus::Ready);
+        assert!(list_row(&e, &Availability::Callable).contains("(shipped, edited)"));
+        assert!(status_human(&e, &Availability::Callable).contains("edited by the operator"));
+        let o = operator_doc("x");
+        assert!(!list_row(&o, &Availability::Callable).contains("shipped"));
+        assert!(is_shipped_name("web_search") && !is_shipped_name("kg_scan"));
     }
 }
 
