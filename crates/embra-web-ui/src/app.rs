@@ -37,7 +37,8 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/embeddings", "embeddings"), ("/embeddings backfill", "embed backfill"),
     ]),
     ("Media", &[
-        ("/attach", "attach file"), ("/download", "download file"), ("/media", "media pane"),
+        ("/attach", "attach file"), ("/attach list", "staged attachments"),
+        ("/attach clear", "drop staged"), ("/download", "download file"), ("/media", "media pane"),
         ("/image-provider", "image gen"), ("/image-provider model", "image model"),
         ("/image-provider key", "image key"),
     ]),
