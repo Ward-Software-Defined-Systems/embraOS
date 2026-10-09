@@ -52,6 +52,7 @@ impl HttpTransport for DemoTransport {
             status: 200,
             content_type: "application/json".into(),
             body: b"{\"mock\":true}".to_vec(),
+            location: None,
         })
     }
 }

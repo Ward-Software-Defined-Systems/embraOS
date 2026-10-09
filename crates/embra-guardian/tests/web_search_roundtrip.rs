@@ -56,6 +56,7 @@ impl HttpTransport for EmptyPage {
             status: 200,
             content_type: "text/html".into(),
             body: b"<html><head><script>var x = 1;</script></head></html>".to_vec(),
+            location: None,
         })
     }
 }

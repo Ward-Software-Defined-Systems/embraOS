@@ -20,6 +20,9 @@ pub struct HttpResponse {
     pub status: u16,
     pub content_type: String,
     pub body: Vec<u8>,
+    /// The `Location` header of a redirect, as sent; the guard resolves
+    /// and checks it before following. `None` on every other response.
+    pub location: Option<String>,
 }
 
 /// Raw transport. Implementations perform the request and nothing else —
@@ -110,42 +113,38 @@ fn is_blocked_v4(v: &Ipv4Addr) -> bool {
         || (o[0] == 100 && (64..=127).contains(&o[1])) // CGNAT 100.64.0.0/10
 }
 
-/// The guard. Returns the JSON string handed back to the guest (always
-/// well-formed JSON — success or a structured error; never panics).
-pub fn guarded_http_get(caps: &Capabilities, url: &str) -> String {
-    let Some(http) = caps.http.as_ref() else {
-        return err_json("capability 'http_get' not granted to this tool");
-    };
+/// Redirects the guard follows on its own, each hop checked like the
+/// first. Brave indexes stale URLs routinely (www/non-www, a dropped
+/// `.html`, a moved path); a 301 used to come back as an empty page.
+pub const MAX_REDIRECTS: usize = 3;
 
-    let parsed = match url::Url::parse(url) {
-        Ok(u) => u,
-        Err(e) => return err_json(&format!("invalid url: {e}")),
-    };
+/// The policy on one URL: https only, no userinfo, a host, the allowlist,
+/// and no private or loopback address, as a literal or as DNS resolves it.
+fn check_url(caps: &Capabilities, url: &str) -> Result<url::Url, String> {
+    let parsed = url::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
     if parsed.scheme() != "https" {
-        return err_json("only https:// destinations are allowed");
+        return Err("only https:// destinations are allowed".to_string());
     }
     if !parsed.username().is_empty() || parsed.password().is_some() {
-        return err_json("url userinfo (user:pass@) is not allowed");
+        return Err("url userinfo (user:pass@) is not allowed".to_string());
     }
     let Some(host) = parsed.host_str().map(str::to_string) else {
-        return err_json("url has no host");
+        return Err("url has no host".to_string());
     };
-
     // Domain allowlist (if configured).
     if let Some(allow) = &caps.http_policy.allow_domains {
         let ok = allow
             .iter()
             .any(|d| host == *d || host.ends_with(&format!(".{d}")));
         if !ok {
-            return err_json("destination domain is not in the allowlist");
+            return Err("destination domain is not in the allowlist".to_string());
         }
     }
-
     // SSRF: refuse a literal private IP, and refuse if DNS resolves to one.
     if let Ok(ip) = host.parse::<IpAddr>()
         && is_blocked_ip(&ip)
     {
-        return err_json("destination is a private/loopback IP (SSRF blocked)");
+        return Err("destination is a private/loopback IP (SSRF blocked)".to_string());
     }
     let port = parsed.port_or_known_default().unwrap_or(443);
     match (host.as_str(), port).to_socket_addrs() {
@@ -154,44 +153,95 @@ pub fn guarded_http_get(caps: &Capabilities, url: &str) -> String {
             for a in addrs {
                 resolved = true;
                 if is_blocked_ip(&a.ip()) {
-                    return err_json(
-                        "destination resolves to a private/loopback address (SSRF blocked)",
+                    return Err(
+                        "destination resolves to a private/loopback address (SSRF blocked)"
+                            .to_string(),
                     );
                 }
             }
             if !resolved {
-                return err_json("destination did not resolve");
+                return Err("destination did not resolve".to_string());
             }
         }
-        Err(e) => return err_json(&format!("dns resolution failed: {e}")),
+        Err(e) => return Err(format!("dns resolution failed: {e}")),
     }
+    Ok(parsed)
+}
 
-    match http.get(url, caps.http_policy.timeout, caps.http_policy.max_bytes) {
-        Ok(resp) => {
-            let ct = resp.content_type.to_ascii_lowercase();
-            let ct_ok = ct.is_empty()
-                || ct.starts_with("text/")
-                || ct.starts_with("application/json");
-            if !ct_ok {
-                return err_json(&format!(
-                    "response content-type '{}' is not allowed",
-                    resp.content_type
-                ));
+fn is_redirect(status: u16) -> bool {
+    matches!(status, 301 | 302 | 303 | 307 | 308)
+}
+
+/// The guard. Returns the JSON string handed back to the guest (always
+/// well-formed JSON — success or a structured error; never panics). A
+/// redirect is followed up to [`MAX_REDIRECTS`] times, every hop through
+/// `check_url` again, so a chain cannot land where a first request could
+/// not; `url` in the envelope is the URL that answered, `redirects` the
+/// hops taken, and a redirect past the limit is returned as it came, with
+/// its target under `redirect`.
+pub fn guarded_http_get(caps: &Capabilities, url: &str) -> String {
+    let Some(http) = caps.http.as_ref() else {
+        return err_json("capability 'http_get' not granted to this tool");
+    };
+    let mut current = url.to_string();
+    let mut hops = 0usize;
+    loop {
+        let parsed = match check_url(caps, &current) {
+            Ok(u) => u,
+            Err(e) => return err_json(&e),
+        };
+        let resp = match http.get(&current, caps.http_policy.timeout, caps.http_policy.max_bytes)
+        {
+            Ok(r) => r,
+            Err(e) => return err_json(&e),
+        };
+        if is_redirect(resp.status)
+            && let Some(loc) = resp.location.as_deref()
+        {
+            if hops < MAX_REDIRECTS {
+                current = match parsed.join(loc) {
+                    Ok(next) => next.to_string(),
+                    Err(e) => return err_json(&format!("invalid redirect target: {e}")),
+                };
+                hops += 1;
+                continue;
             }
-            let mut body = resp.body;
-            if body.len() > caps.http_policy.max_bytes {
-                body.truncate(caps.http_policy.max_bytes);
-            }
-            serde_json::json!({
+            return serde_json::json!({
                 "ok": true,
                 "status": resp.status,
-                "url": url,
+                "url": current,
+                "redirects": hops,
+                "redirect": loc,
                 "content_type": resp.content_type,
-                "body": String::from_utf8_lossy(&body),
+                "body": "",
             })
-            .to_string()
+            .to_string();
         }
-        Err(e) => err_json(&e),
+        let ct = resp.content_type.to_ascii_lowercase();
+        let ct_ok = ct.is_empty()
+            || ct.starts_with("text/")
+            || ct.starts_with("application/json");
+        if !ct_ok {
+            return err_json(&format!(
+                "response content-type '{}' is not allowed",
+                resp.content_type
+            ));
+        }
+        let mut body = resp.body;
+        if body.len() > caps.http_policy.max_bytes {
+            body.truncate(caps.http_policy.max_bytes);
+        }
+        let mut env = serde_json::json!({
+            "ok": true,
+            "status": resp.status,
+            "url": current,
+            "content_type": resp.content_type,
+            "body": String::from_utf8_lossy(&body),
+        });
+        if hops > 0 {
+            env["redirects"] = serde_json::json!(hops);
+        }
+        return env.to_string();
     }
 }
 
@@ -598,8 +648,9 @@ fn trim_infobox(v: &serde_json::Value) -> Option<serde_json::Value> {
 
 /// Default transport: `reqwest` blocking + rustls (the workspace already
 /// links this stack static-musl for the WardSONDB client). Redirects are
-/// **not** followed — an auto-followed 3xx is an SSRF bypass; a 3xx is
-/// surfaced to the guest verbatim instead.
+/// **not** followed here — an auto-followed 3xx is an SSRF bypass; the
+/// guard follows them itself, each hop checked (`MAX_REDIRECTS`), from the
+/// `location` this transport reports.
 pub struct ReqwestTransport {
     client: reqwest::blocking::Client,
 }
@@ -631,12 +682,17 @@ impl HttpTransport for ReqwestTransport {
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_string();
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         let full = resp.bytes().map_err(|e| e.to_string())?;
         let mut body = full.to_vec();
         if body.len() > max_bytes {
             body.truncate(max_bytes);
         }
-        Ok(HttpResponse { status, content_type, body })
+        Ok(HttpResponse { status, content_type, body, location })
     }
 }
 
@@ -654,6 +710,28 @@ impl HttpTransport for MockTransport {
             status: self.status,
             content_type: self.content_type.clone(),
             body: self.body.clone(),
+            location: None,
+        })
+    }
+}
+
+/// A transport that answers per URL: `(url, status, location, body)`.
+#[cfg(test)]
+pub(crate) struct RouteTransport(pub Vec<(&'static str, u16, Option<&'static str>, &'static str)>);
+
+#[cfg(test)]
+impl HttpTransport for RouteTransport {
+    fn get(&self, u: &str, _t: Duration, _m: usize) -> Result<HttpResponse, String> {
+        let (_, status, location, body) = self
+            .0
+            .iter()
+            .find(|(url, ..)| *url == u)
+            .ok_or_else(|| format!("no route for {u}"))?;
+        Ok(HttpResponse {
+            status: *status,
+            content_type: "text/html".into(),
+            body: body.as_bytes().to_vec(),
+            location: location.map(str::to_string),
         })
     }
 }
@@ -681,6 +759,68 @@ mod tests {
     fn rejects_when_capability_not_granted() {
         let v = parse_ok(&guarded_http_get(&Capabilities::none(), "https://1.1.1.1/"));
         assert_eq!(v["ok"], false);
+    }
+
+    fn routed(routes: Vec<(&'static str, u16, Option<&'static str>, &'static str)>) -> Capabilities {
+        Capabilities::with_http(Arc::new(RouteTransport(routes)), EgressPolicy::default())
+    }
+
+    #[test]
+    fn a_redirect_is_followed_through_the_guard_and_named() {
+        // Brave hands back a stale URL; the page moved. One hop, absolute.
+        let caps = routed(vec![
+            ("https://1.1.1.1/old.html", 301, Some("https://1.1.1.1/new"), ""),
+            ("https://1.1.1.1/new", 200, None, "<p>moved here</p>"),
+        ]);
+        let v = parse_ok(&guarded_http_get(&caps, "https://1.1.1.1/old.html"));
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["status"], 200);
+        assert_eq!(v["url"], "https://1.1.1.1/new");
+        assert_eq!(v["redirects"], 1);
+        assert_eq!(v["body"], "<p>moved here</p>");
+        // A relative Location resolves against the URL that answered.
+        let caps = routed(vec![
+            ("https://1.1.1.1/a/old", 302, Some("../b/new"), ""),
+            ("https://1.1.1.1/b/new", 200, None, "ok"),
+        ]);
+        let v = parse_ok(&guarded_http_get(&caps, "https://1.1.1.1/a/old"));
+        assert_eq!(v["url"], "https://1.1.1.1/b/new", "{v}");
+        // A direct answer carries no `redirects` key.
+        let caps = routed(vec![("https://1.1.1.1/", 200, None, "ok")]);
+        let v = parse_ok(&guarded_http_get(&caps, "https://1.1.1.1/"));
+        assert!(v.get("redirects").is_none(), "{v}");
+    }
+
+    #[test]
+    fn a_redirect_is_checked_like_a_first_request() {
+        // To a private address: SSRF blocked on the hop.
+        let caps = routed(vec![("https://1.1.1.1/", 302, Some("https://10.0.0.5/admin"), "")]);
+        let v = parse_ok(&guarded_http_get(&caps, "https://1.1.1.1/"));
+        assert_eq!(v["ok"], false);
+        assert!(v["error"].as_str().unwrap().contains("SSRF"), "{v}");
+        // To http: refused like a first request.
+        let caps = routed(vec![("https://1.1.1.1/", 301, Some("http://1.1.1.1/x"), "")]);
+        let v = parse_ok(&guarded_http_get(&caps, "https://1.1.1.1/"));
+        assert_eq!(v["ok"], false);
+        assert!(v["error"].as_str().unwrap().contains("https"), "{v}");
+    }
+
+    #[test]
+    fn redirects_stop_after_three_hops_and_name_the_target() {
+        let caps = routed(vec![
+            ("https://1.1.1.1/0", 301, Some("https://1.1.1.1/1"), ""),
+            ("https://1.1.1.1/1", 301, Some("https://1.1.1.1/2"), ""),
+            ("https://1.1.1.1/2", 301, Some("https://1.1.1.1/3"), ""),
+            ("https://1.1.1.1/3", 301, Some("https://1.1.1.1/4"), ""),
+            ("https://1.1.1.1/4", 200, None, "never reached"),
+        ]);
+        let v = parse_ok(&guarded_http_get(&caps, "https://1.1.1.1/0"));
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["status"], 301);
+        assert_eq!(v["url"], "https://1.1.1.1/3");
+        assert_eq!(v["redirects"], MAX_REDIRECTS);
+        assert_eq!(v["redirect"], "https://1.1.1.1/4");
+        assert_eq!(v["body"], "");
     }
 
     #[test]

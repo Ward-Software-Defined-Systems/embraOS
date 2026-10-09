@@ -30,6 +30,7 @@ impl HttpTransport for StubHttp {
             status: 200,
             content_type: "application/json".into(),
             body: b"{\"page\":\"ok\"}".to_vec(),
+            location: None,
         })
     }
 }
