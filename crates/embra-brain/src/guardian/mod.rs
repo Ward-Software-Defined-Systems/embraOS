@@ -1240,6 +1240,7 @@ pub async fn guardian_call(
             }
             let input_str = serde_json::to_string(&input).unwrap_or_else(|_| "{}".into());
             let module = compiled.module.clone();
+            let started = std::time::Instant::now();
             let res = tokio::task::spawn_blocking(move || {
                 rt.host().call(
                     &module,
@@ -1251,6 +1252,24 @@ pub async fn guardian_call(
             })
             .await
             .map_err(|e| DispatchError::Handler(format!("guardian: task join: {e}")))?;
+            // One line per invoke, names and numbers only: the tool, how
+            // long, whether the sandbox answered, how much. Never the input
+            // or the output (a sandbox error names no guest text either).
+            // The turn trace and the activity strip carry `guardian_call`;
+            // this is where the dynamic tool's own name reaches the log.
+            let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            match &res {
+                Ok(out) => info!(
+                    target: "guardian",
+                    tool = %tool, elapsed_ms, ok = true, bytes = out.len(),
+                    "guardian: invoke"
+                ),
+                Err(e) => info!(
+                    target: "guardian",
+                    tool = %tool, elapsed_ms, ok = false, error = %e,
+                    "guardian: invoke"
+                ),
+            }
             res.map_err(|ge| DispatchError::Handler(ge.into_handler_message(tool)))
         }
         other => Err(DispatchError::Handler(format!(
