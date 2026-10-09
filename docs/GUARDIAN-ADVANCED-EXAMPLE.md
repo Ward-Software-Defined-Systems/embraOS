@@ -167,10 +167,13 @@ struct Entry {
     injection: bool,
     text: Option<String>,
     // How the fetch of the page went: the HTTP status when it was read,
-    // the guard's reason when it was refused or failed. An empty `text`
-    // is then told from a blocked fetch.
+    // the guard's reason when it was refused or failed, the URL that
+    // answered when the guard followed a redirect, the target of one it
+    // did not follow. An empty `text` is then told from a blocked fetch.
     fetch_status: Option<u16>,
     fetch_error: Option<String>,
+    fetch_url: Option<String>,
+    fetch_redirect: Option<String>,
     // (field, cap) for every field that was length-capped (#7).
     truncated: Vec<(&'static str, usize)>,
 }
@@ -249,6 +252,13 @@ fn run(input: &str) -> String {
             continue;
         }
         e.fetch_status = fenv.get("status").as_f64().map(|st| st as u16);
+        match fenv.get("url").as_str() {
+            Some(answered) if answered != e.url => e.fetch_url = Some(sanitize(answered, 300).0),
+            _ => {}
+        }
+        if let Some(target) = fenv.get("redirect").as_str() {
+            e.fetch_redirect = Some(sanitize(target, 300).0);
+        }
         let body = fenv.get("body").as_str().unwrap_or("");
         let (clean, flagged, cut) = sanitize(&html_text::to_text(body), 4000);
         e.injection = e.injection || flagged;
@@ -268,8 +278,13 @@ fn run(input: &str) -> String {
 
 fn scrub_entry(query: &str, r: &json::Json) -> Entry {
     let url = r.get("url").as_str().unwrap_or("").to_string();
-    let (title, tf, tc) = sanitize(r.get("title").as_str().unwrap_or(""), 200);
-    let (desc, df, dc) = sanitize(r.get("description").as_str().unwrap_or(""), 1000);
+    let raw_title = r.get("title").as_str().unwrap_or("");
+    let raw_desc = r.get("description").as_str().unwrap_or("");
+    // Scored before the scrubber runs: a redacted directive still says
+    // what the page is about, and a security query must find it.
+    let score = overlap_score(query, raw_title, raw_desc);
+    let (title, tf, tc) = sanitize(raw_title, 200);
+    let (desc, df, dc) = sanitize(raw_desc, 1000);
     let mut truncated: Vec<(&'static str, usize)> = vec![];
     if tc {
         truncated.push(("title", 200));
@@ -283,14 +298,18 @@ fn scrub_entry(query: &str, r: &json::Json) -> Entry {
     };
     let mut injection = tf || df;
     let mut snippets: Vec<String> = vec![];
+    let mut snippets_cut = false;
     if let Some(arr) = r.get("snippets").as_array() {
         for s in arr {
-            let (clean, f, _) = sanitize(s.as_str().unwrap_or(""), 500);
+            let (clean, f, cut) = sanitize(s.as_str().unwrap_or(""), 500);
             injection = injection || f;
+            snippets_cut = snippets_cut || cut;
             snippets.push(clean);
         }
     }
-    let score = overlap_score(query, &title, &desc);
+    if snippets_cut {
+        truncated.push(("snippets", 500));
+    }
     Entry {
         title,
         url,
@@ -302,6 +321,8 @@ fn scrub_entry(query: &str, r: &json::Json) -> Entry {
         text: None,
         fetch_status: None,
         fetch_error: None,
+        fetch_url: None,
+        fetch_redirect: None,
         truncated,
     }
 }
@@ -325,6 +346,12 @@ fn entry_json(e: &Entry) -> json::Json {
     }
     if let Some(why) = &e.fetch_error {
         o.push(("fetch_error", json::s(why)));
+    }
+    if let Some(answered) = &e.fetch_url {
+        o.push(("fetch_url", json::s(answered)));
+    }
+    if let Some(target) = &e.fetch_redirect {
+        o.push(("fetch_redirect", json::s(target)));
     }
     if let Some(t) = &e.text {
         o.push(("text", json::s(t)));
@@ -541,14 +568,23 @@ fn overlap_score(query: &str, title: &str, description: &str) -> f64 {
 - **A fetched page says how the fetch went.** `fetch_status` (the HTTP
   status) rides a result whose page was read, `fetch_error` (the guard's
   reason) one whose fetch was refused or failed, so an empty `text` is
-  told from a blocked fetch.
+  told from a blocked fetch. The guard follows up to three redirects,
+  every hop checked like a first request (Brave indexes stale URLs
+  routinely); `fetch_url` names the URL that answered when it is not the
+  result's, and `fetch_redirect` the target of a redirect past that limit.
 - **No third-party crates** (v1 rule): `#![no_std]` + the vendored
   `json` and `html_text` helpers only. `html_text::to_text` is a
   **heuristic** HTML→text reducer (drops `<script>/<style>`, strips
   tags, decodes a small entity set), documented conservative — it does
   not make hostile markup safe; the scrubber still runs on its output.
 - **Structured truncation (#7):** a cut field reports `truncated:
-  {"<field>": <cap>}` instead of an opaque inline marker.
+  {"<field>": <cap>}` instead of an opaque inline marker — `title` 200,
+  `description` 1000, `text` 4000, and `snippets` 500 as one marker for
+  the array.
+- **Scored before the scrubber runs:** `score` counts the query's words
+  in the title and description as Brave sent them, so a redacted
+  directive still ranks for the security query that looks for it, and
+  `min_score` does not drop exactly those results.
 - **Recency / exclude / pagination / freshness:** `recency` accepts
   `day|week|month|year` (or a `YYYY-MM-DDtoYYYY-MM-DD` range); `exclude`
   domains become `-site:` operators; `offset` (0–9) pages results;

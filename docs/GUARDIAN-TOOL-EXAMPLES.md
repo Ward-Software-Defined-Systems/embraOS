@@ -81,10 +81,14 @@ builders: json::s(&str)  json::n(f64)  json::b(bool)  json::null()
 ```text
 host::http_get(url: &str) -> String   // returns a JSON envelope string:
 //   {"ok":true,"status":<u16>,"url":"…","content_type":"…","body":"…"}
+//     (+ "redirects":<n> when the guard followed a redirect; `url` is
+//      the URL that answered; a redirect past the limit comes back as
+//      it came, with "redirect":"<target>" and an empty body)
 //   {"ok":false,"error":"…"}
 // The Guardian enforces: https-only, RFC1918/loopback/CGNAT/IPv6 +
 // DNS-resolved-IP SSRF block, optional domain allowlist, 10s timeout,
-// 256 KiB body cap, text/* | application/json content-types. Audited.
+// 256 KiB body cap, text/* | application/json content-types, and
+// follows at most 3 redirects, every hop checked like the first. Audited.
 ```
 
 `host::web_search` — when `GUARDIAN_CAPS` includes `"web_search"`:

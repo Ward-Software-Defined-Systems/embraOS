@@ -44,7 +44,7 @@
       "id": "seed_guardian_http_get",
       "kind": "semantic",
       "category": "fact",
-      "content": "host::http_get(url) exists only when GUARDIAN_CAPS includes \"http_get\" and returns a JSON envelope STRING to parse: {\"ok\":true,\"status\":...,\"url\":...,\"content_type\":...,\"body\":...} or {\"ok\":false,\"error\":...}. The host enforces https-only, SSRF blocking (private/loopback ranges and DNS-resolved IPs), a 10s timeout, a 256 KiB body cap, and text/JSON content types. Referencing host:: without declaring the capability is a validation failure.",
+      "content": "host::http_get(url) exists only when GUARDIAN_CAPS includes \"http_get\" and returns a JSON envelope STRING to parse: {\"ok\":true,\"status\":...,\"url\":...,\"content_type\":...,\"body\":...} or {\"ok\":false,\"error\":...}. The host enforces https-only, SSRF blocking (private/loopback ranges and DNS-resolved IPs), a 10s timeout, a 256 KiB body cap, and text/JSON content types, and follows at most 3 redirects with every hop checked (the envelope's url is the URL that answered, redirects the hops taken; a redirect past the limit returns status 3xx with its target under redirect and an empty body). Referencing host:: without declaring the capability is a validation failure.",
       "tags": ["guardian", "capabilities", "network", "api"]
     },
     {

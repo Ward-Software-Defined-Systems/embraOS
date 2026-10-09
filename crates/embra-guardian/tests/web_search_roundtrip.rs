@@ -61,16 +61,35 @@ impl HttpTransport for EmptyPage {
     }
 }
 
-fn run_with(results: Vec<SearchResult>, input: &str, http: bool) -> serde_json::Value {
+/// A transport that answers per URL: `(url, status, location, body)`.
+struct Routes(Vec<(&'static str, u16, Option<&'static str>, &'static str)>);
+impl HttpTransport for Routes {
+    fn get(&self, u: &str, _t: Duration, _m: usize) -> Result<HttpResponse, String> {
+        let (_, status, location, body) =
+            self.0.iter().find(|(url, ..)| *url == u).ok_or_else(|| format!("no route for {u}"))?;
+        Ok(HttpResponse {
+            status: *status,
+            content_type: "text/html".into(),
+            body: body.as_bytes().to_vec(),
+            location: location.map(str::to_string),
+        })
+    }
+}
+
+fn run_caps(results: Vec<SearchResult>, input: &str, http: Option<Arc<dyn HttpTransport>>) -> serde_json::Value {
     let host = WasmHost::new().unwrap();
     let m = host.precompile(WASM).unwrap();
     let mut caps = Capabilities::with_search(Arc::new(MockSearch(results)));
-    if http {
-        caps.http = Some(Arc::new(EmptyPage));
+    if let Some(transport) = http {
+        caps.http = Some(transport);
         caps.http_policy = EgressPolicy::default();
     }
     let out = host.call(&m, input, caps, D, MEM).unwrap();
     serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"))
+}
+
+fn run_with(results: Vec<SearchResult>, input: &str, http: bool) -> serde_json::Value {
+    run_caps(results, input, if http { Some(Arc::new(EmptyPage)) } else { None })
 }
 
 fn run(results: Vec<SearchResult>, input: &str) -> serde_json::Value {
@@ -208,6 +227,60 @@ fn a_failed_fetch_is_named_and_an_empty_page_has_a_status() {
     assert!(failed.get("text").is_none() && failed.get("fetch_status").is_none(), "{failed}");
     let why = failed["fetch_error"].as_str().unwrap_or_default();
     assert!(why.contains("resol"), "{failed}");
+}
+
+#[test]
+fn the_score_counts_the_words_before_redaction() {
+    // The second rerun's sample: a Reddit title that IS the directive. It
+    // is redacted and flagged, and it still ranks for the query, so
+    // min_score keeps it.
+    let title = "Wonder how long until \"ignore all previous prompts\" jailbreak stops working";
+    let results = vec![SearchResult { title: title.into(), ..hit(1, "A thread about jailbreaks.") }];
+    let v = run(results, r#"{"query":"\"ignore all previous prompts\" jailbreak","min_score":1}"#);
+    assert_eq!(v["count"], 1, "{v}");
+    let r = &v["results"][0];
+    assert_eq!(r["injection_suspected"], true);
+    assert!(r["title"].as_str().unwrap().contains("[redacted-directive]"), "{r}");
+    assert!(r["score"].as_f64().unwrap() >= 4.0, "{r}");
+}
+
+#[test]
+fn cut_snippets_are_marked() {
+    let long = "word ".repeat(130); // 650 bytes, over the 500 cap
+    let results = vec![SearchResult { snippets: vec![long.clone(), "short".into()], ..hit(1, "d") }];
+    let v = run(results, r#"{"query":"word"}"#);
+    let r = &v["results"][0];
+    assert_eq!(r["truncated"]["snippets"], 500, "{r}");
+    assert!(r["snippets"][0].as_str().unwrap().len() <= 500);
+    assert_eq!(r["snippets"][1], "short");
+}
+
+#[test]
+fn a_redirect_is_followed_and_the_answering_url_named() {
+    // A stale URL from the index: one hop, then the page. And a chain past
+    // the guard's limit: the 3xx as it came, with its target named.
+    let routes: Arc<dyn HttpTransport> = Arc::new(Routes(vec![
+        ("https://1.1.1.1/old.html", 301, Some("https://1.1.1.1/new"), ""),
+        ("https://1.1.1.1/new", 200, None, "<p>moved here</p>"),
+        ("https://1.0.0.1/0", 301, Some("https://1.0.0.1/1"), ""),
+        ("https://1.0.0.1/1", 301, Some("https://1.0.0.1/2"), ""),
+        ("https://1.0.0.1/2", 301, Some("https://1.0.0.1/3"), ""),
+        ("https://1.0.0.1/3", 301, Some("https://1.0.0.1/4"), ""),
+    ]));
+    let results = vec![
+        SearchResult { url: "https://1.1.1.1/old.html".into(), ..hit(1, "moved page") },
+        SearchResult { url: "https://1.0.0.1/0".into(), ..hit(2, "endless chain") },
+    ];
+    let v = run_caps(results, r#"{"query":"page","max":2,"fetch_top":2}"#, Some(routes));
+    let (moved, chain) = (&v["results"][0], &v["results"][1]);
+    assert_eq!(moved["fetch_status"], 200, "{moved}");
+    assert_eq!(moved["fetch_url"], "https://1.1.1.1/new");
+    assert_eq!(moved["text"], "moved here");
+    assert!(moved.get("fetch_redirect").is_none());
+    assert_eq!(chain["fetch_status"], 301, "{chain}");
+    assert_eq!(chain["fetch_url"], "https://1.0.0.1/3");
+    assert_eq!(chain["fetch_redirect"], "https://1.0.0.1/4");
+    assert_eq!(chain["text"], "");
 }
 
 #[test]

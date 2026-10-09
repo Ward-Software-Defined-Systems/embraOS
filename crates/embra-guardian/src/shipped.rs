@@ -55,6 +55,8 @@ pub const KNOWN_WEB_SEARCH_SHA256: &[&str] = &[
     "e5ea961920f40dbeef580df521a8903f91cea1b64de2299db7962faa3f1a5958",
     // 2026-10-09 (Embra#17, the rerun): weak objects need a qualifier; fetch_status, fetch_error
     "dca702dfcdd5a789e960b1068bd583c22eac75670eb6ee650833202ce4f3bf8f",
+    // 2026-10-09 (Embra#17, the second rerun): score before redaction, the snippets marker, fetch_url and fetch_redirect
+    "37b205bde4f9f1f1c3754ce7fcf347cab4a799393a061dfd32fdaa4ae35a0131",
 ];
 
 /// The hashes of every version ever shipped under `name`, oldest first.
