@@ -22,6 +22,7 @@ pub mod error;
 pub mod host;
 pub mod overlay;
 pub mod scaffold;
+pub mod shipped;
 pub mod store;
 pub mod validator;
 
