@@ -465,7 +465,7 @@ The tool-side renderer groups discovered nodes by depth and prints the edge-type
 
 ## Tool reference
 
-Twelve `knowledge_*` tools registered via `#[embra_tool(...)]` macros — ten in `crates/embra-brain/src/knowledge/tools.rs`, plus `knowledge_audit` (`knowledge/audit.rs`) and `knowledge_merge` (`knowledge/merge.rs`), added 2026-07-30. The full registration is verified by `knowledge_tools_register`. The intelligence chooses which to invoke as conversation requires; the args below are what the intelligence fills in, not what an operator types. For the broader tool catalog the intelligence draws from (all 115 tools), see [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — this section covers KG-specific contract details.
+Twelve `knowledge_*` tools registered via `#[embra_tool(...)]` macros — ten in `crates/embra-brain/src/knowledge/tools.rs`, plus `knowledge_audit` (`knowledge/audit.rs`) and `knowledge_merge` (`knowledge/merge.rs`), added 2026-07-30. The full registration is verified by `knowledge_tools_register`. The intelligence chooses which to invoke as conversation requires; the args below are what the intelligence fills in, not what an operator types. For the broader tool catalog the intelligence draws from (all 117 tools), see [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — this section covers KG-specific contract details.
 
 ### Read tools
 
