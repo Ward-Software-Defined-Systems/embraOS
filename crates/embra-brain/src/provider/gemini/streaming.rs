@@ -34,6 +34,10 @@
 //! - The chunk carrying `finishReason` (or `usageMetadata`) finalizes
 //!   the turn. We assemble neutral-IR `Vec<Block>` and emit
 //!   `StreamEvent::Complete(AssistantTurn)`.
+//! - A frame `{"error": …}` is the API's error, not a chunk: the call
+//!   fails with its message (`sse::in_stream_error`) and no `Complete`
+//!   follows. The OpenAI-compat parser has the same rule; the Anthropic
+//!   one reads its `error` event.
 //! - `STOP` with ≥1 `Block::ToolCall` → `TurnOutcome::ToolUse`;
 //!   `STOP` with no tool calls → `EndTurn`. Per Q4, Gemini does not
 //!   emit a dedicated `TOOL_USE` finishReason on Gemini 3.1 Pro —
@@ -44,7 +48,7 @@ use futures_util::{Stream, StreamExt};
 use tokio::sync::mpsc;
 
 use crate::provider::ir::{AssistantTurn, Block, EarlyStopReason, TurnOutcome};
-use crate::provider::sse::LineBuffer;
+use crate::provider::sse::{LineBuffer, in_stream_error};
 use crate::provider::StreamEvent;
 
 use super::wire::{GeminiPart, GeminiStreamChunk};
@@ -95,7 +99,30 @@ where
                 state.emit_complete(&tx).await;
                 return Ok(());
             }
-            let chunk_obj = match serde_json::from_str::<GeminiStreamChunk>(data) {
+            let value = match serde_json::from_str::<serde_json::Value>(data) {
+                Ok(value) => value,
+                Err(e) => {
+                    // Skipped, and said so: a frame that is not JSON
+                    // carries nothing the parser can read.
+                    tracing::warn!(
+                        target: "gemini::streaming",
+                        error = %e,
+                        data = %crate::tools::sessions::truncate_str(data, 512),
+                        "could not parse SSE chunk; skipping"
+                    );
+                    continue;
+                }
+            };
+            if let Some(message) = in_stream_error(&value) {
+                // The API's error inside the stream, the same shape as
+                // its error bodies. It used to be skipped like junk; the
+                // call fails with the message, the driver turns it into
+                // the Error event, and no Complete follows.
+                return Err(anyhow::anyhow!(
+                    "the model server answered with an error: {message}"
+                ));
+            }
+            let chunk_obj = match serde_json::from_value::<GeminiStreamChunk>(value) {
                 Ok(chunk) => chunk,
                 Err(e) => {
                     // Skipped, and said so: a chunk that does not fit the
@@ -939,6 +966,27 @@ mod tests {
         // What arrived before it was delivered; nothing is made up after
         // it. The caller turns the error into the Error event.
         assert!(matches!(rx.recv().await, Some(StreamEvent::TextDelta(t)) if t == "one"));
+        assert!(rx.recv().await.is_none());
+    }
+
+    /// The same rule as the OpenAI-compat parser: an error frame is the
+    /// API's answer, not junk to skip. Its shape is the API's error body.
+    #[tokio::test]
+    async fn an_in_stream_error_frame_fails_the_call() {
+        let body = sse_body(&[
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"one"}]},"index":0}]}"#,
+            r#"{"error":{"code":400,"message":"The input token count exceeds the maximum number of tokens allowed","status":"INVALID_ARGUMENT"}}"#,
+        ]);
+        let stream = futures_util::stream::iter(vec![Ok::<_, std::convert::Infallible>(body)]);
+        let (tx, mut rx) = mpsc::channel(8);
+        let err = pump(stream, tx, false).await.expect_err("the error frame fails the call");
+        let text = err.to_string();
+        assert!(
+            text.starts_with("the model server answered with an error: The input token count"),
+            "{text}"
+        );
+        assert!(matches!(rx.recv().await, Some(StreamEvent::TextDelta(t)) if t == "one"));
+        // Nothing after the frame, and no Complete.
         assert!(rx.recv().await.is_none());
     }
 }
