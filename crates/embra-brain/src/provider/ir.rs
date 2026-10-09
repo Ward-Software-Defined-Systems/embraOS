@@ -168,6 +168,11 @@ pub enum EarlyStopReason {
     Recitation,
     /// Gemini `MALFORMED_FUNCTION_CALL`.
     Malformed,
+    /// OpenAI-compat: the stream ended with neither a finish reason nor
+    /// `[DONE]`, so the server closed mid-reply. `[DONE]` without a
+    /// finish reason stays a clean `EndTurn`. The reply is incomplete and
+    /// nothing was declined; the partial text is persisted unmarked.
+    StreamEnded,
     /// Operator-requested interrupt (`/stop` → the StopTurn RPC). Never
     /// produced by a provider wire mapper — the loop driver synthesizes it
     /// when the stop generation advances mid-turn.

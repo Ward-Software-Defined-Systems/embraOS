@@ -44,7 +44,9 @@
 //!   - `"tool_calls"` → `TurnOutcome::ToolUse`
 //!   - `"length"` → `TurnOutcome::MaxTokens`
 //!   - `"content_filter"` → `TurnOutcome::EarlyStop(Other)`
-//!   - missing → `TurnOutcome::EndTurn` (defensive; logs a warn)
+//!   - missing, after `[DONE]` → `TurnOutcome::EndTurn` (defensive; logs a warn)
+//!   - missing, the body just ended → `TurnOutcome::EarlyStop(StreamEnded)`:
+//!     the server closed mid-reply (logs a warn)
 //! - A frame `{"error": …}` is the server's refusal, not a chunk: the call
 //!   fails with its message (`sse::in_stream_error`) and no `Complete`
 //!   follows. LM Studio answers a prompt over its context length this way,
@@ -144,6 +146,7 @@ async fn consume_sse_lines(
         };
         let data = data.trim_start();
         if data == "[DONE]" {
+            state.saw_done = true;
             state.emit_complete(tx).await;
             return Ok(());
         }
@@ -205,6 +208,10 @@ pub(super) struct ParserState {
     /// `reqwest::Response` and severs the connection — load-bearing for
     /// the operator /stop.
     pub(super) receiver_gone: bool,
+    /// Set when `[DONE]` was read: the server ended the stream on
+    /// purpose. Without it, a body that just ends with no finish reason
+    /// is a server that closed mid-reply (`StreamEnded`).
+    pub(super) saw_done: bool,
 }
 
 #[derive(Default, Debug)]
@@ -225,6 +232,7 @@ impl ParserState {
             completed: false,
             include_reasoning,
             receiver_gone: false,
+            saw_done: false,
         }
     }
 
@@ -343,7 +351,7 @@ impl ParserState {
             });
         }
 
-        let outcome = map_finish_reason(self.finish_reason.as_deref(), &content);
+        let outcome = map_finish_reason(self.finish_reason.as_deref(), &content, self.saw_done);
         self.send(
             tx,
             StreamEvent::Complete(AssistantTurn {
@@ -356,7 +364,10 @@ impl ParserState {
     }
 }
 
-fn map_finish_reason(reason: Option<&str>, content: &[Block]) -> TurnOutcome {
+/// `saw_done` tells a stream the server ended (`[DONE]`) from a body that
+/// just stopped: the first is a clean end without a finish reason, the
+/// second a server that closed mid-reply.
+fn map_finish_reason(reason: Option<&str>, content: &[Block], saw_done: bool) -> TurnOutcome {
     let has_tool_calls = content.iter().any(|b| matches!(b, Block::ToolCall { .. }));
     match reason {
         Some("tool_calls") => TurnOutcome::ToolUse,
@@ -378,12 +389,22 @@ fn map_finish_reason(reason: Option<&str>, content: &[Block]) -> TurnOutcome {
             );
             TurnOutcome::EndTurn
         }
-        None => {
+        None if saw_done => {
             tracing::warn!(
                 target: "provider::openai_compat::streaming",
-                "stream ended with no finish_reason; treating as EndTurn"
+                "stream ended with no finish_reason after [DONE]; treating as EndTurn"
             );
             TurnOutcome::EndTurn
+        }
+        None => {
+            // No finish reason and no [DONE]: the server closed the
+            // connection mid-reply. Not a clean end; the loop driver
+            // shows a warning and keeps the partial text.
+            tracing::warn!(
+                target: "provider::openai_compat::streaming",
+                "stream ended with neither a finish_reason nor [DONE]; the server closed mid-reply"
+            );
+            TurnOutcome::EarlyStop(EarlyStopReason::StreamEnded)
         }
     }
 }
@@ -1241,7 +1262,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_bare_end_of_stream_still_completes_once() {
-        // No finish_reason and no [DONE]: the body just ends.
+        // No finish_reason and no [DONE]: the body just ends. One
+        // Complete, with what arrived, and the outcome says the server
+        // closed mid-reply (a clean end needs a finish reason or [DONE]).
         let sse = data_frame(assistant_chunk_with_text("hi", None));
         let events = drive_fake(&sse, "test-model").await;
         let completes = events
@@ -1249,7 +1272,9 @@ mod tests {
             .filter(|e| matches!(e, StreamEvent::Complete(_)))
             .count();
         assert_eq!(completes, 1);
-        assert_eq!(complete_event(&events).outcome, TurnOutcome::EndTurn);
+        let turn = complete_event(&events);
+        assert_eq!(turn.outcome, TurnOutcome::EarlyStop(EarlyStopReason::StreamEnded));
+        assert_eq!(turn.content.len(), 1);
 
         // A finish_reason, then [DONE], then more: one Complete, and
         // nothing after the end is read.

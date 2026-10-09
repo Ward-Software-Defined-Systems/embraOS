@@ -7128,6 +7128,15 @@ fn terminal_outcome_notice(
              window — the reply above may be cut off. Continue in a new session (/new <name>)."
                 .to_string(),
         )),
+        // The server closed the stream mid-reply (OpenAI-compat: neither a
+        // finish reason nor [DONE]). Like MaxTokens: incomplete, nothing
+        // declined, the partial text persisted unmarked.
+        TurnOutcome::EarlyStop(EarlyStopReason::StreamEnded) => Some((
+            SystemMessageType::Warning,
+            "The model server closed the stream before finishing the reply — the text above \
+             may be incomplete."
+                .to_string(),
+        )),
         // Operator interrupt — not an error and not a provider action; the
         // generic "Provider stopped..." wording below would misattribute it.
         TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop) => Some((
@@ -9159,6 +9168,17 @@ mod terminal_outcome_tests {
         for outcome in [TurnOutcome::EndTurn, TurnOutcome::ToolUse, TurnOutcome::Pause] {
             assert_eq!(terminal_outcome_notice(outcome, None), None);
         }
+    }
+
+    #[test]
+    fn a_stream_ended_turn_gets_a_warning_notice() {
+        let outcome = TurnOutcome::EarlyStop(EarlyStopReason::StreamEnded);
+        let (kind, msg) =
+            terminal_outcome_notice(outcome, None).expect("a closed stream must produce a frame");
+        assert_eq!(kind, SystemMessageType::Warning);
+        assert!(msg.contains("closed the stream"), "{msg}");
+        // The partial text is persisted unmarked, like MaxTokens.
+        assert_eq!(final_assistant_text("partial", &[], outcome), "partial");
     }
 
     #[test]
