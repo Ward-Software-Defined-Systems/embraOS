@@ -138,6 +138,21 @@
     // own; the provider underlines the route and a click fetches it as a
     // download — same origin, so the `download` attribute is honoured.
     // Both routes are ASCII (percent-encoded), so column equals index.
+    const embraDownload = (url) => {
+      const a = document.createElement("a");
+      a.href = url; a.download = ""; a.style.display = "none";
+      document.body.appendChild(a); a.click(); a.remove();
+    };
+    // A live offer (file_offer, /download) starts its download by itself:
+    // the console announces it once with a private OSC that never reaches
+    // the screen (`ESC ] 8771 ; /api/files/<path> BEL`); the writer tab
+    // fetches it, observers keep the clickable row below.
+    try {
+      term.parser.registerOscHandler(8771, (data) => {
+        if (writable && /^\/api\/files\//.test(data)) embraDownload(data);
+        return true;
+      });
+    } catch (e) { console.warn("embra-web: download handler unavailable", e); }
     try {
       const LINK = /\/api\/(files|media)\/[^\s]+/g;
       term.registerLinkProvider({
@@ -153,11 +168,7 @@
             links.push({
               text: url,
               range: { start: { x: m.index + 1, y }, end: { x: m.index + url.length, y } },
-              activate: (_e, u) => {
-                const a = document.createElement("a");
-                a.href = u; a.download = ""; a.style.display = "none";
-                document.body.appendChild(a); a.click(); a.remove();
-              },
+              activate: (_e, u) => embraDownload(u),
             });
           }
           cb(links.length ? links : undefined);

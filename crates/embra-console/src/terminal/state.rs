@@ -148,6 +148,14 @@ impl DisplayMessage {
         )
     }
 
+    /// The announcement of a live offer to the web terminal: a private OSC
+    /// (`ESC ] 8771 ; /api/files/<path> BEL`) that never reaches the
+    /// screen; embra-web's xterm handler starts the download from it. Only
+    /// the web PTY gets it, and only once per offer (never on a repaint).
+    pub fn download_osc(route: &str) -> String {
+        format!("\x1b]{OSC_DOWNLOAD};{route}\x07")
+    }
+
     /// Native-tool-use render (NATIVE-TOOLS-01 Stage 7). Includes the
     /// typed input JSON inline when non-empty and flags errors with an
     /// explicit "ERR" marker. Timeline row:
@@ -496,6 +504,21 @@ mod native_render_tests {
     }
 }
 
+/// The OSC number the web terminal listens on for an offered file's route.
+/// Private: no terminal or addon in the tree claims it.
+pub const OSC_DOWNLOAD: u32 = 8771;
+
+/// Write a live offer's announcement to the PTY, once. Gated on the web
+/// PTY by the caller; a serial terminal would ignore the sequence anyway.
+pub fn announce_download(path: &str) {
+    use std::io::Write;
+    if let Some(route) = embra_common::file_download_route(path) {
+        let mut out = std::io::stdout();
+        let _ = out.write_all(DisplayMessage::download_osc(&route).as_bytes());
+        let _ = out.flush();
+    }
+}
+
 #[cfg(test)]
 mod file_card_tests {
     use super::DisplayMessage;
@@ -533,6 +556,15 @@ mod file_card_tests {
         assert_eq!(
             row.content,
             "[file offered] (history) notes.md (12 KB) — the report — /embra/workspace/uploads/notes.md\nweb: /api/files/uploads/notes.md"
+        );
+    }
+
+    #[test]
+    fn a_live_offer_is_announced_with_the_private_osc() {
+        assert_eq!(super::OSC_DOWNLOAD, 8771);
+        assert_eq!(
+            DisplayMessage::download_osc("/api/files/uploads/notes.md"),
+            "\x1b]8771;/api/files/uploads/notes.md\x07"
         );
     }
 

@@ -471,9 +471,15 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
             }
         }
         ConsoleEvent::File(f) => {
-            // A text card only: there are no bytes to fetch and no pane.
+            // A text card only: there are no bytes to fetch and no pane. A
+            // live offer (`file_offer`, `/download`) is also announced to
+            // the web terminal once, so the browser starts the download by
+            // itself; a replay on attach is not.
             app.messages.push(DisplayMessage::file_with_tz(&f, &app.config_tz));
             app.scroll_offset = 0;
+            if !f.replay && f.origin == "offered" && std::env::var("EMBRA_WEB_PTY").is_ok() {
+                state::announce_download(&f.path);
+            }
         }
     }
 }

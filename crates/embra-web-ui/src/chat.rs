@@ -352,6 +352,22 @@ fn queue_files(
     }
 }
 
+/// Start a download of `url` as `name` through a same-origin anchor with
+/// the `download` attribute, the way a click on the card's link would.
+fn start_download(url: &str, name: &str) {
+    let Some(document) = web_sys::window().and_then(|w| w.document()) else { return };
+    let Ok(el) = document.create_element("a") else { return };
+    let Ok(a) = el.dyn_into::<web_sys::HtmlAnchorElement>() else { return };
+    a.set_href(url);
+    a.set_download(name);
+    // Appended and removed within the call: it is never seen.
+    if let Some(body) = document.body() {
+        let _ = body.append_child(&a);
+        a.click();
+        a.remove();
+    }
+}
+
 fn revoke_previews(items: &[PendingAttachment]) {
     for a in items.iter().filter(|a| !a.preview.is_empty()) {
         let _ = web_sys::Url::revoke_object_url(&a.preview);
@@ -1432,6 +1448,11 @@ fn handle_server_msg(
             // Same replay rule as the media card.
             if replay && had_content_at_connect {
                 return;
+            }
+            // A live offer starts its download by itself; the card keeps
+            // the link for fetching it again. A replay never does.
+            if !replay && origin == "offered" && !url.is_empty() {
+                start_download(&url, &name);
             }
             messages.update(|m| {
                 m.push(Bubble::File(FileCard { path, name, byte_size, media_type, origin, caption, url }));
