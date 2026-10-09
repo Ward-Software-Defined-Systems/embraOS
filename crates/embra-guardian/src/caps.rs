@@ -3,11 +3,13 @@
 //! ambient authority; every capability is added here, "at the guard
 //! level", and gated by per-tool grants + an egress policy.
 //!
-//! v1 capability: [`guarded_http_get`]. The raw transport is behind
-//! [`HttpTransport`] so embra-guardian stays decoupled and the guard is
-//! unit-tested with a mock (no live network in CI). The guard runs
+//! Two capabilities: [`guarded_http_get`] and [`guarded_web_search`]. The
+//! raw transport is behind [`HttpTransport`] and the search backend behind
+//! [`SearchProvider`], so embra-guardian stays decoupled and each guard is
+//! unit-tested with a mock (no live network in CI). The fetch guard runs
 //! *before* the transport: scheme, SSRF/RFC1918 (literal + DNS-resolved),
-//! optional domain allowlist, then size + content-type caps after.
+//! optional domain allowlist, then size + content-type caps after. The
+//! search guard clamps the request, filters and reduces the results.
 
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::sync::Arc;
@@ -365,9 +367,9 @@ pub fn guarded_web_search(caps: &Capabilities, input: &str) -> String {
                 .take(req.count.min(20))
                 .map(|r| {
                     let mut o = serde_json::Map::new();
-                    o.insert("title".into(), truncate(&r.title, 300).into());
+                    o.insert("title".into(), text_field(&r.title, 300).into());
                     o.insert("url".into(), r.url.into());
-                    o.insert("description".into(), truncate(&r.description, 1000).into());
+                    o.insert("description".into(), text_field(&r.description, 1000).into());
                     if let Some(age) = r.age.filter(|a| !a.is_empty()) {
                         o.insert("age".into(), age.into());
                     }
@@ -376,7 +378,7 @@ pub fn guarded_web_search(caps: &Capabilities, input: &str) -> String {
                             .snippets
                             .iter()
                             .take(5)
-                            .map(|s| truncate(s, 500).into())
+                            .map(|s| text_field(s, 500).into())
                             .collect();
                         o.insert("snippets".into(), snips.into());
                     }
@@ -399,6 +401,16 @@ pub fn guarded_web_search(caps: &Capabilities, input: &str) -> String {
         }
         Err(e) => err_json(&e),
     }
+}
+
+/// A result's text field as the model should read it: reduced to text
+/// with the reducer every guest ships (Brave sends `description` with
+/// `<strong>` highlighting and HTML entities and `extra_snippets` as plain
+/// text; one rule covers both), then cut at `cap`. A tool's injection scan
+/// then runs over decoded text, where `you&#x27;re` and `you're` are the
+/// same words (Embra#17).
+fn text_field(s: &str, cap: usize) -> String {
+    truncate(&crate::html_text::to_text(s), cap)
 }
 
 fn truncate(s: &str, cap: usize) -> String {
@@ -467,11 +479,27 @@ impl SearchProvider for BraveSearch {
             return Err(format!("brave search HTTP {}", status.as_u16()));
         }
         let v: serde_json::Value = resp.json().map_err(|e| e.to_string())?;
-        let arr = v
-            .get("web")
-            .and_then(|w| w.get("results"))
-            .and_then(|r| r.as_array())
-            .ok_or_else(|| "unexpected brave response shape".to_string())?;
+        parse_brave_response(&v)
+    }
+}
+
+/// Brave's web-search reply as a [`SearchResponse`]. The reply is an object
+/// with `query` and the result containers Brave has for it; `web` is one
+/// of them and is absent when nothing matched, so a missing or null
+/// `web.results` is an empty set, not an error (the error used to stand
+/// for "no results": a quoted nonsense query, Embra#17). A body that is
+/// not an object is the one shape the parser refuses.
+fn parse_brave_response(v: &serde_json::Value) -> Result<SearchResponse, String> {
+    if !v.is_object() {
+        return Err("unexpected brave response shape".to_string());
+    }
+    let arr: &[serde_json::Value] = v
+        .get("web")
+        .and_then(|w| w.get("results"))
+        .and_then(|r| r.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    {
         // Brave's date field is undocumented (community-confirmed gap):
         // `age` and `page_age` both appear, format not guaranteed. Try
         // both, surface as an opaque string, never fail on its absence.
@@ -511,7 +539,7 @@ impl SearchProvider for BraveSearch {
         // child fields are undocumented + JS-rendered in the dashboard, so
         // treat it as opaque — whitelist known string fields, else a
         // size-capped shallow subset, else `None`. Never an error.
-        let infobox = trim_infobox(&v);
+        let infobox = trim_infobox(v);
         Ok(SearchResponse { results, infobox })
     }
 }
@@ -951,5 +979,70 @@ mod search_tests {
         // the literal query text.
         assert_eq!(parse_request(r#""hello world""#).q, r#""hello world""#);
         assert_eq!(parse_request("[1,2]").q, "[1,2]");
+    }
+
+    #[test]
+    fn a_brave_reply_without_web_is_an_empty_set() {
+        // Brave omits `web` when nothing matched (a quoted nonsense query,
+        // Embra#17). That used to be "unexpected brave response shape".
+        let empty = serde_json::json!({"type": "search", "query": {"original": "\"qzvxkjp0193\""}});
+        let r = parse_brave_response(&empty).unwrap();
+        assert!(r.results.is_empty());
+        assert!(r.infobox.is_none());
+        // An infobox with no web results survives the empty set.
+        let with_box = serde_json::json!({"type": "search", "query": {"original": "x"},
+            "infobox": {"type": "graph", "results": [{"title": "T", "description": "D"}]}});
+        let r = parse_brave_response(&with_box).unwrap();
+        assert!(r.results.is_empty());
+        assert_eq!(r.infobox, trim_infobox(&with_box));
+        // And a null `results` is the same empty set.
+        let null_results = serde_json::json!({"type": "search", "web": {"results": null}});
+        assert!(parse_brave_response(&null_results).unwrap().results.is_empty());
+    }
+
+    #[test]
+    fn a_brave_reply_that_is_not_an_object_is_an_error() {
+        for v in [serde_json::json!([]), serde_json::json!("search"), serde_json::json!(null)] {
+            let err = parse_brave_response(&v).unwrap_err();
+            assert!(err.contains("unexpected brave response shape"), "{v}: {err}");
+        }
+    }
+
+    #[test]
+    fn a_brave_reply_with_results_parses_as_before() {
+        let v = serde_json::json!({"type": "search", "query": {"original": "tokio"}, "web": {"results": [
+            {"title": "Tokio", "url": "https://tokio.rs", "description": "async <strong>runtime</strong>",
+             "page_age": "2024-10-08T10:30:00Z", "extra_snippets": ["one", "two"]},
+            {"title": "No url"}
+        ]}});
+        let r = parse_brave_response(&v).unwrap();
+        assert_eq!(r.results.len(), 2);
+        assert_eq!(r.results[0].title, "Tokio");
+        // The provider keeps Brave's bytes; the guard reduces them.
+        assert_eq!(r.results[0].description, "async <strong>runtime</strong>");
+        assert_eq!(r.results[0].age.as_deref(), Some("2024-10-08T10:30:00Z"));
+        assert_eq!(r.results[0].snippets, vec!["one".to_string(), "two".to_string()]);
+        assert_eq!(r.results[1].url, "");
+    }
+
+    #[test]
+    fn title_description_and_snippets_are_reduced_to_text_before_the_cap() {
+        let hit = SearchResult {
+            title: "<strong>Brave</strong> Search".into(),
+            url: "https://search.brave.com".into(),
+            description: "In May 2023, <strong>Brave</strong> announced it&#x27;s &quot;own&quot; index &lt;u8&gt;".into(),
+            age: None,
+            snippets: vec!["plain &amp; simple".into()],
+        };
+        let long = SearchResult { description: format!("<b>{}</b>", "x".repeat(1200)), ..hit.clone() };
+        let caps = Capabilities::with_search(Arc::new(MockSearch(Ok(vec![hit, long]))));
+        let v = parse(&guarded_web_search(&caps, "brave"));
+        assert_eq!(v["results"][0]["title"], "Brave Search");
+        assert_eq!(v["results"][0]["description"], "In May 2023, Brave announced it's \"own\" index <u8>");
+        assert_eq!(v["results"][0]["snippets"][0], "plain & simple");
+        // Reduced first, then cut: the cut falls on text, never inside a tag.
+        let d = v["results"][1]["description"].as_str().unwrap();
+        assert!(d.starts_with("xxxx") && d.ends_with('…') && !d.contains('<'), "{d}");
+        assert_eq!(d.chars().filter(|c| *c == 'x').count(), 1000);
     }
 }

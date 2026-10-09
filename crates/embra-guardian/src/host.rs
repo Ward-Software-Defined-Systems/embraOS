@@ -7,7 +7,8 @@
 //! * **Zero ambient authority** — the guest is `wasm32-unknown-unknown`
 //!   `#![no_std]`; the only host functions it can reach are the
 //!   Guardian-mediated capabilities registered on the [`wasmtime::Linker`]
-//!   (v1: `guardian::http_get`), and only with a per-call grant.
+//!   (`guardian::http_get`, `guardian::web_search`), and only with a
+//!   per-call grant.
 //! * **Memory cap** — `StoreLimits` bounds linear-memory growth.
 //! * **Wall-clock cap** — epoch interruption traps a runaway guest.
 //! * **Output cap** — oversize output is rejected before allocation.
