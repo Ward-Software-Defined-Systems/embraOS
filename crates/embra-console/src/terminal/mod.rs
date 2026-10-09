@@ -335,7 +335,13 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
             // operator can keep reading the last turn's reasoning until
             // they submit their next message (clear sites: user submit,
             // SystemMessage::Error, ModeTransition).
-            app.messages.push(DisplayMessage::new_with_tz(&app.config_name, &full, &app.config_tz));
+            //
+            // A Done without text ends a turn that failed or was stopped
+            // before any text: it clears the live state above and adds no
+            // empty line (the mobile chat has the same guard).
+            if !full.trim().is_empty() {
+                app.messages.push(DisplayMessage::new_with_tz(&app.config_name, &full, &app.config_tz));
+            }
             app.scroll_offset = 0;
         }
         ConsoleEvent::SystemMessage { content, msg_type } => {
@@ -1044,6 +1050,23 @@ mod reasoning_tests {
         app.live_reasoning = "kept across the gap".to_string();
         handle_console_event(ConsoleEvent::ResponseDone("ok".to_string()), &mut app);
         assert_eq!(app.live_reasoning, "kept across the gap");
+    }
+
+    #[test]
+    fn a_done_frame_without_text_adds_no_message() {
+        // The brain ends a failed stream with a Done carrying no text:
+        // the live text and the typing indicator go, no empty line stays.
+        let mut app = AppState::new();
+        handle_console_event(ConsoleEvent::Token("partial".to_string()), &mut app);
+        app.thinking = true;
+        let before = app.messages.len();
+        handle_console_event(ConsoleEvent::ResponseDone(String::new()), &mut app);
+        assert_eq!(app.messages.len(), before);
+        assert!(app.streaming_text.is_none());
+        assert!(!app.thinking);
+        // A Done with text still lands as the turn's message.
+        handle_console_event(ConsoleEvent::ResponseDone("ok".to_string()), &mut app);
+        assert_eq!(app.messages.len(), before + 1);
     }
 
     #[test]

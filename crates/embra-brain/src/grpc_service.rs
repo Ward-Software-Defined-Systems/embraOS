@@ -1663,6 +1663,11 @@ async fn handle_request(
             // persisted only the final segment; narration the operator
             // watched live never reached history).
             let mut persisted_segments = TranscriptSegments::default();
+            // Set when a continuation's stream ended without a result (the
+            // server answered with an error, or the connection went): the
+            // turn ends like a stop, with a Done frame, and persists what
+            // it has plus the marker.
+            let mut stream_failed = false;
             // Embra_Debug #70: collect tool names dispatched across the
             // full user-turn loop (deduped, first-seen order). Used to
             // synthesize a placeholder when the assistant's last
@@ -1703,7 +1708,19 @@ async fn handle_request(
             let Some(mut current_turn) =
                 collect_response(first_stream, tx, &config_name, Some(&mut stop_check)).await?
             else {
-                // Stream closed without Complete — treat as error and save nothing.
+                // Stream closed without Complete — treat as error and save
+                // nothing. collect_response showed the error; the Done frame
+                // ends the turn for the clients (the typing indicator, the
+                // live text), as it does after an operator stop.
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::Done(
+                            StreamDone {
+                                full_response: String::new(),
+                            },
+                        )),
+                    }))
+                    .await;
                 drop(in_turn_guard);
                 return Ok(());
             };
@@ -1796,6 +1813,13 @@ async fn handle_request(
                             .await
                             .map_err(|e| anyhow::anyhow!("Brain pause-resume failed: {}", e))?;
                         let Some(resp) = collect_response(stream, tx, &config_name, Some(&mut stop_check)).await? else {
+                            error!(
+                                target: "dispatch",
+                                session = %session_name,
+                                "Brain pause-resume failed: the stream ended without a result"
+                            );
+                            persisted_segments.push(STREAM_FAILED_MARKER);
+                            stream_failed = true;
                             break;
                         };
                         current_turn = resp;
@@ -2239,6 +2263,24 @@ async fn handle_request(
                                 )
                             })?;
                         let Some(resp) = collect_response(stream, tx, &config_name, Some(&mut stop_check)).await? else {
+                            // The stream ended without a result: the server
+                            // answered with an error inside it (LM Studio does
+                            // so for a prompt over its context length; shown by
+                            // collect_response) or the connection went. The
+                            // same log line as the pre-stream failure above,
+                            // with the results that went out (Embra#13); the
+                            // turn ends like a stop and persists what it has.
+                            let sizes = tool_result_sizes(
+                                &current_turn.content,
+                                api_messages.last().map(ApiMessage::content).unwrap_or(&[]),
+                            );
+                            error!(
+                                target: "dispatch",
+                                session = %session_name,
+                                "Brain continuation failed (iter {tool_iter}; tool results this iteration: {sizes}): the stream ended without a result"
+                            );
+                            persisted_segments.push(STREAM_FAILED_MARKER);
+                            stream_failed = true;
                             break;
                         };
                         current_turn = resp;
@@ -2288,8 +2330,11 @@ async fn handle_request(
             // so no Done frame was emitted — synthesize one so client
             // streaming animations terminate (a duplicate Done after a
             // between-iterations stop is harmless: clients treat Done as
-            // an idempotent end-of-response).
-            if current_turn.outcome == TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop) {
+            // an idempotent end-of-response). A failed stream never
+            // reached it either.
+            if current_turn.outcome == TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop)
+                || stream_failed
+            {
                 let _ = tx
                     .send(Ok(ConversationResponse {
                         response_type: Some(conversation_response::ResponseType::Done(
@@ -7042,6 +7087,12 @@ fn turn_text(turn: &AssistantTurn) -> String {
 /// `last_response_text` keeps its final-segment semantics for the
 /// operator-stop Done frame, Gemini telemetry, and
 /// `delete_flow_verdict`.
+/// The segment persisted after the text of a continuation whose stream
+/// ended without a result, so the operator on reload and the model on
+/// the next turn see that the reply was cut by the provider, not chosen.
+/// The server's words are in the console and the log, never here.
+const STREAM_FAILED_MARKER: &str = "(turn ended by a provider error; see the error above)";
+
 #[derive(Default)]
 struct TranscriptSegments(Vec<String>);
 
@@ -7291,7 +7342,7 @@ mod tool_only_placeholder_tests {
 
 #[cfg(test)]
 mod transcript_segments_tests {
-    use super::{final_assistant_text, turn_text, TranscriptSegments};
+    use super::{final_assistant_text, turn_text, TranscriptSegments, STREAM_FAILED_MARKER};
     use crate::provider::{AssistantTurn, Block, EarlyStopReason, StreamEvent, TurnOutcome};
     use futures::stream;
     use tokio::sync::mpsc;
@@ -7326,6 +7377,20 @@ mod transcript_segments_tests {
         assert_eq!(
             final_assistant_text(&segs.joined(), &names, TurnOutcome::EndTurn),
             "[tool calls: file_read]"
+        );
+    }
+
+    #[test]
+    fn a_failed_continuation_persists_its_marker_after_the_text() {
+        // The loop pushes the marker as a segment and breaks with the
+        // previous turn's outcome (ToolUse): no suffix, the marker last.
+        let mut segs = TranscriptSegments::default();
+        segs.push("Reading the dump now.");
+        segs.push(STREAM_FAILED_MARKER);
+        let persisted = final_assistant_text(&segs.joined(), &[], TurnOutcome::ToolUse);
+        assert_eq!(
+            persisted,
+            "Reading the dump now.\n\n(turn ended by a provider error; see the error above)"
         );
     }
 
