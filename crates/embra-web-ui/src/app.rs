@@ -38,7 +38,8 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
     ]),
     ("Media", &[
         ("/attach", "attach file"), ("/attach list", "staged attachments"),
-        ("/attach clear", "drop staged"), ("/download", "download file"), ("/media", "media pane"),
+        ("/attach clear", "drop staged"), ("/download", "download file"),
+        ("/media", "media pane"), ("/media off", "hide pane"),
         ("/image-provider", "image gen"), ("/image-provider model", "image model"),
         ("/image-provider key", "image key"),
     ]),
