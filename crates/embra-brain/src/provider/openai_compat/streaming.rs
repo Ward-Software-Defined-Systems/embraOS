@@ -45,6 +45,10 @@
 //!   - `"length"` → `TurnOutcome::MaxTokens`
 //!   - `"content_filter"` → `TurnOutcome::EarlyStop(Other)`
 //!   - missing → `TurnOutcome::EndTurn` (defensive; logs a warn)
+//! - A frame `{"error": …}` is the server's refusal, not a chunk: the call
+//!   fails with its message (`sse::in_stream_error`) and no `Complete`
+//!   follows. LM Studio answers a prompt over its context length this way,
+//!   inside an open 200 stream, and closes.
 
 use std::collections::BTreeMap;
 
@@ -57,7 +61,7 @@ use crate::provider::ir::{AssistantTurn, Block, EarlyStopReason, TurnOutcome};
 use crate::provider::openai_compat::conv::reasoning_block;
 use crate::provider::openai_compat::sanitize::sanitize_harmony_tokens;
 use crate::provider::openai_compat::wire::OpenAIChatChunk;
-use crate::provider::sse::LineBuffer;
+use crate::provider::sse::{LineBuffer, in_stream_error};
 use crate::provider::StreamEvent;
 
 /// Drive an SSE stream from `/v1/chat/completions`, emitting neutral
@@ -98,7 +102,7 @@ where
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(Into::into)?;
         lines.push(chunk.as_ref());
-        consume_sse_lines(&mut lines, &mut state, &tx).await;
+        consume_sse_lines(&mut lines, &mut state, &tx).await?;
         if state.completed {
             return Ok(());
         }
@@ -123,12 +127,14 @@ where
 }
 
 /// Drain the complete lines into the parser. A line without its `\n`
-/// stays in the buffer for the next chunk.
+/// stays in the buffer for the next chunk. An error frame fails the call:
+/// the `Err` carries the server's message, and the caller sends nothing
+/// more.
 async fn consume_sse_lines(
     lines: &mut LineBuffer,
     state: &mut ParserState,
     tx: &mpsc::Sender<StreamEvent>,
-) {
+) -> Result<()> {
     while let Some(line) = lines.next_line() {
         if line.is_empty() || line.starts_with(':') {
             continue;
@@ -139,9 +145,9 @@ async fn consume_sse_lines(
         let data = data.trim_start();
         if data == "[DONE]" {
             state.emit_complete(tx).await;
-            return;
+            return Ok(());
         }
-        let Ok(chunk) = serde_json::from_str::<OpenAIChatChunk>(data) else {
+        let Ok(value) = serde_json::from_str::<JsonValue>(data) else {
             // Malformed JSON — log and continue. Real servers
             // occasionally emit keep-alive comments or junk; tolerate.
             tracing::warn!(
@@ -151,11 +157,32 @@ async fn consume_sse_lines(
             );
             continue;
         };
+        if let Some(message) = in_stream_error(&value) {
+            // The server's refusal, inside the stream: LM Studio answers
+            // a prompt over its context length this way and closes. It
+            // used to be skipped like junk, and the stream's end then read
+            // as a clean end of turn. The call fails with the server's
+            // words; the driver turns the error into the Error event, and
+            // `pump` returns before any Complete.
+            return Err(anyhow::anyhow!(
+                "the model server answered with an error: {message}"
+            ));
+        }
+        let Ok(chunk) = serde_json::from_value::<OpenAIChatChunk>(value) else {
+            // JSON, but not a chunk (no `choices`): skipped like junk.
+            tracing::warn!(
+                target: "provider::openai_compat::streaming",
+                data = %data,
+                "could not parse SSE chunk; skipping"
+            );
+            continue;
+        };
         state.process_chunk(chunk, tx).await;
         if state.completed || state.receiver_gone {
-            return;
+            return Ok(());
         }
     }
+    Ok(())
 }
 
 /// In-flight assembly state.
@@ -1051,18 +1078,45 @@ mod tests {
         assert_eq!(t, "Hello");
     }
 
+    /// The policy this replaces (`in_stream_error_object_is_skipped`)
+    /// skipped the frame like junk and let the stream go on; the end of
+    /// the body then read as a clean end of turn, and a context-length
+    /// refusal from LM Studio ended the turn in silence (2026-10-08).
     #[tokio::test]
-    async fn in_stream_error_object_is_skipped() {
-        // No `choices`: not a chunk. Skipped like any frame that does not
-        // parse; the stream goes on.
-        let mut sse = String::new();
-        sse.push_str(&data_frame(json!({"error": {"message": "slot busy"}})));
-        sse.push_str(&data_frame(assistant_chunk_with_text("ok", Some("stop"))));
-        sse.push_str("data: [DONE]\n\n");
-
-        let events = drive_fake(&sse, "test-model").await;
-        assert_eq!(text_deltas(&events), vec!["ok"]);
-        assert_eq!(complete_event(&events).content.len(), 1);
+    async fn an_in_stream_error_frame_fails_the_call_and_emits_no_complete() {
+        // LM Studio's frame, verbatim from the brain log; the server
+        // closed the stream right after it.
+        let refusal = data_frame(json!({"error": {"message":
+            "Input does not fit in context length. The input has 359277 tokens, \
+             but the context length only supports 262144 tokens."}}));
+        let delta_then_refusal =
+            format!("{}{refusal}", data_frame(assistant_chunk_with_text("one", None)));
+        for (body, delivered) in [(delta_then_refusal, vec!["one"]), (refusal, vec![])] {
+            let (tx, mut rx) = mpsc::channel(8);
+            let stream = futures_util::stream::iter(vec![Ok::<_, std::convert::Infallible>(
+                body.into_bytes(),
+            )]);
+            let err = pump(stream, tx, "test-model".to_string(), false)
+                .await
+                .expect_err("the refusal fails the call");
+            let text = err.to_string();
+            assert!(
+                text.starts_with("the model server answered with an error: Input does not fit"),
+                "{text}"
+            );
+            assert!(text.contains("262144 tokens"), "{text}");
+            // What arrived before the frame was delivered; nothing is
+            // made up after it, and no Complete follows.
+            let mut events = Vec::new();
+            while let Some(e) = rx.recv().await {
+                events.push(e);
+            }
+            assert_eq!(text_deltas(&events), delivered);
+            assert!(
+                !events.iter().any(|e| matches!(e, StreamEvent::Complete(_))),
+                "a Complete after the error frame"
+            );
+        }
     }
 
     #[tokio::test]

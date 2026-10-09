@@ -61,9 +61,72 @@ impl LineBuffer {
     }
 }
 
+/// A server's message in an error frame is cut here before it is shown.
+pub(crate) const ERROR_MESSAGE_MAX: usize = 1024;
+
+/// The message of an in-stream error frame, or `None` for anything else.
+///
+/// An OpenAI-compatible server can answer inside an open 200 stream with
+/// one frame `{"error": {"message": "…"}}` and close: LM Studio does so for
+/// a prompt over its context length. Gemini's error shape is the same
+/// object under `error`. No chunk of either wire carries a top-level
+/// `error` key, so a frame with one is the server's refusal and never a
+/// chunk: the parsers read it before their typed parse and fail the call
+/// with the message. The message is `error.message` when that is a
+/// string, `error` itself when it is one, otherwise the `error` value as
+/// JSON; a null `error` is no error. Cut at [`ERROR_MESSAGE_MAX`].
+pub(crate) fn in_stream_error(frame: &serde_json::Value) -> Option<String> {
+    use serde_json::Value;
+    let error = frame.as_object()?.get("error")?;
+    let message = match error {
+        Value::Null => return None,
+        Value::String(s) => s.clone(),
+        Value::Object(fields) => match fields.get("message") {
+            Some(Value::String(s)) => s.clone(),
+            _ => error.to_string(),
+        },
+        other => other.to_string(),
+    };
+    Some(crate::tools::sessions::truncate_str(&message, ERROR_MESSAGE_MAX).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_error_frame_gives_its_message_and_a_chunk_gives_none() {
+        use serde_json::json;
+        // LM Studio, 2026-10-08, verbatim.
+        let lm_studio = json!({"error": {"message":
+            "Input does not fit in context length. The input has 359277 tokens, \
+             but the context length only supports 262144 tokens."}});
+        assert_eq!(
+            in_stream_error(&lm_studio).as_deref(),
+            Some(
+                "Input does not fit in context length. The input has 359277 tokens, \
+                 but the context length only supports 262144 tokens."
+            )
+        );
+        assert_eq!(in_stream_error(&json!({"error": "slot busy"})).as_deref(), Some("slot busy"));
+        // No message string: the error value itself, as JSON.
+        assert_eq!(
+            in_stream_error(&json!({"error": {"code": 503, "type": "server_error"}})).as_deref(),
+            Some(r#"{"code":503,"type":"server_error"}"#)
+        );
+        // A null error is no error; a chunk of either wire has no `error`.
+        assert_eq!(in_stream_error(&json!({"error": null})), None);
+        assert_eq!(in_stream_error(&json!({"choices": [], "usage": {"total_tokens": 9}})), None);
+        assert_eq!(in_stream_error(&json!({"candidates": [{"content": {"parts": []}}]})), None);
+        assert_eq!(in_stream_error(&json!("error")), None);
+        assert_eq!(in_stream_error(&json!(null)), None);
+        // Cut at the cap, on a character boundary: the e-acute straddles it.
+        let long = format!("{}\u{e9}", "x".repeat(ERROR_MESSAGE_MAX - 1));
+        assert_eq!(
+            in_stream_error(&json!({"error": long})).as_deref(),
+            Some("x".repeat(ERROR_MESSAGE_MAX - 1).as_str())
+        );
+    }
 
     fn lines_of(chunks: &[&[u8]]) -> Vec<String> {
         let mut buf = LineBuffer::default();

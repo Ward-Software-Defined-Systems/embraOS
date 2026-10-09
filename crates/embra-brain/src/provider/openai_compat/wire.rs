@@ -171,8 +171,10 @@ pub struct OpenAIChatRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct OpenAIChatChunk {
-    /// Required. An in-stream `{"error": ...}` object has no `choices`,
-    /// fails to parse, and is skipped with a warning.
+    /// Required: a frame without `choices` is not a chunk and is skipped
+    /// with a warning (streaming.rs). An in-stream `{"error": …}` object
+    /// is read before this parse and fails the call
+    /// (`sse::in_stream_error`); it never reaches here.
     pub choices: Vec<OpenAIChoiceDelta>,
 }
 
@@ -423,8 +425,9 @@ mod tests {
 
     #[test]
     fn chunk_without_choices_is_rejected() {
-        // What keeps an in-stream error object from being read as an
-        // empty chunk: `choices` has no default.
+        // An error object is read before the typed parse and fails the
+        // call; `choices` still has no default, so a frame without one
+        // is never read as an empty chunk either.
         assert!(serde_json::from_value::<OpenAIChatChunk>(
             json!({"error": {"message": "model not loaded"}})
         )
