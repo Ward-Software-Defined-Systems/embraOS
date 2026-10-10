@@ -650,6 +650,8 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/guardian rebuild", "rebuild unloaded or failed tools (needs name or --all)"),
         ("/guardian delete", "remove tool (needs name)"),
         ("/guardian key brave", "set / show Brave Search API key"),
+        ("/guardian secret", "a credential the host adds to http_request calls to a host (needs host, header, value)"),
+        ("/guardian egress", "private hosts the tools may reach: allow / deny <host>, blank lists"),
     ]),
     ("Identity", &[
         ("/soul", "show soul document"),

@@ -121,6 +121,20 @@ pub struct SystemConfig {
     /// Serde-additive `Option` — no schema bump.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git_tokens: Option<std::collections::BTreeMap<String, String>>,
+    /// Per-host credentials the Guardian request guard adds to an outbound
+    /// `http_request` whose host matches: host → header name → value. Set
+    /// via `/guardian secret <host> <header> <value>`. The model never
+    /// carries one in a tool's input and no tool returns this document.
+    /// WardSONDB-only, like `git_tokens`. Serde-additive — no schema bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guardian_secrets:
+        Option<std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>>>,
+    /// Private hosts the Guardian egress guard may reach: the operator's
+    /// allowlist, a name (with its subdomains) or an IP literal. Loopback
+    /// is refused whatever stands here. Set via `/guardian egress allow`.
+    /// Serde-additive — no schema bump.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guardian_private_hosts: Option<Vec<String>>,
     /// Per-provider API keys (Sprint 4 schema v10, spec D2). The
     /// legacy `api_key` field above mirrors whichever of these is
     /// active so existing read paths keep working; new writes
@@ -796,6 +810,8 @@ pub async fn run_config_wizard_grpc(
         image_provider: None,
         image_model: None,
         git_tokens: None,
+        guardian_secrets: None,
+        guardian_private_hosts: None,
         anthropic_api_key,
         gemini_api_key,
         max_tool_iterations: None,
@@ -975,6 +991,8 @@ mod key_lookup_tests {
             image_provider: None,
             image_model: None,
             git_tokens: None,
+            guardian_secrets: None,
+            guardian_private_hosts: None,
             anthropic_api_key: anth.map(str::to_string),
             gemini_api_key: gem.map(str::to_string),
             max_tool_iterations: None,
@@ -1072,6 +1090,8 @@ pub(crate) mod tests_support {
             image_provider: None,
             image_model: None,
             git_tokens: None,
+            guardian_secrets: None,
+            guardian_private_hosts: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
@@ -1111,6 +1131,8 @@ mod max_tool_iterations_serde_tests {
             image_provider: None,
             image_model: None,
             git_tokens: None,
+            guardian_secrets: None,
+            guardian_private_hosts: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
@@ -1433,6 +1455,30 @@ mod anthropic_effort_serde_tests {
             Some("xhigh")
         );
         assert!(back.openai_compat.ollama_effort.is_none());
+    }
+
+    #[test]
+    fn guardian_secrets_and_private_hosts_are_serde_additive() {
+        // Absent on an old document; present and round-tripping when set.
+        let old = json!({
+            "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase1",
+            "created_at": "", "version": "test", "kg_temporal_window_secs": 1800,
+            "kg_max_traversal_depth": 3, "kg_traversal_depth_ceiling": 5, "kg_edge_candidate_limit": 50,
+        });
+        let cfg: SystemConfig = serde_json::from_value(old).unwrap();
+        assert!(cfg.guardian_secrets.is_none() && cfg.guardian_private_hosts.is_none());
+        let text = serde_json::to_string(&cfg).unwrap();
+        assert!(!text.contains("guardian_secrets") && !text.contains("guardian_private_hosts"));
+        let mut cfg = cfg;
+        let mut headers = std::collections::BTreeMap::new();
+        headers.insert("authorization".to_string(), "Bearer t".to_string());
+        let mut secrets = std::collections::BTreeMap::new();
+        secrets.insert("gitlab.ops.wsds".to_string(), headers);
+        cfg.guardian_secrets = Some(secrets);
+        cfg.guardian_private_hosts = Some(vec!["gitlab.ops.wsds".into()]);
+        let back: SystemConfig = serde_json::from_str(&serde_json::to_string(&cfg).unwrap()).unwrap();
+        assert_eq!(back.guardian_secrets.unwrap()["gitlab.ops.wsds"]["authorization"], "Bearer t");
+        assert_eq!(back.guardian_private_hosts.unwrap(), vec!["gitlab.ops.wsds".to_string()]);
     }
 
     #[test]

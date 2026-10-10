@@ -196,7 +196,7 @@ const OPERATOR_CA_DIR_ENV: &str = "EMBRA_CA_DIR";
 /// Load operator CA certs from the STATE drop-in dir. Unparseable files are
 /// skipped with a warn — never fail the call over a bad drop-in; a genuinely
 /// missing trust anchor shows up as a TLS error on the request itself.
-fn load_operator_ca_certs() -> Vec<reqwest::Certificate> {
+pub(crate) fn load_operator_ca_certs() -> Vec<reqwest::Certificate> {
     let dir = std::env::var(OPERATOR_CA_DIR_ENV)
         .ok()
         .filter(|d| !d.is_empty())

@@ -284,7 +284,24 @@ pub async fn handle_guardian_slash(args: &str, db: &Arc<WardsonDbClient>) -> Str
         "reject" => reject(db, rest.trim()).await,
         "list" => list_human(db).await,
         "status" => match load_doc(db, rest.trim()).await {
-            Some(d) => status_human(&d, &availability_now(&d)),
+            Some(d) => {
+                let mut out = status_human(&d, &availability_now(&d));
+                if d.caps.iter().any(|c| c == embra_guardian::abi::CAP_HTTP_REQUEST) {
+                    let hosts = crate::config::load_config(db)
+                        .await
+                        .ok()
+                        .and_then(|cfg| cfg.guardian_secrets)
+                        .map(|m| m.keys().cloned().collect::<Vec<_>>())
+                        .unwrap_or_default();
+                    let line = if hosts.is_empty() {
+                        "secrets: none stored (/guardian secret <host> <header> <value>)".to_string()
+                    } else {
+                        format!("secrets: for {} (names only; values never shown)", hosts.join(", "))
+                    };
+                    out = out.replacen("--- build log tail ---", &format!("{line}\n--- build log tail ---"), 1);
+                }
+                out
+            }
             None => format!("guardian: no such tool '{}'", rest.trim()),
         },
         "show" => match load_doc(db, rest.trim()).await {
@@ -309,15 +326,18 @@ pub async fn handle_guardian_slash(args: &str, db: &Arc<WardsonDbClient>) -> Str
         "delete" => delete(db, rest.trim()).await,
         "rebuild" => rebuild(db, rest).await,
         "key" => key_cmd(rest),
+        "secret" => secret_cmd(db, rest).await,
+        "egress" => egress_cmd(db, rest).await,
         "" => "Usage: /guardian-define (paste a module) | /guardian list | \
                 /guardian status <name> | /guardian show <name> | \
                 /guardian approve <name> | /guardian reject <name> | \
                 /guardian rebuild <name> | /guardian rebuild --all | \
-                /guardian delete <name> | /guardian key brave <token>"
+                /guardian delete <name> | /guardian key brave <token> | \
+                /guardian secret <host> <header> <value> | /guardian egress allow <host>"
             .to_string(),
         other => format!(
             "guardian: unknown subcommand '{other}'. Use list|status|show|approve|reject|\
-             rebuild|delete|key, or /guardian-define to paste a module."
+             rebuild|delete|key|secret|egress, or /guardian-define to paste a module."
         ),
     }
 }
@@ -360,6 +380,249 @@ fn key_cmd(rest: &str) -> String {
         other => {
             format!("guardian: unknown key provider '{other}'. v1 supports: brave.")
         }
+    }
+}
+
+// ── per-host secrets and the egress allowlist ──
+//
+// Both live in `config.system` (`guardian_secrets`, `guardian_private_hosts`),
+// as `git_tokens` do: no tool returns that document, and a STATE file would
+// be one `file_read` away. The request guard injects a secret on a hop whose
+// host matches and on no other; the egress guard admits a listed private
+// host and refuses loopback whatever the list says.
+
+/// What `/guardian secret …` asks for, parsed without a database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SecretOp {
+    List,
+    Show(String),
+    RemoveHost(String),
+    RemoveHeader(String, String),
+    Set { host: String, header: String, value: String },
+}
+
+fn is_header_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+/// `secret` | `secret <host>` | `secret <host> remove` |
+/// `secret <host> <header> remove` | `secret <host> <header> <value…>`.
+/// The value is the rest of the line, spaces included. The host is
+/// normalized like a git host (scheme and path off, lowercase, a port
+/// kept); the header name is lowercased and must be a token.
+fn parse_secret_args(rest: &str) -> Result<SecretOp, String> {
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return Ok(SecretOp::List);
+    }
+    let (host_raw, after_host) = match rest.split_once(char::is_whitespace) {
+        Some((h, r)) => (h, r.trim()),
+        None => (rest, ""),
+    };
+    let host = crate::tools::engineering::normalize_git_host(host_raw)?;
+    if after_host.is_empty() {
+        return Ok(SecretOp::Show(host));
+    }
+    if after_host.eq_ignore_ascii_case("remove") {
+        return Ok(SecretOp::RemoveHost(host));
+    }
+    let (header_raw, value) = match after_host.split_once(char::is_whitespace) {
+        Some((h, v)) => (h, v.trim()),
+        None => (after_host, ""),
+    };
+    let header = header_raw.to_ascii_lowercase();
+    if !is_header_name(&header) {
+        return Err(format!("'{header_raw}' is not a valid header name"));
+    }
+    if value.is_empty() {
+        return Err(format!(
+            "give the value: /guardian secret {host} {header_raw} <value> (or 'remove')"
+        ));
+    }
+    if value.eq_ignore_ascii_case("remove") {
+        return Ok(SecretOp::RemoveHeader(host, header));
+    }
+    if value.contains(['\r', '\n']) {
+        return Err("a header value cannot contain a line break".to_string());
+    }
+    Ok(SecretOp::Set { host, header, value: value.to_string() })
+}
+
+/// `/guardian secret …`. Values are never echoed: replies name hosts and
+/// header names only.
+async fn secret_cmd(db: &Arc<WardsonDbClient>, rest: &str) -> String {
+    let op = match parse_secret_args(rest) {
+        Ok(op) => op,
+        Err(e) => return format!("guardian: {e}"),
+    };
+    let mut cfg = match crate::config::load_config(db).await {
+        Ok(c) => c,
+        Err(e) => return format!("guardian: could not load config — {e}"),
+    };
+    let mut secrets = cfg.guardian_secrets.take().unwrap_or_default();
+    let reply = match op {
+        SecretOp::List => {
+            if secrets.is_empty() {
+                return "guardian: no secrets stored. /guardian secret <host> <header> <value> \
+                        adds one; the host injects it into every http_request to that host, \
+                        and the model never sees it."
+                    .to_string();
+            }
+            let rows: Vec<String> = secrets
+                .iter()
+                .map(|(h, m)| format!("{h} ({})", m.keys().cloned().collect::<Vec<_>>().join(", ")))
+                .collect();
+            return format!("guardian: secrets stored for {} host(s): {}", secrets.len(), rows.join("; "));
+        }
+        SecretOp::Show(host) => {
+            return match secrets.get(&host) {
+                Some(m) => format!(
+                    "guardian: secrets for {host}: {} (names only; values never shown)",
+                    m.keys().cloned().collect::<Vec<_>>().join(", ")
+                ),
+                None => format!("guardian: no secrets stored for {host}"),
+            };
+        }
+        SecretOp::RemoveHost(host) => match secrets.remove(&host) {
+            Some(m) => format!("guardian: {} secret(s) removed for {host}", m.len()),
+            None => return format!("guardian: no secrets stored for {host}"),
+        },
+        SecretOp::RemoveHeader(host, header) => {
+            let removed = secrets.get_mut(&host).and_then(|m| m.remove(&header)).is_some();
+            if let Some(m) = secrets.get(&host)
+                && m.is_empty()
+            {
+                secrets.remove(&host);
+            }
+            if !removed {
+                return format!("guardian: no secret '{header}' stored for {host}");
+            }
+            format!("guardian: secret '{header}' removed for {host}")
+        }
+        SecretOp::Set { host, header, value } => {
+            secrets.entry(host.clone()).or_default().insert(header.clone(), value);
+            format!(
+                "guardian: secret stored for {host}: header '{header}' (value not shown). The host \
+                 adds it to every http_request to {host}; a tool never sees it."
+            )
+        }
+    };
+    cfg.guardian_secrets = if secrets.is_empty() { None } else { Some(secrets) };
+    match crate::config::save_config(db, &cfg).await {
+        Ok(()) => reply,
+        Err(e) => format!("guardian: could not save config — {e}"),
+    }
+}
+
+/// The request guard's view of the stored secrets, flattened.
+fn secrets_from(cfg: &SystemConfig) -> Vec<embra_guardian::SecretHeader> {
+    cfg.guardian_secrets
+        .iter()
+        .flat_map(|hosts| hosts.iter())
+        .flat_map(|(host, headers)| {
+            headers.iter().map(move |(name, value)| embra_guardian::SecretHeader {
+                host: host.to_ascii_lowercase(),
+                name: name.to_ascii_lowercase(),
+                value: value.clone(),
+            })
+        })
+        .collect()
+}
+
+/// What `/guardian egress …` asks for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EgressOp {
+    List,
+    Allow(String),
+    Deny(String),
+}
+
+/// `egress` | `egress allow <host>` | `egress deny <host>`. A host is a
+/// name or an IP literal, normalized like a git host. Loopback cannot be
+/// allowed: the guard refuses it whatever the list says.
+fn parse_egress_args(rest: &str) -> Result<EgressOp, String> {
+    let rest = rest.trim();
+    if rest.is_empty() || rest.eq_ignore_ascii_case("list") {
+        return Ok(EgressOp::List);
+    }
+    let (verb, host_raw) = match rest.split_once(char::is_whitespace) {
+        Some((v, h)) => (v, h.trim()),
+        None => (rest, ""),
+    };
+    if host_raw.is_empty() {
+        return Err(format!("give the host: /guardian egress {verb} <host>"));
+    }
+    let host = crate::tools::engineering::normalize_git_host(host_raw)?;
+    // The address of a literal: the whole host when it parses (an IPv6
+    // literal has colons of its own), else what stands before a port.
+    let literal = host
+        .parse::<std::net::IpAddr>()
+        .ok()
+        .or_else(|| host.rsplit_once(':').and_then(|(h, _)| h.parse::<std::net::IpAddr>().ok()));
+    let bare = host.split(':').next().unwrap_or("");
+    let loopback = bare == "localhost"
+        || literal.is_some_and(|ip| {
+            !matches!(embra_guardian::caps::classify(&ip), embra_guardian::caps::AddressClass::Private)
+        });
+    match verb.to_ascii_lowercase().as_str() {
+        "allow" if loopback => Err(format!(
+            "'{host}' is not a private host: loopback, link-local and public addresses are not \
+             the allowlist's business (loopback is refused always)"
+        )),
+        "allow" => Ok(EgressOp::Allow(host)),
+        "deny" | "remove" => Ok(EgressOp::Deny(host)),
+        other => Err(format!("unknown egress action '{other}'. Use allow <host>, deny <host>, or nothing to list")),
+    }
+}
+
+/// `/guardian egress …`: the operator's allowlist of private hosts.
+async fn egress_cmd(db: &Arc<WardsonDbClient>, rest: &str) -> String {
+    let op = match parse_egress_args(rest) {
+        Ok(op) => op,
+        Err(e) => return format!("guardian: {e}"),
+    };
+    let mut cfg = match crate::config::load_config(db).await {
+        Ok(c) => c,
+        Err(e) => return format!("guardian: could not load config — {e}"),
+    };
+    let mut hosts = cfg.guardian_private_hosts.take().unwrap_or_default();
+    let reply = match op {
+        EgressOp::List => {
+            return if hosts.is_empty() {
+                "guardian: the egress allowlist is empty: tools reach public addresses only. \
+                 /guardian egress allow <host> admits a private host (loopback never)."
+                    .to_string()
+            } else {
+                format!("guardian: private hosts the tools may reach: {}", hosts.join(", "))
+            };
+        }
+        EgressOp::Allow(host) => {
+            if hosts.iter().any(|h| h == &host) {
+                return format!("guardian: {host} is already on the egress allowlist");
+            }
+            hosts.push(host.clone());
+            hosts.sort();
+            format!(
+                "guardian: {host} added to the egress allowlist: http_get and http_request may \
+                 reach it although it resolves to a private address. Loopback stays refused."
+            )
+        }
+        EgressOp::Deny(host) => {
+            let before = hosts.len();
+            hosts.retain(|h| h != &host);
+            if hosts.len() == before {
+                return format!("guardian: {host} is not on the egress allowlist");
+            }
+            format!("guardian: {host} removed from the egress allowlist")
+        }
+    };
+    cfg.guardian_private_hosts = if hosts.is_empty() { None } else { Some(hosts) };
+    match crate::config::save_config(db, &cfg).await {
+        Ok(()) => reply,
+        Err(e) => format!("guardian: could not save config — {e}"),
     }
 }
 
@@ -1453,15 +1716,30 @@ pub async fn guardian_call(
             // structured "not configured" envelope inside the guard — it
             // does NOT fail the call.
             let mut caps = embra_guardian::Capabilities::none();
-            if compiled
-                .caps
-                .iter()
-                .any(|c| c == embra_guardian::abi::CAP_HTTP_GET)
-            {
-                match embra_guardian::caps::ReqwestTransport::new() {
+            let wants_http = compiled.caps.iter().any(|c| c == embra_guardian::abi::CAP_HTTP_GET);
+            let wants_request =
+                compiled.caps.iter().any(|c| c == embra_guardian::abi::CAP_HTTP_REQUEST);
+            if wants_http || wants_request {
+                // The transport takes the operator's CA drop-ins (an internal
+                // host on the allowlist behind an internal CA); the policy
+                // takes the allowlist, and a tool with http_request the
+                // secrets. Before setup there is no config: public hosts only
+                // and no secrets, never a failed call.
+                let cfg = crate::config::load_config(db).await.ok();
+                let roots = crate::tools::engineering::load_operator_ca_certs();
+                match embra_guardian::caps::ReqwestTransport::with_roots(roots) {
                     Ok(tr) => {
                         caps.http = Some(Arc::new(tr));
-                        caps.http_policy = embra_guardian::EgressPolicy::default();
+                        caps.http_policy = embra_guardian::EgressPolicy {
+                            private_hosts: cfg
+                                .as_ref()
+                                .and_then(|c| c.guardian_private_hosts.clone())
+                                .unwrap_or_default(),
+                            ..Default::default()
+                        };
+                        if wants_request {
+                            caps.secrets = cfg.as_ref().map(secrets_from).unwrap_or_default();
+                        }
                     }
                     Err(e) => {
                         return Err(DispatchError::Handler(format!(
@@ -1489,7 +1767,7 @@ pub async fn guardian_call(
             let module = compiled.module.clone();
             // A tool that fetches waits on the network inside its budget;
             // its deadline is the fetch budget plus the guest's own time.
-            let deadline = if compiled.caps.iter().any(|c| c == embra_guardian::abi::CAP_HTTP_GET) {
+            let deadline = if wants_http || wants_request {
                 embra_guardian::host::DEADLINE_WITH_HTTP
             } else {
                 embra_guardian::host::DEFAULT_DEADLINE
@@ -1529,6 +1807,64 @@ pub async fn guardian_call(
         other => Err(DispatchError::Handler(format!(
             "guardian: action must be \"invoke\" or \"status\", got \"{other}\""
         ))),
+    }
+}
+
+#[cfg(test)]
+mod secret_and_egress_tests {
+    use super::*;
+
+    #[test]
+    fn secret_args_parse_every_form_and_keep_the_value_whole() {
+        assert_eq!(parse_secret_args("  ").unwrap(), SecretOp::List);
+        assert_eq!(parse_secret_args("GitLab.OPS.wsds").unwrap(), SecretOp::Show("gitlab.ops.wsds".into()));
+        assert_eq!(parse_secret_args("https://api.example.com/v1 remove").unwrap(), SecretOp::RemoveHost("api.example.com".into()));
+        assert_eq!(
+            parse_secret_args("api.example.com X-API-Key remove").unwrap(),
+            SecretOp::RemoveHeader("api.example.com".into(), "x-api-key".into())
+        );
+        assert_eq!(
+            parse_secret_args("gitlab.ops.wsds:8443 Authorization Bearer two words").unwrap(),
+            SecretOp::Set { host: "gitlab.ops.wsds:8443".into(), header: "authorization".into(), value: "Bearer two words".into() }
+        );
+        assert!(parse_secret_args("api.example.com X Space v").is_ok(), "the value takes the rest");
+        assert!(parse_secret_args("api.example.com [bad] v").unwrap_err().contains("header name"));
+        assert!(parse_secret_args("api.example.com X-API-Key").unwrap_err().contains("give the value"));
+        assert!(parse_secret_args("user@host X-API-Key v").is_err(), "a host with userinfo is refused");
+    }
+
+    #[test]
+    fn secrets_are_flattened_lowercase_for_the_guard() {
+        let mut cfg: SystemConfig = serde_json::from_value(serde_json::json!({
+            "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase1",
+            "created_at": "", "version": "test", "kg_temporal_window_secs": 1800,
+            "kg_max_traversal_depth": 3, "kg_traversal_depth_ceiling": 5, "kg_edge_candidate_limit": 50,
+        }))
+        .unwrap();
+        assert!(secrets_from(&cfg).is_empty());
+        let mut headers = std::collections::BTreeMap::new();
+        headers.insert("Authorization".to_string(), "Bearer t".to_string());
+        let mut secrets = std::collections::BTreeMap::new();
+        secrets.insert("GitLab.ops.wsds".to_string(), headers);
+        cfg.guardian_secrets = Some(secrets);
+        let flat = secrets_from(&cfg);
+        assert_eq!(flat.len(), 1);
+        assert_eq!((flat[0].host.as_str(), flat[0].name.as_str(), flat[0].value.as_str()), ("gitlab.ops.wsds", "authorization", "Bearer t"));
+    }
+
+    #[test]
+    fn egress_args_allow_private_hosts_and_never_loopback() {
+        assert_eq!(parse_egress_args("").unwrap(), EgressOp::List);
+        assert_eq!(parse_egress_args("list").unwrap(), EgressOp::List);
+        assert_eq!(parse_egress_args("allow https://GitLab.ops.wsds/").unwrap(), EgressOp::Allow("gitlab.ops.wsds".into()));
+        assert_eq!(parse_egress_args("allow 172.16.10.187").unwrap(), EgressOp::Allow("172.16.10.187".into()));
+        assert_eq!(parse_egress_args("deny gitlab.ops.wsds").unwrap(), EgressOp::Deny("gitlab.ops.wsds".into()));
+        for lo in ["allow localhost", "allow 127.0.0.1", "allow ::1", "allow 169.254.169.254", "allow 1.1.1.1"] {
+            let err = parse_egress_args(lo).unwrap_err();
+            assert!(err.contains("not a private host"), "{lo}: {err}");
+        }
+        assert!(parse_egress_args("allow").unwrap_err().contains("give the host"));
+        assert!(parse_egress_args("open x").unwrap_err().contains("unknown egress action"));
     }
 }
 

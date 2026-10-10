@@ -533,6 +533,8 @@ impl BrainService for BrainGrpcService {
                     image_provider: None,
                     image_model: None,
                     git_tokens: None,
+                    guardian_secrets: None,
+                    guardian_private_hosts: None,
                     anthropic_api_key: None,
                     gemini_api_key: None,
                     max_tool_iterations: None,
@@ -1193,6 +1195,8 @@ async fn handle_request(
                 image_provider: None,
                 image_model: None,
                 git_tokens: None,
+                guardian_secrets: None,
+                guardian_private_hosts: None,
                 anthropic_api_key: None,
                 gemini_api_key: None,
                 max_tool_iterations: None,
@@ -2869,7 +2873,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-5.5|opus-5|opus-4.8|fable-5.1|fable-5>  Switch the Anthropic model (next message)\n  /effort                            Show the active provider's effort level and what is sent\n  /effort <low|medium|high|xhigh|max>  Set effort for the active provider (Anthropic default max; Gemini high; local presets: sent verbatim, model-validated); /effort reset clears\n  /embeddings                        Show the local semantic-similarity layer: model, index, how many nodes are embedded\n  /embeddings <on|off>               Enable or disable semantic similarity in retrieval (default on)\n  /embeddings backfill [--force]     Embed nodes that need it (local CPU, ~55ms/node); --force re-embeds all\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image or a text file (uploaded id, uploads/ path or any workspace path) to your next message\n  /attach list | clear               Show or drop the staged attachments\n  /download <path>                   Hand a workspace file to your browser as a download (regular files up to 12 MiB)\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-3-pro-image (default) | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian rebuild <name>|--all     Rebuild tools an OS update left unloaded, or failed builds (validated + replicant-checked again)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-5.5|opus-5|opus-4.8|fable-5.1|fable-5>  Switch the Anthropic model (next message)\n  /effort                            Show the active provider's effort level and what is sent\n  /effort <low|medium|high|xhigh|max>  Set effort for the active provider (Anthropic default max; Gemini high; local presets: sent verbatim, model-validated); /effort reset clears\n  /embeddings                        Show the local semantic-similarity layer: model, index, how many nodes are embedded\n  /embeddings <on|off>               Enable or disable semantic similarity in retrieval (default on)\n  /embeddings backfill [--force]     Embed nodes that need it (local CPU, ~55ms/node); --force re-embeds all\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image or a text file (uploaded id, uploads/ path or any workspace path) to your next message\n  /attach list | clear               Show or drop the staged attachments\n  /download <path>                   Hand a workspace file to your browser as a download (regular files up to 12 MiB)\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-3-pro-image (default) | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian rebuild <name>|--all     Rebuild tools an OS update left unloaded, or failed builds (validated + replicant-checked again)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /guardian secret <host> <header> <value>  Store a credential the host adds to every http_request to that host (never in a tool's input); `secret` lists, `<host> remove` forgets\n  /guardian egress allow|deny <host>   The allowlist of private hosts the tools may reach (loopback is refused always); `egress` lists\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -7929,6 +7933,8 @@ mod native_loop_tests {
             image_provider: None,
             image_model: None,
             git_tokens: None,
+            guardian_secrets: None,
+            guardian_private_hosts: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
@@ -8801,6 +8807,8 @@ mod reasoning_delta_privacy_tests {
             image_provider: None,
             image_model: None,
             git_tokens: None,
+            guardian_secrets: None,
+            guardian_private_hosts: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
@@ -8862,6 +8870,8 @@ mod soul_sealed_mode_change_tests {
             image_provider: None,
             image_model: None,
             git_tokens: None,
+            guardian_secrets: None,
+            guardian_private_hosts: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,

@@ -593,6 +593,8 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<CronFired
             image_provider: None,
             image_model: None,
             git_tokens: None,
+            guardian_secrets: None,
+            guardian_private_hosts: None,
             anthropic_api_key: None,
             gemini_api_key: None,
             max_tool_iterations: None,
