@@ -37,8 +37,17 @@ pub const WEB_SEARCH: ShippedTool = ShippedTool {
     source: include_str!("shipped/web_search.rs"),
 };
 
+/// A guarded curl: one HTTP request with headers, query pairs and a body,
+/// for pages, resources and API work (`docs/GUARDIAN-HTTP-REQUEST-EXAMPLE.md`).
+/// Needs no key: credentials come from `/guardian secret`, private hosts
+/// from `/guardian egress allow`.
+pub const HTTP_REQUEST: ShippedTool = ShippedTool {
+    name: "http_request",
+    source: include_str!("shipped/http_request.rs"),
+};
+
 /// Every shipped tool, in install order.
-pub const SHIPPED: &[ShippedTool] = &[WEB_SEARCH];
+pub const SHIPPED: &[ShippedTool] = &[WEB_SEARCH, HTTP_REQUEST];
 
 /// Every version of the `web_search` module the project has shipped as
 /// the doc example, oldest first; the last is the current source. A stored
@@ -67,7 +76,25 @@ pub const KNOWN_WEB_SEARCH_SHA256: &[&str] = &[
 pub fn known_sha256s(name: &str) -> &'static [&'static str] {
     match name {
         "web_search" => KNOWN_WEB_SEARCH_SHA256,
+        "http_request" => KNOWN_HTTP_REQUEST_SHA256,
         _ => &[],
+    }
+}
+
+/// Every version of the `http_request` module the project has shipped,
+/// oldest first; the last is the current source.
+pub const KNOWN_HTTP_REQUEST_SHA256: &[&str] = &[
+    // 2026-10-09: the first version
+    "178c62efb322d2a85cccd82a0c5d9b2689748e5dcfe85ec2f56d1983a00d5568",
+];
+
+/// The doc page a shipped tool's module is mirrored on, byte for byte.
+#[cfg(test)]
+fn doc_of(name: &str) -> &'static str {
+    match name {
+        "web_search" => include_str!("../../../docs/GUARDIAN-ADVANCED-EXAMPLE.md"),
+        "http_request" => include_str!("../../../docs/GUARDIAN-HTTP-REQUEST-EXAMPLE.md"),
+        other => panic!("no doc for the shipped tool {other}"),
     }
 }
 
@@ -104,9 +131,10 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_web_search_source_is_the_doc_example() {
-        let doc = include_str!("../../../docs/GUARDIAN-ADVANCED-EXAMPLE.md");
-        assert_eq!(doc_module(doc, "web_search"), WEB_SEARCH.stored_source());
+    fn every_shipped_source_is_its_doc_example() {
+        for t in SHIPPED {
+            assert_eq!(doc_module(doc_of(t.name), t.name), t.stored_source(), "{}", t.name);
+        }
     }
 
     #[test]
@@ -118,17 +146,28 @@ mod tests {
         let m = crate::validate(WEB_SEARCH.source, &[]).unwrap();
         assert_eq!(m.caps, vec!["http_get".to_string(), "web_search".to_string()]);
         assert!(m.description.contains("/guardian key brave"), "the description names the key");
+        let m = crate::validate(HTTP_REQUEST.source, &[]).unwrap();
+        assert_eq!(m.caps, vec!["http_request".to_string()]);
+        assert!(
+            m.description.contains("/guardian secret") && m.description.contains("/guardian egress allow"),
+            "the description names the two commands"
+        );
+        assert!(m.input_schema["properties"]["json"].is_object(), "{}", m.input_schema);
     }
 
     #[test]
-    fn the_known_hashes_end_with_the_current_source() {
-        let known = known_sha256s("web_search");
-        assert_eq!(known.last().copied(), Some(WEB_SEARCH.source_sha256().as_str()));
-        assert!(known.iter().all(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())));
-        let mut uniq = known.to_vec();
-        uniq.sort_unstable();
-        uniq.dedup();
-        assert_eq!(uniq.len(), known.len(), "a hash repeats");
+    fn every_known_hash_list_ends_with_its_current_source() {
+        for t in SHIPPED {
+            let known = known_sha256s(t.name);
+            assert_eq!(known.last().copied(), Some(t.source_sha256().as_str()), "{}", t.name);
+            assert!(known.iter().all(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit())));
+            let mut uniq = known.to_vec();
+            uniq.sort_unstable();
+            uniq.dedup();
+            assert_eq!(uniq.len(), known.len(), "a hash repeats for {}", t.name);
+        }
         assert!(known_sha256s("other").is_empty());
+        let names: Vec<&str> = SHIPPED.iter().map(|t| t.name).collect();
+        assert_eq!(names, ["web_search", "http_request"]);
     }
 }

@@ -732,7 +732,8 @@ pub fn guarded_http_request(caps: &Capabilities, input: &str) -> String {
             ));
         }
         let mut body = resp.body;
-        if body.len() > req.max_bytes {
+        let cut = body.len() > req.max_bytes;
+        if cut {
             body.truncate(req.max_bytes);
         }
         let mut env = serde_json::json!({
@@ -745,6 +746,10 @@ pub fn guarded_http_request(caps: &Capabilities, input: &str) -> String {
         });
         if hops > 0 {
             env["redirects"] = serde_json::json!(hops);
+        }
+        if cut {
+            // A body cut mid-way is not the answer: the guest says so.
+            env["truncated_at"] = serde_json::json!(req.max_bytes);
         }
         return env.to_string();
     }
@@ -1219,10 +1224,11 @@ impl HttpTransport for ReqwestTransport {
             .iter()
             .map(|(n, v)| (n.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
             .collect();
-        // Read bounded: at most the cap, never the whole of a large body.
+        // Read bounded: one byte past the cap, so a guard can tell a body
+        // it cut from one that fit; never the whole of a large body.
         let mut body = Vec::new();
         (&mut resp)
-            .take(req.max_bytes as u64)
+            .take(req.max_bytes as u64 + 1)
             .read_to_end(&mut body)
             .map_err(|e| e.to_string())?;
         Ok(HttpResponse { status, content_type, body, location, headers })
@@ -1745,11 +1751,15 @@ b"}}"#] {
         let rec = Recorder::new(vec![("https://1.1.1.1/", 200, None, long, "text/plain")]);
         let v = parse(&guarded_http_request(&caps_with(&rec), r#"{"url":"https://1.1.1.1/","max_bytes":100}"#));
         assert_eq!(v["body"].as_str().unwrap().len(), 100);
+        assert_eq!(v["truncated_at"], 100, "{v}");
         assert_eq!(rec.seen()[0].max_bytes, 100);
+        let v = parse(&guarded_http_request(&caps_with(&rec), r#"{"url":"https://1.1.1.1/","max_bytes":2000}"#));
+        assert_eq!(v["body"].as_str().unwrap().len(), 2000);
+        assert!(v.get("truncated_at").is_none(), "a body that fit: {v}");
         let _ = guarded_http_request(&caps_with(&rec), r#"{"url":"https://1.1.1.1/","max_bytes":99999999,"timeout_ms":999999}"#);
         let seen = rec.seen();
-        assert_eq!(seen[1].max_bytes, HTTP_RESPONSE_MAX_BYTES);
-        assert!(seen[1].timeout <= EgressPolicy::default().timeout);
+        assert_eq!(seen[2].max_bytes, HTTP_RESPONSE_MAX_BYTES);
+        assert!(seen[2].timeout <= EgressPolicy::default().timeout);
         let v = parse(&guarded_http_request(&caps_with(&rec), r#"{"url":"https://1.1.1.1/","method":"GET","body":"x"}"#));
         assert_eq!(v["ok"], false, "a GET carries no body: {v}");
         let v = parse(&guarded_http_request(&caps_with(&rec), r#"{"url":"https://1.1.1.1/","method":"TRACE"}"#));

@@ -6,6 +6,7 @@ const DOCS: &[&str] = &[
     include_str!("../../../docs/GUARDIAN-TOOL-EXAMPLES.md"),
     include_str!("../../../docs/GUARDIAN-ADVANCED-EXAMPLE.md"),
     include_str!("../../../docs/GUARDIAN-KG-SCAN-EXAMPLE.md"),
+    include_str!("../../../docs/GUARDIAN-HTTP-REQUEST-EXAMPLE.md"),
 ];
 
 #[test]
@@ -45,6 +46,7 @@ fn every_doc_module_passes_the_validator() {
                     let expect_caps: &[&str] = match m.name.as_str() {
                         "http_fetch" => &["http_get"],
                         "web_search" => &["http_get", "web_search"],
+                        "http_request" => &["http_request"],
                         _ => &[],
                     };
                     assert_eq!(
