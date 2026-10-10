@@ -1826,8 +1826,10 @@ fn select_key_turns(turns: &[serde_json::Value], offset: usize) -> Vec<(usize, &
 }
 
 /// Extract learnings from a session into memory (Option B: returns context for Brain).
-/// Param: `<name> [start-end]`
-pub async fn session_extract(db: &WardsonDbClient, param: &str) -> String {
+/// Param: `<name> [start-end]`. `approved`: the operator approved saving
+/// before the call, as in the memorize turn of a guided delete, so the
+/// instruction asks for no approval round (`extract_instruction`).
+pub async fn session_extract(db: &WardsonDbClient, param: &str, approved: bool) -> String {
     if param.is_empty() {
         return "Usage: session_extract <name> or session_extract <name> <start>-<end>"
             .into();
@@ -1877,39 +1879,66 @@ pub async fn session_extract(db: &WardsonDbClient, param: &str) -> String {
         start + 1,
         end,
         formatted,
-        EXTRACT_INSTRUCTION
+        extract_instruction(approved)
     )
 }
 
 /// What `session_extract` asks for after the transcript. The categories are
 /// the ones `remember` takes; `remember` promotes each learning as it saves
 /// it, so no promotion step is named, and the linking is asked for here.
-const EXTRACT_INSTRUCTION: &str = "Identify durable learnings from this session. For each:\n\
-     - Content: one self-contained statement, on a single line\n\
-     - Suggested #tags\n\
-     - Category: fact / preference / decision / observation / pattern\n\n\
-     Present the proposed extractions for approval. After approval, save each with remember: \
-     the content with its #tags, and the category. remember writes the memory into the \
-     knowledge graph in the same call. Link each new node to the related nodes remember \
-     lists, with knowledge_link.";
+/// The two forms differ in one sentence: an ordinary extract asks for the
+/// operator's approval before saving; an approved one (the memorize turn of
+/// a guided delete, where the deletion reason was the approval) saves now.
+fn extract_instruction(approved: bool) -> String {
+    let save = if approved {
+        "The operator approved these when they gave the deletion reason. Save each now, \
+         without presenting them first, with remember:"
+    } else {
+        "Present the proposed extractions for approval. After approval, save each with remember:"
+    };
+    format!(
+        "Identify durable learnings from this session. For each:\n\
+         - Content: one self-contained statement, on a single line\n\
+         - Suggested #tags\n\
+         - Category: fact / preference / decision / observation / pattern\n\n\
+         {save} the content with its #tags, and the category. remember writes the memory into \
+         the knowledge graph in the same call. Link each new node to the related nodes \
+         remember lists, with knowledge_link."
+    )
+}
 
 #[cfg(test)]
 mod extract_instruction_tests {
-    use super::EXTRACT_INSTRUCTION;
+    use super::extract_instruction;
     use crate::knowledge::types::SemanticCategory;
 
     #[test]
     fn the_extract_instruction_names_the_five_categories_and_no_promote_step() {
-        let categories = EXTRACT_INSTRUCTION
-            .lines()
-            .find(|l| l.starts_with("- Category: "))
-            .expect("a category line");
-        let named: Vec<&str> = categories.trim_start_matches("- Category: ").split(" / ").collect();
-        let known: Vec<&str> = SemanticCategory::ALL.iter().map(SemanticCategory::as_str).collect();
-        assert_eq!(named, known, "the categories remember takes, and no other");
-        assert!(EXTRACT_INSTRUCTION.contains("save each with remember"));
-        assert!(EXTRACT_INSTRUCTION.contains("knowledge_link"));
-        assert!(!EXTRACT_INSTRUCTION.contains("knowledge_promote"));
+        for approved in [false, true] {
+            let text = extract_instruction(approved);
+            let categories = text
+                .lines()
+                .find(|l| l.starts_with("- Category: "))
+                .expect("a category line");
+            let named: Vec<&str> = categories.trim_start_matches("- Category: ").split(" / ").collect();
+            let known: Vec<&str> = SemanticCategory::ALL.iter().map(SemanticCategory::as_str).collect();
+            assert_eq!(named, known, "the categories remember takes, and no other");
+            assert!(text.contains("with remember: the content with its #tags"), "{text}");
+            assert!(text.contains("knowledge_link"), "{text}");
+            assert!(!text.contains("knowledge_promote"), "{text}");
+        }
+    }
+
+    /// The memorize turn of a guided delete reads this text after its own
+    /// prompt; an approval round there ends the turn without the marker,
+    /// and nothing is deleted.
+    #[test]
+    fn only_the_ordinary_extract_asks_for_approval() {
+        let ordinary = extract_instruction(false);
+        assert!(ordinary.contains("Present the proposed extractions for approval. After approval, save each with remember:"), "{ordinary}");
+        let approved = extract_instruction(true);
+        assert!(!approved.contains("for approval"), "{approved}");
+        assert!(approved.contains("Save each now, without presenting them first, with remember:"), "{approved}");
     }
 }
 
@@ -2097,12 +2126,15 @@ pub struct SessionExtractArgs {
 
 impl SessionExtractArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        // The memorize turn of a guided delete extracts the session it
+        // deletes; the operator approved saving with the deletion reason.
+        let approved = ctx.deleting_session == Some(self.name.trim());
         let param = if self.range.is_empty() {
             self.name
         } else {
             format!("{} {}", self.name, self.range)
         };
-        Ok(session_extract(ctx.db, &param).await)
+        Ok(session_extract(ctx.db, &param, approved).await)
     }
 }
 

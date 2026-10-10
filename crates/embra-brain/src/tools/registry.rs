@@ -34,6 +34,11 @@ pub struct DispatchContext<'a> {
     pub config_tz: &'a str,
     pub trace: &'a TurnTraceHandle,
     pub turn_index: usize,
+    /// The session a guided delete is preserving, in that flow's memorize
+    /// turn (`PendingSessionDelete.name` in `grpc_service.rs`); `None` on
+    /// every other dispatch. `remember` attributes a memory to it, and
+    /// `session_extract` drops its approval round for it.
+    pub deleting_session: Option<&'a str>,
 }
 
 /// Inventory-collected tool descriptor.
@@ -223,6 +228,7 @@ mod activity_tests {
             config_tz: "UTC",
             trace: &trace,
             turn_index: 0,
+            deleting_session: None,
         };
         let out = dispatch("time", serde_json::json!({}), ctx).await;
         assert!(out.is_ok(), "{out:?}");

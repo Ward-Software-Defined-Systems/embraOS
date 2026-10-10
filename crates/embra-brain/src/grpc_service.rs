@@ -352,8 +352,9 @@ pub(crate) fn build_delete_memorize_prompt(name: &str, reason: &str) -> String {
          If that reply declines, cancels, or clearly is not a reason to proceed, do not \
          save anything and end your response with {SESSION_DELETE_ABORT_MARKER} on its own line.\n\
          Otherwise treat it as the deletion reason and preserve the session's value before it is removed:\n\
-         1. Call session_extract with name \"{name}\" and follow its instructions — save each \
-         durable learning with remember and its category; remember writes it into the knowledge graph.\n\
+         1. Call session_extract with name \"{name}\" and follow its instructions. The operator's \
+         reply is the approval it asks for: save each durable learning with remember and its category \
+         in this turn, without presenting them first. remember records each as coming from session '{name}'.\n\
          2. Also save one memory recording that session '{name}' was deleted and the operator's reason.\n\
          3. Tell the operator what you preserved, then end your response with \
          {SESSION_DELETE_READY_MARKER} on its own line.\n\
@@ -2023,6 +2024,9 @@ async fn handle_request(
                                 config_tz: &loaded_config.timezone,
                                 trace: &trace_handle,
                                 turn_index,
+                                // The memorize turn of a guided delete: what
+                                // it saves comes from the session it deletes.
+                                deleting_session: delete_exec.as_ref().map(|d| d.name.as_str()),
                             };
                             // Operator-facing tool-execution indicator — rides
                             // on the existing Thinking signal via `current_tool`.
@@ -9541,6 +9545,11 @@ mod session_delete_flow_tests {
         assert!(p.contains("superseded by the v2 rewrite"));
         assert!(p.contains("session_extract"));
         assert!(p.contains("remember"));
+        // The reason is the approval: an approval round would end the turn
+        // without the marker, and nothing would be deleted.
+        assert!(p.contains("The operator's reply is the approval it asks for"), "{p}");
+        assert!(p.contains("without presenting them first"), "{p}");
+        assert!(p.contains("remember records each as coming from session 'old-proj'"), "{p}");
         // `remember` promotes what it saves; the prompt names no second step.
         assert!(!p.contains("knowledge_promote"));
         assert!(p.contains(SESSION_DELETE_READY_MARKER));

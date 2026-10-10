@@ -620,6 +620,7 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<CronFired
             config_tz: &cfg.timezone,
             trace: &cron_trace,
             turn_index: 0,
+            deleting_session: None,
         };
         let started = std::time::Instant::now();
         let started_at = Utc::now();

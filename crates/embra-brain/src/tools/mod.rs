@@ -947,6 +947,34 @@ mod remember_tests {
         assert_eq!(writes[3].1["edge_type"], "derived_from");
     }
 
+    /// The memorize turn of a guided delete saves what the deleted session
+    /// taught: the entry names that session, not the one the flow runs in.
+    /// The node's `source_session` is read back from the entry
+    /// (`promotion.rs`), so the entry write is what this test asserts.
+    #[tokio::test]
+    async fn remember_attributes_a_memory_to_the_session_being_deleted() {
+        for (deleting, expected) in [(Some("old-proj"), "old-proj"), (None, "ops")] {
+            let server = server("memory.semantic", data(json!({"_id": "n1"}))).await;
+            let db = WardsonDbClient::from_url(&server.uri());
+            let config = test_config();
+            let trace = embra_tools_core::new_turn_trace_handle();
+            let ctx = registry::DispatchContext {
+                db: &db,
+                config: &config,
+                session_name: "ops",
+                config_tz: "UTC",
+                trace: &trace,
+                turn_index: 0,
+                deleting_session: deleting,
+            };
+            let out = registry::dispatch("remember", json!({"content": "the cert refresh works #certs"}), ctx).await;
+            assert!(out.is_ok(), "{out:?}");
+            let writes = writes_seen(&server).await;
+            assert_eq!(writes[0].0, "POST /memory.entries/docs");
+            assert_eq!(writes[0].1["session"], expected, "deleting_session = {deleting:?}");
+        }
+    }
+
     #[tokio::test]
     async fn remember_with_a_procedure_writes_a_procedural_node() {
         let server = server("memory.procedural", data(json!({"_id": "p1"}))).await;
@@ -2919,7 +2947,10 @@ impl RememberArgs {
             Ok(promotion) => promotion,
             Err(refusal) => return Ok(refusal),
         };
-        Ok(remember(ctx.db, &self.content, promotion, ctx.session_name, ctx.config).await)
+        // A memory comes from the session being deleted in the memorize
+        // turn of a guided delete, and from the active session otherwise.
+        let session = ctx.deleting_session.unwrap_or(ctx.session_name);
+        Ok(remember(ctx.db, &self.content, promotion, session, ctx.config).await)
     }
 }
 

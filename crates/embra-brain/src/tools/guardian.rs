@@ -570,6 +570,7 @@ mod tests {
             config_tz: "UTC",
             trace: &trace,
             turn_index: 0,
+            deleting_session: None,
         };
         let args = serde_json::json!({"action": "invoke", "tool": PROBE, "input": input});
         let out = crate::tools::registry::dispatch("guardian_call", args, ctx).await?;
