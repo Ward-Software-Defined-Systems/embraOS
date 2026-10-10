@@ -39,6 +39,11 @@ pub struct EgressPolicy {
     /// `None` = any host allowed (after scheme + SSRF). `Some` = the host
     /// must equal or be a subdomain of an entry.
     pub allow_domains: Option<Vec<String>>,
+    /// Hosts a request may reach although they resolve to a private
+    /// address: a name (itself and its subdomains) or an IP literal. The
+    /// operator's egress allowlist. Loopback, link-local, multicast and
+    /// reserved addresses are refused whatever stands here.
+    pub private_hosts: Vec<String>,
     pub max_bytes: usize,
     /// The budget of one guarded call, every redirect hop included; each
     /// hop gets what is left of it.
@@ -47,7 +52,12 @@ pub struct EgressPolicy {
 
 impl Default for EgressPolicy {
     fn default() -> Self {
-        Self { allow_domains: None, max_bytes: 256 * 1024, timeout: Duration::from_secs(10) }
+        Self {
+            allow_domains: None,
+            private_hosts: Vec::new(),
+            max_bytes: 256 * 1024,
+            timeout: Duration::from_secs(10),
+        }
     }
 }
 
@@ -83,36 +93,129 @@ fn err_json(msg: &str) -> String {
     serde_json::json!({ "ok": false, "error": msg }).to_string()
 }
 
-/// True if `ip` is a private / loopback / link-local / ULA / unspecified /
-/// CGNAT / IPv4-mapped-private address — i.e. an SSRF target to refuse.
-pub fn is_blocked_ip(ip: &IpAddr) -> bool {
+/// What an address is, for the egress guard. `Public` is the only class
+/// a request reaches by default; `Private` when the operator put the host
+/// on the egress allowlist (`EgressPolicy::private_hosts`, `/guardian
+/// egress allow <host>`); the rest never, whatever the list says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressClass {
+    Public,
+    /// RFC 1918, CGNAT 100.64/10, IPv6 ULA fc00::/7 and site-local fec0::/10.
+    Private,
+    /// 127/8, ::1, and the unspecified addresses.
+    Loopback,
+    /// 169.254/16 (where cloud metadata services live) and fe80::/10.
+    LinkLocal,
+    /// 224/4 and ff00::/8.
+    Multicast,
+    /// 0/8, 240/4 with the broadcast address, the documentation ranges
+    /// (192.0.2/24, 198.51.100/24, 203.0.113/24), the benchmark range
+    /// 198.18/15, and the IPv6 transition forms (64:ff9b::/96, 2002::/16,
+    /// the deprecated `::a.b.c.d`).
+    Reserved,
+}
+
+/// The class of an address. An IPv4-mapped IPv6 address is judged as the
+/// IPv4 it carries.
+pub fn classify(ip: &IpAddr) -> AddressClass {
     match ip {
-        IpAddr::V4(v) => is_blocked_v4(v),
+        IpAddr::V4(v) => classify_v4(v),
         IpAddr::V6(v) => {
             if v.is_loopback() || v.is_unspecified() {
-                return true;
+                return AddressClass::Loopback;
             }
-            // IPv4-mapped (::ffff:a.b.c.d) → judge the embedded v4.
             if let Some(v4) = v.to_ipv4_mapped() {
-                return is_blocked_v4(&v4);
+                return classify_v4(&v4);
             }
-            let s0 = v.segments()[0];
-            (s0 & 0xfe00) == 0xfc00      // ULA fc00::/7
-                || (s0 & 0xffc0) == 0xfe80 // link-local fe80::/10
+            if v.is_multicast() {
+                return AddressClass::Multicast;
+            }
+            let s = v.segments();
+            if s[..6] == [0, 0, 0, 0, 0, 0] {
+                // IPv4-compatible `::a.b.c.d`, deprecated.
+                return AddressClass::Reserved;
+            }
+            if (s[0] == 0x64 && s[1] == 0xff9b && s[2..6] == [0, 0, 0, 0]) || s[0] == 0x2002 {
+                // NAT64 well-known prefix, 6to4.
+                return AddressClass::Reserved;
+            }
+            if (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfec0 {
+                return AddressClass::Private;
+            }
+            if (s[0] & 0xffc0) == 0xfe80 {
+                return AddressClass::LinkLocal;
+            }
+            AddressClass::Public
         }
     }
 }
 
-fn is_blocked_v4(v: &Ipv4Addr) -> bool {
+fn classify_v4(v: &Ipv4Addr) -> AddressClass {
     let o = v.octets();
-    v.is_private()
-        || v.is_loopback()
-        || v.is_link_local()
-        || v.is_unspecified()
-        || v.is_broadcast()
+    if v.is_loopback() || v.is_unspecified() {
+        AddressClass::Loopback
+    } else if v.is_link_local() {
+        AddressClass::LinkLocal
+    } else if v.is_multicast() {
+        AddressClass::Multicast
+    } else if v.is_private() || (o[0] == 100 && (64..=127).contains(&o[1])) {
+        AddressClass::Private
+    } else if v.is_broadcast()
         || v.is_documentation()
         || o[0] == 0
-        || (o[0] == 100 && (64..=127).contains(&o[1])) // CGNAT 100.64.0.0/10
+        || o[0] >= 240
+        || (o[0] == 198 && (o[1] == 18 || o[1] == 19))
+    {
+        AddressClass::Reserved
+    } else {
+        AddressClass::Public
+    }
+}
+
+/// Anything a request may not reach by default: every class but `Public`.
+pub fn is_blocked_ip(ip: &IpAddr) -> bool {
+    classify(ip) != AddressClass::Public
+}
+
+/// Whether `host` (lowercase, no port) is `entry` or a subdomain of it.
+/// An IP literal, as the host or as the entry, matches only itself: an
+/// address has no subdomains, and a partial entry like `0.0.5` must not
+/// stand for every address that ends in it.
+fn host_matches(host: &str, entry: &str) -> bool {
+    let entry = entry.trim().to_ascii_lowercase();
+    if entry.is_empty() {
+        return false;
+    }
+    if host.parse::<IpAddr>().is_ok() || entry.parse::<IpAddr>().is_ok() {
+        return host == entry;
+    }
+    host == entry || host.ends_with(&format!(".{entry}"))
+}
+
+/// The guard's verdict on an address class: public passes, private passes
+/// for a host on the allowlist, and the rest are refused with the class
+/// named, so the operator knows which command (if any) would open it.
+fn refuse_class(class: AddressClass, private_ok: bool, verb: &str) -> Result<(), String> {
+    match class {
+        AddressClass::Public => Ok(()),
+        AddressClass::Private if private_ok => Ok(()),
+        AddressClass::Private => Err(format!(
+            "destination {verb} a private address (SSRF blocked; not on the egress allowlist \
+             — /guardian egress allow <host>)"
+        )),
+        AddressClass::Loopback => Err(format!(
+            "destination {verb} a loopback address (SSRF blocked; refused always)"
+        )),
+        AddressClass::LinkLocal => Err(format!(
+            "destination {verb} a link-local address (SSRF blocked; refused always)"
+        )),
+        AddressClass::Multicast => Err(format!(
+            "destination {verb} a multicast address (SSRF blocked; refused always)"
+        )),
+        AddressClass::Reserved => Err(format!(
+            "destination {verb} a reserved address (SSRF blocked; refused always)"
+        )),
+    }
 }
 
 /// Redirects the guard follows on its own, each hop checked like the
@@ -142,11 +245,17 @@ fn check_url(caps: &Capabilities, url: &str) -> Result<url::Url, String> {
             return Err("destination domain is not in the allowlist".to_string());
         }
     }
-    // SSRF: refuse a literal private IP, and refuse if DNS resolves to one.
-    if let Ok(ip) = host.parse::<IpAddr>()
-        && is_blocked_ip(&ip)
-    {
-        return Err("destination is a private/loopback IP (SSRF blocked)".to_string());
+    // SSRF: the class of a literal address, and of every address DNS
+    // resolves to. Public passes; private passes when the host is on the
+    // operator's egress allowlist; the rest never.
+    let host_lc = host.to_ascii_lowercase();
+    let private_ok = caps
+        .http_policy
+        .private_hosts
+        .iter()
+        .any(|entry| host_matches(&host_lc, entry));
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        refuse_class(classify(&ip), private_ok, "is")?;
     }
     let port = parsed.port_or_known_default().unwrap_or(443);
     match (host.as_str(), port).to_socket_addrs() {
@@ -154,12 +263,7 @@ fn check_url(caps: &Capabilities, url: &str) -> Result<url::Url, String> {
             let mut resolved = false;
             for a in addrs {
                 resolved = true;
-                if is_blocked_ip(&a.ip()) {
-                    return Err(
-                        "destination resolves to a private/loopback address (SSRF blocked)"
-                            .to_string(),
-                    );
-                }
+                refuse_class(classify(&a.ip()), private_ok, "resolves to")?;
             }
             if !resolved {
                 return Err("destination did not resolve".to_string());
@@ -926,6 +1030,78 @@ mod tests {
         let v = parse_ok(&guarded_http_get(&caps, "https://1.1.1.1/"));
         assert_eq!(v["ok"], false);
         assert!(v["error"].as_str().unwrap().contains("content-type"));
+    }
+
+    #[test]
+    fn every_address_class_is_named() {
+        use AddressClass::*;
+        let table: &[(&str, AddressClass)] = &[
+            ("1.1.1.1", Public), ("2606:4700:4700::1111", Public), ("::ffff:1.1.1.1", Public),
+            ("10.0.0.5", Private), ("172.16.9.9", Private), ("192.168.1.1", Private),
+            ("100.64.0.1", Private), ("fd00::1", Private), ("fec0::1", Private), ("::ffff:10.0.0.1", Private),
+            ("127.0.0.1", Loopback), ("127.9.9.9", Loopback), ("0.0.0.0", Loopback), ("::1", Loopback), ("::", Loopback),
+            ("169.254.169.254", LinkLocal), ("fe80::1", LinkLocal),
+            ("224.0.0.1", Multicast), ("239.255.255.250", Multicast), ("ff02::1", Multicast),
+            ("0.1.2.3", Reserved), ("255.255.255.255", Reserved), ("240.0.0.1", Reserved),
+            ("192.0.2.1", Reserved), ("198.51.100.7", Reserved), ("203.0.113.9", Reserved),
+            ("198.18.0.1", Reserved), ("198.19.255.255", Reserved),
+            ("64:ff9b::1.1.1.1", Reserved), ("2002::1", Reserved), ("::1.2.3.4", Reserved),
+        ];
+        for (lit, want) in table {
+            let ip: IpAddr = lit.parse().unwrap();
+            assert_eq!(classify(&ip), *want, "{lit}");
+        }
+        assert!(!is_blocked_ip(&"1.1.1.1".parse().unwrap()));
+        assert!(is_blocked_ip(&"198.18.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn a_private_host_on_the_list_passes_and_loopback_never_does() {
+        let mock = || MockTransport { status: 200, content_type: "text/plain".into(), body: b"in".to_vec() };
+        let caps = Capabilities::with_http(
+            Arc::new(mock()),
+            EgressPolicy {
+                private_hosts: vec!["10.0.0.5".into(), "127.0.0.1".into(), "169.254.169.254".into()],
+                ..Default::default()
+            },
+        );
+        let v = parse_ok(&guarded_http_get(&caps, "https://10.0.0.5/api"));
+        assert_eq!(v["ok"], true, "a listed private host passes: {v}");
+        assert_eq!(v["body"], "in");
+        for (u, class) in [
+            ("https://127.0.0.1/", "loopback"),
+            ("https://169.254.169.254/latest/meta-data/", "link-local"),
+        ] {
+            let v = parse_ok(&guarded_http_get(&caps, u));
+            assert_eq!(v["ok"], false, "{u}");
+            let err = v["error"].as_str().unwrap();
+            assert!(err.contains(class) && err.contains("refused always"), "{u}: {err}");
+        }
+        // A private host that is not on the list names the command.
+        let v = parse_ok(&guarded_http_get(&caps, "https://10.0.0.6/"));
+        assert_eq!(v["ok"], false);
+        assert!(v["error"].as_str().unwrap().contains("/guardian egress allow"), "{v}");
+        // A redirect from a listed host to loopback is refused on the hop.
+        let caps = Capabilities::with_http(
+            Arc::new(RouteTransport(vec![("https://10.0.0.5/", 302, Some("https://127.0.0.1/"), "")])),
+            EgressPolicy { private_hosts: vec!["10.0.0.5".into()], ..Default::default() },
+        );
+        let v = parse_ok(&guarded_http_get(&caps, "https://10.0.0.5/"));
+        assert_eq!(v["ok"], false, "{v}");
+        assert!(v["error"].as_str().unwrap().contains("loopback"), "{v}");
+    }
+
+    #[test]
+    fn the_list_matches_a_name_its_subdomains_and_an_ip_literal() {
+        assert!(host_matches("gitlab.ops.wsds", "ops.wsds"));
+        assert!(host_matches("ops.wsds", "ops.wsds"));
+        assert!(host_matches("gitlab.ops.wsds", "GitLab.OPS.wsds"));
+        assert!(!host_matches("evilops.wsds", "ops.wsds"));
+        assert!(!host_matches("ops.wsds.example", "ops.wsds"));
+        assert!(host_matches("10.0.0.5", "10.0.0.5"));
+        assert!(!host_matches("110.0.0.5", "10.0.0.5"));
+        assert!(!host_matches("10.0.0.5", "0.0.5"), "an IP entry matches only itself");
+        assert!(!host_matches("anything", " "));
     }
 
     #[test]
