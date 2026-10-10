@@ -1487,13 +1487,20 @@ pub async fn guardian_call(
             }
             let input_str = serde_json::to_string(&input).unwrap_or_else(|_| "{}".into());
             let module = compiled.module.clone();
+            // A tool that fetches waits on the network inside its budget;
+            // its deadline is the fetch budget plus the guest's own time.
+            let deadline = if compiled.caps.iter().any(|c| c == embra_guardian::abi::CAP_HTTP_GET) {
+                embra_guardian::host::DEADLINE_WITH_HTTP
+            } else {
+                embra_guardian::host::DEFAULT_DEADLINE
+            };
             let started = std::time::Instant::now();
             let res = tokio::task::spawn_blocking(move || {
                 rt.host().call(
                     &module,
                     &input_str,
                     caps,
-                    embra_guardian::host::DEFAULT_DEADLINE,
+                    deadline,
                     embra_guardian::host::DEFAULT_MEMORY_CAP,
                 )
             })

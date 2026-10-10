@@ -9,11 +9,31 @@
 //! ABI items the host resolves: `memory`, `galloc`, `gfree`,
 //! `guardian_run`.
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use embra_guardian::caps::Capabilities;
-use embra_guardian::host::{WasmHost, DEFAULT_MEMORY_CAP};
+use embra_guardian::caps::{Capabilities, EgressPolicy, HttpResponse, HttpTransport};
+use embra_guardian::host::{WasmHost, DEADLINE_WITH_HTTP, DEFAULT_DEADLINE, DEFAULT_MEMORY_CAP};
 use embra_guardian::GuardianError;
+
+/// The committed probe tool: `{a,b,url?}` → `{sum, fetched}`; it calls
+/// `host::http_get` when `url` is given, so a slow transport makes a
+/// guest that waits inside a host import.
+const PROBE_WASM: &[u8] = include_bytes!("fixtures/probe.wasm");
+
+/// A transport that takes a second to answer.
+struct SlowHttp;
+impl HttpTransport for SlowHttp {
+    fn get(&self, _u: &str, _t: Duration, _m: usize) -> Result<HttpResponse, String> {
+        std::thread::sleep(Duration::from_secs(1));
+        Ok(HttpResponse {
+            status: 200,
+            content_type: "application/json".into(),
+            body: b"{\"page\":\"ok\"}".to_vec(),
+            location: None,
+        })
+    }
+}
 
 const SHORT_DEADLINE: Duration = Duration::from_millis(250);
 const DEADLINE: Duration = Duration::from_secs(5);
@@ -84,6 +104,49 @@ fn runaway_guest_is_interrupted_and_classified_as_timeout() {
         "interrupt took {:?}",
         started.elapsed()
     );
+}
+
+#[test]
+fn the_timeout_names_the_deadline_the_call_was_given() {
+    let host = WasmHost::new().unwrap();
+    let m = compile(&host, SPIN);
+    let err = host
+        .call(&m, "{}", Capabilities::none(), SHORT_DEADLINE, DEFAULT_MEMORY_CAP)
+        .expect_err("a spinning guest must not return");
+    assert!(matches!(err, GuardianError::Timeout(d) if d == SHORT_DEADLINE), "{err:?}");
+}
+
+#[test]
+fn a_timeout_in_one_call_does_not_trap_another() {
+    // One engine, two calls at once: a guest that spins past a 250 ms
+    // deadline, and the probe tool waiting a second inside a host import
+    // under a 5 s deadline. The second must finish. (One ticker per call
+    // bumping the engine's epoch used to trap both.)
+    let host = Arc::new(WasmHost::new().unwrap());
+    let spin = compile(&host, SPIN);
+    let probe = host.precompile(PROBE_WASM).unwrap();
+    std::thread::scope(|scope| {
+        let h = host.clone();
+        let spinner = scope.spawn(move || {
+            h.call(&spin, "{}", Capabilities::none(), SHORT_DEADLINE, DEFAULT_MEMORY_CAP)
+        });
+        let h = host.clone();
+        let waiter = scope.spawn(move || {
+            let caps = Capabilities::with_http(Arc::new(SlowHttp), EgressPolicy::default());
+            h.call(&probe, r#"{"a":1,"b":1,"url":"https://1.1.1.1/"}"#, caps, DEADLINE, DEFAULT_MEMORY_CAP)
+        });
+        let spun = spinner.join().unwrap();
+        assert!(matches!(spun, Err(GuardianError::Timeout(_))), "{spun:?}");
+        let waited = waiter.join().unwrap().expect("the waiting call completes on its own deadline");
+        let v: serde_json::Value = serde_json::from_str(&waited).unwrap();
+        assert_eq!(v["sum"], 2, "{waited}");
+        assert!(!v["fetched"].is_null(), "{waited}");
+    });
+}
+
+#[test]
+fn the_http_deadline_is_the_fetch_budget_plus_five_seconds() {
+    assert_eq!(DEADLINE_WITH_HTTP, EgressPolicy::default().timeout + DEFAULT_DEADLINE);
 }
 
 #[test]

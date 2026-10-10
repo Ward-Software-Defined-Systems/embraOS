@@ -13,7 +13,7 @@
 
 use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Minimal HTTP response the guard inspects + forwards to the guest.
 pub struct HttpResponse {
@@ -40,6 +40,8 @@ pub struct EgressPolicy {
     /// must equal or be a subdomain of an entry.
     pub allow_domains: Option<Vec<String>>,
     pub max_bytes: usize,
+    /// The budget of one guarded call, every redirect hop included; each
+    /// hop gets what is left of it.
     pub timeout: Duration,
 }
 
@@ -185,13 +187,18 @@ pub fn guarded_http_get(caps: &Capabilities, url: &str) -> String {
     };
     let mut current = url.to_string();
     let mut hops = 0usize;
+    let budget = caps.http_policy.timeout;
+    let started = Instant::now();
     loop {
         let parsed = match check_url(caps, &current) {
             Ok(u) => u,
             Err(e) => return err_json(&e),
         };
-        let resp = match http.get(&current, caps.http_policy.timeout, caps.http_policy.max_bytes)
-        {
+        let remaining = match budget.checked_sub(started.elapsed()) {
+            Some(r) if !r.is_zero() => r,
+            _ => return err_json(&format!("fetch budget of {budget:?} spent")),
+        };
+        let resp = match http.get(&current, remaining, caps.http_policy.max_bytes) {
             Ok(r) => r,
             Err(e) => return err_json(&e),
         };
@@ -803,6 +810,39 @@ mod tests {
         let v = parse_ok(&guarded_http_get(&caps, "https://1.1.1.1/"));
         assert_eq!(v["ok"], false);
         assert!(v["error"].as_str().unwrap().contains("https"), "{v}");
+    }
+
+    /// Answers a redirect, then a page, sleeping `delay` on every request.
+    struct SlowRedirect(Duration);
+    impl HttpTransport for SlowRedirect {
+        fn get(&self, u: &str, _t: Duration, _m: usize) -> Result<HttpResponse, String> {
+            std::thread::sleep(self.0);
+            if u.ends_with("/a") {
+                Ok(HttpResponse { status: 301, content_type: String::new(), body: vec![], location: Some("/b".into()) })
+            } else {
+                Ok(HttpResponse { status: 200, content_type: "text/html".into(), body: b"ok".to_vec(), location: None })
+            }
+        }
+    }
+
+    #[test]
+    fn the_fetch_budget_covers_every_hop() {
+        // A 50 ms budget and a transport that takes 60 ms a hop: the
+        // first hop answers, the second has no budget left.
+        let caps = Capabilities::with_http(
+            Arc::new(SlowRedirect(Duration::from_millis(60))),
+            EgressPolicy { timeout: Duration::from_millis(50), ..Default::default() },
+        );
+        let v = parse_ok(&guarded_http_get(&caps, "https://1.1.1.1/a"));
+        assert_eq!(v["ok"], false, "{v}");
+        assert_eq!(v["error"], "fetch budget of 50ms spent");
+        // With budget to spare, the chain completes.
+        let caps = Capabilities::with_http(
+            Arc::new(SlowRedirect(Duration::from_millis(1))),
+            EgressPolicy { timeout: Duration::from_secs(1), ..Default::default() },
+        );
+        let v = parse_ok(&guarded_http_get(&caps, "https://1.1.1.1/a"));
+        assert_eq!(v["url"], "https://1.1.1.1/b", "{v}");
     }
 
     #[test]
