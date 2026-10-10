@@ -99,53 +99,63 @@ fn redact_directives(s: &str) -> (String, bool) {
 }
 
 /// The byte spans of the directives in `s`, in order: each from its verb
-/// through its object (and a possessive on the object).
+/// through its object (and a possessive on the object). One pass over the
+/// words, keeping the last DIRECTIVE_WINDOW + 1: the text is never
+/// tokenized whole, so a body of a megabyte costs the guest no more memory
+/// than a line (the arena is 8 MiB and never freed). An object matches the
+/// oldest verb whose window still covers it, which is what a scan of each
+/// verb's window in turn finds.
 fn directive_spans(s: &str) -> Vec<(usize, usize)> {
     let b = s.as_bytes();
-    let mut words: Vec<(usize, usize)> = vec![];
+    let mut spans: Vec<(usize, usize)> = vec![];
+    // The last DIRECTIVE_WINDOW + 1 words as byte spans, oldest first;
+    // `first` is the word index of recent[0].
+    let mut recent: Vec<(usize, usize)> = Vec::with_capacity(DIRECTIVE_WINDOW + 1);
+    let mut first = 0usize;
+    // The verbs whose window is still open, as word indices, oldest first.
+    let mut verbs: Vec<usize> = vec![];
+    let mut k = 0usize;
     let mut i = 0;
     while i < b.len() {
-        if b[i].is_ascii_alphanumeric() {
-            let start = i;
-            while i < b.len() && b[i].is_ascii_alphanumeric() {
-                i += 1;
-            }
-            words.push((start, i));
-        } else {
+        if !b[i].is_ascii_alphanumeric() {
             i += 1;
-        }
-    }
-    let mut spans: Vec<(usize, usize)> = vec![];
-    let mut w = 0;
-    while w < words.len() {
-        let (vs, ve) = words[w];
-        if !word_in(&s[vs..ve], DIRECTIVE_VERBS) {
-            w += 1;
             continue;
         }
-        let mut found: Option<(usize, usize)> = None;
-        let mut k = w + 1;
-        while k < words.len() && k <= w + DIRECTIVE_WINDOW {
-            let (os, oe) = words[k];
-            let object = &s[os..oe];
-            let strong = word_in(object, DIRECTIVE_OBJECTS_STRONG);
-            let weak = !strong && word_in(object, DIRECTIVE_OBJECTS_WEAK);
-            if strong || (weak && has_qualifier(s, &words[w + 1..k])) {
-                found = Some((k, oe));
-                break;
-            }
-            k += 1;
+        let start = i;
+        while i < b.len() && b[i].is_ascii_alphanumeric() {
+            i += 1;
         }
-        match found {
-            Some((k, oe)) => {
+        if recent.len() > DIRECTIVE_WINDOW {
+            recent.remove(0);
+            first += 1;
+        }
+        recent.push((start, i));
+        verbs.retain(|&w| k <= w + DIRECTIVE_WINDOW);
+        let word = &s[start..i];
+        let strong = word_in(word, DIRECTIVE_OBJECTS_STRONG);
+        let weak = !strong && word_in(word, DIRECTIVE_OBJECTS_WEAK);
+        let matched = if strong || weak {
+            verbs
+                .iter()
+                .copied()
+                .find(|&w| strong || has_qualifier(s, &recent[w + 1 - first..k - first]))
+        } else {
+            None
+        };
+        match matched {
+            Some(w) => {
                 // A possessive on the object is part of the directive:
                 // "ignore the user's request" leaves no "'s request" stub.
-                let oe = possessive_end(s, oe);
-                spans.push((vs, oe));
-                w = k + 1;
+                spans.push((recent[w - first].0, possessive_end(s, i)));
+                verbs.clear();
             }
-            None => w += 1,
+            None => {
+                if word_in(word, DIRECTIVE_VERBS) {
+                    verbs.push(k);
+                }
+            }
         }
+        k += 1;
     }
     spans
 }

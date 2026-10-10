@@ -34,14 +34,14 @@ impl Json {
         }
         &NULL
     }
-    /// Array index, `&Null` if out of range / not an array.
+    /// Array index, `&Null` if out of range / not an array. (A `match`,
+    /// not nested `if let`s: the guest is edition 2021, without
+    /// let-chains, and the host test compiles this file as 2024.)
     pub fn idx(&self, i: usize) -> &Json {
-        if let Json::Arr(a) = self {
-            if let Some(v) = a.get(i) {
-                return v;
-            }
+        match self {
+            Json::Arr(a) => a.get(i).unwrap_or(&NULL),
+            _ => &NULL,
         }
-        &NULL
     }
     pub fn as_str(&self) -> Option<&str> {
         match self {
@@ -158,7 +158,10 @@ impl P<'_> {
     }
     fn string(&mut self) -> Result<String, String> {
         self.i += 1; // opening quote
-        let mut out = String::new();
+        // Sized once from the raw span: an escape never decodes to more
+        // bytes than it takes. A guest's bump arena never frees what a
+        // string grown by doubling leaves behind.
+        let mut out = String::with_capacity(self.raw_string_len());
         loop {
             let c = *self.b.get(self.i).ok_or("unterminated string")?;
             self.i += 1;
@@ -217,6 +220,19 @@ impl P<'_> {
                 }
             }
         }
+    }
+    /// The bytes from `self.i` to the closing quote of the string being
+    /// parsed, escapes skipped; the rest of the input when unterminated.
+    fn raw_string_len(&self) -> usize {
+        let mut j = self.i;
+        while let Some(&c) = self.b.get(j) {
+            match c {
+                b'"' => return j - self.i,
+                b'\\' => j += 2,
+                _ => j += 1,
+            }
+        }
+        self.b.len().saturating_sub(self.i)
     }
     fn hex4(&mut self) -> Result<u32, String> {
         let s = self.b.get(self.i..self.i + 4).ok_or("short \\u")?;
@@ -283,9 +299,42 @@ impl P<'_> {
 
 // ---- serializer ----
 pub fn stringify(v: &Json) -> String {
-    let mut s = String::new();
+    // Sized once (`size`): a guest's bump arena never frees what a string
+    // grown by doubling leaves behind.
+    let mut s = String::with_capacity(size(v));
     write(&mut s, v);
     s
+}
+
+/// A number's share of the size estimate: `{n}` of an f64 is usually
+/// shorter; a longer one only costs a growth.
+const NUM_SIZE_HINT: usize = 24;
+
+/// The length `write` produces for `v`: exact but for a number.
+fn size(v: &Json) -> usize {
+    match v {
+        Json::Null | Json::Bool(true) => 4,
+        Json::Bool(false) => 5,
+        Json::Num(_) => NUM_SIZE_HINT,
+        Json::Str(s) => str_size(s),
+        Json::Arr(a) => 2 + a.len().saturating_sub(1) + a.iter().map(size).sum::<usize>(),
+        Json::Obj(m) => {
+            2 + m.len().saturating_sub(1)
+                + m.iter().map(|(k, val)| str_size(k) + 1 + size(val)).sum::<usize>()
+        }
+    }
+}
+
+/// The length `write_str` produces for `s`.
+fn str_size(s: &str) -> usize {
+    2 + s
+        .chars()
+        .map(|c| match c {
+            '"' | '\\' | '\n' | '\r' | '\t' | '\u{0008}' | '\u{000C}' => 2,
+            c if (c as u32) < 0x20 => 6,
+            c => c.len_utf8(),
+        })
+        .sum::<usize>()
 }
 
 fn write(out: &mut String, v: &Json) {
@@ -298,7 +347,8 @@ fn write(out: &mut String, v: &Json) {
             // trailing `.0` (42.0 -> "42"); avoid `fract()`/`abs()` which
             // are std/libm-only and unavailable in `#![no_std]` guests.
             if n.is_finite() {
-                out.push_str(&format!("{n}"));
+                // Straight into the output: no string per number.
+                let _ = core::fmt::Write::write_fmt(out, format_args!("{n}"));
             } else {
                 out.push_str("null");
             }
@@ -340,7 +390,9 @@ fn write_str(out: &mut String, s: &str) {
             '\t' => out.push_str("\\t"),
             '\u{0008}' => out.push_str("\\b"),
             '\u{000C}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 0x20 => {
+                let _ = core::fmt::Write::write_fmt(out, format_args!("\\u{:04x}", c as u32));
+            }
             c => out.push(c),
         }
     }
