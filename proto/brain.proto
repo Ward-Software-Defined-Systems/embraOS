@@ -360,6 +360,10 @@ message SessionInfo {
   embra.common.Timestamp created_at = 4;
   embra.common.Timestamp last_active = 5;
   bool has_summary = 6;
+  // The provider the session is pinned to, as /provider takes it:
+  // anthropic, gemini, ollama or lm_studio. A session that records none
+  // reads as anthropic.
+  string provider = 7;
 }
 
 message CreateSessionRequest {

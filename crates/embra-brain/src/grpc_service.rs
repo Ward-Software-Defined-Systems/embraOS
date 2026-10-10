@@ -17,7 +17,7 @@ use crate::provider::ir::{
 use crate::provider::{
     LlmProvider, LlmRequestOptions, ProviderKind, StreamEvent, SystemPromptBundle, ToolManifest,
 };
-use crate::sessions::{SessionManager, SessionState};
+use crate::sessions::{SessionManager, SessionMeta, SessionState};
 use crate::tools;
 
 use embra_common::proto::brain::brain_service_server::BrainService;
@@ -769,6 +769,7 @@ impl BrainService for BrainGrpcService {
             sessions: sessions.into_iter()
                 .filter(|s| s.state != SessionState::Deleted)
                 .map(|s| SessionInfo {
+                    provider: s.recorded_provider().to_string(),
                     name: s.name,
                     state: format!("{:?}", s.state),
                     turn_count: s.turn_count.unwrap_or(0),
@@ -892,6 +893,7 @@ impl BrainService for BrainGrpcService {
 
         Ok(Response::new(CreateSessionResponse {
             session: Some(SessionInfo {
+                provider: session.recorded_provider().to_string(),
                 name: session.name,
                 state: format!("{:?}", session.state),
                 turn_count: session.turn_count.unwrap_or(0),
@@ -927,9 +929,8 @@ impl BrainService for BrainGrpcService {
         // before the current session is detached, so a refused switch
         // leaves it in place. `reattach` would refuse as well; from there
         // the reason would arrive as an internal error.
-        if let Ok(Some(meta)) = mgr.get_meta(&name).await
-            && let Some(refusal) = crate::sessions::reattach_refusal(&name, &meta)
-        {
+        let meta = mgr.get_meta(&name).await.ok().flatten();
+        if let Some(refusal) = meta.as_ref().and_then(|m| crate::sessions::reattach_refusal(&name, m)) {
             return Err(Status::failed_precondition(refusal));
         }
 
@@ -949,6 +950,10 @@ impl BrainService for BrainGrpcService {
                 created_at: None,
                 last_active: None,
                 has_summary: false,
+                provider: meta
+                    .as_ref()
+                    .map_or(crate::sessions::LEGACY_SESSION_PROVIDER, SessionMeta::recorded_provider)
+                    .to_string(),
             }),
             reconnection_briefing: String::new(),
         }))
@@ -1222,11 +1227,7 @@ async fn handle_request(
                 && api_key.is_empty()
                 && loaded_config.key_for(active_kind).is_none()
             {
-                let provider_label = match active_kind {
-                    ProviderKind::Anthropic => "Anthropic",
-                    ProviderKind::Gemini => "Gemini",
-                    _ => unreachable!(),
-                };
+                let provider_label = active_kind.label();
                 let env_var = match active_kind {
                     ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
                     ProviderKind::Gemini => "GEMINI_API_KEY",
@@ -2962,10 +2963,10 @@ async fn handle_slash_command(
                     // config wins over the threaded boot value (the SessionAttach
                     // ModeChange pattern), so a runtime timezone change shows
                     // immediately.
-                    let display_tz = config::load_config(db)
-                        .await
-                        .ok()
-                        .map(|c| c.timezone)
+                    let cfg = config::load_config(db).await.ok();
+                    let display_tz = cfg
+                        .as_ref()
+                        .map(|c| c.timezone.clone())
                         .unwrap_or_else(|| config_tz.to_string());
                     let output = match mgr.list_with_counts().await {
                         Ok(sessions) => {
@@ -2975,21 +2976,19 @@ async fn handle_slash_command(
                             let mut out = if live.is_empty() {
                                 "No sessions.".to_string()
                             } else {
-                                live.iter().map(|s| {
-                                    let indicator = if s.name == "learning" {
-                                        if is_sealed { " [sealed]" } else { " [learning]" }
-                                    } else {
-                                        ""
-                                    };
-                                    let n = s.turn_count.unwrap_or(0);
-                                    format!(
-                                        "  {}{} [{:?}] {} turn{}, last active: {}",
-                                        s.name, indicator, s.state,
-                                        n, if n == 1 { "" } else { "s" },
-                                        format_local_timestamp(s.last_active, &display_tz)
-                                    )
-                                }).collect::<Vec<_>>().join("\n")
+                                live.iter()
+                                    .map(|s| session_list_line(s, is_sealed, &display_tz))
+                                    .collect::<Vec<_>>()
+                                    .join("\n")
                             };
+                            // Without the config the active provider is not
+                            // known, and the footer says nothing.
+                            if let Some(footer) = cfg.as_ref().and_then(|c| {
+                                other_provider_footer(&live, &c.api_provider, mgr.active_session.is_some())
+                            }) {
+                                out.push('\n');
+                                out.push_str(&footer);
+                            }
                             if !deleted.is_empty() {
                                 let names = deleted
                                     .iter()
@@ -4429,6 +4428,50 @@ fn display_model_for(provider: &str, config: &config::SystemConfig) -> String {
         }
         _ => crate::provider::anthropic::DEFAULT_DISPLAY_NAME.to_string(),
     }
+}
+
+/// One row of `/sessions`: the name, the learning session's tag, the state,
+/// the provider the session is pinned to, the turns and the last activity.
+/// `learning` is never switched to and records no provider.
+fn session_list_line(s: &SessionMeta, is_sealed: bool, tz: &str) -> String {
+    let (indicator, provider) = if s.name == "learning" {
+        (if is_sealed { " [sealed]" } else { " [learning]" }, String::new())
+    } else {
+        ("", format!(" {} ·", crate::provider::provider_label(s.recorded_provider())))
+    };
+    let n = s.turn_count.unwrap_or(0);
+    format!(
+        "  {}{} [{:?}]{} {} turn{}, last active: {}",
+        s.name,
+        indicator,
+        s.state,
+        provider,
+        n,
+        if n == 1 { "" } else { "s" },
+        format_local_timestamp(s.last_active, tz)
+    )
+}
+
+/// The line `/sessions` closes with when a session it lists is pinned to
+/// another provider than the active one: those providers as `/provider`
+/// takes them, and the steps `cross_provider_block_message` gives. `None`
+/// when every session is under the active provider.
+fn other_provider_footer(live: &[SessionMeta], active_provider: &str, attached: bool) -> Option<String> {
+    let mut others: Vec<&str> = live
+        .iter()
+        .filter(|s| s.name != "learning")
+        .map(SessionMeta::recorded_provider)
+        .filter(|p| *p != active_provider)
+        .collect();
+    others.sort_unstable();
+    others.dedup();
+    let (under, kind) = match others.as_slice() {
+        [] => return None,
+        [one] => (one.to_string(), *one),
+        several => (format!("another provider ({})", several.join(", ")), "<kind>"),
+    };
+    let close = if attached { "/close, then " } else { "" };
+    Some(format!("  Under {under}: {close}/provider {kind}, then /switch <name>."))
 }
 
 /// Render a UTC timestamp in the operator's configured timezone for
@@ -5973,12 +6016,7 @@ async fn handle_effort_command(
     };
 
     let kind = ProviderKind::from_str(&cfg.api_provider).unwrap_or(ProviderKind::Anthropic);
-    let label = match kind {
-        ProviderKind::Anthropic => "Anthropic",
-        ProviderKind::Gemini => "Gemini",
-        ProviderKind::Ollama => "Ollama",
-        ProviderKind::LmStudio => "LM Studio",
-    };
+    let label = kind.label();
     let preset = match kind {
         ProviderKind::Ollama => Some(OpenAiCompatPreset::Ollama),
         ProviderKind::LmStudio => Some(OpenAiCompatPreset::LmStudio),
@@ -6209,8 +6247,8 @@ async fn read_session_provider(db: &Arc<WardsonDbClient>, session_name: &str) ->
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
             })
-            .unwrap_or_else(|| "anthropic".to_string()),
-        Err(_) => "anthropic".to_string(),
+            .unwrap_or_else(|| crate::sessions::LEGACY_SESSION_PROVIDER.to_string()),
+        Err(_) => crate::sessions::LEGACY_SESSION_PROVIDER.to_string(),
     }
 }
 
@@ -9832,5 +9870,85 @@ mod trigger_turn_tests {
         let body = text.strip_prefix("[embraCRON acted] system_status: ").unwrap();
         assert!(body.len() <= TRIGGER_PERSIST_MAX && body.len() > TRIGGER_PERSIST_MAX - 3);
         assert!(long.starts_with(body));
+    }
+}
+
+#[cfg(test)]
+mod session_listing_tests {
+    //! `/sessions` names the provider each session is pinned to, and says
+    //! how to open a session pinned to another one.
+    use super::{other_provider_footer, session_list_line};
+    use crate::sessions::SessionMeta;
+    use serde_json::json;
+
+    fn meta(name: &str, provider: Option<&str>, turns: u32) -> SessionMeta {
+        let mut doc = json!({
+            "id": format!("id-{name}"), "name": name, "state": "Detached",
+            "created_at": "2026-10-01T12:00:00Z", "last_active": "2026-10-08T18:40:00Z",
+            "turn_count": turns,
+        });
+        if let Some(provider) = provider {
+            doc["provider"] = json!(provider);
+        }
+        serde_json::from_value(doc).expect("a meta document")
+    }
+
+    #[test]
+    fn a_session_line_names_its_provider() {
+        assert_eq!(
+            session_list_line(&meta("qwen-eval", Some("lm_studio"), 14), true, "UTC"),
+            "  qwen-eval [Detached] LM Studio · 14 turns, last active: 2026-10-08 18:40 UTC"
+        );
+        assert_eq!(
+            session_list_line(&meta("main", Some("anthropic"), 1), true, "UTC"),
+            "  main [Detached] Anthropic · 1 turn, last active: 2026-10-08 18:40 UTC"
+        );
+    }
+
+    /// Every session before Sprint 4 ran on Anthropic, and
+    /// `read_session_provider` reads a missing provider so; the listing
+    /// agrees with the check `/switch` makes. `learning` is never switched
+    /// to and shows no provider.
+    #[test]
+    fn a_session_without_a_recorded_provider_reads_as_anthropic() {
+        assert!(session_list_line(&meta("old", None, 3), true, "UTC").contains("[Detached] Anthropic · 3 turns"));
+        assert_eq!(
+            session_list_line(&meta("learning", None, 212), true, "UTC"),
+            "  learning [sealed] [Detached] 212 turns, last active: 2026-10-08 18:40 UTC"
+        );
+    }
+
+    #[test]
+    fn the_footer_names_one_other_provider_in_the_steps() {
+        let live = [meta("main", Some("anthropic"), 9), meta("qwen-eval", Some("lm_studio"), 14)];
+        assert_eq!(
+            other_provider_footer(&live, "anthropic", true).as_deref(),
+            Some("  Under lm_studio: /close, then /provider lm_studio, then /switch <name>.")
+        );
+        assert_eq!(
+            other_provider_footer(&live, "anthropic", false).as_deref(),
+            Some("  Under lm_studio: /provider lm_studio, then /switch <name>.")
+        );
+    }
+
+    #[test]
+    fn the_footer_lists_several_other_providers() {
+        let live = [
+            meta("main", Some("anthropic"), 9),
+            meta("qwen-eval", Some("lm_studio"), 14),
+            meta("glm", Some("ollama"), 2),
+            meta("gemma", Some("ollama"), 5),
+        ];
+        assert_eq!(
+            other_provider_footer(&live, "gemini", true).as_deref(),
+            Some("  Under another provider (anthropic, lm_studio, ollama): /close, then /provider <kind>, then /switch <name>.")
+        );
+    }
+
+    #[test]
+    fn no_footer_when_every_session_is_under_the_active_provider() {
+        let live = [meta("main", Some("anthropic"), 9), meta("old", None, 3), meta("learning", None, 212)];
+        assert_eq!(other_provider_footer(&live, "anthropic", true), None);
+        assert_eq!(other_provider_footer(&[], "anthropic", true), None);
     }
 }

@@ -89,6 +89,30 @@ pub struct SessionMeta {
     pub events_seen_at: Option<DateTime<Utc>>,
 }
 
+/// The provider of a session that records none: every session before
+/// Sprint 4 ran on Anthropic, the only provider there was. The v9 migration
+/// backfilled most; `read_session_provider` and the listings read a missing
+/// field as this.
+pub(crate) const LEGACY_SESSION_PROVIDER: &str = "anthropic";
+
+impl SessionMeta {
+    /// The provider this session is pinned to, the one
+    /// `check_session_provider` compares with the active provider.
+    pub(crate) fn recorded_provider(&self) -> &str {
+        self.provider.as_deref().unwrap_or(LEGACY_SESSION_PROVIDER)
+    }
+}
+
+/// `SessionMeta::recorded_provider` for a meta document read raw, as the
+/// intelligence's session tools read them. `None` for `learning`: it is
+/// never switched to, and its meta (`save_learning_history`) records none.
+pub(crate) fn recorded_provider_in<'a>(name: &str, meta: &'a serde_json::Value) -> Option<&'a str> {
+    if name == "learning" {
+        return None;
+    }
+    Some(meta.get("provider").and_then(|v| v.as_str()).unwrap_or(LEGACY_SESSION_PROVIDER))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionHistory {
     pub session_name: String,

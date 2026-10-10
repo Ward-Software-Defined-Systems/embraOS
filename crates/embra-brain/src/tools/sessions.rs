@@ -559,14 +559,6 @@ pub async fn session_list(db: &WardsonDbClient) -> String {
         return "No sessions found.".into();
     }
 
-    struct SessionInfo {
-        name: String,
-        status: String,
-        turns: usize,
-        last_active: String,
-        created_at: String,
-    }
-
     let mut sessions = Vec::new();
 
     for name in &names {
@@ -579,7 +571,7 @@ pub async fn session_list(db: &WardsonDbClient) -> String {
             .await
             .unwrap_or_default();
 
-        let (status, last_active, created_at) = if let Some(meta) = meta_docs.into_iter().next() {
+        let (status, provider, last_active, created_at) = if let Some(meta) = meta_docs.into_iter().next() {
             // Deleted by the operator: not listed, as in the operator's own
             // session list.
             if meta_says_deleted(&meta) {
@@ -591,6 +583,7 @@ pub async fn session_list(db: &WardsonDbClient) -> String {
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown")
                     .to_string(),
+                crate::sessions::recorded_provider_in(name, &meta).unwrap_or("—").to_string(),
                 meta.get("last_active")
                     .and_then(|v| v.as_str())
                     .unwrap_or("—")
@@ -601,14 +594,15 @@ pub async fn session_list(db: &WardsonDbClient) -> String {
                     .to_string(),
             )
         } else {
-            ("unknown".into(), "—".into(), "—".into())
+            ("unknown".into(), "—".into(), "—".into(), "—".into())
         };
 
         let (_, turn_count) = fetch_turns(db, name).await;
 
-        sessions.push(SessionInfo {
+        sessions.push(SessionRow {
             name: name.clone(),
             status,
+            provider,
             turns: turn_count,
             last_active,
             created_at,
@@ -621,30 +615,41 @@ pub async fn session_list(db: &WardsonDbClient) -> String {
 
     // Sort by last_active descending
     sessions.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+    session_table(&sessions)
+}
 
+/// One row of `session_list`, as read from a session's meta.
+struct SessionRow {
+    name: String,
+    status: String,
+    /// The provider the session is pinned to, as `/provider` takes it
+    /// (`recorded_provider_in`); `—` for `learning`.
+    provider: String,
+    turns: usize,
+    last_active: String,
+    created_at: String,
+}
+
+/// `session_list`'s table. Timestamps are cut to the second, on a
+/// character boundary.
+fn session_table(sessions: &[SessionRow]) -> String {
     let mut output = format!("Sessions ({}):\n", sessions.len());
     output.push_str(&format!(
-        "{:<16} {:<10} {:>5}  {:<24} {:<24}\n",
-        "Name", "Status", "Turns", "Last Active", "Created"
+        "{:<16} {:<10} {:<10} {:>5}  {:<24} {:<24}\n",
+        "Name", "Status", "Provider", "Turns", "Last Active", "Created"
     ));
-    output.push_str(&"-".repeat(85));
+    output.push_str(&"-".repeat(96));
     output.push('\n');
 
-    for s in &sessions {
-        // Truncate timestamps to readable length
-        let last = if s.last_active.len() > 19 {
-            &s.last_active[..19]
-        } else {
-            &s.last_active
-        };
-        let created = if s.created_at.len() > 19 {
-            &s.created_at[..19]
-        } else {
-            &s.created_at
-        };
+    for s in sessions {
         output.push_str(&format!(
-            "{:<16} {:<10} {:>5}  {:<24} {:<24}\n",
-            s.name, s.status, s.turns, last, created
+            "{:<16} {:<10} {:<10} {:>5}  {:<24} {:<24}\n",
+            s.name,
+            s.status,
+            s.provider,
+            s.turns,
+            truncate_str(&s.last_active, 19),
+            truncate_str(&s.created_at, 19)
         ));
     }
 
@@ -949,13 +954,14 @@ pub async fn session_meta(db: &WardsonDbClient, param: &str) -> String {
         return deleted_session_notice(name);
     }
 
-    let (status, last_active, created_at) = if let Some(meta) = meta_docs.into_iter().next() {
+    let (status, provider, last_active, created_at) = if let Some(meta) = meta_docs.into_iter().next() {
         (
             meta.get("state")
                 .or_else(|| meta.get("status"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
                 .to_string(),
+            crate::sessions::recorded_provider_in(name, &meta).unwrap_or("—").to_string(),
             meta.get("last_active")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown")
@@ -996,13 +1002,14 @@ pub async fn session_meta(db: &WardsonDbClient, param: &str) -> String {
     format!(
         "Session: {}\n\
          Status: {}\n\
+         Provider: {}\n\
          Created: {}\n\
          Last Active: {}\n\
          Total Turns: {}\n\
          User Messages: {}\n\
          Assistant Messages: {}\n\
          Summary: {}",
-        name, status, created_at, last_active, total, user_msgs, assistant_msgs, summary_status
+        name, status, provider, created_at, last_active, total, user_msgs, assistant_msgs, summary_status
     )
 }
 
@@ -1905,6 +1912,42 @@ fn extract_instruction(approved: bool) -> String {
          the knowledge graph in the same call. Link each new node to the related nodes \
          remember lists, with knowledge_link."
     )
+}
+
+#[cfg(test)]
+mod session_table_tests {
+    use super::{session_table, SessionRow};
+    use crate::sessions::recorded_provider_in;
+    use serde_json::json;
+
+    /// The intelligence sees the provider each session is pinned to, as
+    /// `/provider` takes it: the kind stored on the meta, `anthropic` for a
+    /// meta that records none, and nothing for `learning`.
+    #[test]
+    fn session_list_shows_each_sessions_provider() {
+        let row = |name: &str, meta: serde_json::Value| SessionRow {
+            name: name.into(),
+            status: "Detached".into(),
+            provider: recorded_provider_in(name, &meta).unwrap_or("—").to_string(),
+            turns: 14,
+            last_active: "2026-10-08T18:40:00.123456+00:00".into(),
+            created_at: "2026-10-01T12:00:00+00:00".into(),
+        };
+        let table = session_table(&[
+            row("qwen-eval", json!({"provider": "lm_studio"})),
+            row("old", json!({})),
+            row("learning", json!({})),
+        ]);
+        let lines: Vec<&str> = table.lines().collect();
+        assert_eq!(lines[0], "Sessions (3):");
+        assert!(lines[1].starts_with("Name             Status     Provider   Turns"), "{table}");
+        assert_eq!(
+            lines[3],
+            "qwen-eval        Detached   lm_studio     14  2026-10-08T18:40:00      2026-10-01T12:00:00     "
+        );
+        assert!(lines[4].starts_with("old              Detached   anthropic "), "{table}");
+        assert!(lines[5].starts_with("learning         Detached   —          "), "{table}");
+    }
 }
 
 #[cfg(test)]

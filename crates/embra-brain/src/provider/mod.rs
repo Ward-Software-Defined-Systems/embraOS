@@ -55,6 +55,26 @@ impl ProviderKind {
             _ => None,
         }
     }
+
+    /// The name the operator reads.
+    pub fn label(self) -> &'static str {
+        match self {
+            ProviderKind::Anthropic => "Anthropic",
+            ProviderKind::Gemini => "Gemini",
+            ProviderKind::Ollama => "Ollama",
+            ProviderKind::LmStudio => "LM Studio",
+        }
+    }
+}
+
+/// The operator's name for a provider stored as a string
+/// (`sessions.<name>.meta.provider`); a string that is no provider is
+/// shown as stored.
+pub fn provider_label(kind: &str) -> &str {
+    match ProviderKind::from_str(kind) {
+        Some(known) => known.label(),
+        None => kind,
+    }
 }
 
 /// Per-provider tool manifest, built from the static registry where a

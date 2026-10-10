@@ -665,8 +665,8 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
     ]),
 ];
 
-// `state`, `last_active`, `has_summary` arrive in the JSON but the v2
-// sheet only renders `name` + `turn_count`. Phase 3 polish will add an
+// `state`, `last_active`, `has_summary` arrive in the JSON but the sheet
+// renders `name`, `turn_count` and `provider`. Phase 3 polish will add an
 // "active session" highlight (state) and a relative last-active label.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -680,6 +680,22 @@ struct Session {
     last_active: String,
     #[serde(default)]
     has_summary: bool,
+    /// The provider the session is pinned to, as `/provider` takes it.
+    /// Empty from an embra-web that predates the field.
+    #[serde(default)]
+    provider: String,
+}
+
+/// The operator's name for a provider: the brain's `ProviderKind::label`.
+/// A string that is no provider is shown as it came.
+fn provider_label(kind: &str) -> &str {
+    match kind {
+        "anthropic" => "Anthropic",
+        "gemini" => "Gemini",
+        "ollama" => "Ollama",
+        "lm_studio" => "LM Studio",
+        other => other,
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -967,10 +983,16 @@ pub fn ChatApp() -> impl IntoView {
                                                 {sessions.get().into_iter().map(|s| {
                                                     let name = s.name.clone();
                                                     let display_name = s.name.clone();
+                                                    let provider = if s.provider.is_empty() {
+                                                        String::new()
+                                                    } else {
+                                                        format!(" · {}", provider_label(&s.provider))
+                                                    };
                                                     let meta = format!(
-                                                        "{} turn{}",
+                                                        "{} turn{}{}",
                                                         s.turn_count,
                                                         if s.turn_count == 1 { "" } else { "s" },
+                                                        provider,
                                                     );
                                                     // Highlight the row that matches the current
                                                     // session_name (set when the brain emits a
