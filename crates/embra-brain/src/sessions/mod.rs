@@ -7,6 +7,8 @@ use crate::db::WardsonDbClient;
 
 pub(crate) mod away;
 
+pub(crate) mod delete_record;
+
 pub(crate) mod events;
 /// Session document format version.
 ///

@@ -2,6 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The tag of the memory the brain writes when a guided delete has run
+/// (`sessions/delete_record.rs`). Such a node records an event: the audit
+/// never pairs two of them and never calls one an orphan (`audit.rs`).
+pub(crate) const SESSION_DELETED_TAG: &str = "session-deleted";
+
 // No doc comments on the variants: schemars would turn the plain string
 // enum of `remember`'s `category` argument into a `oneOf` of constants.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]

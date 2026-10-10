@@ -355,11 +355,11 @@ pub(crate) fn build_delete_memorize_prompt(name: &str, reason: &str) -> String {
          1. Call session_extract with name \"{name}\" and follow its instructions. The operator's \
          reply is the approval it asks for: save each durable learning with remember and its category \
          in this turn, without presenting them first. remember records each as coming from session '{name}'.\n\
-         2. Also save one memory recording that session '{name}' was deleted and the operator's reason.\n\
-         3. Tell the operator what you preserved, then end your response with \
+         2. Tell the operator what you preserved, then end your response with \
          {SESSION_DELETE_READY_MARKER} on its own line.\n\
-         The system performs the actual deletion after your turn — it is soft (a {days}-day \
-         grace period; /sessions restore {name} undoes it).",
+         After your turn the system deletes the session and records the deletion and the operator's \
+         reason as a memory linked to what you saved; do not save one yourself. The deletion is soft \
+         (a {days}-day grace period; /sessions restore {name} undoes it).",
         days = crate::sessions::SESSION_DELETE_RETENTION_DAYS,
     )
 }
@@ -2463,18 +2463,38 @@ async fn handle_request(
                         };
                         match result {
                             Ok(()) => {
+                                // The brain records the deletion, never the
+                                // model: only a deletion that happened gets
+                                // a record, with the operator's own words,
+                                // linked to what the memorize turn kept.
+                                let when = format_local_timestamp(chrono::Utc::now(), &loaded_config.timezone);
+                                let record = crate::sessions::delete_record::record_deletion(
+                                    db,
+                                    &del.name,
+                                    msg.content.trim(),
+                                    turn_started,
+                                    &when,
+                                    &loaded_config,
+                                )
+                                .await;
+                                let (record_sentence, record_warns) =
+                                    crate::sessions::delete_record::record_sentence(&record);
+                                // The summary is stamped and reaped with the
+                                // history (`soft_delete`); the memories stay.
                                 let mut note = format!(
-                                    "Session '{}' deleted ({}-day grace period — `/sessions restore {}` to undo). Summary and extracted memories preserved.",
+                                    "Session '{}' deleted ({}-day grace period — `/sessions restore {}` to undo). The extracted memories stay in the knowledge graph; the summary goes with the session. {}",
                                     del.name,
                                     crate::sessions::SESSION_DELETE_RETENTION_DAYS,
                                     del.name,
+                                    record_sentence,
                                 );
                                 if was_active {
                                     note.push_str(
                                         " No session is now attached — /switch <name> or /new <name>.",
                                     );
                                 }
-                                (SystemMessageType::Info, note)
+                                let kind = if record_warns { SystemMessageType::Warning } else { SystemMessageType::Info };
+                                (kind, note)
                             }
                             Err(e) => (
                                 SystemMessageType::Error,
@@ -9550,6 +9570,11 @@ mod session_delete_flow_tests {
         assert!(p.contains("The operator's reply is the approval it asks for"), "{p}");
         assert!(p.contains("without presenting them first"), "{p}");
         assert!(p.contains("remember records each as coming from session 'old-proj'"), "{p}");
+        // The brain writes the deletion record after the delete has run; a
+        // memory of the deletion from the model would be a second one.
+        assert!(!p.contains("Also save one memory"), "{p}");
+        assert!(p.contains("records the deletion and the operator's reason as a memory"), "{p}");
+        assert!(p.contains("do not save one yourself"), "{p}");
         // `remember` promotes what it saves; the prompt names no second step.
         assert!(!p.contains("knowledge_promote"));
         assert!(p.contains(SESSION_DELETE_READY_MARKER));

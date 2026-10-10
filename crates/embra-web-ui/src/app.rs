@@ -182,7 +182,7 @@ const SPECS: &[Spec] = &[
         fields: &[sel("Provider",
             &["anthropic", "gemini", "ollama", "lm_studio"], true)] },
     Spec { cmd: "/sessions delete", title: "Delete a session (guided)",
-        note: "The intelligence summarizes it and asks your reason, preserves memories to the KG, then soft-deletes (7-day grace).",
+        note: "The intelligence summarizes it, asks your reason and preserves memories to the KG; then it is soft-deleted (7-day grace) and the deletion recorded as a memory.",
         join: " ", guided: false,
         fields: &[t("Session name", "old-project", true)] },
     Spec { cmd: "/sessions restore", title: "Restore a deleted session",

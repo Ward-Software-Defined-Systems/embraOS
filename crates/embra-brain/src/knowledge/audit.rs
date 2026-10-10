@@ -27,7 +27,7 @@ use crate::db::WardsonDbClient;
 use crate::tools::registry::DispatchContext;
 
 use super::tools::{next_scan_page, scan_page_query_body, ScanPage};
-use super::types::{content_preview, EdgeType};
+use super::types::{content_preview, EdgeType, SESSION_DELETED_TAG};
 
 /// Page size for the exhaustive edge scan — same bound rationale as
 /// `ORPHAN_SCAN_PAGE` (well under the server's 100k `--max-query-limit`,
@@ -626,6 +626,11 @@ fn pairwise_findings(
         for i in 0..capped.len() {
             for j in (i + 1)..capped.len() {
                 let (a, b) = (capped[i], capped[j]);
+                // Two deletion records are two events: never a duplicate,
+                // a supersession or a contradiction.
+                if is_deletion_record(a) && is_deletion_record(b) {
+                    continue;
+                }
                 let pk = pair_key(&a.key(), &b.key());
                 let (score, subset) = dedup_score(a, b);
                 if score >= min_similarity {
@@ -723,6 +728,14 @@ fn pairwise_findings(
     out
 }
 
+/// The record a guided delete leaves (`sessions/delete_record.rs`): a node
+/// that records an event, not a claim. Two records say nearly the same words
+/// about two sessions and are neither duplicates nor a contradiction, and a
+/// record links only to what its delete preserved, which may be nothing.
+fn is_deletion_record(n: &NodeMeta) -> bool {
+    n.tags_lower.contains(SESSION_DELETED_TAG)
+}
+
 /// Orphans: zero meaningful edges, at least a day old. Unparseable
 /// `created_at` → included with `age_days: null` at low confidence.
 fn orphan_findings(
@@ -732,6 +745,9 @@ fn orphan_findings(
 ) -> Vec<serde_json::Value> {
     let mut found: Vec<(u8, i64, serde_json::Value)> = Vec::new();
     for n in nodes {
+        if is_deletion_record(n) {
+            continue;
+        }
         let key = n.key();
         if agg.meaningful_degree.get(&key).copied().unwrap_or(0) > 0 {
             continue;
@@ -1637,6 +1653,31 @@ mod tests {
         let d = meta("memory.semantic", "d", "fact", "another thing", "delta epsilon zeta", &["topic", "area"]);
         let found2 = pairwise_findings(&[c, d], &EdgeAggregates::default(), 0.75, false, true, false, &default_band());
         assert_eq!(found2.contradiction_total, 0);
+    }
+
+    /// Two records of guided deletes, built as the brain builds them, with
+    /// the reason the operator most often gives none of. Without the tag
+    /// the same pair is a duplicate and both are orphans.
+    #[test]
+    fn deletion_records_are_never_paired_or_orphaned() {
+        let record = |id: &str, session: &str, tags: &[&str]| {
+            let text = crate::sessions::delete_record::deletion_record(session, "", "2026-06-01 09:00 UTC");
+            // As `remember` stores it: the tag is split off the text.
+            let body = text.trim_end_matches(" #session-deleted").to_string();
+            meta("memory.semantic", id, "observation", &body, &body, tags)
+        };
+        let no_edges = EdgeAggregates::default();
+
+        let records = [record("a", "scratch", &["session-deleted"]), record("b", "test", &["session-deleted"])];
+        let found = pairwise_findings(&records, &no_edges, 0.75, true, true, true, &default_band());
+        assert_eq!((found.dedup_total, found.contradiction_total), (0, 0));
+        assert!(found.supersessions.is_empty());
+        assert!(orphan_findings(&records, &no_edges, now()).is_empty());
+
+        let plain = [record("a", "scratch", &["other"]), record("b", "test", &["other"])];
+        let found = pairwise_findings(&plain, &no_edges, 0.75, true, true, true, &default_band());
+        assert_eq!(found.dedup_total, 1);
+        assert_eq!(orphan_findings(&plain, &no_edges, now()).len(), 2);
     }
 
     #[test]

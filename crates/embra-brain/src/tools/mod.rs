@@ -674,31 +674,96 @@ async fn remember(
         return "Nothing to remember: give content besides the tags.".into();
     }
 
+    match save_memory(db, &text, tags, &promotion, session, config).await {
+        Err(e) => format!("Failed to save memory: {}", e),
+        Ok(Saved { entry_id, node: Ok(node) }) => {
+            let candidates = knowledge::neighbors::candidates_block(
+                &knowledge::neighbors::link_candidates(db, config, node.collection, &node.id).await,
+            );
+            remember_reply(&entry_id, &node, &candidates)
+        }
+        Ok(Saved { entry_id, node: Err(e) }) => remember_unpromoted_reply(&entry_id, &e),
+    }
+}
+
+/// What a memory the brain writes itself came to (`remember_record`).
+#[derive(Debug, PartialEq)]
+pub(crate) enum Recorded {
+    /// The entry and its node.
+    Node { collection: &'static str, id: String },
+    /// The entry without its node: the node could not be written.
+    EntryOnly { entry_id: String, error: String },
+    /// Nothing was saved.
+    Failed(String),
+}
+
+/// A memory the brain writes on its own behalf, the record of a deleted
+/// session: `remember`'s write path, a semantic node of `category`,
+/// attributed to `session`. No model reads the result, so no link
+/// candidates are read.
+pub(crate) async fn remember_record(
+    db: &WardsonDbClient,
+    content: &str,
+    category: knowledge::types::SemanticCategory,
+    session: &str,
+    config: &SystemConfig,
+) -> Recorded {
+    let (text, tags) = split_tags(content);
+    if text.is_empty() {
+        return Recorded::Failed("no content besides the tags".into());
+    }
+    match save_memory(db, &text, tags, &Promotion::Semantic(category), session, config).await {
+        Err(e) => Recorded::Failed(e),
+        Ok(Saved { node: Ok(node), .. }) => Recorded::Node { collection: node.collection, id: node.id },
+        Ok(Saved { entry_id, node: Err(error) }) => Recorded::EntryOnly { entry_id, error },
+    }
+}
+
+/// `text` with every word that `split_tags` would lift into the tags
+/// written without its `#`, and its whitespace folded to single spaces: an
+/// operator's words quoted into a memory stay text.
+pub(crate) fn untag(text: &str) -> String {
+    text.split_whitespace()
+        .map(|w| if is_tag_token(w) { w.trim_start_matches('#') } else { w })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// What `save_memory` wrote: the entry, and its node or why the node could
+/// not be written.
+struct Saved {
+    entry_id: String,
+    node: Result<knowledge::promotion::NewNode, String>,
+}
+
+/// The writes behind a memory: the episodic entry, the node it is promoted
+/// to, and one background task that derives the automatic edges of both.
+/// `Err` when the entry itself could not be written: nothing was saved.
+async fn save_memory(
+    db: &WardsonDbClient,
+    text: &str,
+    tags: Vec<String>,
+    promotion: &Promotion,
+    session: &str,
+    config: &SystemConfig,
+) -> Result<Saved, String> {
     ensure_collection(db, "memory.entries").await;
 
     let created_at = Utc::now().to_rfc3339();
-    let entry_id = match db.write("memory.entries", &entry_doc(&text, &tags, session, &created_at)).await {
-        Ok(id) => id,
-        Err(e) => return format!("Failed to save memory: {}", e),
-    };
+    let entry_id = db
+        .write("memory.entries", &entry_doc(text, &tags, session, &created_at))
+        .await
+        .map_err(|e| e.to_string())?;
 
-    let written = match &promotion {
+    let node = match promotion {
         Promotion::Semantic(category) => {
             knowledge::promotion::write_semantic_node(db, &entry_id, category, config).await
         }
         Promotion::Procedural(procedure) => {
             knowledge::promotion::write_procedural_node(db, &entry_id, procedure, config).await
         }
-    };
-    let (reply, node) = match written {
-        Ok(node) => {
-            let candidates = knowledge::neighbors::candidates_block(
-                &knowledge::neighbors::link_candidates(db, config, node.collection, &node.id).await,
-            );
-            (remember_reply(&entry_id, &node, &candidates), Some(node))
-        }
-        Err(e) => (remember_unpromoted_reply(&entry_id, &e.to_string()), None),
-    };
+    }
+    .map_err(|e| e.to_string());
 
     // Background edge derivation (spec §4.8), for the entry and its node in
     // one task. Both gather their candidates at once, as the entry's always
@@ -707,9 +772,11 @@ async fn remember(
     let db = db.clone();
     let config = config.clone();
     let session = session.to_string();
+    let task_entry_id = entry_id.clone();
+    let task_node = node.as_ref().ok().cloned();
     tokio::spawn(async move {
-        let entry = ("memory.entries", entry_id.as_str());
-        match &node {
+        let entry = ("memory.entries", task_entry_id.as_str());
+        match &task_node {
             Some(node) => {
                 let _ = tokio::join!(
                     knowledge::edges::derive_edges_except(
@@ -741,7 +808,7 @@ async fn remember(
         }
     });
 
-    reply
+    Ok(Saved { entry_id, node })
 }
 
 #[cfg(test)]
@@ -973,6 +1040,44 @@ mod remember_tests {
             assert_eq!(writes[0].0, "POST /memory.entries/docs");
             assert_eq!(writes[0].1["session"], expected, "deleting_session = {deleting:?}");
         }
+    }
+
+    /// The brain's own memory, the record of a deleted session, tells the
+    /// three outcomes apart: the operator's note words each differently.
+    #[tokio::test]
+    async fn remember_record_reports_the_node_the_entry_or_nothing() {
+        let config = test_config();
+
+        let written = server("memory.semantic", data(json!({"_id": "n1"}))).await;
+        let db = WardsonDbClient::from_url(&written.uri());
+        let recorded =
+            remember_record(&db, "the record #session-deleted", SemanticCategory::Observation, "old-proj", &config).await;
+        assert_eq!(recorded, Recorded::Node { collection: "memory.semantic", id: "n1".into() });
+        let writes = writes_seen(&written).await;
+        assert_eq!((&writes[0].1["session"], &writes[0].1["tags"]), (&json!("old-proj"), &json!(["session-deleted"])));
+        assert_eq!(writes[1].1["category"], "observation");
+
+        let no_node = server("memory.semantic", ResponseTemplate::new(500)).await;
+        let db = WardsonDbClient::from_url(&no_node.uri());
+        let recorded = remember_record(&db, "the record", SemanticCategory::Observation, "old-proj", &config).await;
+        assert!(matches!(&recorded, Recorded::EntryOnly { entry_id, .. } if entry_id == "e1"), "{recorded:?}");
+
+        let down = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory.entries/docs"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&down)
+            .await;
+        let db = WardsonDbClient::from_url(&down.uri());
+        let recorded = remember_record(&db, "the record", SemanticCategory::Observation, "old-proj", &config).await;
+        assert!(matches!(recorded, Recorded::Failed(_)), "{recorded:?}");
+    }
+
+    #[test]
+    fn a_word_that_reads_as_a_tag_loses_its_mark() {
+        assert_eq!(untag("done #cleanup, see #5\nand ##x"), "done cleanup, see #5 and ##x");
+        let (text, tags) = split_tags(&untag("drop #scratch now"));
+        assert_eq!((text.as_str(), tags.len()), ("drop scratch now", 0));
     }
 
     #[tokio::test]

@@ -189,6 +189,60 @@ mod already_promoted_tests {
     }
 }
 
+#[cfg(test)]
+mod write_link_tests {
+    use super::write_link;
+    use crate::db::WardsonDbClient;
+    use crate::knowledge::types::EdgeType;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn data(v: serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": v, "meta": {}}))
+    }
+
+    /// Two nodes `a` and `b`; the duplicate check answers `existing`.
+    async fn server(existing: serde_json::Value) -> MockServer {
+        let server = MockServer::start().await;
+        for id in ["a", "b"] {
+            Mock::given(method("GET"))
+                .and(path(format!("/memory.semantic/docs/{id}")))
+                .respond_with(data(json!({"_id": id})))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("POST")).and(path("/memory.edges/query")).respond_with(data(existing)).mount(&server).await;
+        Mock::given(method("POST")).and(path("/memory.edges/docs")).respond_with(data(json!({"_id": "edge1"}))).mount(&server).await;
+        server
+    }
+
+    fn edge_writes(requests: &[wiremock::Request]) -> usize {
+        requests.iter().filter(|r| r.method.as_str() == "POST" && r.url.path() == "/memory.edges/docs").count()
+    }
+
+    /// The checks of `knowledge_link` hold for the brain's own links too: an
+    /// end that is not there and an edge that exists already write nothing.
+    #[tokio::test]
+    async fn write_link_refuses_a_missing_end_and_a_duplicate() {
+        let a = ("memory.semantic", "a");
+        let b = ("memory.semantic", "b");
+
+        let fresh = server(json!([])).await;
+        let db = WardsonDbClient::from_url(&fresh.uri());
+        let missing = write_link(&db, a, &EdgeType::RelatedTo, ("memory.semantic", "gone"), 0.5).await;
+        assert_eq!(missing, Err("Error: Target memory.semantic:gone not found".to_string()));
+        assert_eq!(write_link(&db, a, &EdgeType::RelatedTo, b, 0.5).await, Ok("edge1".to_string()));
+        assert_eq!(edge_writes(&fresh.received_requests().await.unwrap_or_default()), 1);
+
+        let linked = server(json!([{"_id": "edge1"}])).await;
+        let db = WardsonDbClient::from_url(&linked.uri());
+        let again = write_link(&db, a, &EdgeType::RelatedTo, b, 0.5).await;
+        assert!(again.as_ref().is_err_and(|e| e.starts_with("Error: Edge already exists")), "{again:?}");
+        assert_eq!(edge_writes(&linked.received_requests().await.unwrap_or_default()), 0);
+    }
+}
+
 /// `knowledge_link <source_coll>:<source_id> | <edge_type> | <target_coll>:<target_id> | <weight>`
 pub async fn knowledge_link(params: &str, db: &WardsonDbClient) -> String {
     let parts: Vec<&str> = params.splitn(4, '|').map(|s| s.trim()).collect();
@@ -222,12 +276,33 @@ pub async fn knowledge_link(params: &str, db: &WardsonDbClient) -> String {
         return "Error: Weight must be > 0.0 and ≤ 1.0".into();
     }
 
-    // Validate source + target exist
+    match write_link(db, (src_coll, src_id), &edge_type, (tgt_coll, tgt_id), weight).await {
+        Ok(edge_id) => format!(
+            "Created edge: {}:{} --[{} w={}]--> {}:{}\nEdge ID: {}",
+            src_coll, src_id, edge_type.as_str(), weight, tgt_coll, tgt_id, edge_id
+        ),
+        Err(refusal) => refusal,
+    }
+}
+
+/// Write one edge `source --edge_type--> target` after the checks
+/// `knowledge_link` makes once its arguments are parsed: both ends exist and
+/// the edge is not there yet. Returns the edge's id, or the refusal in
+/// `knowledge_link`'s words. The caller gives a brain-created type, a weight
+/// in (0, 1] and two different ends; the brain's own links (the record of a
+/// deleted session) come through here too.
+pub(crate) async fn write_link(
+    db: &WardsonDbClient,
+    (src_coll, src_id): (&str, &str),
+    edge_type: &EdgeType,
+    (tgt_coll, tgt_id): (&str, &str),
+    weight: f64,
+) -> Result<String, String> {
     if db.read(src_coll, src_id).await.is_err() {
-        return format!("Error: Source {}:{} not found", src_coll, src_id);
+        return Err(format!("Error: Source {}:{} not found", src_coll, src_id));
     }
     if db.read(tgt_coll, tgt_id).await.is_err() {
-        return format!("Error: Target {}:{} not found", tgt_coll, tgt_id);
+        return Err(format!("Error: Target {}:{} not found", tgt_coll, tgt_id));
     }
 
     // Duplicate check
@@ -242,10 +317,10 @@ pub async fn knowledge_link(params: &str, db: &WardsonDbClient) -> String {
     if let Ok(existing) = db.query("memory.edges", &dup_filter).await
         && !existing.is_empty()
     {
-        return format!(
+        return Err(format!(
             "Error: Edge already exists from {}:{} to {}:{} with type {}",
             src_coll, src_id, tgt_coll, tgt_id, edge_type.as_str()
-        );
+        ));
     }
 
     let edge_doc = json!({
@@ -258,13 +333,9 @@ pub async fn knowledge_link(params: &str, db: &WardsonDbClient) -> String {
         "metadata": {},
         "created_at": chrono::Utc::now().to_rfc3339(),
     });
-    match db.write("memory.edges", &edge_doc).await {
-        Ok(edge_id) => format!(
-            "Created edge: {}:{} --[{} w={}]--> {}:{}\nEdge ID: {}",
-            src_coll, src_id, edge_type.as_str(), weight, tgt_coll, tgt_id, edge_id
-        ),
-        Err(e) => format!("Error: failed to create edge: {}", e),
-    }
+    db.write("memory.edges", &edge_doc)
+        .await
+        .map_err(|e| format!("Error: failed to create edge: {}", e))
 }
 
 /// Triple-form endpoint: `<collection>:<id>` → (collection, id); a bare

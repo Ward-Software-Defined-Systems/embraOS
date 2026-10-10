@@ -25,7 +25,7 @@ const PROCEDURAL_SCHEMA_HINT: &str = r#"{"title": "...", "description": "...", "
 
 /// What a promotion wrote: enough to name the node and to derive its
 /// automatic edges.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct NewNode {
     pub collection: &'static str,
     pub id: String,
