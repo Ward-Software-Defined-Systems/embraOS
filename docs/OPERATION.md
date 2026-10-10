@@ -12,14 +12,14 @@ You can run multiple named sessions for different contexts:
 /new research         # Create a research-focused session
 /new monitoring       # Create a monitoring session
 /switch main          # Switch back to the main session
-/sessions             # List all sessions
+/sessions             # List all sessions and the provider each is pinned to
 ```
 
 All sessions share the same intelligence — same memory, same identity, same soul. But each has its own conversation history and context.
 
 **Stopping a stuck turn**: if the intelligence gets caught in a reasoning loop (far more common on local models than frontier ones), press **Esc** in the console while the turn is streaming, type `/stop`, or tap the **■** button that replaces Send on mobile. Generation stops immediately — the connection to the model server is severed — and the partial response stays in history marked as interrupted. Stops are fail-safe: they only ever affect the turn that was running when you pressed them, and they work during Learning Mode too.
 
-**Deleting a session** is a conversation, not a keystroke: `/sessions delete <name>` has the intelligence summarize the session and ask why you're removing it; your reason is recorded, durable learnings are preserved to the knowledge graph (`remember`), and only then does the system soft-delete it. Deletion is soft for 7 days — the session disappears from listings and can't be attached, but `/sessions restore <name>` brings it back intact until the database's TTL reaper removes the data for good. Any slash command during the flow cancels it; a declining reply aborts it; the `learning` session (the sealed identity record) can never be deleted.
+**Deleting a session** is a conversation, not a keystroke: `/sessions delete <name>` has the intelligence summarize the session and ask why you're removing it. Your reply is the reason and the approval: durable learnings are preserved to the knowledge graph (`remember`) as memories of that session, and only then does the system soft-delete it. The system then records the deletion and your reason as a memory, linked to what was preserved; the session's summary goes with the session. Deletion is soft for 7 days — the session disappears from listings and can't be attached, but `/sessions restore <name>` brings it back intact until the database's TTL reaper removes the data for good. Any slash command during the flow cancels it; a declining reply aborts it; the `learning` session (the sealed identity record) can never be deleted.
 
 ## Keyboard Shortcuts
 

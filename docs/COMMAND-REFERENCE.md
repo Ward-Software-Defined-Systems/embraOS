@@ -6,11 +6,11 @@ Every slash command available in an embraOS session, grouped as in the web conso
 
 | Command | Description |
 |---|---|
-| `/sessions` | List all sessions, most recently active first, with state, turn count, and last active time (configured timezone) |
+| `/sessions` | List all sessions, most recently active first, with state, the provider each session is pinned to, turn count, and last active time (configured timezone). When a session is pinned to another provider than the active one, a closing line gives the steps to open it |
 | `/new <name>` | Create a new named session and switch to it. Duplicate names are refused (`/switch` to attach an existing session; a soft-deleted name stays reserved through its grace period) |
 | `/switch <name>` | Switch to an existing session (restores full history) |
 | `/close` | Close the current session |
-| `/sessions delete <name>` | Guided deletion: the intelligence summarizes the session, asks your reason, preserves durable memories to the knowledge graph, then soft-deletes it (7-day grace period; any slash command mid-flow cancels; the `learning` session is never deletable) |
+| `/sessions delete <name>` | Guided deletion: the intelligence summarizes the session, asks your reason, and preserves durable memories to the knowledge graph as memories of that session; your reply is the approval. The system then soft-deletes it and records the deletion and your reason as a memory linked to what was kept (7-day grace period; any slash command mid-flow cancels; the `learning` session is never deletable) |
 | `/sessions restore <name>` | Undo a soft delete during its grace period (the session returns Detached — `/switch` to attach) |
 
 ## Turn

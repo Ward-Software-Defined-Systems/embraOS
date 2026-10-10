@@ -57,10 +57,10 @@ For the data model, edge taxonomy, density rationale, promotion path, auto-enric
 | Tool | Description |
 |---|---|
 | **session_summary** | Message counts and recent conversation turns for the intelligence to summarize |
-| **session_list** | List all sessions with status, turn count, last active, and created dates |
+| **session_list** | List all sessions with status, the provider each is pinned to, turn count, last active, and created dates |
 | **session_read** | Read session transcript with **full message content** and optional range (`1-20`, `80-`, last N; default = last 30 turns). Output is budgeted at ~64 KB per call, whole-turn granularity — when the budget stops emission early, a continuation line names the exact remaining range to request next (the 2 MiB tool-result cap stays the hard backstop) |
 | **session_search** | Case-insensitive search across sessions — quoted (`"tool sweep"`) is a literal phrase match, unquoted is whitespace-tokenized AND match (every token must appear in the same turn). `session` (optional) narrows to a single session. Returns up to 20 matches with context (an intentional output bound, not a fetch window — the search itself covers the full transcripts) |
-| **session_meta** | Structured session metadata — status, dates, turn counts (total/user/assistant), summary availability |
+| **session_meta** | Structured session metadata — status, provider, dates, turn counts (total/user/assistant), summary availability |
 | **session_delta** | Returns all turns from a given turn number onward, with full message content — same ~64 KB output budget as `session_read`; a continuation line names the `since_turn` to resume from when it stops early |
 | **session_summarize** | Generate or retrieve cached session summaries — cache-aware with SHA-256 source hashing |
 | **session_summary_save** | Persist Brain-generated summaries with audit trail to `system.consolidation_log` |
