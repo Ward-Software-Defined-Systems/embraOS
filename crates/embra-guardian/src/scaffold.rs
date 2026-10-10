@@ -25,6 +25,9 @@ const JSON_SRC: &str = include_str!("guest/json.rs");
 // Only useful to a tool that also declares `http_get`, but shipping it
 // unconditionally keeps scaffold composition simple.
 const HTML_TEXT_SRC: &str = include_str!("guest/html_text.rs");
+// The prompt-injection scrubber the shipped tools share; always shipped,
+// the prelude declares `mod inject;`.
+const INJECT_SRC: &str = include_str!("guest/inject.rs");
 
 // Scaffold-owned `mod host`. Composed from the declared caps so a tool
 // that declares several capabilities gets ONE module (shared
@@ -238,6 +241,7 @@ pub fn scaffold(base: &Path, m: &ValidatedModule) -> Result<ScaffoldPaths, Guard
     write(&cargo_dir.join("config.toml"), CARGO_CONFIG)?;
     write(&src.join("json.rs"), JSON_SRC)?;
     write(&src.join("html_text.rs"), HTML_TEXT_SRC)?;
+    write(&src.join("inject.rs"), INJECT_SRC)?;
     let lib_rs = src.join("lib.rs");
     write(&lib_rs, &assemble_lib_rs(m))?;
 
@@ -277,6 +281,7 @@ mod tests {
         assert!(s.contains("#![no_std]"));
         assert!(s.contains("mod json;"));
         assert!(s.contains("mod html_text;"));
+        assert!(s.contains("mod inject;"));
         assert!(s.contains("pub extern \"C\" fn guardian_run"));
         assert!(s.contains("// guardian-tool: web_search"));
         assert!(s.contains("fn run(input: &str)"));
@@ -346,6 +351,7 @@ mod tests {
         assert!(p.project.join(".cargo/config.toml").exists());
         assert!(p.project.join("src/json.rs").exists());
         assert!(p.project.join("src/html_text.rs").exists());
+        assert!(p.project.join("src/inject.rs").exists());
         let toml = std::fs::read_to_string(&p.manifest).unwrap();
         assert!(toml.contains("name = \"web_search\""));
         assert!(toml.contains("crate-type = [\"cdylib\"]"));

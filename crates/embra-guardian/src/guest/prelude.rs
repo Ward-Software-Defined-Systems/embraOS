@@ -18,6 +18,7 @@ use alloc::vec::Vec;
 
 mod json;
 mod html_text;
+mod inject;
 
 // Bump allocator over a fixed per-instance arena. The host instantiates a
 // fresh module per call, so linear memory (and this arena) is zeroed and

@@ -59,6 +59,8 @@ pub const KNOWN_WEB_SEARCH_SHA256: &[&str] = &[
     "37b205bde4f9f1f1c3754ce7fcf347cab4a799393a061dfd32fdaa4ae35a0131",
     // 2026-10-09 (Embra#17, the third rerun): a possessive rides the directive; query words trimmed of punctuation
     "7d9bec236041453bff992ef00e7bf57190a7bb78a61bb79053bd70d8aa74fedc",
+    // 2026-10-09: the scrubber moved to the vendored `inject` helper, shared with http_request
+    "efa59644ff899c5d5e6f3c702e3e31b946a0e5f56c8ca17d617254799cc63299",
 ];
 
 /// The hashes of every version ever shipped under `name`, oldest first.

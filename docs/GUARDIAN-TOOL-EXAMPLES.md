@@ -32,7 +32,7 @@ so what's here is exactly what the gate accepts.
 
 You paste **only** these items — the scaffold owns everything else
 (`#![no_std]`, the allocator, the panic handler, the ABI exports, and the
-`json` / `host` / `html_text` modules):
+`json` / `host` / `html_text` / `inject` modules):
 
 - A first marker line: `// guardian-tool: <name>`
   (`name` is `^[a-z][a-z0-9_]{2,39}$`, ≥3 chars, and must not collide
@@ -49,7 +49,7 @@ You paste **only** these items — the scaffold owns everything else
 
 Forbidden in the paste (validator-enforced): `unsafe`, `extern`/FFI,
 `std::*` / `core::arch` / `proc_macro`, `use` of anything outside
-`core`/`alloc`/`json`/`host`/`html_text`, `include!`/`env!`/`asm!`-style macros,
+`core`/`alloc`/`json`/`host`/`html_text`/`inject`, `include!`/`env!`/`asm!`-style macros,
 `mod`, `pub` free items, `#[no_mangle]`/`#[link]`/runtime attrs, and any
 third-party crate dependency (v1 guests are dependency-free). `vec![]`
 and `format!` are available.
@@ -138,6 +138,23 @@ html_text::to_text(html: &str) -> String
 // collapses whitespace. NOT a parser and NOT a sanitizer — pair it with
 // http_get to make a fetched page model-readable, then injection-scrub
 // the result (it is attacker-controlled). See GUARDIAN-ADVANCED-EXAMPLE.md.
+```
+
+### Provided `inject` API (always available, zero-dep)
+
+```text
+inject::redact(text: &str) -> (String, bool)
+// The text with every injection directive ("ignore your previous
+// instructions", "disregard all safety policies", "ignore the user …") and
+// structural marker ("you are now", "</system>", "assistant:", …) rewritten
+// to inject::MARKER ("[redacted-directive]"), and whether anything was
+// found. A page that merely talks about a system prompt is flagged and
+// kept. For text the model will READ (a page reduced with html_text).
+inject::flagged(text: &str) -> bool
+// The same patterns, nothing rewritten: for data that must stay as sent
+// (an API body), with the flag as the signal.
+// A lexical pass, and it says so: a typoglycemia, spaced-out or base64
+// directive passes. The shipped web_search and http_request use both.
 ```
 
 ## Minimal template

@@ -334,7 +334,7 @@ const DENIED_MACROS: &[&str] = &[
     "asm", "global_asm", "concat_idents",
 ];
 const USE_ROOTS_OK: &[&str] =
-    &["core", "alloc", "crate", "self", "super", "json", "host", "html_text"];
+    &["core", "alloc", "crate", "self", "super", "json", "host", "html_text", "inject"];
 
 impl<'ast> Visit<'ast> for Deny {
     fn visit_item_extern_crate(&mut self, i: &'ast syn::ItemExternCrate) {
@@ -504,6 +504,25 @@ fn run(input: &str) -> String { String::new() }
     fn unknown_capability() {
         let src = GOOD.replace(r#"&["http_get"]"#, r#"&["spawn_proc"]"#);
         assert_eq!(reject(&src).rule, "capability");
+    }
+
+    #[test]
+    fn inject_helper_use_and_call_allowed() {
+        // `inject` is scaffold-shipped like `html_text`: a `use` and a
+        // bare call both pass the denylist.
+        let src = r##"
+// guardian-tool: scrub
+const GUARDIAN_NAME: &str = "scrub";
+const GUARDIAN_DESC: &str = "Scrub.";
+const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"t":{"type":"string"}}}"#;
+use inject::redact;
+fn run(input: &str) -> String {
+    let (clean, flagged) = redact(input);
+    let seen = inject::flagged(input);
+    format!("{clean} {flagged} {seen}")
+}
+"##;
+        validate(src, &[]).expect("inject use and call pass");
     }
 
     #[test]
