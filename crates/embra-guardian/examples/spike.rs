@@ -53,6 +53,7 @@ impl HttpTransport for DemoTransport {
             content_type: "application/json".into(),
             body: b"{\"mock\":true}".to_vec(),
             location: None,
+            headers: vec![],
         })
     }
 }

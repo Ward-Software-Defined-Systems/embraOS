@@ -31,6 +31,7 @@ impl HttpTransport for StubHttp {
             content_type: "application/json".into(),
             body: b"{\"page\":\"ok\"}".to_vec(),
             location: None,
+            headers: vec![],
         })
     }
 }

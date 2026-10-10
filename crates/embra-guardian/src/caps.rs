@@ -23,13 +23,107 @@ pub struct HttpResponse {
     /// The `Location` header of a redirect, as sent; the guard resolves
     /// and checks it before following. `None` on every other response.
     pub location: Option<String>,
+    /// Every response header, as sent (the request guard lowercases,
+    /// filters and caps them before the guest sees any).
+    pub headers: Vec<(String, String)>,
+}
+
+/// The methods a guest may ask for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Method {
+    Get,
+    Head,
+    Post,
+    Put,
+    Patch,
+    Delete,
+}
+
+impl Method {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Method::Get => "GET",
+            Method::Head => "HEAD",
+            Method::Post => "POST",
+            Method::Put => "PUT",
+            Method::Patch => "PATCH",
+            Method::Delete => "DELETE",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Method> {
+        match s.trim().to_ascii_uppercase().as_str() {
+            "GET" => Some(Method::Get),
+            "HEAD" => Some(Method::Head),
+            "POST" => Some(Method::Post),
+            "PUT" => Some(Method::Put),
+            "PATCH" => Some(Method::Patch),
+            "DELETE" => Some(Method::Delete),
+            _ => None,
+        }
+    }
+
+    /// Only an idempotent read follows a redirect; a POST to a moved
+    /// resource comes back as the 3xx, for the caller to decide.
+    fn follows_redirects(self) -> bool {
+        matches!(self, Method::Get | Method::Head)
+    }
+}
+
+/// One request as the guard hands it to the transport: the policy has run
+/// on the URL and the operator's secrets are among the headers.
+#[derive(Clone, Debug)]
+pub struct HttpRequest {
+    pub method: Method,
+    pub url: String,
+    /// Lowercase names.
+    pub headers: Vec<(String, String)>,
+    pub body: Option<Vec<u8>>,
+    pub timeout: Duration,
+    pub max_bytes: usize,
+}
+
+impl HttpRequest {
+    /// A plain GET: no headers, no body.
+    pub fn get(url: &str, timeout: Duration, max_bytes: usize) -> Self {
+        Self {
+            method: Method::Get,
+            url: url.to_string(),
+            headers: Vec::new(),
+            body: None,
+            timeout,
+            max_bytes,
+        }
+    }
 }
 
 /// Raw transport. Implementations perform the request and nothing else —
-/// **all policy is enforced by [`guarded_http_get`]**, never here.
+/// **all policy is enforced by the guards**, never here. `get` is what
+/// the fetch guard calls; `request` what the request guard calls, and a
+/// transport that answers plain GETs only (the test stubs) keeps the
+/// default.
 pub trait HttpTransport: Send + Sync {
     fn get(&self, url: &str, timeout: Duration, max_bytes: usize)
         -> Result<HttpResponse, String>;
+
+    fn request(&self, req: &HttpRequest) -> Result<HttpResponse, String> {
+        if req.method == Method::Get && req.headers.is_empty() && req.body.is_none() {
+            return self.get(&req.url, req.timeout, req.max_bytes);
+        }
+        Err("this transport answers a plain GET only".to_string())
+    }
+}
+
+/// A credential the host adds to a request for one host, as the
+/// operator stored it (`/guardian secret <host> <header> <value>`). The
+/// guest never sees it; a redirect to another host never carries it.
+#[derive(Clone, Debug)]
+pub struct SecretHeader {
+    /// Lowercase host, with the port when the operator gave one.
+    pub host: String,
+    /// Lowercase header name.
+    pub name: String,
+    pub value: String,
 }
 
 /// Egress policy applied to every `http_get`. Tunable by the brain later;
@@ -68,6 +162,10 @@ impl Default for EgressPolicy {
 pub struct Capabilities {
     pub http: Option<Arc<dyn HttpTransport>>,
     pub http_policy: EgressPolicy,
+    /// The operator's per-host credentials, injected by the request
+    /// guard on a hop whose host matches. Empty for a tool without
+    /// `http_request`.
+    pub secrets: Vec<SecretHeader>,
     /// `web_search` provider (Brave-backed in v1). `None` ⇒ the host
     /// method returns a structured "not configured" envelope. The
     /// provider holds the API key host-side; it never reaches the guest.
@@ -81,7 +179,7 @@ impl Capabilities {
     }
     /// Grant `http_get` backed by `transport` under `policy`.
     pub fn with_http(transport: Arc<dyn HttpTransport>, policy: EgressPolicy) -> Self {
-        Self { http: Some(transport), http_policy: policy, search: None }
+        Self { http: Some(transport), http_policy: policy, secrets: Vec::new(), search: None }
     }
     /// Grant `web_search` backed by `provider`.
     pub fn with_search(provider: Arc<dyn SearchProvider>) -> Self {
@@ -347,6 +445,302 @@ pub fn guarded_http_get(caps: &Capabilities, url: &str) -> String {
             "status": resp.status,
             "url": current,
             "content_type": resp.content_type,
+            "body": String::from_utf8_lossy(&body),
+        });
+        if hops > 0 {
+            env["redirects"] = serde_json::json!(hops);
+        }
+        return env.to_string();
+    }
+}
+
+// ── http_request capability ──
+
+/// A request body a guest may send.
+pub const HTTP_REQUEST_BODY_MAX: usize = 256 * 1024;
+/// The response a guest may ask for (`max_bytes`); the default is the
+/// policy's. Under `host::MAX_OUTPUT` with room for the envelope.
+pub const HTTP_RESPONSE_MAX_BYTES: usize = 1024 * 1024;
+/// Headers each way: at most this many, and this many bytes in all.
+pub const HTTP_HEADERS_MAX: usize = 32;
+pub const HTTP_HEADERS_BYTES_MAX: usize = 8 * 1024;
+
+/// Headers a guest may not set: a credential comes from the operator's
+/// store only, never from a tool's input.
+const CREDENTIAL_HEADERS: &[&str] = &["authorization", "proxy-authorization", "cookie"];
+/// Headers the transport owns; a guest's value is dropped without a word.
+const TRANSPORT_HEADERS: &[&str] = &[
+    "host", "content-length", "transfer-encoding", "connection", "expect", "upgrade", "te",
+    "keep-alive",
+];
+/// Response headers that never reach the guest.
+const HIDDEN_RESPONSE_HEADERS: &[&str] = &["set-cookie", "set-cookie2"];
+
+fn is_header_token(name: &str) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| {
+            b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
+        })
+}
+
+/// The guest's JSON request, vetted: method, URL with the query appended,
+/// headers (lowercase, no credential or transport header), body, caps.
+fn parse_http_request(input: &str, policy: &EgressPolicy) -> Result<HttpRequest, String> {
+    let v: serde_json::Value = serde_json::from_str(input)
+        .map_err(|e| format!("request must be a JSON object: {e}"))?;
+    let obj = v
+        .as_object()
+        .ok_or_else(|| "request must be a JSON object".to_string())?;
+    let url = obj
+        .get("url")
+        .and_then(|u| u.as_str())
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .ok_or_else(|| "url is required".to_string())?;
+    let method = match obj.get("method") {
+        None | Some(serde_json::Value::Null) => Method::Get,
+        Some(m) => m
+            .as_str()
+            .and_then(Method::parse)
+            .ok_or_else(|| "method must be one of GET, HEAD, POST, PUT, PATCH, DELETE".to_string())?,
+    };
+    let mut parsed = url::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
+    if let Some(query) = obj.get("query") {
+        let pairs = query
+            .as_object()
+            .ok_or_else(|| "query must be an object of scalars".to_string())?;
+        let mut q = parsed.query_pairs_mut();
+        for (k, val) in pairs {
+            let text = match val {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                serde_json::Value::Bool(b) => b.to_string(),
+                _ => return Err(format!("query '{k}' must be a string, a number or a boolean")),
+            };
+            q.append_pair(k, &text);
+        }
+        drop(q);
+    }
+    let mut headers: Vec<(String, String)> = Vec::new();
+    if let Some(accept) = obj.get("accept").and_then(|a| a.as_str()) {
+        headers.push(("accept".to_string(), accept.to_string()));
+    }
+    if let Some(h) = obj.get("headers") {
+        let map = h
+            .as_object()
+            .ok_or_else(|| "headers must be an object of strings".to_string())?;
+        for (name, val) in map {
+            let value = val
+                .as_str()
+                .ok_or_else(|| format!("header '{name}' must be a string"))?;
+            let lname = name.trim().to_ascii_lowercase();
+            if !is_header_token(&lname) {
+                return Err(format!("header '{name}' is not a valid header name"));
+            }
+            if value.contains(['\r', '\n']) {
+                return Err(format!("header '{name}' must not contain a line break"));
+            }
+            if CREDENTIAL_HEADERS.contains(&lname.as_str()) {
+                return Err(format!(
+                    "header '{name}' is a credential: set it with /guardian secret <host> {name} <value>, \
+                     never in a request"
+                ));
+            }
+            if TRANSPORT_HEADERS.contains(&lname.as_str()) {
+                continue;
+            }
+            headers.retain(|(n, _)| n != &lname);
+            headers.push((lname, value.to_string()));
+        }
+    }
+    let header_bytes: usize = headers.iter().map(|(n, v)| n.len() + v.len()).sum();
+    if headers.len() > HTTP_HEADERS_MAX || header_bytes > HTTP_HEADERS_BYTES_MAX {
+        return Err(format!(
+            "too many request headers (at most {HTTP_HEADERS_MAX}, {HTTP_HEADERS_BYTES_MAX} bytes)"
+        ));
+    }
+    let body = match (obj.get("body"), obj.get("json")) {
+        (Some(_), Some(_)) => return Err("give body or json, not both".to_string()),
+        (Some(serde_json::Value::String(b)), None) => Some(b.as_bytes().to_vec()),
+        (Some(serde_json::Value::Null), None) | (None, None) => None,
+        (Some(_), None) => return Err("body must be a string (use json for a JSON value)".to_string()),
+        (None, Some(j)) => {
+            if !headers.iter().any(|(n, _)| n == "content-type") {
+                headers.push(("content-type".to_string(), "application/json".to_string()));
+            }
+            Some(serde_json::to_vec(j).map_err(|e| e.to_string())?)
+        }
+    };
+    if let Some(b) = &body {
+        if matches!(method, Method::Get | Method::Head) {
+            return Err(format!("a {} carries no body", method.as_str()));
+        }
+        if b.len() > HTTP_REQUEST_BODY_MAX {
+            return Err(format!(
+                "request body is {} bytes; the cap is {HTTP_REQUEST_BODY_MAX}",
+                b.len()
+            ));
+        }
+    }
+    let max_bytes = obj
+        .get("max_bytes")
+        .and_then(|m| m.as_u64())
+        .map(|m| usize::try_from(m).unwrap_or(usize::MAX).clamp(1, HTTP_RESPONSE_MAX_BYTES))
+        .unwrap_or(policy.max_bytes);
+    let timeout = obj
+        .get("timeout_ms")
+        .and_then(|t| t.as_u64())
+        .map(|ms| Duration::from_millis(ms).clamp(Duration::from_millis(1), policy.timeout))
+        .unwrap_or(policy.timeout);
+    Ok(HttpRequest {
+        method,
+        url: parsed.to_string(),
+        headers,
+        body,
+        timeout,
+        max_bytes,
+    })
+}
+
+/// The media type, without parameters, lowercase.
+fn media_type(content_type: &str) -> String {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// What a request may read back: text, JSON and XML in their forms, form
+/// data and NDJSON. A binary body is refused by name.
+fn request_content_type_allowed(content_type: &str) -> bool {
+    let mt = media_type(content_type);
+    mt.is_empty()
+        || mt.starts_with("text/")
+        || mt == "application/json"
+        || mt == "application/xml"
+        || mt == "application/x-ndjson"
+        || mt == "application/x-www-form-urlencoded"
+        || (mt.starts_with("application/") && (mt.ends_with("+json") || mt.ends_with("+xml")))
+}
+
+/// The response headers a guest sees: lowercase, no cookies, at most
+/// `HTTP_HEADERS_MAX` and `HTTP_HEADERS_BYTES_MAX` in all, in the order
+/// sent.
+fn guest_headers(headers: &[(String, String)]) -> serde_json::Map<String, serde_json::Value> {
+    let mut out = serde_json::Map::new();
+    let mut bytes = 0usize;
+    for (name, value) in headers {
+        let lname = name.to_ascii_lowercase();
+        if HIDDEN_RESPONSE_HEADERS.contains(&lname.as_str()) {
+            continue;
+        }
+        if out.len() >= HTTP_HEADERS_MAX || bytes + lname.len() + value.len() > HTTP_HEADERS_BYTES_MAX {
+            break;
+        }
+        bytes += lname.len() + value.len();
+        out.insert(lname, serde_json::Value::String(value.clone()));
+    }
+    out
+}
+
+/// The host a secret is stored for, as the URL names it: lowercase, with
+/// the port when the URL carries one.
+fn secret_hosts_of(parsed: &url::Url) -> [String; 2] {
+    let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+    let with_port = match parsed.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.clone(),
+    };
+    [host, with_port]
+}
+
+/// The request guard. Returns the JSON string handed back to the guest
+/// (always well-formed JSON — success or a structured error). Every hop
+/// goes through `check_url`; the operator's secrets whose host is the
+/// hop's host ride that hop and no other, over any header of the same
+/// name; a GET or HEAD follows up to [`MAX_REDIRECTS`] redirects within
+/// the budget, the other methods get the 3xx back with its target under
+/// `redirect`. The envelope never carries a request header.
+pub fn guarded_http_request(caps: &Capabilities, input: &str) -> String {
+    let Some(http) = caps.http.as_ref() else {
+        return err_json("capability 'http_request' not granted to this tool");
+    };
+    let req = match parse_http_request(input, &caps.http_policy) {
+        Ok(r) => r,
+        Err(e) => return err_json(&e),
+    };
+    let budget = req.timeout;
+    let started = Instant::now();
+    let mut current = req.url.clone();
+    let mut hops = 0usize;
+    loop {
+        let parsed = match check_url(caps, &current) {
+            Ok(u) => u,
+            Err(e) => return err_json(&e),
+        };
+        let remaining = match budget.checked_sub(started.elapsed()) {
+            Some(r) if !r.is_zero() => r,
+            _ => return err_json(&format!("fetch budget of {budget:?} spent")),
+        };
+        let hosts = secret_hosts_of(&parsed);
+        let mut headers = req.headers.clone();
+        for secret in caps.secrets.iter().filter(|s| hosts.contains(&s.host)) {
+            headers.retain(|(n, _)| n != &secret.name);
+            headers.push((secret.name.clone(), secret.value.clone()));
+        }
+        let hop = HttpRequest {
+            method: req.method,
+            url: current.clone(),
+            headers,
+            body: req.body.clone(),
+            timeout: remaining,
+            max_bytes: req.max_bytes,
+        };
+        let resp = match http.request(&hop) {
+            Ok(r) => r,
+            Err(e) => return err_json(&e),
+        };
+        if is_redirect(resp.status)
+            && let Some(loc) = resp.location.as_deref()
+        {
+            if req.method.follows_redirects() && hops < MAX_REDIRECTS {
+                current = match parsed.join(loc) {
+                    Ok(next) => next.to_string(),
+                    Err(e) => return err_json(&format!("invalid redirect target: {e}")),
+                };
+                hops += 1;
+                continue;
+            }
+            return serde_json::json!({
+                "ok": true,
+                "status": resp.status,
+                "url": current,
+                "redirects": hops,
+                "redirect": loc,
+                "content_type": resp.content_type,
+                "headers": guest_headers(&resp.headers),
+                "body": "",
+            })
+            .to_string();
+        }
+        if !request_content_type_allowed(&resp.content_type) {
+            return err_json(&format!(
+                "response content-type '{}' is not allowed (text, JSON, XML, NDJSON and form data are)",
+                resp.content_type
+            ));
+        }
+        let mut body = resp.body;
+        if body.len() > req.max_bytes {
+            body.truncate(req.max_bytes);
+        }
+        let mut env = serde_json::json!({
+            "ok": true,
+            "status": resp.status,
+            "url": current,
+            "content_type": resp.content_type,
+            "headers": guest_headers(&resp.headers),
             "body": String::from_utf8_lossy(&body),
         });
         if hops > 0 {
@@ -768,11 +1162,20 @@ pub struct ReqwestTransport {
 
 impl ReqwestTransport {
     pub fn new() -> Result<Self, String> {
-        let client = reqwest::blocking::Client::builder()
+        Self::with_roots(Vec::new())
+    }
+
+    /// With the operator's CA drop-ins beside the compiled-in roots, so a
+    /// private host behind an internal CA (on the egress allowlist) is
+    /// reachable the way the GitLab client reaches it.
+    pub fn with_roots(roots: Vec<reqwest::Certificate>) -> Result<Self, String> {
+        let mut builder = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .user_agent("embra-guardian/0.5")
-            .build()
-            .map_err(|e| e.to_string())?;
+            .user_agent("embra-guardian/0.5");
+        for cert in roots {
+            builder = builder.add_root_certificate(cert);
+        }
+        let client = builder.build().map_err(|e| e.to_string())?;
         Ok(Self { client })
     }
 }
@@ -780,12 +1183,25 @@ impl ReqwestTransport {
 impl HttpTransport for ReqwestTransport {
     fn get(&self, url: &str, timeout: Duration, max_bytes: usize)
         -> Result<HttpResponse, String> {
-        let resp = self
-            .client
-            .get(url)
-            .timeout(timeout)
-            .send()
+        self.request(&HttpRequest::get(url, timeout, max_bytes))
+    }
+
+    fn request(&self, req: &HttpRequest) -> Result<HttpResponse, String> {
+        use std::io::Read;
+        let method = reqwest::Method::from_bytes(req.method.as_str().as_bytes())
             .map_err(|e| e.to_string())?;
+        let mut builder = self.client.request(method, &req.url).timeout(req.timeout);
+        for (name, value) in &req.headers {
+            let n = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+                .map_err(|e| format!("header '{name}': {e}"))?;
+            let v = reqwest::header::HeaderValue::from_str(value)
+                .map_err(|e| format!("header '{name}': {e}"))?;
+            builder = builder.header(n, v);
+        }
+        if let Some(body) = &req.body {
+            builder = builder.body(body.clone());
+        }
+        let mut resp = builder.send().map_err(|e| e.to_string())?;
         let status = resp.status().as_u16();
         let content_type = resp
             .headers()
@@ -798,12 +1214,18 @@ impl HttpTransport for ReqwestTransport {
             .get(reqwest::header::LOCATION)
             .and_then(|v| v.to_str().ok())
             .map(str::to_string);
-        let full = resp.bytes().map_err(|e| e.to_string())?;
-        let mut body = full.to_vec();
-        if body.len() > max_bytes {
-            body.truncate(max_bytes);
-        }
-        Ok(HttpResponse { status, content_type, body, location })
+        let headers: Vec<(String, String)> = resp
+            .headers()
+            .iter()
+            .map(|(n, v)| (n.as_str().to_string(), String::from_utf8_lossy(v.as_bytes()).into_owned()))
+            .collect();
+        // Read bounded: at most the cap, never the whole of a large body.
+        let mut body = Vec::new();
+        (&mut resp)
+            .take(req.max_bytes as u64)
+            .read_to_end(&mut body)
+            .map_err(|e| e.to_string())?;
+        Ok(HttpResponse { status, content_type, body, location, headers })
     }
 }
 
@@ -822,6 +1244,7 @@ impl HttpTransport for MockTransport {
             content_type: self.content_type.clone(),
             body: self.body.clone(),
             location: None,
+            headers: Vec::new(),
         })
     }
 }
@@ -843,6 +1266,7 @@ impl HttpTransport for RouteTransport {
             content_type: "text/html".into(),
             body: body.as_bytes().to_vec(),
             location: location.map(str::to_string),
+            headers: Vec::new(),
         })
     }
 }
@@ -922,9 +1346,9 @@ mod tests {
         fn get(&self, u: &str, _t: Duration, _m: usize) -> Result<HttpResponse, String> {
             std::thread::sleep(self.0);
             if u.ends_with("/a") {
-                Ok(HttpResponse { status: 301, content_type: String::new(), body: vec![], location: Some("/b".into()) })
+                Ok(HttpResponse { status: 301, content_type: String::new(), body: vec![], location: Some("/b".into()), headers: vec![] })
             } else {
-                Ok(HttpResponse { status: 200, content_type: "text/html".into(), body: b"ok".to_vec(), location: None })
+                Ok(HttpResponse { status: 200, content_type: "text/html".into(), body: b"ok".to_vec(), location: None, headers: vec![] })
             }
         }
     }
@@ -1110,6 +1534,254 @@ mod tests {
         assert!(is_blocked_ip(&mapped));
         let pub_v6: IpAddr = "2606:4700:4700::1111".parse().unwrap();
         assert!(!is_blocked_ip(&pub_v6));
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Answers per URL and records every request it saw:
+    /// `(url, status, location, body, content_type, response headers)`.
+    struct Recorder {
+        routes: Vec<(&'static str, u16, Option<&'static str>, &'static str, &'static str)>,
+        extra_headers: Vec<(String, String)>,
+        seen: Mutex<Vec<HttpRequest>>,
+    }
+
+    impl Recorder {
+        fn new(routes: Vec<(&'static str, u16, Option<&'static str>, &'static str, &'static str)>) -> Arc<Self> {
+            Arc::new(Self { routes, extra_headers: Vec::new(), seen: Mutex::new(Vec::new()) })
+        }
+        fn seen(&self) -> Vec<HttpRequest> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    impl HttpTransport for Recorder {
+        fn get(&self, url: &str, timeout: Duration, max_bytes: usize) -> Result<HttpResponse, String> {
+            self.request(&HttpRequest::get(url, timeout, max_bytes))
+        }
+        fn request(&self, req: &HttpRequest) -> Result<HttpResponse, String> {
+            self.seen.lock().unwrap().push(req.clone());
+            let (_, status, location, body, ct) = self
+                .routes
+                .iter()
+                .find(|(u, ..)| *u == req.url)
+                .ok_or_else(|| format!("no route for {}", req.url))?;
+            let mut headers = vec![
+                ("Content-Type".to_string(), ct.to_string()),
+                ("Set-Cookie".to_string(), "sid=1".to_string()),
+                ("X-RateLimit-Remaining".to_string(), "9".to_string()),
+            ];
+            headers.extend(self.extra_headers.iter().cloned());
+            Ok(HttpResponse {
+                status: *status,
+                content_type: ct.to_string(),
+                body: body.as_bytes().to_vec(),
+                location: location.map(str::to_string),
+                headers,
+            })
+        }
+    }
+
+    fn caps_with(rec: &Arc<Recorder>) -> Capabilities {
+        let transport: Arc<dyn HttpTransport> = rec.clone();
+        Capabilities::with_http(transport, EgressPolicy::default())
+    }
+
+    fn parse(s: &str) -> serde_json::Value {
+        serde_json::from_str(s).expect("the guard emits valid JSON")
+    }
+
+    fn header<'a>(req: &'a HttpRequest, name: &str) -> Option<&'a str> {
+        req.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn a_post_carries_its_method_headers_and_body() {
+        let rec = Recorder::new(vec![("https://1.1.1.1/api", 201, None, r#"{"id":7}"#, "application/json")]);
+        let v = parse(&guarded_http_request(
+            &caps_with(&rec),
+            r#"{"url":"https://1.1.1.1/api","method":"post","headers":{"X-Trace":"abc","Accept":"application/json"},"json":{"a":1}}"#,
+        ));
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["status"], 201);
+        assert_eq!(v["body"], r#"{"id":7}"#);
+        assert_eq!(v["headers"]["x-ratelimit-remaining"], "9");
+        assert!(v["headers"].get("set-cookie").is_none(), "{v}");
+        assert!(v.get("redirects").is_none());
+        let seen = rec.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].method, Method::Post);
+        assert_eq!(header(&seen[0], "x-trace"), Some("abc"));
+        assert_eq!(header(&seen[0], "accept"), Some("application/json"));
+        assert_eq!(header(&seen[0], "content-type"), Some("application/json"));
+        assert_eq!(seen[0].body.as_deref(), Some(br#"{"a":1}"#.as_slice()));
+    }
+
+    #[test]
+    fn a_secret_is_injected_for_its_host_and_not_for_a_redirect_to_another() {
+        let rec = Recorder::new(vec![
+            ("https://1.1.1.1/a", 302, Some("https://1.0.0.1/b"), "", "text/html"),
+            ("https://1.0.0.1/b", 200, None, "there", "text/html"),
+            ("https://1.1.1.1:8443/x", 200, None, "port", "text/plain"),
+            ("https://1.1.1.1/x", 200, None, "noport", "text/plain"),
+        ]);
+        let mut caps = caps_with(&rec);
+        caps.secrets = vec![
+            SecretHeader { host: "1.1.1.1".into(), name: "authorization".into(), value: "Bearer t".into() },
+            SecretHeader { host: "1.1.1.1:8443".into(), name: "x-api-key".into(), value: "k".into() },
+        ];
+        let v = parse(&guarded_http_request(&caps, r#"{"url":"https://1.1.1.1/a"}"#));
+        assert_eq!(v["url"], "https://1.0.0.1/b", "{v}");
+        assert_eq!(v["body"], "there");
+        let seen = rec.seen();
+        assert_eq!(header(&seen[0], "authorization"), Some("Bearer t"), "the first hop carries it");
+        assert_eq!(header(&seen[1], "authorization"), None, "the other host does not");
+        // A secret stored with a port matches only the URL with that port.
+        let _ = guarded_http_request(&caps, r#"{"url":"https://1.1.1.1:8443/x"}"#);
+        let _ = guarded_http_request(&caps, r#"{"url":"https://1.1.1.1/x"}"#);
+        let seen = rec.seen();
+        assert_eq!(header(&seen[2], "x-api-key"), Some("k"));
+        assert_eq!(header(&seen[3], "x-api-key"), None);
+        assert_eq!(header(&seen[3], "authorization"), Some("Bearer t"));
+        // The envelope never echoes a request header.
+        let text = guarded_http_request(&caps, r#"{"url":"https://1.1.1.1/x"}"#);
+        assert!(!text.contains("Bearer"), "{text}");
+    }
+
+    #[test]
+    fn a_guest_may_not_set_a_credential_header() {
+        let rec = Recorder::new(vec![]);
+        for h in ["Authorization", "cookie", "Proxy-Authorization"] {
+            let v = parse(&guarded_http_request(
+                &caps_with(&rec),
+                &format!(r#"{{"url":"https://1.1.1.1/","headers":{{"{h}":"x"}}}}"#),
+            ));
+            assert_eq!(v["ok"], false, "{h}");
+            assert!(v["error"].as_str().unwrap().contains("/guardian secret"), "{v}");
+        }
+        assert!(rec.seen().is_empty(), "nothing was sent");
+    }
+
+    #[test]
+    fn transport_headers_are_dropped_and_bad_names_refused() {
+        let rec = Recorder::new(vec![("https://1.1.1.1/", 200, None, "ok", "text/plain")]);
+        let v = parse(&guarded_http_request(
+            &caps_with(&rec),
+            r#"{"url":"https://1.1.1.1/","headers":{"Host":"evil","Content-Length":"5","Connection":"close","X-Ok":"1"}}"#,
+        ));
+        assert_eq!(v["ok"], true, "{v}");
+        let seen = rec.seen();
+        assert_eq!(seen[0].headers, vec![("x-ok".to_string(), "1".to_string())]);
+        for bad in [r#"{"url":"https://1.1.1.1/","headers":{"X Space":"1"}}"#, r#"{"url":"https://1.1.1.1/","headers":{"X-Ok":"a
+b"}}"#] {
+            let v = parse(&guarded_http_request(&caps_with(&rec), bad));
+            assert_eq!(v["ok"], false, "{bad}");
+        }
+    }
+
+    #[test]
+    fn query_pairs_are_appended_encoded() {
+        // The pairs come out in key order (a JSON object's keys are sorted
+        // here; `preserve_order` is never enabled), form-encoded.
+        let rec = Recorder::new(vec![("https://1.1.1.1/s?a=1&b=true&n=2&q=two+words", 200, None, "ok", "text/plain")]);
+        let v = parse(&guarded_http_request(
+            &caps_with(&rec),
+            r#"{"url":"https://1.1.1.1/s?a=1","query":{"q":"two words","n":2,"b":true}}"#,
+        ));
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["url"], "https://1.1.1.1/s?a=1&b=true&n=2&q=two+words");
+        let v = parse(&guarded_http_request(&caps_with(&rec), r#"{"url":"https://1.1.1.1/s","query":{"q":[1]}}"#));
+        assert_eq!(v["ok"], false);
+    }
+
+    #[test]
+    fn a_redirect_is_followed_for_get_and_head_only() {
+        let rec = Recorder::new(vec![
+            ("https://1.1.1.1/old", 301, Some("/new"), "", "text/html"),
+            ("https://1.1.1.1/new", 200, None, "moved", "text/html"),
+        ]);
+        let v = parse(&guarded_http_request(&caps_with(&rec), r#"{"url":"https://1.1.1.1/old"}"#));
+        assert_eq!(v["url"], "https://1.1.1.1/new", "{v}");
+        assert_eq!(v["redirects"], 1);
+        assert_eq!(v["body"], "moved");
+        let v = parse(&guarded_http_request(&caps_with(&rec), r#"{"url":"https://1.1.1.1/old","method":"POST","body":"x"}"#));
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["status"], 301);
+        assert_eq!(v["redirect"], "/new");
+        assert_eq!(v["body"], "");
+        assert_eq!(rec.seen().len(), 3, "the POST was not followed");
+    }
+
+    #[test]
+    fn text_json_xml_and_ndjson_pass_and_an_image_is_refused() {
+        let rec = Recorder::new(vec![
+            ("https://1.1.1.1/j", 200, None, "{}", "application/problem+json; charset=utf-8"),
+            ("https://1.1.1.1/x", 200, None, "<a/>", "application/xml"),
+            ("https://1.1.1.1/n", 200, None, "{}\n{}", "application/x-ndjson"),
+            ("https://1.1.1.1/f", 200, None, "a=b", "application/x-www-form-urlencoded"),
+            ("https://1.1.1.1/t", 404, None, "no such thing", "text/plain"),
+            ("https://1.1.1.1/i", 200, None, "PNG", "image/png"),
+        ]);
+        for path in ["j", "x", "n", "f"] {
+            let v = parse(&guarded_http_request(&caps_with(&rec), &format!(r#"{{"url":"https://1.1.1.1/{path}"}}"#)));
+            assert_eq!(v["ok"], true, "{path}: {v}");
+        }
+        let v = parse(&guarded_http_request(&caps_with(&rec), r#"{"url":"https://1.1.1.1/t"}"#));
+        assert_eq!(v["ok"], true, "a 404 is an answer, not a guard error: {v}");
+        assert_eq!(v["status"], 404);
+        assert_eq!(v["body"], "no such thing");
+        let v = parse(&guarded_http_request(&caps_with(&rec), r#"{"url":"https://1.1.1.1/i"}"#));
+        assert_eq!(v["ok"], false, "{v}");
+        assert!(v["error"].as_str().unwrap().contains("image/png"), "{v}");
+    }
+
+    #[test]
+    fn the_body_is_cut_at_max_bytes_and_the_caps_are_clamped() {
+        let long: &'static str = Box::leak("x".repeat(2000).into_boxed_str());
+        let rec = Recorder::new(vec![("https://1.1.1.1/", 200, None, long, "text/plain")]);
+        let v = parse(&guarded_http_request(&caps_with(&rec), r#"{"url":"https://1.1.1.1/","max_bytes":100}"#));
+        assert_eq!(v["body"].as_str().unwrap().len(), 100);
+        assert_eq!(rec.seen()[0].max_bytes, 100);
+        let _ = guarded_http_request(&caps_with(&rec), r#"{"url":"https://1.1.1.1/","max_bytes":99999999,"timeout_ms":999999}"#);
+        let seen = rec.seen();
+        assert_eq!(seen[1].max_bytes, HTTP_RESPONSE_MAX_BYTES);
+        assert!(seen[1].timeout <= EgressPolicy::default().timeout);
+        let v = parse(&guarded_http_request(&caps_with(&rec), r#"{"url":"https://1.1.1.1/","method":"GET","body":"x"}"#));
+        assert_eq!(v["ok"], false, "a GET carries no body: {v}");
+        let v = parse(&guarded_http_request(&caps_with(&rec), r#"{"url":"https://1.1.1.1/","method":"TRACE"}"#));
+        assert_eq!(v["ok"], false, "{v}");
+        let big = format!(r#"{{"url":"https://1.1.1.1/","method":"POST","body":"{}"}}"#, "y".repeat(HTTP_REQUEST_BODY_MAX + 1));
+        let v = parse(&guarded_http_request(&caps_with(&rec), &big));
+        assert!(v["error"].as_str().unwrap().contains("request body"), "{v}");
+    }
+
+    #[test]
+    fn response_headers_are_lowercased_capped_and_without_cookies() {
+        let mut rec = Recorder::new(vec![("https://1.1.1.1/", 200, None, "ok", "text/plain")]);
+        Arc::get_mut(&mut rec).unwrap().extra_headers =
+            (0..40).map(|i| (format!("X-H{i}"), "v".to_string())).collect();
+        let v = parse(&guarded_http_request(&caps_with(&rec), r#"{"url":"https://1.1.1.1/"}"#));
+        let headers = v["headers"].as_object().unwrap();
+        assert!(headers.len() <= HTTP_HEADERS_MAX, "{}", headers.len());
+        assert!(headers.keys().all(|k| k == &k.to_ascii_lowercase()));
+        assert!(headers.get("set-cookie").is_none());
+        assert_eq!(headers["content-type"], "text/plain");
+    }
+
+    #[test]
+    fn the_request_guard_runs_the_egress_policy_on_every_hop() {
+        let rec = Recorder::new(vec![("https://1.1.1.1/", 302, Some("https://127.0.0.1/"), "", "text/html")]);
+        let v = parse(&guarded_http_request(&caps_with(&rec), r#"{"url":"https://1.1.1.1/"}"#));
+        assert_eq!(v["ok"], false, "{v}");
+        assert!(v["error"].as_str().unwrap().contains("loopback"), "{v}");
+        let v = parse(&guarded_http_request(&caps_with(&rec), r#"{"url":"http://1.1.1.1/"}"#));
+        assert!(v["error"].as_str().unwrap().contains("https"), "{v}");
+        let v = parse(&guarded_http_request(&Capabilities::none(), r#"{"url":"https://1.1.1.1/"}"#));
+        assert!(v["error"].as_str().unwrap().contains("not granted"), "{v}");
     }
 }
 

@@ -88,19 +88,48 @@ const HOST_FN_WEB_SEARCH: &str = r#"
     }
 "#;
 
+const HOST_FN_HTTP_REQUEST: &str = r#"
+    #[link(wasm_import_module = "guardian")]
+    extern "C" {
+        #[link_name = "http_request"]
+        fn guardian_http_request(req_ptr: u32, req_len: u32) -> u64;
+    }
+    /// Guardian-mediated HTTP request. `request_json` is a JSON object:
+    /// {"url":..,"method":"GET|HEAD|POST|PUT|PATCH|DELETE","headers":{..},
+    ///  "query":{..},"accept":..,"body":"…" | "json":<any>,"max_bytes":n,
+    ///  "timeout_ms":n}. Envelope: {"ok":true,"status":u16,"url":..,
+    /// "redirects"?:n,"redirect"?:..,"content_type":..,"headers":{..},
+    /// "body":..} or {"ok":false,"error":..}. The host runs the egress
+    /// policy on every hop (https, the operator's allowlist for private
+    /// hosts, loopback never), adds the operator's per-host secrets
+    /// (`/guardian secret`; a guest may not set authorization or cookie),
+    /// follows redirects for GET and HEAD only, and never echoes a
+    /// request header. Text, JSON, XML, NDJSON and form bodies come back;
+    /// a binary body is refused by name.
+    pub fn http_request(request_json: &str) -> String {
+        read_packed(unsafe {
+            guardian_http_request(request_json.as_ptr() as u32, request_json.len() as u32)
+        })
+    }
+"#;
+
 const HOST_MOD_CLOSE: &str = "}\n";
 
 /// Compose the single scaffold-owned `mod host` from the declared caps.
 /// Empty string when the tool declared no host capabilities.
 fn host_module(caps: &[String]) -> String {
     let http = caps.iter().any(|c| c == abi::CAP_HTTP_GET);
+    let request = caps.iter().any(|c| c == abi::CAP_HTTP_REQUEST);
     let search = caps.iter().any(|c| c == abi::CAP_WEB_SEARCH);
-    if !http && !search {
+    if !http && !request && !search {
         return String::new();
     }
     let mut s = String::from(HOST_MOD_OPEN);
     if http {
         s.push_str(HOST_FN_HTTP_GET);
+    }
+    if request {
+        s.push_str(HOST_FN_HTTP_REQUEST);
     }
     if search {
         s.push_str(HOST_FN_WEB_SEARCH);
@@ -271,6 +300,15 @@ mod tests {
         assert!(s.contains("pub fn web_search(query: &str)"));
         assert!(s.contains("pub fn web_search_ex(request_json: &str)"));
         assert!(!s.contains("link_name = \"http_get\""));
+    }
+
+    #[test]
+    fn assemble_http_request_shim() {
+        let s = assemble_lib_rs(&module(vec!["http_request".into()]));
+        assert!(s.contains("pub fn http_request(request_json: &str)"));
+        assert!(s.contains("#[link_name = \"http_request\"]"));
+        assert!(!s.contains("pub fn http_get("));
+        assert_eq!(s.matches("mod host {").count(), 1);
     }
 
     #[test]

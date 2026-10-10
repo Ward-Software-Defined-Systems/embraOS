@@ -57,6 +57,7 @@ impl HttpTransport for EmptyPage {
             content_type: "text/html".into(),
             body: b"<html><head><script>var x = 1;</script></head></html>".to_vec(),
             location: None,
+            headers: vec![],
         })
     }
 }
@@ -72,6 +73,7 @@ impl HttpTransport for Routes {
             content_type: "text/html".into(),
             body: body.as_bytes().to_vec(),
             location: location.map(str::to_string),
+            headers: vec![],
         })
     }
 }

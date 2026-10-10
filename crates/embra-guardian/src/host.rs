@@ -22,7 +22,7 @@ use wasmtime::{
 };
 
 use crate::abi;
-use crate::caps::{guarded_http_get, guarded_web_search, Capabilities};
+use crate::caps::{guarded_http_get, guarded_http_request, guarded_web_search, Capabilities};
 use crate::error::GuardianError;
 
 /// Hard ceiling on guest output, mirroring the registry's
@@ -127,6 +127,16 @@ impl WasmHost {
             )
             .map_err(|e| GuardianError::Instantiate(e.to_string()))?;
 
+        linker
+            .func_wrap(
+                abi::IMPORT_MODULE,
+                abi::CAP_HTTP_REQUEST,
+                |mut caller: Caller<'_, StoreData>, req_ptr: u32, req_len: u32| -> u64 {
+                    host_http_request(&mut caller, req_ptr, req_len)
+                },
+            )
+            .map_err(|e| GuardianError::Instantiate(e.to_string()))?;
+
         Ok(Self { engine, linker, ticker_stop })
     }
 
@@ -225,12 +235,17 @@ impl WasmHost {
     }
 }
 
-/// `guardian::http_get` host import. Reads the URL from guest memory, runs
-/// the policy-guarded fetch, then hands the JSON result back by calling
-/// the guest's own `galloc` and writing into its linear memory. Returns
+/// The marshalling every host import shares. Reads the guest's string
+/// from its linear memory, runs the guard with this call's grants, and
+/// hands the JSON result back through the guest's own `galloc`. Returns
 /// [`abi::pack`]ed `(ptr, len)`; `0` only on a catastrophic ABI failure
-/// (no `memory`/`galloc`), which the guest treats as an empty result.
-fn host_http_get(caller: &mut Caller<'_, StoreData>, url_ptr: u32, url_len: u32) -> u64 {
+/// (no `memory`/`galloc`), which the guest reads as an empty result.
+fn guest_call(
+    caller: &mut Caller<'_, StoreData>,
+    ptr: u32,
+    len: u32,
+    guard: impl FnOnce(&Capabilities, &str) -> String,
+) -> u64 {
     let Some(Extern::Memory(memory)) = caller.get_export(abi::EXPORT_MEMORY) else {
         return 0;
     };
@@ -241,9 +256,9 @@ fn host_http_get(caller: &mut Caller<'_, StoreData>, url_ptr: u32, url_len: u32)
         return 0;
     };
 
-    let url = {
+    let input = {
         let data = memory.data(&*caller);
-        let (start, end) = (url_ptr as usize, url_ptr as usize + url_len as usize);
+        let (start, end) = (ptr as usize, ptr as usize + len as usize);
         match data.get(start..end) {
             Some(b) => String::from_utf8_lossy(b).into_owned(),
             None => return 0,
@@ -251,7 +266,7 @@ fn host_http_get(caller: &mut Caller<'_, StoreData>, url_ptr: u32, url_len: u32)
     };
 
     let caps = caller.data().caps.clone();
-    let result = guarded_http_get(&caps, &url);
+    let result = guard(&caps, &input);
     let bytes = result.into_bytes();
     let Ok(out_len) = u32::try_from(bytes.len()) else {
         return 0;
@@ -266,43 +281,22 @@ fn host_http_get(caller: &mut Caller<'_, StoreData>, url_ptr: u32, url_len: u32)
     abi::pack(out_ptr, out_len)
 }
 
-/// `guardian::web_search` host import. Same marshalling as
-/// [`host_http_get`]; the policy/credential live in `guarded_web_search`
-/// + the per-call `Capabilities.search` provider (host-side only).
+/// `guardian::http_get` host import: the policy-guarded fetch of a URL.
+fn host_http_get(caller: &mut Caller<'_, StoreData>, url_ptr: u32, url_len: u32) -> u64 {
+    guest_call(caller, url_ptr, url_len, guarded_http_get)
+}
+
+/// `guardian::http_request` host import: a structured request (method,
+/// headers, body) through the same policy, with the operator's secrets
+/// added host-side.
+fn host_http_request(caller: &mut Caller<'_, StoreData>, req_ptr: u32, req_len: u32) -> u64 {
+    guest_call(caller, req_ptr, req_len, guarded_http_request)
+}
+
+/// `guardian::web_search` host import: the query (or a JSON request)
+/// through the search guard; the host holds the provider credential.
 fn host_web_search(caller: &mut Caller<'_, StoreData>, q_ptr: u32, q_len: u32) -> u64 {
-    let Some(Extern::Memory(memory)) = caller.get_export(abi::EXPORT_MEMORY) else {
-        return 0;
-    };
-    let Some(Extern::Func(galloc_fn)) = caller.get_export(abi::EXPORT_ALLOC) else {
-        return 0;
-    };
-    let Ok(galloc) = galloc_fn.typed::<u32, u32>(&*caller) else {
-        return 0;
-    };
-
-    let query = {
-        let data = memory.data(&*caller);
-        let (start, end) = (q_ptr as usize, q_ptr as usize + q_len as usize);
-        match data.get(start..end) {
-            Some(b) => String::from_utf8_lossy(b).into_owned(),
-            None => return 0,
-        }
-    };
-
-    let caps = caller.data().caps.clone();
-    let result = guarded_web_search(&caps, &query);
-    let bytes = result.into_bytes();
-    let Ok(out_len) = u32::try_from(bytes.len()) else {
-        return 0;
-    };
-
-    let Ok(out_ptr) = galloc.call(&mut *caller, out_len) else {
-        return 0;
-    };
-    if memory.write(&mut *caller, out_ptr as usize, &bytes).is_err() {
-        return 0;
-    }
-    abi::pack(out_ptr, out_len)
+    guest_call(caller, q_ptr, q_len, guarded_web_search)
 }
 
 /// Map a wasmtime error to the right `GuardianError`, distinguishing an
