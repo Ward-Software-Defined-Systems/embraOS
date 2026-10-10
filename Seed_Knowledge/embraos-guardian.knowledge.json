@@ -44,7 +44,7 @@
       "id": "seed_guardian_http_get",
       "kind": "semantic",
       "category": "fact",
-      "content": "host::http_get(url) exists only when GUARDIAN_CAPS includes \"http_get\" and returns a JSON envelope STRING to parse: {\"ok\":true,\"status\":...,\"url\":...,\"content_type\":...,\"body\":...} or {\"ok\":false,\"error\":...}. The host enforces https-only, SSRF blocking (private/loopback ranges and DNS-resolved IPs), a 10s timeout, a 256 KiB body cap, and text/JSON content types, and follows at most 3 redirects with every hop checked (the envelope's url is the URL that answered, redirects the hops taken; a redirect past the limit returns status 3xx with its target under redirect and an empty body). Referencing host:: without declaring the capability is a validation failure.",
+      "content": "host::http_get(url) exists only when GUARDIAN_CAPS includes \"http_get\" and returns a JSON envelope STRING to parse: {\"ok\":true,\"status\":...,\"url\":...,\"content_type\":...,\"body\":...} or {\"ok\":false,\"error\":...}. The host enforces https-only, the address class as a literal and as DNS resolves it (a public address passes, a private host only when the operator listed it with /guardian egress allow <host>, loopback never), a 10s timeout, a 256 KiB body cap, and text/JSON content types, and follows at most 3 redirects with every hop checked (the envelope's url is the URL that answered, redirects the hops taken; a redirect past the limit returns status 3xx with its target under redirect and an empty body). Referencing host:: without declaring the capability is a validation failure.",
       "tags": ["guardian", "capabilities", "network", "api"]
     },
     {
@@ -53,6 +53,20 @@
       "category": "fact",
       "content": "host::web_search(query) and host::web_search_ex(request_json) exist only when GUARDIAN_CAPS includes \"web_search\". web_search_ex takes a JSON object: q (required), count 1-20, offset 0-9, freshness (day/week/month/year or a YYYY-MM-DDtoYYYY-MM-DD range), exclude (host list), extra_snippets (bool). The envelope carries ok/query/count/results (title, url, description, optional age and snippets) and an optional infobox for entity queries. The host holds the Brave key (set via /guardian key brave; unset returns a structured not-configured error) and the endpoint is fixed, so there is no guest URL surface.",
       "tags": ["guardian", "capabilities", "search", "api"]
+    },
+    {
+      "id": "seed_guardian_http_request",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "host::http_request(request_json) exists only when GUARDIAN_CAPS includes \"http_request\": one structured HTTP request as a JSON object {url, method (GET|HEAD|POST|PUT|PATCH|DELETE, default GET), headers, query, accept, body or json, max_bytes, timeout_ms} and a JSON envelope STRING back to parse: {\"ok\":true,\"status\":...,\"url\":<the URL that answered>,\"redirects\"?,\"redirect\"?,\"content_type\":...,\"headers\":{...},\"body\":...,\"truncated_at\"?} or {\"ok\":false,\"error\":...}. The host runs the egress policy on every hop (https only; a public address passes, a private host only when the operator listed it with /guardian egress allow <host>, loopback never), adds the operator's per-host secrets, follows redirects for GET and HEAD only (at most 3; another method gets the 3xx back with its target under redirect and an empty body), reads the body bounded (default 256 KiB, at most 1 MiB; truncated_at names a cut) and returns text, JSON, XML, NDJSON and form bodies; a binary body is refused by name. The shipped http_request tool wraps it: a guarded curl for pages, resources and API work that needs no key; an HTML page is reduced to text and scrubbed, any other body comes back as sent and only flagged.",
+      "tags": ["guardian", "capabilities", "network", "api", "http_request"]
+    },
+    {
+      "id": "seed_guardian_secrets",
+      "kind": "semantic",
+      "category": "fact",
+      "content": "A credential never goes into a Guardian tool's input, a tool's source, the turn trace or the session history. The operator stores it host-side with /guardian secret <host> <header> <value> (for example /guardian secret gitlab.ops.wsds PRIVATE-TOKEN glpat-...); the http_request guard adds it to a request whose host matches exactly (port included) and to no other hop, so a redirect to another host never carries it. A tool may not set Authorization, Proxy-Authorization or Cookie itself: the guard refuses the header and names the command. /guardian secret lists the hosts and header names, never a value; /guardian secret <host> remove forgets one. A private host (an RFC 1918 address and the like) is admitted with /guardian egress allow <host>, a name with its subdomains or an IP literal; loopback, link-local and multicast addresses are refused always. Asked for a token, the intelligence tells the operator these two commands instead of asking for the value.",
+      "tags": ["guardian", "secrets", "credentials", "egress", "operator"]
     },
     {
       "id": "seed_guardian_html_text",
@@ -88,7 +102,7 @@
       "id": "seed_guardian_lifecycle",
       "kind": "semantic",
       "category": "fact",
-      "content": "Tool lifecycle: a draft goes through guardian_propose (the known-good template is embedded in that tool's description — start from it), then syn static validation, then the replicant check — an independent soul-verdict call that returns allow, escalate, or refuse and FAILS CLOSED. allow/escalate store the draft as Proposed for the operator; refuse blocks it and is not waivable, not even for an operator paste. The operator runs /guardian approve <name> to trigger the wasm32 build (or /guardian reject <name>); poll guardian_call action=\"status\" until the tool reads ready, then invoke it with schema-shaped JSON input. One tool takes neither path: web_search ships with embraOS and the brain installs it at boot (/guardian list marks it shipped); it stays inert until the operator sets a Brave key with /guardian key brave, and the operator may edit it (/guardian-define, same name) or delete it for good (/guardian delete).",
+      "content": "Tool lifecycle: a draft goes through guardian_propose (the known-good template is embedded in that tool's description — start from it), then syn static validation, then the replicant check — an independent soul-verdict call that returns allow, escalate, or refuse and FAILS CLOSED. allow/escalate store the draft as Proposed for the operator; refuse blocks it and is not waivable, not even for an operator paste. The operator runs /guardian approve <name> to trigger the wasm32 build (or /guardian reject <name>); poll guardian_call action=\"status\" until the tool reads ready, then invoke it with schema-shaped JSON input. Two tools take neither path: web_search and http_request ship with embraOS and the brain installs them at boot (/guardian list marks them shipped); web_search stays inert until the operator sets a Brave key with /guardian key brave, http_request needs no key; the operator may edit either (/guardian-define, same name) or delete it for good (/guardian delete).",
       "tags": ["guardian", "lifecycle", "replicant-check", "authoring"]
     },
     {
@@ -134,6 +148,10 @@
     { "src": "seed_guardian_never_in_schema", "dst": "seed_guardian_lifecycle", "relation": "related_to" },
     { "src": "seed_guardian_authoring_procedure", "dst": "seed_guardian_lifecycle", "relation": "depends_on" },
     { "src": "seed_guardian_authoring_procedure", "dst": "seed_guardian_training_conflicts", "relation": "depends_on" },
+    { "src": "seed_guardian_http_request", "dst": "seed_guardian_http_get", "relation": "refines" },
+    { "src": "seed_guardian_http_request", "dst": "seed_guardian_untrusted_content", "relation": "related_to" },
+    { "src": "seed_guardian_secrets", "dst": "seed_guardian_http_request", "relation": "refines" },
+    { "src": "seed_guardian_secrets", "dst": "seed_guardian_lifecycle", "relation": "related_to" },
     { "_comment": "into the core pack" },
     { "src": "seed_guardian_contract", "dst": "seed_core_guardian_gate", "relation": "related_to", "weight": 0.8 }
   ]

@@ -8,6 +8,9 @@ before the model sees it. Read
 [GUARDIAN-TOOL-EXAMPLES.md](./GUARDIAN-TOOL-EXAMPLES.md) first for the
 contract and the `json` / `host` / `html_text` APIs.
 
+The second shipped tool, `http_request` (a guarded curl for pages and API
+work), is in [GUARDIAN-HTTP-REQUEST-EXAMPLE.md](./GUARDIAN-HTTP-REQUEST-EXAMPLE.md).
+
 **It ships with embraOS.** The module below is the shipped source
 (`crates/embra-guardian/src/shipped/web_search.rs`, the same bytes as this
 page, pinned by a test). The brain installs it at boot and builds it in

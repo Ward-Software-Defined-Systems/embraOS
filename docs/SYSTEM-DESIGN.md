@@ -23,7 +23,7 @@ The runtime services that implement those layers:
 | `embra-web` | 3345 | HTTPS web console (default UI); wraps embra-console in xterm.js over a PTY→WebSocket bridge. `/ws/activity` fans the brain's activity feed out to every browser for the top bar's activity strip. |
 | `embra-console` | — | Conversational TUI (serial; PTY-child of embra-web in default mode). |
 | `embrad` | PID 1 | Init, service supervisor, soul verification gate, 5-second reconciliation loop. |
-| `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for dynamic tools — both authoring paths (operator paste, intelligence proposal) gated by a soul-spec replicant check; intelligence proposals additionally operator-approved; one tool (`web_search`) ships with the image and is installed at boot; capability-broker host imports. |
+| `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for dynamic tools — both authoring paths (operator paste, intelligence proposal) gated by a soul-spec replicant check; intelligence proposals additionally operator-approved; two tools (`web_search`, `http_request`) ship with the image and are installed at boot; capability-broker host imports. |
 
 ### Network exposure
 
@@ -38,7 +38,7 @@ What each port answers to, as the code binds it and as `scripts/run-qemu.sh` for
 | 50002 | `embra-brain` | gRPC, plaintext h2c | no | none | every interface | no | no |
 | 3345 | `embra-web` (web mode only) | HTTPS + WebSocket | yes: a certificate from the embraOS CA, minted by `embra-trustd` at every start | no login; the arbiter (one writer, read-only observers, explicit take-over) is the only gate | every interface | every host interface (`hostfwd=tcp::3345`) | yes |
 
-The image has no firewall; QEMU's user-mode network is the only isolation. A port QEMU does not forward is reachable from inside the guest only: the brain's own `port_scan` and `ssh_*` tools included, Guardian tools excluded (`crates/embra-guardian/src/caps.rs` refuses loopback and private addresses). Outside QEMU's user-mode network, on a bridged VM or on hardware, all six ports are reachable on the guest's address. Transport security between the services is Phase 5 work ([ROADMAP.md](ROADMAP.md)).
+The image has no firewall; QEMU's user-mode network is the only isolation. A port QEMU does not forward is reachable from inside the guest only: the brain's own `port_scan` and `ssh_*` tools included, Guardian tools excluded (`crates/embra-guardian/src/caps.rs` refuses a loopback address always, and a private one unless the operator listed its host with `/guardian egress allow`). Outside QEMU's user-mode network, on a bridged VM or on hardware, all six ports are reachable on the guest's address. Transport security between the services is Phase 5 work ([ROADMAP.md](ROADMAP.md)).
 
 **Persistence:** [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a high-performance Rust JSON document database. It is the single durable store for runtime state: soul, memory entries, the knowledge graph, sessions, schedules, and Guardian dynamic-tool definitions.
 

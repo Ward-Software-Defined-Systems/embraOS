@@ -33,6 +33,7 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 - [REPLICANT-CHECK.md](REPLICANT-CHECK.md) — The soul-spec gate every dynamic tool passes before it compiles: how it works, both authoring paths, and how to test it.
 - [GUARDIAN-TOOL-EXAMPLES.md](GUARDIAN-TOOL-EXAMPLES.md) — Paste-ready dynamic-tool modules (embra-guardian-v1).
 - [GUARDIAN-ADVANCED-EXAMPLE.md](GUARDIAN-ADVANCED-EXAMPLE.md) — The shipped flagship: a worked, prompt-injection-hardened end-to-end Guardian tool.
+- [GUARDIAN-HTTP-REQUEST-EXAMPLE.md](GUARDIAN-HTTP-REQUEST-EXAMPLE.md) — The second shipped tool: `http_request`, a guarded curl for pages, resources and API work; credentials host-side, private hosts by allowlist.
 - [GUARDIAN-KG-SCAN-EXAMPLE.md](GUARDIAN-KG-SCAN-EXAMPLE.md) — `kg_scan`, the first intelligence-proposed tool: scans a `knowledge_dump` JSONL for structural patterns, fed through `guardian_call`'s `data_file` bridge.
 
 ## Appendix

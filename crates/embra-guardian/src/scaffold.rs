@@ -102,7 +102,7 @@ const HOST_FN_HTTP_REQUEST: &str = r#"
     ///  "query":{..},"accept":..,"body":"…" | "json":<any>,"max_bytes":n,
     ///  "timeout_ms":n}. Envelope: {"ok":true,"status":u16,"url":..,
     /// "redirects"?:n,"redirect"?:..,"content_type":..,"headers":{..},
-    /// "body":..} or {"ok":false,"error":..}. The host runs the egress
+    /// "body":..,"truncated_at"?:n} or {"ok":false,"error":..}. The host runs the egress
     /// policy on every hop (https, the operator's allowlist for private
     /// hosts, loopback never), adds the operator's per-host secrets
     /// (`/guardian secret`; a guest may not set authorization or cookie),

@@ -42,8 +42,8 @@ You paste **only** these items — the scaffold owns everything else
 - `const GUARDIAN_DESC: &str = "…";`
 - `const GUARDIAN_SCHEMA: &str = r#"{ "type":"object", "properties":{…} }"#;`
 - *(optional)* `const GUARDIAN_CAPS: &[&str] = &["http_get"];`
-  (v1 capabilities: `"http_get"`, `"web_search"` — declare only what the
-  tool uses; the validator rejects an undeclared `host::` reference)
+  (v1 capabilities: `"http_get"`, `"http_request"`, `"web_search"` — declare
+  only what the tool uses; the validator rejects an undeclared `host::` reference)
 - Exactly one `fn run(input: &str) -> String` (not `pub`, not `unsafe`).
 - Any number of **private** helper `fn`s.
 
@@ -85,10 +85,13 @@ host::http_get(url: &str) -> String   // returns a JSON envelope string:
 //      the URL that answered; a redirect past the limit comes back as
 //      it came, with "redirect":"<target>" and an empty body)
 //   {"ok":false,"error":"…"}
-// The Guardian enforces: https-only, RFC1918/loopback/CGNAT/IPv6 +
-// DNS-resolved-IP SSRF block, optional domain allowlist, 10s timeout,
-// 256 KiB body cap, text/* | application/json content-types, and
-// follows at most 3 redirects, every hop checked like the first. Audited.
+// The Guardian enforces: https-only; the address class, as a literal and
+// as DNS resolves it (a public address passes; a private host only when
+// the operator listed it with /guardian egress allow; loopback, link-local,
+// multicast and reserved never); optional domain allowlist; a 10s budget
+// for the whole call; 256 KiB body cap; text/* | application/json
+// content-types; and follows at most 3 redirects, every hop checked like
+// the first. Audited.
 ```
 
 `host::web_search` — when `GUARDIAN_CAPS` includes `"web_search"`:
@@ -127,6 +130,46 @@ host::web_search_ex(request_json: &str) -> String   // structured form
 // injection-scrub them (see GUARDIAN-ADVANCED-EXAMPLE.md). The key is
 // set by the operator: `/guardian key brave <token>`; if unset the
 // envelope is {"ok":false,"error":"search capability not configured…"}.
+```
+
+`host::http_request` — when `GUARDIAN_CAPS` includes `"http_request"`:
+
+```text
+host::http_request(request_json: &str) -> String
+// The request, a JSON object (url required, the rest optional):
+//   {"url":"https://…",
+//    "method":"GET|HEAD|POST|PUT|PATCH|DELETE",   // default GET
+//    "headers":{"X-Trace":"…"},   // token names, no CR/LF. Authorization,
+//                                 // Proxy-Authorization and Cookie are
+//                                 // refused (/guardian secret sets them);
+//                                 // Host, Content-Length and the other
+//                                 // transport headers are dropped
+//    "query":{"per_page":5},      // appended form-encoded (scalars)
+//    "accept":"application/json", // the Accept header
+//    "body":"…" | "json":<any>,   // json: serialized, content-type
+//                                 // application/json unless given;
+//                                 // GET and HEAD carry no body; 256 KiB
+//    "max_bytes":262144,          // response cap: default 256 KiB, ≤ 1 MiB
+//    "timeout_ms":10000}          // ≤ the policy's 10 s, the whole call
+// Envelope:
+//   {"ok":true,"status":<u16>,"url":"<the URL that answered>",
+//    "redirects":<n>,             // when the guard followed one: GET and
+//                                 // HEAD only, at most 3, every hop checked
+//    "redirect":"<target>",       // a 3xx handed back as it came (another
+//                                 // method, or past the limit); the body
+//                                 // is empty then
+//    "content_type":"…",
+//    "headers":{"<lowercase>":"…"}, // no cookies; 32 headers / 8 KiB
+//    "body":"…",                  // text, JSON, XML, NDJSON, form data;
+//                                 // a binary body is refused by name
+//    "truncated_at":<max_bytes>}  // present when the body was cut there
+//   {"ok":false,"error":"…"}
+// The host runs http_get's egress policy on every hop and adds the
+// operator's secrets (/guardian secret <host> <header> <value>) to a hop
+// whose host matches exactly, port included, and to no other; the
+// envelope never echoes a request header, so a token never reaches the
+// guest. Needs no key. The shipped http_request wraps it
+// (GUARDIAN-HTTP-REQUEST-EXAMPLE.md).
 ```
 
 ### Provided `html_text` API (always available, zero-dep)
@@ -298,4 +341,5 @@ fn run(input: &str) -> String {
 ## See also
 
 - [GUARDIAN-ADVANCED-EXAMPLE.md](./GUARDIAN-ADVANCED-EXAMPLE.md) — the flagship: prompt-injection-hardened `web_search` declaring two capabilities, shipped with the image and installed at boot.
+- [GUARDIAN-HTTP-REQUEST-EXAMPLE.md](./GUARDIAN-HTTP-REQUEST-EXAMPLE.md) — the second shipped tool: `http_request`, a guarded curl for pages, resources and API work over one capability; needs no key, credentials host-side.
 - [GUARDIAN-KG-SCAN-EXAMPLE.md](./GUARDIAN-KG-SCAN-EXAMPLE.md) — `kg_scan`, the first intelligence-proposed tool: pure-compute structural scanning over a `knowledge_dump` JSONL, fed in via `guardian_call`'s `data_file` bridge.
