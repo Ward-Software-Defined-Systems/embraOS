@@ -128,7 +128,10 @@ learning loop.
 Moves a production text-soul instance onto a graph identity (e.g.
 `Embra_IDENTITY-SOUL.graph.json`, derived from the production documents)
 **with all memories preserved and no re-answered questions**. The
-operator profile survives and is graph-ified during the import.
+operator profile survives and is graph-ified during the import. The
+shipped graphs name no operator (`the_shipped_identities_name_no_operator`):
+an `operator` node describes the role, and the profile's `user_operator`
+node links to it.
 
 Do a **dry-run on a copy of DATA first**. The QEMU port forwards do not
 include WardSONDB and the OS has no shell, so the edits happen offline
