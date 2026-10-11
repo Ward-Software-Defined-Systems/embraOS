@@ -40,9 +40,9 @@ lives on the host:
 ## Setup
 
 ```text
-/guardian egress allow gitlab.ops.wsds                   # a private host, once
-/guardian secret gitlab.ops.wsds PRIVATE-TOKEN glpat-…   # a credential, once
-/guardian secret                                         # the hosts and header names
+/guardian egress allow gitlab.example.com                   # a private host, once
+/guardian secret gitlab.example.com PRIVATE-TOKEN glpat-…   # a credential, once
+/guardian secret                                            # the hosts and header names
 ```
 
 ## Input / output
@@ -50,20 +50,20 @@ lives on the host:
 Input (`url` required; everything else optional):
 
 ```json
-{ "url": "https://gitlab.ops.wsds/api/v4/projects/2/issues/17",
+{ "url": "https://gitlab.example.com/api/v4/projects/2/issues/17",
   "method": "GET", "accept": "application/json",
   "query": { "per_page": 5 }, "timeout_ms": 8000 }
 ```
 
 ```json
-{ "url": "https://gitlab.ops.wsds/api/v4/projects/2/issues/17/notes",
+{ "url": "https://gitlab.example.com/api/v4/projects/2/issues/17/notes",
   "method": "POST", "json": { "body": "Posted by the intelligence." } }
 ```
 
 Output:
 
 ```json
-{ "status": 200, "url": "https://gitlab.ops.wsds/api/v4/projects/2/issues/17",
+{ "status": 200, "url": "https://gitlab.example.com/api/v4/projects/2/issues/17",
   "content_type": "application/json",
   "headers": { "content-type": "application/json", "x-request-id": "…" },
   "body": "{\"iid\":17,…}", "injection_suspected": false }

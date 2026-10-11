@@ -219,7 +219,7 @@ const SPECS: &[Spec] = &[
         note: "The egress allowlist for private addresses; loopback is refused always. Blank = list.",
         join: " ", guided: false,
         fields: &[sel("Action", &["(list)", "allow", "deny"], false),
-            t("Host", "gitlab.ops.wsds | 172.16.10.187", false)] },
+            t("Host", "gitlab.example.com | 10.0.0.5", false)] },
     Spec { cmd: "/guardian key brave", title: "Brave Search API key",
         note: "Enables web_search-capable tools. Blank = show status. Stored to STATE (0600).",
         join: " ", guided: false,
