@@ -1,12 +1,24 @@
 //! `knowledge_audit` — read-only hygiene detection over the knowledge graph.
 //!
-//! Four checks (dedup / orphans / rot / contradictions) over
-//! `memory.semantic` + `memory.procedural`, with edge context folded from
-//! ONE exhaustive projected scan of `memory.edges` into compact per-node
-//! aggregates (never a full adjacency list). Detection only — the
-//! destructive counterpart is `knowledge_merge` (`knowledge/merge.rs`),
-//! which consumes this tool's `dedup_candidates` verbatim (findings emit
-//! full collection names for that reason).
+//! Three checks (dedup / orphans / rot) over `memory.semantic` +
+//! `memory.procedural`, with edge context folded from ONE exhaustive
+//! projected scan of `memory.edges` into compact per-node aggregates (never
+//! a full adjacency list). A node another node supersedes (a declared
+//! `supersedes` edge, `knowledge::supersession`) is history: it leaves every
+//! check and is counted in the summary. Detection only — the destructive
+//! counterpart is `knowledge_merge` (`knowledge/merge.rs`), which consumes
+//! this tool's `dedup_candidates` verbatim (findings emit full collection
+//! names for that reason).
+//!
+//! Every check holds on any operator's graph: structure (orphans), a
+//! declaration (history), or token similarity under a tunable threshold
+//! (dedup, and rot's newer near-duplicate). A contradiction check stood here
+//! until 2026-10-11. Token overlap measures how related two notes are, not
+//! whether they disagree: on that day's backup it flagged 894 pairs, 558 of
+//! them two-tag facts sharing one tag, and found 1 of the 23 contradictions
+//! the intelligence had linked itself. Rot read a `refines` edge as
+//! "replaced by" until then; `knowledge_link` defines it as "more specific
+//! than".
 //!
 //! Failure asymmetry, deliberate: a saturated NODE window only shrinks the
 //! candidate set (warn-and-continue), but a failed EDGE-scan page would
@@ -27,13 +39,13 @@ use crate::db::WardsonDbClient;
 use crate::tools::registry::DispatchContext;
 
 use super::tools::{next_scan_page, scan_page_query_body, ScanPage};
-use super::types::{content_preview, EdgeType, SESSION_DELETED_TAG};
+use super::types::{content_preview, EdgeType, SESSION_DELETED_TAG, SUPERSESSION_FIELD, SUPERSESSION_KEY};
 
 /// Page size for the exhaustive edge scan — same bound rationale as
 /// `ORPHAN_SCAN_PAGE` (well under the server's 100k `--max-query-limit`,
 /// bounds per-page memory).
 const AUDIT_SCAN_PAGE: usize = 20_000;
-/// Pairwise dedup/contradiction cap per `(collection, category)` group,
+/// Pairwise dedup/rot cap per `(collection, category)` group,
 /// newest-first — precedent `MEMORY_SCAN_DUPE_SCAN_CAP` (tools/sessions.rs).
 /// The largest production group today (observation, 369) fits uncapped.
 const AUDIT_PAIRWISE_CAP: usize = 500;
@@ -46,8 +58,7 @@ const ORPHAN_MIN_AGE_DAYS: i64 = 1;
 const ORPHAN_HIGH_CONFIDENCE_DAYS: i64 = 7;
 const ROT_UNACCESSED_DAYS: i64 = 90;
 /// Rot ignores nodes younger than this (arg `min_age_days` overrides) —
-/// fresh knowledge hasn't had time to be superseded (2026-07-30 production
-/// feedback: the title-marker heuristics alone flagged healthy young nodes).
+/// fresh knowledge hasn't had time to be superseded.
 const ROT_MIN_AGE_DAYS_DEFAULT: i64 = 30;
 /// A retrieval/traverse hit within this window argues AGAINST rot —
 /// demotes the finding's confidence one level.
@@ -55,21 +66,10 @@ const ROT_RECENT_ACCESS_DAYS: i64 = 30;
 /// Semantic nodes with less trimmed content than this carry no substance
 /// beyond their tags.
 const EMPTY_PAYLOAD_MIN_CHARS: usize = 30;
-const CONTRADICTION_TAG_OVERLAP_MIN: f64 = 0.5;
-/// Contradiction candidates must share subject matter but diverge in
-/// content: body-token similarity inside this default band ("saying the
-/// same thing" sits above it, "different topics" below). Superseded by the
-/// per-instance calibration when enough real `contradicts` pairs exist.
-const CONTRADICTION_BODY_SIM_MIN_DEFAULT: f64 = 0.05;
-const CONTRADICTION_BODY_SIM_MAX_DEFAULT: f64 = 0.5;
-/// Final contradiction score = tag_overlap × category weight; below this
-/// floor the pair is dropped — the category weights make observation/
-/// pattern pairs (which usually coexist) clear it only at very high tag
-/// overlap.
-const CONTRADICTION_SCORE_FLOOR: f64 = 0.35;
-/// Minimum measurable existing-contradicts pairs before the body-sim band
-/// calibrates from this instance's own data instead of the defaults.
-const CONTRADICTION_CALIBRATION_MIN_PAIRS: usize = 5;
+/// What `checks: ["contradictions"]` answers (the module comment says why).
+const CONTRADICTIONS_REMOVED: &str = "contradictions is no longer a check: word overlap measures how related two notes are, not whether they disagree. Link contradicts when you read a disagreement. Pick from: dedup, orphans, rot";
+/// How many nodes of a supersession cycle the warning names.
+const CYCLE_NAMES_SHOWN: usize = 10;
 const PSEUDO_TITLE_MAX_CHARS: usize = 80;
 const W_BODY: f64 = 0.5;
 const W_TITLE: f64 = 0.3;
@@ -78,7 +78,6 @@ const W_TAGS: f64 = 0.2;
 /// dominant real dupe pattern, and raw Jaccard punishes it (the ratio can
 /// sit at |A|/|B|). Set-space mirror of memory_scan's Subset heuristic.
 const CONTAINMENT_SCORE_FLOOR: f64 = 0.8;
-const ROT_FINAL_TOKENS: [&str; 4] = ["final", "finalized", "last", "ultimate"];
 
 /// `(collection, id)` — the codebase-wide node key.
 type NodeKey = (String, String);
@@ -135,15 +134,9 @@ enum AuditCheck {
     Dedup,
     Orphans,
     Rot,
-    Contradictions,
 }
 
-const ALL_CHECKS: [AuditCheck; 4] = [
-    AuditCheck::Dedup,
-    AuditCheck::Orphans,
-    AuditCheck::Rot,
-    AuditCheck::Contradictions,
-];
+const ALL_CHECKS: [AuditCheck; 3] = [AuditCheck::Dedup, AuditCheck::Orphans, AuditCheck::Rot];
 
 impl AuditCheck {
     fn as_str(self) -> &'static str {
@@ -151,7 +144,6 @@ impl AuditCheck {
             AuditCheck::Dedup => "dedup",
             AuditCheck::Orphans => "orphans",
             AuditCheck::Rot => "rot",
-            AuditCheck::Contradictions => "contradictions",
         }
     }
 
@@ -160,7 +152,6 @@ impl AuditCheck {
             "dedup" => Some(AuditCheck::Dedup),
             "orphans" => Some(AuditCheck::Orphans),
             "rot" => Some(AuditCheck::Rot),
-            "contradictions" => Some(AuditCheck::Contradictions),
             _ => None,
         }
     }
@@ -172,15 +163,17 @@ fn resolve_audit_checks(requested: Option<&[String]>) -> Result<Vec<AuditCheck>,
     };
     if req.is_empty() {
         return Err(
-            "checks is empty — omit it to run all four, or pick from: dedup, orphans, rot, contradictions"
-                .into(),
+            "checks is empty — omit it to run all three, or pick from: dedup, orphans, rot".into(),
         );
     }
     let mut picked: Vec<AuditCheck> = Vec::new();
     for name in req {
+        if name.trim().eq_ignore_ascii_case("contradictions") {
+            return Err(CONTRADICTIONS_REMOVED.into());
+        }
         let Some(check) = AuditCheck::parse(name) else {
             return Err(format!(
-                "unknown check '{}' — pick from: dedup, orphans, rot, contradictions",
+                "unknown check '{}' — pick from: dedup, orphans, rot",
                 name
             ));
         };
@@ -357,7 +350,9 @@ struct EdgeAggregates {
     /// on it (rot's old_unaccessed guard).
     incoming_dep_enables: HashMap<NodeKey, u32>,
     refines_pairs: HashSet<(NodeKey, NodeKey)>,
-    contradicts_pairs: HashSet<(NodeKey, NodeKey)>,
+    /// Declared supersessions `(newer, older)` whose older end is audited:
+    /// `supersedes` edges carrying the marker (`knowledge::supersession`).
+    declarations: Vec<(NodeKey, NodeKey)>,
     edges_scanned: usize,
     meaningful_total: u64,
 }
@@ -406,22 +401,26 @@ fn accumulate_edge(
             *agg.incoming_dep_enables.entry(tgt.clone()).or_default() += 1;
         }
     }
-    if src_in && tgt_in {
-        match etype {
-            Some(EdgeType::Refines) => {
-                agg.refines_pairs.insert(pair_key(&src, &tgt));
-            }
-            Some(EdgeType::Contradicts) => {
-                agg.contradicts_pairs.insert(pair_key(&src, &tgt));
-            }
-            _ => {}
-        }
+    // A declaration is the type and the marker. The scan's projection
+    // carries the marker under its dotted path; a whole document under
+    // `metadata`.
+    let marked = doc
+        .get(SUPERSESSION_FIELD)
+        .or_else(|| doc.get("metadata").and_then(|m| m.get(SUPERSESSION_KEY)))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if tgt_in && marked && matches!(etype, Some(EdgeType::Supersedes)) {
+        agg.declarations.push((src.clone(), tgt.clone()));
+    }
+    if src_in && tgt_in && matches!(etype, Some(EdgeType::Refines)) {
+        agg.refines_pairs.insert(pair_key(&src, &tgt));
     }
 }
 
 /// One page of the audit's exhaustive edge scan — the sanctioned no-sort
 /// key-order pagination (`scan_page_query_body`) plus a server-side
-/// projection: the aggregates need endpoints + type only, never payloads.
+/// projection: the aggregates need endpoints, type and the supersession
+/// marker only, never payloads.
 fn audit_edge_page_body(page_limit: usize, page: &ScanPage) -> serde_json::Value {
     let mut body = scan_page_query_body(&json!({}), page_limit, page);
     body["fields"] = json!([
@@ -429,9 +428,36 @@ fn audit_edge_page_body(page_limit: usize, page: &ScanPage) -> serde_json::Value
         "source_collection",
         "target_id",
         "target_collection",
-        "edge_type"
+        "edge_type",
+        SUPERSESSION_FIELD
     ]);
     body
+}
+
+/// The nodes the declarations make history: an older end reached from a
+/// current node through a chain of declarations (C supersedes B supersedes
+/// A: A and B are history). A node in a cycle that reaches no current node
+/// stays in the checks; the second value names those, sorted, for a
+/// warning.
+fn history_of(declarations: &[(NodeKey, NodeKey)]) -> (HashSet<NodeKey>, Vec<NodeKey>) {
+    let superseded: HashSet<&NodeKey> = declarations.iter().map(|(_, older)| older).collect();
+    let mut history: HashSet<NodeKey> = HashSet::new();
+    loop {
+        let mut grew = false;
+        for (newer, older) in declarations {
+            let newer_stands = !superseded.contains(newer) || history.contains(newer);
+            if newer_stands && history.insert(older.clone()) {
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let mut cycles: Vec<NodeKey> =
+        superseded.into_iter().filter(|k| !history.contains(*k)).cloned().collect();
+    cycles.sort();
+    (history, cycles)
 }
 
 async fn scan_edges(
@@ -490,57 +516,6 @@ struct Supersession {
     similarity: f64,
 }
 
-/// Contradiction body-similarity band — the divergence gate. Calibrated
-/// per-instance from the body similarity of pairs already linked by real
-/// `contradicts` edges ("what do actual contradictions look like?"): with
-/// ≥ CONTRADICTION_CALIBRATION_MIN_PAIRS measurable pairs the band is
-/// their p10–p90 (outlier-clamped); otherwise the static defaults.
-struct ContradictionBand {
-    lo: f64,
-    hi: f64,
-    measured_pairs: usize,
-    source: &'static str,
-}
-
-fn contradiction_band(
-    nodes: &[NodeMeta],
-    contradicts_pairs: &HashSet<(NodeKey, NodeKey)>,
-) -> ContradictionBand {
-    let by_key: HashMap<NodeKey, &NodeMeta> = nodes.iter().map(|n| (n.key(), n)).collect();
-    let mut sims: Vec<f64> = contradicts_pairs
-        .iter()
-        .filter_map(|(a, b)| {
-            Some(jaccard(&by_key.get(a)?.body_tokens, &by_key.get(b)?.body_tokens))
-        })
-        .collect();
-    if sims.len() >= CONTRADICTION_CALIBRATION_MIN_PAIRS {
-        sims.sort_by(f64::total_cmp);
-        let lo = sims[sims.len() / 10].max(0.01);
-        let hi = sims[sims.len() * 9 / 10].min(0.85).max(lo);
-        ContradictionBand { lo, hi, measured_pairs: sims.len(), source: "calibrated" }
-    } else {
-        ContradictionBand {
-            lo: CONTRADICTION_BODY_SIM_MIN_DEFAULT,
-            hi: CONTRADICTION_BODY_SIM_MAX_DEFAULT,
-            measured_pairs: sims.len(),
-            source: "defaults",
-        }
-    }
-}
-
-/// Category-aware contradiction weighting (2026-07-30 production feedback):
-/// two observations or patterns usually coexist; divergent facts and
-/// decisions are the pairs actually worth surfacing.
-fn contradiction_category_weight(category: &str) -> f64 {
-    match category {
-        "fact" => 1.0,
-        "decision" => 0.9,
-        "preference" => 0.7,
-        "procedural" => 0.6,
-        _ => 0.4, // observation, pattern, uncategorized
-    }
-}
-
 /// Record the OLDER node of a near-duplicate pair as superseded by the
 /// newer one, keeping the highest-similarity witness per older node. Equal
 /// or unknown timestamps can't be ordered — no supersession.
@@ -574,48 +549,46 @@ fn note_supersession(
 #[derive(Default)]
 struct PairwiseFindings {
     dedup: Vec<serde_json::Value>,
-    contradictions: Vec<serde_json::Value>,
     dedup_total: usize,
-    contradiction_total: usize,
-    /// older node → its best newer near-duplicate (rot's primary gate).
+    /// older node → its best newer near-duplicate (rot's only witness).
     supersessions: HashMap<NodeKey, Supersession>,
     warnings: Vec<String>,
 }
 
-/// Dedup, rot's supersession probe, and contradictions share one pairwise
-/// pass per `(collection, category)` group (pairs never cross groups).
-/// Groups iterate in sorted key order and nodes keep their newest-first
-/// fetch order, so output is deterministic.
+/// Dedup and rot's supersession probe share one pairwise pass per
+/// `(collection, category)` group (pairs never cross groups). History is
+/// left out before the cap. Groups iterate in sorted key order and nodes
+/// keep their newest-first fetch order, so output is deterministic.
 fn pairwise_findings(
     nodes: &[NodeMeta],
     agg: &EdgeAggregates,
+    history: &HashSet<NodeKey>,
     min_similarity: f64,
     want_dedup: bool,
-    want_contra: bool,
     want_rot: bool,
-    band: &ContradictionBand,
 ) -> PairwiseFindings {
     let mut out = PairwiseFindings::default();
-    if !want_dedup && !want_contra && !want_rot {
+    if !want_dedup && !want_rot {
         return out;
     }
 
     let mut groups: HashMap<(&'static str, &str), Vec<&NodeMeta>> = HashMap::new();
     for n in nodes {
+        if history.contains(&n.key()) {
+            continue;
+        }
         groups.entry((n.collection, n.category.as_str())).or_default().push(n);
     }
     let mut keys: Vec<(&'static str, &str)> = groups.keys().copied().collect();
     keys.sort();
 
     let mut scored_dedup: Vec<(f64, bool, &NodeMeta, &NodeMeta)> = Vec::new();
-    // (final score, tag_sim, body_sim, category weight, a, b)
-    let mut scored_contra: Vec<(f64, f64, f64, f64, &NodeMeta, &NodeMeta)> = Vec::new();
 
     for key in keys {
         let group = &groups[&key];
         if group.len() > AUDIT_PAIRWISE_CAP {
             out.warnings.push(format!(
-                "pairwise pass (dedup/rot-supersession/contradictions) limited to the {} newest of {} nodes in {}/{}",
+                "pairwise pass (dedup and rot's near-duplicate probe) limited to the {} newest of {} nodes in {}/{}",
                 AUDIT_PAIRWISE_CAP,
                 group.len(),
                 key.0,
@@ -626,41 +599,27 @@ fn pairwise_findings(
         for i in 0..capped.len() {
             for j in (i + 1)..capped.len() {
                 let (a, b) = (capped[i], capped[j]);
-                // Two deletion records are two events: never a duplicate,
-                // a supersession or a contradiction.
+                // Two deletion records are two events: never a duplicate or
+                // a supersession.
                 if is_deletion_record(a) && is_deletion_record(b) {
                     continue;
                 }
-                let pk = pair_key(&a.key(), &b.key());
+                // A refines link is intentional and means "more specific
+                // than": the pair is neither a duplicate nor a replacement.
+                // Without this the containment floor would flag the general
+                // end of every refines pair as rot.
+                if agg.refines_pairs.contains(&pair_key(&a.key(), &b.key())) {
+                    continue;
+                }
                 let (score, subset) = dedup_score(a, b);
                 if score >= min_similarity {
-                    // Refines-linked pairs are intentional relationships,
-                    // not duplicates (spec).
-                    if want_dedup && !agg.refines_pairs.contains(&pk) {
+                    if want_dedup {
                         scored_dedup.push((score, subset, a, b));
                     }
-                    // Rot's supersession gate: the OLDER of a near-duplicate
-                    // pair is a rot candidate — the newer node covers it.
+                    // Rot's only witness: the OLDER of a near-duplicate pair
+                    // is a candidate — the newer node covers it.
                     if want_rot {
                         note_supersession(&mut out.supersessions, a, b, score);
-                    }
-                } else if want_contra {
-                    // Contradiction candidates must share the subject AND
-                    // diverge: high tag overlap, body similarity inside the
-                    // (calibrated) band — "sharing tags but saying the same
-                    // thing" sits above the band and never surfaces.
-                    let tag_sim = overlap_max(&a.tags_lower, &b.tags_lower);
-                    let body_sim = jaccard(&a.body_tokens, &b.body_tokens);
-                    let weight = contradiction_category_weight(&a.category);
-                    let cscore = tag_sim * weight;
-                    if tag_sim >= CONTRADICTION_TAG_OVERLAP_MIN
-                        && body_sim >= band.lo
-                        && body_sim <= band.hi
-                        && cscore >= CONTRADICTION_SCORE_FLOOR
-                        && !agg.contradicts_pairs.contains(&pk)
-                        && !agg.refines_pairs.contains(&pk)
-                    {
-                        scored_contra.push((cscore, tag_sim, body_sim, weight, a, b));
                     }
                 }
             }
@@ -672,14 +631,8 @@ fn pairwise_findings(
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| (x.2.collection, &x.2.id).cmp(&(y.2.collection, &y.2.id)))
     });
-    scored_contra.sort_by(|x, y| {
-        y.0.partial_cmp(&x.0)
-            .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| (x.4.collection, &x.4.id).cmp(&(y.4.collection, &y.4.id)))
-    });
 
     out.dedup_total = scored_dedup.len();
-    out.contradiction_total = scored_contra.len();
 
     out.dedup = scored_dedup
         .into_iter()
@@ -703,34 +656,12 @@ fn pairwise_findings(
         })
         .collect();
 
-    out.contradictions = scored_contra
-        .into_iter()
-        .map(|(cscore, tag_sim, body_sim, weight, a, b)| {
-            let shared: Vec<&String> = {
-                let mut v: Vec<&String> = a.tags_lower.intersection(&b.tags_lower).collect();
-                v.sort();
-                v
-            };
-            json!({
-                "score": (cscore * 100.0).round() / 100.0,
-                "tag_overlap": (tag_sim * 100.0).round() / 100.0,
-                "body_similarity": (body_sim * 100.0).round() / 100.0,
-                "category_weight": weight,
-                "confidence": "low",
-                "node_a": node_ref(a),
-                "node_b": node_ref(b),
-                "overlap": shared,
-                "rationale": "shared topic tags, content that overlaps but diverges, no contradicts edge — read both nodes before acting",
-            })
-        })
-        .collect();
-
     out
 }
 
 /// The record a guided delete leaves (`sessions/delete_record.rs`): a node
 /// that records an event, not a claim. Two records say nearly the same words
-/// about two sessions and are neither duplicates nor a contradiction, and a
+/// about two sessions and are neither duplicates nor a supersession, and a
 /// record links only to what its delete preserved, which may be nothing.
 fn is_deletion_record(n: &NodeMeta) -> bool {
     n.tags_lower.contains(SESSION_DELETED_TAG)
@@ -783,98 +714,41 @@ fn orphan_findings(
     found.into_iter().map(|(_, _, f)| f).collect()
 }
 
-/// `v`/`V` immediately followed by a digit at a token boundary — v1, V2,
-/// v3.0. Hand-rolled: embra-brain has no regex dependency, and a two-state
-/// scan doesn't justify adding one. "very"/"velvet" never fire (the next
-/// char must be a digit); "curve4" is excluded by the boundary check.
-fn title_has_version_marker(title: &str) -> bool {
-    let chars: Vec<char> = title.chars().collect();
-    for i in 0..chars.len() {
-        let c = chars[i];
-        if (c == 'v' || c == 'V')
-            && chars.get(i + 1).is_some_and(|n| n.is_ascii_digit())
-            && (i == 0 || !chars[i - 1].is_alphanumeric())
-        {
-            return true;
-        }
-    }
-    false
-}
-
-/// Rot v2 (2026-07-30 production feedback): SUPERSESSION-GATED. A node is
-/// flagged only when there is positive evidence something newer covers it —
-/// a newer near-duplicate above `min_similarity` (the pairwise pass's
-/// `supersessions`), or a `refines` edge connecting it to a NEWER node (the
-/// strong form; deliberately direction-agnostic — stored refines direction
-/// varies by authoring habit, the newness carries the signal). Title
-/// markers, >90-day non-access, and empty payloads are TIEBREAKERS that
-/// raise confidence but can never flag a node alone (they false-positived
-/// on healthy nodes in production); a recent retrieval hit lowers
-/// confidence one level. Nodes younger than `min_age_days` are skipped.
+/// Rot: the older node of a near-duplicate pair, at `min_similarity` — the
+/// newer node covers it. That is the only witness; age without access
+/// (when nothing depends on or is enabled by the node) and an empty payload
+/// raise the confidence, and a recent retrieval lowers it. History never
+/// flags: its supersession is declared. Nodes younger than `min_age_days`
+/// are skipped.
 fn rot_findings(
     nodes: &[NodeMeta],
     agg: &EdgeAggregates,
+    history: &HashSet<NodeKey>,
     supersessions: &HashMap<NodeKey, Supersession>,
     min_age_days: i64,
     now: DateTime<Utc>,
 ) -> Vec<serde_json::Value> {
-    let by_key: HashMap<NodeKey, &NodeMeta> = nodes.iter().map(|n| (n.key(), n)).collect();
-    let mut refines_adj: HashMap<&NodeKey, Vec<&NodeKey>> = HashMap::new();
-    for (a, b) in &agg.refines_pairs {
-        refines_adj.entry(a).or_default().push(b);
-        refines_adj.entry(b).or_default().push(a);
-    }
-
     let mut found: Vec<(i32, i64, serde_json::Value)> = Vec::new();
     for n in nodes {
         let key = n.key();
+        if history.contains(&key) {
+            continue;
+        }
         // Min-age gate; an unknown created_at can never satisfy a
         // newer-than comparison, so it never flags either.
         let Some(age_d) = age_days(n.created_at, now) else { continue };
         if age_d < min_age_days {
             continue;
         }
+        let Some(newer) = supersessions.get(&key) else { continue };
 
-        // Primary evidence.
-        let refiner: Option<&NodeMeta> = refines_adj
-            .get(&key)
-            .into_iter()
-            .flatten()
-            .filter_map(|k| by_key.get(*k).copied())
-            .filter(|b| matches!((b.created_at, n.created_at), (Some(bc), Some(ac)) if bc > ac))
-            .max_by_key(|b| b.created_at);
-        let superseded = supersessions.get(&key);
-        if refiner.is_none() && superseded.is_none() {
-            continue;
-        }
-
-        let mut signals: Vec<&str> = Vec::new();
-        let mut phrases: Vec<String> = Vec::new();
+        let mut signals: Vec<&str> = vec!["newer_near_duplicate"];
+        let mut phrases: Vec<String> = vec!["a newer node covers near-identical content".into()];
         // 2 = high, 1 = medium, 0 = low.
-        let mut level: i32 = if refiner.is_some() {
-            signals.push("refines_from_newer");
-            phrases.push("a newer node refines this one".into());
-            2
-        } else {
-            1
-        };
-        if superseded.is_some() {
-            signals.push("superseded_by_newer");
-            phrases.push("a newer node covers near-identical content".into());
-        }
+        let mut level: i32 = 1;
 
-        // Tiebreakers — confidence only, never primary.
-        let mut tiebreak = false;
-        if n.title_tokens.iter().any(|t| ROT_FINAL_TOKENS.contains(&t.as_str())) {
-            signals.push("final_in_title");
-            phrases.push("title claims finality".into());
-            tiebreak = true;
-        }
-        if title_has_version_marker(&n.pseudo_title) {
-            signals.push("version_number");
-            phrases.push("versioned title suggests superseded content".into());
-            tiebreak = true;
-        }
+        // Confidence signals — never a witness on their own.
+        let mut raised = false;
         let incoming = agg.incoming_dep_enables.get(&key).copied().unwrap_or(0);
         if incoming == 0
             && n.last_accessed
@@ -883,14 +757,14 @@ fn rot_findings(
         {
             signals.push("old_unaccessed");
             phrases.push("not retrieved in >90 days and nothing depends_on/enables it".into());
-            tiebreak = true;
+            raised = true;
         }
         if n.empty_payload {
             signals.push("empty_payload");
             phrases.push("no substantive content beyond title/tags".into());
-            tiebreak = true;
+            raised = true;
         }
-        if tiebreak {
+        if raised {
             level += 1;
         }
         // Recent retrieval argues against rot.
@@ -911,27 +785,6 @@ fn rot_findings(
             _ => "low",
         };
 
-        let superseded_by = if let Some(b) = refiner {
-            json!({
-                "collection": b.collection,
-                "id": b.id,
-                "title": b.pseudo_title,
-                "similarity": superseded
-                    .filter(|s| s.newer == b.key())
-                    .map(|s| (s.similarity * 100.0).round() / 100.0),
-                "via": "refines_edge",
-            })
-        } else {
-            let s = superseded.expect("gate guarantees one primary");
-            json!({
-                "collection": s.newer.0,
-                "id": s.newer.1,
-                "title": s.newer_title,
-                "similarity": (s.similarity * 100.0).round() / 100.0,
-                "via": "content_similarity",
-            })
-        };
-
         let finding = json!({
             "collection": n.collection,
             "id": n.id,
@@ -939,7 +792,12 @@ fn rot_findings(
             "signals": signals,
             "age_days": age_d,
             "confidence": confidence,
-            "superseded_by": superseded_by,
+            "newer_duplicate": {
+                "collection": newer.newer.0,
+                "id": newer.newer.1,
+                "title": newer.newer_title,
+                "similarity": (newer.similarity * 100.0).round() / 100.0,
+            },
             "rationale": phrases.join("; "),
         });
         found.push((level, age_d, finding));
@@ -1001,20 +859,29 @@ pub(crate) async fn run_knowledge_audit(
     }
     let node_keys: HashSet<NodeKey> = nodes.iter().map(|n| n.key()).collect();
 
-    // All four checks consume the edge aggregates (degrees, incoming
-    // structural counts, refines/contradicts pair exclusions).
+    // Every check consumes the edge aggregates (degrees, incoming
+    // structural counts, refines pairs, declared supersessions).
     let agg = scan_edges(db, &node_keys).await?;
+    let (history, cycles) = history_of(&agg.declarations);
+    if !cycles.is_empty() {
+        let named: Vec<String> =
+            cycles.iter().take(CYCLE_NAMES_SHOWN).map(|(c, i)| format!("{c}:{i}")).collect();
+        warnings.push(format!(
+            "{} node(s) supersede one another in a cycle that reaches no current node, so they stay in the checks: {}{}",
+            cycles.len(),
+            named.join(", "),
+            if cycles.len() > CYCLE_NAMES_SHOWN { ", …" } else { "" }
+        ));
+    }
 
     let want = |c: AuditCheck| checks.contains(&c);
-    let band = contradiction_band(&nodes, &agg.contradicts_pairs);
     let pairwise = pairwise_findings(
         &nodes,
         &agg,
+        &history,
         min_similarity,
         want(AuditCheck::Dedup),
-        want(AuditCheck::Contradictions),
         want(AuditCheck::Rot),
-        &band,
     );
     let orphans = if want(AuditCheck::Orphans) {
         orphan_findings(&nodes, &agg, now)
@@ -1022,15 +889,14 @@ pub(crate) async fn run_knowledge_audit(
         Vec::new()
     };
     let rot = if want(AuditCheck::Rot) {
-        rot_findings(&nodes, &agg, &pairwise.supersessions, min_age_days, now)
+        rot_findings(&nodes, &agg, &history, &pairwise.supersessions, min_age_days, now)
     } else {
         Vec::new()
     };
     warnings.extend(pairwise.warnings);
 
     let (orphan_total, rot_total) = (orphans.len(), rot.len());
-    let issues_found =
-        pairwise.dedup_total + pairwise.contradiction_total + orphan_total + rot_total;
+    let issues_found = pairwise.dedup_total + orphan_total + rot_total;
 
     // Windowless totals so scan coverage is honestly comparable.
     let mut total_nodes: u64 = 0;
@@ -1055,11 +921,11 @@ pub(crate) async fn run_knowledge_audit(
             "edges_scanned": agg.edges_scanned,
             "checks_run": checks.iter().map(|c| c.as_str()).collect::<Vec<_>>(),
             "issues_found": issues_found,
+            "history": history.len(),
         },
         "dedup_candidates": truncate(pairwise.dedup),
         "orphan_nodes": truncate(orphans),
         "rot_candidates": truncate(rot),
-        "contradiction_candidates": truncate(pairwise.contradictions),
         "stats": {
             "total_nodes": total_nodes,
             "total_edges": total_edges,
@@ -1067,15 +933,6 @@ pub(crate) async fn run_knowledge_audit(
             "orphan_count": orphan_total,
             "dedup_pair_count": pairwise.dedup_total,
             "rot_count": rot_total,
-            "contradiction_count": pairwise.contradiction_total,
-            "contradiction_calibration": {
-                "body_similarity_band": [
-                    (band.lo * 100.0).round() / 100.0,
-                    (band.hi * 100.0).round() / 100.0
-                ],
-                "measured_pairs": band.measured_pairs,
-                "source": band.source,
-            },
         },
         "warnings": warnings,
     });
@@ -1087,19 +944,18 @@ pub(crate) async fn run_knowledge_audit(
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "knowledge_audit",
-    description = "Read-only hygiene audit of the knowledge graph (memory.semantic and memory.procedural; identity.graph and memory.entries are out of scope). checks selects any of: dedup (near-duplicate node pairs by content/tag similarity, threshold min_similarity, default 0.75), orphans (nodes with zero meaningful edges — auto same_session/temporal/tag_overlap and derived_from provenance do not count; nodes under 1 day old are skipped, 7+ days is high confidence), rot (supersession-gated: a node is flagged only when a newer node with similarity >= min_similarity exists, or a refines edge links it to a newer node — the strong form; finality/version title markers, 90+ days without access, and empty payloads raise confidence but never flag alone; a recent retrieval lowers it; nodes younger than min_age_days are skipped, default 30), contradictions (same category, shared tags, content that overlaps but DIVERGES — the body-similarity band is calibrated from this instance's existing contradicts edges when enough exist; category-weighted so fact/decision pairs rank far above observation/pattern pairs, which usually coexist; no existing contradicts edge; low confidence, read both nodes before acting). Returns JSON: summary, per-check findings capped at max_results each (default 50, max 200), stats incl. the contradiction calibration, warnings. Never modifies anything. Feed dedup_candidates to knowledge_merge, dry_run first."
+    description = "Read-only hygiene audit of the knowledge graph (memory.semantic and memory.procedural; identity.graph and memory.entries are out of scope). checks selects any of: dedup (near-duplicate node pairs by content/tag similarity, threshold min_similarity, default 0.75; a pair linked by refines is not one), orphans (nodes with zero meaningful edges — auto same_session/temporal/tag_overlap and derived_from provenance do not count; nodes under 1 day old are skipped, 7+ days is high confidence), rot (the older node of a near-duplicate pair, its newer duplicate named; 90+ days without access and an empty payload raise confidence; a recent retrieval lowers it; nodes younger than min_age_days are skipped, default 30). A node another node supersedes (knowledge_link supersedes) is history: it leaves every check and is counted in the summary. Returns JSON: summary, per-check findings capped at max_results each (default 50, max 200), stats, warnings. Never modifies anything. Feed dedup_candidates to knowledge_merge, dry_run first."
 )]
 pub struct KnowledgeAuditArgs {
     /// Collections to scan: semantic | procedural (full memory.* names also
     /// accepted). Omit for both.
     #[serde(default)]
     pub collections: Option<Vec<String>>,
-    /// Checks to run: dedup | orphans | rot | contradictions. Omit for all
-    /// four.
+    /// Checks to run: dedup | orphans | rot. Omit for all three.
     #[serde(default)]
     pub checks: Option<Vec<String>>,
-    /// Similarity threshold in [0.0, 1.0] for dedup pairs AND rot's
-    /// newer-node supersession probe. Default 0.75.
+    /// Similarity threshold in [0.0, 1.0] for dedup pairs AND rot's newer
+    /// near-duplicate. Default 0.75.
     #[serde(default)]
     pub min_similarity: Option<f64>,
     /// Findings cap per check. Default 50, clamped to [1, 200].
@@ -1157,15 +1013,6 @@ mod tests {
         })
     }
 
-    fn default_band() -> ContradictionBand {
-        ContradictionBand {
-            lo: CONTRADICTION_BODY_SIM_MIN_DEFAULT,
-            hi: CONTRADICTION_BODY_SIM_MAX_DEFAULT,
-            measured_pairs: 0,
-            source: "defaults",
-        }
-    }
-
     fn sup_for(older: &NodeMeta, newer_title: &str, newer_id: &str, sim: f64) -> HashMap<NodeKey, Supersession> {
         let mut m = HashMap::new();
         m.insert(
@@ -1188,7 +1035,7 @@ mod tests {
         assert!(body.get("cursor").is_none());
         assert_eq!(
             body["fields"],
-            json!(["source_id", "source_collection", "target_id", "target_collection", "edge_type"])
+            json!(["source_id", "source_collection", "target_id", "target_collection", "edge_type", SUPERSESSION_FIELD])
         );
         let cursor = audit_edge_page_body(20_000, &ScanPage::Cursor("tok".into()));
         assert_eq!(cursor["cursor"], json!("tok"));
@@ -1218,12 +1065,21 @@ mod tests {
     #[test]
     fn resolve_checks_defaults_all_rejects_unknown_and_empty() {
         let all = resolve_audit_checks(None).unwrap();
-        assert_eq!(all.len(), 4);
+        assert_eq!(all, vec![AuditCheck::Dedup, AuditCheck::Orphans, AuditCheck::Rot]);
         let got = resolve_audit_checks(Some(&["rot".to_string(), "dedup".to_string()])).unwrap();
         // Canonical order regardless of input order.
         assert_eq!(got, vec![AuditCheck::Dedup, AuditCheck::Rot]);
         assert!(resolve_audit_checks(Some(&[])).is_err());
         assert!(resolve_audit_checks(Some(&["bogus".to_string()])).is_err());
+    }
+
+    /// A caller that still asks for contradictions learns why there are none.
+    #[test]
+    fn the_contradictions_check_is_refused_with_its_reason() {
+        let refused = resolve_audit_checks(Some(&["dedup".to_string(), " Contradictions ".to_string()]));
+        assert_eq!(refused, Err(CONTRADICTIONS_REMOVED.to_string()));
+        assert!(CONTRADICTIONS_REMOVED.contains("not whether they disagree"));
+        assert!(CONTRADICTIONS_REMOVED.contains("Link contradicts"));
     }
 
     #[test]
@@ -1358,6 +1214,84 @@ mod tests {
         assert!(agg.refines_pairs.is_empty());
     }
 
+    /// A declaration is a marked supersedes edge into an audited node. The
+    /// scan projects the marker under its dotted path.
+    #[test]
+    fn edge_aggregates_record_only_marked_declarations() {
+        let old: NodeKey = ("memory.semantic".to_string(), "old".to_string());
+        let keys: HashSet<NodeKey> = [old.clone()].into_iter().collect();
+        let mut agg = EdgeAggregates::default();
+        let declared = |etype: &str, target: &str, marked: bool| {
+            let mut doc = edge_doc("memory.semantic", "new", "memory.semantic", target, etype);
+            if marked {
+                doc[SUPERSESSION_FIELD] = json!(true);
+            }
+            doc
+        };
+        accumulate_edge(&mut agg, &declared("supersedes", "old", false), &keys);
+        accumulate_edge(&mut agg, &declared("refines", "old", true), &keys);
+        accumulate_edge(&mut agg, &declared("supersedes", "elsewhere", true), &keys);
+        assert!(agg.declarations.is_empty());
+        accumulate_edge(&mut agg, &declared("supersedes", "old", true), &keys);
+        assert_eq!(agg.declarations, vec![(("memory.semantic".to_string(), "new".to_string()), old.clone())]);
+        // A declaration is a meaningful edge for its older end.
+        assert_eq!(agg.meaningful_degree[&old], 3);
+    }
+
+    fn key(id: &str) -> NodeKey {
+        ("memory.semantic".to_string(), id.to_string())
+    }
+
+    #[test]
+    fn a_chain_makes_every_link_history() {
+        // c supersedes b, b supersedes a: c stands, a and b are history.
+        let (history, cycles) = history_of(&[(key("b"), key("a")), (key("c"), key("b"))]);
+        assert_eq!(history, [key("a"), key("b")].into_iter().collect());
+        assert!(cycles.is_empty());
+    }
+
+    /// Nodes that supersede one another in a ring reach no current node:
+    /// none of them is history, so they stay in the checks and are named.
+    #[test]
+    fn a_supersession_cycle_stays_in_the_checks_and_is_named() {
+        let (history, cycles) =
+            history_of(&[(key("a"), key("b")), (key("b"), key("c")), (key("c"), key("a")), (key("d"), key("e"))]);
+        assert_eq!(history, [key("e")].into_iter().collect());
+        assert_eq!(cycles, vec![key("a"), key("b"), key("c")]);
+    }
+
+    /// A superseded node is history: its near-duplicate successor is no
+    /// dedup pair, it is no rot, and its declaration keeps it from being an
+    /// orphan.
+    #[test]
+    fn a_superseded_node_is_history_in_every_check() {
+        let mut old = meta("memory.semantic", "old", "fact", "same title here", "identical body content tokens", &["tag1"]);
+        old.created_at = Some(now() - chrono::Duration::days(90));
+        let mut new = meta("memory.semantic", "new", "fact", "same title here", "identical body content tokens", &["tag1"]);
+        new.created_at = Some(now() - chrono::Duration::days(40));
+        let keys: HashSet<NodeKey> = [old.key(), new.key()].into_iter().collect();
+        let mut agg = EdgeAggregates::default();
+        let mut declaration = edge_doc("memory.semantic", "new", "memory.semantic", "old", "supersedes");
+        declaration[SUPERSESSION_FIELD] = json!(true);
+        accumulate_edge(&mut agg, &declaration, &keys);
+        let (history, _) = history_of(&agg.declarations);
+        assert_eq!(history, [old.key()].into_iter().collect());
+        let nodes = vec![old, new];
+
+        let pw = pairwise_findings(&nodes, &agg, &history, 0.75, true, true);
+        assert_eq!(pw.dedup_total, 0);
+        assert!(pw.supersessions.is_empty());
+        // Even a witness handed in does not flag history.
+        let sups = sup_for(&nodes[0], "new", "new", 1.0);
+        assert!(rot_findings(&nodes, &agg, &history, &sups, 0, now()).is_empty());
+        assert!(orphan_findings(&nodes, &agg, now()).is_empty());
+
+        // Without the declaration the same pair is a duplicate and rot.
+        let pw = pairwise_findings(&nodes, &EdgeAggregates::default(), &HashSet::new(), 0.75, true, true);
+        assert_eq!(pw.dedup_total, 1);
+        assert_eq!(pw.supersessions.len(), 1);
+    }
+
     #[test]
     fn orphan_excludes_under_one_day_high_confidence_at_seven() {
         let agg = EdgeAggregates::default();
@@ -1401,40 +1335,23 @@ mod tests {
     }
 
     #[test]
-    fn rot_gate_requires_supersession_or_refines_markers_never_flag_alone() {
-        // Production feedback: title markers false-positived on healthy
-        // nodes. A marker-covered old node with NO supersession evidence
-        // must not flag.
+    fn rot_flags_only_the_older_of_a_near_duplicate_pair() {
+        // No newer near-duplicate: nothing, however old the node and
+        // whatever its title says.
         let agg = EdgeAggregates::default();
-        let marked = meta("memory.semantic", "a", "decision", "Final architecture decision v2", "body long enough to not be empty payload", &[]);
-        assert!(rot_findings(std::slice::from_ref(&marked), &agg, &HashMap::new(), ROT_MIN_AGE_DAYS_DEFAULT, now()).is_empty());
+        let titled = meta("memory.semantic", "a", "decision", "Final architecture decision v2", "body long enough to not be empty payload", &[]);
+        assert!(rot_findings(std::slice::from_ref(&titled), &agg, &HashSet::new(), &HashMap::new(), ROT_MIN_AGE_DAYS_DEFAULT, now()).is_empty());
 
-        // With a newer near-duplicate the same node flags — and the markers
-        // now raise confidence to high (medium primary + tiebreaker).
-        let sups = sup_for(&marked, "replacement", "n1", 0.9);
-        let found = rot_findings(std::slice::from_ref(&marked), &agg, &sups, ROT_MIN_AGE_DAYS_DEFAULT, now());
+        // With one, the node flags at medium: the title no longer raises it.
+        let sups = sup_for(&titled, "replacement", "n1", 0.9);
+        let found = rot_findings(std::slice::from_ref(&titled), &agg, &HashSet::new(), &sups, ROT_MIN_AGE_DAYS_DEFAULT, now());
         assert_eq!(found.len(), 1);
         let sigs: Vec<&str> = found[0]["signals"].as_array().unwrap().iter().filter_map(|s| s.as_str()).collect();
-        assert!(sigs.contains(&"superseded_by_newer"));
-        assert!(sigs.contains(&"final_in_title"));
-        assert!(sigs.contains(&"version_number"));
-        assert_eq!(found[0]["confidence"], "high");
-        assert_eq!(found[0]["superseded_by"]["id"], "n1");
-        assert_eq!(found[0]["superseded_by"]["via"], "content_similarity");
-    }
-
-    #[test]
-    fn rot_final_in_title_is_token_match_not_substring() {
-        // "penultimate" contains "ultimate" and "lastly" contains "last" as
-        // substrings — token matching must not fire on either.
-        let agg = EdgeAggregates::default();
-        let pen = meta("memory.semantic", "b", "decision", "The penultimate lastly-noted plan", "body long enough to not be empty payload", &[]);
-        let sups = sup_for(&pen, "newer", "n1", 0.8);
-        let found = rot_findings(std::slice::from_ref(&pen), &agg, &sups, ROT_MIN_AGE_DAYS_DEFAULT, now());
-        assert_eq!(found.len(), 1);
-        let sigs: Vec<&str> = found[0]["signals"].as_array().unwrap().iter().filter_map(|s| s.as_str()).collect();
-        assert!(!sigs.contains(&"final_in_title"));
-        assert_eq!(found[0]["confidence"], "medium"); // primary only, no tiebreaker
+        assert_eq!(sigs, vec!["newer_near_duplicate"]);
+        assert_eq!(found[0]["confidence"], "medium");
+        assert_eq!(found[0]["newer_duplicate"]["id"], "n1");
+        assert_eq!(found[0]["newer_duplicate"]["similarity"], 0.9);
+        assert!(found[0].get("superseded_by").is_none());
     }
 
     #[test]
@@ -1444,9 +1361,9 @@ mod tests {
         young.created_at = Some(now() - chrono::Duration::days(10));
         let sups = sup_for(&young, "newer", "n1", 0.9);
         // 10 days < default 30 → skipped even with supersession evidence.
-        assert!(rot_findings(std::slice::from_ref(&young), &agg, &sups, ROT_MIN_AGE_DAYS_DEFAULT, now()).is_empty());
+        assert!(rot_findings(std::slice::from_ref(&young), &agg, &HashSet::new(), &sups, ROT_MIN_AGE_DAYS_DEFAULT, now()).is_empty());
         // min_age_days = 0 admits it.
-        assert_eq!(rot_findings(std::slice::from_ref(&young), &agg, &sups, 0, now()).len(), 1);
+        assert_eq!(rot_findings(std::slice::from_ref(&young), &agg, &HashSet::new(), &sups, 0, now()).len(), 1);
     }
 
     #[test]
@@ -1455,31 +1372,38 @@ mod tests {
         let mut node = meta("memory.semantic", "a", "fact", "plain title", "body long enough to not be empty payload", &[]);
         node.last_accessed = Some(now() - chrono::Duration::days(5));
         let sups = sup_for(&node, "newer", "n1", 0.9);
-        let found = rot_findings(std::slice::from_ref(&node), &agg, &sups, ROT_MIN_AGE_DAYS_DEFAULT, now());
+        let found = rot_findings(std::slice::from_ref(&node), &agg, &HashSet::new(), &sups, ROT_MIN_AGE_DAYS_DEFAULT, now());
         assert_eq!(found.len(), 1);
         let sigs: Vec<&str> = found[0]["signals"].as_array().unwrap().iter().filter_map(|s| s.as_str()).collect();
         assert!(sigs.contains(&"recently_accessed"));
         assert_eq!(found[0]["confidence"], "low"); // medium primary − recent access
     }
 
+    /// `refines` means "more specific than". The general node and the one
+    /// that adds detail to it share every word of the general one, so the
+    /// containment floor scores them a near-duplicate; linked by refines,
+    /// they are neither a duplicate nor a replacement.
     #[test]
-    fn rot_refines_newer_partner_high_confidence_direction_agnostic() {
-        let mut old = meta("memory.semantic", "old", "fact", "original take", "body long enough to not be empty payload", &[]);
-        old.created_at = Some(now() - chrono::Duration::days(60));
-        let mut newer = meta("memory.semantic", "new", "fact", "refined take", "different body content entirely here", &[]);
-        newer.created_at = Some(now() - chrono::Duration::days(40));
+    fn a_refines_pair_never_flags_rot() {
+        let mut general = meta("memory.semantic", "old", "fact", "certificates live in the pki directory", "certificates live in the pki directory", &["pki"]);
+        general.created_at = Some(now() - chrono::Duration::days(60));
+        let mut detail = meta(
+            "memory.semantic",
+            "new",
+            "fact",
+            "certificates live in the pki directory",
+            "certificates live in the pki directory and the ca cert is ca.pem",
+            &["pki"],
+        );
+        detail.created_at = Some(now() - chrono::Duration::days(40));
+        assert!(dedup_score(&general, &detail).0 >= AUDIT_MIN_SIMILARITY_DEFAULT, "a containment pair");
         let mut agg = EdgeAggregates::default();
-        // Unordered pair — the check keys on the partner being NEWER, not on
-        // the stored edge direction (authoring direction varies).
-        agg.refines_pairs.insert(pair_key(&old.key(), &newer.key()));
-        let nodes = vec![old, newer];
-        let found = rot_findings(&nodes, &agg, &HashMap::new(), ROT_MIN_AGE_DAYS_DEFAULT, now());
-        // Only the OLDER end flags; the newer partner's counterpart is older.
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0]["id"], "old");
-        assert_eq!(found[0]["confidence"], "high");
-        assert_eq!(found[0]["superseded_by"]["id"], "new");
-        assert_eq!(found[0]["superseded_by"]["via"], "refines_edge");
+        agg.refines_pairs.insert(pair_key(&general.key(), &detail.key()));
+        let nodes = vec![general, detail];
+        let pw = pairwise_findings(&nodes, &agg, &HashSet::new(), AUDIT_MIN_SIMILARITY_DEFAULT, true, true);
+        assert_eq!(pw.dedup_total, 0);
+        assert!(pw.supersessions.is_empty());
+        assert!(rot_findings(&nodes, &agg, &HashSet::new(), &pw.supersessions, ROT_MIN_AGE_DAYS_DEFAULT, now()).is_empty());
     }
 
     #[test]
@@ -1490,23 +1414,11 @@ mod tests {
         b.created_at = Some(now() - chrono::Duration::days(40));
         let older_key = a.key();
         let newer_key = b.key();
-        let pw = pairwise_findings(&[a, b], &EdgeAggregates::default(), 0.75, false, false, true, &default_band());
+        let pw = pairwise_findings(&[a, b], &EdgeAggregates::default(), &HashSet::new(), 0.75, false, true);
         assert_eq!(pw.supersessions.len(), 1);
         let s = pw.supersessions.get(&older_key).expect("older node is the candidate");
         assert_eq!(s.newer, newer_key);
         assert!(s.similarity >= 0.99);
-    }
-
-    #[test]
-    fn rot_version_marker_v_digit_boundary_only() {
-        assert!(title_has_version_marker("Decision v2"));
-        assert!(title_has_version_marker("v3.0 rollout plan"));
-        assert!(title_has_version_marker("V1 spec"));
-        assert!(!title_has_version_marker("very good plan"));
-        assert!(!title_has_version_marker("velvet workflow"));
-        assert!(!title_has_version_marker("curve4 tuning"));
-        assert!(!title_has_version_marker("KV2 store"));
-        assert!(!title_has_version_marker(""));
     }
 
     #[test]
@@ -1530,7 +1442,7 @@ mod tests {
 
         // Superseded + >90d unaccessed: the staleness tiebreaker lifts
         // medium → high.
-        let found = rot_findings(std::slice::from_ref(&old), &EdgeAggregates::default(), &sups, ROT_MIN_AGE_DAYS_DEFAULT, now());
+        let found = rot_findings(std::slice::from_ref(&old), &EdgeAggregates::default(), &HashSet::new(), &sups, ROT_MIN_AGE_DAYS_DEFAULT, now());
         assert_eq!(found.len(), 1);
         assert!(found[0]["signals"].as_array().unwrap().iter().any(|s| s == "old_unaccessed"));
         assert_eq!(found[0]["confidence"], "high");
@@ -1544,14 +1456,14 @@ mod tests {
             &edge_doc("memory.semantic", "x", "memory.semantic", "old", "depends_on"),
             &keys,
         );
-        let found2 = rot_findings(std::slice::from_ref(&depended), &agg2, &sups, ROT_MIN_AGE_DAYS_DEFAULT, now());
+        let found2 = rot_findings(std::slice::from_ref(&depended), &agg2, &HashSet::new(), &sups, ROT_MIN_AGE_DAYS_DEFAULT, now());
         assert_eq!(found2.len(), 1);
         assert!(!found2[0]["signals"].as_array().unwrap().iter().any(|s| s == "old_unaccessed"));
         assert_eq!(found2[0]["confidence"], "medium");
 
         // Without any supersession evidence, staleness alone flags nothing.
         let lonely = mk();
-        assert!(rot_findings(std::slice::from_ref(&lonely), &EdgeAggregates::default(), &HashMap::new(), ROT_MIN_AGE_DAYS_DEFAULT, now()).is_empty());
+        assert!(rot_findings(std::slice::from_ref(&lonely), &EdgeAggregates::default(), &HashSet::new(), &HashMap::new(), ROT_MIN_AGE_DAYS_DEFAULT, now()).is_empty());
     }
 
     #[test]
@@ -1599,7 +1511,7 @@ mod tests {
         let a = meta("memory.semantic", "a", "fact", "same title here", "identical body content tokens", &["tag1"]);
         let b = meta("memory.semantic", "b", "fact", "same title here", "identical body content tokens", &["tag1"]);
         let mut agg = EdgeAggregates::default();
-        let found = pairwise_findings(&[a, b], &agg, 1.0, true, false, false, &default_band());
+        let found = pairwise_findings(&[a, b], &agg, &HashSet::new(), 1.0, true, false);
         // Identical nodes score exactly 1.0 — inclusive threshold keeps them.
         assert_eq!(found.dedup_total, 1);
 
@@ -1607,52 +1519,8 @@ mod tests {
         let a2 = meta("memory.semantic", "a", "fact", "same title here", "identical body content tokens", &["tag1"]);
         let b2 = meta("memory.semantic", "b", "fact", "same title here", "identical body content tokens", &["tag1"]);
         agg.refines_pairs.insert(pair_key(&a2.key(), &b2.key()));
-        let found2 = pairwise_findings(&[a2, b2], &agg, 1.0, true, false, false, &default_band());
+        let found2 = pairwise_findings(&[a2, b2], &agg, &HashSet::new(), 1.0, true, false);
         assert_eq!(found2.dedup_total, 0);
-    }
-
-    #[test]
-    fn contradiction_needs_tag_overlap_not_dedup_similar_no_contradicts_or_refines_edge() {
-        // Bodies share the subject token "conclusion" (jaccard 0.2 — inside
-        // the default divergence band) while diverging in claims.
-        let a = meta("memory.semantic", "a", "fact", "alpha topic claim", "alpha conclusion entirely", &["topic", "area"]);
-        let b = meta("memory.semantic", "b", "fact", "beta topic claim", "beta conclusion divergent", &["topic", "area"]);
-        let mut agg = EdgeAggregates::default();
-        let found = pairwise_findings(&[a, b], &agg, 0.75, false, true, false, &default_band());
-        assert_eq!(found.contradiction_total, 1);
-        assert_eq!(found.contradictions[0]["confidence"], "low");
-        assert_eq!(found.contradictions[0]["category_weight"], 1.0); // fact
-
-        // An existing contradicts edge = already acknowledged.
-        let a2 = meta("memory.semantic", "a", "fact", "alpha topic claim", "alpha conclusion entirely", &["topic", "area"]);
-        let b2 = meta("memory.semantic", "b", "fact", "beta topic claim", "beta conclusion divergent", &["topic", "area"]);
-        agg.contradicts_pairs.insert(pair_key(&a2.key(), &b2.key()));
-        let found2 = pairwise_findings(&[a2, b2], &agg, 0.75, false, true, false, &default_band());
-        assert_eq!(found2.contradiction_total, 0);
-
-        // Different categories never pair.
-        let c = meta("memory.semantic", "c", "decision", "alpha topic claim", "alpha conclusion entirely", &["topic", "area"]);
-        let d = meta("memory.semantic", "d", "observation", "beta topic claim", "beta conclusion divergent", &["topic", "area"]);
-        let found3 = pairwise_findings(&[c, d], &EdgeAggregates::default(), 0.75, false, true, false, &default_band());
-        assert_eq!(found3.contradiction_total, 0);
-    }
-
-    #[test]
-    fn contradiction_requires_body_divergence_band() {
-        // Near-identical bodies ("sharing tags but saying the same thing"):
-        // jaccard 4/6 ≈ 0.67 sits ABOVE the default band ceiling — excluded
-        // even though the overall dedup score stays under the threshold.
-        let a = meta("memory.semantic", "a", "fact", "first phrasing", "alpha beta gamma delta epsilon", &["topic", "area"]);
-        let b = meta("memory.semantic", "b", "fact", "second phrasing", "alpha beta gamma delta zeta", &["topic", "area"]);
-        let found = pairwise_findings(&[a, b], &EdgeAggregates::default(), 0.75, false, true, false, &default_band());
-        assert_eq!(found.contradiction_total, 0);
-
-        // Fully disjoint bodies (different topics wearing the same tags):
-        // jaccard 0.0 sits BELOW the band floor — excluded.
-        let c = meta("memory.semantic", "c", "fact", "one thing", "alpha beta gamma", &["topic", "area"]);
-        let d = meta("memory.semantic", "d", "fact", "another thing", "delta epsilon zeta", &["topic", "area"]);
-        let found2 = pairwise_findings(&[c, d], &EdgeAggregates::default(), 0.75, false, true, false, &default_band());
-        assert_eq!(found2.contradiction_total, 0);
     }
 
     /// Two records of guided deletes, built as the brain builds them, with
@@ -1669,78 +1537,15 @@ mod tests {
         let no_edges = EdgeAggregates::default();
 
         let records = [record("a", "scratch", &["session-deleted"]), record("b", "test", &["session-deleted"])];
-        let found = pairwise_findings(&records, &no_edges, 0.75, true, true, true, &default_band());
-        assert_eq!((found.dedup_total, found.contradiction_total), (0, 0));
+        let found = pairwise_findings(&records, &no_edges, &HashSet::new(), 0.75, true, true);
+        assert_eq!(found.dedup_total, 0);
         assert!(found.supersessions.is_empty());
         assert!(orphan_findings(&records, &no_edges, now()).is_empty());
 
         let plain = [record("a", "scratch", &["other"]), record("b", "test", &["other"])];
-        let found = pairwise_findings(&plain, &no_edges, 0.75, true, true, true, &default_band());
+        let found = pairwise_findings(&plain, &no_edges, &HashSet::new(), 0.75, true, true);
         assert_eq!(found.dedup_total, 1);
         assert_eq!(orphan_findings(&plain, &no_edges, now()).len(), 2);
-    }
-
-    #[test]
-    fn contradiction_category_weights_drop_observation_pairs() {
-        // Observation pair at tag overlap 0.5: score 0.5 × 0.4 = 0.2 < the
-        // 0.35 floor — observations coexist by nature.
-        // Bodies share {conclusion, shared} but diverge on id-prefixed
-        // tokens → jaccard 2/6 = 0.33, inside the divergence band.
-        let mk = |id: &str, cat: &str, tags: &[&str]| {
-            meta(
-                "memory.semantic",
-                id,
-                cat,
-                format!("{} claim", id).as_str(),
-                &format!("{id}extra {id}other conclusion shared"),
-                tags,
-            )
-        };
-        let a = mk("a", "observation", &["topic", "extra"]);
-        let b = mk("b", "observation", &["topic", "other"]);
-        let found = pairwise_findings(&[a, b], &EdgeAggregates::default(), 0.75, false, true, false, &default_band());
-        assert_eq!(found.contradiction_total, 0);
-
-        // The same shape as facts clears the floor (0.5 × 1.0).
-        let c = mk("c", "fact", &["topic", "extra"]);
-        let d = mk("d", "fact", &["topic", "other"]);
-        let found2 = pairwise_findings(&[c, d], &EdgeAggregates::default(), 0.75, false, true, false, &default_band());
-        assert_eq!(found2.contradiction_total, 1);
-
-        // Observations still surface at VERY high tag overlap (1.0 × 0.4 =
-        // 0.4 ≥ 0.35) — coexistence is a prior, not a ban.
-        let e = mk("e", "observation", &["topic", "area"]);
-        let f = mk("f", "observation", &["topic", "area"]);
-        let found3 = pairwise_findings(&[e, f], &EdgeAggregates::default(), 0.75, false, true, false, &default_band());
-        assert_eq!(found3.contradiction_total, 1);
-    }
-
-    #[test]
-    fn contradiction_band_calibrates_from_existing_pairs_or_defaults() {
-        // Six known-contradiction pairs, each with body jaccard 2/6 = 1/3 →
-        // the band calibrates to that observed similarity.
-        let mut nodes: Vec<NodeMeta> = Vec::new();
-        let mut pairs: HashSet<(NodeKey, NodeKey)> = HashSet::new();
-        for i in 0..6 {
-            let a = meta("memory.semantic", &format!("a{}", i), "fact", "t", "alpha beta gamma delta", &[]);
-            let b = meta("memory.semantic", &format!("b{}", i), "fact", "t", "alpha beta epsilon zeta", &[]);
-            pairs.insert(pair_key(&a.key(), &b.key()));
-            nodes.push(a);
-            nodes.push(b);
-        }
-        let band = contradiction_band(&nodes, &pairs);
-        assert_eq!(band.source, "calibrated");
-        assert_eq!(band.measured_pairs, 6);
-        assert!((band.lo - 1.0 / 3.0).abs() < 1e-9);
-        assert!((band.hi - 1.0 / 3.0).abs() < 1e-9);
-
-        // Below the calibration minimum → static defaults, honestly labeled.
-        let few: HashSet<(NodeKey, NodeKey)> = pairs.into_iter().take(2).collect();
-        let band2 = contradiction_band(&nodes, &few);
-        assert_eq!(band2.source, "defaults");
-        assert_eq!(band2.measured_pairs, 2);
-        assert!((band2.lo - CONTRADICTION_BODY_SIM_MIN_DEFAULT).abs() < 1e-9);
-        assert!((band2.hi - CONTRADICTION_BODY_SIM_MAX_DEFAULT).abs() < 1e-9);
     }
 
     #[test]
@@ -1750,7 +1555,7 @@ mod tests {
         let nodes: Vec<NodeMeta> = (0..(AUDIT_PAIRWISE_CAP + 3))
             .map(|i| meta("memory.semantic", &format!("n{}", i), "fact", "t", "body words here", &[]))
             .collect();
-        let found = pairwise_findings(&nodes, &EdgeAggregates::default(), 0.99, true, false, false, &default_band());
+        let found = pairwise_findings(&nodes, &EdgeAggregates::default(), &HashSet::new(), 0.99, true, false);
         assert_eq!(found.warnings.len(), 1);
         assert!(found.warnings[0].contains("newest"));
         assert!(found.warnings[0].contains(&format!("{}", AUDIT_PAIRWISE_CAP)));
