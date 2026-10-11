@@ -4,6 +4,8 @@ use tracing::{error, info, warn};
 
 use crate::db::{WardsonDbClient, WardsonDbError};
 
+mod supersession;
+
 /// The version the ladder in `run_migrations` ends on
 /// (`the_ladder_ends_on_the_current_schema_version`).
 ///
@@ -13,7 +15,7 @@ use crate::db::{WardsonDbClient, WardsonDbError};
 /// it is read with a serde default. What has to hold on every boot,
 /// whatever the version (indexes, retention, the identity projection, the
 /// seed packs), is in the tail below the ladder and has no version.
-const CURRENT_SCHEMA_VERSION: u32 = 13;
+const CURRENT_SCHEMA_VERSION: u32 = 14;
 
 /// Run all pending migrations. Each migration is idempotent.
 pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
@@ -137,6 +139,18 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
         // the sealed soul's format marker, never by collection existence.
         run_v13_identity_graph(db).await?;
         set_schema_version(db, 13).await?;
+    }
+
+    if current_version < 14 {
+        // v14: a `superseded_by` field becomes a declared `supersedes` edge
+        // (`supersession.rs`). Recorded only when every field was handled:
+        // a transient error leaves it for the next boot, and a second run
+        // changes nothing.
+        if supersession::run_v14_supersession(db).await {
+            set_schema_version(db, 14).await?;
+        } else {
+            warn!("Migration v14 did not finish; the next boot runs it again");
+        }
     }
 
     // Hot-path index assertions ride EVERY boot, after the versioned ladder

@@ -1573,6 +1573,22 @@ mod tests {
         assert_eq!(clamp_audit_params(Some(-0.5), Some(0), Some(0)), (0.0, 1, 0));
     }
 
+    /// Runs the audit against a live WardSONDB, for a check on a copy of an
+    /// instance's data. Never against the instance itself:
+    ///
+    /// `EMBRA_AUDIT_DB=http://127.0.0.1:18091 cargo test -p embra-brain audit_on_a_live_copy -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "needs a WardSONDB holding a copy of an instance's data"]
+    async fn audit_on_a_live_copy() {
+        let url = std::env::var("EMBRA_AUDIT_DB").expect("EMBRA_AUDIT_DB=<url of the copy>");
+        let db = WardsonDbClient::from_url(&url);
+        let args: KnowledgeAuditArgs = serde_json::from_value(json!({})).expect("defaults");
+        let report = run_knowledge_audit(&db, args).await.expect("the audit runs");
+        let v: serde_json::Value = serde_json::from_str(&report).expect("a JSON report");
+        let shown = json!({"summary": v["summary"], "stats": v["stats"], "warnings": v["warnings"]});
+        println!("{}", serde_json::to_string_pretty(&shown).expect("prints"));
+    }
+
     #[test]
     fn knowledge_audit_args_defaults_and_schema_is_plain_object() {
         let a: KnowledgeAuditArgs = serde_json::from_value(json!({})).unwrap();
