@@ -228,6 +228,10 @@ pub struct OpenAiCompatSetupState {
     pub current_bearer: Option<String>,
     pub current_model: Option<String>,
     pub step: OpenAiCompatSetupStep,
+    /// Set by `/model` on the active Ollama or LM Studio preset: the flow
+    /// starts at the model step with the endpoint and bearer as they are,
+    /// and the pick only switches the model (`local_model_selection`).
+    pub model_only: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1113,6 +1117,12 @@ async fn handle_request(
                     .await;
                     if matches!(outcome, SetupStepOutcome::Advance) {
                         *pending_openai_compat_setup.lock().await = Some(state);
+                    } else if matches!(outcome, SetupStepOutcome::Complete)
+                        && state.model_only
+                        && let Ok(cfg) = config::load_config(db).await
+                    {
+                        let brain = display_model_for(&cfg.api_provider, &cfg);
+                        send_brain_status(tx, &cfg, session_mgr, &brain).await;
                     }
                     // Complete and Error already cleared the Mutex
                     // (or didn't reinstate it). Either way the flow ends
@@ -2898,7 +2908,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the active Anthropic model\n  /model <opus-5.5|opus-5|opus-4.8|fable-5.1|fable-5>  Switch the Anthropic model (next message)\n  /effort                            Show the active provider's effort level and what is sent\n  /effort <low|medium|high|xhigh|max>  Set effort for the active provider (Anthropic default max; Gemini high; local presets: sent verbatim, model-validated); /effort reset clears\n  /embeddings                        Show the local semantic-similarity layer: model, index, how many nodes are embedded\n  /embeddings <on|off>               Enable or disable semantic similarity in retrieval (default on)\n  /embeddings backfill [--force]     Embed nodes that need it (local CPU, ~55ms/node); --force re-embeds all\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image or a text file (uploaded id, uploads/ path or any workspace path) to your next message\n  /attach list | clear               Show or drop the staged attachments\n  /download <path>                   Hand a workspace file to your browser as a download (regular files up to 12 MiB)\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-3-pro-image (default) | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian rebuild <name>|--all     Rebuild tools an OS update left unloaded, or failed builds (validated + replicant-checked again)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /guardian secret <host> <header> <value>  Store a credential the host adds to every http_request to that host (never in a tool's input); `secret` lists, `<host> remove` forgets\n  /guardian egress allow|deny <host>   The allowlist of private hosts the tools may reach (loopback is refused always); `egress` lists\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the model; on Ollama / LM Studio, pick one from the models the server lists\n  /model <name>                      Switch the model (next message): opus-5.5|opus-5|opus-4.8|fable-5.1|fable-5 on Anthropic, a listed model on Ollama / LM Studio\n  /effort                            Show the active provider's effort level and what is sent\n  /effort <low|medium|high|xhigh|max>  Set effort for the active provider (Anthropic default max; Gemini high; local presets: sent verbatim, model-validated); /effort reset clears\n  /embeddings                        Show the local semantic-similarity layer: model, index, how many nodes are embedded\n  /embeddings <on|off>               Enable or disable semantic similarity in retrieval (default on)\n  /embeddings backfill [--force]     Embed nodes that need it (local CPU, ~55ms/node); --force re-embeds all\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image or a text file (uploaded id, uploads/ path or any workspace path) to your next message\n  /attach list | clear               Show or drop the staged attachments\n  /download <path>                   Hand a workspace file to your browser as a download (regular files up to 12 MiB)\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-3-pro-image (default) | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian rebuild <name>|--all     Rebuild tools an OS update left unloaded, or failed builds (validated + replicant-checked again)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /guardian secret <host> <header> <value>  Store a credential the host adds to every http_request to that host (never in a tool's input); `secret` lists, `<host> remove` forgets\n  /guardian egress allow|deny <host>   The allowlist of private hosts the tools may reach (loopback is refused always); `egress` lists\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -2914,7 +2924,7 @@ async fn handle_slash_command(
             handle_show_reasoning_command(args, tx, db).await;
         }
         "/model" => {
-            handle_model_command(args, tx, db, session_mgr).await;
+            handle_model_command(args, tx, db, session_mgr, pending_openai_compat_setup).await;
         }
         "/effort" => {
             handle_effort_command(args, tx, db).await;
@@ -4549,6 +4559,7 @@ async fn enter_openai_compat_setup(
         current_bearer,
         current_model,
         step: OpenAiCompatSetupStep::AwaitingEndpoint,
+        model_only: false,
     });
 
     let _ = tx
@@ -4707,6 +4718,24 @@ async fn handle_pending_openai_compat_step(
                 models.first().cloned().unwrap_or_default()
             } else if models.iter().any(|m| m == trimmed) {
                 trimmed.to_string()
+            } else if state.model_only {
+                // `/model` never asked for an endpoint: end the flow and
+                // name the way back.
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::System(
+                            SystemMessage {
+                                content: format!(
+                                    "'{trimmed}' is not among the {} models {} lists. Run /model again to pick from the list.",
+                                    models.len(),
+                                    state.preset.label(),
+                                ),
+                                msg_type: SystemMessageType::Error as i32,
+                            },
+                        )),
+                    }))
+                    .await;
+                return SetupStepOutcome::Error;
             } else {
                 let _ = tx
                     .send(Ok(ConversationResponse {
@@ -4867,6 +4896,28 @@ async fn complete_openai_compat_setup(
             return SetupStepOutcome::Error;
         }
     };
+    if state.model_only {
+        // `/model` on the active preset: the model moves, and the endpoint
+        // and the bearer stay as they are.
+        set_local_model(&mut cfg, state.preset, &model);
+        let outcome = match config::save_config(db, &cfg).await {
+            Ok(()) => {
+                crate::provider::health::request_probe();
+                (local_model_set_message(state.preset, &model), SystemMessageType::Info, SetupStepOutcome::Complete)
+            }
+            Err(e) => (format!("Failed to persist config: {e}"), SystemMessageType::Error, SetupStepOutcome::Error),
+        };
+        let _ = tx
+            .send(Ok(ConversationResponse {
+                response_type: Some(conversation_response::ResponseType::System(SystemMessage {
+                    content: outcome.0,
+                    msg_type: outcome.1 as i32,
+                })),
+            }))
+            .await;
+        *pending.lock().await = None;
+        return outcome.2;
+    }
     match state.preset {
         OpenAiCompatPreset::Ollama => {
             cfg.openai_compat.ollama_endpoint = endpoint.clone();
@@ -5289,18 +5340,24 @@ fn set_effort_field(cfg: &mut config::SystemConfig, kind: ProviderKind, level: O
     }
 }
 
-/// `/model [<opus-5.5|opus-5|opus-4.8|fable-5.1|fable-5>]` — show or switch
-/// the Anthropic model. Persists `SystemConfig.anthropic_model`; the loop driver rebuilds
-/// the provider per-turn from config, so a switch takes effect on the next
-/// user message. Only meaningful for the Anthropic provider (Gemini /
-/// OpenAI-compat models are set via `/provider --setup`). On a successful
-/// switch it emits an Operational ModeChange so the status bar reflects the
-/// new Brain immediately.
+/// `/model [<name>]` — show or switch the active provider's model; the
+/// loop driver rebuilds the provider per turn from config, so a switch
+/// takes effect on the next user message.
+/// - Anthropic: one of `ANTHROPIC_MODEL_CHOICES`, persisted as
+///   `SystemConfig.anthropic_model`.
+/// - Ollama and LM Studio: a model the server lists. Without a name the
+///   server's list comes back as a selector (`local_model_selection`), and
+///   the pick goes through the reconfigure flow's model step alone.
+/// - Gemini runs one model.
+///
+/// A switch emits an Operational ModeChange so the status bar shows the
+/// new Brain at once.
 async fn handle_model_command(
     args: &str,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
     db: &Arc<WardsonDbClient>,
     session_mgr: &Arc<RwLock<SessionManager>>,
+    pending_openai_compat_setup: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
 ) {
     let send = |content: String, kind: SystemMessageType| {
         let tx = tx.clone();
@@ -5332,33 +5389,40 @@ async fn handle_model_command(
 
     let active = cfg.api_provider.clone();
     let trimmed = args.trim();
+
+    match ProviderKind::from_str(&active) {
+        Some(kind @ (ProviderKind::Ollama | ProviderKind::LmStudio)) => {
+            let preset = match kind {
+                ProviderKind::Ollama => crate::provider::openai_compat::OpenAiCompatPreset::Ollama,
+                _ => crate::provider::openai_compat::OpenAiCompatPreset::LmStudio,
+            };
+            handle_local_model_command(preset, trimmed, cfg, tx, db, session_mgr, pending_openai_compat_setup).await;
+            return;
+        }
+        Some(ProviderKind::Gemini) => {
+            let current = display_model_for(&active, &cfg);
+            let (msg, kind) = if trimmed.is_empty() {
+                (format!("Gemini model: {current}, the one Gemini chat model embraOS runs."), SystemMessageType::Info)
+            } else {
+                (format!("Gemini runs one model ({current}); there is no other to switch to."), SystemMessageType::Error)
+            };
+            send(msg, kind).await;
+            return;
+        }
+        _ => {}
+    }
+
     let options = anthropic_model_options();
 
     // No args → show current model + options.
     if trimmed.is_empty() {
         let current = display_model_for(&active, &cfg);
-        let msg = if active == "anthropic" {
+        send(
             format!(
                 "Anthropic model: {current}. Options: {options}. \
                  Use `/model fable-5` to switch (takes effect on your next message)."
-            )
-        } else {
-            format!(
-                "Active provider '{active}' model: {current}. `/model` switches the \
-                 Anthropic model; for {active}, use `/provider --setup {active}`."
-            )
-        };
-        send(msg, SystemMessageType::Info).await;
-        return;
-    }
-
-    if active != "anthropic" {
-        send(
-            format!(
-                "`/model` currently switches only the Anthropic model. Active \
-                 provider is '{active}' — use `/provider --setup {active}` to change its model."
             ),
-            SystemMessageType::Error,
+            SystemMessageType::Info,
         )
         .await;
         return;
@@ -5399,10 +5463,197 @@ async fn handle_model_command(
         SystemMessageType::Info,
     )
     .await;
+    send_brain_status(tx, &cfg, session_mgr, display).await;
+}
 
-    // Refresh the status bar. Reaching a slash command implies the soul is
-    // sealed (Operational) — the learning loop ignores slash commands — so an
-    // Operational→Operational ModeChange with the new Brain is correct.
+/// `/model` on the active Ollama or LM Studio preset. The server's list is
+/// the set of choices: a name must be on it, and no name brings the list
+/// back as a selector. The endpoint and the bearer stay as configured;
+/// `/provider --setup <kind>` changes those.
+async fn handle_local_model_command(
+    preset: crate::provider::openai_compat::OpenAiCompatPreset,
+    wanted: &str,
+    mut cfg: config::SystemConfig,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    db: &Arc<WardsonDbClient>,
+    session_mgr: &Arc<RwLock<SessionManager>>,
+    pending: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
+) {
+    let send = |content: String, kind: SystemMessageType| {
+        let tx = tx.clone();
+        async move {
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage { content, msg_type: kind as i32 },
+                    )),
+                }))
+                .await;
+        }
+    };
+    let (endpoint, current) = local_endpoint_and_model(&cfg, preset);
+    let bearer = std::env::var(bearer_env_var(preset)).ok().filter(|s| !s.is_empty());
+
+    let models = match crate::provider::openai_compat::OpenAICompatProvider::probe_models(
+        preset,
+        &endpoint,
+        bearer.as_deref(),
+    )
+    .await
+    {
+        Ok(models) if !models.is_empty() => models,
+        Ok(_) => {
+            send(
+                format!("No models found at {endpoint}. Pull or load a model on the server, then run /model again."),
+                SystemMessageType::Error,
+            )
+            .await;
+            return;
+        }
+        Err(e) => {
+            send(
+                format!(
+                    "Could not list the models at {endpoint}: {e}. /provider --setup {} reconfigures the endpoint.",
+                    preset.as_kind().as_str()
+                ),
+                SystemMessageType::Error,
+            )
+            .await;
+            return;
+        }
+    };
+
+    if wanted.is_empty() {
+        let (prompt, state) = local_model_selection(preset, endpoint, bearer, current, models);
+        *pending.lock().await = Some(state);
+        let _ = tx
+            .send(Ok(ConversationResponse {
+                response_type: Some(conversation_response::ResponseType::Setup(prompt)),
+            }))
+            .await;
+        return;
+    }
+
+    let model = match local_model_choice(preset, &models, wanted) {
+        Ok(model) => model,
+        Err(msg) => {
+            send(msg, SystemMessageType::Error).await;
+            return;
+        }
+    };
+    set_local_model(&mut cfg, preset, &model);
+    if let Err(e) = config::save_config(db, &cfg).await {
+        send(format!("/model: failed to save: {e}"), SystemMessageType::Error).await;
+        return;
+    }
+    crate::provider::health::request_probe();
+    send(local_model_set_message(preset, &model), SystemMessageType::Info).await;
+    send_brain_status(tx, &cfg, session_mgr, &model).await;
+}
+
+/// The configured endpoint (the preset's default when none is) and model
+/// of an OpenAI-compatible preset.
+fn local_endpoint_and_model(
+    cfg: &config::SystemConfig,
+    preset: crate::provider::openai_compat::OpenAiCompatPreset,
+) -> (String, Option<String>) {
+    use crate::provider::openai_compat::OpenAiCompatPreset;
+    let (endpoint, model) = match preset {
+        OpenAiCompatPreset::Ollama => (&cfg.openai_compat.ollama_endpoint, &cfg.openai_compat.ollama_model),
+        OpenAiCompatPreset::LmStudio => (&cfg.openai_compat.lm_studio_endpoint, &cfg.openai_compat.lm_studio_model),
+    };
+    (
+        non_empty(endpoint).unwrap_or_else(|| preset.default_base_url().to_string()),
+        non_empty(model),
+    )
+}
+
+fn set_local_model(
+    cfg: &mut config::SystemConfig,
+    preset: crate::provider::openai_compat::OpenAiCompatPreset,
+    model: &str,
+) {
+    use crate::provider::openai_compat::OpenAiCompatPreset;
+    match preset {
+        OpenAiCompatPreset::Ollama => cfg.openai_compat.ollama_model = model.to_string(),
+        OpenAiCompatPreset::LmStudio => cfg.openai_compat.lm_studio_model = model.to_string(),
+    }
+}
+
+fn local_model_set_message(preset: crate::provider::openai_compat::OpenAiCompatPreset, model: &str) -> String {
+    format!("{} model set to {model}. Takes effect on your next message.", preset.label())
+}
+
+/// How many of the server's models a refusal names.
+const LOCAL_MODELS_NAMED: usize = 12;
+
+/// The model a `/model <name>` means: the exact name the server lists, or
+/// the one name that matches it ignoring case. Anything else is refused
+/// with the list.
+fn local_model_choice(
+    preset: crate::provider::openai_compat::OpenAiCompatPreset,
+    models: &[String],
+    wanted: &str,
+) -> Result<String, String> {
+    if let Some(exact) = models.iter().find(|m| m.as_str() == wanted) {
+        return Ok(exact.clone());
+    }
+    let folded: Vec<&String> = models.iter().filter(|m| m.eq_ignore_ascii_case(wanted)).collect();
+    if let [only] = folded.as_slice() {
+        return Ok((*only).clone());
+    }
+    let named: Vec<&str> = models.iter().take(LOCAL_MODELS_NAMED).map(String::as_str).collect();
+    let more = models.len().saturating_sub(named.len());
+    Err(format!(
+        "'{wanted}' is not a model {} lists. It lists: {}{}. /model alone picks from the list.",
+        preset.label(),
+        named.join(", "),
+        if more > 0 { format!(" and {more} more") } else { String::new() },
+    ))
+}
+
+/// The selector `/model` shows for a local server, and the reconfigure
+/// state that receives the pick at its model step: the current model
+/// chosen when the server still lists it, the endpoint and bearer kept.
+fn local_model_selection(
+    preset: crate::provider::openai_compat::OpenAiCompatPreset,
+    endpoint: String,
+    bearer: Option<String>,
+    current: Option<String>,
+    models: Vec<String>,
+) -> (SetupPrompt, OpenAiCompatSetupState) {
+    let default_value = current
+        .as_ref()
+        .filter(|m| models.contains(m))
+        .cloned()
+        .unwrap_or_else(|| models.first().cloned().unwrap_or_default());
+    let prompt = SetupPrompt {
+        field_type: SetupFieldType::Selector as i32,
+        prompt: format!("Select an {} model:", preset.label()),
+        options: models.clone(),
+        default_value,
+    };
+    let state = OpenAiCompatSetupState {
+        preset,
+        current_endpoint: Some(endpoint.clone()),
+        current_bearer: bearer.clone(),
+        current_model: current,
+        step: OpenAiCompatSetupStep::AwaitingModelSelection { endpoint, bearer, models },
+        model_only: true,
+    };
+    (prompt, state)
+}
+
+/// Refresh the status bar after a model switch. Reaching a slash command
+/// implies the soul is sealed (Operational) — the learning loop ignores
+/// slash commands — so an Operational→Operational ModeChange with the new
+/// Brain is correct.
+async fn send_brain_status(
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    cfg: &config::SystemConfig,
+    session_mgr: &Arc<RwLock<SessionManager>>,
+    brain: &str,
+) {
     let session = session_mgr
         .read()
         .await
@@ -5417,7 +5668,7 @@ async fn handle_model_command(
                     to_mode: OperatingMode::Operational as i32,
                     message: format!(
                         "Operational — Name: {} — Session: {} — TZ: {} — Brain: {}",
-                        cfg.name, session, cfg.timezone, display
+                        cfg.name, session, cfg.timezone, brain
                     ),
                 },
             )),
@@ -8267,6 +8518,7 @@ mod setup_reconfigure_tests {
             current_bearer: bearer.map(String::from),
             current_model: model.map(String::from),
             step,
+            model_only: false,
         }
     }
 
@@ -8682,6 +8934,139 @@ mod setup_reconfigure_tests {
         let (events, _) = run_step(&mut state, BEARER_SKIP).await;
         let prompt = last_setup_prompt(&events).expect("expected Selector");
         assert_eq!(prompt.default_value, "new-a");
+    }
+
+    // ===========================================================
+    // `/model` on a local server: the reconfigure flow's model step alone
+    // ===========================================================
+
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_local_model_must_be_one_the_server_lists() {
+        let models = names(&["qwen3.8:27b", "Gemma4:12b", "gemma4:31b"]);
+        let ollama = OpenAiCompatPreset::Ollama;
+        assert_eq!(local_model_choice(ollama, &models, "qwen3.8:27b"), Ok("qwen3.8:27b".to_string()));
+        // The one listed name that matches ignoring case is that name.
+        assert_eq!(local_model_choice(ollama, &models, "QWEN3.8:27B"), Ok("qwen3.8:27b".to_string()));
+        // An exact name wins; two names that differ only in case are no choice.
+        let twins = names(&["Model", "model"]);
+        assert_eq!(local_model_choice(ollama, &twins, "model"), Ok("model".to_string()));
+        assert!(local_model_choice(ollama, &twins, "MODEL").is_err());
+        let refused = local_model_choice(ollama, &models, "llama4").unwrap_err();
+        assert!(refused.contains("'llama4' is not a model Ollama lists"), "{refused}");
+        assert!(refused.contains("It lists: qwen3.8:27b, Gemma4:12b, gemma4:31b."), "{refused}");
+        assert!(refused.ends_with("/model alone picks from the list."), "{refused}");
+        let many: Vec<String> = (0..15).map(|i| format!("m{i}")).collect();
+        let refused = local_model_choice(OpenAiCompatPreset::LmStudio, &many, "x").unwrap_err();
+        assert!(refused.contains("not a model LM Studio lists"), "{refused}");
+        assert!(refused.contains("m11 and 3 more."), "{refused}");
+    }
+
+    #[test]
+    fn model_selection_starts_at_the_model_step_and_keeps_the_endpoint_and_bearer() {
+        let (prompt, state) = local_model_selection(
+            OpenAiCompatPreset::LmStudio,
+            "http://studio:1234".to_string(),
+            Some("tok".to_string()),
+            Some("qwen3.8-27b".to_string()),
+            names(&["gemma4-31b", "qwen3.8-27b"]),
+        );
+        assert_eq!(prompt.field_type, SetupFieldType::Selector as i32);
+        assert_eq!(prompt.prompt, "Select an LM Studio model:");
+        assert_eq!(prompt.options, names(&["gemma4-31b", "qwen3.8-27b"]));
+        assert_eq!(prompt.default_value, "qwen3.8-27b");
+        assert!(state.model_only);
+        let OpenAiCompatSetupStep::AwaitingModelSelection { endpoint, bearer, models } = &state.step else {
+            panic!("expected AwaitingModelSelection");
+        };
+        assert_eq!(endpoint, "http://studio:1234");
+        assert_eq!(bearer.as_deref(), Some("tok"));
+        assert_eq!(models.len(), 2);
+        // A current model the server no longer lists: the first is chosen.
+        let (prompt, _) =
+            local_model_selection(OpenAiCompatPreset::Ollama, "e".into(), None, Some("gone".into()), names(&["a", "b"]));
+        assert_eq!(prompt.default_value, "a");
+    }
+
+    /// `/model` never asked for an endpoint: a pick outside the list ends
+    /// the flow and names the way back, where the reconfigure flow restarts
+    /// at the endpoint step.
+    #[tokio::test]
+    async fn a_model_only_pick_outside_the_list_ends_the_flow() {
+        let (_, mut state) =
+            local_model_selection(OpenAiCompatPreset::Ollama, "http://ollama:11434".into(), None, None, names(&["a", "b"]));
+        let (events, outcome) = run_step(&mut state, "c").await;
+        assert!(matches!(outcome, SetupStepOutcome::Error));
+        assert!(last_setup_prompt(&events).is_none(), "no endpoint prompt");
+        let error = events
+            .iter()
+            .find_map(|e| match &e.response_type {
+                Some(conversation_response::ResponseType::System(m)) => Some(m.content.clone()),
+                _ => None,
+            })
+            .expect("an error");
+        assert!(error.contains("Run /model again"), "{error}");
+    }
+
+    /// The pick saves the model and nothing else: the stored config is read
+    /// and written back with the endpoint as it was.
+    #[tokio::test]
+    async fn a_model_only_pick_moves_the_model_alone() {
+        let db_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/config.system/docs/config"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "meta": {}, "data": {
+                "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase1",
+                "created_at": "", "version": "test", "api_provider": "ollama",
+                "openai_compat": {"ollama_endpoint": "http://ollama:11434", "ollama_model": "a"},
+            }})))
+            .mount(&db_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/config.system"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "meta": {}, "data": {}})))
+            .mount(&db_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/config.system/docs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "meta": {}, "data": {"_id": "config"}})))
+            .mount(&db_server)
+            .await;
+        let (_, mut state) = local_model_selection(
+            OpenAiCompatPreset::Ollama,
+            "http://ollama:11434".into(),
+            None,
+            Some("a".into()),
+            names(&["a", "b"]),
+        );
+        let (tx, mut rx) = mpsc::channel::<Result<ConversationResponse, Status>>(64);
+        let pending = Arc::new(Mutex::new(None));
+        let db = Arc::new(WardsonDbClient::from_url(&db_server.uri()));
+        let outcome = handle_pending_openai_compat_step(&mut state, "b", &tx, &db, &pending).await;
+        drop(tx);
+        assert!(matches!(outcome, SetupStepOutcome::Complete));
+        let mut said = Vec::new();
+        while let Some(Ok(r)) = rx.recv().await {
+            if let Some(conversation_response::ResponseType::System(m)) = r.response_type {
+                said.push(m.content);
+            }
+        }
+        assert_eq!(said, vec!["Ollama model set to b. Takes effect on your next message.".to_string()]);
+        let saved: Vec<serde_json::Value> = db_server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/config.system/docs")
+            .map(|r| serde_json::from_slice(&r.body).expect("a config document"))
+            .collect();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0]["openai_compat"]["ollama_model"], "b");
+        assert_eq!(saved[0]["openai_compat"]["ollama_endpoint"], "http://ollama:11434");
+        assert!(pending.lock().await.is_none());
     }
 }
 
