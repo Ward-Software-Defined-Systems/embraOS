@@ -1085,6 +1085,7 @@ pub async fn knowledge_graph_stats(db: &WardsonDbClient) -> String {
             .collect();
         out.push_str(&format!("  Categories: {}\n", cats.join(", ")));
     }
+    out.push_str(&edited_nodes_line(db, "memory.semantic", sem_total).await);
     // Seeded-node counts render only when a pack is loaded — legacy output
     // stays byte-stable.
     let sem_seeded = db
@@ -1100,6 +1101,7 @@ pub async fn knowledge_graph_stats(db: &WardsonDbClient) -> String {
     // Procedural count
     let proc_total = db.count("memory.procedural").await.unwrap_or(0);
     out.push_str(&format!("memory.procedural: {} nodes\n", proc_total));
+    out.push_str(&edited_nodes_line(db, "memory.procedural", proc_total).await);
     let proc_seeded = db
         .count_filtered("memory.procedural", &seeded_nodes_filter())
         .await
@@ -1238,8 +1240,10 @@ async fn edited_seed_nodes_line(db: &WardsonDbClient, collection: &str) -> Strin
 }
 
 /// The rendered line: the ids, or `none`; and the window when it filled.
+/// It names seed nodes only, and says so: read on its own, an unscoped
+/// "Edited here: none" claimed that nothing in the graph was edited.
 fn edited_seed_line(ids: &[String], saturated: bool) -> String {
-    let mut line = String::from("  Edited here (updated_at past created_at): ");
+    let mut line = String::from("  Seed nodes edited here (updated_at past created_at): ");
     if ids.is_empty() {
         line.push_str("none");
     } else {
@@ -1253,6 +1257,40 @@ fn edited_seed_line(ids: &[String], saturated: bool) -> String {
     }
     line.push('\n');
     line
+}
+
+/// The nodes of `collection` edited in place: `updated_at` past
+/// `created_at`, the predicate the seed reconcile uses
+/// (`seed::operator_edited`); seeding and promotion write the two equal.
+/// WardSONDB cannot compare two fields in a filter, so this is one
+/// projected read under `MEMORY_FETCH_WINDOW`. The line says when the
+/// window filled, and a read that failed says so rather than counting none.
+async fn edited_nodes_line(db: &WardsonDbClient, collection: &str, total: u64) -> String {
+    match db
+        .fetch_recent_with_fields(collection, crate::db::MEMORY_FETCH_WINDOW, Some(&["created_at", "updated_at"]))
+        .await
+    {
+        Ok(docs) => {
+            let saturated = crate::db::client::window_saturated(docs.len(), crate::db::MEMORY_FETCH_WINDOW);
+            edited_nodes_text(edited_in_place(&docs), docs.len(), total, saturated)
+        }
+        Err(e) => format!("  Edited in place (updated_at past created_at): not read ({e})\n"),
+    }
+}
+
+/// How many of `docs` were edited in place.
+fn edited_in_place(docs: &[serde_json::Value]) -> usize {
+    docs.iter().filter(|d| super::seed::operator_edited(d)).count()
+}
+
+/// The rendered line: the count out of the collection, or out of the
+/// window read when it filled.
+fn edited_nodes_text(edited: usize, read: usize, total: u64, saturated: bool) -> String {
+    if saturated {
+        format!("  Edited in place (updated_at past created_at): {edited} of the newest {read} read\n")
+    } else {
+        format!("  Edited in place (updated_at past created_at): {edited} of {total}\n")
+    }
 }
 
 /// Render the edge provenance split (KG review 2026-07-26, A4):
@@ -1395,15 +1433,42 @@ mod windowless_stats_tests {
     fn edited_seed_line_names_the_ids_or_none() {
         assert_eq!(
             super::edited_seed_line(&[], false),
-            "  Edited here (updated_at past created_at): none\n"
+            "  Seed nodes edited here (updated_at past created_at): none\n"
         );
         let ids = ["seed_kg_density".to_string(), "seed_kg_link_tool".to_string()];
         assert_eq!(
             super::edited_seed_line(&ids, false),
-            "  Edited here (updated_at past created_at): seed_kg_density, seed_kg_link_tool\n"
+            "  Seed nodes edited here (updated_at past created_at): seed_kg_density, seed_kg_link_tool\n"
         );
         // A full window is said, never passed off as the whole list.
         assert!(super::edited_seed_line(&ids, true).contains("seed nodes read)"));
+    }
+
+    /// Every node counts, seed or not: an edit is an `updated_at` past
+    /// `created_at`, and a node without the fields was never edited.
+    #[test]
+    fn nodes_edited_in_place_are_those_with_a_later_updated_at() {
+        let docs = [
+            serde_json::json!({"_id": "a", "created_at": "2026-09-18T22:23:35Z", "updated_at": "2026-10-11T15:04:11Z"}),
+            serde_json::json!({"_id": "b", "created_at": "2026-09-18T22:23:35Z", "updated_at": "2026-09-18T22:23:35Z"}),
+            serde_json::json!({"_id": "seed_kg_x", "created_at": "2026-07-31T00:00:00Z", "updated_at": "2026-10-01T00:00:00Z"}),
+            serde_json::json!({"_id": "c"}),
+        ];
+        assert_eq!(super::edited_in_place(&docs), 2);
+    }
+
+    /// The count is out of the whole collection, or out of the window read
+    /// when it filled; a full window is never passed off as the whole.
+    #[test]
+    fn the_edited_in_place_line_counts_the_collection_or_the_window() {
+        assert_eq!(
+            super::edited_nodes_text(238, 1328, 1328, false),
+            "  Edited in place (updated_at past created_at): 238 of 1328\n"
+        );
+        assert_eq!(
+            super::edited_nodes_text(4100, 10_000, 12_500, true),
+            "  Edited in place (updated_at past created_at): 4100 of the newest 10000 read\n"
+        );
     }
 
     #[test]
