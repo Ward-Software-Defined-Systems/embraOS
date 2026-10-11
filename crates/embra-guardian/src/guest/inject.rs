@@ -15,7 +15,7 @@
 // signal a caller weighs. Decoded text in, never markup: run
 // `html_text::to_text` first on a page.
 
-use alloc::string::{String, ToString};
+use alloc::string::String;
 use alloc::vec::Vec;
 
 /// What a rewritten directive or structural marker becomes.
@@ -74,21 +74,18 @@ pub fn scan(s: &str) -> Vec<String> {
 
 /// The text with every directive and structural marker rewritten to
 /// [`MARKER`], and what it carried, named as [`scan`] names it. A
-/// flag-only phrase is named and stays in the text.
+/// flag-only phrase is named and stays in the text. The output is sized
+/// before it is written and holds one copy of the text, whatever was
+/// found: the arena never frees, and a string grown by doubling leaves
+/// twice its length behind.
 pub fn scrub(s: &str) -> (String, Vec<String>) {
-    let mut spans: Vec<(usize, usize)> = vec![];
-    let mut pairs: Vec<(&'static str, &'static str)> = vec![];
-    directives(s, |span, pair| {
-        spans.push(span);
-        note(&mut pairs, pair);
-    });
-    let mut out = rewrite_spans(s, &spans);
-    for m in REDACT_MARKERS {
-        if contains_ci(&out, m) {
-            out = redact_ci(&out, m, MARKER);
-        }
-    }
-    (out, names(s, &pairs))
+    let markers: Vec<&'static str> =
+        REDACT_MARKERS.iter().copied().filter(|m| contains_ci(s, m)).collect();
+    let mut len = 0;
+    rewrite(s, &markers, |piece| len += piece.len());
+    let mut out = String::with_capacity(len);
+    rewrite(s, &markers, |piece| out.push_str(piece));
+    (out, scan(s))
 }
 
 /// [`scrub`], with whether anything was found in place of the names.
@@ -141,20 +138,46 @@ fn note(pairs: &mut Vec<(&'static str, &'static str)>, pair: (&'static str, &'st
     }
 }
 
-/// `s` with each span rewritten to [`MARKER`].
-fn rewrite_spans(s: &str, spans: &[(usize, usize)]) -> String {
-    if spans.is_empty() {
-        return s.to_string();
-    }
-    let mut out = String::with_capacity(s.len());
+/// Walks `s` once and hands `emit` the rewritten text in pieces: each
+/// directive span becomes [`MARKER`], and so does each of `markers` that
+/// matches between two spans; the rest goes out as it came, in runs. The
+/// spans stream from the scan in order and never overlap, so none is kept.
+/// It gives what rewriting the directives first and then each marker on
+/// the result gives: no marker overlaps another or [`MARKER`], and a marker
+/// inside a directive goes with it.
+fn rewrite(s: &str, markers: &[&str], mut emit: impl FnMut(&str)) {
     let mut last = 0;
-    for &(a, z) in spans {
-        out.push_str(&s[last..a]);
-        out.push_str(MARKER);
+    directives(s, |(a, z), _| {
+        markers_between(s, last, a, markers, &mut emit);
+        emit(MARKER);
         last = z;
+    });
+    markers_between(s, last, s.len(), markers, &mut emit);
+}
+
+/// Hands `emit` the text of `s[from..to]`, each of `markers` that matches
+/// wholly inside it rewritten to [`MARKER`]. A match starts on an ASCII
+/// byte and is ASCII throughout, so every cut is on a character boundary.
+fn markers_between<F: FnMut(&str)>(s: &str, from: usize, to: usize, markers: &[&str], emit: &mut F) {
+    if markers.is_empty() {
+        emit(&s[from..to]);
+        return;
     }
-    out.push_str(&s[last..]);
-    out
+    let b = s.as_bytes();
+    let mut run = from;
+    let mut i = from;
+    while i < to {
+        match markers.iter().copied().find(|m| i + m.len() <= to && starts_with_ci(&b[i..], m.as_bytes())) {
+            Some(m) => {
+                emit(&s[run..i]);
+                emit(MARKER);
+                i += m.len();
+                run = i;
+            }
+            None => i += 1,
+        }
+    }
+    emit(&s[run..to]);
 }
 
 /// Calls `found` with the byte span and the (verb, object) of each
@@ -239,6 +262,11 @@ fn has_qualifier(s: &str, between: &[(usize, usize)]) -> bool {
     between.iter().any(|(a, z)| word_of(&s[*a..*z], DIRECTIVE_QUALIFIERS).is_some())
 }
 
+/// Whether `hay` begins with `needle`, ASCII case ignored.
+fn starts_with_ci(hay: &[u8], needle: &[u8]) -> bool {
+    hay.len() >= needle.len() && hay.iter().zip(needle).all(|(h, n)| h.eq_ignore_ascii_case(n))
+}
+
 fn contains_ci(hay: &str, needle: &str) -> bool {
     let h = hay.as_bytes();
     let n = needle.as_bytes();
@@ -258,33 +286,3 @@ fn contains_ci(hay: &str, needle: &str) -> bool {
     }
     false
 }
-
-fn redact_ci(s: &str, needle: &str, repl: &str) -> String {
-    if needle.is_empty() {
-        return s.to_string();
-    }
-    let hb = s.as_bytes();
-    let nb = needle.as_bytes();
-    let mut outb: Vec<u8> = vec![];
-    let mut i = 0;
-    while i < hb.len() {
-        if i + nb.len() <= hb.len() {
-            let mut k = 0;
-            while k < nb.len() && hb[i + k].eq_ignore_ascii_case(&nb[k]) {
-                k += 1;
-            }
-            if k == nb.len() {
-                outb.extend_from_slice(repl.as_bytes());
-                i += nb.len();
-                continue;
-            }
-        }
-        outb.push(hb[i]);
-        i += 1;
-    }
-    match core::str::from_utf8(&outb) {
-        Ok(t) => t.to_string(),
-        Err(_) => s.to_string(),
-    }
-}
-
