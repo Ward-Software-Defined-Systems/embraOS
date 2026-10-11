@@ -29,7 +29,7 @@
       "id": "seed_kg_edge_types",
       "kind": "semantic",
       "category": "fact",
-      "content": "Edge vocabulary: same_session, temporal, and tag_overlap are auto-derived at write time; derived_from is promotion provenance; enables, contradicts, refines, depends_on, and related_to are created deliberately via knowledge_link; free-form relation names exist only in the identity projection and in seed knowledge packs.",
+      "content": "Edge vocabulary: same_session, temporal, and tag_overlap are auto-derived at write time; derived_from is promotion provenance; enables, contradicts, refines, depends_on, related_to, and supersedes are created deliberately via knowledge_link; free-form relation names exist only in the identity projection and in seed knowledge packs.",
       "tags": ["knowledge-graph", "edges"]
     },
     {
@@ -80,7 +80,7 @@
       "id": "seed_kg_correction",
       "kind": "semantic",
       "category": "pattern",
-      "content": "When recorded knowledge turns out wrong, correct it in place with knowledge_update — edges and provenance survive. Reserve a contradicts edge for when both claims should stand, and knowledge_merge for true duplicates.",
+      "content": "When recorded knowledge turns out wrong, correct it in place with knowledge_update — edges and provenance survive. Reserve a contradicts edge for when both claims should stand, a supersedes edge from the newer node for when the outdated one should stay as history, and knowledge_merge for true duplicates.",
       "tags": ["curation", "hygiene", "knowledge-graph"]
     },
     {
@@ -90,7 +90,7 @@
       "description": "Audit the knowledge graph, review the findings with the operator, and consolidate agreed duplicates safely.",
       "steps": [
         "Run knowledge_audit over semantic and procedural memory",
-        "Review the dedup, orphan, rot, and contradiction findings with the operator",
+        "Review the dedup, orphan, and rot findings with the operator",
         "For each agreed duplicate pair, run knowledge_merge with dry_run=true and check the preview",
         "Run the real merge, then re-run knowledge_audit to confirm the issues resolved"
       ],
@@ -118,7 +118,7 @@
       "id": "seed_kg_superseded_marker",
       "kind": "semantic",
       "category": "fact",
-      "content": "For a preserved learning trail, patch a superseded_by field onto an outdated node with knowledge_update. It is a documented marker for readers, not a mechanism — retrieval does not down-rank nodes that carry it.",
+      "content": "When a newer node replaces an older one that should stay as history, link them with knowledge_link: the newer node supersedes the older, both semantic or procedural. Every read then marks the older node superseded and names its successor, and knowledge_audit leaves it out of its checks. A node that is simply wrong is corrected in place instead.",
       "tags": ["curation", "hygiene"]
     },
     {
@@ -154,14 +154,14 @@
       "id": "seed_kg_audit_tool",
       "kind": "semantic",
       "category": "fact",
-      "content": "knowledge_audit is read-only hygiene detection: near-duplicate pairs, orphaned nodes with no meaningful edges, superseded (rot) candidates with their newer witnesses, and unacknowledged contradictions. Its dedup findings feed knowledge_merge directly.",
+      "content": "knowledge_audit is read-only hygiene detection: near-duplicate pairs, orphaned nodes with no meaningful edges, and rot — the older node of a near-duplicate pair. A node another node supersedes is history and is left out of every check. Its dedup findings feed knowledge_merge directly.",
       "tags": ["tools", "curation", "audit"]
     },
     {
       "id": "seed_kg_link_tool",
       "kind": "semantic",
       "category": "fact",
-      "content": "knowledge_link records deliberate relationships — enables, contradicts, refines, depends_on, related_to — between any two nodes. These rare, meaningful edges are what knowledge_traverse keeps when automatic edges crowd a node, and a node without one is what knowledge_audit reports as orphaned, so create one whenever a real relationship is established in conversation. remember lists the nearest existing nodes of every new node: link the ones that are really related in the same turn, and none that are only similar in wording.",
+      "content": "knowledge_link records deliberate relationships — enables, contradicts, refines, depends_on, related_to, and supersedes (between knowledge nodes only) — between two nodes. These rare, meaningful edges are what knowledge_traverse keeps when automatic edges crowd a node, and a node without one is what knowledge_audit reports as orphaned, so create one whenever a real relationship is established in conversation. remember lists the nearest existing nodes of every new node: link the ones that are really related in the same turn, and none that are only similar in wording.",
       "tags": ["tools", "edges", "curation", "knowledge-graph"]
     },
     {

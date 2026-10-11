@@ -48,7 +48,7 @@ session_extract <name>    // for every session since last feedback loop
 ### 1.7 — Knowledge Audit: Clean
 
 ```
-knowledge_audit    // duplicate, orphaned, superseded and contradicting nodes
+knowledge_audit    // near-duplicate pairs, orphaned nodes, rot (the older of a near-duplicate pair)
 knowledge_merge <source node> | <target node>    // for each duplicate pair the operator agrees to; dry_run first
 ```
 
@@ -102,6 +102,7 @@ recall infrastructure
 Accept        // no memory of its own: named in the 5.2 findings record
 Reclassify    knowledge_update <collection>:<id> | {"tags": [...]} or {"category": "<category>"}
 Rewrite       knowledge_update <collection>:<id> | {"content": "<rewritten>"}    // in place, links kept; forget + remember only for an entry that has no node
+Supersede     knowledge_link <newer node> | supersedes | <older node> | 1.0    // the older node stays as history: every read marks it and knowledge_audit leaves it out
 Remove        forget <entry or node id>    // S2/S3 only, after approval: the entry, its node and their edges
 Add practice  remember <practice, one line> #operational-practice    // category: pattern; procedure: <procedure_json> when it has steps
 recall <key terms from each modified entry>

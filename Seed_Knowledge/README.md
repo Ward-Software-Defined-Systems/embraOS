@@ -128,7 +128,9 @@ applied):
   misspelt. `relation` is free-form
   (the built-in vocabulary — `enables`, `contradicts`, `refines`,
   `depends_on`, `related_to` — is recommended so the edges read uniformly
-  next to brain-authored ones); `weight` optional, default `1.0`, must be
+  next to brain-authored ones; a pack's `supersedes` is a relation name
+  only, because a declared supersession is written by `knowledge_link`
+  alone); `weight` optional, default `1.0`, must be
   in `(0.0, 1.0]`; duplicate `(src, dst, relation)` triples are rejected.
 
 ## What the loader does with a pack

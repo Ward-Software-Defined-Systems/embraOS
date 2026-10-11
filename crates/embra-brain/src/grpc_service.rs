@@ -9584,6 +9584,7 @@ mod session_delete_flow_tests {
                 .unwrap_or_else(|| panic!("the action map names {name}"))
         };
         assert!(action("Rewrite").contains("knowledge_update"));
+        assert!(action("Supersede").contains("knowledge_link") && action("Supersede").contains("| supersedes |"));
         assert!(action("Reclassify").contains("knowledge_update"));
         assert!(action("Remove").contains("forget"));
         assert!(action("Add practice").contains("remember"));
