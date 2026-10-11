@@ -18,6 +18,7 @@ pub(crate) mod node_store;
 pub mod promotion;
 pub mod retrieval;
 pub mod seed;
+pub(crate) mod supersession;
 pub(crate) mod text;
 pub mod tools;
 pub mod traversal;

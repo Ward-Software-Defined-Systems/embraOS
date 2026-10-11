@@ -571,10 +571,10 @@ mod measure {
             nodes.iter().enumerate().map(|(i, n)| (n.1.as_str(), i)).collect();
         let cos = |i: usize, j: usize| super::super::cosine(&nodes[i].3, &nodes[j].3) as f64;
 
-        // The edges the intelligence created: the five types, without the
+        // The edges the intelligence created: the six types, without the
         // origin stamp that the seed packs and the identity projection carry.
         // Keyed (newer, older), with the types that link the pair.
-        const TYPES: [&str; 5] = ["enables", "contradicts", "refines", "depends_on", "related_to"];
+        const TYPES: [&str; 6] = ["enables", "contradicts", "refines", "depends_on", "related_to", "supersedes"];
         let mut pairs: std::collections::HashMap<(usize, usize), Vec<&str>> = std::collections::HashMap::new();
         for edge_type in TYPES {
             let body = serde_json::json!({

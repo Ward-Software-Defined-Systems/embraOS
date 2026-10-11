@@ -12,7 +12,10 @@ use crate::brain::Message;
 use crate::config::SystemConfig;
 use crate::db::WardsonDbClient;
 
+use std::collections::HashMap;
+
 use super::retrieval::retrieve_relevant_knowledge;
+use super::supersession::{successor_of, superseded_note, NodeKey};
 use super::types::RankedNode;
 
 /// Minimum score a retrieval result must reach to be injected. Below this,
@@ -180,17 +183,31 @@ pub async fn build_turn_context(
         return user_message.to_string();
     }
 
+    // A superseded node is still injected, with its successor named: the
+    // ranking is unchanged and the mark tells the model which claim stands.
+    let superseders = super::supersession::superseders(db).await;
+    retrieved_context_block(&qualifying, &superseders, user_message)
+}
+
+/// The `<retrieved_context>` block and the operator's message after it. A
+/// superseded node's line names its successor.
+fn retrieved_context_block(
+    qualifying: &[&RankedNode],
+    superseders: &HashMap<NodeKey, NodeKey>,
+    user_message: &str,
+) -> String {
     let mut ctx = String::from("<retrieved_context source=\"auto-enrichment\">\n");
     ctx.push_str(
         "Relevant prior knowledge for this turn (retrieved automatically, not user-provided):\n\n",
     );
     for (i, r) in qualifying.iter().enumerate() {
         ctx.push_str(&format!(
-            "{}. [{}] {} (score: {:.2})\n",
+            "{}. [{}] {} (score: {:.2}){}\n",
             i + 1,
             r.node.collection,
             r.node.content_preview,
-            r.score
+            r.score,
+            superseded_note(successor_of(superseders, &r.node.collection, &r.node.id)),
         ));
     }
     ctx.push_str(
@@ -358,6 +375,30 @@ mod injection_gate_tests {
             source: "direct_query".to_string(),
             relevance,
         }
+    }
+
+    /// A superseded node keeps its place in the block and names its
+    /// successor; a live one reads as before.
+    #[test]
+    fn a_superseded_node_is_injected_with_its_successor_named() {
+        let mut old = ranked(0.62, MIN_RELEVANCE);
+        old.node.id = "old".to_string();
+        old.node.content_preview = "the clone lives in repos/".to_string();
+        let mut live = ranked(0.55, MIN_RELEVANCE);
+        live.node.id = "live".to_string();
+        live.node.content_preview = "the clone was deleted".to_string();
+        let mut superseders = HashMap::new();
+        superseders.insert(
+            ("memory.semantic".to_string(), "old".to_string()),
+            ("memory.semantic".to_string(), "live".to_string()),
+        );
+        let block = retrieved_context_block(&[&old, &live], &superseders, "where is the clone?");
+        assert!(
+            block.contains("1. [memory.semantic] the clone lives in repos/ (score: 0.62) — superseded by memory.semantic:live\n"),
+            "{block}"
+        );
+        assert!(block.contains("2. [memory.semantic] the clone was deleted (score: 0.55)\n"), "{block}");
+        assert!(block.ends_with("</retrieved_context>\n\nwhere is the clone?"), "{block}");
     }
 
     #[test]

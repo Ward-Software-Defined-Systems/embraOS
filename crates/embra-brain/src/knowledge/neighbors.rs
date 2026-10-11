@@ -4,7 +4,7 @@
 //! `remember` and `knowledge_promote` return them with the new node, so the
 //! intelligence has ids to link to in the same turn — retrieval and
 //! enrichment show it nodes without ids. The list is an offer, not an edge:
-//! which of the five relations holds, and in which direction, is a judgement
+//! which of the six relations holds, and in which direction, is a judgement
 //! `knowledge_link` leaves to the intelligence, and nothing here writes an
 //! edge.
 //!
@@ -39,6 +39,8 @@ pub(crate) struct Candidate {
     pub preview: String,
     /// The audit's dedup rule pairs it with the new node.
     pub near_duplicate: bool,
+    /// The node that supersedes it, when one is declared (`supersession.rs`).
+    pub superseded_by: Option<super::supersession::NodeKey>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -89,10 +91,16 @@ pub(crate) async fn link_candidates(
         found.push(candidate(hit_collection, &hit_id, cosine, &doc, near_duplicate));
     }
     if found.is_empty() {
-        Candidates::NoneClose
-    } else {
-        Candidates::Found(found)
+        return Candidates::NoneClose;
     }
+    // A superseded candidate names its successor: the audit never pairs
+    // history, so this list is where a new node that restates a superseded
+    // one shows.
+    let superseders = super::supersession::superseders(db).await;
+    for c in &mut found {
+        c.superseded_by = super::supersession::successor_of(&superseders, c.collection, &c.id).cloned();
+    }
+    Candidates::Found(found)
 }
 
 fn candidate(
@@ -117,6 +125,7 @@ fn candidate(
         cosine,
         preview: content_preview(&preview, PREVIEW_CHARS),
         near_duplicate,
+        superseded_by: None,
     }
 }
 
@@ -133,21 +142,30 @@ pub(crate) fn candidates_block(candidates: &Candidates) -> String {
     let mut out = String::from("Nearest nodes (similarity):\n");
     for c in found {
         out.push_str(&format!(
-            "- {}:{} [{}] {:.2}{} — {}\n",
+            "- {}:{} [{}] {:.2}{}{} — {}\n",
             c.collection,
             c.id,
             c.label,
             c.cosine,
             if c.near_duplicate { ", near-duplicate" } else { "" },
+            c.superseded_by
+                .as_ref()
+                .map(|(collection, id)| format!(", superseded by {collection}:{id}"))
+                .unwrap_or_default(),
             c.preview
         ));
     }
     out.push_str(
         "Link the new node to each of these it has a real relation to, with knowledge_link; link nothing that is only similar in wording.",
     );
-    if found.iter().any(|c| c.near_duplicate) {
+    if found.iter().any(|c| c.near_duplicate && c.superseded_by.is_none()) {
         out.push_str(
             " A near-duplicate says the same thing: merge it with knowledge_merge (dry_run first) instead of linking.",
+        );
+    }
+    if found.iter().any(|c| c.near_duplicate && c.superseded_by.is_some()) {
+        out.push_str(
+            " A superseded near-duplicate is history: compare the new node with its successor instead of merging.",
         );
     }
     out
@@ -190,6 +208,19 @@ mod tests {
         let block = candidates_block(&Candidates::Found(vec![twin]));
         assert!(block.contains("- memory.semantic:n3 [fact] 0.97, near-duplicate — the same\n"), "{block}");
         assert!(block.ends_with("merge it with knowledge_merge (dry_run first) instead of linking."), "{block}");
+    }
+
+    #[test]
+    fn a_superseded_near_duplicate_points_at_its_successor() {
+        let mut old = candidate("memory.semantic", "n3", 0.97, &json!({"content": "the same", "category": "fact"}), true);
+        old.superseded_by = Some(("memory.semantic".to_string(), "n8".to_string()));
+        let block = candidates_block(&Candidates::Found(vec![old]));
+        assert!(
+            block.contains("- memory.semantic:n3 [fact] 0.97, near-duplicate, superseded by memory.semantic:n8 — the same\n"),
+            "{block}"
+        );
+        assert!(block.ends_with("compare the new node with its successor instead of merging."), "{block}");
+        assert!(!block.contains("merge it with knowledge_merge"), "{block}");
     }
 
     #[test]

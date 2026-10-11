@@ -273,7 +273,14 @@ async fn recall(db: &WardsonDbClient, query: &str, unpromoted_only: bool) -> Str
         .map(str::to_string)
         .collect();
 
-    let mut output_lines = recall_lines(&entries, &semantic, &procedural, &query_tokens, unpromoted_only);
+    // The node lines mark a superseded node; the worklist lists no nodes.
+    let superseders = if unpromoted_only {
+        std::collections::HashMap::new()
+    } else {
+        crate::knowledge::supersession::superseders(db).await
+    };
+    let mut output_lines =
+        recall_lines(&entries, &semantic, &procedural, &query_tokens, unpromoted_only, &superseders);
 
     if output_lines.is_empty() {
         if unpromoted_only {
@@ -313,6 +320,10 @@ fn recall_lines(
     procedural: &[serde_json::Value],
     query_tokens: &[String],
     unpromoted_only: bool,
+    superseders: &std::collections::HashMap<
+        crate::knowledge::supersession::NodeKey,
+        crate::knowledge::supersession::NodeKey,
+    >,
 ) -> Vec<String> {
     fn tags_to_str(doc: &serde_json::Value) -> String {
         match doc.get("tags") {
@@ -345,7 +356,10 @@ fn recall_lines(
             if !matches_query(&searchable, &tags) { continue; }
             let ts = doc.get("created_at").and_then(|v| v.as_str()).unwrap_or("");
             let display = if !title.is_empty() { format!("{}: {}", title, content) } else { content.to_string() };
-            output_lines.push(format!("  [{}] [{}] {} (tags: {}) — {}", collection, id, display, tags, ts));
+            let mark = crate::knowledge::supersession::superseded_note(
+                crate::knowledge::supersession::successor_of(superseders, collection, id),
+            );
+            output_lines.push(format!("  [{}] [{}] {} (tags: {}) — {}{}", collection, id, display, tags, ts, mark));
             listed_nodes.insert((collection, id));
         }
     }
@@ -397,9 +411,25 @@ mod recall_listing_tests {
             "_id": "n1", "content": "the cert refresh works after manual generation", "category": "fact",
             "tags": ["certs"], "created_at": "2026-10-01T00:00:01Z",
         });
-        let lines = recall_lines(&[promoted_entry()], &[node], &[], &tokens("refresh"), false);
+        let lines = recall_lines(&[promoted_entry()], &[node], &[], &tokens("refresh"), false, &std::collections::HashMap::new());
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("[memory.semantic] [n1]"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_superseded_node_line_names_its_successor() {
+        let node = json!({
+            "_id": "n1", "content": "the cert refresh works after manual generation", "category": "fact",
+            "tags": ["certs"], "created_at": "2026-10-01T00:00:01Z",
+        });
+        let mut superseders = std::collections::HashMap::new();
+        superseders.insert(
+            ("memory.semantic".to_string(), "n1".to_string()),
+            ("memory.semantic".to_string(), "n9".to_string()),
+        );
+        let lines = recall_lines(&[], &[node], &[], &tokens("refresh"), false, &superseders);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].ends_with("2026-10-01T00:00:01Z — superseded by memory.semantic:n9"), "{lines:?}");
     }
 
     #[test]
@@ -410,7 +440,7 @@ mod recall_listing_tests {
             "_id": "n1", "content": "certificates rotate by hand", "category": "fact",
             "tags": ["certs"], "created_at": "2026-10-01T00:00:01Z",
         });
-        let lines = recall_lines(&[promoted_entry()], &[node], &[], &tokens("refresh"), false);
+        let lines = recall_lines(&[promoted_entry()], &[node], &[], &tokens("refresh"), false, &std::collections::HashMap::new());
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("[memory.entries] [e1]"), "{lines:?}");
         assert!(lines[0].contains("[promoted → memory.semantic]"), "{lines:?}");
@@ -426,7 +456,7 @@ mod recall_listing_tests {
             "_id": "p1", "title": "Rotate the cert", "description": "how to rotate the cert by hand",
             "tags": [], "created_at": "2026-10-01T00:00:01Z",
         });
-        let lines = recall_lines(&[entry], &[], &[procedure], &tokens("rotate"), false);
+        let lines = recall_lines(&[entry], &[], &[procedure], &tokens("rotate"), false, &std::collections::HashMap::new());
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("[memory.procedural] [p1] Rotate the cert: "), "{lines:?}");
     }
@@ -437,7 +467,7 @@ mod recall_listing_tests {
             "_id": "e3", "content": "refresh the docs", "tags": [], "promoted_to": null,
             "created_at": "2026-10-01T00:00:00Z",
         });
-        let lines = recall_lines(&[promoted_entry(), unpromoted], &[], &[], &tokens("refresh"), true);
+        let lines = recall_lines(&[promoted_entry(), unpromoted], &[], &[], &tokens("refresh"), true, &std::collections::HashMap::new());
         assert_eq!(lines.len(), 1, "{lines:?}");
         assert!(lines[0].contains("[memory.entries] [e3]"), "{lines:?}");
     }

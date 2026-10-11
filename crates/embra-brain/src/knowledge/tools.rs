@@ -12,7 +12,7 @@ use super::promotion::{node_of_entry, promote_to_procedural, promote_to_semantic
 use super::node_store::NodeStore;
 use super::retrieval::retrieve_relevant_knowledge;
 use super::traversal::{spawn_access_touches, traverse_multi};
-use super::types::{content_preview, EdgeType, NodeType, SemanticCategory};
+use super::types::{content_preview, EdgeType, NodeType, SemanticCategory, SUPERSESSION_KEY};
 
 /// `knowledge_promote <entry_id> | <type> | <data>`
 pub async fn knowledge_promote(
@@ -195,7 +195,7 @@ mod write_link_tests {
     use crate::db::WardsonDbClient;
     use crate::knowledge::types::EdgeType;
     use serde_json::json;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn data(v: serde_json::Value) -> ResponseTemplate {
@@ -241,6 +241,81 @@ mod write_link_tests {
         assert!(again.as_ref().is_err_and(|e| e.starts_with("Error: Edge already exists")), "{again:?}");
         assert_eq!(edge_writes(&linked.received_requests().await.unwrap_or_default()), 0);
     }
+
+    fn written_edges(requests: &[wiremock::Request]) -> Vec<serde_json::Value> {
+        requests
+            .iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/memory.edges/docs")
+            .map(|r| serde_json::from_slice(&r.body).expect("an edge document"))
+            .collect()
+    }
+
+    /// The marker makes a `supersedes` edge a declaration, and no other edge
+    /// carries it.
+    #[tokio::test]
+    async fn a_supersedes_link_carries_the_marker_and_no_other_type_does() {
+        let a = ("memory.semantic", "a");
+        let b = ("memory.semantic", "b");
+        let fresh = server(json!([])).await;
+        let db = WardsonDbClient::from_url(&fresh.uri());
+        assert_eq!(write_link(&db, a, &EdgeType::Supersedes, b, 1.0).await, Ok("edge1".to_string()));
+        assert_eq!(write_link(&db, a, &EdgeType::RelatedTo, b, 0.5).await, Ok("edge1".to_string()));
+        let edges = written_edges(&fresh.received_requests().await.unwrap_or_default());
+        assert_eq!(edges.len(), 2);
+        assert_eq!(edges[0]["edge_type"], "supersedes");
+        assert_eq!(edges[0]["metadata"], json!({"supersession": true}));
+        assert_eq!(edges[1]["edge_type"], "related_to");
+        assert_eq!(edges[1]["metadata"], json!({}));
+    }
+
+    /// A declaration joins two knowledge nodes: an identity node is sealed
+    /// and an entry is not a node. Nothing is read or written.
+    #[tokio::test]
+    async fn supersedes_is_refused_outside_semantic_and_procedural() {
+        let fresh = server(json!([])).await;
+        let db = WardsonDbClient::from_url(&fresh.uri());
+        for (source, target) in [
+            (("memory.semantic", "a"), ("identity.graph", "self")),
+            (("memory.entries", "e1"), ("memory.semantic", "b")),
+        ] {
+            let refused = write_link(&db, source, &EdgeType::Supersedes, target, 1.0).await;
+            assert!(refused.as_ref().is_err_and(|e| e.contains("supersedes joins two knowledge nodes")), "{refused:?}");
+        }
+        assert!(fresh.received_requests().await.unwrap_or_default().is_empty());
+    }
+
+    /// Two nodes that supersede each other would both be history and leave
+    /// every check: the reverse of an existing declaration is refused.
+    #[tokio::test]
+    async fn supersedes_is_refused_when_the_reverse_exists() {
+        let server = MockServer::start().await;
+        for id in ["a", "b"] {
+            Mock::given(method("GET"))
+                .and(path(format!("/memory.semantic/docs/{id}")))
+                .respond_with(data(json!({"_id": id})))
+                .mount(&server)
+                .await;
+        }
+        // b → a exists; a → b does not.
+        Mock::given(method("POST"))
+            .and(path("/memory.edges/query"))
+            .and(body_partial_json(json!({"filter": {"source_id": "b", "target_id": "a"}, "limit": 1})))
+            .respond_with(data(json!([{"_id": "edge0"}])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/memory.edges/query"))
+            .and(body_partial_json(json!({"filter": {"source_id": "a", "target_id": "b"}, "limit": 1})))
+            .respond_with(data(json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST")).and(path("/memory.edges/docs")).respond_with(data(json!({"_id": "edge1"}))).mount(&server).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let refused =
+            write_link(&db, ("memory.semantic", "a"), &EdgeType::Supersedes, ("memory.semantic", "b"), 1.0).await;
+        assert!(refused.as_ref().is_err_and(|e| e.contains("already supersedes")), "{refused:?}");
+        assert_eq!(edge_writes(&server.received_requests().await.unwrap_or_default()), 0);
+    }
 }
 
 /// `knowledge_link <source_coll>:<source_id> | <edge_type> | <target_coll>:<target_id> | <weight>`
@@ -253,14 +328,14 @@ pub async fn knowledge_link(params: &str, db: &WardsonDbClient) -> String {
         return "Error: source must be <collection>:<id>".into();
     };
     // The gate: the strict parser, then the brain-created check. The model
-    // links with the five types it may create and cannot mint another.
+    // links with the six types it may create and cannot mint another.
     // `EdgeType::parse_lossy` is for reading — it also carries the free-form
     // relations of an identity graph — and never goes here.
     let Some(edge_type) = EdgeType::from_str(parts[1]) else {
-        return format!("Error: Invalid edge type '{}'. Brain-created types: enables, contradicts, refines, depends_on, related_to", parts[1]);
+        return format!("Error: Invalid edge type '{}'. Brain-created types: {}", parts[1], BRAIN_CREATED_TYPES);
     };
     if !edge_type.is_brain_created() {
-        return format!("Error: Invalid edge type '{}'. Brain-created types: enables, contradicts, refines, depends_on, related_to", parts[1]);
+        return format!("Error: Invalid edge type '{}'. Brain-created types: {}", parts[1], BRAIN_CREATED_TYPES);
     }
     let Some((tgt_coll, tgt_id)) = parts[2].split_once(':') else {
         return "Error: target must be <collection>:<id>".into();
@@ -285,12 +360,24 @@ pub async fn knowledge_link(params: &str, db: &WardsonDbClient) -> String {
     }
 }
 
+/// The types `knowledge_link` creates, as its refusals name them.
+const BRAIN_CREATED_TYPES: &str = "enables, contradicts, refines, depends_on, related_to, supersedes";
+
+/// The collections a declared supersession may join: the knowledge nodes.
+/// An identity node is sealed and an entry is not a node.
+const SUPERSESSION_COLLECTIONS: [&str; 2] = ["memory.semantic", "memory.procedural"];
+
 /// Write one edge `source --edge_type--> target` after the checks
 /// `knowledge_link` makes once its arguments are parsed: both ends exist and
 /// the edge is not there yet. Returns the edge's id, or the refusal in
 /// `knowledge_link`'s words. The caller gives a brain-created type, a weight
 /// in (0, 1] and two different ends; the brain's own links (the record of a
-/// deleted session) come through here too.
+/// deleted session, migration v14) come through here too.
+///
+/// A `supersedes` edge is a declaration: it joins two knowledge nodes, is
+/// refused when the target already supersedes the source (both would be
+/// history and leave every check), and carries `SUPERSESSION_KEY`, which no
+/// other edge does (`supersession.rs`).
 pub(crate) async fn write_link(
     db: &WardsonDbClient,
     (src_coll, src_id): (&str, &str),
@@ -298,6 +385,19 @@ pub(crate) async fn write_link(
     (tgt_coll, tgt_id): (&str, &str),
     weight: f64,
 ) -> Result<String, String> {
+    if src_coll == tgt_coll && src_id == tgt_id {
+        return Err("Error: Cannot create edge from a node to itself".into());
+    }
+    let declares = *edge_type == EdgeType::Supersedes;
+    if declares
+        && !(SUPERSESSION_COLLECTIONS.contains(&src_coll) && SUPERSESSION_COLLECTIONS.contains(&tgt_coll))
+    {
+        return Err(format!(
+            "Error: supersedes joins two knowledge nodes ({}), not {}:{} and {}:{}",
+            SUPERSESSION_COLLECTIONS.join(" or "),
+            src_coll, src_id, tgt_coll, tgt_id
+        ));
+    }
     if db.read(src_coll, src_id).await.is_err() {
         return Err(format!("Error: Source {}:{} not found", src_coll, src_id));
     }
@@ -322,7 +422,31 @@ pub(crate) async fn write_link(
             src_coll, src_id, tgt_coll, tgt_id, edge_type.as_str()
         ));
     }
+    if declares {
+        let reverse = json!({
+            "filter": {
+                "source_id": tgt_id,
+                "target_id": src_id,
+                "edge_type": edge_type.as_str(),
+            },
+            "limit": 1,
+        });
+        match db.query("memory.edges", &reverse).await {
+            Ok(existing) if !existing.is_empty() => {
+                return Err(format!(
+                    "Error: {}:{} already supersedes {}:{}; unlink that edge first (knowledge_unlink_edge) — a node cannot supersede what supersedes it",
+                    tgt_coll, tgt_id, src_coll, src_id
+                ));
+            }
+            Ok(_) => {}
+            Err(e) => return Err(format!("Error: could not check for the reverse supersedes edge: {}", e)),
+        }
+    }
 
+    let mut metadata = serde_json::Map::new();
+    if declares {
+        metadata.insert(SUPERSESSION_KEY.to_string(), serde_json::Value::Bool(true));
+    }
     let edge_doc = json!({
         "source_id": src_id,
         "source_collection": src_coll,
@@ -330,7 +454,7 @@ pub(crate) async fn write_link(
         "target_collection": tgt_coll,
         "edge_type": edge_type.as_str(),
         "weight": weight,
-        "metadata": {},
+        "metadata": metadata,
         "created_at": chrono::Utc::now().to_rfc3339(),
     });
     db.write("memory.edges", &edge_doc)
@@ -361,8 +485,8 @@ fn display_coll(coll: &str) -> &str {
 /// matches any collection — the filter keys on id + type). Symmetric edge
 /// types (`same_session`/`temporal`/`tag_overlap`/`related_to`) are removed
 /// bidirectionally; directional types (`enables`/`contradicts`/`refines`/
-/// `depends_on`/`derived_from` and free-form identity relations) only
-/// remove the forward direction.
+/// `depends_on`/`supersedes`/`derived_from` and free-form identity
+/// relations) only remove the forward direction.
 pub async fn knowledge_unlink_edge(params: &str, db: &WardsonDbClient) -> String {
     let trimmed = params.trim();
     if trimmed.is_empty() {
@@ -384,7 +508,7 @@ pub async fn knowledge_unlink_edge(params: &str, db: &WardsonDbClient) -> String
         // deletion (they are directional → forward doc only). A deleted
         // identity-projection edge is restored by the next boot reconcile.
         let Some(edge_type) = EdgeType::parse_lossy(parts[1]) else {
-            return format!("Error: Invalid edge type '{}'. Built-in types: same_session, temporal, tag_overlap, derived_from, enables, contradicts, refines, depends_on, related_to — or any stored free-form relation", parts[1]);
+            return format!("Error: Invalid edge type '{}'. Built-in types: same_session, temporal, tag_overlap, derived_from, {} — or any stored free-form relation", parts[1], BRAIN_CREATED_TYPES);
         };
         let (tgt_coll, tgt_id) = split_endpoint(parts[2]);
         if tgt_id.is_empty() {
@@ -586,6 +710,8 @@ mod unlink_summary_tests {
 /// JSON patch is an object containing only the fields to change. Immutable fields
 /// (`_id`, `source_entry_id`, `source_session`, `created_at`, `access_count`,
 /// `last_accessed`, `updated_at`) are rejected. `updated_at` is auto-refreshed.
+/// A non-null `superseded_by` is rejected too: supersession is a `supersedes`
+/// edge (`knowledge_link`). A null clears a leftover field.
 ///
 /// Edges referencing the node by id are preserved automatically — `memory.edges`
 /// stores references by id, not content, so a PATCH on the node doc leaves every
@@ -657,6 +783,12 @@ pub async fn knowledge_update(params: &str, db: &WardsonDbClient, config: &Syste
             );
         }
     }
+    // Supersession is an edge, not a field: the field was a convention that
+    // nothing read and no read surface showed. A null still passes, so a
+    // field migration v14 could not convert can be cleared.
+    if obj.get("superseded_by").is_some_and(|v| !v.is_null()) {
+        return "knowledge_update rejected (superseded_by is not a field: link the newer node to this one with knowledge_link, edge_type supersedes)".into();
+    }
 
     let existing = match db.read(coll, id).await {
         Ok(doc) => doc,
@@ -673,9 +805,9 @@ pub async fn knowledge_update(params: &str, db: &WardsonDbClient, config: &Syste
         return format!("knowledge_update failed: {}", e);
     }
 
-    // Re-embed when the node's own embeddable text changed. Editing tags or
-    // `superseded_by` must not pay for an inference pass; editing `content`
-    // must, or the vector silently describes the pre-edit node.
+    // Re-embed when the node's own embeddable text changed. Editing tags
+    // must not pay for an inference pass; editing `content` must, or the
+    // vector silently describes the pre-edit node.
     if changed_fields
         .iter()
         .any(|f| matches!(f.as_str(), "content" | "title" | "description" | "preconditions" | "steps"))
@@ -726,7 +858,7 @@ pub async fn knowledge_traverse(
         .unwrap_or(config.kg_max_traversal_depth);
 
     // parse_lossy: operators can filter on free-form identity relations
-    // (e.g. `has_trait`) — the built-in nine still parse to their variants.
+    // (e.g. `has_trait`) — the built-in types still parse to their variants.
     let edge_types: Option<Vec<EdgeType>> = toks.next().and_then(|s| {
         let parsed: Vec<EdgeType> = s.split(',')
             .filter_map(EdgeType::parse_lossy)
@@ -745,7 +877,12 @@ pub async fn knowledge_traverse(
         Err(e) => return format!("Error: traversal failed: {}", e),
     };
 
-    // Format output
+    // Format output. One read of the declarations marks every superseded
+    // node the traversal prints, however many there are.
+    let superseders = super::supersession::superseders(db).await;
+    let mark = |collection: &str, id: &str| {
+        super::supersession::superseded_note(super::supersession::successor_of(&superseders, collection, id))
+    };
     let mut out = String::new();
     out.push_str(&format!("Traversal from {}:{}\n", start_coll, start_id));
     if let Some(start_node) = result.nodes.iter().find(|n| n.depth == 0) {
@@ -755,7 +892,12 @@ pub async fn knowledge_traverse(
             NodeType::Procedural { title } => format!("procedural: {}", title),
             NodeType::Identity { node_type } => format!("identity/{}", node_type),
         };
-        out.push_str(&format!("Starting node: \"{}\" ({})\n\n", start_node.content_preview, kind));
+        out.push_str(&format!(
+            "Starting node: \"{}\" ({}){}\n\n",
+            start_node.content_preview,
+            kind,
+            mark(&start_node.collection, &start_node.id)
+        ));
     }
 
     // Group edges by depth of the target node
@@ -773,8 +915,8 @@ pub async fn knowledge_traverse(
                 .map(|e| (e.edge_type.as_str(), e.weight))
                 .unwrap_or(("?", 0.0));
             out.push_str(&format!(
-                "  → {}:{} via {} (w={:.2})\n    \"{}\"\n",
-                node.collection, node.id, etype, w, node.content_preview
+                "  → {}:{} via {} (w={:.2}){}\n    \"{}\"\n",
+                node.collection, node.id, etype, w, mark(&node.collection, &node.id), node.content_preview
             ));
         }
         out.push('\n');
@@ -899,10 +1041,20 @@ pub async fn knowledge_query(
         out.push_str("[No direct matches — these are session-adjacent results]\n");
     }
     out.push('\n');
+    let superseders = super::supersession::superseders(db).await;
     for (i, r) in results.iter().enumerate() {
         out.push_str(&format!(
-            "{}. [{}] {} (score: {:.2})\n   Source: {}\n\n",
-            i + 1, r.node.collection, r.node.content_preview, r.score, r.source
+            "{}. [{}] {} (score: {:.2}){}\n   Source: {}\n\n",
+            i + 1,
+            r.node.collection,
+            r.node.content_preview,
+            r.score,
+            super::supersession::superseded_note(super::supersession::successor_of(
+                &superseders,
+                &r.node.collection,
+                &r.node.id,
+            )),
+            r.source
         ));
     }
     out
@@ -1196,6 +1348,22 @@ mod gate_tests {
             let out = knowledge_update(&params, &db, &config()).await;
             assert!(out.contains(&format!("'{field}' is immutable")), "{field}: {out}");
         }
+    }
+
+    /// Supersession is an edge now: a value for the old field is refused
+    /// with the edge named, and a null (which clears the key) is let through
+    /// to the database, here an address that answers nothing.
+    #[tokio::test]
+    async fn the_old_supersession_field_is_refused_and_can_be_cleared() {
+        let db = nowhere();
+        for value in [r#""01a0e8be""#, r#"{"collection":"memory.semantic","id":"n2"}"#] {
+            let params = format!(r#"memory.semantic:n1 | {{"superseded_by":{value}}}"#);
+            let out = knowledge_update(&params, &db, &config()).await;
+            assert!(out.starts_with("knowledge_update rejected (superseded_by is not a field"), "{out}");
+            assert!(out.contains("edge_type supersedes"), "{out}");
+        }
+        let cleared = knowledge_update(r#"memory.semantic:n1 | {"superseded_by":null}"#, &db, &config()).await;
+        assert!(!cleared.contains("superseded_by is not a field"), "{cleared}");
     }
 
     #[tokio::test]
@@ -1793,7 +1961,7 @@ fn resolve_dump_collections(requested: Option<&[String]>) -> Result<Vec<&'static
 }
 
 /// Validate the edge-type restriction. Any non-empty token is dumpable —
-/// the nine built-ins plus free-form identity-projection relations (the
+/// the built-ins plus free-form identity-projection relations (the
 /// `$in` filter matches stored strings verbatim); an empty list or an
 /// empty/whitespace token is an error.
 fn validate_dump_edge_types(edge_types: &[String]) -> Result<(), String> {
@@ -2219,7 +2387,7 @@ impl KnowledgePromoteArgs {
 #[embra_tool(
     name = "knowledge_link",
     is_side_effectful = true,
-    description = "Create a directed, weighted, typed edge between two knowledge nodes. edge_type: enables | contradicts | refines | depends_on | related_to. weight is 0.0-1.0 indicating confidence. Use enables when the source is a prerequisite for the target; contradicts when they conflict; refines when the source is more specific than the target; depends_on when the source requires the target to hold; related_to for same-scope, non-hierarchical association."
+    description = "Create a directed, weighted, typed edge between two knowledge nodes. edge_type: enables | contradicts | refines | depends_on | related_to | supersedes. weight is 0.0-1.0 indicating confidence. Use enables when the source is a prerequisite for the target; contradicts when they conflict; refines when the source is more specific than the target; depends_on when the source requires the target to hold; related_to for same-scope, non-hierarchical association; supersedes when the source replaces the target, which stays as history (both must be semantic or procedural nodes; every read then marks the target superseded and knowledge_audit leaves it out)."
 )]
 pub struct KnowledgeLinkArgs {
     pub source_collection: String,
@@ -2249,7 +2417,7 @@ impl KnowledgeLinkArgs {
 #[embra_tool(
     name = "knowledge_unlink_edge",
     is_side_effectful = true,
-    description = "Delete edges. Provide either edge_id (removes one edge by its document id) OR the triple — source_id + edge_type + target_id; source_collection/target_collection are optional (matching is by id and type). Symmetric edge types (same_session, temporal, tag_overlap, related_to) are removed bidirectionally; directional types (enables, contradicts, refines, depends_on, derived_from — and free-form identity relations) remove only the forward direction. edge_id takes precedence when both are provided."
+    description = "Delete edges. Provide either edge_id (removes one edge by its document id) OR the triple — source_id + edge_type + target_id; source_collection/target_collection are optional (matching is by id and type). Symmetric edge types (same_session, temporal, tag_overlap, related_to) are removed bidirectionally; directional types (enables, contradicts, refines, depends_on, supersedes, derived_from — and free-form identity relations) remove only the forward direction. edge_id takes precedence when both are provided."
 )]
 pub struct KnowledgeUnlinkEdgeArgs {
     /// Specific edge document id. When set, the triple fields are ignored.
@@ -2360,7 +2528,8 @@ pub struct KnowledgeTraverseArgs {
     #[serde(default)]
     pub depth: Option<u32>,
     /// CSV of edge types to include (same_session, temporal, tag_overlap,
-    /// derived_from, enables, contradicts, refines, depends_on, related_to).
+    /// derived_from, enables, contradicts, refines, depends_on, related_to,
+    /// supersedes).
     #[serde(default)]
     pub edge_types: Option<String>,
     #[serde(default)]
@@ -2469,8 +2638,8 @@ pub struct KnowledgeDumpArgs {
     #[serde(default)]
     pub collections: Option<Vec<String>>,
     /// Edge types to include (same_session, temporal, tag_overlap,
-    /// derived_from, enables, contradicts, refines, depends_on, related_to —
-    /// or any stored free-form identity relation). Omit for all. Requires
+    /// derived_from, enables, contradicts, refines, depends_on, related_to,
+    /// supersedes — or any stored free-form identity relation). Omit for all. Requires
     /// 'edges' among the dumped collections.
     #[serde(default)]
     pub edge_types: Option<Vec<String>>,

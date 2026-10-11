@@ -353,6 +353,19 @@ fn hot_path_index_specs() -> Vec<(&'static str, serde_json::Value)> {
             "memory.edges",
             serde_json::json!({"name": "idx_edge_metadata_origin", "field": "metadata.origin"}),
         ),
+        // Every read surface asks for the declared supersessions
+        // (`knowledge::supersession`): enrichment on each turn that injects
+        // a node, the query, traversal, recall and link-candidate replies.
+        // Only `supersedes` edges carry the marker, so the index holds the
+        // declarations and nothing else. Looked up by the printed ids
+        // instead, through `idx_edge_target`, 1,000 nodes read 176,866
+        // edges on the 2026-10-11 backup; this index answers in one hop. No
+        // hop or reconcile filter carries the key, so it serves nothing
+        // else, and `metadata.origin` still sorts first in the reconcile's.
+        (
+            "memory.edges",
+            serde_json::json!({"name": "idx_edge_supersession", "field": "metadata.supersession"}),
+        ),
         // The same reconcile's per-pack node count and revision read filter
         // the node collections by `{origin, pack}`.
         (
@@ -714,6 +727,23 @@ mod hot_path_index_tests {
         assert_eq!(*collection, "memory.edges");
         assert_eq!(body["field"], "metadata.origin");
         assert!(body.get("fields").is_none(), "must stay single-field");
+    }
+
+    /// The read surfaces find every declared supersession through a
+    /// single-field index on the marker their query filters by.
+    #[test]
+    fn the_supersession_index_serves_the_declarations_query() {
+        let specs = hot_path_index_specs();
+        let (collection, body) = specs
+            .iter()
+            .find(|(_, b)| b["name"] == "idx_edge_supersession")
+            .expect("idx_edge_supersession spec present");
+        assert_eq!(*collection, "memory.edges");
+        assert_eq!(body["field"], crate::knowledge::types::SUPERSESSION_FIELD);
+        assert!(body.get("fields").is_none(), "must stay single-field");
+        let query = crate::knowledge::supersession::supersessions_query_body();
+        let keys: Vec<&String> = query["filter"].as_object().expect("an object").keys().collect();
+        assert_eq!(keys, vec![crate::knowledge::types::SUPERSESSION_FIELD]);
     }
 
     /// WardSONDB serves an AND from the single-field index of its

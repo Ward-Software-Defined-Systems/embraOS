@@ -7,6 +7,15 @@ use serde::{Deserialize, Serialize};
 /// never pairs two of them and never calls one an orphan (`audit.rs`).
 pub(crate) const SESSION_DELETED_TAG: &str = "session-deleted";
 
+/// The key a declared supersession carries in its edge's `metadata`.
+/// `write_link` sets it on `supersedes` edges and on nothing else, so an
+/// identity or seed relation spelled `supersedes` declares nothing. It has
+/// an index of its own (`idx_edge_supersession`): one query finds every
+/// declaration (`supersession.rs`), and the audit reads it (`audit.rs`).
+pub(crate) const SUPERSESSION_KEY: &str = "supersession";
+/// `SUPERSESSION_KEY` as a filter path on `memory.edges`.
+pub(crate) const SUPERSESSION_FIELD: &str = "metadata.supersession";
+
 // No doc comments on the variants: schemars would turn the plain string
 // enum of `remember`'s `category` argument into a `oneOf` of constants.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, schemars::JsonSchema)]
@@ -52,6 +61,10 @@ pub enum EdgeType {
     Contradicts,
     Refines,
     DependsOn,
+    /// The source replaces the target, which stays as history: every read
+    /// surface marks it and the audit leaves it out of its checks. Only an
+    /// edge carrying `SUPERSESSION_KEY` declares it. Directional.
+    Supersedes,
     /// Symmetric same-scope link. Used when two nodes concern the same topic /
     /// system area but neither enables, refines, nor contradicts the other.
     /// Still stored with a source → target direction; retrieval treats it as
@@ -78,12 +91,13 @@ impl EdgeType {
             Self::Contradicts => "contradicts",
             Self::Refines => "refines",
             Self::DependsOn => "depends_on",
+            Self::Supersedes => "supersedes",
             Self::RelatedTo => "related_to",
             Self::Other(s) => s,
         }
     }
 
-    /// STRICT parse: the nine built-in types only — anything else is
+    /// STRICT parse: the built-in types only — anything else is
     /// `None`, including free-form identity relations. This is the
     /// input-validation gate for `knowledge_link` (and the write-side
     /// vocabulary boundary generally); it must never learn to produce
@@ -99,6 +113,7 @@ impl EdgeType {
             "contradicts" => Some(Self::Contradicts),
             "refines" => Some(Self::Refines),
             "depends_on" => Some(Self::DependsOn),
+            "supersedes" => Some(Self::Supersedes),
             "related_to" => Some(Self::RelatedTo),
             _ => None,
         }
@@ -130,6 +145,7 @@ impl EdgeType {
                 | Self::Contradicts
                 | Self::Refines
                 | Self::DependsOn
+                | Self::Supersedes
                 | Self::RelatedTo
         )
     }
@@ -147,8 +163,8 @@ impl EdgeType {
     /// bidirectionally (see `knowledge::edges::push_bidirectional`), and
     /// `related_to` is documented as same-scope/non-hierarchical. The
     /// remaining brain-created types (`enables`, `contradicts`, `refines`,
-    /// `depends_on`) plus `derived_from` (provenance from promotion) are
-    /// directional and must not be deleted bidirectionally.
+    /// `depends_on`, `supersedes`) plus `derived_from` (provenance from
+    /// promotion) are directional and must not be deleted bidirectionally.
     pub fn is_symmetric(&self) -> bool {
         matches!(
             self,
@@ -160,7 +176,7 @@ impl EdgeType {
 // Manual serde: `Other(String)` under a derive would serialize as
 // `{"other": "..."}` — the wire format must stay a PLAIN STRING, byte-
 // identical to the old `#[serde(rename_all = "snake_case")]` derive for
-// the nine built-in variants (TraversalResult edges serialize into tool
+// the built-in variants (TraversalResult edges serialize into tool
 // output). Pinned by `edge_type_wire_format_tests`.
 impl Serialize for EdgeType {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
@@ -201,6 +217,7 @@ mod edge_type_tests {
             EdgeType::Contradicts,
             EdgeType::Refines,
             EdgeType::DependsOn,
+            EdgeType::Supersedes,
         ] {
             assert!(t.is_brain_created());
         }
@@ -224,6 +241,7 @@ mod edge_type_tests {
             EdgeType::Contradicts,
             EdgeType::Refines,
             EdgeType::DependsOn,
+            EdgeType::Supersedes,
             EdgeType::DerivedFrom,
         ] {
             assert!(!t.is_symmetric(), "{:?} should be directional", t);
@@ -272,6 +290,11 @@ mod edge_type_tests {
     }
 
     #[test]
+    fn the_supersession_field_is_the_key_under_metadata() {
+        assert_eq!(super::SUPERSESSION_FIELD, format!("metadata.{}", super::SUPERSESSION_KEY));
+    }
+
+    #[test]
     fn other_is_neither_brain_created_nor_symmetric() {
         let t = EdgeType::Other("holds_value".to_string());
         assert!(!t.is_brain_created());
@@ -298,6 +321,7 @@ mod edge_type_wire_format_tests {
             (EdgeType::Contradicts, "contradicts"),
             (EdgeType::Refines, "refines"),
             (EdgeType::DependsOn, "depends_on"),
+            (EdgeType::Supersedes, "supersedes"),
             (EdgeType::RelatedTo, "related_to"),
         ] {
             assert_eq!(

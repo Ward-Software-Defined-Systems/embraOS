@@ -733,6 +733,7 @@ mod edge_query_body_tests {
             EdgeType::Contradicts,
             EdgeType::Refines,
             EdgeType::DependsOn,
+            EdgeType::Supersedes,
             EdgeType::RelatedTo,
             EdgeType::Other("navigatesFor".into()),
         ] {
