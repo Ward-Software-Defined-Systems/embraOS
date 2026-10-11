@@ -519,7 +519,9 @@ use inject::redact;
 fn run(input: &str) -> String {
     let (clean, flagged) = redact(input);
     let seen = inject::flagged(input);
-    format!("{clean} {flagged} {seen}")
+    let (scrubbed, found) = inject::scrub(input);
+    let names = inject::scan(input);
+    format!("{clean} {flagged} {seen} {scrubbed} {} {}", found.len(), names.len())
 }
 "##;
         validate(src, &[]).expect("inject use and call pass");

@@ -1,6 +1,6 @@
 // guardian-tool: web_search
 const GUARDIAN_NAME: &str = "web_search";
-const GUARDIAN_DESC: &str = "Search the web (Brave, via the Guardian web_search guard) with optional recency/exclude/pagination/min_score, optionally fetch + read the top results via the http_get guard, and neutralize prompt-injection in every field before the model sees it. Ranked by query overlap, de-duplicated by host. Needs the operator's Brave Search key (/guardian key brave); without it every call answers 'search capability not configured'.";
+const GUARDIAN_DESC: &str = "Search the web (Brave, via the Guardian web_search guard) with optional recency/exclude/pagination/min_score, optionally fetch + read the top results via the http_get guard, and rewrite injection directives in every field before the model sees it. Ranked by query overlap, de-duplicated by host. A result's injection_suspected is false unless the scan matched; its injection_signals name each match. Needs the operator's Brave Search key (/guardian key brave); without it every call answers 'search capability not configured'.";
 const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"query":{"type":"string"},"max":{"type":"integer"},"recency":{"type":"string"},"exclude":{"type":"array","items":{"type":"string"}},"offset":{"type":"integer"},"extra_snippets":{"type":"boolean"},"fetch_top":{"type":"integer"},"min_score":{"type":"number"}},"required":["query"]}"#;
 const GUARDIAN_CAPS: &[&str] = &["web_search", "http_get"];
 
@@ -11,7 +11,9 @@ struct Entry {
     age: Option<String>,
     snippets: Vec<String>,
     score: f64,
-    injection: bool,
+    // What the scrubber found in any field, named as `inject::scan` names
+    // it, each name once, in field order.
+    signals: Vec<String>,
     text: Option<String>,
     // How the fetch of the page went: the HTTP status when it was read,
     // the guard's reason when it was refused or failed, the URL that
@@ -95,20 +97,28 @@ fn run(input: &str) -> String {
         let fenv = json::parse(&host::http_get(&e.url)).unwrap_or(json::null());
         if !fenv.get("ok").as_bool().unwrap_or(false) {
             let why = fenv.get("error").as_str().unwrap_or("fetch failed");
-            e.fetch_error = Some(sanitize(why, 200).0);
+            let (clean, found, _) = sanitize(why, 200);
+            add_signals(&mut e.signals, found);
+            e.fetch_error = Some(clean);
             continue;
         }
         e.fetch_status = fenv.get("status").as_f64().map(|st| st as u16);
         match fenv.get("url").as_str() {
-            Some(answered) if answered != e.url => e.fetch_url = Some(sanitize(answered, 300).0),
+            Some(answered) if answered != e.url => {
+                let (clean, found, _) = sanitize(answered, 300);
+                add_signals(&mut e.signals, found);
+                e.fetch_url = Some(clean);
+            }
             _ => {}
         }
         if let Some(target) = fenv.get("redirect").as_str() {
-            e.fetch_redirect = Some(sanitize(target, 300).0);
+            let (clean, found, _) = sanitize(target, 300);
+            add_signals(&mut e.signals, found);
+            e.fetch_redirect = Some(clean);
         }
         let body = fenv.get("body").as_str().unwrap_or("");
-        let (clean, flagged, cut) = sanitize(&html_text::to_text(body), 4000);
-        e.injection = e.injection || flagged;
+        let (clean, found, cut) = sanitize(&html_text::to_text(body), 4000);
+        add_signals(&mut e.signals, found);
         if cut {
             e.truncated.push(("text", 4000));
         }
@@ -130,8 +140,8 @@ fn scrub_entry(query: &str, r: &json::Json) -> Entry {
     // Scored before the scrubber runs: a redacted directive still says
     // what the page is about, and a security query must find it.
     let score = overlap_score(query, raw_title, raw_desc);
-    let (title, tf, tc) = sanitize(raw_title, 200);
-    let (desc, df, dc) = sanitize(raw_desc, 1000);
+    let (title, title_found, tc) = sanitize(raw_title, 200);
+    let (desc, desc_found, dc) = sanitize(raw_desc, 1000);
     let mut truncated: Vec<(&'static str, usize)> = vec![];
     if tc {
         truncated.push(("title", 200));
@@ -139,17 +149,15 @@ fn scrub_entry(query: &str, r: &json::Json) -> Entry {
     if dc {
         truncated.push(("description", 1000));
     }
-    let age = match r.get("age").as_str() {
-        Some(a) if !a.is_empty() => Some(sanitize(a, 60).0),
-        _ => None,
-    };
-    let mut injection = tf || df;
+    let mut signals: Vec<String> = vec![];
+    add_signals(&mut signals, title_found);
+    add_signals(&mut signals, desc_found);
     let mut snippets: Vec<String> = vec![];
     let mut snippets_cut = false;
     if let Some(arr) = r.get("snippets").as_array() {
         for s in arr {
-            let (clean, f, cut) = sanitize(s.as_str().unwrap_or(""), 500);
-            injection = injection || f;
+            let (clean, found, cut) = sanitize(s.as_str().unwrap_or(""), 500);
+            add_signals(&mut signals, found);
             snippets_cut = snippets_cut || cut;
             snippets.push(clean);
         }
@@ -157,6 +165,14 @@ fn scrub_entry(query: &str, r: &json::Json) -> Entry {
     if snippets_cut {
         truncated.push(("snippets", 500));
     }
+    let age = match r.get("age").as_str() {
+        Some(a) if !a.is_empty() => {
+            let (clean, found, _) = sanitize(a, 60);
+            add_signals(&mut signals, found);
+            Some(clean)
+        }
+        _ => None,
+    };
     Entry {
         title,
         url,
@@ -164,7 +180,7 @@ fn scrub_entry(query: &str, r: &json::Json) -> Entry {
         age,
         snippets,
         score,
-        injection,
+        signals,
         text: None,
         fetch_status: None,
         fetch_error: None,
@@ -180,8 +196,12 @@ fn entry_json(e: &Entry) -> json::Json {
         ("url", json::s(&e.url)),
         ("description", json::s(&e.description)),
         ("score", json::n(e.score)),
-        ("injection_suspected", json::b(e.injection)),
+        // False unless the scan matched, and then the names say what.
+        ("injection_suspected", json::b(!e.signals.is_empty())),
     ];
+    if !e.signals.is_empty() {
+        o.push(("injection_signals", json::arr(e.signals.iter().map(|n| json::s(n)).collect())));
+    }
     if let Some(a) = &e.age {
         o.push(("age", json::s(a)));
     }
@@ -215,18 +235,18 @@ fn err(msg: &str) -> String {
     json::stringify(&json::obj(vec![("error", json::s(msg))]))
 }
 
-/// Returns (clean, injection_flagged, was_truncated). Truncation is
+/// Returns (clean, what the scrubber found, was_truncated). Truncation is
 /// reported structurally by the caller — no opaque inline marker (#7).
 /// Order: the control and zero-width characters out, the shared scrubber
-/// (`inject::redact`: directives and structural markers rewritten, a page
-/// that merely talks about a system prompt flagged), then the cap.
-fn sanitize(raw: &str, cap: usize) -> (String, bool, bool) {
+/// (`inject::scrub`: directives and structural markers rewritten, a page
+/// that merely talks about a system prompt named and kept), then the cap.
+fn sanitize(raw: &str, cap: usize) -> (String, Vec<String>, bool) {
     let cleaned: String = raw
         .chars()
         .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
         .filter(|c| !matches!(*c, '\u{200B}'..='\u{200F}' | '\u{2060}' | '\u{FEFF}'))
         .collect();
-    let (mut s, flagged) = inject::redact(&cleaned);
+    let (mut s, found) = inject::scrub(&cleaned);
     let mut truncated = false;
     if s.len() > cap {
         let mut end = cap;
@@ -236,7 +256,16 @@ fn sanitize(raw: &str, cap: usize) -> (String, bool, bool) {
         s.truncate(end);
         truncated = true;
     }
-    (s, flagged, truncated)
+    (s, found, truncated)
+}
+
+/// Adds the names in `found` that `into` does not hold yet, in order.
+fn add_signals(into: &mut Vec<String>, found: Vec<String>) {
+    for n in found {
+        if !into.contains(&n) {
+            into.push(n);
+        }
+    }
 }
 
 fn contains_ci(hay: &str, needle: &str) -> bool {

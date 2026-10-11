@@ -226,30 +226,52 @@ pub fn assemble_lib_rs(m: &ValidatedModule) -> String {
     s
 }
 
+/// Every file [`scaffold`] writes for `m`, as (path in the project,
+/// contents). [`inputs_sha256`] hashes the same list, so the two never
+/// drift apart.
+fn project_files(m: &ValidatedModule) -> [(&'static str, String); 6] {
+    [
+        ("Cargo.toml", CARGO_TOML_TMPL.replace("{NAME}", &m.name)),
+        (".cargo/config.toml", CARGO_CONFIG.to_string()),
+        ("src/json.rs", JSON_SRC.to_string()),
+        ("src/html_text.rs", HTML_TEXT_SRC.to_string()),
+        ("src/inject.rs", INJECT_SRC.to_string()),
+        ("src/lib.rs", assemble_lib_rs(m)),
+    ]
+}
+
+/// The hash of everything [`scaffold`] writes for `m`, each file with its
+/// path: the manifest, the cargo config, the three helpers and the
+/// assembled `lib.rs` (the prelude and the host shim included). Two
+/// projects with the same hash compile the same tool. A committed wasm
+/// fixture carries it beside it, so a helper or prelude change without a
+/// rebuild fails its round trip.
+pub fn inputs_sha256(m: &ValidatedModule) -> String {
+    let mut all = String::new();
+    for (path, contents) in project_files(m) {
+        all.push_str(path);
+        all.push('\0');
+        all.push_str(&contents);
+        all.push('\0');
+    }
+    crate::store::sha256_hex(&all)
+}
+
 /// Materialize the project under `base`. Idempotent: overwrites
 /// `Cargo.toml` / `src/*` so a redefine or a reconcile rebuild is clean.
 pub fn scaffold(base: &Path, m: &ValidatedModule) -> Result<ScaffoldPaths, GuardianError> {
     let project = safe_tool_dir(base, &m.name)?;
-    let src = project.join("src");
-    let cargo_dir = project.join(".cargo");
-    for d in [&project, &src, &cargo_dir] {
-        std::fs::create_dir_all(d).map_err(|e| GuardianError::Io(e.to_string()))?;
+    for d in [project.clone(), project.join("src"), project.join(".cargo")] {
+        std::fs::create_dir_all(&d).map_err(|e| GuardianError::Io(e.to_string()))?;
     }
-
-    let manifest = project.join("Cargo.toml");
-    write(&manifest, &CARGO_TOML_TMPL.replace("{NAME}", &m.name))?;
-    write(&cargo_dir.join("config.toml"), CARGO_CONFIG)?;
-    write(&src.join("json.rs"), JSON_SRC)?;
-    write(&src.join("html_text.rs"), HTML_TEXT_SRC)?;
-    write(&src.join("inject.rs"), INJECT_SRC)?;
-    let lib_rs = src.join("lib.rs");
-    write(&lib_rs, &assemble_lib_rs(m))?;
-
+    for (path, contents) in project_files(m) {
+        write(&project.join(path), &contents)?;
+    }
     Ok(ScaffoldPaths {
-        project,
-        manifest,
-        lib_rs,
+        manifest: project.join("Cargo.toml"),
+        lib_rs: project.join("src").join("lib.rs"),
         artifact_name: format!("{}.wasm", m.name),
+        project,
     })
 }
 

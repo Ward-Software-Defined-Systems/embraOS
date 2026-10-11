@@ -1,7 +1,9 @@
 //! Generates the committed wasm test fixture by running the *real*
 //! validator + scaffold over a sample tool, into the dir given as argv[1].
 //! Used by `scripts`/manual to (re)build `tests/fixtures/probe.wasm`.
-//! Prints the project path and artifact filename on two lines.
+//! Prints the project path, the artifact filename and the hash of the
+//! build inputs (`scaffold::inputs_sha256`, the `.inputs-sha256` sidecar
+//! of a shipped fixture) on three lines.
 
 use std::path::Path;
 
@@ -48,5 +50,6 @@ fn main() -> anyhow::Result<()> {
     let p = embra_guardian::scaffold(Path::new(&out), &m)?;
     println!("{}", p.project.display());
     println!("{}", p.artifact_name);
+    println!("{}", embra_guardian::scaffold::inputs_sha256(&m));
     Ok(())
 }

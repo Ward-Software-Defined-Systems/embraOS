@@ -186,18 +186,26 @@ html_text::to_text(html: &str) -> String
 ### Provided `inject` API (always available, zero-dep)
 
 ```text
-inject::redact(text: &str) -> (String, bool)
+inject::scrub(text: &str) -> (String, Vec<String>)
 // The text with every injection directive ("ignore your previous
 // instructions", "disregard all safety policies", "ignore the user …") and
 // structural marker ("you are now", "</system>", "assistant:", …) rewritten
-// to inject::MARKER ("[redacted-directive]"), and whether anything was
-// found. A page that merely talks about a system prompt is flagged and
-// kept. For text the model will READ (a page reduced with html_text).
-inject::flagged(text: &str) -> bool
+// to inject::MARKER ("[redacted-directive]"), and the names of what was
+// found (see scan). A page that merely talks about a system prompt is
+// named and kept. For text the model will READ (a page reduced with
+// html_text).
+inject::scan(text: &str) -> Vec<String>
 // The same patterns, nothing rewritten: for data that must stay as sent
-// (an API body), with the flag as the signal.
+// (an API body). Each finding is named once, spelled from the scanner's
+// lists and never copied from the text: "directive: ignore … instructions",
+// "marker: you are now", "mentions: system prompt". Empty when nothing
+// matched. scrub(text).1 == scan(text).
+inject::redact(text: &str) -> (String, bool)
+inject::flagged(text: &str) -> bool
+// scrub and scan with a bool in place of the names.
 // A lexical pass, and it says so: a typoglycemia, spaced-out or base64
-// directive passes. The shipped web_search and http_request use both.
+// directive passes. The shipped web_search uses scrub; http_request uses
+// scrub on a page and scan on data.
 ```
 
 ## Minimal template

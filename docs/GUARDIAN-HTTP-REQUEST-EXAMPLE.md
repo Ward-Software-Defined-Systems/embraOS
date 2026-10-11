@@ -73,9 +73,30 @@ Output:
 text and returns anything else as sent, `text` reduces whatever came back,
 `raw` never reduces. A reduced page is scrubbed: injection directives and
 the structural markers of an injected turn become `[redacted-directive]`
-(`inject::redact`), and `injection_suspected` says whether anything was
-found. A body returned as sent is left intact and only flagged
-(`inject::flagged`): data must stay as it was sent.
+(`inject::scrub`). A body returned as sent is never rewritten, only scanned
+(`inject::scan`): data must stay as it was sent. The scan reads the whole
+body the host returned, the part past the tool's own cut included.
+
+`injection_suspected` is false unless the scan matched. When it matched,
+`injection_signals` names each finding once:
+
+- `directive: <verb> … <object>` (`directive: ignore … instructions`): an
+  imperative aimed at the model's instructions;
+- `marker: <marker>` (`marker: assistant:`): the frame of an injected turn;
+- `mentions: system prompt`: the phrase only, not a directive. Pages about
+  prompt injection carry it, and so does a repository whose commits talk
+  about the system prompt.
+
+A name is spelled from the scanner's own lists, never copied from the body,
+so the field cannot carry injected words. A commits listing that mentions
+the system prompt answers:
+
+```json
+{ "status": 200, "url": "https://gitlab.example.com/api/v4/projects/2/repository/commits",
+  "content_type": "application/json", "headers": { "…": "…" },
+  "body": "[{\"id\":\"5604bce…\",\"message\":\"… No tool description or system prompt changed.\\n\"},…]",
+  "injection_suspected": true, "injection_signals": ["mentions: system prompt"] }
+```
 
 `truncated` names a cut: `{"body": N}` when the host cut the body at
 `max_bytes` (N bytes kept; default 256 KiB, at most 1 MiB, ask again with a
@@ -92,7 +113,7 @@ admit it, and a credential header in the input names `/guardian secret`.
 ```rust
 // guardian-tool: http_request
 const GUARDIAN_NAME: &str = "http_request";
-const GUARDIAN_DESC: &str = "A guarded curl: one HTTP request (GET, HEAD, POST, PUT, PATCH, DELETE) with headers, query pairs and a body or JSON value, for pages, resources and API work. Answers status, the answering URL, the response headers and the body (text, JSON, XML, NDJSON, form data; binary refused). An HTML page is reduced to text (as=auto|text) and scrubbed of injection directives; other bodies come back as sent, only flagged. Needs no key: a credential comes from the operator's store (/guardian secret <host> <header> <value>), never from the input; a private host needs /guardian egress allow <host>.";
+const GUARDIAN_DESC: &str = "A guarded curl: one HTTP request (GET, HEAD, POST, PUT, PATCH, DELETE) with headers, query pairs and a body or JSON value, for pages and APIs. Answers status, the answering URL, headers and body (text, JSON, XML, NDJSON, form data; no binary). An HTML page is reduced to text (as=auto|text), its injection directives rewritten; other bodies come back as sent. injection_suspected is false unless the scan matched; injection_signals names each match. Needs no key: a credential comes from /guardian secret <host> <header> <value>, never the input; a private host needs /guardian egress allow <host>.";
 const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"url":{"type":"string"},"method":{"type":"string"},"headers":{"type":"object"},"query":{"type":"object"},"accept":{"type":"string"},"body":{"type":"string"},"json":{"description":"any JSON value, sent as the body with content-type application/json"},"as":{"type":"string","enum":["auto","text","raw"]},"max_bytes":{"type":"integer"},"timeout_ms":{"type":"integer"}},"required":["url"]}"#;
 const GUARDIAN_CAPS: &[&str] = &["http_request"];
 
@@ -144,12 +165,13 @@ fn run(input: &str) -> String {
     let stopped = env.get("redirect").as_str().is_some();
     let reduce = !stopped && (mode == "text" || (mode == "auto" && is_html(content_type)));
     let mut truncated: Vec<(&str, json::Json)> = vec![];
-    let (key, value, flagged) = if stopped {
-        ("body", json::s(""), false)
+    let (key, value, found) = if stopped {
+        ("body", json::s(""), vec![])
     } else if reduce {
         // A page the model will read: reduced, then the scrubber rewrites
-        // directives and the structural markers of an injected turn.
-        let (clean, hit) = inject::redact(&html_text::to_text(body));
+        // directives and the structural markers of an injected turn and
+        // names what it found.
+        let (clean, found) = inject::scrub(&html_text::to_text(body));
         let end = cut_at(&clean, TEXT_CAP);
         if let Some(n) = host_cut {
             truncated.push(("body", json::n(n as f64)));
@@ -157,22 +179,27 @@ fn run(input: &str) -> String {
         if end < clean.len() {
             truncated.push(("text", json::n(TEXT_CAP as f64)));
         }
-        ("text", json::s(&clean[..end]), hit)
+        ("text", json::s(&clean[..end]), found)
     } else {
-        // Data: as sent, nothing rewritten; the flag is the signal.
+        // Data: as sent, nothing rewritten; the names are the signal.
         let end = cut_at(body, BODY_CAP);
         if end < body.len() {
             truncated.push(("body", json::n(BODY_CAP as f64)));
         } else if let Some(n) = host_cut {
             truncated.push(("body", json::n(n as f64)));
         }
-        ("body", json::s(&body[..end]), inject::flagged(body))
+        ("body", json::s(&body[..end]), inject::scan(body))
     };
     out.push((key, value));
     if !truncated.is_empty() {
         out.push(("truncated", json::obj(truncated)));
     }
-    out.push(("injection_suspected", json::b(flagged)));
+    // False unless the scan matched, and then the names say what it matched:
+    // never a flag every body carries.
+    out.push(("injection_suspected", json::b(!found.is_empty())));
+    if !found.is_empty() {
+        out.push(("injection_signals", json::arr(found.iter().map(|n| json::s(n)).collect())));
+    }
     json::stringify(&json::obj(out))
 }
 
@@ -212,11 +239,15 @@ fn err(msg: &str) -> String {
   The cut of a body is on a character boundary.
 - **Tested end to end** over a wasm fixture built from this module with the
   pinned toolchain (`crates/embra-guardian/tests/http_request_roundtrip.rs`),
-  with a recording transport: a page reduced and scrubbed, a POST's method,
-  headers and JSON body as sent, a secret injected for its host and never
-  for a redirect's, a redirect followed for GET and handed back for POST,
-  a 404 as an answer, a binary body refused, a private host by allowlist
-  and loopback never, a body at the host's 1 MiB cap through the sandbox.
+  with a recording transport: a page reduced and scrubbed with its findings
+  named, a POST's method, headers and JSON body as sent, a commits listing
+  that mentions the system prompt named as a mention and a clean one with
+  the flag false, a secret injected for its host and never for a
+  redirect's, a redirect followed for GET and handed back for POST, a 404
+  as an answer, a binary body refused, a private host by allowlist and
+  loopback never, a body at the host's 1 MiB cap through the sandbox. A
+  sidecar beside the fixture holds the hash of every file the scaffold
+  wrote, so a helper or prelude change without a rebuild fails the test.
 
 ## Try it
 

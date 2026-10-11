@@ -1,6 +1,6 @@
 // guardian-tool: http_request
 const GUARDIAN_NAME: &str = "http_request";
-const GUARDIAN_DESC: &str = "A guarded curl: one HTTP request (GET, HEAD, POST, PUT, PATCH, DELETE) with headers, query pairs and a body or JSON value, for pages, resources and API work. Answers status, the answering URL, the response headers and the body (text, JSON, XML, NDJSON, form data; binary refused). An HTML page is reduced to text (as=auto|text) and scrubbed of injection directives; other bodies come back as sent, only flagged. Needs no key: a credential comes from the operator's store (/guardian secret <host> <header> <value>), never from the input; a private host needs /guardian egress allow <host>.";
+const GUARDIAN_DESC: &str = "A guarded curl: one HTTP request (GET, HEAD, POST, PUT, PATCH, DELETE) with headers, query pairs and a body or JSON value, for pages and APIs. Answers status, the answering URL, headers and body (text, JSON, XML, NDJSON, form data; no binary). An HTML page is reduced to text (as=auto|text), its injection directives rewritten; other bodies come back as sent. injection_suspected is false unless the scan matched; injection_signals names each match. Needs no key: a credential comes from /guardian secret <host> <header> <value>, never the input; a private host needs /guardian egress allow <host>.";
 const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"url":{"type":"string"},"method":{"type":"string"},"headers":{"type":"object"},"query":{"type":"object"},"accept":{"type":"string"},"body":{"type":"string"},"json":{"description":"any JSON value, sent as the body with content-type application/json"},"as":{"type":"string","enum":["auto","text","raw"]},"max_bytes":{"type":"integer"},"timeout_ms":{"type":"integer"}},"required":["url"]}"#;
 const GUARDIAN_CAPS: &[&str] = &["http_request"];
 
@@ -52,12 +52,13 @@ fn run(input: &str) -> String {
     let stopped = env.get("redirect").as_str().is_some();
     let reduce = !stopped && (mode == "text" || (mode == "auto" && is_html(content_type)));
     let mut truncated: Vec<(&str, json::Json)> = vec![];
-    let (key, value, flagged) = if stopped {
-        ("body", json::s(""), false)
+    let (key, value, found) = if stopped {
+        ("body", json::s(""), vec![])
     } else if reduce {
         // A page the model will read: reduced, then the scrubber rewrites
-        // directives and the structural markers of an injected turn.
-        let (clean, hit) = inject::redact(&html_text::to_text(body));
+        // directives and the structural markers of an injected turn and
+        // names what it found.
+        let (clean, found) = inject::scrub(&html_text::to_text(body));
         let end = cut_at(&clean, TEXT_CAP);
         if let Some(n) = host_cut {
             truncated.push(("body", json::n(n as f64)));
@@ -65,22 +66,27 @@ fn run(input: &str) -> String {
         if end < clean.len() {
             truncated.push(("text", json::n(TEXT_CAP as f64)));
         }
-        ("text", json::s(&clean[..end]), hit)
+        ("text", json::s(&clean[..end]), found)
     } else {
-        // Data: as sent, nothing rewritten; the flag is the signal.
+        // Data: as sent, nothing rewritten; the names are the signal.
         let end = cut_at(body, BODY_CAP);
         if end < body.len() {
             truncated.push(("body", json::n(BODY_CAP as f64)));
         } else if let Some(n) = host_cut {
             truncated.push(("body", json::n(n as f64)));
         }
-        ("body", json::s(&body[..end]), inject::flagged(body))
+        ("body", json::s(&body[..end]), inject::scan(body))
     };
     out.push((key, value));
     if !truncated.is_empty() {
         out.push(("truncated", json::obj(truncated)));
     }
-    out.push(("injection_suspected", json::b(flagged)));
+    // False unless the scan matched, and then the names say what it matched:
+    // never a flag every body carries.
+    out.push(("injection_suspected", json::b(!found.is_empty())));
+    if !found.is_empty() {
+        out.push(("injection_signals", json::arr(found.iter().map(|n| json::s(n)).collect())));
+    }
     json::stringify(&json::obj(out))
 }
 

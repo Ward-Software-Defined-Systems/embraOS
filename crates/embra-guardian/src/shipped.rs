@@ -70,6 +70,8 @@ pub const KNOWN_WEB_SEARCH_SHA256: &[&str] = &[
     "7d9bec236041453bff992ef00e7bf57190a7bb78a61bb79053bd70d8aa74fedc",
     // 2026-10-09: the scrubber moved to the vendored `inject` helper, shared with http_request
     "efa59644ff899c5d5e6f3c702e3e31b946a0e5f56c8ca17d617254799cc63299",
+    // 2026-10-11: injection_signals name what the scan found; the flag is false unless it matched
+    "e1a54d65d20ca9954987f2d00fbc0b55ff6d4cccbbf8e2350a2630bc26e91ad0",
 ];
 
 /// The hashes of every version ever shipped under `name`, oldest first.
@@ -86,6 +88,8 @@ pub fn known_sha256s(name: &str) -> &'static [&'static str] {
 pub const KNOWN_HTTP_REQUEST_SHA256: &[&str] = &[
     // 2026-10-09: the first version
     "178c62efb322d2a85cccd82a0c5d9b2689748e5dcfe85ec2f56d1983a00d5568",
+    // 2026-10-11: injection_signals name what the scan found; the flag is false unless it matched
+    "dc9a2f43013f7f5612f5d1bb0738949c54a4174f6b4c34b548363163d63c6c47",
 ];
 
 /// The doc page a shipped tool's module is mirrored on, byte for byte.
