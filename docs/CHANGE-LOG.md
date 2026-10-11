@@ -56,7 +56,7 @@ Since the fast-forward of 2026-10-03 `main` also carries the code-review pit sto
   - `a_json_escape_before_a_word_hides_nothing`, `a_backslash_in_decoded_text_is_a_character`, `a_json_body_is_read_as_json_and_any_other_as_text`, `a_backslash_in_a_result_is_a_character`;
   - `the_fixture_was_built_with_the_current_helpers`.
 - No tool manifest or prompt changed: Guardian descriptions reach the model through `guardian_list`.
-- Live in QEMU: TBD.
+- Live in QEMU (William's word, 2026-10-11): an `http_request` GET of a commits API and a `web_search` with `fetch_top` name what they found, and `guardian_list` shows both new descriptions.
 
 **`knowledge_graph_stats` scopes its edited-seed line and counts every node edited in place (branch `code-review`, 2026-10-11).** Embra, 2026-10-11, relayed by William: the stats said "Edited here (updated_at past created_at): none" while node `01a0b69e-2ee2…` had been edited that day. The count was right: the line lists seed-pack nodes (`origin: knowledge_seed`) and that node is not one; the backup held 71 seed nodes, none edited. The label was wrong: it never said "seed", and read on its own it claimed nothing in the graph was edited, while 238 ordinary nodes were (this entry).
 - The line reads `Seed nodes edited here (updated_at past created_at): …`.
@@ -64,7 +64,7 @@ Since the fast-forward of 2026-10-03 `main` also carries the code-review pit sto
 - On the backup it would read 238 of 1,328 semantic nodes and 2 of 33 procedural ones.
 - Guards: `edited_seed_line_names_the_ids_or_none`, `nodes_edited_in_place_are_those_with_a_later_updated_at`, `the_edited_in_place_line_counts_the_collection_or_the_window`.
 - No tool description changed.
-- Live in QEMU: TBD. The check: `knowledge_graph_stats` shows the `Seed nodes edited here` line, and an `Edited in place` line under each node collection.
+- Live in QEMU (William's word, 2026-10-11): the check passed. `knowledge_graph_stats` shows the `Seed nodes edited here` line, and an `Edited in place` line under each node collection.
 
 **The duplicate passes compare everything they read (branch `code-review`, 2026-10-11).** Embra, 2026-10-11, relayed by William: the audit's pairwise pass stopped at the 500 newest nodes of a category, and with 506 facts and 518 observations the oldest were never compared. Two more caps of the same kind sat in `memory_scan` and `memory_dedup`: the newest 500 entries, so 882 of the backup's 1,382 were never compared, and `memory_scan` stopped at its tenth candidate. Each cap kept the newest and dropped the oldest, which is where duplicates and stale content collect. His decision: remove them (this entry).
 
@@ -82,7 +82,7 @@ Measured in a release build on the 2026-10-11 backup (`measure_the_quadratic_pas
 - **On the backup.** The real audit compared all 1,361 nodes with no warnings.
 - **Guards.** `a_category_larger_than_the_old_cap_is_compared_in_full`, `every_entry_is_compared_the_oldest_included`, `every_candidate_is_found_and_the_report_counts_the_rest`, `a_full_window_is_named_as_the_bound`.
 
-No tool description changed; the pins stand. Brain tests 1,416. Live in QEMU: TBD. The checks: `knowledge_audit` compares every node of a category, past the old 500; `memory_scan` lists 10 candidates and counts the rest; `memory_dedup` compares every entry, the oldest included.
+No tool description changed; the pins stand. Brain tests 1,416. Live in QEMU (William's word, 2026-10-11): every check passed. The checks: `knowledge_audit` compares every node of a category, past the old 500; `memory_scan` lists 10 candidates and counts the rest; `memory_dedup` compares every entry, the oldest included.
 
 **`/model` switches the model on Ollama and LM Studio; the example hosts are generic (branch `code-review`, 2026-10-11).** William, 2026-10-11: `/model` offered no way to change the model on the Ollama and LM Studio providers, and a private host stood in a web console form and a public doc.
 
@@ -132,7 +132,7 @@ His decisions: remove the contradiction check; make supersession a `supersedes` 
     - Gemini `444f60d0…` → `6cc66b81…` → `96db55c3…`; OpenAI-compat `b9028c76…` → `5e85303e…` → `4a90a17a…`.
   - **Effect on instances.** The count stays 117, and each instance pays one prompt-cache write on its first turn after the upgrade. The system prompt is untouched. The first boot builds the marker's index once (9.2 s on 472k edges, debug build) and runs v14.
   - **Tests.** Workspace: 1,941 passed, 0 failed, 13 ignored across 30 binaries; the two new ignored tests run against a copy of an instance's data.
-  - **Live in QEMU: TBD.** The checks:
+  - **Live in QEMU (William's word, 2026-10-11): every check passed.** The checks:
     - the boot journal shows v14 and the revised seed nodes;
     - `knowledge_audit` runs three checks with `history: 8`;
     - `knowledge_query` and `knowledge_traverse` on one of the 8 show "superseded by";
