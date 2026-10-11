@@ -1729,6 +1729,26 @@ mod tests {
         );
     }
 
+    /// Every instance loads the committed packs. A pack's text names no
+    /// person and no private host: an example uses an example host.
+    #[test]
+    fn the_committed_packs_name_no_person_or_private_host() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Seed_Knowledge");
+        let mut packs = 0;
+        for entry in std::fs::read_dir(&dir).expect("Seed_Knowledge/ exists") {
+            let path = entry.expect("readable dir entry").path();
+            let Some(fname) = path.file_name().and_then(|n| n.to_str()) else { continue };
+            if !fname.ends_with(SEED_FILE_SUFFIX) {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&path).expect("readable pack");
+            let hits = crate::identity_graph::format::maintainer_specifics(&raw);
+            assert!(hits.is_empty(), "{fname}: {hits:?}");
+            packs += 1;
+        }
+        assert!(packs > 0, "no committed pack was read");
+    }
+
     #[test]
     fn committed_seed_packs_validate() {
         // Every pack committed under Seed_Knowledge/ must parse clean —

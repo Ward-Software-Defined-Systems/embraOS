@@ -347,6 +347,28 @@ fn title_case_id(id: &str) -> String {
         .join(" ")
 }
 
+/// What would describe one operator to every other in a file the image
+/// ships (an identity graph, a seed pack): the maintainer's name as a word,
+/// or a host under the maintainer's private `.wsds` domain. The public
+/// maintainer's name, "Ward Software Defined Systems", is no hit.
+#[cfg(test)]
+pub(crate) fn maintainer_specifics(text: &str) -> Vec<String> {
+    let mut hits: Vec<String> = text
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| matches!(*word, "Will" | "William"))
+        .map(str::to_string)
+        .collect();
+    let lower = text.to_lowercase();
+    for (at, _) in lower.match_indices(".wsds") {
+        let after = lower[at + ".wsds".len()..].chars().next();
+        if !after.is_some_and(char::is_alphanumeric) {
+            let start = lower[..at].rfind(|c: char| !(c.is_alphanumeric() || c == '.' || c == '-')).map_or(0, |i| i + 1);
+            hits.push(text[start..at + ".wsds".len()].to_string());
+        }
+    }
+    hits
+}
+
 #[cfg(test)]
 mod format_tests {
     use super::*;
@@ -359,6 +381,32 @@ mod format_tests {
         env!("CARGO_MANIFEST_DIR"),
         "/../../Imported_Intelligence/Meridian_IDENTITY-SOUL.graph.json"
     ));
+
+    /// Every operator who picks a shipped identity imports the same text:
+    /// no node, and no file comment, may name the maintainer or a private
+    /// host of theirs. The `operator` node is the role.
+    #[test]
+    fn the_shipped_identities_name_no_operator() {
+        for (file, text) in [("Embra", EMBRA_FIXTURE), ("Meridian", MERIDIAN_FIXTURE)] {
+            assert_eq!(maintainer_specifics(text), Vec::<String>::new(), "{file}");
+        }
+        let operator = parse_import(EMBRA_FIXTURE)
+            .expect("Embra fixture valid")
+            .nodes
+            .into_iter()
+            .find(|n| n.id == "operator")
+            .expect("Embra keeps its operator node: user_operator links to it");
+        assert!(operator.text.starts_with("The operator:"), "{}", operator.text);
+    }
+
+    #[test]
+    fn the_scan_finds_a_name_and_a_private_host_and_not_the_public_maintainer() {
+        let hits = maintainer_specifics(
+            "The operator (Will) runs gitlab.ops.wsds; Ward Software Defined Systems (WSDS) will ship it.",
+        );
+        assert_eq!(hits, vec!["Will".to_string(), "gitlab.ops.wsds".to_string()]);
+        assert!(maintainer_specifics("willing, Williams, Willow and wsds.io").is_empty());
+    }
 
     #[test]
     fn both_fixtures_parse_clean() {

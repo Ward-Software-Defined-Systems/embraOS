@@ -74,7 +74,7 @@ renders them faithfully. The two committed examples are deliberate contrasts:
 
 | | `Embra_IDENTITY-SOUL.graph.json` | `Meridian_IDENTITY-SOUL.graph.json` |
 |---|---|---|
-| Derivation | Production Embra (from `Embra_IDENTITY.md` + `Embra_SOUL.md`) | Authored control fixture (QNM dynamical-specificity test) |
+| Derivation | Production Embra (from `Embra_IDENTITY.md` + `Embra_SOUL.md`), naming no operator | Authored control fixture (QNM dynamical-specificity test) |
 | Nodes / edges | 100 / 354 | 100 / 349 |
 | Node types | 13 (trait, value, soul_line, behavior, principle, anti_pattern, …) | 13 entirely different (belief, craft_virtue, drive, failure_mode, horizon, …) |
 | Relations | 10 | 54 |
@@ -84,10 +84,19 @@ Where a relation you need matches one of the knowledge graph's brain-created
 edge types — `enables`, `refines`, `contradicts`, `depends_on`, `related_to`
 — prefer reusing it: those edges are first-class citizens of the existing
 traversal and retrieval semantics. Everything else imports as a free-form
-relation and traverses identically.
+relation and traverses identically. `supersedes` is a brain-created type
+too, but in an identity graph it is a relation name only: a declared
+supersession joins two knowledge nodes and is written by `knowledge_link`.
 
 ## Crafting guidance
 
+- **Name no operator.** Every operator who picks the file imports the same
+  text. An `operator` node describes the role; the person comes from
+  Learning Mode's first phase, whose `user_operator` node links to a node
+  named `operator` when the graph has one. A name, a private host or one
+  operator's projects in a node's text would describe someone else to
+  everyone else. `the_shipped_identities_name_no_operator` checks the
+  committed files.
 - **Soul lines must be nodes, not implications.** The sealed graph *is* the
   soul: an inviolable line that only exists as connotation across other
   nodes is not enforceable. Give each hard constraint its own node (Embra
