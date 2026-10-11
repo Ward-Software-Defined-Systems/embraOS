@@ -1067,11 +1067,60 @@ pub async fn session_delta(db: &WardsonDbClient, param: &str) -> String {
 
 /// Inventory and analysis of memory.entries.
 /// Param: optional tag filter.
-/// Cap on the O(n²) duplicate-candidate pass in `memory_scan`/`memory_dedup`.
-/// Applied to the newest entries (fetches are recency-sorted); without it a
-/// saturated 10k window would mean ~5×10⁷ substring checks and risk the
-/// global tool timeout.
-const MEMORY_SCAN_DUPE_SCAN_CAP: usize = 500;
+/// How many duplicate candidates `memory_scan` lists; it counts the rest, and
+/// `memory_dedup` lists every group.
+///
+/// Neither caps what it compares. A 500-entry cap compared the newest entries
+/// only and never the oldest, where duplicates collect (2026-10-11: 882 of
+/// 1,382 entries never compared). Every entry the fetch window read is
+/// compared; the pass is quadratic, half a microsecond per pair in a release
+/// build (`measure_the_quadratic_passes`): 1,382 entries took 0.46 s, the
+/// 10,000-entry window about 25 s. It runs on the blocking pool.
+const MEMORY_SCAN_CANDIDATES_SHOWN: usize = 10;
+
+/// Every entry pair where one entry's normalized text contains the other's:
+/// `(id, normalized text)` in, one report line per pair out.
+fn subset_candidates(normalized: &[(String, String)]) -> Vec<String> {
+    let mut dupes = Vec::new();
+    for i in 0..normalized.len() {
+        for j in (i + 1)..normalized.len() {
+            let (shorter, longer) = if normalized[i].1.len() <= normalized[j].1.len() {
+                (&normalized[i], &normalized[j])
+            } else {
+                (&normalized[j], &normalized[i])
+            };
+            if !shorter.1.is_empty() && longer.1.contains(&shorter.1) {
+                dupes.push(format!("  Subset: [{}] is contained in [{}]", shorter.0, longer.0));
+            }
+        }
+    }
+    dupes
+}
+
+/// `memory_scan`'s list of duplicate candidates: the count, the first
+/// `MEMORY_SCAN_CANDIDATES_SHOWN`, and how many more there are.
+fn candidates_section(dupes: &[String]) -> String {
+    let mut out = format!("\nDuplicate candidates ({}):\n", dupes.len());
+    for d in dupes.iter().take(MEMORY_SCAN_CANDIDATES_SHOWN) {
+        out.push_str(d);
+        out.push('\n');
+    }
+    if dupes.len() > MEMORY_SCAN_CANDIDATES_SHOWN {
+        out.push_str(&format!(
+            "  … and {} more; memory_dedup lists every group with a merge plan\n",
+            dupes.len() - MEMORY_SCAN_CANDIDATES_SHOWN
+        ));
+    }
+    out
+}
+
+/// What a scan says when the fetch window came back full: it compared what
+/// the window read, and older entries were not read.
+fn window_note(read: usize) -> String {
+    format!(
+        "the newest {read} entries were compared; older ones are past the read window"
+    )
+}
 
 pub async fn memory_scan(db: &WardsonDbClient, param: &str) -> String {
     ensure_collection(db, "memory.entries").await;
@@ -1092,6 +1141,7 @@ pub async fn memory_scan(db: &WardsonDbClient, param: &str) -> String {
     if entries.is_empty() {
         return "No memory entries found.".into();
     }
+    let window_full = crate::db::client::window_saturated(entries.len(), crate::db::MEMORY_FETCH_WINDOW);
 
     let tag_filter = if param.is_empty() {
         None
@@ -1172,17 +1222,11 @@ pub async fn memory_scan(db: &WardsonDbClient, param: &str) -> String {
         }
     }
 
-    // Duplicate candidates: find pairs where content is very similar.
-    // The pairwise pass is O(n²); at the 10k fetch window that's ~5×10⁷
-    // substring checks, so bound it to the newest entries (the fetch is
-    // newest-first). Tag/session/age stats above still use the full window.
-    let dupe_scan_truncated = entries.len() > MEMORY_SCAN_DUPE_SCAN_CAP;
-    let mut dupes = Vec::new();
-    let normalized: Vec<(usize, String, String)> = entries
+    // Duplicate candidates: every entry the window read is compared, on the
+    // blocking pool (the pass is quadratic; see MEMORY_SCAN_CANDIDATES_SHOWN).
+    let normalized: Vec<(String, String)> = entries
         .iter()
-        .take(MEMORY_SCAN_DUPE_SCAN_CAP)
-        .enumerate()
-        .map(|(i, doc)| {
+        .map(|doc| {
             let id = doc
                 .get("_id")
                 .or_else(|| doc.get("id"))
@@ -1197,29 +1241,10 @@ pub async fn memory_scan(db: &WardsonDbClient, param: &str) -> String {
                 .split_whitespace()
                 .collect::<Vec<_>>()
                 .join(" ");
-            (i, id, content)
+            (id, content)
         })
         .collect();
-
-    for i in 0..normalized.len() {
-        for j in (i + 1)..normalized.len() {
-            let (shorter, longer) = if normalized[i].2.len() <= normalized[j].2.len() {
-                (&normalized[i], &normalized[j])
-            } else {
-                (&normalized[j], &normalized[i])
-            };
-
-            if !shorter.2.is_empty() && longer.2.contains(&shorter.2) {
-                dupes.push(format!(
-                    "  Subset: [{}] is contained in [{}]",
-                    shorter.1, longer.1
-                ));
-            }
-        }
-        if dupes.len() >= 10 {
-            break;
-        }
-    }
+    let dupes = tokio::task::spawn_blocking(move || subset_candidates(&normalized)).await;
 
     // Format output
     let mut output = format!("Memory Scan Report\n==================\n\nTotal entries: {}\n", total);
@@ -1250,19 +1275,19 @@ pub async fn memory_scan(db: &WardsonDbClient, param: &str) -> String {
         output.push_str(&format!("  {}: {}\n", session, count));
     }
 
-    if dupe_scan_truncated {
-        output.push_str(&format!(
-            "\n(duplicate scan limited to the {} most-recent entries)\n",
-            MEMORY_SCAN_DUPE_SCAN_CAP
-        ));
+    if window_full {
+        output.push_str(&format!("\n({})\n", window_note(crate::db::MEMORY_FETCH_WINDOW)));
     }
-    if !dupes.is_empty() {
-        output.push_str(&format!("\nDuplicate candidates ({}):\n", dupes.len()));
-        for d in &dupes {
-            output.push_str(d);
-            output.push('\n');
+    let (dupes, scan_failed) = match dupes {
+        Ok(dupes) => (dupes, false),
+        Err(e) => {
+            output.push_str(&format!("\n(the duplicate scan failed: {e})\n"));
+            (Vec::new(), true)
         }
-    } else {
+    };
+    if !dupes.is_empty() {
+        output.push_str(&candidates_section(&dupes));
+    } else if !scan_failed {
         output.push_str("\nNo duplicate candidates detected.\n");
     }
 
@@ -1285,6 +1310,57 @@ struct NormalizedEntry {
     created_at: String,
     /// The node the entry was promoted to, `(collection, id)`.
     node: Option<(&'static str, String)>,
+}
+
+/// The duplicate groups among `normalized`, each with its strategy: the
+/// first entry of a group and every later one whose normalized text is the
+/// same (Identical) or contains or is contained in it (Subset). An entry
+/// joins one group at most.
+fn duplicate_groups(normalized: &[NormalizedEntry]) -> Vec<(String, Vec<usize>)> {
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    let mut used = vec![false; normalized.len()];
+    for i in 0..normalized.len() {
+        if used[i] || normalized[i].normalized.is_empty() {
+            continue;
+        }
+        let mut group = vec![i];
+        let mut strategy = String::new();
+
+        for j in (i + 1)..normalized.len() {
+            if used[j] || normalized[j].normalized.is_empty() {
+                continue;
+            }
+
+            if normalized[i].normalized == normalized[j].normalized {
+                group.push(j);
+                strategy = "Identical".into();
+            } else {
+                let (shorter, longer) = if normalized[i].normalized.len()
+                    <= normalized[j].normalized.len()
+                {
+                    (&normalized[i].normalized, &normalized[j].normalized)
+                } else {
+                    (&normalized[j].normalized, &normalized[i].normalized)
+                };
+
+                if longer.contains(shorter.as_str()) {
+                    group.push(j);
+                    strategy = "Subset".into();
+                }
+            }
+        }
+
+        if group.len() > 1 {
+            for &idx in &group {
+                used[idx] = true;
+            }
+            if strategy.is_empty() {
+                strategy = "Near-duplicate".into();
+            }
+            groups.push((strategy, group));
+        }
+    }
+    groups
 }
 
 /// The entry a duplicate group keeps: one that has a node before one that
@@ -1343,8 +1419,8 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
 
     // FIX-8 (spec-gap sibling of FIX-3): the old empty body froze this tool
     // on the server's default window of the OLDEST 100 entries. Explicit
-    // recency window; the pairwise pass below is O(n²) so the no-param path
-    // is additionally capped to the newest MEMORY_SCAN_DUPE_SCAN_CAP.
+    // recency window; every entry it read is compared (the quadratic pass
+    // runs on the blocking pool; see MEMORY_SCAN_CANDIDATES_SHOWN).
     let all_entries = db
         .fetch_recent("memory.entries", crate::db::MEMORY_FETCH_WINDOW)
         .await
@@ -1355,10 +1431,10 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
     }
 
     // Filter to specific IDs if provided
-    let mut dedup_scan_truncated = false;
+    let window_full = param.is_empty()
+        && crate::db::client::window_saturated(all_entries.len(), crate::db::MEMORY_FETCH_WINDOW);
     let entries: Vec<&serde_json::Value> = if param.is_empty() {
-        dedup_scan_truncated = all_entries.len() > MEMORY_SCAN_DUPE_SCAN_CAP;
-        all_entries.iter().take(MEMORY_SCAN_DUPE_SCAN_CAP).collect()
+        all_entries.iter().collect()
     } else {
         let ids: Vec<&str> = param.split(',').map(|s| s.trim()).collect();
         all_entries
@@ -1420,57 +1496,19 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
         })
         .collect();
 
-    // Find duplicate groups
-    let mut groups: Vec<(String, Vec<usize>)> = Vec::new(); // (strategy, indices)
+    // Find duplicate groups, on the blocking pool: the pass is quadratic.
+    let (normalized, groups) = match tokio::task::spawn_blocking(move || {
+        let groups = duplicate_groups(&normalized);
+        (normalized, groups)
+    })
+    .await
+    {
+        Ok(compared) => compared,
+        Err(e) => return format!("memory_dedup failed while comparing entries: {e}"),
+    };
 
-    let mut used = vec![false; normalized.len()];
-    for i in 0..normalized.len() {
-        if used[i] || normalized[i].normalized.is_empty() {
-            continue;
-        }
-        let mut group = vec![i];
-        let mut strategy = String::new();
-
-        for j in (i + 1)..normalized.len() {
-            if used[j] || normalized[j].normalized.is_empty() {
-                continue;
-            }
-
-            if normalized[i].normalized == normalized[j].normalized {
-                group.push(j);
-                strategy = "Identical".into();
-            } else {
-                let (shorter, longer) = if normalized[i].normalized.len()
-                    <= normalized[j].normalized.len()
-                {
-                    (&normalized[i].normalized, &normalized[j].normalized)
-                } else {
-                    (&normalized[j].normalized, &normalized[i].normalized)
-                };
-
-                if longer.contains(shorter.as_str()) {
-                    group.push(j);
-                    strategy = "Subset".into();
-                }
-            }
-        }
-
-        if group.len() > 1 {
-            for &idx in &group {
-                used[idx] = true;
-            }
-            if strategy.is_empty() {
-                strategy = "Near-duplicate".into();
-            }
-            groups.push((strategy, group));
-        }
-    }
-
-    let scan_note = if dedup_scan_truncated {
-        format!(
-            " (scan limited to the {} most-recent entries)",
-            MEMORY_SCAN_DUPE_SCAN_CAP
-        )
+    let scan_note = if window_full {
+        format!(" ({})", window_note(crate::db::MEMORY_FETCH_WINDOW))
     } else {
         String::new()
     };
@@ -1519,13 +1557,13 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
     // Cross-collection duplicate detection (Sprint 2): flag unpromoted entries whose
     // normalized content is a subset/superset of an existing semantic node's content.
     // Same recency-window treatment as the main pass (FIX-8): the old empty body
-    // froze this check on the oldest-100 semantic nodes; the O(entries × semantic)
-    // comparison is bounded to the newest MEMORY_SCAN_DUPE_SCAN_CAP nodes.
-    let mut semantic = db
+    // froze this check on the oldest-100 semantic nodes. Every node the window
+    // read is compared; the comparison is O(unpromoted entries × nodes), and
+    // since promotion at creation an entry without a node is rare.
+    let semantic = db
         .fetch_recent("memory.semantic", crate::db::MEMORY_FETCH_WINDOW)
         .await
         .unwrap_or_default();
-    semantic.truncate(MEMORY_SCAN_DUPE_SCAN_CAP);
     if !semantic.is_empty() {
         let cross_dupes = cross_collection_overlaps(&normalized, &semantic);
         if !cross_dupes.is_empty() {
@@ -1542,7 +1580,10 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
 
 #[cfg(test)]
 mod memory_dedup_tests {
-    use super::{cross_collection_overlaps, keep_index, NormalizedEntry, DEDUP_EXECUTION_NOTE};
+    use super::{
+        candidates_section, cross_collection_overlaps, duplicate_groups, keep_index, subset_candidates,
+        window_note, NormalizedEntry, DEDUP_EXECUTION_NOTE, MEMORY_SCAN_CANDIDATES_SHOWN,
+    };
     use serde_json::json;
 
     fn entry(id: &str, text: &str, created_at: &str, node: Option<&str>) -> NormalizedEntry {
@@ -1554,6 +1595,55 @@ mod memory_dedup_tests {
             created_at: created_at.into(),
             node: node.map(|n| ("memory.semantic", n.to_string())),
         }
+    }
+
+    /// Newest first, as the window reads them: 600 distinct entries, then a
+    /// duplicate pair at the oldest end, past where the old 500 cap stopped.
+    fn entries_with_an_old_pair() -> Vec<NormalizedEntry> {
+        let mut out: Vec<NormalizedEntry> = (0..600)
+            .map(|i| entry(&format!("e{i}"), &format!("distinct note number {i} alpha{i}"), "2026-10-01T00:00:00Z", None))
+            .collect();
+        out.push(entry("old1", "the cert refresh works after manual generation", "2026-06-01T00:00:00Z", None));
+        out.push(entry("old2", "the cert refresh works after manual generation", "2026-05-01T00:00:00Z", None));
+        out
+    }
+
+    #[test]
+    fn every_entry_is_compared_the_oldest_included() {
+        let entries = entries_with_an_old_pair();
+        let groups = duplicate_groups(&entries);
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0].0, "Identical");
+        assert_eq!(groups[0].1, vec![600, 601]);
+        let pairs: Vec<(String, String)> =
+            entries.iter().map(|e| (e.id.clone(), e.normalized.clone())).collect();
+        let dupes = subset_candidates(&pairs);
+        assert_eq!(dupes, vec!["  Subset: [old1] is contained in [old2]".to_string()]);
+    }
+
+    /// The scan no longer stops at its tenth candidate: it finds all of them
+    /// and the report lists ten and counts the rest.
+    #[test]
+    fn every_candidate_is_found_and_the_report_counts_the_rest() {
+        let pairs: Vec<(String, String)> = (0..12)
+            .flat_map(|i| {
+                [(format!("short{i}"), format!("topic{i} words")), (format!("long{i}"), format!("topic{i} words and more"))]
+            })
+            .collect();
+        let dupes = subset_candidates(&pairs);
+        assert_eq!(dupes.len(), 12);
+        let section = candidates_section(&dupes);
+        assert!(section.starts_with("\nDuplicate candidates (12):\n"), "{section}");
+        assert_eq!(section.matches("  Subset:").count(), MEMORY_SCAN_CANDIDATES_SHOWN);
+        assert!(section.ends_with("  … and 2 more; memory_dedup lists every group with a merge plan\n"), "{section}");
+    }
+
+    #[test]
+    fn a_full_window_is_named_as_the_bound() {
+        assert_eq!(
+            window_note(10_000),
+            "the newest 10000 entries were compared; older ones are past the read window"
+        );
     }
 
     #[test]

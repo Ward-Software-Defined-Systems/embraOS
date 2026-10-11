@@ -45,10 +45,6 @@ use super::types::{content_preview, EdgeType, SESSION_DELETED_TAG, SUPERSESSION_
 /// `ORPHAN_SCAN_PAGE` (well under the server's 100k `--max-query-limit`,
 /// bounds per-page memory).
 const AUDIT_SCAN_PAGE: usize = 20_000;
-/// Pairwise dedup/rot cap per `(collection, category)` group,
-/// newest-first — precedent `MEMORY_SCAN_DUPE_SCAN_CAP` (tools/sessions.rs).
-/// The largest production group today (observation, 369) fits uncapped.
-const AUDIT_PAIRWISE_CAP: usize = 500;
 const AUDIT_MAX_RESULTS_DEFAULT: usize = 50;
 const AUDIT_MAX_RESULTS_CEILING: usize = 200;
 const AUDIT_MIN_SIMILARITY_DEFAULT: f64 = 0.75;
@@ -552,13 +548,21 @@ struct PairwiseFindings {
     dedup_total: usize,
     /// older node → its best newer near-duplicate (rot's only witness).
     supersessions: HashMap<NodeKey, Supersession>,
-    warnings: Vec<String>,
 }
 
 /// Dedup and rot's supersession probe share one pairwise pass per
 /// `(collection, category)` group (pairs never cross groups). History is
-/// left out before the cap. Groups iterate in sorted key order and nodes
-/// keep their newest-first fetch order, so output is deterministic.
+/// left out; every other node the window read is compared. Groups iterate
+/// in sorted key order and nodes keep their newest-first fetch order, so
+/// output is deterministic.
+///
+/// The pass is quadratic: about a microsecond per pair in a release build
+/// (`measure_the_quadratic_passes`, 2026-10-11). The 518 observations of
+/// that day's backup took 0.14 s, 2,000 nodes take 2 s, and a category
+/// filling the 10,000-node window about 50 s. It runs on the blocking pool.
+/// A cap of the 500 newest per group stood here until then: it compared the
+/// newest nodes and never the oldest, where duplicates and stale content
+/// collect.
 fn pairwise_findings(
     nodes: &[NodeMeta],
     agg: &EdgeAggregates,
@@ -586,19 +590,9 @@ fn pairwise_findings(
 
     for key in keys {
         let group = &groups[&key];
-        if group.len() > AUDIT_PAIRWISE_CAP {
-            out.warnings.push(format!(
-                "pairwise pass (dedup and rot's near-duplicate probe) limited to the {} newest of {} nodes in {}/{}",
-                AUDIT_PAIRWISE_CAP,
-                group.len(),
-                key.0,
-                key.1
-            ));
-        }
-        let capped = &group[..group.len().min(AUDIT_PAIRWISE_CAP)];
-        for i in 0..capped.len() {
-            for j in (i + 1)..capped.len() {
-                let (a, b) = (capped[i], capped[j]);
+        for i in 0..group.len() {
+            for j in (i + 1)..group.len() {
+                let (a, b) = (group[i], group[j]);
                 // Two deletion records are two events: never a duplicate or
                 // a supersession.
                 if is_deletion_record(a) && is_deletion_record(b) {
@@ -875,14 +869,15 @@ pub(crate) async fn run_knowledge_audit(
     }
 
     let want = |c: AuditCheck| checks.contains(&c);
-    let pairwise = pairwise_findings(
-        &nodes,
-        &agg,
-        &history,
-        min_similarity,
-        want(AuditCheck::Dedup),
-        want(AuditCheck::Rot),
-    );
+    // The pairwise pass is quadratic and CPU-bound: it runs on the blocking
+    // pool, not on a runtime worker, and hands its inputs back.
+    let (want_dedup, want_rot) = (want(AuditCheck::Dedup), want(AuditCheck::Rot));
+    let (pairwise, nodes, agg, history) = tokio::task::spawn_blocking(move || {
+        let pairwise = pairwise_findings(&nodes, &agg, &history, min_similarity, want_dedup, want_rot);
+        (pairwise, nodes, agg, history)
+    })
+    .await
+    .map_err(|e| format!("audit failed in its pairwise pass: {e}"))?;
     let orphans = if want(AuditCheck::Orphans) {
         orphan_findings(&nodes, &agg, now)
     } else {
@@ -893,7 +888,6 @@ pub(crate) async fn run_knowledge_audit(
     } else {
         Vec::new()
     };
-    warnings.extend(pairwise.warnings);
 
     let (orphan_total, rot_total) = (orphans.len(), rot.len());
     let issues_found = pairwise.dedup_total + orphan_total + rot_total;
@@ -1548,17 +1542,22 @@ mod tests {
         assert_eq!(orphan_findings(&plain, &no_edges, now()).len(), 2);
     }
 
+    /// Every node is compared, the oldest included: a category past the
+    /// old cap of 500 still finds the pair at its far end.
     #[test]
-    fn pairwise_cap_takes_newest_and_warns() {
-        // Nodes arrive newest-first from fetch_recent; the cap keeps the
-        // head of that order and says so.
-        let nodes: Vec<NodeMeta> = (0..(AUDIT_PAIRWISE_CAP + 3))
-            .map(|i| meta("memory.semantic", &format!("n{}", i), "fact", "t", "body words here", &[]))
+    fn a_category_larger_than_the_old_cap_is_compared_in_full() {
+        // Newest first, as the window reads them: 600 distinct nodes, then
+        // two duplicates at the oldest end.
+        let mut nodes: Vec<NodeMeta> = (0..600)
+            .map(|i| meta("memory.semantic", &format!("n{i}"), "fact", "t", &format!("alpha{i} beta{i} gamma{i}"), &[]))
             .collect();
-        let found = pairwise_findings(&nodes, &EdgeAggregates::default(), &HashSet::new(), 0.99, true, false);
-        assert_eq!(found.warnings.len(), 1);
-        assert!(found.warnings[0].contains("newest"));
-        assert!(found.warnings[0].contains(&format!("{}", AUDIT_PAIRWISE_CAP)));
+        for id in ["old1", "old2"] {
+            nodes.push(meta("memory.semantic", id, "fact", "same title", "identical old body content tokens", &["tag1"]));
+        }
+        let found = pairwise_findings(&nodes, &EdgeAggregates::default(), &HashSet::new(), 0.99, true, true);
+        assert_eq!(found.dedup_total, 1);
+        assert_eq!(found.dedup[0]["node_a"]["id"], "old1");
+        assert_eq!(found.dedup[0]["node_b"]["id"], "old2");
     }
 
     #[test]
@@ -1587,6 +1586,82 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&report).expect("a JSON report");
         let shown = json!({"summary": v["summary"], "stats": v["stats"], "warnings": v["warnings"]});
         println!("{}", serde_json::to_string_pretty(&shown).expect("prints"));
+    }
+
+    /// Measures what the quadratic passes cost on an instance's own data:
+    /// the audit's `dedup_score` over every pair of the largest category, then
+    /// over that category replicated to larger sizes; and the entry scans'
+    /// comparison (whitespace-normalized equality and containment, as
+    /// `memory_scan` and `memory_dedup` run it) over every entry pair. Run it
+    /// in release, against a copy:
+    ///
+    /// `EMBRA_AUDIT_DB=http://127.0.0.1:18092 cargo test --release -p embra-brain measure_the_quadratic_passes -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "a measurement against a copy of an instance's data"]
+    async fn measure_the_quadratic_passes() {
+        let url = std::env::var("EMBRA_AUDIT_DB").expect("EMBRA_AUDIT_DB=<url of the copy>");
+        let db = WardsonDbClient::from_url(&url);
+        let docs = db.fetch_recent("memory.semantic", MEMORY_FETCH_WINDOW).await.expect("nodes");
+        let nodes: Vec<NodeMeta> = docs.iter().filter_map(|d| parse_node_meta(d, "memory.semantic")).collect();
+        let mut by_category: HashMap<&str, Vec<&NodeMeta>> = HashMap::new();
+        for n in &nodes {
+            by_category.entry(n.category.as_str()).or_default().push(n);
+        }
+        let (category, group) = by_category.iter().max_by_key(|(_, g)| g.len()).expect("a category");
+        println!("nodes {}, largest category {category} with {}", nodes.len(), group.len());
+        let time_pairs = |group: &[&NodeMeta]| {
+            let started = std::time::Instant::now();
+            let mut over = 0usize;
+            for i in 0..group.len() {
+                for j in (i + 1)..group.len() {
+                    if dedup_score(group[i], group[j]).0 >= AUDIT_MIN_SIMILARITY_DEFAULT {
+                        over += 1;
+                    }
+                }
+            }
+            let pairs = group.len() * group.len().saturating_sub(1) / 2;
+            let took = started.elapsed();
+            println!(
+                "audit pairs: n={:>5} pairs={:>10} took={:>9.3}s per_pair={:>6.0}ns near-duplicates={over}",
+                group.len(),
+                pairs,
+                took.as_secs_f64(),
+                took.as_nanos() as f64 / pairs.max(1) as f64
+            );
+        };
+        time_pairs(group);
+        for size in [2_000usize, 5_000] {
+            let replicated: Vec<&NodeMeta> = group.iter().cycle().take(size).copied().collect();
+            time_pairs(&replicated);
+        }
+
+        let entries = db.fetch_recent("memory.entries", MEMORY_FETCH_WINDOW).await.expect("entries");
+        let normalized: Vec<String> = entries
+            .iter()
+            .map(|d| {
+                d.get("content").and_then(|v| v.as_str()).unwrap_or("").to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let mut matches = 0usize;
+        for i in 0..normalized.len() {
+            for j in (i + 1)..normalized.len() {
+                let (a, b) = (&normalized[i], &normalized[j]);
+                let (shorter, longer) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+                if !shorter.is_empty() && (a == b || longer.contains(shorter.as_str())) {
+                    matches += 1;
+                }
+            }
+        }
+        let pairs = normalized.len() * normalized.len().saturating_sub(1) / 2;
+        let took = started.elapsed();
+        println!(
+            "entry pairs: n={:>5} pairs={:>10} took={:>9.3}s per_pair={:>6.0}ns identical-or-contained={matches}",
+            normalized.len(),
+            pairs,
+            took.as_secs_f64(),
+            took.as_nanos() as f64 / pairs.max(1) as f64
+        );
     }
 
     #[test]
