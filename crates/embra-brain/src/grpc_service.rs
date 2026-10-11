@@ -4814,13 +4814,15 @@ async fn advance_to_probe(
         }
     };
 
-    // Pre-select current model if still in the list, else first.
-    let default_model = state
-        .current_model
-        .as_ref()
-        .filter(|m| models.iter().any(|x| x == *m))
-        .cloned()
-        .unwrap_or_else(|| models[0].clone());
+    // The current model, when the server still lists it, leads the list
+    // and is the default: the console's selector starts on the first
+    // option whatever the default, so Enter keeps the model.
+    let mut models = models;
+    if let Some(at) = state.current_model.as_ref().and_then(|c| models.iter().position(|m| m == c)) {
+        let listed = models.remove(at);
+        models.insert(0, listed);
+    }
+    let default_model = models[0].clone();
 
     let _ = tx
         .send(Ok(ConversationResponse {
@@ -5613,20 +5615,22 @@ fn local_model_choice(
 }
 
 /// The selector `/model` shows for a local server, and the reconfigure
-/// state that receives the pick at its model step: the current model
-/// chosen when the server still lists it, the endpoint and bearer kept.
+/// state that receives the pick at its model step: the endpoint and
+/// bearer kept. The current model, when the server still lists it, is the
+/// first option as well as the default: the console's selector starts on
+/// the first option whatever the default, so Enter keeps the model.
 fn local_model_selection(
     preset: crate::provider::openai_compat::OpenAiCompatPreset,
     endpoint: String,
     bearer: Option<String>,
     current: Option<String>,
-    models: Vec<String>,
+    mut models: Vec<String>,
 ) -> (SetupPrompt, OpenAiCompatSetupState) {
-    let default_value = current
-        .as_ref()
-        .filter(|m| models.contains(m))
-        .cloned()
-        .unwrap_or_else(|| models.first().cloned().unwrap_or_default());
+    if let Some(at) = current.as_ref().and_then(|c| models.iter().position(|m| m == c)) {
+        let listed = models.remove(at);
+        models.insert(0, listed);
+    }
+    let default_value = models.first().cloned().unwrap_or_default();
     let prompt = SetupPrompt {
         field_type: SetupFieldType::Selector as i32,
         prompt: format!("Select an {} model:", preset.label()),
@@ -8936,6 +8940,32 @@ mod setup_reconfigure_tests {
         assert_eq!(prompt.default_value, "new-a");
     }
 
+    /// The console's selector starts on the first option whatever the
+    /// default: the current model leads the list, so Enter keeps it.
+    #[tokio::test]
+    async fn the_current_model_leads_the_wizards_list() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "object": "list",
+                "data": [{"id": "a"}, {"id": "b"}, {"id": "c"}]
+            })))
+            .mount(&server)
+            .await;
+        let mut state = make_state(
+            OpenAiCompatPreset::LmStudio,
+            Some(&server.uri()),
+            None,
+            Some("c"),
+            OpenAiCompatSetupStep::AwaitingBearerChoice { endpoint: server.uri() },
+        );
+        let (events, _) = run_step(&mut state, BEARER_SKIP).await;
+        let prompt = last_setup_prompt(&events).expect("expected Selector");
+        assert_eq!(prompt.options, vec!["c".to_string(), "a".to_string(), "b".to_string()]);
+        assert_eq!(prompt.default_value, "c");
+    }
+
     // ===========================================================
     // `/model` on a local server: the reconfigure flow's model step alone
     // ===========================================================
@@ -8976,7 +9006,9 @@ mod setup_reconfigure_tests {
         );
         assert_eq!(prompt.field_type, SetupFieldType::Selector as i32);
         assert_eq!(prompt.prompt, "Select an LM Studio model:");
-        assert_eq!(prompt.options, names(&["gemma4-31b", "qwen3.8-27b"]));
+        // The current model leads: the console's selector starts on the
+        // first option, so Enter keeps the model.
+        assert_eq!(prompt.options, names(&["qwen3.8-27b", "gemma4-31b"]));
         assert_eq!(prompt.default_value, "qwen3.8-27b");
         assert!(state.model_only);
         let OpenAiCompatSetupStep::AwaitingModelSelection { endpoint, bearer, models } = &state.step else {

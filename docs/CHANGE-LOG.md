@@ -35,11 +35,12 @@ Since the fast-forward of 2026-10-03 `main` also carries the code-review pit sto
   - **With a name**, it switches to that model when the server lists it: the exact name, or the one listed name that matches ignoring case. Anything else is refused, and the refusal shows the list.
   - **Either way**, the preset's model is persisted, the provider is probed again, and the status bar is refreshed.
   - **Gemini** runs one model and says so.
+  - **The console's selector starts on the first option** whatever the default. The current model now leads the list, both in `/model`'s selector and in `/provider --setup`'s model step, so Enter keeps the model.
   - The `/help` text, the console's command list, the web console's `/model` form and COMMAND-REFERENCE say the same.
-  - Guards: `a_local_model_must_be_one_the_server_lists`, `model_selection_starts_at_the_model_step_and_keeps_the_endpoint_and_bearer`, `a_model_only_pick_outside_the_list_ends_the_flow`, `a_model_only_pick_moves_the_model_alone`.
+  - Guards: `a_local_model_must_be_one_the_server_lists`, `model_selection_starts_at_the_model_step_and_keeps_the_endpoint_and_bearer`, `a_model_only_pick_outside_the_list_ends_the_flow`, `a_model_only_pick_moves_the_model_alone`, `the_current_model_leads_the_wizards_list`.
 - **The example hosts are generic** (`bb9753f`). The web console's `/guardian egress` form and `docs/GUARDIAN-HTTP-REQUEST-EXAMPLE.md` use `gitlab.example.com`.
 
-No tool description or system prompt changed; the manifest pin and the prompt goldens stand. Tests: brain 1,412, console 64. The web console's wasm lint and release build pass. Live in QEMU: TBD. The checks:
+No tool description or system prompt changed; the manifest pin and the prompt goldens stand. Tests: brain 1,413, console 64. The web console's wasm lint and release build pass. Live in QEMU: TBD. The checks:
 - `/model` on Ollama and on LM Studio shows the server's models, and a pick switches the model;
 - `/model <name>` switches, and refuses a name the server does not list;
 - the status bar shows the new model.
