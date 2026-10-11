@@ -90,6 +90,8 @@ pub const KNOWN_HTTP_REQUEST_SHA256: &[&str] = &[
     "178c62efb322d2a85cccd82a0c5d9b2689748e5dcfe85ec2f56d1983a00d5568",
     // 2026-10-11: injection_signals name what the scan found; the flag is false unless it matched
     "dc9a2f43013f7f5612f5d1bb0738949c54a4174f6b4c34b548363163d63c6c47",
+    // 2026-10-11: a JSON body is read as JSON (scan_json), any other body as text
+    "82d0bdbfa997356cf598cd3ed8b3d91c99d688ba4f82e5a93ae79ae13f184b67",
 ];
 
 /// The doc page a shipped tool's module is mirrored on, byte for byte.

@@ -43,13 +43,17 @@ Since the fast-forward of 2026-10-03 `main` also carries the code-review pit sto
   - The two shipped tools take it at the next boot, since their sources moved.
   - A tool built before keeps 8 MiB until it is rebuilt (`/guardian rebuild --all`).
   - The seed node `seed_guardian_runtime_model` gives the intelligence the new size; an unedited seed node is revised in place at the next boot.
-- **A JSON escape no longer hides a word** (`9ec6834`, found while planning). The scan reads an API body as JSON text, where `\n\nIgnore all previous instructions` read as `nIgnore` and passed. An escape is now taken whole: `\\`, `\"` and `\/` as pairs, `\n`, `\r` and `\t`, and `\u` with four hex digits. `\b` and `\f` are left alone, so a `\b` regex stays clean. A marker split by a line break is still not found.
+- **A JSON escape no longer hides a word in a JSON body** (`9ec6834` and the commit after this entry's, found while planning). `http_request` scans an API body as sent, and in JSON text `\n\nIgnore all previous instructions` read as `nIgnore` and passed.
+  - A JSON body (`application/json`, `application/x-ndjson`, `application/*+json`) is now read by `inject::scan_json`, which takes an escape whole: `\\`, `\"` and `\/` as pairs, `\n`, `\r` and `\t`, and `\u` with four hex digits. `\b` and `\f` are left alone.
+  - `9ec6834` first applied the rule to every text. On `web_search`'s fields and reduced pages, which are decoded text, a backslash before a word then hid it: "forget C:\rules" lost its flag. Before anything was pushed, the rule was scoped to JSON bodies.
+  - Decoded text reads exactly as it did before this wave. Against the earlier scanner, 600,000 generated texts (465,000 with a backslash) show 0 differences, and the rebuilt `web_search.wasm` is byte-identical to the build before the escape rule.
+  - A marker split by a line break is still not found.
 - **A fixture names every build input.** `scaffold::inputs_sha256` hashes every file the scaffold writes. A sidecar beside each shipped fixture holds it, so a helper or prelude change without a rebuild fails the build; the source hash alone let a stale fixture pass.
 - **Guards:**
   - `scan_names_what_the_text_carries_in_the_lists_spelling`, `scrub_and_scan_name_the_same_things`, `a_commit_history_that_mentions_the_system_prompt_names_a_mention`, `signals_are_merged_across_fields_in_order_once_each`;
   - `the_one_pass_rewrite_gives_what_the_sequential_one_gave`, `the_rewrite_is_sized_once`, `a_text_at_the_host_cap_holds_one_copy_whatever_it_finds`;
   - `the_arena_fits_the_per_call_cap`, `twenty_fetched_pages_fit_the_arena`;
-  - `a_json_escape_before_a_word_hides_nothing`;
+  - `a_json_escape_before_a_word_hides_nothing`, `a_backslash_in_decoded_text_is_a_character`, `a_json_body_is_read_as_json_and_any_other_as_text`, `a_backslash_in_a_result_is_a_character`;
   - `the_fixture_was_built_with_the_current_helpers`.
 - No tool manifest or prompt changed: Guardian descriptions reach the model through `guardian_list`.
 - Live in QEMU: TBD.

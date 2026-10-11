@@ -200,12 +200,16 @@ inject::scan(text: &str) -> Vec<String>
 // lists and never copied from the text: "directive: ignore … instructions",
 // "marker: you are now", "mentions: system prompt". Empty when nothing
 // matched. scrub(text).1 == scan(text).
+inject::scan_json(text: &str) -> Vec<String>
+// scan for JSON text as it was sent (an API body): an escape is read whole,
+// so "\n\nIgnore all previous instructions" is found. In decoded text use
+// scan or scrub, where a backslash is a character.
 inject::redact(text: &str) -> (String, bool)
 inject::flagged(text: &str) -> bool
 // scrub and scan with a bool in place of the names.
 // A lexical pass, and it says so: a typoglycemia, spaced-out or base64
 // directive passes. The shipped web_search uses scrub; http_request uses
-// scrub on a page and scan on data.
+// scrub on a page, scan_json on a JSON body and scan on any other.
 ```
 
 ## Minimal template

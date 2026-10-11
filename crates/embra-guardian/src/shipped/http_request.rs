@@ -68,14 +68,17 @@ fn run(input: &str) -> String {
         }
         ("text", json::s(&clean[..end]), found)
     } else {
-        // Data: as sent, nothing rewritten; the names are the signal.
+        // Data: as sent, nothing rewritten; the names are the signal. A
+        // JSON body is read as JSON, so an escape before a word hides
+        // nothing; any other body is read as text.
         let end = cut_at(body, BODY_CAP);
         if end < body.len() {
             truncated.push(("body", json::n(BODY_CAP as f64)));
         } else if let Some(n) = host_cut {
             truncated.push(("body", json::n(n as f64)));
         }
-        ("body", json::s(&body[..end]), inject::scan(body))
+        let found = if is_json(content_type) { inject::scan_json(body) } else { inject::scan(body) };
+        ("body", json::s(&body[..end]), found)
     };
     out.push((key, value));
     if !truncated.is_empty() {
@@ -93,6 +96,16 @@ fn run(input: &str) -> String {
 fn is_html(content_type: &str) -> bool {
     let ct = content_type.trim().to_ascii_lowercase();
     ct.starts_with("text/html") || ct.starts_with("application/xhtml+xml")
+}
+
+/// The JSON media types the host lets through: JSON, NDJSON and any
+/// `application/*+json`.
+fn is_json(content_type: &str) -> bool {
+    let ct = content_type.trim().to_ascii_lowercase();
+    let mt = ct.split(';').next().unwrap_or("").trim();
+    mt == "application/json"
+        || mt == "application/x-ndjson"
+        || (mt.starts_with("application/") && mt.ends_with("+json"))
 }
 
 /// Where to cut `s` so that at most `limit` bytes remain, on a character

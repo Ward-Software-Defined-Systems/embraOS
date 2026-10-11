@@ -9,8 +9,10 @@
 // nouns only with a qualifier between — the structural markers of an
 // injected turn, and a mention of a system prompt. `scrub` rewrites the
 // directives and the markers of a text the model will read; `scan`
-// rewrites nothing, for data that must stay as sent. Both name what they
-// found, spelled from the lists below and never copied from the text. A
+// rewrites nothing, for data that must stay as sent; `scan_json` is `scan`
+// for JSON text, where an escape before a word must not hide it. All three
+// name what they found, spelled from the lists below and never copied from
+// the text. A
 // typoglycemia, spaced-out or base64 directive passes; the names are the
 // signal a caller weighs. Decoded text in, never markup: run
 // `html_text::to_text` first on a page.
@@ -67,9 +69,15 @@ const MENTION_NAME: &str = "mentions: ";
 /// once; empty when nothing was found. Nothing is rewritten: for data that
 /// must stay as it was sent.
 pub fn scan(s: &str) -> Vec<String> {
-    let mut pairs: Vec<(&'static str, &'static str)> = vec![];
-    directives(s, |_, pair| note(&mut pairs, pair));
-    names(s, &pairs)
+    names(s, &pairs_of(s, false))
+}
+
+/// [`scan`] for JSON text as it was sent: an escape is read whole, so the
+/// letter of `\n` never starts the next word ("\n\nIgnore all previous
+/// instructions" is a directive). Decoded text keeps [`scan`], where a
+/// backslash is a character.
+pub fn scan_json(s: &str) -> Vec<String> {
+    names(s, &pairs_of(s, true))
 }
 
 /// The text with every directive and structural marker rewritten to
@@ -98,6 +106,13 @@ pub fn redact(s: &str) -> (String, bool) {
 /// [`scan`] without the names.
 pub fn flagged(s: &str) -> bool {
     !scan(s).is_empty()
+}
+
+/// The directives of `s`, as (verb, object) pairs, each once.
+fn pairs_of(s: &str, json: bool) -> Vec<(&'static str, &'static str)> {
+    let mut pairs: Vec<(&'static str, &'static str)> = vec![];
+    directives(s, json, |_, pair| note(&mut pairs, pair));
+    pairs
 }
 
 /// The names of what `s` carries: the directives found, as (verb, object)
@@ -147,7 +162,7 @@ fn note(pairs: &mut Vec<(&'static str, &'static str)>, pair: (&'static str, &'st
 /// inside a directive goes with it.
 fn rewrite(s: &str, markers: &[&str], mut emit: impl FnMut(&str)) {
     let mut last = 0;
-    directives(s, |(a, z), _| {
+    directives(s, false, |(a, z), _| {
         markers_between(s, last, a, markers, &mut emit);
         emit(MARKER);
         last = z;
@@ -184,14 +199,15 @@ fn markers_between<F: FnMut(&str)>(s: &str, from: usize, to: usize, markers: &[&
 /// directive in `s`, in order: each span from its verb through its object
 /// (and a possessive on the object), each word spelled as its list spells
 /// it. Words are runs of ASCII letters and digits; everything else
-/// separates them, a JSON escape whole (`separator_len`). A DIRECTIVE_VERBS word followed within DIRECTIVE_WINDOW
+/// separates them, and in JSON text (`json`) an escape whole
+/// (`separator_len`). A DIRECTIVE_VERBS word followed within DIRECTIVE_WINDOW
 /// words by a strong object, or by a weak object with a qualifier between
 /// them, is one directive. One pass over the words, keeping the last
 /// DIRECTIVE_WINDOW + 1: the text is never tokenized whole, so a body of a
 /// megabyte costs the guest no more memory than a line (the arena never
 /// frees). An object matches the oldest verb whose window still covers it,
 /// which is what a scan of each verb's window in turn finds.
-fn directives(s: &str, mut found: impl FnMut((usize, usize), (&'static str, &'static str))) {
+fn directives(s: &str, json: bool, mut found: impl FnMut((usize, usize), (&'static str, &'static str))) {
     let b = s.as_bytes();
     // The last DIRECTIVE_WINDOW + 1 words as byte spans, oldest first;
     // `first` is the word index of recent[0].
@@ -204,7 +220,7 @@ fn directives(s: &str, mut found: impl FnMut((usize, usize), (&'static str, &'st
     let mut i = 0;
     while i < b.len() {
         if !b[i].is_ascii_alphanumeric() {
-            i += separator_len(b, i);
+            i += if json { separator_len(b, i) } else { 1 };
             continue;
         }
         let start = i;
@@ -239,13 +255,13 @@ fn directives(s: &str, mut found: impl FnMut((usize, usize), (&'static str, &'st
     }
 }
 
-/// How many bytes the separator at `i` spans. A JSON escape is taken
-/// whole, so its letter never starts the next word: an API body is JSON
-/// text, and `\nIgnore` read as `nIgnore`. `\\`, `\"` and `\/` go as pairs,
-/// so their second byte never starts an escape; then `\n`, `\r`, `\t`, and
-/// `\u` with four hex digits. `\b` and `\f` stay one byte each: a `\b`
-/// regex and a `\forget` read as they always have. Anything else is one
-/// byte.
+/// How many bytes the separator at `i` spans in JSON text. An escape is
+/// taken whole, so its letter never starts the next word: an API body is
+/// JSON text, and `\nIgnore` read as `nIgnore`. `\\`, `\"` and `\/` go as
+/// pairs, so their second byte never starts an escape; then `\n`, `\r`,
+/// `\t`, and `\u` with four hex digits. `\b` and `\f` stay one byte each.
+/// Anything else is one byte. Decoded text never comes here: there a
+/// backslash is a character, and "forget C:\rules" keeps its object.
 fn separator_len(b: &[u8], i: usize) -> usize {
     if b[i] != b'\\' {
         return 1;
