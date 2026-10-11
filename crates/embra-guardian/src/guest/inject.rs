@@ -184,7 +184,7 @@ fn markers_between<F: FnMut(&str)>(s: &str, from: usize, to: usize, markers: &[&
 /// directive in `s`, in order: each span from its verb through its object
 /// (and a possessive on the object), each word spelled as its list spells
 /// it. Words are runs of ASCII letters and digits; everything else
-/// separates them. A DIRECTIVE_VERBS word followed within DIRECTIVE_WINDOW
+/// separates them, a JSON escape whole (`separator_len`). A DIRECTIVE_VERBS word followed within DIRECTIVE_WINDOW
 /// words by a strong object, or by a weak object with a qualifier between
 /// them, is one directive. One pass over the words, keeping the last
 /// DIRECTIVE_WINDOW + 1: the text is never tokenized whole, so a body of a
@@ -204,7 +204,7 @@ fn directives(s: &str, mut found: impl FnMut((usize, usize), (&'static str, &'st
     let mut i = 0;
     while i < b.len() {
         if !b[i].is_ascii_alphanumeric() {
-            i += 1;
+            i += separator_len(b, i);
             continue;
         }
         let start = i;
@@ -236,6 +236,24 @@ fn directives(s: &str, mut found: impl FnMut((usize, usize), (&'static str, &'st
             verbs.push((k, verb));
         }
         k += 1;
+    }
+}
+
+/// How many bytes the separator at `i` spans. A JSON escape is taken
+/// whole, so its letter never starts the next word: an API body is JSON
+/// text, and `\nIgnore` read as `nIgnore`. `\\`, `\"` and `\/` go as pairs,
+/// so their second byte never starts an escape; then `\n`, `\r`, `\t`, and
+/// `\u` with four hex digits. `\b` and `\f` stay one byte each: a `\b`
+/// regex and a `\forget` read as they always have. Anything else is one
+/// byte.
+fn separator_len(b: &[u8], i: usize) -> usize {
+    if b[i] != b'\\' {
+        return 1;
+    }
+    match b.get(i + 1) {
+        Some(b'\\' | b'"' | b'/' | b'n' | b'r' | b't') => 2,
+        Some(b'u') if b.len() >= i + 6 && b[i + 2..i + 6].iter().all(u8::is_ascii_hexdigit) => 6,
+        _ => 1,
     }
 }
 

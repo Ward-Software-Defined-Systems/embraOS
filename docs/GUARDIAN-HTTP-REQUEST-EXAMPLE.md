@@ -75,7 +75,10 @@ text and returns anything else as sent, `text` reduces whatever came back,
 the structural markers of an injected turn become `[redacted-directive]`
 (`inject::scrub`). A body returned as sent is never rewritten, only scanned
 (`inject::scan`): data must stay as it was sent. The scan reads the whole
-body the host returned, the part past the tool's own cut included.
+body the host returned, the part past the tool's own cut included. It reads
+JSON text as JSON: an escape before a word does not hide it (`\n\nIgnore …`
+in an API body reads as `Ignore …`). A marker split by a line break is not
+found.
 
 `injection_suspected` is false unless the scan matched. When it matched,
 `injection_signals` names each finding once:
