@@ -286,6 +286,25 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    #[test]
+    fn the_arena_fits_the_per_call_cap() {
+        // The prelude's arena, the stack and the data must fit the host's
+        // per-call cap, or no tool instantiates.
+        let line = PRELUDE_SRC
+            .lines()
+            .find(|l| l.starts_with("const ARENA: usize = "))
+            .expect("the prelude declares ARENA");
+        let mib: usize = line
+            .trim_start_matches("const ARENA: usize = ")
+            .trim_end_matches(" * 1024 * 1024;")
+            .parse()
+            .expect("ARENA is written N * 1024 * 1024");
+        assert!(
+            (mib + 8) * 1024 * 1024 <= crate::host::DEFAULT_MEMORY_CAP,
+            "{mib} MiB of arena leaves the stack and the data no room under the cap"
+        );
+    }
+
     fn module(caps: Vec<String>) -> ValidatedModule {
         ValidatedModule {
             name: "web_search".into(),

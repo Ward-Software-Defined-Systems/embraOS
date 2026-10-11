@@ -22,8 +22,11 @@ mod inject;
 
 // Bump allocator over a fixed per-instance arena. The host instantiates a
 // fresh module per call, so linear memory (and this arena) is zeroed and
-// reset every invocation — `dealloc` is intentionally a no-op.
-const ARENA: usize = 8 * 1024 * 1024;
+// reset every invocation — `dealloc` is intentionally a no-op. 56 MiB: the
+// host's per-call cap (64 MiB, `host::DEFAULT_MEMORY_CAP`) less 8 MiB for
+// the stack and the data. The arena is zeroed `.bss`, so a page costs RAM
+// only once it is written: a call that needs little pays for little.
+const ARENA: usize = 56 * 1024 * 1024;
 static mut ARENA_BUF: [u8; ARENA] = [0; ARENA];
 static mut ARENA_OFF: usize = 0;
 

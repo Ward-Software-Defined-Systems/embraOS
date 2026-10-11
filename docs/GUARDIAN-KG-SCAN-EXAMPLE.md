@@ -120,7 +120,7 @@ are skipped, never misreported.
 
 ## Limits
 
-- **Guest budget:** 5 s epoch deadline, 8 MiB bump arena with a no-op
+- **Guest budget:** 5 s epoch deadline, 56 MiB bump arena with a no-op
   `dealloc` (JSON parsing allocates a multiple of the input size), and
   matchers that are O(nodes × edges) and worse. Scan slim,
   edge-type-filtered dumps; keep bridged data near 1 MiB.

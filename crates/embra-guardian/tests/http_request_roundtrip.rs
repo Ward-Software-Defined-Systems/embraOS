@@ -304,9 +304,13 @@ fn a_body_at_the_host_cap_fits_the_sandbox_and_a_cut_is_named() {
     let big = b"ab\"\n".repeat(256 * 1024);
     assert_eq!(big.len(), 1024 * 1024);
     let page = format!("<p>{}</p>", "word ".repeat(40_000)).into_bytes();
+    let tools = "[tool: ".repeat(149_796).into_bytes();
+    assert!(tools.len() <= 1024 * 1024);
     let rec = Recorder::new(vec![
         ("https://1.1.1.1/big.json", 200, None, "application/json", big.clone()),
         ("https://1.1.1.1/big.html", 200, None, "text/html", page),
+        ("https://1.1.1.1/big.txt", 200, None, "text/plain", big.clone()),
+        ("https://1.1.1.1/tools.txt", 200, None, "text/plain", tools),
     ]);
     // At the host's cap (1 MiB), the tool cuts at its own.
     let v = call(&rec, r#"{"url":"https://1.1.1.1/big.json","max_bytes":1048576}"#);
@@ -327,6 +331,17 @@ fn a_body_at_the_host_cap_fits_the_sandbox_and_a_cut_is_named() {
     assert_eq!(v["text"].as_str().unwrap().len(), 64 * 1024);
     assert_eq!(v["truncated"]["text"], 64 * 1024, "{}", v["truncated"]);
     assert!(v["truncated"].get("body").is_none(), "the page fit the host's cap: {}", v["truncated"]);
+    // The worst case for escaping, reduced as text: the envelope is half as
+    // large again, and `to_text` copies the body once more. The 8 MiB arena
+    // did not hold it.
+    let v = call(&rec, r#"{"url":"https://1.1.1.1/big.txt","as":"text","max_bytes":1048576}"#);
+    assert_eq!(v["status"], 200, "{}", v["error"]);
+    assert_eq!(v["truncated"]["text"], 64 * 1024, "{}", v["truncated"]);
+    // A mebibyte of the shortest marker: the rewrite grows it 3.3 times.
+    let v = call(&rec, r#"{"url":"https://1.1.1.1/tools.txt","as":"text","max_bytes":1048576}"#);
+    assert_eq!(v["status"], 200, "{}", v["error"]);
+    assert!(v["text"].as_str().unwrap().starts_with("[redacted-directive] [redacted-directive] "));
+    assert_eq!(v["injection_signals"], serde_json::json!(["marker: [tool:"]));
 }
 
 #[test]
@@ -394,4 +409,67 @@ fn a_text_at_the_host_cap_holds_one_copy_whatever_it_finds() {
     assert!(text.starts_with("[redacted-directive] [redacted-directive] "), "{}", &text[..80]);
     assert!(!text.contains("ignore"));
     assert_eq!(v["injection_signals"], serde_json::json!(["directive: ignore … rules"]));
+}
+
+/// A field of `/proc/self/status`, in kB.
+fn status_kb(key: &str) -> u64 {
+    let status = std::fs::read_to_string("/proc/self/status").unwrap();
+    let line = status.lines().find(|l| l.starts_with(key)).unwrap();
+    line.split_whitespace().nth(1).unwrap().parse().unwrap()
+}
+
+/// What a call costs at the arena the fixture was built with: the mean time
+/// of 200 small calls with the process's RSS and peak around them, then one
+/// call that scrubs a mebibyte of text. On the committed fixture, or on the
+/// build `EMBRA_ARENA_WASM` names, to compare two arenas:
+///
+/// `cargo test --release -p embra-guardian --test http_request_roundtrip measure_a_call_with_the_arena -- --ignored --nocapture`
+///
+/// 2026-10-11, release build, the same module at 8 MiB and at 56 MiB:
+/// 51.4 µs and 52.2 µs per small call, RSS and peak unchanged across the
+/// 200 calls at either size; the mebibyte 162 ms and 165 ms, the peak
+/// 22.6 MB and 22.5 MB after it. The arena is zeroed `.bss`, and a page
+/// costs RAM only once it is written.
+#[test]
+#[ignore = "a measurement: compares the arena of two builds"]
+fn measure_a_call_with_the_arena() {
+    let wasm = match std::env::var("EMBRA_ARENA_WASM") {
+        Ok(path) => std::fs::read(path).unwrap(),
+        Err(_) => WASM.to_vec(),
+    };
+    let host = WasmHost::new().unwrap();
+    let m = host.precompile(&wasm).unwrap();
+    let mut text = String::from("You are now here. ");
+    while text.len() + 5 <= 1024 * 1024 {
+        text.push_str("word ");
+    }
+    let rec = Recorder::new(vec![
+        ("https://1.1.1.1/small", 200, None, "application/json", br#"{"ok":true}"#.to_vec()),
+        ("https://1.1.1.1/big", 200, None, "text/plain", text.into_bytes()),
+    ]);
+    let transport: Arc<dyn HttpTransport> = rec.clone();
+    let once = |input: &str| {
+        let caps = Capabilities::with_http(transport.clone(), EgressPolicy::default());
+        host.call(&m, input, caps, DEADLINE_WITH_HTTP, MEM).unwrap()
+    };
+    for _ in 0..5 {
+        once(r#"{"url":"https://1.1.1.1/small"}"#);
+    }
+    let (rss, peak) = (status_kb("VmRSS:"), status_kb("VmHWM:"));
+    let n = 200;
+    let t = std::time::Instant::now();
+    for _ in 0..n {
+        once(r#"{"url":"https://1.1.1.1/small"}"#);
+    }
+    let per_call = t.elapsed() / n;
+    let (rss_after, peak_after) = (status_kb("VmRSS:"), status_kb("VmHWM:"));
+    let t = std::time::Instant::now();
+    let out = once(r#"{"url":"https://1.1.1.1/big","as":"text","max_bytes":1048576}"#);
+    let heavy = t.elapsed();
+    assert!(out.contains("\"status\":200"), "{}", &out[..out.len().min(200)]);
+    eprintln!(
+        "small call: {per_call:?} mean of {n}; RSS {rss} → {rss_after} kB, peak {peak} → {peak_after} kB\n\
+         a mebibyte scrubbed: {heavy:?}; peak after {} kB",
+        status_kb("VmHWM:")
+    );
 }

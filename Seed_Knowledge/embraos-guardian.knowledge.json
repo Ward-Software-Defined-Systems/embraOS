@@ -87,7 +87,7 @@
       "id": "seed_guardian_runtime_model",
       "kind": "semantic",
       "category": "fact",
-      "content": "Guardian tools run in a wasmtime sandbox with a fresh instance per call, a bounded execution timeout, and a fixed memory arena of about 8 MiB — keep parse-heavy inputs around 1 MiB. Nothing persists inside the guest between calls: there is no state, no filesystem, and no ambient authority. To persist results, return them and let the brain write memories or knowledge nodes.",
+      "content": "Guardian tools run in a wasmtime sandbox with a fresh instance per call, a bounded execution timeout, and a fixed memory arena of 56 MiB that never frees — keep parse-heavy inputs to a few MiB (the data_file bridge stops at 2 MiB). Nothing persists inside the guest between calls: there is no state, no filesystem, and no ambient authority. To persist results, return them and let the brain write memories or knowledge nodes.",
       "tags": ["guardian", "sandbox", "runtime", "wasm"]
     },
     {

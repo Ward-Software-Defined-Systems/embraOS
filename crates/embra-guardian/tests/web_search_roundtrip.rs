@@ -82,6 +82,22 @@ impl HttpTransport for Routes {
     }
 }
 
+/// A transport that answers every URL with the same page.
+struct SamePage(String);
+impl HttpTransport for SamePage {
+    fn get(&self, _u: &str, _t: Duration, max_bytes: usize) -> Result<HttpResponse, String> {
+        let mut body = self.0.clone().into_bytes();
+        body.truncate(max_bytes + 1);
+        Ok(HttpResponse {
+            status: 200,
+            content_type: "text/html".into(),
+            body,
+            location: None,
+            headers: vec![],
+        })
+    }
+}
+
 fn run_caps(results: Vec<SearchResult>, input: &str, http: Option<Arc<dyn HttpTransport>>) -> serde_json::Value {
     let host = WasmHost::new().unwrap();
     let m = host.precompile(WASM).unwrap();
@@ -373,4 +389,27 @@ fn signals_are_merged_across_fields_in_order_once_each() {
         ]),
         "{r}"
     );
+}
+
+#[test]
+fn twenty_fetched_pages_fit_the_arena() {
+    // The most a search returns, every page at the guard's 256 KiB cap and
+    // all of it text: each fetch leaves about 2 MiB in an arena that never
+    // frees. Measured on the 8 MiB arena: three pages answered, four
+    // trapped the call.
+    let results: Vec<SearchResult> =
+        (1..=20).map(|i| SearchResult { url: format!("https://1.1.1.{i}/p"), ..hit(i, "word") }).collect();
+    let mut page = String::from("<p>");
+    while page.len() + 9 <= 256 * 1024 {
+        page.push_str("word ");
+    }
+    page.push_str("</p>");
+    let v = run_caps(results, r#"{"query":"word","max":20,"fetch_top":20}"#, Some(Arc::new(SamePage(page))));
+    let all = v["results"].as_array().unwrap_or_else(|| panic!("{v}"));
+    assert_eq!(all.len(), 20, "{v}");
+    for r in all {
+        assert_eq!(r["fetch_status"], 200, "{}", r["url"]);
+        assert_eq!(r["text"].as_str().unwrap().len(), 4000, "{}", r["url"]);
+        assert_eq!(r["truncated"]["text"], 4000, "{}", r["url"]);
+    }
 }
