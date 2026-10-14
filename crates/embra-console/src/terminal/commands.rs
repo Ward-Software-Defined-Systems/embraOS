@@ -36,7 +36,7 @@ Model:
   /provider                              Show active provider, model, session
   /provider <anthropic|gemini|ollama|lm_studio>
                                          Switch provider for future turns
-  /provider --setup <anthropic|gemini>   Add/replace an API key (multi-turn)
+  /provider --setup <anthropic|gemini>   Add/replace an API key, then pick the model (multi-turn)
   /provider --setup <ollama|lm_studio>   Reconfigure endpoint, bearer, model (multi-turn)
   /model                                 Show the model; Ollama / LM Studio: pick from the server's list
   /model <name>                          Switch the model (next message): opus-5.5|opus-5|opus-4.8|

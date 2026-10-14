@@ -130,7 +130,7 @@ async fn trigger_refusal(
     db: &Arc<WardsonDbClient>,
     session_mgr: &Arc<RwLock<SessionManager>>,
     in_turn: &Arc<AtomicBool>,
-    pending_key_setup: &Arc<Mutex<Option<ProviderKind>>>,
+    pending_key_setup: &Arc<Mutex<Option<KeySetupStep>>>,
     pending_openai_compat_setup: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
     pending_session_delete: &Arc<Mutex<Option<PendingSessionDelete>>>,
     budget: &mut ActBudget,
@@ -172,13 +172,13 @@ pub struct BrainGrpcService {
     /// Operator's queued provider switch. Drained between turns by the
     /// loop driver after `in_turn` clears. Stage 8 populates it.
     pending_provider: Arc<Mutex<Option<ProviderKind>>>,
-    /// Set by `/provider --setup <anthropic|gemini>` to indicate that
-    /// the next user message should be treated as a candidate API key
-    /// for the given provider rather than a regular conversation turn.
-    /// The UserMessage handler intercepts and clears this before the
-    /// loop driver runs. OpenAI-compat presets use the parallel
+    /// Set by `/provider --setup <anthropic|gemini>`: the next user
+    /// message is the key for the given provider, then (once the key is
+    /// saved) the pick of its model, rather than a regular conversation
+    /// turn. The UserMessage handler intercepts each before the loop
+    /// driver runs. OpenAI-compat presets use the parallel
     /// `pending_openai_compat_setup` multi-step state machine instead.
-    pending_key_setup: Arc<Mutex<Option<ProviderKind>>>,
+    pending_key_setup: Arc<Mutex<Option<KeySetupStep>>>,
     /// Multi-step state machine for `/provider --setup <ollama|lm_studio>`.
     /// Parallel to `pending_key_setup` but for OpenAI-compat presets'
     /// 4-step reconfigure flow (Endpoint → Bearer choice → Bearer
@@ -261,6 +261,17 @@ enum SetupStepOutcome {
     Advance,
     Complete,
     Error,
+}
+
+/// Where `/provider --setup <anthropic|gemini>` stands: the key, then the
+/// model, the order the local presets' setup uses (endpoint, bearer,
+/// model).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum KeySetupStep {
+    /// The next message is this provider's API key.
+    Key(ProviderKind),
+    /// The key is saved; the next message picks this provider's model.
+    Model(ProviderKind),
 }
 
 /// Guided `/sessions delete <name>` flow state (the pending_key_setup
@@ -1087,7 +1098,7 @@ async fn handle_request(
     api_key: &str,
     in_turn: &Arc<AtomicBool>,
     pending_provider: &Arc<Mutex<Option<ProviderKind>>>,
-    pending_key_setup: &Arc<Mutex<Option<ProviderKind>>>,
+    pending_key_setup: &Arc<Mutex<Option<KeySetupStep>>>,
     pending_openai_compat_setup: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
     pending_session_delete: &Arc<Mutex<Option<PendingSessionDelete>>>,
     stop_rx: &watch::Receiver<u64>,
@@ -1131,11 +1142,18 @@ async fn handle_request(
                 }
             }
 
-            let pending_target = *pending_key_setup.lock().await;
-            if let Some(target) = pending_target {
-                let candidate = msg.content.trim().to_string();
-                handle_pending_key_setup(target, candidate, tx, db, pending_key_setup).await;
-                return Ok(());
+            let pending_step = *pending_key_setup.lock().await;
+            match pending_step {
+                Some(KeySetupStep::Key(target)) => {
+                    let candidate = msg.content.trim().to_string();
+                    handle_pending_key_setup(target, candidate, tx, db, pending_key_setup).await;
+                    return Ok(());
+                }
+                Some(KeySetupStep::Model(target)) => {
+                    handle_setup_model_pick(target, &msg.content, tx, db, session_mgr, pending_key_setup).await;
+                    return Ok(());
+                }
+                None => {}
             }
 
             // Guided /sessions delete flow. AwaitingKickoff: this message
@@ -2565,6 +2583,33 @@ async fn handle_request(
                     }
                 }
             }
+            // A slash command ends the model step of the key setup; the
+            // key step stays armed, as before. A `/provider --setup`
+            // re-entry starts a new flow and needs no word.
+            {
+                let mut guard = pending_key_setup.lock().await;
+                let (kept, ended) = key_setup_after_slash(*guard);
+                *guard = kept;
+                drop(guard);
+                let is_reentry = cmd.command == "/provider" && cmd.args.contains("--setup");
+                if let Some(target) = ended
+                    && !is_reentry
+                {
+                    let _ = tx
+                        .send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::System(
+                                SystemMessage {
+                                    content: format!(
+                                        "Model choice cancelled; the {} model is unchanged.",
+                                        cloud_provider_name(target)
+                                    ),
+                                    msg_type: SystemMessageType::Info as i32,
+                                },
+                            )),
+                        }))
+                        .await;
+                }
+            }
             // Any slash command also cancels an in-flight guided session
             // deletion (always announced — even a /sessions delete re-entry
             // replaces the old flow, and saying so is honest). Deliberately
@@ -2850,7 +2895,7 @@ async fn handle_slash_command(
     _api_key: &str,
     in_turn: &Arc<AtomicBool>,
     pending_provider: &Arc<Mutex<Option<ProviderKind>>>,
-    pending_key_setup: &Arc<Mutex<Option<ProviderKind>>>,
+    pending_key_setup: &Arc<Mutex<Option<KeySetupStep>>>,
     pending_openai_compat_setup: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
     pending_session_delete: &Arc<Mutex<Option<PendingSessionDelete>>>,
 ) -> Option<String> {
@@ -2910,7 +2955,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the model; on Ollama / LM Studio, pick one from the models the server lists\n  /model <name>                      Switch the model (next message): opus-5.5|opus-5|opus-4.8|fable-5.1|fable-5 on Anthropic, gemini-3.1-pro|gemini-4-argon on Gemini, a listed model on Ollama / LM Studio\n  /effort                            Show the active provider's effort level and what is sent\n  /effort <low|medium|high|xhigh|max>  Set effort for the active provider (Anthropic default max; Gemini high; local presets: sent verbatim, model-validated); /effort reset clears\n  /embeddings                        Show the local semantic-similarity layer: model, index, how many nodes are embedded\n  /embeddings <on|off>               Enable or disable semantic similarity in retrieval (default on)\n  /embeddings backfill [--force]     Embed nodes that need it (local CPU, ~55ms/node); --force re-embeds all\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image or a text file (uploaded id, uploads/ path or any workspace path) to your next message\n  /attach list | clear               Show or drop the staged attachments\n  /download <path>                   Hand a workspace file to your browser as a download (regular files up to 12 MiB)\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-3-pro-image (default) | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian rebuild <name>|--all     Rebuild tools an OS update left unloaded, or failed builds (validated + replicant-checked again)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /guardian secret <host> <header> <value>  Store a credential the host adds to every http_request to that host (never in a tool's input); `secret` lists, `<host> remove` forgets\n  /guardian egress allow|deny <host>   The allowlist of private hosts the tools may reach (loopback is refused always); `egress` lists\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key, then pick the model (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the model; on Ollama / LM Studio, pick one from the models the server lists\n  /model <name>                      Switch the model (next message): opus-5.5|opus-5|opus-4.8|fable-5.1|fable-5 on Anthropic, gemini-3.1-pro|gemini-4-argon on Gemini, a listed model on Ollama / LM Studio\n  /effort                            Show the active provider's effort level and what is sent\n  /effort <low|medium|high|xhigh|max>  Set effort for the active provider (Anthropic default max; Gemini high; local presets: sent verbatim, model-validated); /effort reset clears\n  /embeddings                        Show the local semantic-similarity layer: model, index, how many nodes are embedded\n  /embeddings <on|off>               Enable or disable semantic similarity in retrieval (default on)\n  /embeddings backfill [--force]     Embed nodes that need it (local CPU, ~55ms/node); --force re-embeds all\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image or a text file (uploaded id, uploads/ path or any workspace path) to your next message\n  /attach list | clear               Show or drop the staged attachments\n  /download <path>                   Hand a workspace file to your browser as a download (regular files up to 12 MiB)\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-3-pro-image (default) | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian rebuild <name>|--all     Rebuild tools an OS update left unloaded, or failed builds (validated + replicant-checked again)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /guardian secret <host> <header> <value>  Store a credential the host adds to every http_request to that host (never in a tool's input); `secret` lists, `<host> remove` forgets\n  /guardian egress allow|deny <host>   The allowlist of private hosts the tools may reach (loopback is refused always); `egress` lists\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -3558,7 +3603,7 @@ async fn handle_provider_command(
     session_mgr: &Arc<RwLock<SessionManager>>,
     in_turn: &Arc<AtomicBool>,
     pending_provider: &Arc<Mutex<Option<ProviderKind>>>,
-    pending_key_setup: &Arc<Mutex<Option<ProviderKind>>>,
+    pending_key_setup: &Arc<Mutex<Option<KeySetupStep>>>,
     pending_openai_compat_setup: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
 ) {
     let send_msg = |content: String, kind: SystemMessageType| {
@@ -3659,7 +3704,7 @@ async fn handle_provider_command(
             ProviderKind::Anthropic | ProviderKind::Gemini => {
                 // Clear any in-flight OpenAI-compat reconfigure too.
                 *pending_openai_compat_setup.lock().await = None;
-                *pending_key_setup.lock().await = Some(target);
+                *pending_key_setup.lock().await = Some(KeySetupStep::Key(target));
             }
         }
         // Prompt for the key. Console renders as a system message;
@@ -5019,7 +5064,7 @@ async fn handle_pending_key_setup(
     candidate: String,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
     db: &Arc<WardsonDbClient>,
-    pending_key_setup: &Arc<Mutex<Option<ProviderKind>>>,
+    pending_key_setup: &Arc<Mutex<Option<KeySetupStep>>>,
 ) {
     let send_msg = |content: String, kind: SystemMessageType| {
         let tx = tx.clone();
@@ -5118,17 +5163,208 @@ async fn handle_pending_key_setup(
         );
     }
 
-    // Clear flag and acknowledge.
-    *pending_key_setup.lock().await = None;
-    send_msg(
-        format!(
-            "Key for {} recorded. Use /provider {} to switch, or stay on the current provider.",
-            target.as_str(),
-            target.as_str()
+    // The key is in. The model comes next, the way the local presets'
+    // setup ends with theirs.
+    match step_after_saved_key(target) {
+        Some(step) => {
+            *pending_key_setup.lock().await = Some(step);
+            send_msg(
+                format!("Key for {} recorded.", target.as_str()),
+                SystemMessageType::Info,
+            )
+            .await;
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::Setup(
+                        cloud_model_selection(target, &cfg),
+                    )),
+                }))
+                .await;
+        }
+        None => {
+            *pending_key_setup.lock().await = None;
+            send_msg(
+                format!(
+                    "Key for {} recorded. Use /provider {} to switch, or stay on the current provider.",
+                    target.as_str(),
+                    target.as_str()
+                ),
+                SystemMessageType::Info,
+            )
+            .await;
+        }
+    }
+}
+
+/// What follows a saved key: the model step, for the two providers whose
+/// setup takes a key.
+fn step_after_saved_key(target: ProviderKind) -> Option<KeySetupStep> {
+    match target {
+        ProviderKind::Anthropic | ProviderKind::Gemini => Some(KeySetupStep::Model(target)),
+        ProviderKind::Ollama | ProviderKind::LmStudio => None,
+    }
+}
+
+/// "Anthropic" or "Gemini", for the model step's messages.
+fn cloud_provider_name(target: ProviderKind) -> &'static str {
+    match target {
+        ProviderKind::Gemini => "Gemini",
+        _ => "Anthropic",
+    }
+}
+
+/// The model step of `/provider --setup <anthropic|gemini>`: the
+/// provider's wizard labels, with the current model first and as the
+/// default (the console's selector starts on the first option, so Enter
+/// keeps the model). A current model that no label names (the legacy
+/// `opus-4.7`, an env override, the customtools id) leaves the wizard
+/// order; the prompt names it either way.
+fn cloud_model_selection(target: ProviderKind, cfg: &config::SystemConfig) -> SetupPrompt {
+    let labels: &[&str] = match target {
+        ProviderKind::Gemini => &config::GEMINI_WIZARD_LABELS,
+        _ => &config::ANTHROPIC_WIZARD_LABELS,
+    };
+    let current = display_model_for(target.as_str(), cfg);
+    let mut options: Vec<String> = labels.iter().map(|l| l.to_string()).collect();
+    if let Some(at) = options
+        .iter()
+        .position(|l| model_alias_for_label(target, l).as_deref() == Some(current.as_str()))
+    {
+        let label = options.remove(at);
+        options.insert(0, label);
+    }
+    SetupPrompt {
+        field_type: SetupFieldType::Selector as i32,
+        prompt: format!(
+            "Which {} model? Current: {current}.",
+            cloud_provider_name(target)
         ),
-        SystemMessageType::Info,
-    )
-    .await;
+        default_value: options.first().cloned().unwrap_or_default(),
+        options,
+    }
+}
+
+/// The alias one of the provider's wizard labels seeds.
+fn model_alias_for_label(target: ProviderKind, label: &str) -> Option<String> {
+    match target {
+        ProviderKind::Gemini => config::gemini_model_from_label(label),
+        _ => config::anthropic_model_from_label(label),
+    }
+}
+
+/// The alias a model-step answer names: one of the provider's wizard
+/// labels, or an alias typed the way `/model` takes it.
+fn model_alias_for_pick(target: ProviderKind, answer: &str) -> Option<String> {
+    let answer = answer.trim();
+    model_alias_for_label(target, answer).or_else(|| match target {
+        ProviderKind::Gemini => {
+            parse_gemini_model_choice(answer).map(|(_, alias)| alias.to_string())
+        }
+        _ => parse_anthropic_model_choice(answer).map(|(_, display)| display.to_string()),
+    })
+}
+
+/// The answer to the model step: save the alias the way `/model` does, or
+/// say the model stays. Either way the step ends here, and the answer
+/// never reaches the model as a message.
+async fn handle_setup_model_pick(
+    target: ProviderKind,
+    answer: &str,
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    db: &Arc<WardsonDbClient>,
+    session_mgr: &Arc<RwLock<SessionManager>>,
+    pending_key_setup: &Arc<Mutex<Option<KeySetupStep>>>,
+) {
+    *pending_key_setup.lock().await = None;
+    let send = |content: String, kind: SystemMessageType| {
+        let tx = tx.clone();
+        async move {
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(
+                        SystemMessage {
+                            content,
+                            msg_type: kind as i32,
+                        },
+                    )),
+                }))
+                .await;
+        }
+    };
+    let name = cloud_provider_name(target);
+    let mut cfg = match config::load_config(db).await {
+        Ok(c) => c,
+        Err(e) => {
+            send(
+                format!("{name} model: failed to load config: {e}"),
+                SystemMessageType::Error,
+            )
+            .await;
+            return;
+        }
+    };
+    let current = display_model_for(target.as_str(), &cfg);
+    if answer.trim().is_empty() {
+        send(
+            format!("The {name} model stays {current}."),
+            SystemMessageType::Info,
+        )
+        .await;
+        return;
+    }
+    let Some(alias) = model_alias_for_pick(target, answer) else {
+        send(
+            format!(
+                "'{}' is not a {name} model; the model stays {current}. /model changes it later.",
+                answer.trim()
+            ),
+            SystemMessageType::Error,
+        )
+        .await;
+        return;
+    };
+    match target {
+        ProviderKind::Gemini => cfg.gemini_model = Some(alias.clone()),
+        _ => cfg.anthropic_model = Some(alias.clone()),
+    }
+    if let Err(e) = config::save_config(db, &cfg).await {
+        send(
+            format!("{name} model: failed to save: {e}"),
+            SystemMessageType::Error,
+        )
+        .await;
+        return;
+    }
+    crate::provider::health::request_probe();
+    if cfg.api_provider == target.as_str() {
+        send(
+            format!("{name} model set to {alias}. Takes effect on your next message."),
+            SystemMessageType::Info,
+        )
+        .await;
+        send_brain_status(tx, &cfg, session_mgr, &alias).await;
+    } else {
+        send(
+            format!(
+                "{name} model set to {alias}. Use /provider {} to switch, or stay on the current provider.",
+                target.as_str()
+            ),
+            SystemMessageType::Info,
+        )
+        .await;
+    }
+}
+
+/// What a slash command leaves of the key setup: the key step stays
+/// armed, as it always has; the model step ends, and the provider whose
+/// step ended is returned so the cancel can be said.
+fn key_setup_after_slash(
+    step: Option<KeySetupStep>,
+) -> (Option<KeySetupStep>, Option<ProviderKind>) {
+    match step {
+        Some(KeySetupStep::Model(target)) => (None, Some(target)),
+        other => (other, None),
+    }
 }
 
 /// Pick the Gemini model id, honoring (in priority order):
@@ -9730,6 +9966,18 @@ mod gemini_model_tests {
     }
 
     #[test]
+    fn gemini_wizard_seeded_aliases_are_selectable() {
+        for label in crate::config::GEMINI_WIZARD_LABELS {
+            let alias = crate::config::gemini_model_from_label(label).expect(label);
+            let (_, parsed) = parse_gemini_model_choice(&alias).unwrap_or_else(|| {
+                panic!("wizard label '{label}' seeds '{alias}', which /model does not accept")
+            });
+            assert_eq!(parsed, alias, "{label}");
+            assert!(GEMINI_MODEL_CHOICES.contains(&parsed), "{label}");
+        }
+    }
+
+    #[test]
     fn listed_gemini_choices_are_the_canonical_displays() {
         for choice in GEMINI_MODEL_CHOICES {
             let (id, alias) = parse_gemini_model_choice(choice).expect(choice);
@@ -9835,6 +10083,192 @@ mod gemini_model_tests {
         let (said, _, saved) = run_model_command(&db_server, "").await;
         assert!(said[0].starts_with("Gemini model: gemini-3.1-pro. Options: gemini-3.1-pro, gemini-4-argon."), "{}", said[0]);
         assert!(saved.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod key_setup_model_step_tests {
+    //! The model step that ends `/provider --setup <anthropic|gemini>`.
+    use super::*;
+    use embra_common::proto::brain::ConversationResponse;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn cfg(provider: &str, anthropic: Option<&str>, gemini: Option<&str>) -> config::SystemConfig {
+        let mut v = json!({
+            "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase1",
+            "created_at": "", "version": "test", "api_provider": provider,
+        });
+        if let Some(a) = anthropic {
+            v["anthropic_model"] = json!(a);
+        }
+        if let Some(g) = gemini {
+            v["gemini_model"] = json!(g);
+        }
+        serde_json::from_value(v).expect("a config")
+    }
+
+    fn labels(list: &[&str]) -> Vec<String> {
+        list.iter().map(|l| l.to_string()).collect()
+    }
+
+    #[test]
+    fn a_saved_key_leads_to_the_model_step_on_both_cloud_providers() {
+        for kind in [ProviderKind::Anthropic, ProviderKind::Gemini] {
+            assert_eq!(step_after_saved_key(kind), Some(KeySetupStep::Model(kind)));
+        }
+        assert_eq!(step_after_saved_key(ProviderKind::Ollama), None);
+        assert_eq!(step_after_saved_key(ProviderKind::LmStudio), None);
+    }
+
+    #[test]
+    fn the_model_step_puts_the_current_model_first() {
+        let p = cloud_model_selection(ProviderKind::Anthropic, &cfg("anthropic", Some("opus-5.5"), None));
+        assert_eq!(p.field_type, SetupFieldType::Selector as i32);
+        assert_eq!(p.options.len(), 5);
+        assert_eq!(p.options[0], "Anthropic Claude Opus 5.5");
+        assert_eq!(p.default_value, "Anthropic Claude Opus 5.5");
+
+        let p = cloud_model_selection(ProviderKind::Gemini, &cfg("gemini", None, Some("gemini-4-argon")));
+        assert_eq!(p.options, labels(&["Google Gemini 4 Argon", "Google Gemini 3.1 Pro"]));
+        // No stored choice: the default is current, and it leads already.
+        let p = cloud_model_selection(ProviderKind::Gemini, &cfg("gemini", None, None));
+        assert_eq!(p.options, labels(&["Google Gemini 3.1 Pro", "Google Gemini 4 Argon"]));
+
+        // A current model that no label names keeps the wizard order and
+        // is named in the prompt.
+        let p = cloud_model_selection(ProviderKind::Anthropic, &cfg("anthropic", Some("opus-4.7"), None));
+        assert_eq!(p.options, labels(&config::ANTHROPIC_WIZARD_LABELS));
+        assert!(p.prompt.contains("opus-4.7"), "{}", p.prompt);
+        let p = cloud_model_selection(
+            ProviderKind::Gemini,
+            &cfg("gemini", None, Some("gemini-3.1-pro-preview-customtools")),
+        );
+        assert_eq!(p.options, labels(&config::GEMINI_WIZARD_LABELS));
+        assert!(p.prompt.contains("customtools"), "{}", p.prompt);
+    }
+
+    #[test]
+    fn a_pick_maps_a_wizard_label_or_a_typed_alias() {
+        let (a, g) = (ProviderKind::Anthropic, ProviderKind::Gemini);
+        assert_eq!(model_alias_for_pick(a, "Anthropic Claude Fable 5.1").as_deref(), Some("fable-5.1"));
+        assert_eq!(model_alias_for_pick(a, " opus-5 ").as_deref(), Some("opus-5"));
+        assert_eq!(model_alias_for_pick(a, "Google Gemini 4 Argon"), None);
+        assert_eq!(model_alias_for_pick(g, "Google Gemini 4 Argon").as_deref(), Some("gemini-4-argon"));
+        assert_eq!(model_alias_for_pick(g, "3.1-pro").as_deref(), Some("gemini-3.1-pro"));
+        assert_eq!(model_alias_for_pick(g, "Anthropic Claude Opus 5"), None);
+        assert_eq!(model_alias_for_pick(g, "hello there"), None);
+    }
+
+    #[test]
+    fn a_slash_command_cancels_the_model_step_but_not_the_key_step() {
+        let key = Some(KeySetupStep::Key(ProviderKind::Gemini));
+        assert_eq!(key_setup_after_slash(key), (key, None));
+        assert_eq!(
+            key_setup_after_slash(Some(KeySetupStep::Model(ProviderKind::Anthropic))),
+            (None, Some(ProviderKind::Anthropic))
+        );
+        assert_eq!(key_setup_after_slash(None), (None, None));
+    }
+
+    /// A WardSONDB that holds a config on `provider` and accepts a save.
+    async fn config_db(provider: &str) -> MockServer {
+        let db_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/config.system/docs/config"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "meta": {}, "data": {
+                "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase1",
+                "created_at": "", "version": "test", "api_provider": provider,
+            }})))
+            .mount(&db_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/config.system"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "meta": {}, "data": {}})))
+            .mount(&db_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/config.system/docs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "meta": {}, "data": {"_id": "config"}})))
+            .mount(&db_server)
+            .await;
+        db_server
+    }
+
+    /// Answer the model step and return what was said, the status bar's
+    /// messages, the configs saved and the step left pending.
+    async fn run_pick(
+        db_server: &MockServer,
+        target: ProviderKind,
+        answer: &str,
+    ) -> (Vec<String>, Vec<String>, Vec<serde_json::Value>, Option<KeySetupStep>) {
+        let db = Arc::new(WardsonDbClient::from_url(&db_server.uri()));
+        let session_mgr = Arc::new(RwLock::new(SessionManager::new(WardsonDbClient::from_url(
+            &db_server.uri(),
+        ))));
+        let pending = Arc::new(Mutex::new(Some(KeySetupStep::Model(target))));
+        let (tx, mut rx) = mpsc::channel::<Result<ConversationResponse, Status>>(64);
+        handle_setup_model_pick(target, answer, &tx, &db, &session_mgr, &pending).await;
+        drop(tx);
+        let (mut said, mut status) = (Vec::new(), Vec::new());
+        while let Some(Ok(r)) = rx.recv().await {
+            match r.response_type {
+                Some(conversation_response::ResponseType::System(m)) => said.push(m.content),
+                Some(conversation_response::ResponseType::ModeChange(m)) => status.push(m.message),
+                _ => {}
+            }
+        }
+        let saved = db_server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/config.system/docs")
+            .map(|r| serde_json::from_slice(&r.body).expect("a config document"))
+            .collect();
+        let left = *pending.lock().await;
+        (said, status, saved, left)
+    }
+
+    #[tokio::test]
+    async fn a_setup_pick_is_saved_and_ends_the_flow() {
+        // Gemini is the active provider: the pick takes effect at once.
+        let db_server = config_db("gemini").await;
+        let (said, status, saved, left) =
+            run_pick(&db_server, ProviderKind::Gemini, "Google Gemini 4 Argon").await;
+        assert_eq!(
+            said,
+            vec!["Gemini model set to gemini-4-argon. Takes effect on your next message.".to_string()]
+        );
+        assert!(status[0].contains("Brain: gemini-4-argon"), "{}", status[0]);
+        assert_eq!(saved[0]["gemini_model"], "gemini-4-argon");
+        assert_eq!(left, None);
+
+        // Anthropic set up while Gemini is active: saved for a later switch.
+        let db_server = config_db("gemini").await;
+        let (said, status, saved, left) =
+            run_pick(&db_server, ProviderKind::Anthropic, "Anthropic Claude Opus 5.5").await;
+        assert_eq!(
+            said,
+            vec!["Anthropic model set to opus-5.5. Use /provider anthropic to switch, or stay on the current provider.".to_string()]
+        );
+        assert!(status.is_empty());
+        assert_eq!(saved[0]["anthropic_model"], "opus-5.5");
+        assert_eq!(left, None);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_setup_pick_saves_nothing_and_ends_the_flow() {
+        let db_server = config_db("gemini").await;
+        let (said, status, saved, left) =
+            run_pick(&db_server, ProviderKind::Gemini, "what is the weather").await;
+        assert_eq!(
+            said,
+            vec!["'what is the weather' is not a Gemini model; the model stays gemini-3.1-pro. /model changes it later.".to_string()]
+        );
+        assert!(status.is_empty() && saved.is_empty());
+        assert_eq!(left, None);
     }
 }
 

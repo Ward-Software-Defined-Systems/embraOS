@@ -298,6 +298,7 @@ const PROVIDER_ANTHROPIC_OPUS48_LABEL: &str = "Anthropic Claude Opus 4.8";
 const PROVIDER_ANTHROPIC_FABLE51_LABEL: &str = "Anthropic Claude Fable 5.1";
 const PROVIDER_ANTHROPIC_FABLE_LABEL: &str = "Anthropic Claude Fable 5";
 const PROVIDER_GEMINI_LABEL: &str = "Google Gemini 3.1 Pro";
+const PROVIDER_GEMINI_ARGON_LABEL: &str = "Google Gemini 4 Argon";
 const PROVIDER_OLLAMA_LABEL: &str = "Ollama (OpenAI-compat)";
 const PROVIDER_LM_STUDIO_LABEL: &str = "LM Studio (OpenAI-compat)";
 
@@ -306,20 +307,34 @@ const PROVIDER_LM_STUDIO_LABEL: &str = "LM Studio (OpenAI-compat)";
 /// option pre-selected and does not read `default_value`
 /// (`embra-console` `Selector::new`), so the label of the default model
 /// must stay first.
-pub(crate) const PROVIDER_WIZARD_LABELS: [&str; 8] = [
+pub(crate) const PROVIDER_WIZARD_LABELS: [&str; 9] = [
     PROVIDER_ANTHROPIC_OPUS5_LABEL,
     PROVIDER_ANTHROPIC_OPUS55_LABEL,
     PROVIDER_ANTHROPIC_OPUS48_LABEL,
     PROVIDER_ANTHROPIC_FABLE51_LABEL,
     PROVIDER_ANTHROPIC_FABLE_LABEL,
     PROVIDER_GEMINI_LABEL,
+    PROVIDER_GEMINI_ARGON_LABEL,
     PROVIDER_OLLAMA_LABEL,
     PROVIDER_LM_STUDIO_LABEL,
 ];
 
+/// The Anthropic and the Gemini labels, in wizard order: the options of
+/// the model step that ends `/provider --setup <anthropic|gemini>`. A
+/// test keeps them equal to the wizard's own.
+pub(crate) const ANTHROPIC_WIZARD_LABELS: [&str; 5] = [
+    PROVIDER_ANTHROPIC_OPUS5_LABEL,
+    PROVIDER_ANTHROPIC_OPUS55_LABEL,
+    PROVIDER_ANTHROPIC_OPUS48_LABEL,
+    PROVIDER_ANTHROPIC_FABLE51_LABEL,
+    PROVIDER_ANTHROPIC_FABLE_LABEL,
+];
+pub(crate) const GEMINI_WIZARD_LABELS: [&str; 2] =
+    [PROVIDER_GEMINI_LABEL, PROVIDER_GEMINI_ARGON_LABEL];
+
 fn provider_from_label(label: &str) -> ProviderKind {
     match label {
-        PROVIDER_GEMINI_LABEL => ProviderKind::Gemini,
+        PROVIDER_GEMINI_LABEL | PROVIDER_GEMINI_ARGON_LABEL => ProviderKind::Gemini,
         PROVIDER_OLLAMA_LABEL => ProviderKind::Ollama,
         PROVIDER_LM_STUDIO_LABEL => ProviderKind::LmStudio,
         // All Anthropic labels map here; the chosen model is captured
@@ -341,6 +356,20 @@ pub(crate) fn anthropic_model_from_label(label: &str) -> Option<String> {
         PROVIDER_ANTHROPIC_OPUS48_LABEL => Some("opus-4.8".to_string()),
         PROVIDER_ANTHROPIC_FABLE51_LABEL => Some("fable-5.1".to_string()),
         PROVIDER_ANTHROPIC_FABLE_LABEL => Some("fable-5".to_string()),
+        _ => None,
+    }
+}
+
+/// Which Gemini model a label implies, as the alias persisted to
+/// `SystemConfig.gemini_model` (the brain maps it to the API id). Like
+/// the Anthropic labels, every Gemini label seeds its model explicitly,
+/// so a wizard choice keeps meaning what the operator picked if the
+/// default moves in a later build. Other labels yield `None`. Later
+/// switchable via `/model`.
+pub(crate) fn gemini_model_from_label(label: &str) -> Option<String> {
+    match label {
+        PROVIDER_GEMINI_LABEL => Some("gemini-3.1-pro".to_string()),
+        PROVIDER_GEMINI_ARGON_LABEL => Some("gemini-4-argon".to_string()),
         _ => None,
     }
 }
@@ -472,7 +501,7 @@ async fn validate_api_key_for(provider: ProviderKind, key: &str) -> ApiKeyCheck 
         ),
         (ValidationResult::Forbidden, ProviderKind::Gemini) => ApiKeyCheck::Invalid(
             "Forbidden — likely missing billing on the Gemini API. \
-             Verify at aistudio.google.com — gemini-3.1-pro-preview requires a billed account."
+             Verify at aistudio.google.com — Gemini 3.1 Pro and Gemini 4 Argon require a billed (paid-tier) account."
                 .into(),
         ),
         (ValidationResult::Forbidden, ProviderKind::Ollama | ProviderKind::LmStudio) => {
@@ -558,11 +587,14 @@ pub async fn run_config_wizard_grpc(
     // Capture the chosen Anthropic model for the Anthropic path; persisted
     // below as `SystemConfig.anthropic_model`.
     let anthropic_model = anthropic_model_from_label(&provider_choice);
+    // And the Gemini model for the Gemini path (`SystemConfig.gemini_model`).
+    let gemini_model = gemini_model_from_label(&provider_choice);
     info!(
         "Config wizard: provider = {}{}",
         provider_kind.as_str(),
         anthropic_model
             .as_deref()
+            .or(gemini_model.as_deref())
             .map(|m| format!(" ({m})"))
             .unwrap_or_default()
     );
@@ -803,7 +835,7 @@ pub async fn run_config_wizard_grpc(
         kg_traversal_edge_limit: default_kg_traversal_edge_limit(),
         kg_traversal_node_budget: default_kg_traversal_node_budget(),
         api_provider: provider_kind.as_str().to_string(),
-        gemini_model: None,
+        gemini_model,
         anthropic_model,
         anthropic_effort: None,
         gemini_effort: None,
@@ -922,7 +954,14 @@ pub async fn run_config_wizard_grpc(
     // Sprint 5: OpenAI-compat presets show the operator-selected
     // model id (Ollama/LM Studio) populated from the sub-flow.
     let model: String = match config.api_provider.as_str() {
-        "gemini" => "gemini-3.1-pro".to_string(),
+        // Gemini: the seeded alias, shown the way the turn path shows it.
+        "gemini" => crate::provider::gemini::display_name_for(
+            config
+                .gemini_model
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .unwrap_or(crate::provider::gemini::DEFAULT_MODEL),
+        ),
         "ollama" => {
             if config.openai_compat.ollama_model.is_empty() {
                 "ollama".to_string()
@@ -1263,10 +1302,12 @@ mod provider_label_tests {
     //! it did, 4.7 → 4.8 → 5). The selector itself is server-driven, so
     //! the console and chat-mobile UIs render whichever labels appear here.
     use super::{
-        anthropic_model_from_label, provider_from_label,
+        anthropic_model_from_label, gemini_model_from_label, provider_from_label,
+        ANTHROPIC_WIZARD_LABELS, GEMINI_WIZARD_LABELS,
         PROVIDER_ANTHROPIC_FABLE51_LABEL, PROVIDER_ANTHROPIC_FABLE_LABEL,
         PROVIDER_ANTHROPIC_OPUS48_LABEL, PROVIDER_ANTHROPIC_OPUS55_LABEL,
-        PROVIDER_ANTHROPIC_OPUS5_LABEL, PROVIDER_GEMINI_LABEL, PROVIDER_WIZARD_LABELS,
+        PROVIDER_ANTHROPIC_OPUS5_LABEL, PROVIDER_GEMINI_ARGON_LABEL, PROVIDER_GEMINI_LABEL,
+        PROVIDER_WIZARD_LABELS,
     };
     use crate::provider::ProviderKind;
 
@@ -1296,6 +1337,57 @@ mod provider_label_tests {
                 ),
                 _ => assert_eq!(anthropic_model_from_label(label), None, "{label}"),
             }
+        }
+    }
+
+    /// Like the Anthropic labels: a Gemini label without a seeded model
+    /// would persist `None` and run the default under another model's
+    /// name.
+    #[test]
+    fn every_gemini_wizard_label_seeds_a_model() {
+        for label in PROVIDER_WIZARD_LABELS {
+            match provider_from_label(label) {
+                ProviderKind::Gemini => assert!(
+                    gemini_model_from_label(label).is_some(),
+                    "'{label}' seeds no model"
+                ),
+                _ => assert_eq!(gemini_model_from_label(label), None, "{label}"),
+            }
+        }
+    }
+
+    #[test]
+    fn gemini_labels_seed_expected_models() {
+        assert_eq!(
+            gemini_model_from_label(PROVIDER_GEMINI_LABEL).as_deref(),
+            Some("gemini-3.1-pro")
+        );
+        assert_eq!(
+            gemini_model_from_label(PROVIDER_GEMINI_ARGON_LABEL).as_deref(),
+            Some("gemini-4-argon")
+        );
+    }
+
+    /// The setup flow's model step offers the per-provider lists; they
+    /// must stay the wizard's cloud labels, in its order.
+    #[test]
+    fn every_wizard_label_is_in_its_providers_setup_list() {
+        let cloud: Vec<&str> = PROVIDER_WIZARD_LABELS
+            .iter()
+            .copied()
+            .filter(|l| matches!(provider_from_label(l), ProviderKind::Anthropic | ProviderKind::Gemini))
+            .collect();
+        let lists: Vec<&str> = ANTHROPIC_WIZARD_LABELS
+            .iter()
+            .chain(GEMINI_WIZARD_LABELS.iter())
+            .copied()
+            .collect();
+        assert_eq!(cloud, lists);
+        for label in ANTHROPIC_WIZARD_LABELS {
+            assert_eq!(provider_from_label(label), ProviderKind::Anthropic, "{label}");
+        }
+        for label in GEMINI_WIZARD_LABELS {
+            assert_eq!(provider_from_label(label), ProviderKind::Gemini, "{label}");
         }
     }
 
