@@ -95,5 +95,5 @@ Every slash command available in an embraOS session, grouped as in the web conso
 | Command | Description |
 |---|---|
 | `/help` | Show all commands and keyboard shortcuts |
-| `/status` | System status — version, uptime, WardSONDB health, memory, soul status, and the active LLM provider's last endpoint probe (`provider` block: reachable, model present, key state, latency, age — probed ~30 s after boot, every 5 min, and right after a `/provider` switch or setup; state changes also arrive as notifications) |
+| `/status` | System status — version, uptime, WardSONDB health, memory, soul status, and the active LLM provider's last endpoint probe (`provider` block: reachable, model present, key state, latency, age, and on Ollama the context window the model is loaded with — probed ~30 s after boot, every 5 min, and right after a `/provider` switch or setup; state changes also arrive as notifications, among them a window below 64000 tokens) |
 | `/feedback-loop` | **(EXPERIMENTAL)** Trigger Phase 3 Continuity Engine self-evaluation protocol — the Brain walks through a multi-step gather/evaluate/reconcile/execute sequence using existing tools |
