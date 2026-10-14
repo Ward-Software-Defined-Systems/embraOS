@@ -173,6 +173,49 @@ pub struct GeminiThinkingConfig {
 pub struct GeminiStreamChunk {
     #[serde(default)]
     pub candidates: Vec<GeminiCandidate>,
+    /// The token counts so far, kept as raw JSON and read by
+    /// [`GeminiUsage::from_json`]. A typed field could fail the chunk's
+    /// parse, and the chunk that carries the counts is often the one with
+    /// the finish reason, the last text and the tool calls.
+    #[serde(default)]
+    pub usage_metadata: Option<serde_json::Value>,
+}
+
+/// The token counts of one model call, from `usageMetadata`
+/// (`GenerateContentResponse.usageMetadata` in the API reference). A
+/// count that is absent or not a whole number reads as `None`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GeminiUsage {
+    /// `promptTokenCount`: the prompt, cached part included.
+    pub prompt: Option<u64>,
+    /// `cachedContentTokenCount`: the part of the prompt served from a
+    /// cache, explicit or implicit.
+    pub cached: Option<u64>,
+    /// `candidatesTokenCount`: the output.
+    pub candidates: Option<u64>,
+    /// `toolUsePromptTokenCount`.
+    pub tool_use_prompt: Option<u64>,
+    /// `thoughtsTokenCount`: the thinking.
+    pub thoughts: Option<u64>,
+    /// `totalTokenCount`.
+    pub total: Option<u64>,
+}
+
+impl GeminiUsage {
+    /// Read the counts from a `usageMetadata` value; `None` when it is
+    /// not an object.
+    pub fn from_json(value: &serde_json::Value) -> Option<Self> {
+        let fields = value.as_object()?;
+        let count = |key: &str| fields.get(key).and_then(serde_json::Value::as_u64);
+        Some(Self {
+            prompt: count("promptTokenCount"),
+            cached: count("cachedContentTokenCount"),
+            candidates: count("candidatesTokenCount"),
+            tool_use_prompt: count("toolUsePromptTokenCount"),
+            thoughts: count("thoughtsTokenCount"),
+            total: count("totalTokenCount"),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

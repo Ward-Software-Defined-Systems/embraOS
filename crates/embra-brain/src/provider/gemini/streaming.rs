@@ -11,7 +11,7 @@
 //!     "finishReason": "STOP" | null,
 //!     "index": 0
 //!   }],
-//!   "usageMetadata": {...}   // terminal chunk only
+//!   "usageMetadata": {...}   // the token counts so far
 //! }
 //! ```
 //!
@@ -31,9 +31,11 @@
 //!   summaries are not user-visible).
 //!
 //! Terminal handling:
-//! - The chunk carrying `finishReason` (or `usageMetadata`) finalizes
-//!   the turn. We assemble neutral-IR `Vec<Block>` and emit
-//!   `StreamEvent::Complete(AssistantTurn)`.
+//! - The chunk carrying `finishReason` finalizes the turn. We assemble
+//!   neutral-IR `Vec<Block>` and emit `StreamEvent::Complete(AssistantTurn)`.
+//! - `usageMetadata` ends nothing. The latest block read (on any chunk,
+//!   a candidate-less one included) is what the parser returns, for the
+//!   call's usage line.
 //! - A frame `{"error": …}` is the API's error, not a chunk: the call
 //!   fails with its message (`sse::in_stream_error`) and no `Complete`
 //!   follows. The OpenAI-compat parser has the same rule; the Anthropic
@@ -51,7 +53,7 @@ use crate::provider::ir::{AssistantTurn, Block, EarlyStopReason, TurnOutcome};
 use crate::provider::sse::{LineBuffer, in_stream_error};
 use crate::provider::StreamEvent;
 
-use super::wire::{GeminiPart, GeminiStreamChunk};
+use super::wire::{GeminiPart, GeminiStreamChunk, GeminiUsage};
 
 /// Drive the SSE stream from `:streamGenerateContent?alt=sse`,
 /// emitting neutral [`StreamEvent`]s into `tx`. Terminates on
@@ -59,12 +61,13 @@ use super::wire::{GeminiPart, GeminiStreamChunk};
 /// stream ends. `include_reasoning` gates `StreamEvent::ReasoningDelta`
 /// emission for `thought:true` text parts (belt-and-suspenders against
 /// the API returning thoughts when the request body had
-/// `includeThoughts: false`).
+/// `includeThoughts: false`). Returns the call's token counts, the
+/// latest `usageMetadata` read, when the stream carried any.
 pub async fn process_sse_stream(
     response: reqwest::Response,
     tx: mpsc::Sender<StreamEvent>,
     include_reasoning: bool,
-) -> Result<()> {
+) -> Result<Option<GeminiUsage>> {
     pump(response.bytes_stream(), tx, include_reasoning).await
 }
 
@@ -75,7 +78,7 @@ async fn pump<S, B, E>(
     mut stream: S,
     tx: mpsc::Sender<StreamEvent>,
     include_reasoning: bool,
-) -> Result<()>
+) -> Result<Option<GeminiUsage>>
 where
     S: Stream<Item = std::result::Result<B, E>> + Unpin,
     B: AsRef<[u8]>,
@@ -97,7 +100,7 @@ where
             };
             if data == "[DONE]" {
                 state.emit_complete(&tx).await;
-                return Ok(());
+                return Ok(state.usage.take());
             }
             let value = match serde_json::from_str::<serde_json::Value>(data) {
                 Ok(value) => value,
@@ -137,10 +140,16 @@ where
                     continue;
                 }
             };
+            // Before `process_chunk`, which stops at a chunk without
+            // candidates: a usage-only chunk counts too. Each block holds
+            // the counts so far, so the latest replaces the last.
+            if let Some(usage) = chunk_obj.usage_metadata.as_ref().and_then(GeminiUsage::from_json) {
+                state.usage = Some(usage);
+            }
             state.process_chunk(chunk_obj, &tx).await;
             if state.terminal {
                 state.emit_complete(&tx).await;
-                return Ok(());
+                return Ok(state.usage.take());
             }
             if state.receiver_gone {
                 // Consumer dropped the stream (operator /stop) — exit so
@@ -149,7 +158,7 @@ where
                     target: "gemini::streaming",
                     "receiver dropped mid-stream; aborting SSE pump"
                 );
-                return Ok(());
+                return Ok(state.usage.take());
             }
         }
     }
@@ -158,7 +167,7 @@ where
     // anyway so consumers don't hang. Mirrors the Anthropic parser's
     // safety behavior.
     state.emit_complete(&tx).await;
-    Ok(())
+    Ok(state.usage.take())
 }
 
 /// Mutable in-flight assembly state.
@@ -181,6 +190,8 @@ struct ParserState {
     /// dropping the `reqwest::Response` (severs the connection). Never
     /// downgrade sends back to fire-and-forget.
     receiver_gone: bool,
+    /// The latest `usageMetadata` read; returned by `pump`.
+    usage: Option<GeminiUsage>,
 }
 
 impl ParserState {
@@ -988,5 +999,78 @@ mod tests {
         assert!(matches!(rx.recv().await, Some(StreamEvent::TextDelta(t)) if t == "one"));
         // Nothing after the frame, and no Complete.
         assert!(rx.recv().await.is_none());
+    }
+
+    /// Run the parser over one SSE body and keep what it returns too.
+    async fn run_with_usage(events: &[&str]) -> (Vec<StreamEvent>, Option<GeminiUsage>) {
+        let (tx, mut rx) = mpsc::channel(128);
+        let stream = futures_util::stream::iter(vec![Ok::<_, std::convert::Infallible>(
+            sse_body(events),
+        )]);
+        let parser = tokio::spawn(pump(stream, tx, false));
+        let mut out = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            out.push(ev);
+        }
+        let usage = parser.await.expect("parser task").expect("parser result");
+        (out, usage)
+    }
+
+    /// Each `usageMetadata` holds the counts so far: the latest one read
+    /// is the call's, whether it rides a text chunk, a chunk without
+    /// candidates, or the final chunk.
+    #[tokio::test]
+    async fn the_last_usage_block_read_is_returned() {
+        let (out, usage) = run_with_usage(&[
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"a"}]},"index":0}],"usageMetadata":{"promptTokenCount":100}}"#,
+            r#"{"usageMetadata":{"promptTokenCount":100,"thoughtsTokenCount":40}}"#,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"b"}]},"finishReason":"STOP","index":0}],"usageMetadata":{"promptTokenCount":100,"cachedContentTokenCount":80,"candidatesTokenCount":2,"toolUsePromptTokenCount":0,"thoughtsTokenCount":40,"totalTokenCount":142}}"#,
+        ])
+        .await;
+        assert_eq!(text_deltas(&out), vec!["a", "b"]);
+        assert_eq!(
+            usage,
+            Some(GeminiUsage {
+                prompt: Some(100),
+                cached: Some(80),
+                candidates: Some(2),
+                tool_use_prompt: Some(0),
+                thoughts: Some(40),
+                total: Some(142),
+            })
+        );
+
+        // A usage block on a middle chunk only, and none on the last.
+        let (_, usage) = run_with_usage(&[
+            r#"{"usageMetadata":{"promptTokenCount":7,"thoughtsTokenCount":3}}"#,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"c"}]},"finishReason":"STOP","index":0}]}"#,
+        ])
+        .await;
+        let usage = usage.expect("the middle block");
+        assert_eq!((usage.prompt, usage.thoughts, usage.cached), (Some(7), Some(3), None));
+    }
+
+    #[tokio::test]
+    async fn a_stream_without_usage_returns_none() {
+        let (out, usage) = run_with_usage(&[
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP","index":0}]}"#,
+        ])
+        .await;
+        assert_eq!(text_deltas(&out), vec!["hi"]);
+        assert_eq!(usage, None);
+    }
+
+    /// The final chunk carries the finish reason, the last text and the
+    /// tool calls; a usage block that does not parse must cost none of
+    /// them.
+    #[tokio::test]
+    async fn a_usage_block_that_does_not_parse_costs_the_chunk_nothing() {
+        let (out, usage) = run_with_usage(&[
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"cut"}]},"finishReason":"MAX_TOKENS","index":0}],"usageMetadata":7}"#,
+        ])
+        .await;
+        assert_eq!(text_deltas(&out), vec!["cut"]);
+        assert_eq!(complete_turn(&out).outcome, TurnOutcome::MaxTokens);
+        assert_eq!(usage, None);
     }
 }

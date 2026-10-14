@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use crate::db::WardsonDbClient;
 #[cfg(test)]
@@ -280,8 +280,10 @@ impl LlmProvider for GeminiProvider {
         let body_with_cache_json = serde_json::to_value(&body_with_cache)
             .map_err(|e| ProviderError::Decode(format!("request serialization: {e}")))?;
 
-        let response = match send_with_retry(&http, &url, &api_key, &body_with_cache_json).await {
-            Ok(r) => r,
+        // Whether the request that got the response used the cached
+        // content: false after the stale-cache retry below.
+        let (response, explicit_cache) = match send_with_retry(&http, &url, &api_key, &body_with_cache_json).await {
+            Ok(r) => (r, cache_handle.is_some()),
             Err(ProviderError::Http { status, body })
                 if cache_handle.is_some() && is_cache_stale_error(status, &body) =>
             {
@@ -305,19 +307,38 @@ impl LlmProvider for GeminiProvider {
                 let body_no_cache_json = serde_json::to_value(&body_no_cache).map_err(|e| {
                     ProviderError::Decode(format!("retry serialization: {e}"))
                 })?;
-                send_with_retry(&http, &url, &api_key, &body_no_cache_json).await?
+                (send_with_retry(&http, &url, &api_key, &body_no_cache_json).await?, false)
             }
             Err(e) => return Err(e),
         };
 
         let (tx, rx) = mpsc::channel::<StreamEvent>(128);
         let include_reasoning = options.include_reasoning;
+        let model = self.model_id.clone();
+        let session = system.session_name.clone();
         tokio::spawn(async move {
-            if let Err(e) =
-                streaming::process_sse_stream(response, tx.clone(), include_reasoning).await
-            {
-                error!("Gemini SSE stream error: {}", e);
-                let _ = tx.send(StreamEvent::Error(e.to_string())).await;
+            match streaming::process_sse_stream(response, tx.clone(), include_reasoning).await {
+                // One line per model call: what the prompt cost, how much
+                // of it a cache served (explicit or implicit), and the
+                // thinking and the output. `system_logs` reads it.
+                Ok(Some(usage)) => info!(
+                    target: "gemini::usage",
+                    model = %model,
+                    session = %session,
+                    explicit_cache,
+                    prompt_tokens = usage.prompt,
+                    cached_tokens = usage.cached,
+                    thoughts_tokens = usage.thoughts,
+                    output_tokens = usage.candidates,
+                    tool_prompt_tokens = usage.tool_use_prompt,
+                    total_tokens = usage.total,
+                    "gemini call usage"
+                ),
+                Ok(None) => {}
+                Err(e) => {
+                    error!("Gemini SSE stream error: {}", e);
+                    let _ = tx.send(StreamEvent::Error(e.to_string())).await;
+                }
             }
         });
 
