@@ -1330,9 +1330,11 @@ async fn handle_request(
             let provider_kind = ProviderKind::from_str(&loaded_config.api_provider)
                 .unwrap_or(ProviderKind::Anthropic);
             if provider_kind == ProviderKind::Gemini {
+                let model_id = resolve_gemini_model_id(&loaded_config);
                 info!(
                     target: "gemini::diag",
-                    model = %resolve_gemini_model_id(&loaded_config),
+                    model = %model_id,
+                    explicit_cache = crate::provider::gemini::explicit_cache_supported(&model_id),
                     session = %session_name,
                     "gemini turn starting"
                 );
@@ -5158,7 +5160,7 @@ fn resolve_gemini_model_id_inner(env: Option<&str>, cfg_field: Option<&str>) -> 
     {
         return s.to_string();
     }
-    "gemini-3.1-pro-preview".to_string()
+    crate::provider::gemini::DEFAULT_MODEL.to_string()
 }
 
 /// Resolve the active Anthropic model, returning `(api_model_id, display)`.
@@ -6653,6 +6655,7 @@ async fn run_learning_loop(
             info!(
                 target: "gemini::diag",
                 model = %model_id,
+                explicit_cache = crate::provider::gemini::explicit_cache_supported(&model_id),
                 "gemini learning turn starting"
             );
             Arc::new(

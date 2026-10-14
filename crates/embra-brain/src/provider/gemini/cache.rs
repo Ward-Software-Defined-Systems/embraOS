@@ -6,15 +6,17 @@
 //!   `provider.gemini_cache:current` with `{cache_name, fingerprint,
 //!   created_at, ttl_seconds, session_name}`.
 //! - Fingerprint = `sha256(system_prompt || "\x00" || canonical
-//!   tools JSON)`. A change invalidates the cache.
+//!   tools JSON || "\x00" || model id)`. A change of any of them
+//!   invalidates the cache, so a cache made for one model is never
+//!   sent with a request to another.
 //! - Session change invalidates the cache (the spec scopes caches
 //!   per session).
 //! - Stale on TTL expiry → delete + recreate at the start of the
 //!   next turn (no mid-turn refresh).
-//! - On 4xx from `cachedContents`, return `Ok(None)` so callers fall
-//!   back to per-request system+tools. Gemini 3.1 Pro's caching
-//!   eligibility isn't documented in the model table; the caller
-//!   keeps working uncached if create rejects.
+//! - Only the models Google documents for explicit caching get a
+//!   manager: Gemini 3 and 2.5 (`super::explicit_cache_supported`).
+//!   On a 4xx from `cachedContents` it still returns `Ok(None)`, and
+//!   the caller falls back to per-request system+tools.
 //!
 //! Cuts vs. spec:
 //! - No mid-turn TTL PATCH (delete+recreate is fine for the
@@ -48,7 +50,8 @@ pub struct CacheHandle {
     /// `cachedContents/abc123`. Used as-is in `cachedContent`
     /// references.
     pub cache_name: String,
-    /// 16-hex-char sha256 prefix over (system_prompt || tools_json).
+    /// 16-hex-char sha256 prefix over (system_prompt || tools_json ||
+    /// model id).
     pub fingerprint: String,
     pub created_at: DateTime<Utc>,
     pub ttl_seconds: u32,
@@ -69,15 +72,23 @@ pub struct GeminiCacheManager {
     model_id: String,
 }
 
-/// Compute the cache fingerprint over a system prompt and tools
-/// manifest. Stable across identical inputs; changes when either
-/// side mutates.
-pub fn compute_fingerprint(system: &SystemPromptBundle, tools: &ToolManifest) -> String {
+/// Compute the cache fingerprint over a system prompt, a tools manifest
+/// and the model the cache is made for. Stable across identical inputs;
+/// changes when any of them does. The model is in it because a cached
+/// content belongs to the model it was created for: after a `/model`
+/// switch the stored handle must miss, not be sent to the other model.
+pub fn compute_fingerprint(
+    system: &SystemPromptBundle,
+    tools: &ToolManifest,
+    model_id: &str,
+) -> String {
     let canonical_tools = serde_json::to_string(&tools.wire_json).unwrap_or_default();
     let mut hasher = Sha256::new();
     hasher.update(system.text.as_bytes());
     hasher.update(b"\x00");
     hasher.update(canonical_tools.as_bytes());
+    hasher.update(b"\x00");
+    hasher.update(model_id.as_bytes());
     let digest = hasher.finalize();
     hex::encode(&digest[..8])
 }
@@ -101,7 +112,7 @@ impl GeminiCacheManager {
         system: &SystemPromptBundle,
         tools: &ToolManifest,
     ) -> Result<Option<CacheHandle>, ProviderError> {
-        let target_fingerprint = compute_fingerprint(system, tools);
+        let target_fingerprint = compute_fingerprint(system, tools, &self.model_id);
         let now = Utc::now();
 
         if let Some(stored) = self.read_stored().await {
@@ -111,13 +122,15 @@ impl GeminiCacheManager {
             if session_match && fingerprint_match && !stale {
                 info!(
                     target: "gemini::cache",
+                    model = %self.model_id,
                     cache_name = %stored.cache_name,
                     fingerprint = %stored.fingerprint,
                     "cache:hit"
                 );
                 return Ok(Some(stored));
             }
-            // Different session, fingerprint, or expired — invalidate.
+            // Different session, fingerprint (prompt, tools or model),
+            // or expired — invalidate.
             let reason = if !session_match {
                 "session_changed"
             } else if !fingerprint_match {
@@ -127,6 +140,7 @@ impl GeminiCacheManager {
             };
             info!(
                 target: "gemini::cache",
+                model = %self.model_id,
                 old_fingerprint = %stored.fingerprint,
                 new_fingerprint = %target_fingerprint,
                 reason,
@@ -149,6 +163,7 @@ impl GeminiCacheManager {
             Some(handle) => {
                 info!(
                     target: "gemini::cache",
+                    model = %self.model_id,
                     cache_name = %handle.cache_name,
                     fingerprint = %handle.fingerprint,
                     ttl_seconds = handle.ttl_seconds,
@@ -319,12 +334,14 @@ mod tests {
         }
     }
 
+    const MODEL: &str = "gemini-3.1-pro-preview";
+
     #[test]
     fn fingerprint_stable_for_same_inputs() {
         let s = bundle("you are an assistant");
         let t = manifest(serde_json::json!([{"functionDeclarations": []}]));
-        let a = compute_fingerprint(&s, &t);
-        let b = compute_fingerprint(&s, &t);
+        let a = compute_fingerprint(&s, &t, MODEL);
+        let b = compute_fingerprint(&s, &t, MODEL);
         assert_eq!(a, b);
         assert_eq!(a.len(), 16);
     }
@@ -332,8 +349,8 @@ mod tests {
     #[test]
     fn fingerprint_changes_on_system_prompt_edit() {
         let t = manifest(serde_json::json!([]));
-        let a = compute_fingerprint(&bundle("v1"), &t);
-        let b = compute_fingerprint(&bundle("v2"), &t);
+        let a = compute_fingerprint(&bundle("v1"), &t, MODEL);
+        let b = compute_fingerprint(&bundle("v2"), &t, MODEL);
         assert_ne!(a, b);
     }
 
@@ -342,9 +359,21 @@ mod tests {
         let s = bundle("hi");
         let t1 = manifest(serde_json::json!([{"functionDeclarations": [{"name": "a"}]}]));
         let t2 = manifest(serde_json::json!([{"functionDeclarations": [{"name": "a"}, {"name": "b"}]}]));
-        let a = compute_fingerprint(&s, &t1);
-        let b = compute_fingerprint(&s, &t2);
+        let a = compute_fingerprint(&s, &t1, MODEL);
+        let b = compute_fingerprint(&s, &t2, MODEL);
         assert_ne!(a, b);
+    }
+
+    /// A cached content belongs to the model it was made for. With the
+    /// model in the fingerprint, a handle stored for one model misses
+    /// after a switch, instead of being sent with a request to another.
+    #[test]
+    fn a_model_switch_changes_the_cache_fingerprint() {
+        let s = bundle("hi");
+        let t = manifest(serde_json::json!([{"functionDeclarations": [{"name": "a"}]}]));
+        let pro = compute_fingerprint(&s, &t, MODEL);
+        let customtools = compute_fingerprint(&s, &t, "gemini-3.1-pro-preview-customtools");
+        assert_ne!(pro, customtools);
     }
 
     #[test]

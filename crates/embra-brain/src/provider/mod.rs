@@ -91,8 +91,8 @@ pub struct ToolManifest {
 /// The system prompt, and the session it is sent for. The text is stable
 /// across turns (no per-turn state injection), which is what prompt
 /// caching — Anthropic's and Gemini's — depends on. Gemini's cache
-/// manager derives its staleness fingerprint from this text and the tool
-/// manifest itself (`gemini::cache::compute_fingerprint`).
+/// manager derives its staleness fingerprint from this text, the tool
+/// manifest and the model (`gemini::cache::compute_fingerprint`).
 pub struct SystemPromptBundle {
     pub text: String,
     /// Active session name. The Anthropic provider ignores this; the
@@ -180,7 +180,7 @@ pub struct LlmRequestOptions {
 #[async_trait]
 pub trait LlmProvider: Send + Sync {
     /// Human-readable model identifier for the status bar.
-    /// Anthropic: `"opus-5"`. Gemini: `"gemini-3.1-pro"`.
+    /// Anthropic: `"opus-5"`. Gemini: `"gemini-3.1-pro"` or `"gemini-4-argon"`.
     fn display_name(&self) -> &str;
 
     /// Which provider this is. Test-only: the running brain always knows

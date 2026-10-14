@@ -1,5 +1,5 @@
-//! Gemini provider: `gemini-3.1-pro-preview` via the public Generative
-//! Language API.
+//! Gemini provider: `gemini-3.1-pro-preview` (the default) and
+//! `gemini-4-argon`, via the public Generative Language API.
 //!
 //! Submodules:
 //! - [`wire`] — Gemini-shaped request / response types.
@@ -7,7 +7,8 @@
 //!   Gemini's OpenAPI-3.0 subset.
 //! - [`streaming`] — SSE parser (wire → neutral StreamEvent stream).
 //! - [`conv`] — neutral IR → Gemini wire converter.
-//! - `cache` (Stage 6) — explicit Context Cache lifecycle manager.
+//! - `cache` (Stage 6) — explicit Context Cache lifecycle manager, for
+//!   the models that take it ([`explicit_cache_supported`]).
 
 pub mod cache;
 mod conv;
@@ -40,26 +41,69 @@ use wire::{
     GeminiSystemInstruction, GeminiSystemPart, GeminiThinkingConfig, GeminiToolConfig,
 };
 
-const DEFAULT_MODEL: &str = "gemini-3.1-pro-preview";
-const DEFAULT_DISPLAY_NAME: &str = "gemini-3.1-pro";
+/// The Gemini chat model an instance runs unless the operator picks
+/// another, and the name it is shown under.
+pub const DEFAULT_MODEL: &str = "gemini-3.1-pro-preview";
+pub const DEFAULT_DISPLAY_NAME: &str = "gemini-3.1-pro";
 pub(crate) const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 const VALIDATE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Per-Gemini-3.1-Pro-docs: 64k output ceiling; `thinking_level` is
-/// `high` unless the operator lowers it via `/effort` (mapped by
-/// [`thinking_level_for`]). Thinking cannot be disabled.
+/// 64,000 output tokens: under the 65,536 that a synchronous request of
+/// Gemini 3.1 Pro or Gemini 4 Argon may produce (Argon's longer output
+/// needs its long-decode mode, which embraOS does not use).
+/// `thinking_level` is `high` unless the operator lowers it via
+/// `/effort` (mapped by [`thinking_level_for`]). Thinking cannot be
+/// disabled.
 const MAX_OUTPUT_TOKENS: u32 = 64_000;
 pub(crate) const THINKING_LEVEL: &str = "high";
 
 /// Map the canonical embraOS effort ladder (`low|medium|high|xhigh|max`)
-/// onto Gemini 3.1 Pro's `thinkingLevel` (`low|medium|high`; thinking
-/// cannot be disabled). `xhigh`/`max` have no Gemini equivalent above
-/// `high`, so they clamp to it; anything unrecognized is the default.
+/// onto Gemini's `thinkingLevel` (`low|medium|high` on 3.1 Pro and on
+/// 4 Argon, which also requires the field; thinking cannot be
+/// disabled). `xhigh`/`max` have no Gemini equivalent above `high`, so
+/// they clamp to it; anything unrecognized is the default.
 pub(crate) fn thinking_level_for(level: &str) -> &'static str {
     match level.trim().to_ascii_lowercase().as_str() {
         "low" => "low",
         "medium" => "medium",
         _ => THINKING_LEVEL,
+    }
+}
+
+/// The name a Gemini model id is shown under: the default's short form,
+/// and any other id as itself (`gemini-4-argon`, the customtools id).
+pub fn display_name_for(model_id: &str) -> String {
+    if model_id == DEFAULT_MODEL {
+        DEFAULT_DISPLAY_NAME.to_string()
+    } else {
+        model_id.to_string()
+    }
+}
+
+/// Whether a model takes the explicit context cache (`cachedContents`).
+/// Google: it "can be manually enabled on Gemini 3 and 2.5 models", and
+/// "is not supported for Gemini 4 Argon (`gemini-4-argon`) and onward".
+/// Every other id, `*-latest` aliases included, relies on the implicit
+/// caching all models have.
+pub(crate) fn explicit_cache_supported(model_id: &str) -> bool {
+    ["gemini-3.", "gemini-3-", "gemini-2.5-"]
+        .iter()
+        .any(|family| model_id.starts_with(family))
+}
+
+/// A manifest with nothing to declare: `[]`, or the wrapper with an
+/// empty `functionDeclarations` list that `build_tool_manifest(&[])`
+/// gives Learning Mode. A request built from one carries no `tools` and
+/// no `toolConfig`.
+fn declares_no_tools(wire_json: &serde_json::Value) -> bool {
+    match wire_json {
+        serde_json::Value::Array(entries) => entries.iter().all(|entry| {
+            entry
+                .get("functionDeclarations")
+                .and_then(|d| d.as_array())
+                .is_some_and(|d| d.is_empty())
+        }),
+        _ => false,
     }
 }
 
@@ -76,9 +120,11 @@ pub struct GeminiProvider {
     display_name: String,
     /// `thinkingLevel` sent on every request (see [`thinking_level_for`]).
     thinking_level: String,
-    /// Optional context-cache lifecycle manager. `None` if Brain
-    /// construction couldn't acquire a WardSONDB handle, in which
-    /// case every turn pays the full system+tools cost.
+    /// Optional context-cache lifecycle manager. `None` when the
+    /// builder passed no WardSONDB handle, or when the model takes no
+    /// explicit cache ([`explicit_cache_supported`]); every request
+    /// then carries the system prompt and the tools, which Google's
+    /// implicit caching may still serve.
     cache: Option<Arc<GeminiCacheManager>>,
 }
 
@@ -87,15 +133,11 @@ impl GeminiProvider {
         Self::with_model(api_key, DEFAULT_MODEL.to_string())
     }
 
-    /// Construct with an alternate model id — used to swap to
-    /// `gemini-3.1-pro-preview-customtools` when telemetry shows the
-    /// default is ignoring custom tools (per spec D8).
+    /// Construct with a model id: the default, `gemini-4-argon`, or an
+    /// id set by hand, such as `gemini-3.1-pro-preview-customtools`
+    /// (spec D8: the default ignoring custom tools).
     pub fn with_model(api_key: String, model_id: String) -> Self {
-        let display_name = if model_id == DEFAULT_MODEL {
-            DEFAULT_DISPLAY_NAME.to_string()
-        } else {
-            model_id.clone()
-        };
+        let display_name = display_name_for(&model_id);
         Self {
             api_key,
             http: Client::new(),
@@ -119,16 +161,19 @@ impl GeminiProvider {
         self
     }
 
-    /// Attach a Context Cache lifecycle manager. Stage 10 Brain
-    /// construction calls this when the WardSONDB handle is
-    /// available. Idempotent — replaces any existing cache.
+    /// Attach a Context Cache lifecycle manager when the model takes the
+    /// explicit cache ([`explicit_cache_supported`]); any other model
+    /// gets none. The turn and learning builders call this when the
+    /// WardSONDB handle is available. Idempotent — replaces any
+    /// existing cache.
     pub fn with_cache(mut self, db: Arc<WardsonDbClient>) -> Self {
-        let manager = Arc::new(GeminiCacheManager::new(
-            self.api_key.clone(),
-            db,
-            self.model_id.clone(),
-        ));
-        self.cache = Some(manager);
+        self.cache = explicit_cache_supported(&self.model_id).then(|| {
+            Arc::new(GeminiCacheManager::new(
+                self.api_key.clone(),
+                db,
+                self.model_id.clone(),
+            ))
+        });
         self
     }
 
@@ -190,9 +235,9 @@ impl LlmProvider for GeminiProvider {
         let contents = conv::ir_messages_to_wire(messages);
 
         // Tools manifest is `[{functionDeclarations: [...]}]` from the
-        // tool_schema translator. An empty manifest skips the tools
-        // / tool_config fields entirely.
-        let tools_empty = matches!(&tools.wire_json, serde_json::Value::Array(a) if a.is_empty());
+        // tool_schema translator. A manifest that declares nothing
+        // skips the tools / tool_config fields entirely.
+        let tools_empty = declares_no_tools(&tools.wire_json);
 
         // Try to reuse a cached system+tools handle. On hit, omit
         // systemInstruction and tools from the request body — the
@@ -505,6 +550,94 @@ mod tests {
             "gemini-3.1-pro-preview-customtools".into(),
         );
         assert_eq!(p.display_name(), "gemini-3.1-pro-preview-customtools");
+    }
+
+    #[test]
+    fn display_name_for_shortens_the_default_only() {
+        assert_eq!(display_name_for(DEFAULT_MODEL), DEFAULT_DISPLAY_NAME);
+        assert_eq!(display_name_for("gemini-4-argon"), "gemini-4-argon");
+        assert_eq!(
+            display_name_for("gemini-3.1-pro-preview-customtools"),
+            "gemini-3.1-pro-preview-customtools"
+        );
+    }
+
+    #[test]
+    fn the_explicit_cache_is_for_gemini_3_and_2_5_only() {
+        for id in [
+            DEFAULT_MODEL,
+            "gemini-3.1-pro-preview-customtools",
+            "gemini-3-flash-preview",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash",
+        ] {
+            assert!(explicit_cache_supported(id), "{id} takes the explicit cache");
+        }
+        for id in [
+            "gemini-4-argon",
+            "gemini-4-argon-cyber-permissive",
+            "gemini-pro-latest",
+            "gemini-2.0-flash",
+            "gemini-30-x",
+            "",
+        ] {
+            assert!(!explicit_cache_supported(id), "{id} takes no explicit cache");
+        }
+    }
+
+    #[test]
+    fn an_argon_provider_carries_no_cache_manager() {
+        let db = Arc::new(WardsonDbClient::from_url("http://127.0.0.1:1"));
+        let argon = GeminiProvider::with_model("k".into(), "gemini-4-argon".into()).with_cache(db.clone());
+        assert!(argon.cache.is_none());
+        let default = GeminiProvider::new("k".into()).with_cache(db);
+        assert!(default.cache.is_some());
+    }
+
+    #[test]
+    fn a_manifest_without_declarations_sends_no_tools_or_tool_config() {
+        for (wire, declares_none) in [
+            (serde_json::json!([]), true),
+            (serde_json::json!([{"functionDeclarations": []}]), true),
+            (serde_json::json!([{"functionDeclarations": [{"name": "a"}]}]), false),
+            (serde_json::json!([{"googleSearch": {}}]), false),
+            (serde_json::json!({}), false),
+        ] {
+            assert_eq!(declares_no_tools(&wire), declares_none, "{wire}");
+        }
+
+        let system = SystemPromptBundle {
+            text: "sys".into(),
+            session_name: "main".into(),
+        };
+        let options = LlmRequestOptions {
+            include_reasoning: true,
+        };
+        let body_of = |tools: &ToolManifest| {
+            let empty = declares_no_tools(&tools.wire_json);
+            serde_json::to_value(build_request_body(
+                &[],
+                &system,
+                tools,
+                empty,
+                None,
+                options,
+                THINKING_LEVEL,
+            ))
+            .unwrap()
+        };
+        let p = GeminiProvider::new("k".into());
+
+        // Learning Mode's manifest: the system prompt, nothing to call.
+        let v = body_of(&p.build_tool_manifest(&[]));
+        assert!(v.get("tools").is_none() && v.get("toolConfig").is_none(), "{v}");
+        assert!(v.get("systemInstruction").is_some(), "{v}");
+
+        let descriptors: Vec<&'static ToolDescriptor> =
+            crate::tools::registry::all_descriptors().collect();
+        let v = body_of(&p.build_tool_manifest(&descriptors));
+        assert!(v.get("tools").is_some(), "the full manifest is sent");
+        assert!(v.get("toolConfig").is_some() && v.get("systemInstruction").is_some());
     }
 
     #[test]
