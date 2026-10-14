@@ -8,6 +8,7 @@ Hardware mapping for the test fleet:
 
 - **Ollama** runs on an **M1 Mac Mini, 16 GB unified memory**
 - **LM Studio and Ollama** run on a **Mac Studio M4 Max, 128 GB unified memory**
+- **Ollama** runs on an **x86_64 server with an NVIDIA RTX 3080 Ti, 12 GB of VRAM** (Ubuntu 24.04), for the smaller models on x86_64 and NVIDIA; they are under evaluation
 
 ---
 
@@ -25,23 +26,31 @@ The list is deliberately short. MoE models need a minimum active-parameter thres
 | Ollama | Qwen3.6 27B (dense) | `qwen3.6:27b-mlx` | 19GB | 256K | vetted |
 | Ollama | Gemma 4 12B (dense) | `gemma4:12b-mlx` | 7.7GB | 256K | under evaluation |
 | Ollama | Gemma 4 31B (dense) | `gemma4:31b-mlx` | 19GB | 256K | under evaluation |
+| Ollama | Gemma 4 12B (dense, Q4_K_M GGUF) | `gemma4:12b` | 8.0GB | 256K | under evaluation |
 | LM Studio | Qwen3.8 27B (dense, 8-bit) | `qwen/qwen3.8-27b` | 30GB | 256K | vetted |
 | LM Studio | Qwen3.6 27B (dense, 8-bit) | `qwen/qwen3.6-27b` | 30GB | 256K | vetted |
 
-The Ollama tags are the MLX builds, the ones the test fleet runs. A tag without
-`-mlx` is a GGUF build, on which Ollama trims a request to fit its context
-window without an error ([Ollama](#ollama-mac-mini-mac-studio) under Server
-Configuration). Sizes
-and context lengths are the Ollama library's own figures for the tags listed,
-read 2026-10-13. The LM Studio sizes are the weights of the 8-bit MLX builds
+The `-mlx` tags are the MLX builds, which the Macs run. The plain tag of each of
+the four models (`gemma4:12b`, `qwen3.8:27b`, …) lists both builds, and a pull
+takes one by platform: the MLX build on an Apple Silicon Mac, the GGUF build
+anywhere else (`runnerPreferences` in Ollama's `manifest/manifest.go`). So
+`gemma4:12b` is a GGUF build on the x86_64 server. The `RUNNER` column of
+`ollama ps` shows which build is loaded. On a GGUF build, Ollama trims a request
+to fit its context window without an error
+([Ollama](#ollama-mac-mini-mac-studio-x86_64-server) under Server Configuration).
+Sizes and context lengths are the Ollama library's own figures for the tags
+listed, read 2026-10-13; for `gemma4:12b`, the figure of its GGUF build
+(`gemma4:12b-it-q4_K_M`). The LM Studio sizes are the weights of the 8-bit MLX builds
 (`lmstudio-community/Qwen3.8-27B-MLX-8bit` and `…/Qwen3.6-27B-MLX-8bit`, 29.5 GB
 each). Gemma 4 12B and 31B are dense; the family's MoE is the `gemma4:26b` tag
-(25.2B total, 3.8B active), below the active-parameter threshold above. The two
+(25.2B total, 3.8B active), below the active-parameter threshold above. The three
 Gemma 4 rows are under evaluation by the operator and not yet vetted against the
 tool surface. The 27B tags and `gemma4:31b-mlx` need more than the Mac Mini's 16 GB
-of unified memory and run on the Mac Studio; `gemma4:12b-mlx` fits the Mac Mini. The
-hardware mapping above says which *server* runs where, not that every model fits
-on every host.
+of unified memory and run on the Mac Studio; `gemma4:12b-mlx` fits the Mac Mini.
+On the x86_64 server, `gemma4:12b` loads entirely onto the 12 GB GPU at 4,096
+tokens (2026-10-13). Whether it stays there at the 64000 tokens it needs
+([Ollama](#ollama-mac-mini-mac-studio-x86_64-server)) is TBD. The hardware mapping
+above says which *server* runs where, not that every model fits on every host.
 
 ### Ollama Cloud
 
@@ -79,14 +88,14 @@ embra-brain sends no sampling parameters and no chat-template settings. Its requ
 
 That is what the preset in [`LOCAL_MODEL_SETTINGS/LM-Studio-Examples/`](LOCAL_MODEL_SETTINGS/LM-Studio-Examples/) pins. `embraOS_Qwen3.8-27B` (import it in "My Models", then select it for the model) sets the three prediction settings that matter for a tool-calling session: `contextOverflowPolicy: stopAtLimit`, so the server stops at the context limit instead of truncating the prompt — a truncation drops part of the tool manifest or the history without a word; `repeatPenalty: 1`, which turns the penalty on repeated tokens off — tool-call JSON and code repeat tokens by nature; and `minPSampling: 0`, which turns min-p sampling off. It carries no load settings; the load configuration above stays as it is.
 
-### Ollama (Mac Mini, Mac Studio)
+### Ollama (Mac Mini, Mac Studio, x86_64 server)
 
 The request is the same as for LM Studio: no sampling parameters and no `think` flag. Thinking follows `reasoning_effort` where the model documents it (`/effort`); everything else is the server's own configuration.
 
 The context length is the server's too. The brain reaches Ollama through its OpenAI-compatible endpoint, which has no field for it (Ollama's OpenAI-compat note: `"The OpenAI API does not have a way of setting the context size"`; `num_ctx` is not a field there, per [`ollama#7063`](https://github.com/ollama/ollama/issues/7063), still open since 2024-10-01). What sets it depends on the build:
 
-- **MLX builds** (the `-mlx` tags above). The window is the model's own maximum, 256K for the four tags. `OLLAMA_CONTEXT_LENGTH` and the default below change only the figure `ollama ps` shows. Ollama never trims an MLX request.
-- **GGUF builds** (any tag without `-mlx`). The window is `OLLAMA_CONTEXT_LENGTH`, or a Modelfile's `PARAMETER num_ctx`, or else a default Ollama picks from the GPU memory it detects: 4,096 tokens under 24 GiB, 32,768 from 24 to 48 GiB, 262,144 from 48 GiB ([docs.ollama.com/context-length](https://docs.ollama.com/context-length); the server logs its pick at startup as `vram-based default context`). The tool list the brain sends is 78 KB of JSON, about 20,000 tokens, so the 4,096 default cannot hold even the tools, and Ollama trims every request to fit ([below](#when-a-session-outgrows-the-context-length)). Set `OLLAMA_CONTEXT_LENGTH` to at least 64000, Ollama's own figure for agents, together with `OLLAMA_FLASH_ATTENTION` and `OLLAMA_KV_CACHE_TYPE` (launchd environment variables on a Mac). Then check the `CONTEXT` and `PROCESSOR` columns of `ollama ps`: a window that does not fit in VRAM moves part of the model to the CPU.
+- **MLX builds** (the `-mlx` tags, and a plain tag pulled on an Apple Silicon Mac). The window is the model's own maximum, 256K for the four `-mlx` tags. `OLLAMA_CONTEXT_LENGTH` and the default below change only the figure `ollama ps` shows. Ollama never trims an MLX request.
+- **GGUF builds** (a plain tag pulled anywhere but an Apple Silicon Mac, such as `gemma4:12b` on the x86_64 server). The window is `OLLAMA_CONTEXT_LENGTH`, or a Modelfile's `PARAMETER num_ctx`, or else a default Ollama picks from the GPU memory it detects: 4,096 tokens under 24 GiB, 32,768 from 24 to 48 GiB, 262,144 from 48 GiB ([docs.ollama.com/context-length](https://docs.ollama.com/context-length); the server logs its pick at startup as `vram-based default context`, on the x86_64 server `total_vram="11.6 GiB" default_num_ctx=4096`). The tool list the brain sends is 78 KB of JSON, about 20,000 tokens, so the 4,096 default cannot hold even the tools, and Ollama trims every request to fit ([below](#when-a-session-outgrows-the-context-length)). Set `OLLAMA_CONTEXT_LENGTH` to at least 64000, Ollama's own figure for agents, together with `OLLAMA_FLASH_ATTENTION` and `OLLAMA_KV_CACHE_TYPE` (launchd environment variables on a Mac; on Linux, a systemd override from `systemctl edit ollama`). Then check the `CONTEXT` and `PROCESSOR` columns of `ollama ps`: a window that does not fit in VRAM moves part of the model to the CPU.
 
 **The brain checks the window.** Every 5 minutes the provider probe reads Ollama's `/api/ps`, the list of loaded models behind `ollama ps`.
 
@@ -102,11 +111,11 @@ Every turn replays the whole session: the system prompt, the history, the turn's
 
 **Refused: LM Studio with the preset, and Ollama's MLX builds.** Ollama answers HTTP 400 before any stream opens (`input length (N tokens) exceeds the model's maximum context length (M tokens)`; read from Ollama's source, `mlxrunner/pipeline.go`, not yet seen live). LM Studio opens the stream and answers inside it with one error frame, then closes. Either way the brain shows the server's own message as an error (`Brain error: the model server answered with an error: Input does not fit in context length. The input has 359277 tokens, but the context length only supports 262144 tokens.` is LM Studio's), logs it at ERROR with the sizes of the tool results that went out with the request, ends the turn, and persists the turn's text with the marker `(turn ended by a provider error; see the error above)`. A refused turn stays refused: the history only grows, so continue in a new session (`/new <name>`; the knowledge graph and the memories are shared).
 
-**Trimmed without a word: Ollama's GGUF builds.** Ollama trims a request that does not fit unless the request turns trimming off, and the OpenAI-compatible endpoint cannot: `truncate` is a field of Ollama's native `/api/chat` only. First it drops the oldest messages, keeping the system prompt and the latest message, and logs that only at debug level (`truncating input messages which exceed context length`, with `OLLAMA_DEBUG=1`). If the system prompt, the tool list and the latest message still do not fit, it cuts the prompt itself: it keeps the first few tokens and the last ones, about half the window in all, and logs `truncating input prompt` at WARN (`server/prompt.go` and `llm/llama_server.go` in Ollama's source). The model answers from what is left and the turn ends normally. No error reaches the brain. The brain sees the window Ollama loaded and warns about a short one ([above](#ollama-mac-mini-mac-studio)), but it does not see each trim. This is why a session on a GGUF build can lose its earlier turns, its identity or its tools with no error anywhere. At the 4,096-token default every request is cut, because the tool list alone does not fit. The model sees about the last 2,000 tokens. It misses its identity, most of its tools and, in a tool loop, the operator's own message. The operator found this on a 16 GB NVIDIA GPU (2026-10-13).
+**Trimmed without a word: Ollama's GGUF builds.** Ollama trims a request that does not fit unless the request turns trimming off, and the OpenAI-compatible endpoint cannot: `truncate` is a field of Ollama's native `/api/chat` only. First it drops the oldest messages, keeping the system prompt and the latest message, and logs that only at debug level (`truncating input messages which exceed context length`, with `OLLAMA_DEBUG=1`). If the system prompt, the tool list and the latest message still do not fit, it cuts the prompt itself: it keeps the first few tokens and the last ones, about half the window in all, and logs `truncating input prompt` at WARN (`server/prompt.go` and `llm/llama_server.go` in Ollama's source). The model answers from what is left and the turn ends normally. No error reaches the brain. The brain sees the window Ollama loaded and warns about a short one ([above](#ollama-mac-mini-mac-studio-x86_64-server)), but it does not see each trim. This is why a session on a GGUF build can lose its earlier turns, its identity or its tools with no error anywhere. At the 4,096-token default every request is cut, because the tool list alone does not fit. On the x86_64 server, each of the 29 requests of a test on `gemma4:12b` was 20,037 to 20,126 tokens, and Ollama kept 2,051 of them, the first 5 and the last 2,046 (`truncating input prompt limit=2051 prompt=20044 keep=5 new=2051`, 2026-10-13). The model misses its identity, most of its tools and, in a tool loop, the operator's own message. The operator first found this on a 16 GB NVIDIA GPU (2026-10-13).
 
 **Turn silent trimming off.** Use a server that refuses: Ollama's MLX builds, or LM Studio with the preset (`contextOverflowPolicy: stopAtLimit`). Ollama has no server setting that turns trimming off for a GGUF build, and the OpenAI-compatible endpoint cannot ask for it per request. On a GGUF build:
 
-- set `OLLAMA_CONTEXT_LENGTH` ([above](#ollama-mac-mini-mac-studio)), so trimming starts only when a session outgrows a real window;
+- set `OLLAMA_CONTEXT_LENGTH` ([above](#ollama-mac-mini-mac-studio-x86_64-server)), so trimming starts only when a session outgrows a real window;
 - read Ollama's log for trims: `truncating input prompt` appears at WARN, but a dropped message appears only with `OLLAMA_DEBUG=1`.
 
 What fills a session fastest is a full `introspect` mid-session (a second copy of the sealed graph, ~70K tokens on a large graph) and a whole-file read of a dump; read a dump in slices with `file_read`'s `offset` and `limit`, and feed one to a dynamic tool through `guardian_call`'s `data_file`, which never enters the context. Tool results live within their turn: a later turn replays only the text the intelligence wrote.
