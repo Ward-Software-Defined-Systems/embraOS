@@ -76,7 +76,7 @@ Live in QEMU: TBD. The checks:
 - `gemini::usage` lines show `cached_tokens` from the second call, with no `gemini::cache` lines while on Argon.
 - `/model 3.1-pro` brings the explicit cache back with no 400.
 - `/effort medium` lowers the thinking tokens.
-- The setup model step works for Gemini and for Anthropic.
+- The setup model step works for Gemini (passed on Omega, William's word, 2026-10-14) and for Anthropic (TBD).
 - On a fresh instance, the wizard runs Argon.
 - Vision on Argon: an attached image is answered; `image_view` returns an image the model describes (images inside a function response, which Google documents for Gemini 3 only); a GIF attached on Gemini is answered (stored as PNG).
 
