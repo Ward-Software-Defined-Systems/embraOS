@@ -49,12 +49,14 @@ pub struct SystemConfig {
     /// backward compatibility.
     #[serde(default = "default_api_provider")]
     pub api_provider: String,
-    /// Optional override for the Gemini model id. Defaults to
-    /// `gemini-3.1-pro-preview`. Operators set this to
-    /// `gemini-3.1-pro-preview-customtools` (per spec D8) when the
-    /// standard model is observed ignoring custom tools in favor of
-    /// bash invocations. The brain also honors `EMBRA_GEMINI_MODEL`
-    /// env var which takes precedence over this field.
+    /// The Gemini chat model: the alias `/model` stores
+    /// (`"gemini-3.1-pro"`, `"gemini-4-argon"`), which the brain's
+    /// resolver maps to the API id. `None` means the default,
+    /// `gemini-3.1-pro-preview`. Any other value is sent as typed, such
+    /// as `gemini-3.1-pro-preview-customtools` (spec D8) when the
+    /// standard model ignores custom tools in favor of bash invocations.
+    /// The brain also honors the `EMBRA_GEMINI_MODEL` env var, which
+    /// takes precedence over this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gemini_model: Option<String>,
     /// Active Anthropic model alias (`"opus-5.5"`, `"opus-5"`, `"opus-4.8"`,
@@ -80,8 +82,8 @@ pub struct SystemConfig {
     pub anthropic_effort: Option<String>,
     /// Gemini reasoning posture, stored on the canonical embraOS effort
     /// ladder (`"low"|"medium"|"high"|"xhigh"|"max"`) and mapped to
-    /// `thinkingLevel` at send time (`xhigh`/`max` clamp to `high`, Gemini
-    /// 3.1 Pro's ceiling). `None` = `"high"`, byte-identical to before the
+    /// `thinkingLevel` at send time (`xhigh`/`max` clamp to `high`, the
+    /// ceiling of both Gemini models). `None` = `"high"`, byte-identical to before the
     /// knob existed. Env `EMBRA_GEMINI_EFFORT` takes precedence. Settable
     /// via `/effort` while Gemini is active. Serde-additive — no schema
     /// bump; one more field on every `SystemConfig` literal.

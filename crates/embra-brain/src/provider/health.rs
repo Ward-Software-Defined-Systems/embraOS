@@ -583,13 +583,8 @@ pub fn transition_events(prev: Option<&ProviderProbe>, next: &ProviderProbe) -> 
         ));
     }
     if next.model_present == Some(false) && prev_model_present != Some(false) {
-        // The Anthropic model is chosen with `/model`; `/provider --setup
-        // anthropic` only takes an API key.
-        let remedy = if next.kind == ProviderKind::Anthropic.as_str() {
-            "run /model to pick an available model".to_string()
-        } else {
-            format!("run /provider --setup {} to pick an available model", next.kind)
-        };
+        // Every provider's model is chosen with `/model`.
+        let remedy = "run /model to pick an available model";
         out.push(Notification::new(
             Priority::Critical,
             format!(
@@ -689,7 +684,7 @@ mod tests {
         // Model missing: once, then silent while unchanged.
         let n = transition_events(Some(&ok), &absent);
         assert_eq!(n.len(), 1);
-        assert!(n[0].message.contains("/provider --setup lm_studio"));
+        assert!(n[0].message.contains("run /model to pick"));
         assert!(transition_events(Some(&absent), &absent).is_empty());
         // Key rejected: once.
         let n = transition_events(Some(&ok), &bad_key);
@@ -724,9 +719,17 @@ mod tests {
         assert!(n[0].message.contains("run /model to pick"), "{}", n[0].message);
         assert!(!n[0].message.contains("--setup"), "{}", n[0].message);
 
-        // OpenAI-compat presets pick their model in the setup flow.
-        let n = transition_events(None, &result(true, Some(false), Some("valid")));
-        assert!(n[0].message.contains("run /provider --setup lm_studio to pick"));
+        // Gemini, Ollama and LM Studio pick their model with `/model` too.
+        for kind in [ProviderKind::Gemini, ProviderKind::Ollama, ProviderKind::LmStudio] {
+            let mut absent = ProviderProbe::base(&target(kind, "m", ""), "host".into());
+            absent.reachable = true;
+            absent.model_present = Some(false);
+            absent.key_state = Some("valid".into());
+            let n = transition_events(None, &absent);
+            assert_eq!(n.len(), 1, "{kind:?}");
+            assert!(n[0].message.contains("run /model to pick"), "{}", n[0].message);
+            assert!(!n[0].message.contains("--setup"), "{}", n[0].message);
+        }
     }
 
     #[test]

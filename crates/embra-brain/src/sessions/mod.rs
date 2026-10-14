@@ -333,7 +333,14 @@ impl SessionManager {
         let (provider, model) = match crate::config::load_config(&self.db).await {
             Ok(cfg) => {
                 let m = match cfg.api_provider.as_str() {
-                    "gemini" => "gemini-3.1-pro".to_string(),
+                    // Gemini: the stored alias or id, shown the way the
+                    // turn path shows it (`display_name_for`).
+                    "gemini" => crate::provider::gemini::display_name_for(
+                        cfg.gemini_model
+                            .as_deref()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(crate::provider::gemini::DEFAULT_MODEL),
+                    ),
                     // Anthropic: reflect the persisted model alias (set by
                     // the wizard / `/model`), falling back to the default's
                     // display. Display metadata only — the resolver in

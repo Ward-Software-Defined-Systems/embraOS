@@ -45,6 +45,8 @@ use wire::{
 /// another, and the name it is shown under.
 pub const DEFAULT_MODEL: &str = "gemini-3.1-pro-preview";
 pub const DEFAULT_DISPLAY_NAME: &str = "gemini-3.1-pro";
+/// Gemini 4 Argon: selectable, not the default. Its id is its alias.
+pub const ARGON_MODEL: &str = "gemini-4-argon";
 pub(crate) const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 const VALIDATE_TIMEOUT: Duration = Duration::from_secs(10);
 
