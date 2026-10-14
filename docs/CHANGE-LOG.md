@@ -50,12 +50,17 @@ Docs:
 - `docs/RECOMMENDED-LOCAL-MODELS.md` says what the probe warns about, where the reading shows, and when it cannot read the window: a keep-alive under 5 minutes, a proxy that blocks `/api/ps`, an older Ollama. It also names the two cases where the remedy does not help: a Modelfile `num_ctx`, and the model's trained length.
 - `TOOL-REFERENCE` and `COMMAND-REFERENCE` name the field.
 
-Live in QEMU, on the test fleet's x86_64 server (William's word, 2026-10-13): the warning works. The server ran Ollama 0.40.4 with its defaults on an RTX 3080 Ti, 12 GB. Its log shows the rest:
+Live in QEMU, on the test fleet's x86_64 server (William's word, 2026-10-13): the warning works.
+- From 21:28 to 21:44 the instance used a `:cloud` model on the Mac Studio's Ollama, which showed no warning.
+- After the switch back, one CRITICAL came between 21:44 and 21:52, and none after it. A switch to another endpoint or model starts the comparison over (`same_target`), so the first reading after it is a first sighting again.
+
+The server ran Ollama 0.40.4 with its defaults on an RTX 3080 Ti, 12 GB. Its log shows the rest:
 - `vram-based default context total_vram="11.6 GiB" default_num_ctx=4096`; `gemma4:12b`, the GGUF build, loaded at 4,096 tokens.
-- The probe's `GET /v1/models` and `GET /api/ps` every 5 minutes. The first probe after the model loaded ran 4 minutes after the first turn began.
+- The probe's `GET /v1/models` and `GET /api/ps` every 5 minutes, and none from 21:28 to 21:44. The first probe after the model loaded ran 4 minutes after the first turn began.
+- After the switch back, the probe found the model loaded at 21:49. The model then unloaded and loaded again three times, once after an Ollama restart. A probe read the window after each of those reloads (21:54, 22:45, 23:00); without `carry_context_window` each would have been a first sighting.
 - 29 requests of 20,037 to 20,126 tokens, each cut to 2,051 (`truncating input prompt`).
 
-TBD: the notice on the fix (`OLLAMA_CONTEXT_LENGTH` at 65536), an MLX build on a Mac, and a cloud model.
+TBD: the notice on the fix (`OLLAMA_CONTEXT_LENGTH` at 65536) and an MLX build on a Mac.
 
 **Ollama's GGUF builds trim a request that does not fit, without an error; the models doc says so, and its Ollama rows name the MLX builds (branch `code-review`, 2026-10-13).** William, 2026-10-13: the Ollama models on both Macs are the MLX builds; and the Ollama behind the Omega instance, on a 16 GB NVIDIA GPU (RTX 4080) with no `OLLAMA_CONTEXT_LENGTH`, ran `gemma4:12b` at 4,096 tokens with no error anywhere. Read in Ollama's source (main @ `63b4f61ca926`) and at docs.ollama.com/context-length:
 - **The default window comes from GPU memory.** Ollama picks it from the GPU memory it detects: 4,096 tokens under 24 GiB, 32,768 from 24 to 48 GiB, 262,144 above (`server/routes.go`, logged at startup as `vram-based default context`).
