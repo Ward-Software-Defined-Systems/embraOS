@@ -7,7 +7,10 @@
 //! ignores EXIF, so an un-rotated phone photo arrives sideways).
 //!
 //! Bytes that need no transform (small, upright, within the edge cap) are
-//! kept byte-identical — nothing is re-encoded gratuitously.
+//! kept byte-identical — nothing is re-encoded gratuitously. A GIF is the
+//! exception: it is always stored as the PNG of its first frame, because
+//! Gemini takes no GIF (its image types are PNG, JPEG, WebP, HEIC and
+//! HEIF) and a vision model reads one frame anyway.
 
 use std::io::Cursor;
 
@@ -184,7 +187,10 @@ pub fn normalize_blocking(bytes: Vec<u8>) -> Result<Normalized, IngestError> {
     };
     let needs_rotate = orientation != Orientation::NoTransforms;
     let needs_scale = w.max(h) > MEDIA_LONG_EDGE_MAX;
-    if !needs_rotate && !needs_scale && bytes.len() <= MEDIA_INLINE_MAX {
+    // A GIF never stays a GIF (module doc): the ladder below writes its
+    // first frame as PNG.
+    let needs_reencode = kind == ImageKind::Gif;
+    if !needs_rotate && !needs_scale && !needs_reencode && bytes.len() <= MEDIA_INLINE_MAX {
         return Ok(Normalized {
             bytes,
             kind,
@@ -285,6 +291,30 @@ pub(crate) mod tests {
             .write_to(&mut out, ImageFormat::Png)
             .unwrap();
         out.into_inner()
+    }
+
+    pub(crate) fn gif_fixture(w: u32, h: u32) -> Vec<u8> {
+        let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(w, h, |x, _| Rgba([(x % 256) as u8, 90, 30, 255]));
+        let mut out = Cursor::new(Vec::new());
+        DynamicImage::ImageRgba8(img)
+            .write_to(&mut out, ImageFormat::Gif)
+            .unwrap();
+        out.into_inner()
+    }
+
+    /// Small, upright and under every cap, a GIF is still re-encoded:
+    /// stored as PNG, which every provider takes.
+    #[test]
+    fn a_gif_is_stored_as_png() {
+        let gif = gif_fixture(4, 3);
+        assert_eq!(sniff(&gif), Some(ImageKind::Gif));
+        let n = normalize_blocking(gif).unwrap();
+        assert_eq!(n.kind, ImageKind::Png);
+        assert_eq!(n.kind.media_type(), "image/png");
+        assert!(n.transformed);
+        assert_eq!((n.width, n.height), (4, 3));
+        assert_eq!(sniff(&n.bytes), Some(ImageKind::Png));
     }
 
     /// JPEG fixture with an EXIF orientation tag (`orientation` 1..=8),

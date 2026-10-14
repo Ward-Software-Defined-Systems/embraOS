@@ -36,6 +36,23 @@ impl ImageViewArgs {
     }
 }
 
+/// A GIF stored before uploads became PNG goes to the model as the PNG of
+/// its first frame, which every provider takes (Gemini takes no GIF). Any
+/// other stored image is returned as stored.
+async fn readable_by_every_provider(
+    mut meta: store::MediaMeta,
+    data: Vec<u8>,
+) -> Result<(store::MediaMeta, Vec<u8>), String> {
+    if meta.media_type != "image/gif" {
+        return Ok((meta, data));
+    }
+    let n = ingest::normalize(data).await.map_err(|e| e.to_string())?;
+    meta.media_type = n.kind.media_type().to_string();
+    meta.width = n.width;
+    meta.height = n.height;
+    Ok((meta, n.bytes))
+}
+
 /// Store-parameterized core (unit-tested against a temp store). User-facing
 /// problems come back as `Ok(text)` per house style; only store corruption
 /// is a hard `DispatchError::Handler`.
@@ -66,9 +83,13 @@ pub async fn image_view(store: &MediaStore, path: &str, session: &str) -> Result
             .is_some_and(|stem| store::parse_media_id(stem).is_ok());
     let (meta, data) = if in_store {
         let id = resolved.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
-        match store.get(&id).await {
+        let (meta, data) = match store.get(&id).await {
             Ok(pair) => pair,
             Err(e) => return Err(DispatchError::Handler(format!("image_view: {e}"))),
+        };
+        match readable_by_every_provider(meta, data).await {
+            Ok(pair) => pair,
+            Err(e) => return Ok(ToolOutput::text(format!("image_view: {} — {}", resolved.display(), e))),
         }
     } else {
         let bytes = match tokio::fs::read(&resolved).await {
@@ -336,7 +357,7 @@ pub async fn image_generate(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::media::ingest::tests::png_fixture;
+    use crate::media::ingest::tests::{gif_fixture, png_fixture};
 
     struct TempDir(std::path::PathBuf);
     impl TempDir {
@@ -354,6 +375,35 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// A GIF stored before uploads became PNG (put as a GIF here, the old
+    /// way) is shown to the model as PNG; a GIF file outside the store is
+    /// normalized like any image and comes back as PNG too.
+    #[tokio::test]
+    async fn image_view_shows_a_gif_as_png() {
+        let dir = TempDir::new();
+        let store = MediaStore::at(dir.0.join("MEDIA"));
+        let old = ingest::Normalized {
+            bytes: gif_fixture(5, 2),
+            kind: ingest::ImageKind::Gif,
+            width: 5,
+            height: 2,
+            transformed: false,
+        };
+        let meta = store.put(MediaOrigin::Attached, "anim.gif", "s", old).await.unwrap();
+        assert_eq!(meta.media_type, "image/gif");
+        let stored = store::to_attachment_ref(&meta, store.dir()).path;
+        let out = image_view(&store, &stored, "s").await.unwrap();
+        assert_eq!(out.images.len(), 1);
+        assert_eq!(out.images[0].media_type, "image/png");
+        assert_eq!((out.images[0].width, out.images[0].height), (5, 2));
+        assert_eq!(ingest::sniff(&out.images[0].data), Some(ingest::ImageKind::Png));
+
+        let src = dir.0.join("loop.gif");
+        std::fs::write(&src, gif_fixture(3, 3)).unwrap();
+        let out = image_view(&store, src.to_str().unwrap(), "s").await.unwrap();
+        assert_eq!(out.images[0].media_type, "image/png");
     }
 
     #[tokio::test]
