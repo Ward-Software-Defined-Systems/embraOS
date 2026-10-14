@@ -15,13 +15,18 @@
 //! Model and key resolution is the caller's job ([`ProbeTarget`] is
 //! built by `grpc_service::provider_probe_target` with the turn path's
 //! own resolvers), so the probe checks exactly what a turn would use.
+//!
+//! On Ollama the probe also reads the context window the model is loaded
+//! with (`/api/ps`, [`ContextWindow`]): a GGUF build trims a request that
+//! does not fit and reports no error, so a window below
+//! [`CONTEXT_FLOOR_TOKENS`] is announced once, and its fix once.
 
 use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use reqwest::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use super::anthropic::{API_VERSION as ANTHROPIC_API_VERSION, MODELS_URL as ANTHROPIC_MODELS_URL};
@@ -33,6 +38,11 @@ use crate::proactive::{Notification, Priority};
 /// Bound on one probe request (mirrors the providers' key-validation
 /// clients and `probe_models`).
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The smallest context window, in tokens, the docs ask for on a server
+/// that trims (`docs/RECOMMENDED-LOCAL-MODELS.md`; Ollama's own figure
+/// for agents). A GGUF model Ollama loads with less is announced.
+pub const CONTEXT_FLOOR_TOKENS: u64 = 64_000;
 
 /// What to probe — resolved by the caller from `SystemConfig` exactly the
 /// way a turn resolves it (env model overrides, per-provider key with the
@@ -69,6 +79,52 @@ pub struct ProviderProbe {
     pub checked_at: DateTime<Utc>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The window the model is loaded with — Ollama only, read from
+    /// `/api/ps` while the model is loaded and kept while it is not
+    /// ([`carry_context_window`]). Absent until first seen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<ContextWindow>,
+}
+
+/// What the model server says about the model's context window.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ContextWindow {
+    /// Ollama trims a request longer than `tokens` to fit, without an
+    /// error.
+    Window {
+        tokens: u64,
+        below_floor: bool,
+        seen_at: DateTime<Utc>,
+    },
+    /// An MLX build: the window is the model's own maximum, and Ollama
+    /// never trims it.
+    ModelMaximum { seen_at: DateTime<Utc> },
+    /// The server does not report it: no `/api/ps`, or an Ollama that
+    /// predates the field.
+    Unavailable { reason: String },
+}
+
+impl ContextWindow {
+    /// A window below [`CONTEXT_FLOOR_TOKENS`] that Ollama trims to.
+    fn is_short(&self) -> bool {
+        matches!(self, ContextWindow::Window { below_floor: true, .. })
+    }
+
+    fn summary(&self) -> String {
+        match self {
+            ContextWindow::Window {
+                tokens,
+                below_floor: true,
+                ..
+            } => format!(
+                "context window {tokens} tokens, under {CONTEXT_FLOOR_TOKENS}: Ollama trims without an error"
+            ),
+            ContextWindow::Window { tokens, .. } => format!("context window {tokens} tokens"),
+            ContextWindow::ModelMaximum { .. } => "context window: the model's maximum".to_string(),
+            ContextWindow::Unavailable { reason } => format!("context window not reported ({reason})"),
+        }
+    }
 }
 
 impl ProviderProbe {
@@ -84,6 +140,7 @@ impl ProviderProbe {
             latency_ms: None,
             checked_at: Utc::now(),
             error: Some("not configured".into()),
+            context_window: None,
         }
     }
 
@@ -99,6 +156,7 @@ impl ProviderProbe {
             latency_ms: None,
             checked_at: Utc::now(),
             error: None,
+            context_window: None,
         }
     }
 
@@ -142,6 +200,9 @@ impl ProviderProbe {
             }
             .to_string(),
         );
+        if let Some(w) = &self.context_window {
+            parts.push(w.summary());
+        }
         if let Some(k) = self.key_state.as_deref().filter(|k| *k != "valid") {
             parts.push(format!("key {k}"));
         }
@@ -297,6 +358,8 @@ async fn probe_openai_compat(t: &ProbeTarget) -> ProviderProbe {
                     t.model,
                     models.len()
                 ));
+            } else if t.kind == ProviderKind::Ollama && !is_cloud_model(&t.model) {
+                out.context_window = read_context_window(t).await;
             }
         }
         Err(ProviderError::Http { status, .. }) => {
@@ -319,6 +382,168 @@ async fn probe_openai_compat(t: &ProbeTarget) -> ProviderProbe {
     out
 }
 
+/// Ollama's cloud models (`:cloud`, `:<tag>-cloud`) run on ollama.com and
+/// are never loaded locally, so `/api/ps` has nothing to say about them.
+fn is_cloud_model(id: &str) -> bool {
+    id.rsplit_once(':')
+        .is_some_and(|(_, tag)| tag == "cloud" || tag.ends_with("-cloud"))
+}
+
+/// `GET /api/ps`: the fields read, nothing more. `models` is required, so
+/// a 200 that is not this answer (a proxy's page) reads as `Unavailable`,
+/// never as "nothing loaded".
+#[derive(Deserialize)]
+struct PsAnswer {
+    models: Vec<PsModel>,
+}
+
+#[derive(Deserialize)]
+struct PsModel {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    model: String,
+    /// The loaded window; absent on an Ollama that predates the field.
+    context_length: Option<u64>,
+    /// `mlx` | `ggml` | `llamacpp`; absent on an older Ollama.
+    runner: Option<String>,
+    details: Option<PsDetails>,
+}
+
+#[derive(Deserialize)]
+struct PsDetails {
+    /// `gguf`, or `safetensors` for an MLX build.
+    format: Option<String>,
+}
+
+/// The window Ollama loaded the configured model with: the `CONTEXT`
+/// column of `ollama ps`. Built like `probe_models`: a fresh client under
+/// `PROBE_TIMEOUT`, the bearer only when one is set.
+///
+/// `None` when the model is not loaded, and when the server could not
+/// answer now (a network error, a 5xx): a proxy's 502 while Ollama
+/// restarts is not "not reported". `Unavailable` when the server does not
+/// serve the list: a 4xx, or a body that is not one.
+async fn read_context_window(t: &ProbeTarget) -> Option<ContextWindow> {
+    let url = format!("{}/api/ps", t.endpoint.trim_end_matches('/'));
+    let client = Client::builder().timeout(PROBE_TIMEOUT).build().ok()?;
+    let mut req = client.get(&url);
+    if !t.key.is_empty() {
+        req = req.bearer_auth(&t.key);
+    }
+    let resp = req.send().await.ok()?;
+    let status = resp.status();
+    if status.is_client_error() {
+        return Some(ContextWindow::Unavailable {
+            reason: format!("HTTP {} from /api/ps", status.as_u16()),
+        });
+    }
+    if !status.is_success() {
+        return None;
+    }
+    let body = resp.bytes().await.ok()?;
+    let Ok(answer) = serde_json::from_slice::<PsAnswer>(&body) else {
+        return Some(ContextWindow::Unavailable {
+            reason: "the answer from /api/ps is not a list of models".into(),
+        });
+    };
+    answer
+        .models
+        .iter()
+        .find(|m| m.name == t.model || m.model == t.model)
+        .map(|m| window_of(m, Utc::now()))
+}
+
+/// One `/api/ps` entry → its reading. An MLX build's figure is only the
+/// number `ollama ps` shows: the window is the model's maximum, and Ollama
+/// never trims it. `runner` decides; on an Ollama too old to send it, the
+/// weight format does (`safetensors` is MLX).
+fn window_of(m: &PsModel, seen_at: DateTime<Utc>) -> ContextWindow {
+    let format = m.details.as_ref().and_then(|d| d.format.as_deref());
+    let mlx = match m.runner.as_deref() {
+        Some(runner) => runner == "mlx",
+        None => format == Some("safetensors"),
+    };
+    if mlx {
+        return ContextWindow::ModelMaximum { seen_at };
+    }
+    match m.context_length {
+        Some(tokens) if tokens > 0 => ContextWindow::Window {
+            tokens,
+            below_floor: tokens < CONTEXT_FLOOR_TOKENS,
+            seen_at,
+        },
+        _ => ContextWindow::Unavailable {
+            reason: "this Ollama does not report the context window".into(),
+        },
+    }
+}
+
+/// About how many tokens the tool list takes on the OpenAI-compatible
+/// wire: its JSON bytes over four. Computed once. A translation that
+/// fails sends no tools (`OpenAICompatProvider::build_tool_manifest`), so
+/// it counts as 0.
+fn tool_list_tokens() -> u64 {
+    static TOKENS: OnceLock<u64> = OnceLock::new();
+    *TOKENS.get_or_init(|| {
+        let descriptors: Vec<&'static crate::tools::registry::ToolDescriptor> =
+            crate::tools::registry::all_descriptors().collect();
+        super::openai_compat::tool_schema::translate(&descriptors)
+            .map(|manifest| manifest.to_string().len() as u64 / 4)
+            .unwrap_or(0)
+    })
+}
+
+/// The announcement of a window below [`CONTEXT_FLOOR_TOKENS`]. Critical
+/// when it cannot hold even the tool list: then every request is cut.
+fn short_window_notice(model: &str, tokens: u64) -> Notification {
+    let remedy = format!(
+        "Set OLLAMA_CONTEXT_LENGTH to {CONTEXT_FLOOR_TOKENS} or more on the Ollama server and restart it."
+    );
+    if tokens < tool_list_tokens() {
+        Notification::new(
+            Priority::Critical,
+            format!(
+                "Ollama is running {model} with a context window of {tokens} tokens, less than \
+                 embraOS's tool list alone. Ollama cuts every request to fit and reports no \
+                 error, so the model works without its identity, most of its tools and its \
+                 earlier turns. {remedy}"
+            ),
+        )
+    } else {
+        Notification::new(
+            Priority::Normal,
+            format!(
+                "Ollama is running {model} with a context window of {tokens} tokens, below the \
+                 {CONTEXT_FLOOR_TOKENS} embraOS needs. A request that does not fit is cut to fit \
+                 with no error, its earlier turns first. {remedy}"
+            ),
+        )
+    }
+}
+
+/// The two results are about the same provider, model and endpoint: the
+/// comparison [`transition_events`] and [`carry_context_window`] make.
+fn same_target(prev: &ProviderProbe, next: &ProviderProbe) -> bool {
+    prev.configured && prev.kind == next.kind && prev.model == next.model && prev.endpoint == next.endpoint
+}
+
+/// Keep the last context-window reading while the model is unloaded.
+/// Ollama lists loaded models only, and it unloads an idle one after
+/// `OLLAMA_KEEP_ALIVE` (5 minutes by default); without the carry, every
+/// reload would read as a first sighting and repeat the warning. Only for
+/// the same target, and never over a fresh reading.
+pub fn carry_context_window(prev: Option<&ProviderProbe>, next: &mut ProviderProbe) {
+    if next.context_window.is_some() {
+        return;
+    }
+    if let Some(p) = prev
+        && same_target(p, next)
+    {
+        next.context_window = p.context_window.clone();
+    }
+}
+
 /// Operator notifications for a probe result, given the previous one.
 /// Pure — fires only on CHANGES of the same target, never for an
 /// unconfigured provider, so a headless instance never floods the
@@ -328,9 +553,7 @@ pub fn transition_events(prev: Option<&ProviderProbe>, next: &ProviderProbe) -> 
     if !next.configured {
         return out;
     }
-    let prev = prev.filter(|p| {
-        p.configured && p.kind == next.kind && p.model == next.model && p.endpoint == next.endpoint
-    });
+    let prev = prev.filter(|p| same_target(p, next));
     let prev_reachable = prev.map(|p| p.reachable);
     let prev_model_present = prev.and_then(|p| p.model_present);
     let prev_key_state = prev.and_then(|p| p.key_state.as_deref());
@@ -385,6 +608,30 @@ pub fn transition_events(prev: Option<&ProviderProbe>, next: &ProviderProbe) -> 
                 next.kind, next.kind
             ),
         ));
+    }
+    // A short window once, and its fix once. An MLX build and an
+    // unreported window never notify.
+    let prev_short = prev
+        .and_then(|p| p.context_window.as_ref())
+        .is_some_and(ContextWindow::is_short);
+    match &next.context_window {
+        Some(ContextWindow::Window {
+            tokens,
+            below_floor: true,
+            ..
+        }) if !prev_short => out.push(short_window_notice(&next.model, *tokens)),
+        Some(ContextWindow::Window {
+            tokens,
+            below_floor: false,
+            ..
+        }) if prev_short => out.push(Notification::new(
+            Priority::Normal,
+            format!(
+                "Ollama now runs {} with a context window of {tokens} tokens.",
+                next.model
+            ),
+        )),
+        _ => {}
     }
     out
 }
@@ -568,5 +815,262 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), probe_requested())
             .await
             .expect("request_probe must wake the loop");
+    }
+
+    /// A healthy Ollama probe of `model` holding `window`.
+    fn ollama(model: &str, window: Option<ContextWindow>) -> ProviderProbe {
+        let endpoint = "http://ollama:11434";
+        let mut p = ProviderProbe::base(&target(ProviderKind::Ollama, model, endpoint), endpoint.into());
+        p.reachable = true;
+        p.model_present = Some(true);
+        p.key_state = Some("valid".into());
+        p.context_window = window;
+        p
+    }
+
+    fn window(tokens: u64) -> Option<ContextWindow> {
+        Some(ContextWindow::Window {
+            tokens,
+            below_floor: tokens < CONTEXT_FLOOR_TOKENS,
+            seen_at: Utc::now(),
+        })
+    }
+
+    async fn ps_requests(server: &MockServer) -> Vec<wiremock::Request> {
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|r| r.url.path() == "/api/ps")
+            .collect()
+    }
+
+    /// An Ollama that lists `ids` and answers `/api/ps` with `ps`.
+    async fn ollama_server(ids: &[&str], ps: ResponseTemplate) -> MockServer {
+        let server = MockServer::start().await;
+        let data: Vec<_> = ids.iter().map(|id| serde_json::json!({ "id": id })).collect();
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({ "object": "list", "data": data })),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET")).and(path("/api/ps")).respond_with(ps).mount(&server).await;
+        server
+    }
+
+    #[tokio::test]
+    async fn ollama_probe_reads_the_window_of_the_loaded_model() {
+        let ps = ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "models": [
+                {"name": "gemma4:12b", "model": "gemma4:12b", "context_length": 4096,
+                 "runner": "llamacpp", "details": {"format": "gguf"}},
+                {"name": "gemma4:12b-mlx", "model": "gemma4:12b-mlx", "context_length": 4096,
+                 "runner": "mlx", "details": {"format": "safetensors"}},
+                {"name": "qwen3.8:27b", "model": "qwen3.8:27b", "context_length": 65536,
+                 "runner": "llamacpp", "details": {"format": "gguf"}}
+            ]
+        }));
+        let ids = ["gemma4:12b", "gemma4:12b-mlx", "qwen3.8:27b", "qwen3.6:27b", "glm-5.3:cloud"];
+        let server = ollama_server(&ids, ps).await;
+        let uri = server.uri();
+
+        let p = probe(Some(&target(ProviderKind::Ollama, "gemma4:12b", &uri))).await;
+        assert!(
+            matches!(
+                p.context_window,
+                Some(ContextWindow::Window { tokens: 4096, below_floor: true, .. })
+            ),
+            "{p:?}"
+        );
+        assert!(p.healthy() && p.error.is_none(), "a short window is not an endpoint failure: {p:?}");
+        let asked = ps_requests(&server).await;
+        assert_eq!(asked.len(), 1);
+        assert_eq!(asked[0].headers.get("authorization").unwrap(), "Bearer sk-test");
+
+        // MLX: the figure is only what `ollama ps` shows.
+        let p = probe(Some(&target(ProviderKind::Ollama, "gemma4:12b-mlx", &uri))).await;
+        assert!(matches!(p.context_window, Some(ContextWindow::ModelMaximum { .. })), "{p:?}");
+        let p = probe(Some(&target(ProviderKind::Ollama, "qwen3.8:27b", &uri))).await;
+        assert!(
+            matches!(
+                p.context_window,
+                Some(ContextWindow::Window { tokens: 65536, below_floor: false, .. })
+            ),
+            "{p:?}"
+        );
+        // Listed by /v1/models but not loaded: nothing to read yet.
+        let p = probe(Some(&target(ProviderKind::Ollama, "qwen3.6:27b", &uri))).await;
+        assert!(p.model_present == Some(true) && p.context_window.is_none(), "{p:?}");
+
+        // A cloud model and an LM Studio target never ask /api/ps.
+        let before = ps_requests(&server).await.len();
+        let p = probe(Some(&target(ProviderKind::Ollama, "glm-5.3:cloud", &uri))).await;
+        assert!(p.model_present == Some(true) && p.context_window.is_none(), "{p:?}");
+        let p = probe(Some(&target(ProviderKind::LmStudio, "gemma4:12b", &uri))).await;
+        assert!(p.model_present == Some(true) && p.context_window.is_none(), "{p:?}");
+        assert_eq!(ps_requests(&server).await.len(), before);
+    }
+
+    #[tokio::test]
+    async fn a_server_that_does_not_report_the_window_reads_as_unavailable() {
+        let probe_of = |server: &MockServer| {
+            let t = target(ProviderKind::Ollama, "m:7b", &server.uri());
+            async move { probe(Some(&t)).await }
+        };
+
+        // No /api/ps (a server behind the preset that is not Ollama).
+        let server = ollama_server(&["m:7b"], ResponseTemplate::new(404)).await;
+        let p = probe_of(&server).await;
+        match &p.context_window {
+            Some(ContextWindow::Unavailable { reason }) => assert!(reason.contains("404"), "{reason}"),
+            other => panic!("expected Unavailable, got {other:?}"),
+        }
+        assert!(p.healthy() && p.error.is_none(), "{p:?}");
+
+        // An Ollama too old to send the window.
+        let ps = ResponseTemplate::new(200)
+            .set_body_json(serde_json::json!({"models": [{"name": "m:7b", "model": "m:7b"}]}));
+        let p = probe_of(&ollama_server(&["m:7b"], ps).await).await;
+        assert!(matches!(p.context_window, Some(ContextWindow::Unavailable { .. })), "{p:?}");
+
+        // Too old to send the runner: the weight format decides.
+        let ps = ResponseTemplate::new(200).set_body_json(serde_json::json!({"models": [
+            {"name": "m:7b", "model": "m:7b", "context_length": 4096, "details": {"format": "safetensors"}}
+        ]}));
+        let p = probe_of(&ollama_server(&["m:7b"], ps).await).await;
+        assert!(matches!(p.context_window, Some(ContextWindow::ModelMaximum { .. })), "{p:?}");
+        let ps = ResponseTemplate::new(200).set_body_json(serde_json::json!({"models": [
+            {"name": "m:7b", "model": "m:7b", "context_length": 8192, "details": {"format": "gguf"}}
+        ]}));
+        let p = probe_of(&ollama_server(&["m:7b"], ps).await).await;
+        assert!(
+            matches!(p.context_window, Some(ContextWindow::Window { tokens: 8192, .. })),
+            "{p:?}"
+        );
+
+        // A 200 that is not the list is not "nothing loaded".
+        let ps = ResponseTemplate::new(200).set_body_json(serde_json::json!({}));
+        let p = probe_of(&ollama_server(&["m:7b"], ps).await).await;
+        assert!(matches!(p.context_window, Some(ContextWindow::Unavailable { .. })), "{p:?}");
+
+        // A server error is transient: no reading, so a held one is kept.
+        let p = probe_of(&ollama_server(&["m:7b"], ResponseTemplate::new(500)).await).await;
+        assert!(p.healthy() && p.context_window.is_none(), "{p:?}");
+    }
+
+    #[test]
+    fn the_window_reading_is_kept_while_the_model_is_unloaded() {
+        let seen = ollama("gemma4:12b", window(4096));
+
+        let mut unloaded = ollama("gemma4:12b", None);
+        carry_context_window(Some(&seen), &mut unloaded);
+        assert_eq!(unloaded.context_window, seen.context_window);
+        assert!(transition_events(Some(&seen), &unloaded).is_empty());
+
+        // A fresh reading wins.
+        let mut fresh = ollama("gemma4:12b", window(65536));
+        carry_context_window(Some(&seen), &mut fresh);
+        assert!(matches!(
+            fresh.context_window,
+            Some(ContextWindow::Window { tokens: 65536, .. })
+        ));
+
+        // Another model, or no configured provider before, carries nothing.
+        let mut other = ollama("qwen3.8:27b", None);
+        carry_context_window(Some(&seen), &mut other);
+        assert!(other.context_window.is_none());
+        let mut first = ollama("gemma4:12b", None);
+        carry_context_window(Some(&ProviderProbe::unconfigured()), &mut first);
+        assert!(first.context_window.is_none());
+        carry_context_window(None, &mut first);
+        assert!(first.context_window.is_none());
+    }
+
+    #[test]
+    fn a_short_window_is_announced_once_and_its_fix_once() {
+        let tools = tool_list_tokens();
+        assert!(tools > 4096 && tools <= 60_000, "tool list ≈ {tools} tokens");
+        let m = "gemma4:12b";
+
+        // First sight of a window the tool list does not fit: Critical.
+        for prev in [None, Some(ollama(m, None))] {
+            let n = transition_events(prev.as_ref(), &ollama(m, window(4096)));
+            assert_eq!(n.len(), 1);
+            assert!(matches!(n[0].priority, Priority::Critical));
+            for needle in ["gemma4:12b", "4096 tokens", "OLLAMA_CONTEXT_LENGTH", "64000"] {
+                assert!(n[0].message.contains(needle), "{needle}: {}", n[0].message);
+            }
+        }
+        // Short, but it holds the tools: Normal.
+        let n = transition_events(None, &ollama(m, window(60_000)));
+        assert_eq!(n.len(), 1);
+        assert!(matches!(n[0].priority, Priority::Normal));
+        assert!(n[0].message.contains("60000 tokens"), "{}", n[0].message);
+
+        // Unchanged: silent. Fixed: one Normal.
+        assert!(transition_events(Some(&ollama(m, window(4096))), &ollama(m, window(4096))).is_empty());
+        let n = transition_events(Some(&ollama(m, window(4096))), &ollama(m, window(65536)));
+        assert_eq!(n.len(), 1);
+        assert!(matches!(n[0].priority, Priority::Normal));
+        assert!(
+            n[0].message.contains("now runs gemma4:12b with a context window of 65536 tokens"),
+            "{}",
+            n[0].message
+        );
+
+        // A window at the floor, an MLX build and an unreported window are silent.
+        let mlx = Some(ContextWindow::ModelMaximum { seen_at: Utc::now() });
+        let unreported = Some(ContextWindow::Unavailable { reason: "HTTP 404 from /api/ps".into() });
+        for w in [window(65536), mlx.clone(), unreported.clone()] {
+            assert!(transition_events(None, &ollama(m, w.clone())).is_empty(), "{w:?}");
+            assert!(transition_events(Some(&ollama(m, None)), &ollama(m, w.clone())).is_empty(), "{w:?}");
+        }
+        // Another model resets the comparison.
+        assert_eq!(
+            transition_events(Some(&ollama("qwen3.8:27b", window(4096))), &ollama(m, window(4096))).len(),
+            1
+        );
+
+        // The summary line says it; the endpoint state does not change.
+        let short = ollama(m, window(4096));
+        assert!(
+            short
+                .summary_line()
+                .contains("context window 4096 tokens, under 64000: Ollama trims without an error"),
+            "{}",
+            short.summary_line()
+        );
+        assert_eq!(short.state(), "up");
+        assert!(short.healthy());
+        let fine = ollama(m, window(65536)).summary_line();
+        assert!(fine.contains("context window 65536 tokens") && !fine.contains("under"), "{fine}");
+        assert!(ollama(m, mlx.clone()).summary_line().contains("context window: the model's maximum"));
+        assert!(
+            ollama(m, unreported)
+                .summary_line()
+                .contains("context window not reported (HTTP 404 from /api/ps)")
+        );
+
+        // `/status` and `system_status` carry it as `provider.context_window`.
+        let status = |p: ProviderProbe| serde_json::to_value(crate::tools::ProviderStatus::from(p)).unwrap();
+        let v = status(short);
+        assert_eq!(v["context_window"]["state"], "window");
+        assert_eq!(v["context_window"]["tokens"], 4096);
+        assert_eq!(v["context_window"]["below_floor"], true);
+        assert_eq!(status(ollama(m, mlx))["context_window"]["state"], "model_maximum");
+        assert!(status(ollama(m, None)).get("context_window").is_none());
+    }
+
+    #[test]
+    fn cloud_tags_are_recognized() {
+        for cloud in ["glm-5.3:cloud", "gpt-oss:120b-cloud", "deepseek-v4-pro:cloud"] {
+            assert!(is_cloud_model(cloud), "{cloud}");
+        }
+        for local in ["cloudy:7b", "gemma4:12b-mlx", "qwen3.8:27b", "cloud"] {
+            assert!(!is_cloud_model(local), "{local}");
+        }
     }
 }

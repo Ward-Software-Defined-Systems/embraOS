@@ -241,8 +241,10 @@ async fn deliver_due_reminders(db: &WardsonDbClient, tx: &mpsc::Sender<Notificat
 }
 
 /// One provider probe: resolve the target from persisted config the way a
-/// turn would, run it, publish it for `/status`, and tell the operator
-/// about CHANGES (`health::transition_events`).
+/// turn would, run it, keep the last context-window reading while the
+/// model is unloaded (`health::carry_context_window`), publish it for
+/// `/status`, and tell the operator about CHANGES
+/// (`health::transition_events`).
 async fn run_provider_probe(
     db: &WardsonDbClient,
     boot_key: &str,
@@ -254,7 +256,8 @@ async fn run_provider_probe(
         .await
         .ok()
         .and_then(|cfg| crate::grpc_service::provider_probe_target(&cfg, boot_key));
-    let probe = health::probe(target.as_ref()).await;
+    let mut probe = health::probe(target.as_ref()).await;
+    health::carry_context_window(previous.as_ref(), &mut probe);
     if probe.configured {
         if probe.healthy() {
             info!(
@@ -263,6 +266,7 @@ async fn run_provider_probe(
                 model = %probe.model,
                 endpoint = %probe.endpoint,
                 latency_ms = ?probe.latency_ms,
+                context_window = ?probe.context_window,
                 "provider endpoint ok"
             );
         } else {
@@ -275,6 +279,7 @@ async fn run_provider_probe(
                 model_present = ?probe.model_present,
                 key_state = ?probe.key_state,
                 error = ?probe.error,
+                context_window = ?probe.context_window,
                 "provider endpoint check failed"
             );
         }
