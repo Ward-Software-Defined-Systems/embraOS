@@ -111,7 +111,7 @@ The server ran Ollama 0.40.4 with its defaults on an RTX 3080 Ti, 12 GB. Its log
 - After the switch back, the probe found the model loaded at 21:49. The model then unloaded and loaded again three times, once after an Ollama restart. A probe read the window after each of those reloads (21:54, 22:45, 23:00); without `carry_context_window` each would have been a first sighting.
 - 29 requests of 20,037 to 20,126 tokens, each cut to 2,051 (`truncating input prompt`).
 
-TBD: the notice on the fix (`OLLAMA_CONTEXT_LENGTH` at 65536) and an MLX build on a Mac.
+The fix passed live on Omega, whose Ollama runs on the RTX 4080 (William's word, 2026-10-14): the short-window warning came, and after the context length was raised, the notice that the window is fixed. TBD: an MLX build on a Mac.
 
 **Ollama's GGUF builds trim a request that does not fit, without an error; the models doc says so, and its Ollama rows name the MLX builds (branch `code-review`, 2026-10-13).** William, 2026-10-13: the Ollama models on both Macs are the MLX builds; and the Ollama behind the Omega instance, on a 16 GB NVIDIA GPU (RTX 4080) with no `OLLAMA_CONTEXT_LENGTH`, ran `gemma4:12b` at 4,096 tokens with no error anywhere. Read in Ollama's source (main @ `63b4f61ca926`) and at docs.ollama.com/context-length:
 - **The default window comes from GPU memory.** Ollama picks it from the GPU memory it detects: 4,096 tokens under 24 GiB, 32,768 from 24 to 48 GiB, 262,144 above (`server/routes.go`, logged at startup as `vram-based default context`).
