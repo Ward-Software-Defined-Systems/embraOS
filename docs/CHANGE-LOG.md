@@ -78,7 +78,7 @@ Live in QEMU: TBD. The checks:
 - `/effort medium` lowers the thinking tokens.
 - The setup model step works for Gemini (passed on Omega, William's word, 2026-10-14) and for Anthropic (TBD).
 - On a fresh instance, the wizard runs Argon.
-- Vision on Argon: an attached image is answered; `image_view` returns an image the model describes (images inside a function response, which Google documents for Gemini 3 only); a GIF attached on Gemini is answered (stored as PNG).
+- Vision on Argon passed on Omega (William's word, 2026-10-14): an attached image is answered, and `image_view` and `image_generate` return images the model reads. So Argon takes images inside a function response, which Google documents for Gemini 3 only. TBD: a GIF attached on Gemini is answered (stored as PNG).
 
 **The provider probe reads the context window Ollama loaded the model with, and warns below 64000 tokens (branch `code-review`, 2026-10-13).** William, 2026-10-13, after the entry below: the brain counts no tokens, so a short window on a GGUF build went unnoticed. He asked for a warning and chose the existing 5-minute probe over a nudge after each turn. A model stays loaded for Ollama's default 5-minute keep-alive, so the first probe after a turn finds it.
 
