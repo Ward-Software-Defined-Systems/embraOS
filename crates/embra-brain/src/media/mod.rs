@@ -28,6 +28,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use embra_tools_core::ToolImage;
 
 use crate::provider::ir::ImageData;
+use crate::provider::ProviderKind;
 
 pub use store::{MediaMeta, MediaOrigin, MediaStore};
 
@@ -53,8 +54,25 @@ pub const MEDIA_MAX_PER_MESSAGE: usize = 10;
 /// Inline-replay ceiling, newest-first over the session history.
 pub const MEDIA_HISTORY_MAX_IMAGES: usize = 20;
 /// Inline-replay byte ceiling (raw bytes; ≈ ×4/3 on the wire — 16 MiB
-/// raw ≈ 21 MB base64, under the 32 MB request cap with room for text).
+/// raw ≈ 21 MB base64, under Anthropic's 32 MB request cap with room for
+/// text). Gemini's cap is lower: see [`history_image_bytes_for`].
 pub const MEDIA_HISTORY_MAX_BYTES: u64 = 16 * 1024 * 1024;
+/// The inline-replay byte ceiling on Gemini, which caps a request that
+/// carries inline images at 20 MB in all: "text prompts, system
+/// instructions, and inline bytes" (ai.google.dev, image understanding).
+/// 12 MiB raw ≈ 16.8 MB in base64 leaves over 3 MB of it for the system
+/// prompt, the tools and the history text.
+pub const MEDIA_HISTORY_MAX_BYTES_GEMINI: u64 = 12 * 1024 * 1024;
+
+/// The inline-replay byte ceiling for the provider a turn goes to.
+pub fn history_image_bytes_for(kind: ProviderKind) -> u64 {
+    match kind {
+        ProviderKind::Gemini => MEDIA_HISTORY_MAX_BYTES_GEMINI,
+        ProviderKind::Anthropic | ProviderKind::Ollama | ProviderKind::LmStudio => {
+            MEDIA_HISTORY_MAX_BYTES
+        }
+    }
+}
 /// Operator-facing name cap (original filename).
 pub const MEDIA_NAME_MAX: usize = 120;
 /// Concurrent normalizations (decode is CPU + memory heavy).
@@ -176,6 +194,11 @@ mod tests {
         assert_eq!(out[0].name, "px.png");
     }
 
+    /// Gemini's request cap with inline images (ai.google.dev, image
+    /// understanding): 20 MB for text, system instructions and inline
+    /// bytes together.
+    const GEMINI_INLINE_REQUEST_MAX: u64 = 20 * 1_000_000;
+
     #[test]
     fn caps_pinned() {
         assert_eq!(MEDIA_UPLOAD_MAX, 12 * 1024 * 1024);
@@ -184,6 +207,7 @@ mod tests {
         assert_eq!(MEDIA_MAX_PER_MESSAGE, 10);
         assert_eq!(MEDIA_HISTORY_MAX_IMAGES, 20);
         assert_eq!(MEDIA_HISTORY_MAX_BYTES, 16 * 1024 * 1024);
+        assert_eq!(MEDIA_HISTORY_MAX_BYTES_GEMINI, 12 * 1024 * 1024);
         assert_eq!(text::TEXT_UPLOAD_MAX, 2 * 1024 * 1024);
         assert_eq!(text::TEXT_INLINE_MAX, 48 * 1024);
         assert_eq!(text::TEXT_HISTORY_MAX_BYTES, 256 * 1024);
@@ -195,10 +219,22 @@ mod tests {
         const { assert!(text::TEXT_UPLOAD_MAX <= MEDIA_UPLOAD_MAX) };
         // Relations between constants are checked when this test is
         // compiled, not when it runs: breaking one stops the build.
-        // The replay ceiling must stay under the vision API's 32 MB
-        // request cap after base64 inflation (×4/3).
+        // The replay ceiling must stay under Anthropic's 32 MB request
+        // cap after base64 inflation (×4/3).
         const { assert!(MEDIA_HISTORY_MAX_BYTES * 4 / 3 < 32 * 1_000_000) };
+        // Gemini's stays under its 20 MB cap with 3 MB left for the text.
+        const { assert!(MEDIA_HISTORY_MAX_BYTES_GEMINI * 4 / 3 + 3 * 1_000_000 < GEMINI_INLINE_REQUEST_MAX) };
         // One inline image can never exceed the API's per-image cap.
         const { assert!(MEDIA_INLINE_MAX * 4 / 3 < 10 * 1_000_000) };
+    }
+
+    /// Each provider's replay budget fits its own request cap.
+    #[test]
+    fn each_provider_replays_images_under_its_request_cap() {
+        assert_eq!(history_image_bytes_for(ProviderKind::Gemini), MEDIA_HISTORY_MAX_BYTES_GEMINI);
+        for kind in [ProviderKind::Anthropic, ProviderKind::Ollama, ProviderKind::LmStudio] {
+            assert_eq!(history_image_bytes_for(kind), MEDIA_HISTORY_MAX_BYTES, "{kind:?}");
+        }
+        assert!(history_image_bytes_for(ProviderKind::Gemini) * 4 / 3 < GEMINI_INLINE_REQUEST_MAX);
     }
 }

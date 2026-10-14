@@ -1624,8 +1624,14 @@ async fn handle_request(
             // Within a single turn, the loop pushes the assistant turn's
             // full content (including any ProviderOpaque thinking blocks)
             // verbatim between iterations — the API requires this.
-            let mut api_messages: Vec<ApiMessage> =
-                media::replay::history_to_api(&media_store, &history).await;
+            // The image budget is the turn's provider's: Gemini caps a
+            // request at 20 MB, Anthropic at 32 MB.
+            let mut api_messages: Vec<ApiMessage> = media::replay::history_to_api(
+                &media_store,
+                &history,
+                media::history_image_bytes_for(provider_kind),
+            )
+            .await;
             // Attached files ride the model-facing text ahead of the
             // operator's words, inside the turn's one text block. What is
             // persisted stays `msg.content` plus the refs.

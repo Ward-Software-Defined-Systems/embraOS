@@ -2,9 +2,10 @@
 //!
 //! Policy (William, 2026-08-20): operator attachments replay INLINE as
 //! base64 on every request — no third-party file store, no horizon. The
-//! ceiling is the safety rail on the vision API's 32 MB request cap, not
-//! a policy of its own: newest-first, at most [`MEDIA_HISTORY_MAX_IMAGES`]
-//! images / [`MEDIA_HISTORY_MAX_BYTES`] raw bytes stay inline; anything
+//! ceiling is the safety rail on the provider's request cap (32 MB on
+//! Anthropic, 20 MB on Gemini), not a policy of its own: newest-first, at
+//! most [`MEDIA_HISTORY_MAX_IMAGES`] images and the provider's byte budget
+//! (`super::history_image_bytes_for`) stay inline; anything
 //! past it (or whose file is gone) degrades to a text placeholder that
 //! names the path, so the model can `image_view` it on demand. Aging is
 //! monotonic by turn distance, so each image crosses the boundary once —
@@ -24,7 +25,7 @@ use crate::provider::ir::{ApiMessage, Block, ImageData};
 
 use super::store::{to_image_data, MediaStore};
 use super::text::{self, FILE_ONLY_PLACEHOLDER, TEXT_HISTORY_MAX_BYTES, TEXT_INLINE_MAX, TextUpload};
-use super::{MEDIA_HISTORY_MAX_BYTES, MEDIA_HISTORY_MAX_IMAGES};
+use super::MEDIA_HISTORY_MAX_IMAGES;
 
 /// Text a user turn gets when the operator sent images with no words.
 /// Keeps every provider on the non-empty-text path (cache breakpoints,
@@ -63,8 +64,13 @@ fn inline_text_cost(r: &AttachmentRef) -> u64 {
 }
 
 /// Convert persisted history to IR, loading inline images from the store
-/// under the ceiling.
-pub async fn history_to_api(store: &MediaStore, history: &[Message]) -> Vec<ApiMessage> {
+/// under the ceiling: [`MEDIA_HISTORY_MAX_IMAGES`] images and
+/// `image_bytes_max` raw bytes, the budget of the turn's provider.
+pub async fn history_to_api(
+    store: &MediaStore,
+    history: &[Message],
+    image_bytes_max: u64,
+) -> Vec<ApiMessage> {
     if history.iter().all(|m| m.attachments.is_none()) {
         return history.iter().map(legacy_message_to_api).collect();
     }
@@ -83,7 +89,7 @@ pub async fn history_to_api(store: &MediaStore, history: &[Message]) -> Vec<ApiM
         }
         for (ri, r) in m.attachment_refs().iter().enumerate() {
             if r.is_image() {
-                if count < MEDIA_HISTORY_MAX_IMAGES && bytes + r.bytes <= MEDIA_HISTORY_MAX_BYTES {
+                if count < MEDIA_HISTORY_MAX_IMAGES && bytes + r.bytes <= image_bytes_max {
                     inline[ti][ri] = true;
                     count += 1;
                     bytes += r.bytes;
@@ -164,6 +170,8 @@ mod tests {
     use super::*;
     use crate::media::ingest::{self, tests::png_fixture};
     use crate::media::store::{to_attachment_ref, MediaOrigin};
+    use crate::media::{history_image_bytes_for, MEDIA_HISTORY_MAX_BYTES, MEDIA_INLINE_MAX};
+    use crate::provider::ProviderKind;
 
     struct TempDir(std::path::PathBuf);
     impl TempDir {
@@ -194,7 +202,7 @@ mod tests {
         let dir = TempDir::new();
         let store = MediaStore::at(&dir.0);
         let history = vec![Message::user("hi"), Message::assistant("hello")];
-        let out = history_to_api(&store, &history).await;
+        let out = history_to_api(&store, &history, MEDIA_HISTORY_MAX_BYTES).await;
         assert_eq!(out.len(), 2);
         assert!(matches!(&out[0], ApiMessage::User { content } if matches!(&content[0], Block::Text(t) if t == "hi")));
         assert!(matches!(&out[1], ApiMessage::Assistant { content } if matches!(&content[0], Block::Text(t) if t == "hello")));
@@ -211,7 +219,7 @@ mod tests {
             Message::assistant_with_attachments("a picture; I generated one too", vec![g]),
             Message::user(""),
         ];
-        let out = history_to_api(&store, &history).await;
+        let out = history_to_api(&store, &history, MEDIA_HISTORY_MAX_BYTES).await;
         assert_eq!(count_images(&out[0]), 1);
         assert!(matches!(&out[0].content()[0], Block::Image(img) if img.name == "img3.png"));
         assert!(matches!(&out[0].content()[1], Block::Text(t) if t == "what is this"));
@@ -224,7 +232,7 @@ mod tests {
         let dir = TempDir::new();
         let store = MediaStore::at(&dir.0);
         let a = stored(&store, 3).await;
-        let out = history_to_api(&store, &[Message::user_with_attachments("", vec![a])]).await;
+        let out = history_to_api(&store, &[Message::user_with_attachments("", vec![a])], MEDIA_HISTORY_MAX_BYTES).await;
         assert_eq!(count_images(&out[0]), 1);
         assert!(matches!(out[0].content().last(), Some(Block::Text(t)) if t == IMAGE_ONLY_PLACEHOLDER));
     }
@@ -236,7 +244,7 @@ mod tests {
         let mut a = stored(&store, 3).await;
         std::fs::remove_file(&a.path).unwrap();
         a.name = "gone.png".into();
-        let out = history_to_api(&store, &[Message::user_with_attachments("look", vec![a])]).await;
+        let out = history_to_api(&store, &[Message::user_with_attachments("look", vec![a])], MEDIA_HISTORY_MAX_BYTES).await;
         assert_eq!(count_images(&out[0]), 0);
         let Block::Text(t) = &out[0].content()[0] else { panic!() };
         assert!(t.starts_with("look\n[image: gone.png (3×2) — not inlined; path "), "{t}");
@@ -254,7 +262,7 @@ mod tests {
             history.push(Message::user_with_attachments(format!("turn {i}"), vec![r]));
             history.push(Message::assistant("ok"));
         }
-        let out = history_to_api(&store, &history).await;
+        let out = history_to_api(&store, &history, MEDIA_HISTORY_MAX_BYTES).await;
         let user_msgs: Vec<&ApiMessage> = out.iter().step_by(2).collect();
         assert_eq!(count_images(user_msgs[0]), 0, "oldest aged out");
         assert_eq!(count_images(user_msgs[1]), 0, "second oldest aged out");
@@ -265,8 +273,32 @@ mod tests {
         // Byte ceiling: a ref declaring a huge size is never inlined.
         let mut big = stored(&store, 3).await;
         big.bytes = MEDIA_HISTORY_MAX_BYTES + 1;
-        let out = history_to_api(&store, &[Message::user_with_attachments("x", vec![big])]).await;
+        let out = history_to_api(&store, &[Message::user_with_attachments("x", vec![big])], MEDIA_HISTORY_MAX_BYTES).await;
         assert_eq!(count_images(&out[0]), 0);
+    }
+
+    /// Gemini's budget is lower (its 20 MB request cap): with every image
+    /// as large as an inline image may be, it keeps eight of nine, newest
+    /// first, where the others keep all nine.
+    #[tokio::test]
+    async fn gemini_replays_fewer_image_bytes_newest_first() {
+        let dir = TempDir::new();
+        let store = MediaStore::at(&dir.0);
+        let mut history = Vec::new();
+        for i in 0..9u32 {
+            let mut r = stored(&store, 3 + i).await;
+            r.bytes = MEDIA_INLINE_MAX as u64;
+            history.push(Message::user_with_attachments(format!("turn {i}"), vec![r]));
+            history.push(Message::assistant("ok"));
+        }
+        let images = |out: &[ApiMessage]| out.iter().map(count_images).sum::<usize>();
+        let anthropic =
+            history_to_api(&store, &history, history_image_bytes_for(ProviderKind::Anthropic)).await;
+        assert_eq!(images(&anthropic), 9);
+        let gemini =
+            history_to_api(&store, &history, history_image_bytes_for(ProviderKind::Gemini)).await;
+        assert_eq!(images(&gemini), 8);
+        assert_eq!(count_images(&gemini[0]), 0, "the oldest ages out first");
     }
 
     #[tokio::test]
@@ -282,7 +314,7 @@ mod tests {
             bytes: 12,
             path: "/embra/workspace/uploads/notes.md".into(),
         };
-        let out = history_to_api(&store, &[Message::user_with_attachments("read it", vec![text_ref])]).await;
+        let out = history_to_api(&store, &[Message::user_with_attachments("read it", vec![text_ref])], MEDIA_HISTORY_MAX_BYTES).await;
         assert_eq!(count_images(&out[0]), 0);
         let text = user_text(&out[0]);
         assert!(text.contains("read it"), "{text}");
@@ -333,7 +365,7 @@ mod tests {
                 ]
             })
             .collect();
-        let out = history_to_api(&store, &history).await;
+        let out = history_to_api(&store, &history, MEDIA_HISTORY_MAX_BYTES).await;
         let oldest = user_text(&out[0]);
         assert!(oldest.contains("[file: f0.md (96 KB) — not inlined; path "), "{oldest}");
         assert!(oldest.contains("use file_read to read it]"), "{oldest}");
@@ -371,7 +403,7 @@ mod tests {
         let mut r = text_ref_at(&tmp.0, "gone.md", "was here", 8);
         std::fs::remove_file(&r.path).unwrap();
         r.bytes = 2048;
-        let out = history_to_api(&store, &[Message::user_with_attachments("where", vec![r])]).await;
+        let out = history_to_api(&store, &[Message::user_with_attachments("where", vec![r])], MEDIA_HISTORY_MAX_BYTES).await;
         let t = user_text(&out[0]);
         assert!(t.starts_with("where\n[file: gone.md (2 KB) — not inlined; path "), "{t}");
         assert!(t.ends_with("; use file_read to read it]"), "{t}");
@@ -383,7 +415,7 @@ mod tests {
         let tmp = TempDir::new();
         let store = MediaStore::at(&tmp.0);
         let r = text_ref_at(&tmp.0, "only.md", "just a file", 11);
-        let out = history_to_api(&store, &[Message::user_with_attachments("", vec![r])]).await;
+        let out = history_to_api(&store, &[Message::user_with_attachments("", vec![r])], MEDIA_HISTORY_MAX_BYTES).await;
         let t = user_text(&out[0]);
         assert!(t.starts_with("The operator attached these files."), "{t}");
         assert!(t.contains("<attached_file name=\"only.md\""), "{t}");
