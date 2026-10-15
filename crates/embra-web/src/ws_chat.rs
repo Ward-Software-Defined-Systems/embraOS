@@ -56,7 +56,11 @@ async fn handle_chat_socket(socket: WebSocket, st: AppState) {
     // `connect_lazy` defers the TCP handshake to the first RPC — fine
     // here because the very next call is `converse`.
     let channel = endpoint.connect_lazy();
-    let mut client = EmbraApiClient::new(channel);
+    // Every hop that receives brain payloads takes the shared limit
+    // (`media.rs` does the same): a `ToolExecution` carries a result of up
+    // to 2 MiB and an uncapped input, and tonic's default is 4 MiB.
+    let mut client = EmbraApiClient::new(channel)
+        .max_decoding_message_size(embra_common::GRPC_MAX_MESSAGE_BYTES);
 
     // Bridge the WS receiver into the request stream via an mpsc — same
     // pattern as embra-console's `grpc_client::open_conversation`.

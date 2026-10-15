@@ -102,7 +102,10 @@ impl ActivityFeed {
                 return false;
             }
         };
-        let mut client = EmbraApiClient::new(endpoint.connect_lazy());
+        // The shared limit, like every hop that receives brain payloads;
+        // a frame here is small, the rule is uniform.
+        let mut client = EmbraApiClient::new(endpoint.connect_lazy())
+            .max_decoding_message_size(embra_common::GRPC_MAX_MESSAGE_BYTES);
         let mut frames = match client.watch_activity(WatchActivityRequest {}).await {
             Ok(r) => r.into_inner(),
             Err(e) => {
