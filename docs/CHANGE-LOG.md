@@ -78,7 +78,7 @@ Live in QEMU, on Omega (William's word, 2026-10-14), passed:
 - `/effort medium` lowers the thinking tokens.
 
 The other checks:
-- The setup model step works for Gemini (passed on Omega, William's word, 2026-10-14) and for Anthropic (TBD).
+- The setup model step works for Gemini and for Anthropic (passed on Omega, William's word, 2026-10-14).
 - On a fresh instance, the wizard runs Argon (TBD).
 - Vision on Argon passed on Omega (William's word, 2026-10-14): an attached image is answered, and `image_view` and `image_generate` return images the model reads. So Argon takes images inside a function response, which Google documents for Gemini 3 only. A GIF attached on Gemini is answered too, stored as PNG (William's word, 2026-10-14).
 
