@@ -71,13 +71,15 @@ The request embraOS sends already fits. Long decode, past 64K tokens out (`backg
 
 No tool description or system prompt changed; the manifest pin and the prompt goldens stand. The guards are named in each commit. A mutation check broke 13 targeted behaviours, and each broke a test. Brain tests 1,423 → 1,448; clippy reports nothing on the workspace or the web console. Docs: COMMAND-REFERENCE (`/model`, the Gemini row, `/effort`, `/provider --setup`) and SYSTEM-DESIGN (the Gemini bullet, the cache section, the Anthropic bullet's setup step).
 
-Live in QEMU: TBD. The checks:
+Live in QEMU, on Omega (William's word, 2026-10-14), passed:
 - `/model` lists both models and switches; a tool turn runs on Argon.
 - `gemini::usage` lines show `cached_tokens` from the second call, with no `gemini::cache` lines while on Argon.
 - `/model 3.1-pro` brings the explicit cache back with no 400.
 - `/effort medium` lowers the thinking tokens.
+
+The other checks:
 - The setup model step works for Gemini (passed on Omega, William's word, 2026-10-14) and for Anthropic (TBD).
-- On a fresh instance, the wizard runs Argon.
+- On a fresh instance, the wizard runs Argon (TBD).
 - Vision on Argon passed on Omega (William's word, 2026-10-14): an attached image is answered, and `image_view` and `image_generate` return images the model reads. So Argon takes images inside a function response, which Google documents for Gemini 3 only. TBD: a GIF attached on Gemini is answered (stored as PNG).
 
 **The provider probe reads the context window Ollama loaded the model with, and warns below 64000 tokens (branch `code-review`, 2026-10-13).** William, 2026-10-13, after the entry below: the brain counts no tokens, so a short window on a GGUF build went unnoticed. He asked for a warning and chose the existing 5-minute probe over a nudge after each turn. A model stays loaded for Ollama's default 5-minute keep-alive, so the first probe after a turn finds it.
