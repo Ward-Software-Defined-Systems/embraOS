@@ -171,6 +171,10 @@ pub enum ServiceStatus {
 }
 
 pub struct Supervisor {
+    /// This boot's web console access token (web mode): minted once in
+    /// `register_services`, handed to embra-web in its environment and
+    /// printed in the boot banner, the one place it is shown.
+    web_token: Option<String>,
     /// In start order.
     services: Vec<ServiceState>,
 }
@@ -178,6 +182,7 @@ pub struct Supervisor {
 impl Supervisor {
     pub fn new() -> Self {
         Self {
+            web_token: None,
             services: Vec::new(),
         }
     }
@@ -362,6 +367,19 @@ impl Supervisor {
         // Web mode: embra-web (it spawns the sole PTY-hosted embra-console
         // internally). Otherwise: the serial embra-console TUI.
         if web_mode_enabled() {
+            // The web console's gate: a token for this boot, in embra-web's
+            // environment (never an argument: `ps` shows those) and in the
+            // URL the banner prints. Without a token there is no gate, and
+            // an open console is worse than none: the error stays on the
+            // serial console, and `EMBRA_TUI=1` still boots the TUI.
+            let token = match boot_token() {
+                Ok(t) => t,
+                Err(e) => {
+                    error!("Web mode: no access token could be minted ({e}); embra-web is NOT started. Boot with EMBRA_TUI=1 for the serial console.");
+                    return;
+                }
+            };
+            self.web_token = Some(token.clone());
             info!("Web mode (embra.web=1): registering embra-web; serial console skipped");
             self.add_service(ServiceDef {
                 name: "embra-web".to_string(),
@@ -372,7 +390,7 @@ impl Supervisor {
                     "--trust-addr".to_string(), "http://127.0.0.1:50001".to_string(),
                     "--console-bin".to_string(), "/usr/bin/embra-console".to_string(),
                 ],
-                env: vec![],
+                env: vec![("EMBRA_WEB_TOKEN".to_string(), token)],
                 // embra-web only binds :3345 *after* it has fetched its
                 // serving cert from embra-trustd, so a TCP-connect on 3345
                 // is a real readiness signal (port open ⇒ cert acquired +
@@ -445,8 +463,11 @@ impl Supervisor {
                     let _ = writeln!(o);
                     let _ = writeln!(o,
                         "\x1b[1;32m  \u{2713} embraOS boot complete \u{2014} web console is ready\x1b[0m");
+                    let url = console_url(self.web_token.as_deref().unwrap_or(""));
                     let _ = writeln!(o,
-                        "    \x1b[1;36mhttps://localhost:3345/embraOS\x1b[0m  \x1b[2m(QEMU hostfwd; accept the embraOS-CA cert)\x1b[0m");
+                        "    \x1b[1;36m{url}\x1b[0m  \x1b[2m(QEMU hostfwd; accept the embraOS-CA cert)\x1b[0m");
+                    let _ = writeln!(o,
+                        "    \x1b[2mThis boot's access token is in the URL; the URL is the credential, and it is shown here only.\x1b[0m");
                     let _ = writeln!(o);
                     let _ = o.flush();
                 }
@@ -827,6 +848,49 @@ fn halt_system(reason: &str) -> ! {
 /// other report is a failed verification and halts the system.
 fn is_first_run(reason: &str) -> bool {
     reason.contains("no soul") || reason.contains("not found")
+}
+
+/// 16 bytes of `/dev/urandom` as 32 lowercase hex characters: the web
+/// console's token for this boot. A failed read is an error, never a
+/// weaker source.
+fn boot_token() -> Result<String> {
+    use std::io::Read;
+    let mut bytes = [0u8; 16];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(hex_of(&bytes))
+}
+
+fn hex_of(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The URL the boot banner prints: the console's one address, with this
+/// boot's token.
+fn console_url(token: &str) -> String {
+    format!("https://localhost:3345/embraOS?token={token}")
+}
+
+#[cfg(test)]
+mod web_token_tests {
+    use super::{boot_token, console_url, hex_of};
+
+    #[test]
+    fn a_boot_token_is_thirty_two_lowercase_hex_characters() {
+        assert_eq!(hex_of(&[0u8; 16]).len(), 32);
+        assert_eq!(hex_of(&[0xde, 0xad, 0x00, 0x0f]), "dead000f");
+        let t = boot_token().expect("/dev/urandom");
+        assert_eq!(t.len(), 32);
+        assert!(t.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert_ne!(t, boot_token().unwrap());
+    }
+
+    #[test]
+    fn the_console_url_carries_the_token() {
+        assert_eq!(
+            console_url("0123456789abcdef0123456789abcdef"),
+            "https://localhost:3345/embraOS?token=0123456789abcdef0123456789abcdef"
+        );
+    }
 }
 
 #[cfg(test)]

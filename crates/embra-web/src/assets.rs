@@ -54,17 +54,54 @@ fn serve(path: &str) -> Option<Response> {
     )
 }
 
-/// Router fallback: serve a real embedded asset, else SPA-fallback to
-/// `index.html` (so `/embraOS` and client routing resolve).
+/// Where a path goes. The app lives at `/embraOS` alone (William's
+/// choice, 2026-10-15): `/` and the app's file name answer 404, so the
+/// console has one address, the one the boot banner prints. The assets
+/// keep their root paths (`/assets/…`, the Trunk-emitted `.js`/`.wasm`),
+/// which `index.html` references absolutely.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Route {
+    /// `index.html`.
+    App,
+    /// An embedded file, if one exists at the path.
+    Lookup,
+    NotFound,
+}
+
+pub fn route(path: &str) -> Route {
+    match path {
+        "embraOS" => Route::App,
+        p if p.starts_with("embraOS/") => Route::App,
+        "" | "index.html" => Route::NotFound,
+        _ => Route::Lookup,
+    }
+}
+
+/// Router fallback: the app under `/embraOS`, a real embedded asset at
+/// its own path, 404 for everything else.
 pub async fn static_handler(uri: Uri) -> Response {
     let path = uri.path().trim_start_matches('/');
-    let path = if path.is_empty() { "index.html" } else { path };
+    let served = match route(path) {
+        Route::App => serve("index.html"),
+        Route::Lookup => serve(path),
+        Route::NotFound => None,
+    };
+    served.unwrap_or_else(|| (StatusCode::NOT_FOUND, "not found").into_response())
+}
 
-    if let Some(resp) = serve(path) {
-        return resp;
+#[cfg(test)]
+mod tests {
+    use super::{Route, route};
+
+    #[test]
+    fn the_app_is_served_under_embraos_and_the_assets_at_their_root_paths() {
+        assert_eq!(route("embraOS"), Route::App);
+        assert_eq!(route("embraOS/"), Route::App);
+        assert_eq!(route("embraOS/anything"), Route::App);
+        assert_eq!(route(""), Route::NotFound, "the root is not the app");
+        assert_eq!(route("index.html"), Route::NotFound, "nor is the app's file name");
+        assert_eq!(route("assets/app.css"), Route::Lookup);
+        assert_eq!(route("embra-web-ui_bg.wasm"), Route::Lookup);
+        assert_eq!(route("nope"), Route::Lookup, "an unknown path is looked up and found missing");
     }
-    if let Some(resp) = serve("index.html") {
-        return resp;
-    }
-    (StatusCode::NOT_FOUND, "not found").into_response()
 }

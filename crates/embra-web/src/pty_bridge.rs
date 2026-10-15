@@ -226,6 +226,9 @@ fn console_command(console_bin: &str, apid_addr: &str) -> CommandBuilder {
     // serial console never gets this env (its default is halfblocks).
     cmd.env("EMBRA_TUI_GRAPHICS", "sixel");
     cmd.env("TERM", "xterm-256color");
+    // The web console's access token is embra-web's alone; the console
+    // child never carries it, whatever the builder inherits.
+    cmd.env_remove(crate::access::TOKEN_ENV);
     cmd
 }
 
@@ -426,6 +429,14 @@ mod tests {
         assert_eq!(env("EMBRA_WEB_PTY").as_deref(), Some("1"));
         assert_eq!(env("EMBRA_TUI_GRAPHICS").as_deref(), Some("sixel"));
         assert_eq!(env("TERM").as_deref(), Some("xterm-256color"));
+    }
+
+    #[test]
+    fn the_console_child_gets_no_access_token() {
+        // Whatever embra-web's own environment holds, the child's has no
+        // token: the builder is told to drop it.
+        let cmd = console_command("/usr/bin/embra-console", "http://127.0.0.1:50000");
+        assert!(cmd.get_env(crate::access::TOKEN_ENV).is_none());
     }
 
     /// One console lifetime against a real PTY: the opening size, a resize

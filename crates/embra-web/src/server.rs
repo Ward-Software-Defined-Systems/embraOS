@@ -16,6 +16,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
 
+use crate::access;
 use crate::api_tools::api_tools_list;
 use crate::assets::static_handler;
 use crate::config::WebConfig;
@@ -91,6 +92,9 @@ pub async fn serve(
         // A workspace file as a download (`file_offer`, `/download`).
         .route("/api/files/{*path}", get(api_file_get))
         .fallback(static_handler)
+        // The gate (`access.rs`) over every route and the fallback: the
+        // boot's token in the query once, the cookie after, 401 otherwise.
+        .layer(axum::middleware::from_fn_with_state(state.clone(), access::require_token))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", cfg.port);

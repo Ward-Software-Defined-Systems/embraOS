@@ -9,6 +9,7 @@
 //!
 //! See the approved plan for the full architecture.
 
+mod access;
 mod activity_bridge;
 mod activity_feed;
 mod api_tools;
@@ -64,6 +65,19 @@ async fn main() -> anyhow::Result<()> {
     let server_config = tls::acquire_server_config(&cfg.trust_addr).await?;
     tracing::info!("obtained serving cert from embra-trustd");
 
+    // This boot's access token (`access.rs`): embrad's, or one of our own
+    // on the host. In the OS it is never logged; the boot banner shows it.
+    let from_env = cfg.token.is_some();
+    let token: std::sync::Arc<str> = match cfg.token.clone() {
+        Some(t) => t.into(),
+        None => access::generate_token()?.into(),
+    };
+    if from_env {
+        tracing::info!("{}", access::startup_line(true, cfg.port, &token));
+    } else {
+        println!("{}", access::startup_line(false, cfg.port, &token));
+    }
+
     // One shared PTY + one embra-console child for the process lifetime;
     // arbiter governs which connected browser may type.
     let bridge = PtyBridge::spawn(cfg.console_bin.clone(), cfg.apid_addr.clone());
@@ -78,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
         // One subscription to the brain's tool-call feed per process, kept
         // as a backlog and fanned out to every `/ws/tools` socket.
         tools: ToolFeed::spawn(cfg.apid_addr.clone()),
+        token,
     };
 
     server::serve(&cfg, state, server_config).await

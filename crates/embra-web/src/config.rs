@@ -15,6 +15,11 @@ pub struct WebConfig {
     pub trust_addr: String,
     /// Path to the `embra-console` binary the PTY bridge spawns.
     pub console_bin: String,
+    /// This boot's access token, from `EMBRA_WEB_TOKEN` (embrad mints it
+    /// and prints the URL that carries it); `None` on the host, where
+    /// embra-web mints its own. An environment variable, never an
+    /// argument: `ps` shows arguments.
+    pub token: Option<String>,
 }
 
 impl Default for WebConfig {
@@ -24,6 +29,7 @@ impl Default for WebConfig {
             apid_addr: "http://127.0.0.1:50000".to_string(),
             trust_addr: "http://127.0.0.1:50001".to_string(),
             console_bin: "/usr/bin/embra-console".to_string(),
+            token: None,
         }
     }
 }
@@ -31,7 +37,12 @@ impl Default for WebConfig {
 impl WebConfig {
     pub fn from_args() -> Self {
         let args: Vec<String> = std::env::args().collect();
-        let mut cfg = WebConfig::default();
+        let mut cfg = WebConfig {
+            token: std::env::var(crate::access::TOKEN_ENV)
+                .ok()
+                .filter(|t| !t.trim().is_empty()),
+            ..WebConfig::default()
+        };
 
         let mut i = 1;
         while i < args.len() {
