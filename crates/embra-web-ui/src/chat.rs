@@ -1099,7 +1099,7 @@ async fn run_ws_once(
     // first non-reconnection frame" heuristic — the flag never flipped,
     // so every reconnect re-dumped the full history) AND to a context
     // reset (timeline empty ⇒ we correctly re-show the briefing).
-    let had_content_at_connect = messages.with_untracked(|m| !m.is_empty());
+    let mut had_content_at_connect = messages.with_untracked(|m| !m.is_empty());
 
     let (mut sink, mut stream) = ws.split();
 
@@ -1150,7 +1150,7 @@ async fn run_ws_once(
                     session_name,
                     reasoning,
                     current_setup,
-                    had_content_at_connect,
+                    &mut had_content_at_connect,
                 );
             }
             Ok(WsMessage::Bytes(_)) => {
@@ -1175,8 +1175,24 @@ fn handle_server_msg(
     session_name: RwSignal<String>,
     reasoning: RwSignal<String>,
     current_setup: RwSignal<Option<SetupData>>,
-    had_content_at_connect: bool,
+    had_content_at_connect: &mut bool,
 ) {
+    // The transcript-reset frame heads every history replay (an attach, a
+    // /switch, a /new) and names the session. Another session than the one
+    // shown: the timeline starts over and the replay that follows renders.
+    // The same session (a reconnect): nothing changes, and the replay stays
+    // suppressed below, so a flaky connection keeps its tool cards.
+    if let ServerMsg::System { kind, content } = &srv
+        && kind == "reset"
+    {
+        if *content != session_name.get_untracked() {
+            messages.set(Vec::new());
+            streaming.set(String::new());
+            *had_content_at_connect = false;
+        }
+        session_name.set(content.clone());
+        return;
+    }
     // Reconnection-briefing filter. On attach the brain replays the whole
     // session history as a series of `kind:"reconnection"` System frames.
     // We want them on a cold open (empty timeline — the operator needs the
@@ -1195,7 +1211,7 @@ fn handle_server_msg(
         &srv,
         ServerMsg::System { kind, .. } if kind == "reconnection"
     );
-    if is_reconnection_msg && had_content_at_connect {
+    if is_reconnection_msg && *had_content_at_connect {
         if let ServerMsg::System { content, .. } = &srv {
             // Still extract session=foo so the topbar stays accurate
             // even when we suppress the bubble.
@@ -1259,9 +1275,25 @@ fn handle_server_msg(
             // Defensive: skip a System frame with no visible text so it
             // can't render as a stray empty bubble. Session extraction and
             // the reasoning clear above still ran.
-            if !content.trim().is_empty() {
-                messages.update(|m| m.push(Bubble::System { content, kind }));
+            if content.trim().is_empty() {
+                return;
             }
+            // A replayed turn renders as its speaker's bubble; its
+            // attachments arrive as `replay:true` media and file frames
+            // and are cards already. The attach notice and every other
+            // system row stay muted system bubbles.
+            let bubble = if kind == "reconnection"
+                && let Some(text) = content.strip_prefix("[user] ")
+            {
+                Bubble::User { text: text.to_string(), images: Vec::new(), files: Vec::new() }
+            } else if kind == "reconnection"
+                && let Some(text) = content.strip_prefix("[assistant] ")
+            {
+                Bubble::Assistant(text.to_string())
+            } else {
+                Bubble::System { content, kind }
+            };
+            messages.update(|m| m.push(bubble));
         }
         ServerMsg::Tool {
             name,
@@ -1329,7 +1361,7 @@ fn handle_server_msg(
             // reconnection briefing: shown on a cold open, suppressed when
             // the timeline is already populated (a WS flap would otherwise
             // re-dump every card).
-            if replay && had_content_at_connect {
+            if replay && *had_content_at_connect {
                 return;
             }
             messages.update(|m| {
@@ -1338,7 +1370,7 @@ fn handle_server_msg(
         }
         ServerMsg::File { path, name, byte_size, media_type, origin, caption, replay, url, .. } => {
             // Same replay rule as the media card.
-            if replay && had_content_at_connect {
+            if replay && *had_content_at_connect {
                 return;
             }
             // A live offer starts its download by itself; the card keeps
@@ -1616,20 +1648,40 @@ fn BubbleView(idx: usize, bubble: Bubble) -> impl IntoView {
             } else {
                 truncate(result.trim(), 8192)
             };
-            // Full styled card. The earlier blanks were a CSS flex-collapse of
-            // `.bubble.tool` (fixed via `flex-shrink: 0` on `.bubble`), NOT the
-            // nesting / `<pre>` / json highlighting — those are all restored
-            // here. `class:error` is the documented reactive-toggle form (a
-            // bare `class=variable` is unsupported in Leptos 0.7).
+            // The head's one-line summary: the result's first line, or what
+            // is missing; an error says so first.
+            let first_line = result.trim().lines().next().unwrap_or("").trim();
+            let mut summary = if first_line.is_empty() {
+                "(no output)".to_string()
+            } else {
+                truncate(first_line, 100)
+            };
+            if is_error {
+                summary = format!("ERR {summary}");
+            }
+            // One line per call, tap to expand: the signal is the card's own
+            // and lives as long as the card (the keyed list below never
+            // re-creates a card). The earlier blanks were a CSS
+            // flex-collapse of `.bubble.tool` (fixed via `flex-shrink: 0` on
+            // `.bubble`). `class:error` is the documented reactive-toggle
+            // form (a bare `class=variable` is unsupported in Leptos 0.7).
+            let expanded = RwSignal::new(false);
             view! {
                 <div class="bubble tool" class:error=is_error>
-                    <div class="tool-head"><span class="t-name">{display_name}</span></div>
-                    <div class="tool-detail">
-                        <div class="t-section">"input"</div>
-                        <pre class="t-pre">{json_pre(&detail_input)}</pre>
-                        <div class="t-section">"result"</div>
-                        <pre class="t-pre">{json_pre(&detail_result)}</pre>
+                    <div class="tool-head" on:click=move |_| expanded.update(|b| *b = !*b)>
+                        <span class="t-name">{display_name}</span>
+                        <span class="t-sep">"→"</span>
+                        <span class="t-result">{summary}</span>
+                        <span class="t-toggle">{move || if expanded.get() { "▾" } else { "▸" }}</span>
                     </div>
+                    {move || expanded.get().then(|| view! {
+                        <div class="tool-detail">
+                            <div class="t-section">"input"</div>
+                            <pre class="t-pre">{json_pre(&detail_input)}</pre>
+                            <div class="t-section">"result"</div>
+                            <pre class="t-pre">{json_pre(&detail_result)}</pre>
+                        </div>
+                    })}
                 </div>
             }
             .into_any()
