@@ -46,7 +46,7 @@ The same pages showed two gaps on every Gemini model, both fixed:
 
 Each guard failed when its fix was removed (mutation check). No tool description changed. Brain tests 1,448 → 1,452. Docs: TOOL-REFERENCE's paragraph on images.
 
-Live in QEMU: TBD, with the Argon checks below (a GIF attached on Gemini is answered).
+Live in QEMU (William's word, 2026-10-14): a GIF attached on Gemini is answered.
 
 **Gemini 4 Argon is selectable at the first-boot wizard, in `/provider --setup` and with `/model`, and the explicit context cache is kept to the models that take it (branch `code-review`, 2026-10-14).** Google released Gemini 4 Argon (`gemini-4-argon`) on 2026-10-13, and William wants to test it. Read at ai.google.dev (2026-10-14):
 - one 1,048,576-token window shared by input and output, and up to 65,536 output tokens on a synchronous request (embraOS asks for 64,000);
@@ -80,7 +80,7 @@ Live in QEMU, on Omega (William's word, 2026-10-14), passed:
 The other checks:
 - The setup model step works for Gemini (passed on Omega, William's word, 2026-10-14) and for Anthropic (TBD).
 - On a fresh instance, the wizard runs Argon (TBD).
-- Vision on Argon passed on Omega (William's word, 2026-10-14): an attached image is answered, and `image_view` and `image_generate` return images the model reads. So Argon takes images inside a function response, which Google documents for Gemini 3 only. TBD: a GIF attached on Gemini is answered (stored as PNG).
+- Vision on Argon passed on Omega (William's word, 2026-10-14): an attached image is answered, and `image_view` and `image_generate` return images the model reads. So Argon takes images inside a function response, which Google documents for Gemini 3 only. A GIF attached on Gemini is answered too, stored as PNG (William's word, 2026-10-14).
 
 **The provider probe reads the context window Ollama loaded the model with, and warns below 64000 tokens (branch `code-review`, 2026-10-13).** William, 2026-10-13, after the entry below: the brain counts no tokens, so a short window on a GGUF build went unnoticed. He asked for a warning and chose the existing 5-minute probe over a nudge after each turn. A model stays loaded for Ollama's default 5-minute keep-alive, so the first probe after a turn finds it.
 
