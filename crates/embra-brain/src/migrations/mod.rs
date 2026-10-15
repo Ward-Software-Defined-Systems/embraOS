@@ -401,6 +401,14 @@ fn hot_path_index_specs() -> Vec<(&'static str, serde_json::Value)> {
             "tools.turn_trace",
             serde_json::json!({"name": "idx_turn_trace_session", "field": "session"}),
         ),
+        // The web console's Tools tab reads the record back newest first
+        // (`ListToolCalls`, `tool_calls::list_query_body`): sorted by
+        // `started_at` under a limit, paged with `started_at $lt`. Without
+        // the index every page scans the collection.
+        (
+            "tools.turn_trace",
+            serde_json::json!({"name": "idx_turn_trace_started_at", "field": "started_at"}),
+        ),
         // Every operator turn asks for the cron runs since its watermark
         // (`sessions::events`), sorted by `started_at` with a limit, and
         // `cron_list runs=N` reads per job. The collection is created on

@@ -3,6 +3,7 @@
 //! Bridges Phase 0 Brain + tools + sessions into a gRPC streaming interface.
 
 use crate::activity;
+use crate::tool_calls;
 use crate::brain::Message;
 use crate::config;
 use crate::db::WardsonDbClient;
@@ -768,6 +769,46 @@ impl BrainService for BrainGrpcService {
         });
 
         Ok(Response::new(Box::pin(ReceiverStream::new(rx))))
+    }
+
+    type WatchToolCallsStream = Pin<Box<dyn Stream<Item = Result<ToolCallRecord, Status>> + Send>>;
+
+    /// The tool-call feed (`tool_calls.rs`): one record per finished call,
+    /// with its input and result cut per side. embra-web holds the one
+    /// production subscription and fans it out to the Tools tab.
+    async fn watch_tool_calls(
+        &self,
+        _req: Request<WatchToolCallsRequest>,
+    ) -> Result<Response<Self::WatchToolCallsStream>, Status> {
+        let rx = tool_calls::subscribe();
+        let (tx, out) = mpsc::channel::<Result<ToolCallRecord, Status>>(64);
+        tokio::spawn(tool_calls::forward(rx, tx));
+        Ok(Response::new(Box::pin(ReceiverStream::new(out))))
+    }
+
+    /// The record read back (`tools.turn_trace`), newest first: the Tools
+    /// tab's backfill after a restart and its paging.
+    async fn list_tool_calls(
+        &self,
+        req: Request<ListToolCallsRequest>,
+    ) -> Result<Response<ListToolCallsResponse>, Status> {
+        let req = req.into_inner();
+        let limit = if req.limit == 0 {
+            tool_calls::LIST_DEFAULT
+        } else {
+            req.limit.min(tool_calls::LIST_MAX)
+        };
+        let body = tool_calls::list_query_body(limit, &req.before, &req.session);
+        let docs = self
+            .db
+            .query_with_options("tools.turn_trace", &body)
+            .await
+            .map_err(|e| Status::unavailable(format!("tools.turn_trace: {e}")))?;
+        let records = docs
+            .as_array()
+            .map(|a| a.iter().filter_map(tool_calls::record_from_trace).collect())
+            .unwrap_or_default();
+        Ok(Response::new(ListToolCallsResponse { records }))
     }
 
     // --- Session RPCs ---
@@ -2061,8 +2102,10 @@ async fn handle_request(
                             if !tool_names_in_turn.iter().any(|n| n == name) {
                                 tool_names_in_turn.push(name.clone());
                             }
+                            let seq = tool_calls::next_seq();
                             let started = std::time::Instant::now();
-                            let started_at_rfc = chrono::Utc::now().to_rfc3339();
+                            let started_at = chrono::Utc::now();
+                            let started_at_rfc = started_at.to_rfc3339();
                             info!(
                                 target: "dispatch",
                                 session = %session_name,
@@ -2110,6 +2153,43 @@ async fn handle_request(
                                         tool = %name,
                                         "dispatch abandoned by operator stop"
                                     );
+                                    // The call's record, for the Tools tab
+                                    // and `turn_trace`: a stopped call used
+                                    // to leave no trace at all.
+                                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                                    let input_json =
+                                        serde_json::to_string(args).unwrap_or_default();
+                                    if tool_calls::has_watchers() {
+                                        tool_calls::emit(tool_calls::stopped_record(tool_calls::Call {
+                                            seq,
+                                            tool_use_id: id,
+                                            name,
+                                            session: &session_name,
+                                            job_id: "",
+                                            started_at,
+                                            elapsed_ms,
+                                            is_error: true,
+                                            input_json: &input_json,
+                                            result: tool_calls::STOPPED_RESULT,
+                                        }));
+                                    }
+                                    let stopped_doc = serde_json::json!({
+                                        "session": session_name.to_string(),
+                                        "turn_index": turn_index,
+                                        "seq": seq,
+                                        "tool_use_id": id.clone(),
+                                        "tool_name": name.clone(),
+                                        "input_preview": preview_str(&input_json, TURN_TRACE_PREVIEW_MAX),
+                                        "started_at": started_at_rfc.clone(),
+                                        "elapsed_ms": elapsed_ms,
+                                        "is_error": true,
+                                        "stopped": true,
+                                        "result_preview": tool_calls::STOPPED_RESULT,
+                                    });
+                                    let db_clone = db.clone();
+                                    tokio::spawn(async move {
+                                        let _ = db_clone.write("tools.turn_trace", &stopped_doc).await;
+                                    });
                                     break;
                                 }
                             };
@@ -2190,6 +2270,7 @@ async fn handle_request(
                             let persist_doc = serde_json::json!({
                                 "session": session_name.to_string(),
                                 "turn_index": turn_index,
+                                "seq": seq,
                                 "tool_use_id": id.clone(),
                                 "tool_name": name.clone(),
                                 "input_preview": input_preview,
@@ -2203,6 +2284,24 @@ async fn handle_request(
                                 let _ = db_clone.write("tools.turn_trace", &persist_doc).await;
                             });
 
+                            // The live record for the Tools tab
+                            // (`tool_calls`); the cuts and copies run only
+                            // with a watcher.
+                            if tool_calls::has_watchers() {
+                                tool_calls::emit(tool_calls::record(tool_calls::Call {
+                                    seq,
+                                    tool_use_id: id,
+                                    name,
+                                    session: &session_name,
+                                    job_id: "",
+                                    started_at,
+                                    elapsed_ms,
+                                    is_error,
+                                    input_json: &input_json,
+                                    result: &content,
+                                }));
+                            }
+
                             let _ = tx.send(Ok(ConversationResponse {
                                 response_type: Some(conversation_response::ResponseType::Tool(
                                     ToolExecution {
@@ -2211,6 +2310,7 @@ async fn handle_request(
                                         input_json,
                                         result: content.clone(),
                                         is_error,
+                                        seq,
                                     }
                                 )),
                             })).await;

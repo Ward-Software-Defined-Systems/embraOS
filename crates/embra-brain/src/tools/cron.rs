@@ -622,6 +622,7 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<CronFired
             turn_index: 0,
             deleting_session: None,
         };
+        let seq = crate::tool_calls::next_seq();
         let started = std::time::Instant::now();
         let started_at = Utc::now();
         let (result_text, is_error) = match super::registry::dispatch(&plan.name, plan.args.clone(), ctx)
@@ -641,6 +642,23 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<CronFired
             if let Err(e) = db.write(CRON_RUNS, &run).await {
                 tracing::warn!(target: "cron", command = %plan.display, "cron run not recorded: {e}");
             }
+        }
+        // The live record for the web console's Tools tab: a cron-fired
+        // call is in the list with its job, and never in a transcript.
+        if crate::tool_calls::has_watchers() {
+            let input_json = serde_json::to_string(&plan.args).unwrap_or_default();
+            crate::tool_calls::emit(crate::tool_calls::record(crate::tool_calls::Call {
+                seq,
+                tool_use_id: "",
+                name: &plan.name,
+                session: "cron",
+                job_id: doc_id(doc).unwrap_or(""),
+                started_at,
+                elapsed_ms,
+                is_error,
+                input_json: &input_json,
+                result: &result_text,
+            }));
         }
         let note = plan.note.as_ref().map(|n| format!(" ({n})")).unwrap_or_default();
         let act = doc.get("act").and_then(|v| v.as_bool()).unwrap_or(false);

@@ -148,6 +148,45 @@ impl EmbraApi for EmbraApiImpl {
         Ok(Response::new(Box::pin(output)))
     }
 
+    // --- Tool-call feed pass-through ---
+
+    type WatchToolCallsStream = Pin<Box<dyn Stream<Item = Result<ToolCallRecord, Status>> + Send>>;
+
+    /// The brain's tool-call feed, record by record, as an opaque payload
+    /// like `Converse`. embra-web holds the one production subscription.
+    async fn watch_tool_calls(
+        &self,
+        _request: Request<WatchToolCallsRequest>,
+    ) -> Result<Response<Self::WatchToolCallsStream>, Status> {
+        let mut brain = self.backends.brain_client().await?;
+        let records = brain
+            .watch_tool_calls(embra_common::proto::brain::WatchToolCallsRequest {})
+            .await?
+            .into_inner();
+        #[expect(
+            clippy::result_large_err,
+            reason = "the stream's item type is Result<_, tonic::Status>, fixed by the service trait"
+        )]
+        let output = records.map(|rec| rec.map(|r| ToolCallRecord { payload: r.encode_to_vec() }));
+        Ok(Response::new(Box::pin(output)))
+    }
+
+    /// The record read back, unary pass-through: the request and the
+    /// response are the brain's messages, serialized.
+    async fn list_tool_calls(
+        &self,
+        request: Request<ListToolCallsRequest>,
+    ) -> Result<Response<ListToolCallsResponse>, Status> {
+        let inner = embra_common::proto::brain::ListToolCallsRequest::decode(
+            request.into_inner().payload.as_slice(),
+        )
+        .map_err(|e| Status::invalid_argument(format!("ListToolCallsRequest payload: {e}")))?;
+        let mut brain = self.backends.brain_client().await?;
+        let resp = brain.list_tool_calls(inner).await?;
+        let payload = resp.into_inner().encode_to_vec();
+        Ok(Response::new(ListToolCallsResponse { payload }))
+    }
+
     // --- Media store pass-through ---
 
     async fn put_media(&self, request: Request<PutMediaRequest>) -> Result<Response<PutMediaResponse>, Status> {
@@ -301,6 +340,41 @@ mod tests {
             .await
             .err()
             .expect("no brain, no stream");
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_brain_fails_the_tool_call_watch_with_unavailable() {
+        let backends = BackendConnections::new(
+            "http://127.0.0.1:1".to_string(),
+            "http://127.0.0.1:1".to_string(),
+        );
+        let api = EmbraApiImpl::new(backends);
+        let err = api
+            .watch_tool_calls(Request::new(WatchToolCallsRequest {}))
+            .await
+            .err()
+            .expect("no brain, no stream");
+        assert_eq!(err.code(), tonic::Code::Unavailable);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_brain_fails_the_tool_call_list_with_unavailable() {
+        let backends = BackendConnections::new(
+            "http://127.0.0.1:1".to_string(),
+            "http://127.0.0.1:1".to_string(),
+        );
+        let api = EmbraApiImpl::new(backends);
+        let payload = embra_common::proto::brain::ListToolCallsRequest {
+            limit: 5,
+            before: String::new(),
+            session: String::new(),
+        }
+        .encode_to_vec();
+        let err = api
+            .list_tool_calls(Request::new(ListToolCallsRequest { payload }))
+            .await
+            .expect_err("no brain, no page");
         assert_eq!(err.code(), tonic::Code::Unavailable);
     }
 }

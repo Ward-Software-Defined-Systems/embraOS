@@ -12,6 +12,7 @@
 //! Exposes all functionality via gRPC on port 50002.
 
 mod activity;
+mod tool_calls;
 mod brain;
 mod tools;
 mod db;

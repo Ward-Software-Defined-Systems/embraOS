@@ -121,6 +121,13 @@ impl EmbraApi for Gateway {
     async fn watch_activity(&self, _: Request<WatchActivityRequest>) -> Result<Response<Self::WatchActivityStream>, Status> {
         Err(not_here())
     }
+    type WatchToolCallsStream = Pin<Box<dyn Stream<Item = Result<ToolCallRecord, Status>> + Send>>;
+    async fn watch_tool_calls(&self, _: Request<WatchToolCallsRequest>) -> Result<Response<Self::WatchToolCallsStream>, Status> {
+        Err(not_here())
+    }
+    async fn list_tool_calls(&self, _: Request<ListToolCallsRequest>) -> Result<Response<ListToolCallsResponse>, Status> {
+        Err(not_here())
+    }
     async fn stop_turn(&self, _: Request<StopTurnRequest>) -> Result<Response<StopTurnResponse>, Status> {
         Err(not_here())
     }

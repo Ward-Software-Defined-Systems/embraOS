@@ -39,6 +39,16 @@ service BrainService {
   // result, no memory content, no reasoning.
   rpc WatchActivity(WatchActivityRequest) returns (stream ActivityFrame);
 
+  // The tool-call feed: one record per finished tool call, with its input
+  // and result cut per side (64 KiB) and marked when cut. The one feed that
+  // carries content, by design; the activity feed never does. One
+  // subscriber per embra-web process, fanned out to the browsers' Tools
+  // tab.
+  rpc WatchToolCalls(WatchToolCallsRequest) returns (stream ToolCallRecord);
+  // The record read back: `tools.turn_trace` newest first, 2 KiB previews,
+  // for the Tools tab's backfill after a restart and its paging.
+  rpc ListToolCalls(ListToolCallsRequest) returns (ListToolCallsResponse);
+
   // Media — operator-attached / tool-produced images in the MEDIA store.
   // Unary on purpose (bytes never ride the Converse stream): an upload
   // normalizes + stores and returns the ref; a download serves the stored
@@ -211,6 +221,10 @@ message ToolExecution {
   // handler returned Err). The follow-up tool_result block carries the
   // corresponding `is_error: true` so the model can recover mid-loop.
   bool is_error = 5;
+  // The brain's per-boot call number, the same the tool-call feed's record
+  // carries: the console prints it on the call's marker line and the
+  // browser opens the call from it.
+  uint64 seq = 6;
 }
 
 message ThinkingState {
@@ -345,6 +359,42 @@ message RetrievalEvent {
   uint32 candidates = 1;
   uint32 results = 2;
   float top_score = 3;
+}
+
+// --- Tool-call feed ---
+
+message WatchToolCallsRequest {}
+
+message ListToolCallsRequest {
+  uint32 limit = 1;    // records per page; 0 = the default, capped by the brain
+  string before = 2;   // the exact started_at of the oldest record shown; empty = newest
+  string session = 3;  // empty = every session
+}
+
+message ListToolCallsResponse {
+  repeated ToolCallRecord records = 1;  // newest first
+}
+
+// One tool call. Live from the dispatch sites, or read back from the
+// `tools.turn_trace` record (`from_record`, previews only).
+message ToolCallRecord {
+  uint64 seq = 1;           // per brain process; 0 on a record without one
+  string tool_use_id = 2;   // the provider's id; empty for a cron-fired call
+  string name = 3;
+  string session = 4;
+  string origin = 5;        // turn | cron
+  int64 started_at_ms = 6;  // unix milliseconds
+  uint32 elapsed_ms = 7;
+  bool is_error = 8;
+  bool stopped = 9;         // the dispatch was abandoned on an operator stop
+  string input_json = 10;   // cut at 64 KiB, marked
+  uint32 input_bytes = 11;  // the full length; 0 when read back from the record
+  string result = 12;       // cut at 64 KiB, marked
+  uint32 result_bytes = 13; // the full length; 0 when read back from the record
+  uint32 dropped = 14;      // records a lagging watcher lost before this one
+  string job_id = 15;       // the cron job that fired the call; empty otherwise
+  bool from_record = 16;    // read back from tools.turn_trace: 2 KiB previews
+  string started_at_rfc = 17; // the stored form of started_at, the paging cursor
 }
 
 // --- Sessions ---

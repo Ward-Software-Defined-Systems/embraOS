@@ -15,6 +15,9 @@ service EmbraAPI {
   rpc StopTurn(StopTurnRequest) returns (StopTurnResponse);
   // The brain's activity feed, pass-through (see brain.proto).
   rpc WatchActivity(WatchActivityRequest) returns (stream ActivityFrame);
+  // The brain's tool-call feed and its record read-back, pass-through.
+  rpc WatchToolCalls(WatchToolCallsRequest) returns (stream ToolCallRecord);
+  rpc ListToolCalls(ListToolCallsRequest) returns (ListToolCallsResponse);
   // Media store pass-through (unary; bytes never ride the Converse stream).
   rpc PutMedia(PutMediaRequest) returns (PutMediaResponse);
   rpc GetMedia(GetMediaRequest) returns (GetMediaResponse);
@@ -65,6 +68,10 @@ message StopTurnRequest {}
 message StopTurnResponse { bytes payload = 1; }  // Serialized embra.brain.StopTurnResponse
 message WatchActivityRequest {}
 message ActivityFrame { bytes payload = 1; }  // Serialized embra.brain.ActivityFrame
+message WatchToolCallsRequest {}
+message ToolCallRecord { bytes payload = 1; }  // Serialized embra.brain.ToolCallRecord
+message ListToolCallsRequest { bytes payload = 1; }  // Serialized embra.brain.ListToolCallsRequest
+message ListToolCallsResponse { bytes payload = 1; }  // Serialized embra.brain.ListToolCallsResponse
 
 message PutMediaRequest {
   string session_name = 1;
