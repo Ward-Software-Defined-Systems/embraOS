@@ -170,6 +170,9 @@ fn system_msg_kind(t: i32) -> &'static str {
         3 => "error",
         4 => "notification",
         5 => "reconnection",
+        // The frames that follow replay a session's history: the client
+        // clears its timeline first. `content` names the session.
+        6 => "reset",
         _ => "unspecified",
     }
 }
@@ -376,5 +379,11 @@ mod media_bridge_tests {
                 "url": "/api/files/uploads/notes.md"
             })
         );
+    }
+
+    #[test]
+    fn a_transcript_reset_maps_to_the_reset_kind() {
+        assert_eq!(system_msg_kind(6), "reset");
+        assert_eq!(system_msg_kind(5), "reconnection");
     }
 }

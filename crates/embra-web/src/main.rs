@@ -11,6 +11,7 @@
 
 mod activity_bridge;
 mod activity_feed;
+mod api_tools;
 mod arbiter;
 mod assets;
 mod chat_bridge;
@@ -25,9 +26,12 @@ mod stop;
 mod state;
 mod status;
 mod tls;
+mod tool_bridge;
+mod tool_feed;
 mod ws;
 mod ws_activity;
 mod ws_chat;
+mod ws_tools;
 
 use std::sync::{Arc, Mutex};
 
@@ -36,6 +40,7 @@ use arbiter::Arbiter;
 use config::WebConfig;
 use pty_bridge::PtyBridge;
 use state::AppState;
+use tool_feed::ToolFeed;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -70,6 +75,9 @@ async fn main() -> anyhow::Result<()> {
         // One subscription to the brain's activity feed per process,
         // fanned out to every `/ws/activity` socket.
         activity: ActivityFeed::spawn(cfg.apid_addr.clone()),
+        // One subscription to the brain's tool-call feed per process, kept
+        // as a backlog and fanned out to every `/ws/tools` socket.
+        tools: ToolFeed::spawn(cfg.apid_addr.clone()),
     };
 
     server::serve(&cfg, state, server_config).await

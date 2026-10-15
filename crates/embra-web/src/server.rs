@@ -16,6 +16,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 use tokio_rustls::server::TlsStream;
 
+use crate::api_tools::api_tools_list;
 use crate::assets::static_handler;
 use crate::config::WebConfig;
 use crate::media::{MEDIA_BODY_LIMIT, api_media_get, api_media_put};
@@ -27,6 +28,7 @@ use crate::status::api_status;
 use crate::ws::ws_terminal;
 use crate::ws_activity::ws_activity;
 use crate::ws_chat::ws_chat;
+use crate::ws_tools::ws_tools;
 
 /// A TLS-terminating listener. `axum::serve::Listener::accept` has no
 /// Result, so transient TCP/handshake errors are logged and skipped.
@@ -72,7 +74,9 @@ pub async fn serve(
         .route("/ws/terminal", get(ws_terminal))
         .route("/ws/chat", get(ws_chat))
         .route("/ws/activity", get(ws_activity))
+        .route("/ws/tools", get(ws_tools))
         .route("/api/status", get(api_status))
+        .route("/api/tools", get(api_tools_list))
         .route("/api/sessions", get(api_sessions_list))
         .route("/api/stop", post(api_stop))
         // Media store door. Registered explicitly — the SPA fallback

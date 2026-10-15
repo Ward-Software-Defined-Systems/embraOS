@@ -6,6 +6,7 @@ use crate::activity_feed::ActivityFeed;
 use crate::arbiter::Arbiter;
 use crate::metrics::CpuSnapshot;
 use crate::pty_bridge::PtyBridge;
+use crate::tool_feed::ToolFeed;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -26,4 +27,8 @@ pub struct AppState {
     /// The brain's activity feed, subscribed once through apid and fanned
     /// out to every `/ws/activity` socket (`activity_feed.rs`).
     pub activity: ActivityFeed,
+    /// The brain's tool-call feed, subscribed once through apid, kept as a
+    /// bounded backlog and fanned out to every `/ws/tools` socket
+    /// (`tool_feed.rs`).
+    pub tools: ToolFeed,
 }
