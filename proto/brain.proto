@@ -194,6 +194,7 @@ enum SystemMessageType {
   SYSTEM_MESSAGE_TYPE_ERROR = 3;
   SYSTEM_MESSAGE_TYPE_NOTIFICATION = 4;    // Proactive engine (reminders, etc.)
   SYSTEM_MESSAGE_TYPE_RECONNECTION = 5;    // Reconnection briefing
+  SYSTEM_MESSAGE_TYPE_TRANSCRIPT_RESET = 6; // The frames that follow replay a session's history: the client clears its transcript first. content = the session name
 }
 
 message ToolExecution {

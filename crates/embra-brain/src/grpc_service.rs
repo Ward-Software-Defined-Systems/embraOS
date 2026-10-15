@@ -2753,30 +2753,7 @@ async fn handle_request(
                 let mgr = session_mgr.read().await;
                 match mgr.load_history(&session_name).await {
                     Ok(history) => {
-                        for msg in &history {
-                            let role_display = if msg.role == "user" { "user" } else { "assistant" };
-                            let _ = tx.send(Ok(ConversationResponse {
-                                response_type: Some(conversation_response::ResponseType::System(
-                                    SystemMessage {
-                                        content: format!("[{}] {}", role_display, msg.content),
-                                        msg_type: SystemMessageType::Reconnection as i32,
-                                    }
-                                )),
-                            })).await;
-                            // Persisted image refs replay as `replay:true`
-                            // frames right under their turn, so the client
-                            // can re-render cards (and apply its
-                            // reconnection-replay suppression uniformly).
-                            for r in msg.attachment_refs() {
-                                let frame = if r.is_image() {
-                                    conversation_response::ResponseType::Media(media::media_ref_from_attachment(r))
-                                } else {
-                                    let origin = if msg.role == "user" { "attached" } else { "offered" };
-                                    conversation_response::ResponseType::File(media::text::file_ref_from_attachment(r, origin))
-                                };
-                                let _ = tx.send(Ok(ConversationResponse { response_type: Some(frame) })).await;
-                            }
-                        }
+                        replay_history(tx, &session_name, &history).await;
                         history.len()
                     }
                     Err(_) => 0,
@@ -3197,6 +3174,9 @@ async fn handle_slash_command(
                         mgr.active_session = Some(s.name.clone());
                         let name = s.name.clone();
                         drop(mgr);
+                        // A new session is an empty transcript: the clients
+                        // clear what they show before the confirmation.
+                        send_transcript_reset(tx, &name).await;
                         send_msg(tx, format!("Created and switched to session '{}'", name)).await;
                         send_session_update(tx, &name).await;
                     }
@@ -3253,17 +3233,7 @@ async fn handle_slash_command(
                     let history_len: usize = match mgr.load_history(args).await {
                         Ok(history) => {
                             drop(mgr);
-                            for msg in &history {
-                                let role_display = if msg.role == "user" { "user" } else { "assistant" };
-                                let _ = tx.send(Ok(ConversationResponse {
-                                    response_type: Some(conversation_response::ResponseType::System(
-                                        SystemMessage {
-                                            content: format!("[{}] {}", role_display, msg.content),
-                                            msg_type: SystemMessageType::Reconnection as i32,
-                                        }
-                                    )),
-                                })).await;
-                            }
+                            replay_history(tx, args, &history).await;
                             send_msg(tx, format!("Switched to session '{}' ({} messages)", args, history.len())).await;
                             history.len()
                         }
@@ -7861,6 +7831,64 @@ fn terminal_outcome_notice(
     }
 }
 
+/// Tells one client that the frames that follow replay a session's history:
+/// it clears its transcript first. `content` names the session. Sent at the
+/// head of every replay and alone by `/new`, whose session has no history.
+async fn send_transcript_reset(
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    session: &str,
+) {
+    let _ = tx
+        .send(Ok(ConversationResponse {
+            response_type: Some(conversation_response::ResponseType::System(SystemMessage {
+                content: session.to_string(),
+                msg_type: SystemMessageType::TranscriptReset as i32,
+            })),
+        }))
+        .await;
+}
+
+/// Replays a session's history to one client: the reset frame, then one
+/// `[user] …` / `[assistant] …` row per message with its `replay:true` media
+/// and file frames right under it, so the cards come back with their turn.
+/// The attach and `/switch` both go through here, so they show the same
+/// thing.
+async fn replay_history(
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    session: &str,
+    history: &[crate::brain::Message],
+) {
+    send_transcript_reset(tx, session).await;
+    for msg in history {
+        let role_display = if msg.role == "user" { "user" } else { "assistant" };
+        let _ = tx
+            .send(Ok(ConversationResponse {
+                response_type: Some(conversation_response::ResponseType::System(
+                    SystemMessage {
+                        content: format!("[{}] {}", role_display, msg.content),
+                        msg_type: SystemMessageType::Reconnection as i32,
+                    },
+                )),
+            }))
+            .await;
+        for r in msg.attachment_refs() {
+            let frame = if r.is_image() {
+                conversation_response::ResponseType::Media(media::media_ref_from_attachment(r))
+            } else {
+                let origin = if msg.role == "user" { "attached" } else { "offered" };
+                conversation_response::ResponseType::File(media::text::file_ref_from_attachment(
+                    r, origin,
+                ))
+            };
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(frame),
+                }))
+                .await;
+        }
+    }
+}
+
 /// The text of a response whose `Done` never went out. A stop that cuts the
 /// stream comes back from `collect_response` as an `OperatorStop` turn with
 /// the partial and no `Done`; every `Complete` sends its own.
@@ -10818,6 +10846,61 @@ mod session_delete_flow_tests {
         assert!(slot.is_none(), "reason consumption must clear the flow state");
         // No flow pending: a message is a message.
         assert!(advance_delete_flow(&mut slot).is_none());
+    }
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::{replay_history, SystemMessageType};
+    use crate::brain::{AttachmentRef, Message};
+    use embra_common::proto::brain::conversation_response::ResponseType;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn the_replay_sends_the_reset_then_each_row_with_its_attachments() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let history = vec![
+            Message {
+                role: "user".into(),
+                content: "look at this".into(),
+                attachments: Some(vec![AttachmentRef {
+                    id: "img1".into(),
+                    name: "poster.png".into(),
+                    media_type: "image/png".into(),
+                    width: 10,
+                    height: 10,
+                    bytes: 100,
+                    path: "/embra/workspace/MEDIA/poster.png".into(),
+                }]),
+            },
+            Message {
+                role: "assistant".into(),
+                content: "a poster".into(),
+                attachments: None,
+            },
+        ];
+        replay_history(&tx, "main", &history).await;
+        drop(tx);
+        let mut frames = Vec::new();
+        while let Some(Ok(f)) = rx.recv().await {
+            frames.push(f.response_type.expect("typed frame"));
+        }
+        assert_eq!(frames.len(), 4, "{frames:?}");
+        assert!(
+            matches!(&frames[0], ResponseType::System(m)
+                if m.msg_type == SystemMessageType::TranscriptReset as i32 && m.content == "main"),
+            "{frames:?}"
+        );
+        assert!(
+            matches!(&frames[1], ResponseType::System(m)
+                if m.msg_type == SystemMessageType::Reconnection as i32 && m.content == "[user] look at this"),
+            "{frames:?}"
+        );
+        assert!(matches!(&frames[2], ResponseType::Media(m) if m.replay && m.id == "img1"), "{frames:?}");
+        assert!(
+            matches!(&frames[3], ResponseType::System(m) if m.content == "[assistant] a poster"),
+            "{frames:?}"
+        );
     }
 }
 
