@@ -85,19 +85,17 @@ impl ToolFeed {
         }
     }
 
-    /// The first messages for a new socket — the backlog, then `offline`
-    /// while the brain is away — and the receiver for the rest. The
-    /// receiver is taken before the backlog is read, so nothing published
-    /// between the two is missed; the browser keys the calls, so one that
-    /// lands in both is shown once.
+    /// The first messages for a new socket — the backlog, then the feed's
+    /// state (`online`, or `offline` while the brain is away) — and the
+    /// receiver for the rest. The receiver is taken before the backlog is
+    /// read, so nothing published between the two is missed; the browser
+    /// keys the calls, so one that lands in both is shown once.
     pub fn subscribe(&self) -> (Vec<String>, broadcast::Receiver<String>) {
         let rx = self.tx.subscribe();
         let mut first = Vec::with_capacity(2);
         if let Ok(b) = self.backlog.read() {
             first.push(to_json(&ToolMsg::Backlog { calls: b.calls.iter().cloned().collect() }));
-            if !b.online {
-                first.push(to_json(&ToolMsg::Offline));
-            }
+            first.push(to_json(if b.online { &ToolMsg::Online } else { &ToolMsg::Offline }));
         }
         (first, rx)
     }
@@ -240,8 +238,9 @@ mod tests {
         feed.mark_online();
         feed.publish_call(call(1, "ok"));
         let (first, _late) = feed.subscribe();
-        assert_eq!(first.len(), 1, "online: the backlog alone");
+        assert_eq!(first.len(), 2, "online: the backlog, then the state");
         assert!(first[0].starts_with(r#"{"t":"backlog","calls":[{"seq":1,"#), "{first:?}");
+        assert_eq!(first[1], r#"{"t":"online"}"#, "a fresh tab must not read offline while the feed is up");
         assert_eq!(early.try_recv().unwrap(), r#"{"t":"online"}"#);
         assert!(early.try_recv().unwrap().starts_with(r#"{"t":"call","seq":1,"#));
     }
