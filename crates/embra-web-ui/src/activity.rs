@@ -690,7 +690,7 @@ fn activity_ws_url() -> String {
 
 /// The socket task: reconnects for the app's lifetime, 1 s doubling to
 /// 10 s between attempts, reset after a connection that delivered.
-fn start_ws(state: Rc<RefCell<Viz>>, aria: RwSignal<String>) {
+fn start_ws(state: Rc<RefCell<Viz>>, aria: RwSignal<String>, running: RwSignal<Option<String>>) {
     spawn_local(async move {
         let mut backoff_ms: u32 = 1000;
         loop {
@@ -706,6 +706,13 @@ fn start_ws(state: Rc<RefCell<Viz>>, aria: RwSignal<String>) {
                                 let mut v = state.borrow_mut();
                                 v.apply(msg, now_ms());
                                 aria.set(describe(&v));
+                                // The Tools tab's running row reads this;
+                                // set only on a change, so a quiet tick
+                                // re-renders nothing.
+                                let next = v.tool_running.as_ref().map(|(name, _)| name.clone());
+                                if running.get_untracked() != next {
+                                    running.set(next);
+                                }
                             }
                         }
                         Ok(WsMessage::Bytes(_)) => {}
@@ -721,6 +728,9 @@ fn start_ws(state: Rc<RefCell<Viz>>, aria: RwSignal<String>) {
                 v.connected = false;
                 v.online = false;
                 v.tool_running = None;
+            }
+            if running.get_untracked().is_some() {
+                running.set(None);
             }
             TimeoutFuture::new(backoff_ms).await;
             backoff_ms = (backoff_ms * 2).min(10_000);
@@ -795,8 +805,11 @@ fn prefers_reduced_motion() -> bool {
         .is_some_and(|m| m.matches())
 }
 
+/// `running`: the tool the brain is running, from the feed's ticks, for the
+/// sidebar's Tools tab. `App` owns the signal: the strip and the sidebar
+/// are siblings, and Leptos context flows down, not across.
 #[component]
-pub fn ActivityStrip() -> impl IntoView {
+pub fn ActivityStrip(running: RwSignal<Option<String>>) -> impl IntoView {
     let canvas_ref = NodeRef::<leptos::html::Canvas>::new();
     let state: Rc<RefCell<Viz>> = Rc::new(RefCell::new(Viz {
         reduced_motion: prefers_reduced_motion(),
@@ -818,7 +831,7 @@ pub fn ActivityStrip() -> impl IntoView {
                 return;
             };
             started.set(true);
-            start_ws(state.clone(), aria);
+            start_ws(state.clone(), aria, running);
             start_raf(canvas, state.clone());
         });
     }

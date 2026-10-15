@@ -1,8 +1,10 @@
 mod activity;
 mod app;
 mod chat;
+mod json_view;
 mod status;
 mod term;
+mod tools;
 
 use leptos::prelude::*;
 

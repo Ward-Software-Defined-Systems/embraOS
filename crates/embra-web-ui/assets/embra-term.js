@@ -175,6 +175,34 @@
         },
       });
     } catch (e) { console.warn("embra-web: link provider unavailable", e); }
+    // A tool call's marker row (`⚙ #17  14:02:11  read_file  0.8s`, `!` on
+    // an error) links to the call in the sidebar's Tools tab: the number
+    // is the brain's per-boot call number, the same the tool feed carries.
+    // Observers click too — nothing is typed.
+    try {
+      const MARKER = /[⚙!] #(\d+)\b/g;
+      term.registerLinkProvider({
+        provideLinks(y, cb) {
+          const line = term.buffer.active.getLine(y - 1);
+          if (!line) { cb(undefined); return; }
+          const text = line.translateToString(true);
+          const links = [];
+          let m;
+          MARKER.lastIndex = 0;
+          while ((m = MARKER.exec(text)) !== null) {
+            const seq = Number(m[1]);
+            // Columns are code units; the marker's glyph is one cell.
+            const start = Array.from(text.slice(0, m.index)).length + 1;
+            links.push({
+              text: m[0],
+              range: { start: { x: start, y }, end: { x: start + Array.from(m[0]).length - 1, y } },
+              activate: () => window.dispatchEvent(new CustomEvent("embra-tool-open", { detail: { seq } })),
+            });
+          }
+          cb(links.length ? links : undefined);
+        },
+      });
+    } catch (e) { console.warn("embra-web: marker link provider unavailable", e); }
     try { fit.fit(); } catch (e) {}
     term.onData((d) => {
       if (writable && ws && ws.readyState === 1) ws.send(new TextEncoder().encode(d));

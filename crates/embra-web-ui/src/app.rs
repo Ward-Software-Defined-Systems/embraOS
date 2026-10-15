@@ -13,6 +13,7 @@ use wasm_bindgen::prelude::*;
 
 use crate::status::use_status;
 use crate::term;
+use crate::tools::{self, ToolCall, ToolSheet, ToolsTab};
 
 /// Sidebar command groups: (title, [(command, hint)]) in CURATED order —
 /// rendered as-is (no re-sort), so each group leads with its entry point
@@ -30,6 +31,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
     ("Turn", &[
         ("/ml", "multiline"), ("/stop", "stop turn"),
         ("/iter-cap", "tool cap"), ("/show-reasoning", "reasoning"),
+        ("/show-tools", "tool rows"),
     ]),
     ("Model", &[
         ("/provider", "switch"), ("/provider --setup", "guided setup"),
@@ -70,6 +72,32 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
 /// operator expands what they use and the browser remembers it — so a
 /// group added later also starts collapsed instead of springing open.
 const NAV_OPEN_KEY: &str = "embra-nav-open";
+
+/// localStorage key: the sidebar tab the operator left open.
+const NAV_TAB_KEY: &str = "embra-nav-tab";
+
+/// The sidebar's two tabs: the command list, and the tool calls.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum NavTab {
+    Commands,
+    Tools,
+}
+
+fn load_tab() -> NavTab {
+    let stored = web_sys::window()
+        .and_then(|w| w.local_storage().ok().flatten())
+        .and_then(|ls| ls.get_item(NAV_TAB_KEY).ok().flatten());
+    match stored.as_deref() {
+        Some("tools") => NavTab::Tools,
+        _ => NavTab::Commands,
+    }
+}
+
+fn save_tab(tab: NavTab) {
+    if let Some(ls) = web_sys::window().and_then(|w| w.local_storage().ok().flatten()) {
+        let _ = ls.set_item(NAV_TAB_KEY, if tab == NavTab::Tools { "tools" } else { "commands" });
+    }
+}
 
 /// A field in a command's parameter modal.
 struct Field {
@@ -122,6 +150,10 @@ const SPECS: &[Spec] = &[
     Spec { cmd: "/show-reasoning", title: "Reasoning panel",
         note: "Toggle the live-reasoning panel.", join: " ", guided: false,
         fields: &[sel("State", &["(show current)", "on", "off", "reset"], false)] },
+    Spec { cmd: "/show-tools", title: "Tool rows in the terminal",
+        note: "Console-local: how a tool call renders in the terminal — one marker line per call (the web default), the whole call, or nothing. The Tools tab keeps every input and result whatever you pick.",
+        join: " ", guided: false,
+        fields: &[sel("Mode", &["(show current)", "marker", "full", "off"], false)] },
     Spec { cmd: "/github-token", title: "GitHub token",
         note: "Blank = show status. Stored to STATE.", join: " ", guided: false,
         fields: &[Field { label: "Token", ph: "ghp_… (blank = status)",
@@ -414,6 +446,16 @@ pub fn App() -> impl IntoView {
     // collapsed) + the filter box.
     let expanded = RwSignal::new(load_expanded());
     let nav_filter = RwSignal::new(String::new());
+    // The sidebar's tabs and the Tools tab's state: the calls (`/ws/tools`
+    // plus the record), the feed's state, whether the record has more,
+    // the tool the brain is running (from the activity strip's feed), and
+    // the call open in the sheet, by its key.
+    let tab = RwSignal::new(load_tab());
+    let tool_calls = RwSignal::new(Vec::<ToolCall>::new());
+    let tools_online = RwSignal::new(false);
+    let more_available = RwSignal::new(false);
+    let running_tool = RwSignal::new(None::<String>);
+    let tool_open = RwSignal::new(None::<String>);
 
     let open_modal = move |i: usize| {
         vals.set(defaults(&SPECS[i]));
@@ -456,6 +498,20 @@ pub fn App() -> impl IntoView {
     Effect::new(move |_| {
         term::init("embra-term");
         term::on_role(move |r, o| role.set((r, o)));
+        tools::start_ws(tool_calls, tools_online, more_available);
+        // A `⚙ #n` marker clicked in the terminal: show the Tools tab and
+        // open the newest call with that number (a number is per boot, so
+        // an older boot's read-back record loses to the live call).
+        tools::on_marker_click(move |seq| {
+            let key = tool_calls.with_untracked(|l| {
+                l.iter().filter(|c| c.seq == seq).max_by_key(|c| c.started_at_ms).map(ToolCall::key)
+            });
+            if let Some(key) = key {
+                tab.set(NavTab::Tools);
+                save_tab(NavTab::Tools);
+                tool_open.set(Some(key));
+            }
+        });
 
         if let Some(win) = web_sys::window() {
             let cb = Closure::<dyn FnMut(web_sys::KeyboardEvent)>::new(
@@ -469,6 +525,7 @@ pub fn App() -> impl IntoView {
                         modal.set(None);
                         editor_open.set(false);
                         takeover_open.set(false);
+                        tool_open.set(None);
                     }
                 },
             );
@@ -488,7 +545,8 @@ pub fn App() -> impl IntoView {
         let any_open = palette_open.get()
             || modal.get().is_some()
             || editor_open.get()
-            || takeover_open.get();
+            || takeover_open.get()
+            || tool_open.get().is_some();
         if prev == Some(true) && !any_open {
             term::focus();
         }
@@ -510,7 +568,7 @@ pub fn App() -> impl IntoView {
                 // The activity strip owns the flexible middle; `.role`
                 // stays right-aligned. Guided provider setup is in the
                 // sidebar's Model group and the ⌘K palette.
-                <crate::activity::ActivityStrip />
+                <crate::activity::ActivityStrip running=running_tool />
                 <div class="role">
                     {move || {
                         let (r, o) = role.get();
@@ -574,6 +632,28 @@ pub fn App() -> impl IntoView {
             </div>
 
             <div class="nav">
+                // Two tabs in the fixed 248 px column: the command list and
+                // the tool calls. Switching never changes the column's
+                // width, so the terminal never resizes.
+                <div class="nav-tabs" role="tablist">
+                    <button class="nav-tab" role="tab"
+                        class:active=move || tab.get() == NavTab::Commands
+                        on:click=move |_| { tab.set(NavTab::Commands); save_tab(NavTab::Commands); }>
+                        "Commands"
+                    </button>
+                    <button class="nav-tab" role="tab"
+                        class:active=move || tab.get() == NavTab::Tools
+                        on:click=move |_| { tab.set(NavTab::Tools); save_tab(NavTab::Tools); }>
+                        "Tools"
+                        <span class="count">{move || tool_calls.with(|l| l.len())}</span>
+                        {move || running_tool.get().is_some().then(|| view! { <span class="run-dot"></span> })}
+                    </button>
+                </div>
+                {move || (tab.get() == NavTab::Tools).then(|| view! {
+                    <ToolsTab calls=tool_calls online=tools_online more=more_available
+                        running=running_tool tool_open=tool_open />
+                })}
+                {move || (tab.get() == NavTab::Commands).then(|| view! {
                 <input class="nav-filter" type="text" placeholder="Filter commands…"
                     prop:value=move || nav_filter.get()
                     on:input=move |e| nav_filter.set(event_target_value(&e))
@@ -621,9 +701,14 @@ pub fn App() -> impl IntoView {
                         })
                     }).collect_view()
                 }}
+                })}
             </div>
 
             <div class="main">
+                // The call the operator opened from the Tools tab or a
+                // terminal marker: a sheet over the left part of the
+                // terminal, which keeps its size.
+                <ToolSheet calls=tool_calls tool_open=tool_open />
                 // Service + meter pills own this full-width strip (moved out
                 // of the 52 px top bar 2026-09-17 — they need the room, and
                 // the guided-setup control needed none). Rendered from the
