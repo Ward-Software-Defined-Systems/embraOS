@@ -132,6 +132,9 @@ async fn run_tui(mut client: BrainClient, _device: Option<String>) -> Result<()>
     terminal_tui.clear()?;
 
     let mut app = AppState::new();
+    // Tool rows: one marker line per call on the web PTY, where the Tools
+    // tab keeps every call; the serial console keeps the full rows.
+    app.show_tools = ShowTools::default_for(web_pty);
     app.status_message = "OK".to_string();
     app.viewport_cols = use_cols;
     app.viewport_rows = use_rows;
@@ -345,28 +348,61 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
             app.scroll_offset = 0;
         }
         ConsoleEvent::SystemMessage { content, msg_type } => {
-            // SYSTEM_MESSAGE_TYPE_ERROR == 3. Brain failures during a
-            // turn should not leave stale reasoning on the panel.
-            if msg_type == "3" {
-                app.clear_live_reasoning();
+            match msg_type.as_str() {
+                // SYSTEM_MESSAGE_TYPE_TRANSCRIPT_RESET == 6: the frames
+                // that follow replay a session's history (an attach,
+                // /switch, /new). The transcript starts over; `content`
+                // names the session and is not a row.
+                "6" => {
+                    app.messages.clear();
+                    app.scroll_offset = 0;
+                }
+                // SYSTEM_MESSAGE_TYPE_RECONNECTION == 5: a replayed turn
+                // renders as its speaker, marked `history` where a live row
+                // shows its time; any other reconnection row (the attach
+                // notice) stays a system row.
+                "5" => {
+                    let row = if let Some(text) = content.strip_prefix("[user] ") {
+                        DisplayMessage::history("user", text)
+                    } else if let Some(text) = content.strip_prefix("[assistant] ") {
+                        DisplayMessage::history("assistant", text)
+                    } else {
+                        DisplayMessage::system_with_tz(&content, &app.config_tz)
+                    };
+                    app.messages.push(row);
+                    app.scroll_offset = 0;
+                }
+                other => {
+                    // SYSTEM_MESSAGE_TYPE_ERROR == 3. Brain failures during
+                    // a turn should not leave stale reasoning on the panel.
+                    if other == "3" {
+                        app.clear_live_reasoning();
+                    }
+                    app.messages.push(DisplayMessage::system_with_tz(&content, &app.config_tz));
+                    app.scroll_offset = 0;
+                }
             }
-            app.messages.push(DisplayMessage::system_with_tz(&content, &app.config_tz));
-            app.scroll_offset = 0;
         }
         ConsoleEvent::ToolExecution {
+            seq,
             name,
             input_json,
             result,
             is_error,
-            ..
         } => {
-            app.messages.push(DisplayMessage::tool_native(
-                &name,
-                &input_json,
-                &result,
-                is_error,
-                &app.config_tz,
-            ));
+            // The duration stashed when the brain cleared the tool, for
+            // this tool; another tool's stash, or none, gives a row
+            // without one — never a lost row.
+            let elapsed = match app.last_tool_run.take() {
+                Some((tool, elapsed)) if tool == name => Some(elapsed),
+                _ => None,
+            };
+            let started_at = chrono::Utc::now()
+                - chrono::TimeDelta::from_std(elapsed.unwrap_or_default()).unwrap_or_default();
+            app.messages.push(
+                DisplayMessage::tool_native(&name, &input_json, &result, is_error, &app.config_tz)
+                    .stamped(seq, started_at, elapsed, &app.config_tz),
+            );
             app.scroll_offset = 0;
         }
         ConsoleEvent::ThinkingState { is_thinking, name, current_tool } => {
@@ -385,8 +421,13 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
                     app.current_tool = Some(tool);
                 }
                 None => {
-                    app.current_tool = None;
-                    app.current_tool_started = None;
+                    // The brain clears the tool before it sends the call's
+                    // frame: keep the name and the elapsed time for that
+                    // frame's marker row.
+                    app.last_tool_run = app
+                        .current_tool
+                        .take()
+                        .zip(app.current_tool_started.take().map(|s| s.elapsed()));
                 }
             }
         }
@@ -721,6 +762,25 @@ async fn handle_key_event(
                         if !note.is_empty() {
                             app.messages.push(DisplayMessage::system_with_tz(&note, &app.config_tz));
                         }
+                    } else if cmd == "/show-tools" {
+                        // Console-local: how a tool call renders in the
+                        // transcript. The web console's Tools tab keeps
+                        // every call whatever the mode.
+                        let note = match args.trim() {
+                            "" => format!(
+                                "Tool rows: {} ({}). Options: full | marker | off.",
+                                app.show_tools.as_str(),
+                                app.show_tools.describe()
+                            ),
+                            mode => match ShowTools::parse(mode) {
+                                Some(m) => {
+                                    app.show_tools = m;
+                                    format!("Tool rows: {} ({}).", m.as_str(), m.describe())
+                                }
+                                None => "Usage: /show-tools [full|marker|off]".to_string(),
+                            },
+                        };
+                        app.messages.push(DisplayMessage::system_with_tz(&note, &app.config_tz));
                     } else if commands::is_local_command(cmd) {
                         if let Some(output) = commands::handle_local_command(cmd, args, &app.config_name) {
                             app.messages.push(DisplayMessage::system_with_tz(&output, &app.config_tz));
@@ -1254,6 +1314,95 @@ fn apply_paste(app: &mut AppState, s: &str) {
         app.cursor_pos += text.chars().count();
     }
     app.scroll_offset = 0;
+}
+
+#[cfg(test)]
+mod tool_row_tests {
+    use super::*;
+
+    #[test]
+    fn a_tool_row_takes_its_time_from_the_thinking_frames() {
+        let mut app = AppState::new();
+        handle_console_event(
+            ConsoleEvent::ThinkingState {
+                is_thinking: true,
+                name: String::new(),
+                current_tool: Some("remember".to_string()),
+            },
+            &mut app,
+        );
+        // The brain clears the tool before the call's frame arrives.
+        handle_console_event(
+            ConsoleEvent::ThinkingState { is_thinking: true, name: String::new(), current_tool: None },
+            &mut app,
+        );
+        handle_console_event(
+            ConsoleEvent::ToolExecution {
+                seq: 17,
+                name: "remember".to_string(),
+                input_json: "{}".to_string(),
+                result: "saved".to_string(),
+                is_error: false,
+            },
+            &mut app,
+        );
+        let row = app.messages.last().unwrap().tool.as_ref().expect("a tool row");
+        assert_eq!(row.seq, 17);
+        assert_eq!(row.name, "remember");
+        assert!(row.elapsed.is_some());
+        assert!(app.last_tool_run.is_none(), "the stash is consumed");
+
+        // Without a stash the row still lands, with no duration.
+        handle_console_event(
+            ConsoleEvent::ToolExecution {
+                seq: 18,
+                name: "recall".to_string(),
+                input_json: "{}".to_string(),
+                result: String::new(),
+                is_error: false,
+            },
+            &mut app,
+        );
+        let row = app.messages.last().unwrap().tool.as_ref().expect("a tool row");
+        assert_eq!(row.seq, 18);
+        assert!(row.elapsed.is_none());
+    }
+
+    #[test]
+    fn a_transcript_reset_clears_the_messages_and_the_scroll() {
+        let mut app = AppState::new();
+        app.messages.push(DisplayMessage::system_with_tz("old", "UTC"));
+        app.scroll_offset = 4;
+        handle_console_event(
+            ConsoleEvent::SystemMessage { content: "main".to_string(), msg_type: "6".to_string() },
+            &mut app,
+        );
+        assert!(app.messages.is_empty(), "the session name is not a row");
+        assert_eq!(app.scroll_offset, 0);
+    }
+
+    #[test]
+    fn a_replayed_row_becomes_a_styled_entry_marked_history() {
+        let mut app = AppState::new();
+        for content in ["[user] hello", "[assistant] hi", "Session 'main' attached (2 messages restored)"] {
+            handle_console_event(
+                ConsoleEvent::SystemMessage { content: content.to_string(), msg_type: "5".to_string() },
+                &mut app,
+            );
+        }
+        assert_eq!(app.messages[0].role, "user");
+        assert_eq!(app.messages[0].content, "hello");
+        assert_eq!(app.messages[0].timestamp, "history");
+        assert_eq!(app.messages[1].role, "assistant");
+        assert_eq!(app.messages[1].content, "hi");
+        assert_eq!(app.messages[2].role, "system");
+        assert!(app.messages[2].content.starts_with("Session 'main' attached"));
+    }
+
+    #[test]
+    fn show_tools_is_a_console_local_command() {
+        assert!(commands::is_local_command("/show-tools"));
+    }
 }
 
 #[cfg(test)]

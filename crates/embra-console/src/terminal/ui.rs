@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use super::render::{self, StyledLine, StyledSegment};
-use super::state::{AppMode, AppState, SetupStep};
+use super::state::{AppMode, AppState, SetupStep, ShowTools};
 
 pub fn draw(f: &mut Frame, app: &mut AppState) {
     let available_width = f.area().width.saturating_sub(2) as usize; // minus borders
@@ -279,14 +279,42 @@ fn draw_header(f: &mut Frame, area: Rect, app: &AppState) {
     f.render_widget(header, area);
 }
 
-fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
+/// The transcript's lines, before wrapping: one entry per message, a tool
+/// row by the console's `show_tools` mode, a replayed `assistant` row under
+/// the intelligence's configured name.
+fn conversation_lines(app: &AppState) -> Vec<StyledLine> {
     let mut styled_lines: Vec<StyledLine> = Vec::new();
 
     for msg in &app.messages {
+        if msg.role == "tool" {
+            match app.show_tools {
+                ShowTools::Off => continue,
+                ShowTools::Marker if msg.tool.is_some() => {
+                    let row = msg.tool.as_ref().expect("checked above");
+                    let color = if row.is_error { Color::Red } else { Color::DarkGray };
+                    styled_lines.push(vec![StyledSegment::new(
+                        format!("  {}", row.marker_line()),
+                        Style::default().fg(color),
+                    )]);
+                    styled_lines.push(vec![StyledSegment::new(String::new(), Style::default())]);
+                    continue;
+                }
+                // Full, or a tool row without its marker data: the whole
+                // call, as it always rendered.
+                _ => {}
+            }
+        }
         let (color, prefix) = match msg.role.as_str() {
             "user" | "You" => (Color::LightBlue, "You"),
             "system" => (Color::White, ""),
             "tool" => (Color::Cyan, ""),
+            // A replayed turn of the intelligence: the ModeTransition that
+            // names it arrives after the replay, so the name is read at
+            // draw time.
+            "assistant" => (
+                Color::Green,
+                if app.config_name.is_empty() { "assistant" } else { app.config_name.as_str() },
+            ),
             _ => (Color::Green, msg.role.as_str()),
         };
 
@@ -330,6 +358,11 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
         }
         styled_lines.push(vec![StyledSegment::new(String::new(), Style::default())]);
     }
+    styled_lines
+}
+
+fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
+    let mut styled_lines = conversation_lines(app);
 
     // Show selector if active
     if let Some(ref selector) = app.selector {
@@ -609,6 +642,53 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &AppState) {
 
     let status = Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::DarkGray));
     f.render_widget(status, area);
+}
+
+#[cfg(test)]
+mod conversation_lines_tests {
+    use super::conversation_lines;
+    use super::super::render::StyledLine;
+    use super::super::state::{AppState, DisplayMessage, ShowTools};
+
+    fn text_of(lines: &[StyledLine]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| l.iter().map(|s| s.text.as_str()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn tool_rows_follow_the_show_tools_mode() {
+        let mut app = AppState::new();
+        app.messages.push(DisplayMessage::tool_native("file_read", "{}", "one\ntwo\nthree", false, "UTC"));
+
+        app.show_tools = ShowTools::Off;
+        assert!(conversation_lines(&app).is_empty(), "nothing, not even a spacer");
+
+        app.show_tools = ShowTools::Marker;
+        let lines = text_of(&conversation_lines(&app));
+        assert_eq!(lines.len(), 2, "one marker line and the spacer: {lines:?}");
+        assert!(lines[0].starts_with("  ⚙ "), "{lines:?}");
+        assert!(lines[0].contains("file_read"), "{lines:?}");
+
+        app.show_tools = ShowTools::Full;
+        let lines = text_of(&conversation_lines(&app));
+        assert_eq!(lines.len(), 4, "three content lines and the spacer: {lines:?}");
+        assert!(lines[0].contains("[ok file_read]"), "{lines:?}");
+    }
+
+    #[test]
+    fn a_history_row_is_drawn_as_its_speaker_with_the_configured_name() {
+        let mut app = AppState::new();
+        app.config_name = "Embra".to_string();
+        app.messages.push(DisplayMessage::history("user", "hello"));
+        app.messages.push(DisplayMessage::history("assistant", "hi there"));
+        let lines = text_of(&conversation_lines(&app));
+        assert_eq!(lines[0], "[history] You: ");
+        assert_eq!(lines[1], "  hello");
+        assert_eq!(lines[3], "[history] Embra: ");
+        assert_eq!(lines[4], "  hi there");
+    }
 }
 
 #[cfg(test)]

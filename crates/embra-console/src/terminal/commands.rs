@@ -1,11 +1,11 @@
 //! Slash command handling for embra-console.
 //!
-//! Only local commands (/help, /ml, /media) are handled here.
-//! All other commands are forwarded to embra-brain via gRPC.
+//! Only local commands (/help, /ml, /media, /show-tools) are handled
+//! here. All other commands are forwarded to embra-brain via gRPC.
 
 /// Returns true if this command is handled locally (not sent to brain)
 pub fn is_local_command(cmd: &str) -> bool {
-    matches!(cmd, "/help" | "/ml" | "/media")
+    matches!(cmd, "/help" | "/ml" | "/media" | "/show-tools")
 }
 
 /// Handle a local command, returning the output string
@@ -31,6 +31,8 @@ Turn:
   /show-reasoning                Show whether reasoning streams to the panel
   /show-reasoning <on|off>       Toggle live reasoning in the expression panel (default on)
   /show-reasoning reset          Restore default (on)
+  /show-tools                    Show how tool calls render here (web console default: marker; serial: full)
+  /show-tools <full|marker|off>  The whole call, one marker line per call, or nothing (the web console's Tools tab keeps every call)
 
 Model:
   /provider                              Show active provider, model, session

@@ -21,6 +21,10 @@ pub enum ConsoleEvent {
     ResponseDone(String),
     SystemMessage { content: String, msg_type: String },
     ToolExecution {
+        /// The brain's per-boot call number; 0 from a brain without one.
+        /// The marker row prints it and the web console opens the call
+        /// from it.
+        seq: u64,
         name: String,
         input_json: String,
         result: String,
@@ -116,6 +120,7 @@ impl BrainClient {
                                 }
                                 brain::conversation_response::ResponseType::Tool(t) => {
                                     ConsoleEvent::ToolExecution {
+                                        seq: t.seq,
                                         name: t.tool_name,
                                         input_json: t.input_json,
                                         result: t.result,

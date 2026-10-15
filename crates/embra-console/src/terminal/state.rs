@@ -3,7 +3,7 @@
 //! These mirror Phase 0's AppState/AppMode but without backend dependencies.
 //! All data comes from gRPC ConsoleEvents.
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 
 /// Operating mode of the console
@@ -67,12 +67,115 @@ impl Selector {
     }
 }
 
+/// How a tool call renders in the transcript. The web console's Tools
+/// tab keeps every call, so its default is one marker line per call; the
+/// serial console has no tab and keeps the full rows. Console-local, set
+/// with `/show-tools`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShowTools {
+    /// The whole call: `[ok name] {input} result`, every line.
+    Full,
+    /// One dim line: `⚙ #seq  HH:MM:SS  name  0.8s`.
+    Marker,
+    /// Nothing: the responses alone.
+    Off,
+}
+
+impl ShowTools {
+    /// The default per transport: the web PTY has the Tools tab beside it.
+    pub fn default_for(web_pty: bool) -> Self {
+        if web_pty { ShowTools::Marker } else { ShowTools::Full }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "full" => Some(ShowTools::Full),
+            "marker" => Some(ShowTools::Marker),
+            "off" => Some(ShowTools::Off),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ShowTools::Full => "full",
+            ShowTools::Marker => "marker",
+            ShowTools::Off => "off",
+        }
+    }
+
+    /// What the mode shows, for the command's answer.
+    pub fn describe(self) -> &'static str {
+        match self {
+            ShowTools::Full => "the whole call under each row",
+            ShowTools::Marker => "one line per call",
+            ShowTools::Off => "the responses alone",
+        }
+    }
+}
+
+/// The marker-row data of a tool row: the call number, when it started
+/// (the operator's clock, with seconds), how long it ran.
+#[derive(Debug, Clone)]
+pub struct ToolRow {
+    pub seq: u64,
+    pub name: String,
+    pub is_error: bool,
+    pub at: String,
+    pub elapsed: Option<std::time::Duration>,
+}
+
+impl ToolRow {
+    /// `⚙ #17  14:03:22  remember  0.8s`; `!` and a trailing `ERR` on an
+    /// error; no `#` without a call number; no duration without one.
+    pub fn marker_line(&self) -> String {
+        let mut s = String::from(if self.is_error { "! " } else { "⚙ " });
+        if self.seq > 0 {
+            s.push_str(&format!("#{}  ", self.seq));
+        }
+        s.push_str(&self.at);
+        s.push_str("  ");
+        s.push_str(&self.name);
+        if let Some(elapsed) = self.elapsed {
+            s.push_str("  ");
+            s.push_str(&format_elapsed(elapsed));
+        }
+        if self.is_error {
+            s.push_str("  ERR");
+        }
+        s
+    }
+}
+
+/// `0.8s` under ten seconds, `12s` under a minute, `2m 05s` beyond.
+fn format_elapsed(d: std::time::Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs < 10.0 {
+        format!("{secs:.1}s")
+    } else if secs < 60.0 {
+        format!("{}s", secs.round() as u64)
+    } else {
+        let whole = d.as_secs();
+        format!("{}m {:02}s", whole / 60, whole % 60)
+    }
+}
+
+/// The clock, with seconds, in the operator's zone.
+fn clock_in_tz(at: DateTime<Utc>, tz_str: &str) -> String {
+    match tz_str.parse::<Tz>() {
+        Ok(tz) => at.with_timezone(&tz).format("%H:%M:%S").to_string(),
+        Err(_) => at.format("%H:%M:%S").to_string(),
+    }
+}
+
 /// A message displayed in the conversation area
 #[derive(Debug, Clone)]
 pub struct DisplayMessage {
     pub role: String,
     pub content: String,
     pub timestamp: String,
+    /// The marker data of a tool row; `None` on every other row.
+    pub tool: Option<ToolRow>,
 }
 
 impl DisplayMessage {
@@ -86,7 +189,36 @@ impl DisplayMessage {
             role: role.into(),
             content: content.into(),
             timestamp: ts,
+            tool: None,
         }
+    }
+
+    /// A replayed turn of a session's history: its speaker's row, marked
+    /// `history` where a live row shows its time (history keeps none).
+    pub fn history(role: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: role.into(),
+            content: content.into(),
+            timestamp: "history".to_string(),
+            tool: None,
+        }
+    }
+
+    /// The marker-row data: the call number, its start (the elapsed time
+    /// back from now, or now itself without one) and its duration.
+    pub fn stamped(
+        mut self,
+        seq: u64,
+        started_at: DateTime<Utc>,
+        elapsed: Option<std::time::Duration>,
+        tz_str: &str,
+    ) -> Self {
+        if let Some(row) = self.tool.as_mut() {
+            row.seq = seq;
+            row.at = clock_in_tz(started_at, tz_str);
+            row.elapsed = elapsed;
+        }
+        self
     }
 
     pub fn system_with_tz(content: impl Into<String>, tz_str: &str) -> Self {
@@ -167,11 +299,21 @@ impl DisplayMessage {
         } else {
             format!(" {}", input_json)
         };
-        Self::new_with_tz(
+        let mut row = Self::new_with_tz(
             "tool",
             format!("[{} {}]{} {}", marker, name, input_summary, result),
             tz_str,
-        )
+        );
+        // The marker data; `stamped` fills in the call number, the start
+        // and the duration when the event handler has them.
+        row.tool = Some(ToolRow {
+            seq: 0,
+            name: name.to_string(),
+            is_error,
+            at: clock_in_tz(Utc::now(), tz_str),
+            elapsed: None,
+        });
+        row
     }
 }
 
@@ -209,6 +351,13 @@ pub struct AppState {
     /// elapsed seconds next to the tool name. Reset only on a *changed*
     /// tool — duplicate signals for the same tool don't restart the clock.
     pub current_tool_started: Option<std::time::Instant>,
+    /// The tool the brain just cleared and how long it ran: the brain
+    /// clears `current_tool` before it sends the call's frame, and the
+    /// frame's marker row takes the duration from here (`ToolExecution`
+    /// arm). Consumed by that frame; a stash for another tool is dropped.
+    pub last_tool_run: Option<(String, std::time::Duration)>,
+    /// How tool rows render (`/show-tools`); set per transport at start.
+    pub show_tools: ShowTools,
     pub status_message: String,
     pub should_quit: bool,
     pub selector: Option<Selector>,
@@ -280,6 +429,8 @@ impl AppState {
             thinking_name: "Embra".to_string(),
             current_tool: None,
             current_tool_started: None,
+            last_tool_run: None,
+            show_tools: ShowTools::Full,
             status_message: String::new(),
             should_quit: false,
             selector: None,
@@ -374,6 +525,52 @@ impl AppState {
             AppMode::Learning => "Talk to your intelligence...",
             AppMode::Operational { .. } => "Type a message...",
         }
+    }
+}
+
+#[cfg(test)]
+mod show_tools_tests {
+    use super::*;
+    use chrono::TimeZone;
+    use std::time::Duration;
+
+    #[test]
+    fn a_marker_row_names_the_call_its_time_and_its_duration() {
+        let at = Utc.with_ymd_and_hms(2026, 10, 15, 14, 3, 22).unwrap();
+        let m = DisplayMessage::tool_native("remember", "{}", "saved", false, "UTC")
+            .stamped(17, at, Some(Duration::from_millis(812)), "UTC");
+        assert_eq!(m.tool.as_ref().unwrap().marker_line(), "⚙ #17  14:03:22  remember  0.8s");
+        // The content string is what it always was.
+        assert!(m.content.starts_with("[ok remember]"));
+
+        let e = DisplayMessage::tool_native("git_push", "{}", "fatal", true, "UTC")
+            .stamped(17, at, Some(Duration::from_millis(812)), "UTC");
+        assert_eq!(e.tool.as_ref().unwrap().marker_line(), "! #17  14:03:22  git_push  0.8s  ERR");
+
+        let unnumbered = DisplayMessage::tool_native("recall", "{}", "", false, "UTC")
+            .stamped(0, at, None, "UTC");
+        assert_eq!(unnumbered.tool.as_ref().unwrap().marker_line(), "⚙ 14:03:22  recall");
+
+        let zoned = DisplayMessage::tool_native("recall", "{}", "", false, "America/New_York")
+            .stamped(1, at, Some(Duration::from_secs(125)), "America/New_York");
+        assert_eq!(zoned.tool.as_ref().unwrap().at, "10:03:22");
+        assert_eq!(zoned.tool.as_ref().unwrap().marker_line(), "⚙ #1  10:03:22  recall  2m 05s");
+    }
+
+    #[test]
+    fn the_serial_default_is_full_and_the_web_default_is_marker() {
+        assert_eq!(ShowTools::default_for(false), ShowTools::Full);
+        assert_eq!(ShowTools::default_for(true), ShowTools::Marker);
+        assert_eq!(AppState::new().show_tools, ShowTools::Full);
+    }
+
+    #[test]
+    fn show_tools_parses_its_three_modes_and_rejects_the_rest() {
+        assert_eq!(ShowTools::parse("full"), Some(ShowTools::Full));
+        assert_eq!(ShowTools::parse(" Marker "), Some(ShowTools::Marker));
+        assert_eq!(ShowTools::parse("OFF"), Some(ShowTools::Off));
+        assert_eq!(ShowTools::parse("on"), None);
+        assert_eq!(ShowTools::parse(""), None);
     }
 }
 
