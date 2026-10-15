@@ -323,7 +323,10 @@ pub fn ToolsTab(
                     let key = c.key();
                     let is_sel = selected.as_deref() == Some(key.as_str());
                     let sub = sub_line(&c);
-                    let seq = (c.seq > 0).then(|| format!("#{}", c.seq));
+                    // The call number is per boot: shown on a live row,
+                    // where it matches the terminal's marker, never on a
+                    // read-back row, whose number belongs to its own boot.
+                    let seq = (c.seq > 0 && !c.from_record).then(|| format!("#{}", c.seq));
                     let status = if c.is_error { "!" } else { "✓" };
                     view! {
                         <button class="tool-row" class:err=c.is_error class:rec=c.from_record
@@ -358,7 +361,7 @@ pub fn ToolSheet(calls: RwSignal<Vec<ToolCall>>, tool_open: RwSignal<Option<Stri
         {move || {
             let key = tool_open.get()?;
             let c = calls.with(|l| l.iter().find(|c| c.key() == key).cloned())?;
-            let title_seq = (c.seq > 0).then(|| format!(" #{}", c.seq));
+            let title_seq = (c.seq > 0 && !c.from_record).then(|| format!(" #{}", c.seq));
             let status_cls = if c.is_error { "ts-status err" } else { "ts-status" };
             let mut meta = vec![local_clock(c.started_at_ms), format_elapsed(c.elapsed_ms), source_of(&c)];
             if !c.id.is_empty() {
