@@ -79,7 +79,7 @@ Live in QEMU, on Omega (William's word, 2026-10-14), passed:
 
 The other checks:
 - The setup model step works for Gemini and for Anthropic (passed on Omega, William's word, 2026-10-14).
-- On a fresh instance, the wizard runs Argon (TBD).
+- On a fresh instance, the wizard runs Argon: "Google Gemini 4 Argon" saves its alias and the instance comes up on it (passed, William's word, 2026-10-14). Every check of this entry has passed live.
 - Vision on Argon passed on Omega (William's word, 2026-10-14): an attached image is answered, and `image_view` and `image_generate` return images the model reads. So Argon takes images inside a function response, which Google documents for Gemini 3 only. A GIF attached on Gemini is answered too, stored as PNG (William's word, 2026-10-14).
 
 **The provider probe reads the context window Ollama loaded the model with, and warns below 64000 tokens (branch `code-review`, 2026-10-13).** William, 2026-10-13, after the entry below: the brain counts no tokens, so a short window on a GGUF build went unnoticed. He asked for a warning and chose the existing 5-minute probe over a nudge after each turn. A model stays loaded for Ollama's default 5-minute keep-alive, so the first probe after a turn finds it.
