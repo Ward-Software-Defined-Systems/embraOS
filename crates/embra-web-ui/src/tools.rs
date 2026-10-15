@@ -93,6 +93,14 @@ fn insert_sorted(list: &mut Vec<ToolCall>, call: ToolCall) {
     list.insert(at, call);
 }
 
+/// This boot's call count for the tab: the highest call number among the
+/// live rows (the brain's per-boot counter, the newest `⚙ #n` marker),
+/// zero when no live row is in the list. A read-back row is history and
+/// counts for nothing, so the count never reads 100 at boot.
+pub fn calls_this_boot(list: &[ToolCall]) -> u64 {
+    list.iter().filter(|c| !c.from_record).map(|c| c.seq).max().unwrap_or(0)
+}
+
 fn tools_ws_url() -> String {
     let location = web_sys::window().map(|w| w.location());
     let protocol = location.as_ref().and_then(|l| l.protocol().ok()).unwrap_or_default();

@@ -645,7 +645,14 @@ pub fn App() -> impl IntoView {
                         class:active=move || tab.get() == NavTab::Tools
                         on:click=move |_| { tab.set(NavTab::Tools); save_tab(NavTab::Tools); }>
                         "Tools"
-                        <span class="count">{move || tool_calls.with(|l| l.len())}</span>
+                        // This boot's calls: the highest live call number, which
+                        // is the brain's per-boot counter and the newest `⚙ #n`
+                        // marker. The record rows are history and count for nothing;
+                        // the list's length read 100 at every boot.
+                        {move || {
+                            let n = tool_calls.with(|l| tools::calls_this_boot(l));
+                            (n > 0).then(|| view! { <span class="count">{n}</span> })
+                        }}
                         {move || running_tool.get().is_some().then(|| view! { <span class="run-dot"></span> })}
                     </button>
                 </div>
