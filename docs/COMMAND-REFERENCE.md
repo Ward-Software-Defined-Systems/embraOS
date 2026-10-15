@@ -7,8 +7,8 @@ Every slash command available in an embraOS session, grouped as in the web conso
 | Command | Description |
 |---|---|
 | `/sessions` | List all sessions, most recently active first, with state, the provider each session is pinned to, turn count, and last active time (configured timezone). When a session is pinned to another provider than the active one, a closing line gives the steps to open it |
-| `/new <name>` | Create a new named session and switch to it. Duplicate names are refused (`/switch` to attach an existing session; a soft-deleted name stays reserved through its grace period) |
-| `/switch <name>` | Switch to an existing session (restores full history) |
+| `/new <name>` | Create a new named session and switch to it; the transcript starts empty (the web console and the mobile chat clear what they showed). Duplicate names are refused (`/switch` to attach an existing session; a soft-deleted name stays reserved through its grace period) |
+| `/switch <name>` | Switch to an existing session: the transcript is replaced by that session's history (rows marked `history`, images and files included), then the intelligence briefs itself on what happened while away |
 | `/close` | Close the current session |
 | `/sessions delete <name>` | Guided deletion: the intelligence summarizes the session, asks your reason, and preserves durable memories to the knowledge graph as memories of that session; your reply is the approval. The system then soft-deletes it and records the deletion and your reason as a memory linked to what was kept (7-day grace period; any slash command mid-flow cancels; the `learning` session is never deletable) |
 | `/sessions restore <name>` | Undo a soft delete during its grace period (the session returns Detached — `/switch` to attach) |
@@ -18,13 +18,15 @@ Every slash command available in an embraOS session, grouped as in the web conso
 | Command | Description |
 |---|---|
 | `/ml` | Open a multi-line message editor. **Web console (default):** a textarea modal — Ctrl/⌘+Enter or **Send** to submit, Esc/Cancel to discard; sent verbatim as one message. A multi-line paste from the clipboard into the web console's input does the same without the editor: it is shown as a pasted preview and Enter sends it whole, verbatim; a single-line paste is typed into the input. **Serial TUI (`EMBRA_TUI=1`):** toggles dot-terminator mode — type lines, `.` on its own line to send |
-| `/stop` | Stop a stuck in-flight turn (local models can loop in unbounded reasoning). Console: type it or press **Esc** while the turn streams; mobile: the ■ button that replaces Send while busy. The partial response is kept, marked `(response interrupted by operator stop)` |
+| `/stop` | Stop a stuck in-flight turn (local models can loop in unbounded reasoning). Console: type it or press **Esc** while the turn streams; mobile: the ■ button that replaces Send while busy. The partial response is kept, marked `(response interrupted by operator stop)`; on screen it lands once, with the warning under it |
 | `/iter-cap` | Show the current per-turn tool iteration cap (default 100) |
 | `/iter-cap <N>` | Set the per-turn tool iteration cap (1..=1000). Persisted via `SystemConfig`; takes effect on the next user message. On cap-hit the loop emits a warning frame, asks the model to summarize, and terminates gracefully |
 | `/iter-cap reset` | Restore the default iteration cap (100) |
 | `/show-reasoning` | Show whether live reasoning / chain-of-thought streams to the expression panel (default on) |
 | `/show-reasoning <on\|off>` | Toggle live reasoning streaming. When on, the panel renders the model's reasoning in italic dark-gray during a turn (Anthropic `display: "summarized"`, Gemini `includeThoughts: true`, OpenAI-compat already-on); reverts to the operator-set `express` content when idle. When off, providers omit reasoning from request bodies entirely (no token cost) and the panel only shows operator-set expressions. Persists past `ResponseDone` until the next user message |
 | `/show-reasoning reset` | Restore the default (on) |
+| `/show-tools` | **Console-local.** Show how a tool call renders in the transcript. Web console default `marker`: one dim line per call, `⚙ #17  14:02:11  read_file  0.8s` (`!` and `ERR` on an error) — click it to open the call in the sidebar's Tools tab. Serial TUI default `full`: the whole call under its row, as before |
+| `/show-tools <full\|marker\|off>` | The whole call, one marker line per call, or nothing at all (the responses alone). Re-renders the transcript, past calls included; lasts for the console's life. The web console's Tools tab keeps every call's input and result whatever the mode |
 
 ## Model
 

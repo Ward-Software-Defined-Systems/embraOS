@@ -41,7 +41,9 @@ run on macOS; Step 4 (Buildroot) runs in a `linux/amd64` Docker container.
 
 > **Default UI is the browser console.** `run-qemu.sh` boots the **embra-web**
 > console by default, served over HTTPS at
-> **https://localhost:3345/embraOS** (accept the embraOS-CA cert on first visit).
+> **https://localhost:3345/embraOS** — open it from the URL embraOS prints at boot,
+> which carries this boot's access token (`?token=…`; accept the embraOS-CA cert
+> on first visit; the token changes at every boot and is shown nowhere else).
 > Set **`EMBRA_TUI=1`** before `run-qemu.sh` to boot the serial TUI on this
 > terminal instead — no image rebuild needed.
 
@@ -160,7 +162,7 @@ docker run --rm -v "$PWD":/work -v embraos-br-x86_64:/work/buildroot-src \
 ### 4. Boot
 
 ```bash
-./scripts/run-qemu.sh                  # web console (default) — https://localhost:3345/embraOS
+./scripts/run-qemu.sh                  # web console (default) — the URL printed at boot (https://localhost:3345/embraOS?token=…)
 EMBRA_TUI=1 ./scripts/run-qemu.sh      # stable Phase 1 serial TUI on this terminal
 EMBRA_DB_VERBOSE=1 ./scripts/run-qemu.sh   # opt-in per-request WardSONDB log lines
 ```
@@ -246,8 +248,8 @@ backfilled (see `docs/QUICK-START.md`).
 > retrieval silently falls back to keyword-only.
 
 > **Port forwarding:** QEMU forwards 50000 (gRPC) and 8443 (REST) on the host's loopback only,
-> and 3345 (HTTPS — https://localhost:3345/embraOS) on every host interface, in both UI modes;
-> other machines on the host's network reach the web console and nothing else. apid's REST routes are
+> and 3345 (HTTPS — https://localhost:3345/embraOS, behind this boot's access token) on every host interface, in both UI modes;
+> other machines on the host's network reach the web console and nothing else, and only with the URL embraOS printed at boot. apid's REST routes are
 > `/health`, `/version` and `/status` (the brain's status incl. the LLM provider
 > probe; 503 while the brain is away). Test:
 > ```bash
@@ -296,8 +298,8 @@ banner at the top of this file.
 1. **Boot — web console (default).** `./scripts/run-qemu.sh`. Banner shows
    `Acceleration: HVF (macOS)`, `UI mode: web console (default)`, and
    `3345→3345 (HTTPS web)`. No kernel panic on `ttyS0`.
-2. **Config Wizard + Learning Mode** in the browser at
-   `https://localhost:3345/embraOS` (accept the embraOS-CA cert) — name, LLM
+2. **Config Wizard + Learning Mode** in the browser at the URL embraOS printed at
+   boot (`https://localhost:3345/embraOS?token=…`; accept the embraOS-CA cert) — name, LLM
    provider + credentials, timezone; full soul-formation conversation; soul
    sealed.
 3. **REST gateway:** from the host, `curl http://localhost:8443/health` →

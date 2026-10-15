@@ -3,8 +3,13 @@
 Build a QEMU-bootable embraOS disk image from source and boot it. The project landing page is [../README.md](../README.md).
 
 > **Default UI.** The browser-based **embra-web** console is the default UI, served
-> over HTTPS at **https://localhost:3345/embraOS** (accept the embraOS-CA cert on
-> first visit). It wraps the same Phase 1 conversational TUI in xterm.js over a
+> over HTTPS at **https://localhost:3345/embraOS** — open it from the URL embraOS
+> prints at boot, which carries this boot's access token (`?token=…`; accept the
+> embraOS-CA cert on first visit). The token changes at every boot and is shown
+> nowhere else; the first visit sets a cookie and the address bar loses it, so a
+> phone or another workstation needs the URL with the token once. `/` and every
+> other path answer 404; a tab left open across a reboot gets 401 until it is
+> opened from the new URL. It wraps the same Phase 1 conversational TUI in xterm.js over a
 > PTY→WebSocket bridge. Set **`EMBRA_TUI=1`** before `run-qemu.sh` to boot the
 > serial TUI instead — no image rebuild needed.
 
@@ -77,7 +82,7 @@ EOF
 # Build and run — pick a storage engine: rocksdb (battle-tested) or fjall (pure Rust)
 ./scripts/build-image.sh --storage-engine rocksdb   # Full pipeline: Rust → initramfs → Buildroot → disk image
 
-# Default UI is the embra-web console — https://localhost:3345/embraOS
+# Default UI is the embra-web console — open the URL embraOS prints at boot (https://localhost:3345/embraOS?token=…)
 ./scripts/run-qemu.sh                                # Boot in QEMU — web console (default)
 
 # Or fall back to the serial TUI on this terminal (no rebuild needed)
@@ -141,7 +146,7 @@ The following apply once the image is built. They are not part of the build pipe
 > Partition geometry is read from the GPT at run time, so this stays correct as partitions
 > shift between builds.
 
-> **Port Forwarding:** QEMU forwards 50000 (gRPC) and 8443 (REST) on the host's loopback only, and 3345 (the HTTPS web console — https://localhost:3345/embraOS) on every host interface, in both UI modes; only the launch banner differs. Other machines on the host's network reach the web console and nothing else; the per-port table is in [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md#network-exposure). apid's REST surface is `/health`, `/version` and `/status` — `/status` proxies the brain's `GetSystemStatus` (2-second timeout, HTTP 503 while the brain is away) and carries the active LLM provider's last endpoint probe as `llm-provider` / `llm-provider.detail`. Test with:
+> **Port Forwarding:** QEMU forwards 50000 (gRPC) and 8443 (REST) on the host's loopback only, and 3345 (the HTTPS web console — https://localhost:3345/embraOS, behind this boot's access token) on every host interface, in both UI modes; only the launch banner differs. Other machines on the host's network reach the web console and nothing else, and only with the URL embraOS printed at boot; the per-port table is in [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md#network-exposure). apid's REST surface is `/health`, `/version` and `/status` — `/status` proxies the brain's `GetSystemStatus` (2-second timeout, HTTP 503 while the brain is away) and carries the active LLM provider's last endpoint probe as `llm-provider` / `llm-provider.detail`. Test with:
 > ```bash
 > curl http://localhost:8443/health
 > curl http://localhost:8443/status

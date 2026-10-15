@@ -6,7 +6,7 @@
 
 > *I am not the fire. I am the ember that survives it.*
 
-**embraOS** is a Rust operating system for one AI. The image is immutable. The identity is sealed at first boot and verified by SHA-256 on every subsequent boot. Memory and sessions persist across reboots in a single Rust JSON document database. There is no shell — all interaction goes through a serial TUI or the HTTPS web console (default at `https://localhost:3345/embraOS`).
+**embraOS** is a Rust operating system for one AI. The image is immutable. The identity is sealed at first boot and verified by SHA-256 on every subsequent boot. Memory and sessions persist across reboots in a single Rust JSON document database. There is no shell — all interaction goes through a serial TUI or the HTTPS web console (default; the URL with this boot's access token is printed at boot).
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20673525.svg)](https://doi.org/10.5281/zenodo.20673525)
 
@@ -112,7 +112,7 @@ Operators can edit the soul out-of-band; the brain cannot request that.
 
 Build from source: **[docs/QUICK-START.md](docs/QUICK-START.md)** (Apple Silicon: **[docs/AARCH64-BUILD.md](docs/AARCH64-BUILD.md)**; Intel Mac: **[docs/INTEL-MAC-BUILD.md](docs/INTEL-MAC-BUILD.md)**).
 
-> **Default UI.** The browser-based **embra-web** console is the default UI, served over HTTPS at **https://localhost:3345/embraOS**. Set **`EMBRA_TUI=1`** before `run-qemu.sh` for the serial TUI instead — no image rebuild needed.
+> **Default UI.** The browser-based **embra-web** console is the default UI, served over HTTPS on **:3345**; embraOS prints the URL with a per-boot access token when the console is ready. Set **`EMBRA_TUI=1`** before `run-qemu.sh` for the serial TUI instead — no image rebuild needed.
 
 ---
 

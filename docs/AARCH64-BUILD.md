@@ -41,7 +41,9 @@ Rust toolchain) and Step 4 (Buildroot) run in a `linux/arm64` Docker container.
 
 > **Default UI is the browser console.** `run-qemu-aarch64.sh` boots the
 > **embra-web** console by default, served over HTTPS at
-> **https://localhost:3345/embraOS** (accept the embraOS-CA cert on first visit). Set
+> **https://localhost:3345/embraOS** — open it from the URL embraOS prints at boot, which
+> carries this boot's access token (`?token=…`; accept the embraOS-CA cert on first
+> visit; the token changes at every boot and is shown nowhere else). Set
 > **`EMBRA_TUI=1`** before `run-qemu-aarch64.sh` to boot the serial TUI on this
 > terminal instead — no image rebuild needed.
 
@@ -116,7 +118,7 @@ docker run --rm -v "$PWD":/work -v embraos-br-aarch64:/work/buildroot-src \
 ### 3. Boot
 
 ```bash
-./scripts/run-qemu-aarch64.sh                  # web console (default) — https://localhost:3345/embraOS
+./scripts/run-qemu-aarch64.sh                  # web console (default) — the URL printed at boot (https://localhost:3345/embraOS?token=…)
 EMBRA_TUI=1 ./scripts/run-qemu-aarch64.sh      # stable Phase 1 serial TUI on this terminal
 EMBRA_DB_VERBOSE=1 ./scripts/run-qemu-aarch64.sh   # opt-in per-request WardSONDB log lines
 ```
@@ -187,8 +189,8 @@ backfilled (see `docs/QUICK-START.md`).
 > missing from the rootfs rather than shipping keyword-only retrieval.
 
 > **Port forwarding:** QEMU forwards 50000 (gRPC) and 8443 (REST) on the host's loopback only,
-> and 3345 (HTTPS — https://localhost:3345/embraOS) on every host interface, in both UI modes;
-> other machines on the host's network reach the web console and nothing else. apid's REST routes are `/health`,
+> and 3345 (HTTPS — https://localhost:3345/embraOS, behind this boot's access token) on every host interface, in both UI modes;
+> other machines on the host's network reach the web console and nothing else, and only with the URL embraOS printed at boot. apid's REST routes are `/health`,
 > `/version` and `/status` (the brain's status incl. the LLM provider probe; 503 while
 > the brain is away). Test:
 > ```bash
@@ -932,8 +934,8 @@ Re-run it as the regression checklist after any canonical-build bump:
    `UI mode: web console (default)` and `3345→3345 (HTTPS web)`. QEMU launches
    `qemu-system-aarch64 -machine virt -accel hvf -cpu host`, kernel `Image`,
    `console=ttyAMA0` — no kernel panic on the PL011 console.
-2. **Config Wizard + Learning Mode** in the browser at
-   `https://localhost:3345/embraOS` (accept the embraOS-CA cert) — name, LLM provider
+2. **Config Wizard + Learning Mode** in the browser at the URL embraOS printed at
+   boot (`https://localhost:3345/embraOS?token=…`; accept the embraOS-CA cert) — name, LLM provider
    + credentials, timezone; full soul-formation conversation; soul sealed.
 3. **REST gateway:** from the host, `curl http://localhost:8443/health` → healthy; `curl http://localhost:8443/status` → `ok:true` with the `services` map.
 4. **Conversation session** — tool dispatch, memory writes to WardSONDB, session
