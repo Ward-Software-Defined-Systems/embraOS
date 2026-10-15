@@ -1710,6 +1710,14 @@ async fn handle_request(
             // turn ends like a stop, with a Done frame, and persists what
             // it has plus the marker.
             let mut stream_failed = false;
+            // Text the operator saw stream in as tokens that no `Done` closed:
+            // the partial of a stop that cut the stream, or a synthetic token
+            // (the silent-end diagnostic, the cap fallbacks). The turn's
+            // closing `Done` carries it, so the clients turn their live line
+            // into a row. `None` after every `Complete`, whose `Done` already
+            // went out — that text is never sent twice. Assigned from the
+            // first response below, like `last_response_text`.
+            let mut undelivered: Option<String>;
             // Embra_Debug #70: collect tool names dispatched across the
             // full user-turn loop (deduped, first-seen order). Used to
             // synthesize a placeholder when the assistant's last
@@ -1769,6 +1777,7 @@ async fn handle_request(
             // Track text from the most recent turn for persistence fallback.
             last_response_text = turn_text(&current_turn);
             persisted_segments.push(&last_response_text);
+            undelivered = undelivered_after(&current_turn);
             api_messages.push(ApiMessage::assistant_blocks(current_turn.content.clone()));
 
             loop {
@@ -1826,6 +1835,7 @@ async fn handle_request(
                                         ),
                                     }))
                                     .await;
+                                undelivered = Some(diagnostic.clone());
                                 last_response_text = diagnostic;
                                 persisted_segments.push(&last_response_text);
                                 warn!(
@@ -1867,6 +1877,7 @@ async fn handle_request(
                         current_turn = resp;
                         last_response_text = turn_text(&current_turn);
                         persisted_segments.push(&last_response_text);
+                        undelivered = undelivered_after(&current_turn);
                         api_messages.push(ApiMessage::assistant_blocks(
                             current_turn.content.clone(),
                         ));
@@ -1930,11 +1941,14 @@ async fn handle_request(
                                         collect_response(stream, tx, &config_name, Some(&mut stop_check)).await?
                                     {
                                         let final_text = turn_text(&final_turn);
+                                        let stopped_in_stream = final_turn.outcome
+                                            == TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop);
                                         api_messages.push(ApiMessage::assistant_blocks(
                                             final_turn.content,
                                         ));
                                         persisted_segments.push(&final_text);
                                         if !final_text.is_empty() {
+                                            undelivered = stopped_in_stream.then(|| final_text.clone());
                                             last_response_text = final_text;
                                         } else {
                                             // Model produced no text on the final
@@ -1957,6 +1971,7 @@ async fn handle_request(
                                                 }))
                                                 .await;
                                             persisted_segments.push(&fallback);
+                                            undelivered = Some(fallback.clone());
                                             last_response_text = fallback;
                                         }
                                     } else {
@@ -1981,6 +1996,7 @@ async fn handle_request(
                                         // assignment predates the
                                         // accumulator).
                                         persisted_segments.push(&fallback);
+                                        undelivered = Some(fallback.clone());
                                         if last_response_text.is_empty() {
                                             last_response_text = fallback;
                                         }
@@ -2331,6 +2347,7 @@ async fn handle_request(
                         current_turn = resp;
                         last_response_text = turn_text(&current_turn);
                         persisted_segments.push(&last_response_text);
+                        undelivered = undelivered_after(&current_turn);
                         api_messages.push(ApiMessage::assistant_blocks(
                             current_turn.content.clone(),
                         ));
@@ -2338,55 +2355,45 @@ async fn handle_request(
                 }
             }
 
+            // A stop that landed on a path that `break`s past the loop top
+            // (the iteration cap's final call) is still a stop: the same
+            // override the loop top applies, so the notice and the
+            // persisted marker say so.
+            if stop_check.stopped() {
+                current_turn.outcome = TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop);
+            }
             // Surface refusal / truncation terminal outcomes as operator-
             // facing frames — a refusal must never end a turn silently (and
             // is never silently retried on a fallback model; rationale in
             // `terminal_outcome_notice`). Single post-loop site so every
             // exit path from the tool loop is covered; normal outcomes and
             // the stale-turn abort paths (`ToolUse`/`Pause`) yield no frame.
-            if let Some((kind, content)) =
-                terminal_outcome_notice(current_turn.outcome, current_turn.stop_details.as_ref())
-            {
-                if current_turn.outcome == TurnOutcome::EarlyStop(EarlyStopReason::Refusal) {
-                    warn!(
-                        target: "dispatch",
-                        session = %session_name,
-                        category = current_turn
-                            .stop_details
-                            .as_ref()
-                            .and_then(|d| d.category.as_deref())
-                            .unwrap_or("unspecified"),
-                        "turn ended with provider refusal"
-                    );
-                }
-                let _ = tx
-                    .send(Ok(ConversationResponse {
-                        response_type: Some(conversation_response::ResponseType::System(
-                            SystemMessage {
-                                content,
-                                msg_type: kind as i32,
-                            },
-                        )),
-                    }))
-                    .await;
+            let notice =
+                terminal_outcome_notice(current_turn.outcome, current_turn.stop_details.as_ref());
+            if current_turn.outcome == TurnOutcome::EarlyStop(EarlyStopReason::Refusal) {
+                warn!(
+                    target: "dispatch",
+                    session = %session_name,
+                    category = current_turn
+                        .stop_details
+                        .as_ref()
+                        .and_then(|d| d.category.as_deref())
+                        .unwrap_or("unspecified"),
+                    "turn ended with provider refusal"
+                );
             }
-
-            // A stopped turn usually never reached StreamEvent::Complete,
-            // so no Done frame was emitted — synthesize one so client
-            // streaming animations terminate (a duplicate Done after a
-            // between-iterations stop is harmless: clients treat Done as
-            // an idempotent end-of-response). A failed stream never
-            // reached it either.
-            if current_turn.outcome == TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop)
-                || stream_failed
-            {
+            // The turn closes with one `Done` first — the text the operator
+            // saw stream in without its `Done`, or an empty one after a stop
+            // or a failed stream so the clients end their live state — and
+            // the notice after it, under the text it talks about. Text that
+            // a `Complete` already closed is never sent again: both clients
+            // add a row per non-empty `Done`. `closing_frames` decides.
+            let stopped =
+                current_turn.outcome == TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop);
+            for frame in closing_frames(stopped, stream_failed, undelivered.take(), notice) {
                 let _ = tx
                     .send(Ok(ConversationResponse {
-                        response_type: Some(conversation_response::ResponseType::Done(
-                            StreamDone {
-                                full_response: last_response_text.clone(),
-                            },
-                        )),
+                        response_type: Some(frame),
                     }))
                     .await;
             }
@@ -7460,17 +7467,20 @@ async fn stream_brain_to_grpc(
                 tokio::select! {
                     ev = brain_rx.next() => ev,
                     _ = check.triggered() => {
+                        // The Done first: it turns the partial the operator
+                        // watched into a row; the Warning lands under it,
+                        // where "above" is true.
+                        let _ = tx.send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::Done(
+                                StreamDone { full_response: full_response.clone() }
+                            )),
+                        })).await;
                         let _ = tx.send(Ok(ConversationResponse {
                             response_type: Some(conversation_response::ResponseType::System(
                                 SystemMessage {
                                     content: "Turn stopped by operator — any partial response above is incomplete.".to_string(),
                                     msg_type: SystemMessageType::Warning as i32,
                                 }
-                            )),
-                        })).await;
-                        let _ = tx.send(Ok(ConversationResponse {
-                            response_type: Some(conversation_response::ResponseType::Done(
-                                StreamDone { full_response: full_response.clone() }
                             )),
                         })).await;
                         return LearningAnswer { text: full_response, stopped: true };
@@ -7849,6 +7859,47 @@ fn terminal_outcome_notice(
             format!("Provider stopped this response early ({reason:?})."),
         )),
     }
+}
+
+/// The text of a response whose `Done` never went out. A stop that cuts the
+/// stream comes back from `collect_response` as an `OperatorStop` turn with
+/// the partial and no `Done`; every `Complete` sends its own.
+fn undelivered_after(turn: &AssistantTurn) -> Option<String> {
+    (turn.outcome == TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop))
+        .then(|| turn_text(turn))
+}
+
+/// The frames that close a turn, in order: a `Done` first — carrying text the
+/// operator saw stream in without its `Done`, or empty after a stop or a
+/// failed stream so the clients end their live state — then the notice,
+/// under the text it talks about. A normal end whose text was closed by its
+/// own `Done` sends nothing. Text a `Complete` already closed is never sent
+/// again: the console and the mobile chat add a row per non-empty `Done`.
+fn closing_frames(
+    stopped: bool,
+    stream_failed: bool,
+    undelivered: Option<String>,
+    notice: Option<(SystemMessageType, String)>,
+) -> Vec<conversation_response::ResponseType> {
+    let mut frames = Vec::new();
+    match undelivered {
+        Some(text) => frames.push(conversation_response::ResponseType::Done(StreamDone {
+            full_response: text,
+        })),
+        None if stopped || stream_failed => {
+            frames.push(conversation_response::ResponseType::Done(StreamDone {
+                full_response: String::new(),
+            }))
+        }
+        None => {}
+    }
+    if let Some((kind, content)) = notice {
+        frames.push(conversation_response::ResponseType::System(SystemMessage {
+            content,
+            msg_type: kind as i32,
+        }));
+    }
+    frames
 }
 
 /// Final assistant text persisted to session history for a terminal turn.
@@ -10900,12 +10951,88 @@ mod operator_stop_tests {
         while let Some(Ok(frame)) = rx.recv().await {
             frames.push(frame.response_type.expect("typed frame"));
         }
+        // The Done first, so the partial lands as a row; the Warning under
+        // it, where "any partial response above" is true.
+        assert!(matches!(&frames[0], ResponseType::Done(_)), "{frames:?}");
         assert!(
-            matches!(&frames[0], ResponseType::System(m)
+            matches!(&frames[1], ResponseType::System(m)
                 if m.msg_type == SystemMessageType::Warning as i32 && m.content.contains("stopped by operator")),
             "{frames:?}"
         );
-        assert!(matches!(&frames[1], ResponseType::Done(_)), "{frames:?}");
+    }
+
+    fn stop_notice() -> Option<(SystemMessageType, String)> {
+        super::terminal_outcome_notice(
+            TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop),
+            None,
+        )
+    }
+
+    fn done_text(frame: &embra_common::proto::brain::conversation_response::ResponseType) -> &str {
+        match frame {
+            embra_common::proto::brain::conversation_response::ResponseType::Done(d) => {
+                &d.full_response
+            }
+            other => panic!("expected a Done, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_stop_during_a_tool_closes_with_an_empty_done_then_the_warning() {
+        use embra_common::proto::brain::conversation_response::ResponseType;
+        // The text of the response whose tool was running already went out
+        // with its own Done: nothing is sent twice.
+        let frames = super::closing_frames(true, false, None, stop_notice());
+        assert_eq!(frames.len(), 2, "{frames:?}");
+        assert_eq!(done_text(&frames[0]), "");
+        assert!(
+            matches!(&frames[1], ResponseType::System(m)
+                if m.msg_type == SystemMessageType::Warning as i32 && m.content.contains("stopped by operator")),
+            "{frames:?}"
+        );
+    }
+
+    #[test]
+    fn a_stop_during_streaming_closes_with_the_partial_then_the_warning() {
+        use embra_common::proto::brain::conversation_response::ResponseType;
+        let frames = super::closing_frames(
+            true,
+            false,
+            Some("The file holds".to_string()),
+            stop_notice(),
+        );
+        assert_eq!(frames.len(), 2, "{frames:?}");
+        assert_eq!(done_text(&frames[0]), "The file holds");
+        assert!(matches!(&frames[1], ResponseType::System(_)), "{frames:?}");
+    }
+
+    #[test]
+    fn a_dangling_token_gets_its_done_and_no_notice() {
+        // The silent-end diagnostic and the cap fallbacks stream as tokens
+        // that no Complete closes; the closing Done turns the live line
+        // into a row.
+        let frames = super::closing_frames(
+            false,
+            false,
+            Some("(model ended turn silently after 1 side-effectful tool call)".to_string()),
+            None,
+        );
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert!(done_text(&frames[0]).starts_with("(model ended turn silently"));
+    }
+
+    #[test]
+    fn a_normal_end_sends_no_closing_frame() {
+        assert!(super::closing_frames(false, false, None, None).is_empty());
+    }
+
+    #[test]
+    fn a_failed_stream_closes_with_an_empty_done() {
+        // The error frame went out from inside the stream; the Done ends
+        // the clients' live state and adds no row.
+        let frames = super::closing_frames(false, true, None, None);
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert_eq!(done_text(&frames[0]), "");
     }
 
     #[test]
