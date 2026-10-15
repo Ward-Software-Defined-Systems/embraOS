@@ -1715,6 +1715,11 @@ async fn handle_request(
                 // Images first, then the files and the (possibly enriched) text.
                 ApiMessage::user_with_images(turn_images, &model_text)
             });
+            // A turn the operator stopped before any text is persisted as
+            // a marker. The model reads it as a note inside the operator's
+            // next message, never as a reply of its own
+            // (`sessions::model_view`).
+            let mut api_messages = crate::sessions::model_view::fold_stopped_turns(api_messages);
 
             // Send thinking indicator.
             let _ = tx.send(Ok(ConversationResponse {
@@ -7273,11 +7278,9 @@ async fn run_learning_loop(
         })).await;
 
         // Call Brain with conversation history (text-only neutral IR).
-        let messages: Vec<ApiMessage> = state
-            .conversation_history
-            .iter()
-            .map(legacy_message_to_api)
-            .collect();
+        let messages: Vec<ApiMessage> = crate::sessions::model_view::fold_stopped_turns(
+            state.conversation_history.iter().map(legacy_message_to_api).collect(),
+        );
         // A turn of the learning loop is a turn: marked as running from
         // here to the end of its stream, so that an operator stop reaches it.
         let (in_turn_guard, mut stop_check) = stop.begin("learning");
@@ -7415,11 +7418,9 @@ async fn run_learning_loop(
                                 )),
                             })).await;
 
-                            let messages: Vec<ApiMessage> = state
-                                .conversation_history
-                                .iter()
-                                .map(legacy_message_to_api)
-                                .collect();
+                            let messages: Vec<ApiMessage> = crate::sessions::model_view::fold_stopped_turns(
+                                state.conversation_history.iter().map(legacy_message_to_api).collect(),
+                            );
                             let (in_turn_guard, mut stop_check) = stop.begin("learning");
                             let mut brain_rx = provider
                                 .stream_turn(
@@ -8061,7 +8062,7 @@ fn final_assistant_text(
         // Takes precedence over the tool placeholder for the same reason
         // the refusal marker does: the stop frame + turn_trace carry the
         // tool detail, and the next turn must see the interruption.
-        "(turn stopped by operator)".to_string()
+        crate::sessions::model_view::OPERATOR_STOP_MARKER.to_string()
     } else if !tool_names.is_empty() {
         render_tool_only_placeholder(tool_names)
     } else {

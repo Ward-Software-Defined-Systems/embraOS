@@ -10,6 +10,8 @@ pub(crate) mod away;
 pub(crate) mod delete_record;
 
 pub(crate) mod events;
+
+pub(crate) mod model_view;
 /// Session document format version.
 ///
 /// Set to `CURRENT_SESSION_FORMAT` on every session created post-v7
