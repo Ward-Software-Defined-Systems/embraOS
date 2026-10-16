@@ -215,7 +215,11 @@ button.btn.ghost:hover { border-color: var(--accent); color: var(--accent); }
   border-radius: 6px; padding: 4px 8px; cursor: pointer; }
 .ts-close:hover { color: var(--accent); border-color: var(--accent); }
 .ts-note { padding: 0 10px 8px; color: var(--txt-dim); font-size: var(--text-xs); }
-.tool-sheet .t-pre { max-height: none; }
+/* The sheet is a flex column: an uncapped section would shrink to the
+   sheet's height and squeeze its sibling to a line. Each section stops at
+   60% of the sheet and scrolls on its own, so a long input never hides
+   the result; a short one keeps a readable floor. */
+.tool-sheet .t-pre { max-height: 60%; min-height: 4rem; flex: 0 1 auto; }
 .term-wrap {
   flex: 1; min-height: 0; background: #0c0907; border: 1px solid var(--line);
   border-radius: 10px; padding: 10px;
@@ -469,7 +473,7 @@ body.is-observer .term-wrap {
   -webkit-overflow-scrolling: touch;
 }
 /* The card caps a section's height so a long result stays scrollable on
-   a phone; the sheet lifts the cap (it scrolls as a whole). */
+   a phone; the sheet has its own cap (`.tool-sheet .t-pre`). */
 .bubble.tool .t-pre { max-height: 40dvh; }
 /* JSON syntax colors — mirror the serial TUI (keys cyan, strings green,
    numbers + true/false/null amber). Default text keeps --txt. */
