@@ -92,6 +92,8 @@ pub const KNOWN_HTTP_REQUEST_SHA256: &[&str] = &[
     "dc9a2f43013f7f5612f5d1bb0738949c54a4174f6b4c34b548363163d63c6c47",
     // 2026-10-11: a JSON body is read as JSON (scan_json), any other body as text
     "82d0bdbfa997356cf598cd3ed8b3d91c99d688ba4f82e5a93ae79ae13f184b67",
+    // 2026-10-17: save_to — the body saved to the workspace by the host, any type, whole or nothing
+    "68df41916507b6b8e82837ac4ca3350ab7884edd28f710d63da30b469f9b96f2",
 ];
 
 /// The doc page a shipped tool's module is mirrored on, byte for byte.
@@ -159,6 +161,8 @@ mod tests {
             "the description names the two commands"
         );
         assert!(m.input_schema["properties"]["json"].is_object(), "{}", m.input_schema);
+        assert!(m.input_schema["properties"]["save_to"].is_object(), "{}", m.input_schema);
+        assert!(m.description.contains("save_to"), "the description names the save");
     }
 
     #[test]

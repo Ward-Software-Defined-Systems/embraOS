@@ -1,12 +1,13 @@
 // guardian-tool: http_request
 const GUARDIAN_NAME: &str = "http_request";
-const GUARDIAN_DESC: &str = "A guarded curl: one HTTP request (GET, HEAD, POST, PUT, PATCH, DELETE) with headers, query pairs and a body or JSON value, for pages and APIs. Answers status, the answering URL, headers and body (text, JSON, XML, NDJSON, form data; no binary). An HTML page is reduced to text (as=auto|text), its injection directives rewritten; other bodies come back as sent. injection_suspected is false unless the scan matched; injection_signals names each match. Needs no key: a credential comes from /guardian secret <host> <header> <value>, never the input; a private host needs /guardian egress allow <host>.";
-const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"url":{"type":"string"},"method":{"type":"string"},"headers":{"type":"object"},"query":{"type":"object"},"accept":{"type":"string"},"body":{"type":"string"},"json":{"description":"any JSON value, sent as the body with content-type application/json"},"as":{"type":"string","enum":["auto","text","raw"]},"max_bytes":{"type":"integer"},"timeout_ms":{"type":"integer"}},"required":["url"]}"#;
+const GUARDIAN_DESC: &str = "A guarded curl: one HTTP request (GET, HEAD, POST, PUT, PATCH, DELETE) with headers, query, body or json. Answers status, URL, headers, body (text, JSON, XML, NDJSON, form). HTML is reduced to text (as=auto|text) and scrubbed; injection_suspected is false unless the scan matched; injection_signals names each match. save_to=<workspace path> saves a 2xx body of any type (binary too, up to 12 MiB, never overwriting) and answers the path, for image_view or file_offer. Credentials: /guardian secret <host> <header> <value>, never the input; a private host needs /guardian egress allow <host>.";
+const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"url":{"type":"string"},"method":{"type":"string"},"headers":{"type":"object"},"query":{"type":"object"},"accept":{"type":"string"},"body":{"type":"string"},"json":{"description":"any JSON value, sent as the body with content-type application/json"},"as":{"type":"string","enum":["auto","text","raw"]},"save_to":{"type":"string"},"max_bytes":{"type":"integer"},"timeout_ms":{"type":"integer"}},"required":["url"]}"#;
 const GUARDIAN_CAPS: &[&str] = &["http_request"];
 
 // A page reduced to text is cut here, a body returned as sent there. The
-// host caps a body at the caller's max_bytes (at most 1 MiB); the output
-// must stay under the sandbox's 2 MiB after JSON escaping.
+// host caps a body at the caller's max_bytes (at most 1 MiB; a body saved
+// with save_to lands in a file and never comes here); the output must stay
+// under the sandbox's 2 MiB after JSON escaping.
 const TEXT_CAP: usize = 64 * 1024;
 const BODY_CAP: usize = 768 * 1024;
 
@@ -47,6 +48,15 @@ fn run(input: &str) -> String {
     }
     out.push(("content_type", json::s(content_type)));
     out.push(("headers", env.get("headers").clone()));
+
+    // A saved body: the host wrote it under the workspace (a 2xx only,
+    // whole or nothing) and answers the path and the size. Nothing was
+    // read, so there is nothing to cut or to scan.
+    let saved = env.get("saved");
+    if !saved.is_null() {
+        out.push(("saved", saved.clone()));
+        return json::stringify(&json::obj(out));
+    }
 
     // A redirect the guard handed back (a POST's 3xx) has no body to read.
     let stopped = env.get("redirect").as_str().is_some();

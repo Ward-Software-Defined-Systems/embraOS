@@ -7,7 +7,7 @@
 //!
 //! ```text
 //! cargo run -p embra-guardian --example gen_fixture <dir> crates/embra-guardian/src/shipped/http_request.rs
-//! cargo build --release --offline --target wasm32-unknown-unknown --manifest-path <dir>/tools/http_request/Cargo.toml
+//! cargo build --release --offline --target wasm32-unknown-unknown --manifest-path <dir>/tools/http_request/Cargo.toml --target-dir <dir>/target
 //! cp <dir>/target/wasm32-unknown-unknown/release/http_request.wasm crates/embra-guardian/tests/fixtures/
 //! ```
 //!
@@ -22,7 +22,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use embra_guardian::caps::{
-    Capabilities, EgressPolicy, HttpRequest, HttpResponse, HttpTransport, Method, SecretHeader,
+    Capabilities, EgressPolicy, FileSink, HttpRequest, HttpResponse, HttpTransport, Method,
+    SavedFile, SecretHeader,
 };
 use embra_guardian::host::{DEADLINE_WITH_HTTP, WasmHost};
 use embra_guardian::shipped;
@@ -117,6 +118,36 @@ fn run(
 
 fn call(rec: &Arc<Recorder>, input: &str) -> serde_json::Value {
     run(rec, input, vec![], vec![])
+}
+
+/// The host's store, recorded: what was asked, what arrived, as what. The
+/// brain's sink resolves the jail and writes; here the path is answered as
+/// the brain would answer it.
+#[derive(Default)]
+struct RecordingSink {
+    saved: Mutex<Vec<(String, Vec<u8>, String)>>,
+}
+
+impl FileSink for RecordingSink {
+    fn save(&self, path: &str, bytes: &[u8], content_type: &str) -> Result<SavedFile, String> {
+        self.saved
+            .lock()
+            .unwrap()
+            .push((path.to_string(), bytes.to_vec(), content_type.to_string()));
+        Ok(SavedFile { path: format!("/embra/workspace/{path}"), bytes: bytes.len() })
+    }
+}
+
+/// `run` with the store granted, as the brain grants it to a tool with
+/// `http_request`.
+fn run_saving(rec: &Arc<Recorder>, input: &str, sink: &Arc<RecordingSink>) -> serde_json::Value {
+    let host = WasmHost::new().unwrap();
+    let m = host.precompile(WASM).unwrap();
+    let transport: Arc<dyn HttpTransport> = rec.clone();
+    let mut caps = Capabilities::with_http(transport, EgressPolicy::default());
+    caps.files = Some(sink.clone());
+    let out = host.call(&m, input, caps, DEADLINE_WITH_HTTP, MEM).unwrap();
+    serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"))
 }
 
 #[test]
@@ -502,4 +533,63 @@ fn a_json_body_is_read_as_json_and_any_other_as_text() {
     assert_eq!(v["injection_suspected"], false, "a plain body reads `\\nIgnore` as one word: {v}");
     let v = call(&rec, r#"{"url":"https://1.1.1.1/e.txt"}"#);
     assert_eq!(v["injection_signals"], serde_json::json!(["directive: forget … rules"]), "{v}");
+}
+
+#[test]
+fn a_save_to_stores_a_binary_body_and_answers_saved_without_a_body_or_a_scan() {
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    png.extend((0..4000u32).map(|i| (i % 251) as u8));
+    let rec = Recorder::new(vec![("https://1.1.1.1/screenshot", 200, None, "image/png", png.clone())]);
+    let sink = Arc::new(RecordingSink::default());
+    let v = run_saving(
+        &rec,
+        r#"{"url":"https://1.1.1.1/screenshot","method":"POST","json":{"url":"https://example.com/"},"save_to":"shots/example.png"}"#,
+        &sink,
+    );
+    assert_eq!(v["status"], 200, "{v}");
+    assert_eq!(v["content_type"], "image/png", "a type the text path refuses lands in a file");
+    assert_eq!(v["saved"]["path"], "/embra/workspace/shots/example.png");
+    assert_eq!(v["saved"]["bytes"], 4008);
+    for absent in ["body", "text", "truncated", "injection_suspected", "injection_signals"] {
+        assert!(v.get(absent).is_none(), "{absent} must be absent: {v}");
+    }
+    let saved = sink.saved.lock().unwrap().clone();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(saved[0].0, "shots/example.png");
+    assert_eq!(saved[0].1, png, "the bytes as sent, whole");
+    assert_eq!(saved[0].2, "image/png");
+    assert_eq!(rec.seen()[0].method, Method::Post);
+}
+
+#[test]
+fn a_save_to_error_page_comes_back_as_text_and_nothing_is_saved() {
+    let rec = Recorder::new(vec![(
+        "https://1.1.1.1/missing.png",
+        404,
+        None,
+        "text/html",
+        b"<h1>Not found</h1><p>The page is gone.</p>".to_vec(),
+    )]);
+    let sink = Arc::new(RecordingSink::default());
+    let v = run_saving(&rec, r#"{"url":"https://1.1.1.1/missing.png","save_to":"shots/missing.png"}"#, &sink);
+    assert_eq!(v["status"], 404, "{v}");
+    assert!(v.get("saved").is_none(), "{v}");
+    let text = v["text"].as_str().unwrap();
+    assert!(text.contains("Not found") && text.contains("gone"), "the page is readable: {text}");
+    assert_eq!(v["injection_suspected"], false);
+    assert!(sink.saved.lock().unwrap().is_empty(), "a non-2xx never lands in a file");
+}
+
+#[test]
+fn a_save_to_with_head_or_without_the_capability_is_refused() {
+    let rec = Recorder::new(vec![("https://1.1.1.1/a.png", 200, None, "image/png", vec![1, 2, 3])]);
+    // Without the store: refused by name, no request made.
+    let v = call(&rec, r#"{"url":"https://1.1.1.1/a.png","save_to":"a.png"}"#);
+    assert!(v["error"].as_str().unwrap().contains("not granted"), "{v}");
+    // HEAD has no body to save.
+    let sink = Arc::new(RecordingSink::default());
+    let v = run_saving(&rec, r#"{"url":"https://1.1.1.1/a.png","method":"HEAD","save_to":"a.png"}"#, &sink);
+    assert!(v["error"].as_str().unwrap().contains("HEAD"), "{v}");
+    assert!(rec.seen().is_empty(), "no refusal costs a request");
+    assert!(sink.saved.lock().unwrap().is_empty());
 }

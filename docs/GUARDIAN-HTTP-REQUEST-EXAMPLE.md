@@ -30,15 +30,25 @@ lives on the host:
    may not set `Authorization`, `Proxy-Authorization` or `Cookie` itself, and
    a token never enters a tool's input, the turn trace or the session history.
 3. **The user agent** — every hop carries `User-Agent: embraOS/<version>`,
-   the workspace version (`embraOS/0.17.0-phase1` today), so it moves with
+   the workspace version (`embraOS/0.18.0-phase1` today), so it moves with
    a release; a `User-Agent` in the request's `headers` is sent instead.
 4. **Redirects** followed for GET and HEAD only, at most three, every hop
    checked; the other methods get the 3xx back with its target under
    `redirect`. The whole call shares one budget (10 s).
 5. **The answer** — status, the URL that answered, the response headers
    (lowercase, no cookies, capped) and the body, for text, JSON, XML, NDJSON
-   and form data; a binary body is refused by name. The envelope never
-   carries a request header.
+   and form data; a binary body is refused by name unless it is saved
+   (step 6). The envelope never carries a request header.
+6. **A save, with `save_to`** — a 2xx body of any type goes to a file under
+   `/embra/workspace`, whole or not at all: a body over 12 MiB is refused
+   and nothing is written; an existing file is never overwritten; the media
+   store (`MEDIA/`) and the Guardian build tree (`.guardian/`) are refused;
+   a symlinked directory leads nowhere (the nearest existing ancestor is
+   canonicalized before any directory is created); the write is atomic. The
+   answer names the saved path and its size; nothing is read or scanned. A
+   non-2xx answer comes back as text as usual, so an error page stays
+   readable. The broker never resolves a path: the brain's workspace sink
+   does (`crates/embra-brain/src/guardian/save.rs`).
 
 ## Setup
 
@@ -110,24 +120,56 @@ the system prompt answers:
 `max_bytes` (N bytes kept; default 256 KiB, at most 1 MiB, ask again with a
 larger `max_bytes`) or the tool at its own 768 KiB; `{"text": 65536}` when
 the reduced text was cut. A body cut mid-way is not the answer, and the
-model is told so.
+model is told so. With `save_to` the hop reads up to the 12 MiB save cap: a
+2xx body over it is refused whole, and a non-2xx answer comes back as text
+cut at 1 MiB.
 
 A refused request or a guard error answers `{"error": "…"}` in the guard's
 words: the reason a private host was refused names the command that would
 admit it, and a credential header in the input names `/guardian secret`.
+
+### `save_to`
+
+`save_to` names a file under `/embra/workspace` (relative to it, or absolute
+under it) that takes the body in place of the answer: any content type, a
+binary one included, a 2xx only, up to 12 MiB, never over an existing file.
+A screenshot from a headless-browser service reached over HTTPS:
+
+```json
+{ "url": "https://browser.example.lan/screenshot", "method": "POST",
+  "json": { "url": "https://example.com/", "options": { "type": "png" } },
+  "save_to": "shots/example.png" }
+```
+
+```json
+{ "status": 200, "url": "https://browser.example.lan/screenshot",
+  "content_type": "image/png", "headers": { "content-type": "image/png" },
+  "saved": { "path": "/embra/workspace/shots/example.png", "bytes": 183221 } }
+```
+
+Nothing was read, so the answer carries no `body`, no `truncated` and no
+`injection_*` field, and `as` is ignored. `image_view` then shows the
+picture to the intelligence and to the operator, and `file_offer` offers
+the file for download. A body over the cap answers `{"error": "the body is
+larger than the save cap of 12582912 bytes; nothing written"}`; an existing
+target, a path outside the workspace, `MEDIA/…`, `.guardian/…` and a path
+that names no file are refused in the sink's words before any request is
+sent; HEAD with `save_to` is refused. A non-2xx answer is not saved: it
+comes back as text under the response cap, the way an error page should.
 
 ## The module
 
 ```rust
 // guardian-tool: http_request
 const GUARDIAN_NAME: &str = "http_request";
-const GUARDIAN_DESC: &str = "A guarded curl: one HTTP request (GET, HEAD, POST, PUT, PATCH, DELETE) with headers, query pairs and a body or JSON value, for pages and APIs. Answers status, the answering URL, headers and body (text, JSON, XML, NDJSON, form data; no binary). An HTML page is reduced to text (as=auto|text), its injection directives rewritten; other bodies come back as sent. injection_suspected is false unless the scan matched; injection_signals names each match. Needs no key: a credential comes from /guardian secret <host> <header> <value>, never the input; a private host needs /guardian egress allow <host>.";
-const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"url":{"type":"string"},"method":{"type":"string"},"headers":{"type":"object"},"query":{"type":"object"},"accept":{"type":"string"},"body":{"type":"string"},"json":{"description":"any JSON value, sent as the body with content-type application/json"},"as":{"type":"string","enum":["auto","text","raw"]},"max_bytes":{"type":"integer"},"timeout_ms":{"type":"integer"}},"required":["url"]}"#;
+const GUARDIAN_DESC: &str = "A guarded curl: one HTTP request (GET, HEAD, POST, PUT, PATCH, DELETE) with headers, query, body or json. Answers status, URL, headers, body (text, JSON, XML, NDJSON, form). HTML is reduced to text (as=auto|text) and scrubbed; injection_suspected is false unless the scan matched; injection_signals names each match. save_to=<workspace path> saves a 2xx body of any type (binary too, up to 12 MiB, never overwriting) and answers the path, for image_view or file_offer. Credentials: /guardian secret <host> <header> <value>, never the input; a private host needs /guardian egress allow <host>.";
+const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"url":{"type":"string"},"method":{"type":"string"},"headers":{"type":"object"},"query":{"type":"object"},"accept":{"type":"string"},"body":{"type":"string"},"json":{"description":"any JSON value, sent as the body with content-type application/json"},"as":{"type":"string","enum":["auto","text","raw"]},"save_to":{"type":"string"},"max_bytes":{"type":"integer"},"timeout_ms":{"type":"integer"}},"required":["url"]}"#;
 const GUARDIAN_CAPS: &[&str] = &["http_request"];
 
 // A page reduced to text is cut here, a body returned as sent there. The
-// host caps a body at the caller's max_bytes (at most 1 MiB); the output
-// must stay under the sandbox's 2 MiB after JSON escaping.
+// host caps a body at the caller's max_bytes (at most 1 MiB; a body saved
+// with save_to lands in a file and never comes here); the output must stay
+// under the sandbox's 2 MiB after JSON escaping.
 const TEXT_CAP: usize = 64 * 1024;
 const BODY_CAP: usize = 768 * 1024;
 
@@ -168,6 +210,15 @@ fn run(input: &str) -> String {
     }
     out.push(("content_type", json::s(content_type)));
     out.push(("headers", env.get("headers").clone()));
+
+    // A saved body: the host wrote it under the workspace (a 2xx only,
+    // whole or nothing) and answers the path and the size. Nothing was
+    // read, so there is nothing to cut or to scan.
+    let saved = env.get("saved");
+    if !saved.is_null() {
+        out.push(("saved", saved.clone()));
+        return json::stringify(&json::obj(out));
+    }
 
     // A redirect the guard handed back (a POST's 3xx) has no body to read.
     let stopped = env.get("redirect").as_str().is_some();
@@ -255,6 +306,11 @@ fn err(msg: &str) -> String {
   the command that stores one; the transport's own headers are dropped),
   query pairs (appended form-encoded), the body (256 KiB) or a JSON value,
   and the caps.
+- **A save is the host's.** With `save_to` the tool forwards the path as
+  written; the brain's sink resolves it inside the workspace jail, refuses
+  the media store, the Guardian build tree, an existing target and a
+  symlinked escape, and writes atomically through the one commit routine.
+  The tool reads nothing of a saved body.
 - **Never panics:** every accessor uses `unwrap_or`; a guard error yields
   `{"error":…}`. A panic would be a sandbox trap surfaced as a tool error.
   The cut of a body is on a character boundary.
@@ -266,7 +322,10 @@ fn err(msg: &str) -> String {
   the flag false, a secret injected for its host and never for a
   redirect's, a redirect followed for GET and handed back for POST, a 404
   as an answer, a binary body refused, a private host by allowlist and
-  loopback never, a body at the host's 1 MiB cap through the sandbox. A
+  loopback never, a body at the host's 1 MiB cap through the sandbox, a
+  binary body saved to the workspace and answered as `saved` with no body
+  and no scan, an error page under `save_to` answered as text with nothing
+  saved. A
   sidecar beside the fixture holds the hash of every file the scaffold
   wrote, so a helper or prelude change without a rebuild fails the test.
 
