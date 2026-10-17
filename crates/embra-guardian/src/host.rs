@@ -39,6 +39,13 @@ pub const DEFAULT_DEADLINE: Duration = Duration::from_secs(5);
 /// to end the invoke as a timeout. Pinned by
 /// `the_http_deadline_is_the_fetch_budget_plus_five_seconds`.
 pub const DEADLINE_WITH_HTTP: Duration = Duration::from_secs(15);
+/// The deadline of a call whose fetch budget is `budget`: the budget plus
+/// `DEFAULT_DEADLINE` for the guest's own work. `DEADLINE_WITH_HTTP` is
+/// this function at the default budget; an `http_request` input that asks
+/// for more with `timeout_ms` (up to `caps::HTTP_TIMEOUT_MAX`) moves both.
+pub fn deadline_for_budget(budget: Duration) -> Duration {
+    budget + DEFAULT_DEADLINE
+}
 /// The engine's epoch advances once per tick, from one thread per engine;
 /// a call's deadline is its own count of ticks, so one call's timeout
 /// never reaches another call in flight. A deadline is kept to within one

@@ -519,6 +519,22 @@ async fn secret_cmd(db: &Arc<WardsonDbClient>, rest: &str) -> String {
 }
 
 /// The request guard's view of the stored secrets, flattened.
+/// The fetch budget of one `guardian_call`: what the input asks with a
+/// top-level `timeout_ms`, held between the policy's default and
+/// `HTTP_TIMEOUT_MAX`; the default when it asks nothing or nonsense. The
+/// request guard clamps a hop's `timeout_ms` to the policy's budget, so the
+/// budget set here is what the guard honours; the call's deadline is sized
+/// from it as well (`host::deadline_for_budget`).
+fn fetch_budget(input: &Value) -> std::time::Duration {
+    let default = embra_guardian::EgressPolicy::default().timeout;
+    input
+        .get("timeout_ms")
+        .and_then(Value::as_u64)
+        .map(std::time::Duration::from_millis)
+        .map(|asked| asked.clamp(default, embra_guardian::caps::HTTP_TIMEOUT_MAX))
+        .unwrap_or(default)
+}
+
 fn secrets_from(cfg: &SystemConfig) -> Vec<embra_guardian::SecretHeader> {
     cfg.guardian_secrets
         .iter()
@@ -1720,6 +1736,14 @@ pub async fn guardian_call(
             let wants_http = compiled.caps.iter().any(|c| c == embra_guardian::abi::CAP_HTTP_GET);
             let wants_request =
                 compiled.caps.iter().any(|c| c == embra_guardian::abi::CAP_HTTP_REQUEST);
+            // The fetch budget: the default, or what an `http_request`
+            // input asks with `timeout_ms`, up to the ceiling. The policy
+            // and the deadline both follow it.
+            let budget = if wants_request {
+                fetch_budget(&input)
+            } else {
+                embra_guardian::EgressPolicy::default().timeout
+            };
             if wants_http || wants_request {
                 // The transport takes the operator's CA drop-ins (an internal
                 // host on the allowlist behind an internal CA); the policy
@@ -1736,6 +1760,7 @@ pub async fn guardian_call(
                                 .as_ref()
                                 .and_then(|c| c.guardian_private_hosts.clone())
                                 .unwrap_or_default(),
+                            timeout: budget,
                             ..Default::default()
                         };
                         if wants_request {
@@ -1777,7 +1802,7 @@ pub async fn guardian_call(
             // A tool that fetches waits on the network inside its budget;
             // its deadline is the fetch budget plus the guest's own time.
             let deadline = if wants_http || wants_request {
-                embra_guardian::host::DEADLINE_WITH_HTTP
+                embra_guardian::host::deadline_for_budget(budget)
             } else {
                 embra_guardian::host::DEFAULT_DEADLINE
             };
@@ -2159,5 +2184,35 @@ mod tests {
             "{status}"
         );
         assert!(status.contains("/guardian approve word_count"), "{status}");
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn the_fetch_budget_follows_timeout_ms_between_the_default_and_the_ceiling() {
+        let default = embra_guardian::EgressPolicy::default().timeout;
+        assert_eq!(fetch_budget(&serde_json::json!({"url": "https://a/"})), default, "asks nothing");
+        assert_eq!(
+            fetch_budget(&serde_json::json!({"timeout_ms": 1000})),
+            default,
+            "under the default the budget stays; the guard gives the hop the asked second"
+        );
+        assert_eq!(fetch_budget(&serde_json::json!({"timeout_ms": 45000})), Duration::from_secs(45));
+        assert_eq!(
+            fetch_budget(&serde_json::json!({"timeout_ms": 600000})),
+            embra_guardian::caps::HTTP_TIMEOUT_MAX,
+            "the ceiling"
+        );
+        assert_eq!(fetch_budget(&serde_json::json!({"timeout_ms": "soon"})), default, "nonsense is the default");
+        assert_eq!(fetch_budget(&Value::Null), default);
+        assert_eq!(
+            embra_guardian::host::deadline_for_budget(fetch_budget(&serde_json::json!({"timeout_ms": 45000}))),
+            Duration::from_secs(50),
+            "the deadline follows the asked budget"
+        );
     }
 }

@@ -12,8 +12,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use embra_guardian::caps::{Capabilities, EgressPolicy, HttpResponse, HttpTransport};
-use embra_guardian::host::{WasmHost, DEADLINE_WITH_HTTP, DEFAULT_DEADLINE, DEFAULT_MEMORY_CAP};
+use embra_guardian::caps::{Capabilities, EgressPolicy, HttpResponse, HttpTransport, HTTP_TIMEOUT_MAX};
+use embra_guardian::host::{
+    deadline_for_budget, WasmHost, DEADLINE_WITH_HTTP, DEFAULT_DEADLINE, DEFAULT_MEMORY_CAP,
+};
 use embra_guardian::GuardianError;
 
 /// The committed probe tool: `{a,b,url?}` → `{sum, fetched}`; it calls
@@ -148,6 +150,10 @@ fn a_timeout_in_one_call_does_not_trap_another() {
 #[test]
 fn the_http_deadline_is_the_fetch_budget_plus_five_seconds() {
     assert_eq!(DEADLINE_WITH_HTTP, EgressPolicy::default().timeout + DEFAULT_DEADLINE);
+    assert_eq!(DEADLINE_WITH_HTTP, deadline_for_budget(EgressPolicy::default().timeout));
+    // An input may ask for more, up to the ceiling; the deadline follows.
+    assert!(HTTP_TIMEOUT_MAX >= EgressPolicy::default().timeout);
+    assert_eq!(deadline_for_budget(HTTP_TIMEOUT_MAX), HTTP_TIMEOUT_MAX + DEFAULT_DEADLINE);
 }
 
 #[test]

@@ -495,6 +495,12 @@ pub const HTTP_RESPONSE_MAX_BYTES: usize = 1024 * 1024;
 /// The brain's download and media ceiling, so a saved file can always be
 /// offered with `file_offer` and shown with `image_view`.
 pub const HTTP_SAVE_MAX_BYTES: usize = 12 * 1024 * 1024;
+/// The budget an `http_request` input may ask for with `timeout_ms`. The
+/// brain sets the policy's `timeout` to the asked value, held between the
+/// default (10 s) and this ceiling, and sizes the call's deadline from it
+/// (`host::deadline_for_budget`): a render behind an HTTP service can take
+/// longer than the default.
+pub const HTTP_TIMEOUT_MAX: Duration = Duration::from_secs(60);
 /// Headers each way: at most this many, and this many bytes in all.
 pub const HTTP_HEADERS_MAX: usize = 32;
 pub const HTTP_HEADERS_BYTES_MAX: usize = 8 * 1024;

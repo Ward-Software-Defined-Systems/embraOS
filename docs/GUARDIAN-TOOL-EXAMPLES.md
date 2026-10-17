@@ -150,7 +150,9 @@ host::http_request(request_json: &str) -> String
 //                                 // application/json unless given;
 //                                 // GET and HEAD carry no body; 256 KiB
 //    "max_bytes":262144,          // response cap: default 256 KiB, ≤ 1 MiB
-//    "timeout_ms":10000}          // ≤ the policy's 10 s, the whole call
+//    "timeout_ms":10000}          // the whole call; ≤ the budget: 10 s, or
+//                                 // a top-level timeout_ms in the call's
+//                                 // input, up to 60 s
 // Envelope:
 //   {"ok":true,"status":<u16>,"url":"<the URL that answered>",
 //    "redirects":<n>,             // when the guard followed one: GET and

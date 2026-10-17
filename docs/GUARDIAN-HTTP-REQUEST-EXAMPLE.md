@@ -34,7 +34,8 @@ lives on the host:
    a release; a `User-Agent` in the request's `headers` is sent instead.
 4. **Redirects** followed for GET and HEAD only, at most three, every hop
    checked; the other methods get the 3xx back with its target under
-   `redirect`. The whole call shares one budget (10 s).
+   `redirect`. The whole call shares one budget: 10 s, or what a top-level
+   `timeout_ms` asks, up to 60 s; the call's deadline follows it.
 5. **The answer** — status, the URL that answered, the response headers
    (lowercase, no cookies, capped) and the body, for text, JSON, XML, NDJSON
    and form data; a binary body is refused by name unless it is saved
