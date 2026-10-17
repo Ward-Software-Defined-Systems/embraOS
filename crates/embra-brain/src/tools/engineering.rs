@@ -1,4 +1,5 @@
 use chrono::Utc;
+use embra_tools_core::USER_AGENT;
 
 use crate::db::WardsonDbClient;
 
@@ -322,7 +323,7 @@ async fn gl_get(host: &str, token: &str, path: &str) -> Result<serde_json::Value
     let url = format!("https://{}/api/v4/{}", host, path);
     let resp = gitlab_client()
         .get(&url)
-        .header("User-Agent", "embraOS/0.1.0")
+        .header("User-Agent", USER_AGENT)
         .header("PRIVATE-TOKEN", token)
         .send()
         .await
@@ -346,7 +347,7 @@ async fn gl_send(
     let url = format!("https://{}/api/v4/{}", host, path);
     let resp = gitlab_client()
         .request(method, &url)
-        .header("User-Agent", "embraOS/0.1.0")
+        .header("User-Agent", USER_AGENT)
         .header("PRIVATE-TOKEN", token)
         .json(payload)
         .send()
@@ -398,7 +399,7 @@ pub async fn gl_issues(db: &WardsonDbClient, host: Option<&str>, project: &str) 
     );
     match gitlab_client()
         .get(&url)
-        .header("User-Agent", "embraOS/0.1.0")
+        .header("User-Agent", USER_AGENT)
         .header("PRIVATE-TOKEN", &token)
         .send()
         .await
@@ -447,7 +448,7 @@ pub async fn gl_mrs(db: &WardsonDbClient, host: Option<&str>, project: &str) -> 
     );
     match gitlab_client()
         .get(&url)
-        .header("User-Agent", "embraOS/0.1.0")
+        .header("User-Agent", USER_AGENT)
         .header("PRIVATE-TOKEN", &token)
         .send()
         .await
@@ -508,7 +509,7 @@ pub async fn gl_issue_create(
     });
     match gitlab_client()
         .post(&url)
-        .header("User-Agent", "embraOS/0.1.0")
+        .header("User-Agent", USER_AGENT)
         .header("PRIVATE-TOKEN", &token)
         .json(&payload)
         .send()
@@ -558,7 +559,7 @@ pub async fn gl_mr_create(
     });
     match gitlab_client()
         .post(&url)
-        .header("User-Agent", "embraOS/0.1.0")
+        .header("User-Agent", USER_AGENT)
         .header("PRIVATE-TOKEN", &token)
         .json(&payload)
         .send()
@@ -1336,7 +1337,7 @@ pub async fn gh_issues(db: &WardsonDbClient, param: &str) -> String {
     let client = reqwest::Client::new();
     match client
         .get(&url)
-        .header("User-Agent", "embraOS/0.1.0")
+        .header("User-Agent", USER_AGENT)
         .header("Authorization", format!("Bearer {}", token))
         .send()
         .await
@@ -1395,7 +1396,7 @@ async fn fetch_issue_thread_comments(
     );
     let resp = client
         .get(&url)
-        .header("User-Agent", "embraOS/0.1.0")
+        .header("User-Agent", USER_AGENT)
         .header("Authorization", format!("Bearer {}", token))
         .send()
         .await;
@@ -1435,7 +1436,7 @@ pub async fn gh_issue_view(db: &WardsonDbClient, param: &str) -> String {
     let issue_url = format!("https://api.github.com/repos/{}/issues/{}", repo, number);
     let issue: serde_json::Value = match client
         .get(&issue_url)
-        .header("User-Agent", "embraOS/0.1.0")
+        .header("User-Agent", USER_AGENT)
         .header("Authorization", format!("Bearer {}", token))
         .send()
         .await
@@ -1511,7 +1512,7 @@ pub async fn gh_prs(db: &WardsonDbClient, param: &str) -> String {
     let client = reqwest::Client::new();
     match client
         .get(&url)
-        .header("User-Agent", "embraOS/0.1.0")
+        .header("User-Agent", USER_AGENT)
         .header("Authorization", format!("Bearer {}", token))
         .send()
         .await
@@ -1561,7 +1562,7 @@ pub async fn gh_pr_view(db: &WardsonDbClient, param: &str) -> String {
     let pr_url = format!("https://api.github.com/repos/{}/pulls/{}", repo, number);
     let pr: serde_json::Value = match client
         .get(&pr_url)
-        .header("User-Agent", "embraOS/0.1.0")
+        .header("User-Agent", USER_AGENT)
         .header("Authorization", format!("Bearer {}", token))
         .send()
         .await
@@ -2076,7 +2077,7 @@ pub async fn gh_issue_create(db: &WardsonDbClient, param: &str) -> String {
     let client = reqwest::Client::new();
     match client
         .post(&url)
-        .header("User-Agent", "embraOS/0.1.0")
+        .header("User-Agent", USER_AGENT)
         .header("Authorization", format!("Bearer {}", token))
         .json(&payload)
         .send()
@@ -2115,7 +2116,7 @@ async fn post_github_comment(
     let client = reqwest::Client::new();
     match client
         .post(&url)
-        .header("User-Agent", "embraOS/0.1.0")
+        .header("User-Agent", USER_AGENT)
         .header("Authorization", format!("Bearer {}", token))
         .json(&payload)
         .send()
@@ -2242,7 +2243,7 @@ async fn patch_issue_or_pr_state(
     let client = reqwest::Client::new();
     match client
         .patch(&url)
-        .header("User-Agent", "embraOS/0.1.0")
+        .header("User-Agent", USER_AGENT)
         .header("Authorization", format!("Bearer {}", token))
         .json(&payload)
         .send()
@@ -2294,7 +2295,7 @@ pub async fn gh_pr_create(db: &WardsonDbClient, param: &str) -> String {
     let client = reqwest::Client::new();
     match client
         .post(&url)
-        .header("User-Agent", "embraOS/0.1.0")
+        .header("User-Agent", USER_AGENT)
         .header("Authorization", format!("Bearer {}", token))
         .json(&payload)
         .send()
@@ -2350,7 +2351,7 @@ pub async fn gh_pr_merge(db: &WardsonDbClient, param: &str) -> String {
     let client = reqwest::Client::new();
     match client
         .put(&url)
-        .header("User-Agent", "embraOS/0.1.0")
+        .header("User-Agent", USER_AGENT)
         .header("Authorization", format!("Bearer {}", token))
         .json(&payload)
         .send()
@@ -2406,7 +2407,7 @@ async fn fetch_classic_projects(token: &str, owner: &str) -> ProjectsFetch {
     for url in &endpoints {
         match client
             .get(url)
-            .header("User-Agent", "embraOS/0.1.0")
+            .header("User-Agent", USER_AGENT)
             .header("Authorization", format!("Bearer {}", token))
             .header("Accept", "application/vnd.github.inertia-preview+json")
             .send()
@@ -5507,5 +5508,50 @@ mod git_token_tests {
             ]
         );
         assert!(host_token_git_args(&std::collections::BTreeMap::new()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod user_agent_tests {
+    use std::path::{Path, PathBuf};
+
+    fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// Every `User-Agent` a tool sends is `embra_tools_core::USER_AGENT`,
+    /// never a literal: the version in it is the workspace's and moves with
+    /// a release, and the Guardian broker sends the same string.
+    #[test]
+    fn every_user_agent_header_in_the_tools_is_the_shared_constant() {
+        let mut files = Vec::new();
+        rust_files(&Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        let mut sites = 0usize;
+        let mut literals = Vec::new();
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap();
+            for (n, line) in text.lines().enumerate() {
+                let lower = line.to_ascii_lowercase();
+                if !lower.contains(".header(") || !lower.contains("user-agent") {
+                    continue;
+                }
+                // `.header("User-Agent", <value>)`: the value is the second argument.
+                let value = line.split(',').nth(1).map(str::trim).unwrap_or("");
+                if value.starts_with('"') {
+                    literals.push(format!("{}:{}", path.display(), n + 1));
+                } else {
+                    sites += 1;
+                }
+            }
+        }
+        assert!(literals.is_empty(), "a literal user agent at {literals:?}; send embra_tools_core::USER_AGENT");
+        assert!(sites > 0, "no User-Agent header under src/");
     }
 }

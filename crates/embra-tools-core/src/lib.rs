@@ -177,6 +177,53 @@ pub fn new_turn_trace_handle() -> TurnTraceHandle {
     Arc::new(Mutex::new(VecDeque::with_capacity(32)))
 }
 
+/// The `User-Agent` every HTTP request a tool sends carries, in the
+/// `product/version` form: the Guardian
+/// broker's clients (`http_get`, `http_request`, Brave `web_search`) and the
+/// brain's GitLab and GitHub clients. The version is the workspace's
+/// (`[workspace.package] version`, which every crate inherits), so the
+/// string moves with a release and nowhere else. An `http_request` input
+/// may name its own `user-agent` header; that value replaces this one for
+/// that request. Guard `the_user_agent_names_embraos_and_the_workspace_version`.
+pub const USER_AGENT: &str = concat!("embraOS/", env!("CARGO_PKG_VERSION"));
+
+#[cfg(test)]
+mod user_agent_tests {
+    use super::USER_AGENT;
+
+    /// The version under `[workspace.package]` in the workspace manifest.
+    fn workspace_version() -> String {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root");
+        let text = std::fs::read_to_string(root.join("Cargo.toml")).expect("the workspace manifest");
+        let mut in_package = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if line.starts_with('[') {
+                in_package = line == "[workspace.package]";
+                continue;
+            }
+            if in_package
+                && let Some(rest) = line.strip_prefix("version")
+                && let Some(value) = rest.trim_start().strip_prefix('=')
+            {
+                return value.trim().trim_matches('"').to_string();
+            }
+        }
+        panic!("no [workspace.package] version in the workspace manifest");
+    }
+
+    #[test]
+    fn the_user_agent_names_embraos_and_the_workspace_version() {
+        assert_eq!(USER_AGENT, format!("embraOS/{}", workspace_version()));
+        // A header value is printable ASCII without a space: a version that
+        // broke this would fail both Guardian clients at construction.
+        assert!(USER_AGENT.bytes().all(|b| b.is_ascii_graphic()), "{USER_AGENT:?}");
+    }
+}
+
 #[cfg(test)]
 mod output_tests {
     use super::*;

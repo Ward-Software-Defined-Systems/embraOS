@@ -998,7 +998,7 @@ impl BraveSearch {
     pub fn new(api_key: &str) -> Result<Self, String> {
         let client = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .user_agent("embra-guardian/0.5")
+            .user_agent(embra_tools_core::USER_AGENT)
             .build()
             .map_err(|e| e.to_string())?;
         Ok(Self { client, api_key: api_key.trim().to_string() })
@@ -1174,9 +1174,12 @@ impl ReqwestTransport {
     /// private host behind an internal CA (on the egress allowlist) is
     /// reachable the way the GitLab client reaches it.
     pub fn with_roots(roots: Vec<reqwest::Certificate>) -> Result<Self, String> {
+        // The shared user agent is a client default: reqwest fills it into a
+        // request that names none, so a `user-agent` the guard passes through
+        // from an `http_request` input replaces it (`transport_tests`).
         let mut builder = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .user_agent("embra-guardian/0.5");
+            .user_agent(embra_tools_core::USER_AGENT);
         for cert in roots {
             builder = builder.add_root_certificate(cert);
         }
@@ -1659,6 +1662,21 @@ mod request_tests {
     }
 
     #[test]
+    fn a_user_agent_in_the_input_reaches_the_transport() {
+        // Neither a credential nor a transport header: the guard keeps it,
+        // lowercased, and the transport's default gives way to it.
+        let rec = Recorder::new(vec![("https://1.1.1.1/", 200, None, "ok", "text/plain")]);
+        let v = parse(&guarded_http_request(
+            &caps_with(&rec),
+            r#"{"url":"https://1.1.1.1/","headers":{"User-Agent":"demo/1"}}"#,
+        ));
+        assert_eq!(v["ok"], true, "{v}");
+        let seen = rec.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(header(&seen[0], "user-agent"), Some("demo/1"));
+    }
+
+    #[test]
     fn a_guest_may_not_set_a_credential_header() {
         let rec = Recorder::new(vec![]);
         for h in ["Authorization", "cookie", "Proxy-Authorization"] {
@@ -1792,6 +1810,75 @@ b"}}"#] {
         assert!(v["error"].as_str().unwrap().contains("https"), "{v}");
         let v = parse(&guarded_http_request(&Capabilities::none(), r#"{"url":"https://1.1.1.1/"}"#));
         assert!(v["error"].as_str().unwrap().contains("not granted"), "{v}");
+    }
+}
+
+/// The real transport against a loopback listener that answers with the
+/// request head it received, so the test reads what went over the wire.
+/// The transport enforces no policy (the guards do), so a plain `http://`
+/// loopback URL reaches it.
+#[cfg(test)]
+mod transport_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
+    fn echo_server() -> (String, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("a loopback listener");
+        let url = format!("http://{}/echo", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let (mut sock, _) = listener.accept().expect("one connection");
+            let mut head = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !head.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = sock.read(&mut buf).expect("the request head");
+                if n == 0 {
+                    break;
+                }
+                head.extend_from_slice(&buf[..n]);
+            }
+            let body = String::from_utf8_lossy(&head).into_owned();
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            sock.write_all(resp.as_bytes()).expect("the response");
+            let _ = sock.flush();
+        });
+        (url, handle)
+    }
+
+    /// Every `user-agent` value in a request head, as sent.
+    fn user_agents(head: &str) -> Vec<String> {
+        head.lines()
+            .filter_map(|l| l.split_once(':'))
+            .filter(|(n, _)| n.trim().eq_ignore_ascii_case("user-agent"))
+            .map(|(_, v)| v.trim().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn the_transport_sends_the_shared_user_agent_by_default() {
+        let (url, server) = echo_server();
+        let transport = ReqwestTransport::new().expect("a client");
+        let resp = transport.get(&url, Duration::from_secs(5), 64 * 1024).expect("a reply");
+        server.join().unwrap();
+        assert_eq!(resp.status, 200);
+        let head = String::from_utf8_lossy(&resp.body);
+        assert_eq!(user_agents(&head), vec![embra_tools_core::USER_AGENT.to_string()], "{head}");
+    }
+
+    #[test]
+    fn a_user_agent_header_in_the_request_replaces_the_default() {
+        let (url, server) = echo_server();
+        let transport = ReqwestTransport::new().expect("a client");
+        let mut req = HttpRequest::get(&url, Duration::from_secs(5), 64 * 1024);
+        req.headers.push(("user-agent".to_string(), "demo/1".to_string()));
+        let resp = transport.request(&req).expect("a reply");
+        server.join().unwrap();
+        let head = String::from_utf8_lossy(&resp.body);
+        assert_eq!(user_agents(&head), vec!["demo/1".to_string()], "{head}");
     }
 }
 
