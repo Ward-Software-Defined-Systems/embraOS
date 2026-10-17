@@ -26,14 +26,21 @@ pub(crate) const WORKSPACE_ROOT: &str = "/embra/workspace";
 /// `pub(crate)` so guardian_call's `data_file` bridge shares the exact same
 /// jail (tools/guardian.rs) instead of growing a second resolver.
 pub(crate) fn resolve_workspace_path(path: &str) -> Result<String, String> {
+    resolve_in(WORKSPACE_ROOT, path)
+}
+
+/// The resolver behind [`resolve_workspace_path`], against any root, so the
+/// Guardian's workspace sink can run under a temporary directory in a test.
+/// Production callers go through `resolve_workspace_path`.
+pub(crate) fn resolve_in(root: &str, path: &str) -> Result<String, String> {
     let trimmed = path.trim();
     let resolved = if trimmed.is_empty() {
-        WORKSPACE_ROOT.to_string()
+        root.to_string()
     } else if trimmed.starts_with('/') {
         trimmed.to_string()
     } else {
         let rel = trimmed.trim_start_matches("./");
-        format!("{}/{}", WORKSPACE_ROOT, rel)
+        format!("{}/{}", root, rel)
     };
     // Defeat path traversal in either form: `../etc/passwd` (relative) and
     // `/embra/workspace/../etc/passwd` (absolute) both contain a `..` segment
@@ -47,10 +54,10 @@ pub(crate) fn resolve_workspace_path(path: &str) -> Result<String, String> {
             resolved
         ));
     }
-    if !resolved.starts_with(WORKSPACE_ROOT) {
+    if !resolved.starts_with(root) {
         return Err(format!(
             "Denied: path '{}' resolves outside {}",
-            resolved, WORKSPACE_ROOT
+            resolved, root
         ));
     }
     Ok(resolved)
@@ -2802,7 +2809,7 @@ pub(crate) fn expand_escapes(s: &str) -> String {
 }
 
 /// Ensure parent directories exist for a path. Workspace restricted.
-async fn ensure_parent_dirs(path: &str) -> Result<(), String> {
+pub(crate) async fn ensure_parent_dirs(path: &str) -> Result<(), String> {
     let file_path = std::path::Path::new(path);
     if let Some(parent) = file_path.parent()
         && !parent.exists()

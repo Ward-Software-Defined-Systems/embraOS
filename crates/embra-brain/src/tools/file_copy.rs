@@ -765,7 +765,7 @@ async fn execute_tree(
 /// Walk up from `p` until a component exists (by `symlink_metadata`, so a
 /// dangling link counts as existing and the later `create_dir_all` reports
 /// it instead of silently building beside it).
-async fn nearest_existing_ancestor(p: &Path) -> PathBuf {
+pub(crate) async fn nearest_existing_ancestor(p: &Path) -> PathBuf {
     let mut cur = p.to_path_buf();
     loop {
         if tokio::fs::symlink_metadata(&cur).await.is_ok() {

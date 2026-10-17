@@ -20,6 +20,7 @@ use crate::config::SystemConfig;
 use crate::db::WardsonDbClient;
 
 mod replicant;
+mod save;
 
 /// Guardian's writable sub-tree of the workspace (DATA, persists reboots).
 const GUARDIAN_BASE: &str = "/embra/workspace/.guardian";
@@ -1739,6 +1740,14 @@ pub async fn guardian_call(
                         };
                         if wants_request {
                             caps.secrets = cfg.as_ref().map(secrets_from).unwrap_or_default();
+                            // `save_to` lands under the workspace through
+                            // the brain's sink; the broker never resolves a
+                            // path. The handle is captured here, in the
+                            // async arm, for the blocking thread the call
+                            // runs on.
+                            caps.files = Some(Arc::new(save::WorkspaceSink::new(
+                                tokio::runtime::Handle::current(),
+                            )));
                         }
                     }
                     Err(e) => {
