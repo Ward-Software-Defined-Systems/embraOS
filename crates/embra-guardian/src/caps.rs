@@ -81,6 +81,10 @@ pub struct HttpRequest {
     pub body: Option<Vec<u8>>,
     pub timeout: Duration,
     pub max_bytes: usize,
+    /// `save_to`: the caller's path for the body, handed to the host's
+    /// [`FileSink`] as written. The guard's concern alone; a transport
+    /// ignores it.
+    pub save_to: Option<String>,
 }
 
 impl HttpRequest {
@@ -93,6 +97,7 @@ impl HttpRequest {
             body: None,
             timeout,
             max_bytes,
+            save_to: None,
         }
     }
 }
@@ -112,6 +117,27 @@ pub trait HttpTransport: Send + Sync {
         }
         Err("this transport answers a plain GET only".to_string())
     }
+}
+
+/// What a save answered: the path the host wrote and its size.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedFile {
+    pub path: String,
+    pub bytes: usize,
+}
+
+/// The host's file store behind `save_to`. The broker hands it the
+/// caller's path as written, the bytes and the content type, and nothing
+/// else: the store resolves the path inside the operator's jail, refuses
+/// an existing target and writes atomically. The broker never resolves a
+/// path itself. `check` is the pre-flight, run before the first hop so a
+/// bad path costs no request; the default lets a store implement `save`
+/// alone.
+pub trait FileSink: Send + Sync {
+    fn check(&self, _path: &str) -> Result<(), String> {
+        Ok(())
+    }
+    fn save(&self, path: &str, bytes: &[u8], content_type: &str) -> Result<SavedFile, String>;
 }
 
 /// A credential the host adds to a request for one host, as the
@@ -170,6 +196,10 @@ pub struct Capabilities {
     /// method returns a structured "not configured" envelope. The
     /// provider holds the API key host-side; it never reaches the guest.
     pub search: Option<Arc<dyn SearchProvider>>,
+    /// The file store behind `http_request`'s `save_to`. `None` ⇒ a
+    /// request that asks to save is refused by name. Granted with the
+    /// secrets, to a tool with `http_request`.
+    pub files: Option<Arc<dyn FileSink>>,
 }
 
 impl Capabilities {
@@ -179,7 +209,7 @@ impl Capabilities {
     }
     /// Grant `http_get` backed by `transport` under `policy`.
     pub fn with_http(transport: Arc<dyn HttpTransport>, policy: EgressPolicy) -> Self {
-        Self { http: Some(transport), http_policy: policy, secrets: Vec::new(), search: None }
+        Self { http: Some(transport), http_policy: policy, secrets: Vec::new(), search: None, files: None }
     }
     /// Grant `web_search` backed by `provider`.
     pub fn with_search(provider: Arc<dyn SearchProvider>) -> Self {
@@ -461,6 +491,10 @@ pub const HTTP_REQUEST_BODY_MAX: usize = 256 * 1024;
 /// The response a guest may ask for (`max_bytes`); the default is the
 /// policy's. Under `host::MAX_OUTPUT` with room for the envelope.
 pub const HTTP_RESPONSE_MAX_BYTES: usize = 1024 * 1024;
+/// The response a guest may save to a file (`save_to`), whole or nothing.
+/// The brain's download and media ceiling, so a saved file can always be
+/// offered with `file_offer` and shown with `image_view`.
+pub const HTTP_SAVE_MAX_BYTES: usize = 12 * 1024 * 1024;
 /// Headers each way: at most this many, and this many bytes in all.
 pub const HTTP_HEADERS_MAX: usize = 32;
 pub const HTTP_HEADERS_BYTES_MAX: usize = 8 * 1024;
@@ -582,11 +616,32 @@ fn parse_http_request(input: &str, policy: &EgressPolicy) -> Result<HttpRequest,
             ));
         }
     }
+    let save_to = match obj.get("save_to") {
+        None | Some(serde_json::Value::Null) => None,
+        Some(serde_json::Value::String(s)) => {
+            let s = s.trim();
+            if s.is_empty() || s.contains('\0') {
+                return Err("save_to must be a non-empty path (a file under the workspace)".to_string());
+            }
+            Some(s.to_string())
+        }
+        Some(_) => return Err("save_to must be a string path".to_string()),
+    };
+    if save_to.is_some() && method == Method::Head {
+        return Err("a HEAD has no body to save".to_string());
+    }
+    // A body read into text answers under the response cap; a body saved
+    // to a file under the save cap, which is also its default.
+    let (ceiling, default_max) = if save_to.is_some() {
+        (HTTP_SAVE_MAX_BYTES, HTTP_SAVE_MAX_BYTES)
+    } else {
+        (HTTP_RESPONSE_MAX_BYTES, policy.max_bytes)
+    };
     let max_bytes = obj
         .get("max_bytes")
         .and_then(|m| m.as_u64())
-        .map(|m| usize::try_from(m).unwrap_or(usize::MAX).clamp(1, HTTP_RESPONSE_MAX_BYTES))
-        .unwrap_or(policy.max_bytes);
+        .map(|m| usize::try_from(m).unwrap_or(usize::MAX).clamp(1, ceiling))
+        .unwrap_or(default_max);
     let timeout = obj
         .get("timeout_ms")
         .and_then(|t| t.as_u64())
@@ -599,6 +654,7 @@ fn parse_http_request(input: &str, policy: &EgressPolicy) -> Result<HttpRequest,
         body,
         timeout,
         max_bytes,
+        save_to,
     })
 }
 
@@ -662,7 +718,11 @@ fn secret_hosts_of(parsed: &url::Url) -> [String; 2] {
 /// hop's host ride that hop and no other, over any header of the same
 /// name; a GET or HEAD follows up to [`MAX_REDIRECTS`] redirects within
 /// the budget, the other methods get the 3xx back with its target under
-/// `redirect`. The envelope never carries a request header.
+/// `redirect`. The envelope never carries a request header. With
+/// `save_to`, a 2xx body of any type goes to the host's [`FileSink`] whole
+/// (under [`HTTP_SAVE_MAX_BYTES`]) and the envelope answers `saved`
+/// instead of a body; any other answer comes back as text under the
+/// response cap.
 pub fn guarded_http_request(caps: &Capabilities, input: &str) -> String {
     let Some(http) = caps.http.as_ref() else {
         return err_json("capability 'http_request' not granted to this tool");
@@ -670,6 +730,20 @@ pub fn guarded_http_request(caps: &Capabilities, input: &str) -> String {
     let req = match parse_http_request(input, &caps.http_policy) {
         Ok(r) => r,
         Err(e) => return err_json(&e),
+    };
+    // A save needs the store, and the store's pre-flight runs before the
+    // first hop: a path the jail refuses costs no request.
+    let sink = match req.save_to.as_deref() {
+        None => None,
+        Some(dest) => match caps.files.as_ref() {
+            None => return err_json("save_to needs the workspace, which this tool was not granted"),
+            Some(files) => {
+                if let Err(e) = files.check(dest) {
+                    return err_json(&format!("save_to: {e}"));
+                }
+                Some((files, dest))
+            }
+        },
     };
     let budget = req.timeout;
     let started = Instant::now();
@@ -697,6 +771,7 @@ pub fn guarded_http_request(caps: &Capabilities, input: &str) -> String {
             body: req.body.clone(),
             timeout: remaining,
             max_bytes: req.max_bytes,
+            save_to: req.save_to.clone(),
         };
         let resp = match http.request(&hop) {
             Ok(r) => r,
@@ -725,16 +800,48 @@ pub fn guarded_http_request(caps: &Capabilities, input: &str) -> String {
             })
             .to_string();
         }
+        if let Some((files, dest)) = sink
+            && (200..300).contains(&resp.status)
+        {
+            // A save is whole or nothing: the transport read one byte past
+            // the cap, so a body over it is refused before anything lands.
+            // Any content type may land in a file; nothing is read.
+            if resp.body.len() > req.max_bytes {
+                return err_json(&format!(
+                    "the body is larger than the save cap of {HTTP_SAVE_MAX_BYTES} bytes; nothing written"
+                ));
+            }
+            let saved = match files.save(dest, &resp.body, &resp.content_type) {
+                Ok(s) => s,
+                Err(e) => return err_json(&format!("save_to: {e}")),
+            };
+            let mut env = serde_json::json!({
+                "ok": true,
+                "status": resp.status,
+                "url": current,
+                "content_type": resp.content_type,
+                "headers": guest_headers(&resp.headers),
+                "saved": { "path": saved.path, "bytes": saved.bytes },
+            });
+            if hops > 0 {
+                env["redirects"] = serde_json::json!(hops);
+            }
+            return env.to_string();
+        }
         if !request_content_type_allowed(&resp.content_type) {
             return err_json(&format!(
                 "response content-type '{}' is not allowed (text, JSON, XML, NDJSON and form data are)",
                 resp.content_type
             ));
         }
+        // A body read as text answers under the response cap whatever the
+        // request asked: a save that did not happen (a non-2xx answer)
+        // comes back readable and never as 12 MiB of text.
+        let text_cap = req.max_bytes.min(HTTP_RESPONSE_MAX_BYTES);
         let mut body = resp.body;
-        let cut = body.len() > req.max_bytes;
+        let cut = body.len() > text_cap;
         if cut {
-            body.truncate(req.max_bytes);
+            body.truncate(text_cap);
         }
         let mut env = serde_json::json!({
             "ok": true,
@@ -749,7 +856,7 @@ pub fn guarded_http_request(caps: &Capabilities, input: &str) -> String {
         }
         if cut {
             // A body cut mid-way is not the answer: the guest says so.
-            env["truncated_at"] = serde_json::json!(req.max_bytes);
+            env["truncated_at"] = serde_json::json!(text_cap);
         }
         return env.to_string();
     }
@@ -2178,5 +2285,253 @@ mod search_tests {
         let d = v["results"][1]["description"].as_str().unwrap();
         assert!(d.starts_with("xxxx") && d.ends_with('…') && !d.contains('<'), "{d}");
         assert_eq!(d.chars().filter(|c| *c == 'x').count(), 1000);
+    }
+}
+
+#[cfg(test)]
+mod save_tests {
+    //! `save_to`: a 2xx body of any type goes to the host's sink whole, the
+    //! envelope answers `saved`, nothing is read; every other shape comes
+    //! back as today, under the text ceiling.
+    use super::*;
+    use std::sync::Mutex;
+
+    /// One answer: `(url, status, location, content_type, body)`, the body
+    /// as bytes (a PNG is not a `&str`).
+    type Route = (&'static str, u16, Option<&'static str>, &'static str, Vec<u8>);
+
+    /// Routes with byte bodies, recording each hop.
+    struct BytesRecorder {
+        routes: Vec<Route>,
+        seen: Mutex<Vec<HttpRequest>>,
+    }
+
+    impl BytesRecorder {
+        fn new(routes: Vec<Route>) -> Arc<Self> {
+            Arc::new(Self { routes, seen: Mutex::new(Vec::new()) })
+        }
+        fn seen(&self) -> Vec<HttpRequest> {
+            self.seen.lock().unwrap().clone()
+        }
+    }
+
+    impl HttpTransport for BytesRecorder {
+        fn get(&self, url: &str, timeout: Duration, max_bytes: usize) -> Result<HttpResponse, String> {
+            self.request(&HttpRequest::get(url, timeout, max_bytes))
+        }
+        fn request(&self, req: &HttpRequest) -> Result<HttpResponse, String> {
+            self.seen.lock().unwrap().push(req.clone());
+            let (_, status, location, ct, body) = self
+                .routes
+                .iter()
+                .find(|(u, ..)| *u == req.url)
+                .ok_or_else(|| format!("no route for {}", req.url))?;
+            // The real transport reads one byte past the cap and no more.
+            let mut body = body.clone();
+            body.truncate(req.max_bytes + 1);
+            Ok(HttpResponse {
+                status: *status,
+                content_type: ct.to_string(),
+                body,
+                location: location.map(str::to_string),
+                headers: vec![("Content-Type".to_string(), ct.to_string())],
+            })
+        }
+    }
+
+    /// The host's store, recorded: what was asked, what arrived, as what.
+    #[derive(Default)]
+    struct RecordingSink {
+        refuse: Option<&'static str>,
+        saved: Mutex<Vec<(String, Vec<u8>, String)>>,
+    }
+
+    impl FileSink for RecordingSink {
+        fn check(&self, _path: &str) -> Result<(), String> {
+            match self.refuse {
+                Some(why) => Err(why.to_string()),
+                None => Ok(()),
+            }
+        }
+        fn save(&self, path: &str, bytes: &[u8], content_type: &str) -> Result<SavedFile, String> {
+            self.saved
+                .lock()
+                .unwrap()
+                .push((path.to_string(), bytes.to_vec(), content_type.to_string()));
+            Ok(SavedFile { path: format!("/embra/workspace/{path}"), bytes: bytes.len() })
+        }
+    }
+
+    fn png(len: usize) -> Vec<u8> {
+        let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
+        b.extend((0..len.saturating_sub(8)).map(|i| (i % 251) as u8));
+        b
+    }
+
+    fn caps(rec: &Arc<BytesRecorder>, sink: &Arc<RecordingSink>) -> Capabilities {
+        let transport: Arc<dyn HttpTransport> = rec.clone();
+        let mut caps = Capabilities::with_http(transport, EgressPolicy::default());
+        caps.files = Some(sink.clone());
+        caps
+    }
+
+    fn parse(s: &str) -> serde_json::Value {
+        serde_json::from_str(s).expect("the guard emits valid JSON")
+    }
+
+    #[test]
+    fn a_save_to_writes_a_2xx_body_whole_and_answers_saved() {
+        let body = png(1000);
+        let rec = BytesRecorder::new(vec![("https://1.1.1.1/shot", 200, None, "image/png", body.clone())]);
+        let sink = Arc::new(RecordingSink::default());
+        let v = parse(&guarded_http_request(
+            &caps(&rec, &sink),
+            r#"{"url":"https://1.1.1.1/shot","method":"POST","json":{"url":"https://example.com/"},"save_to":"shots/a.png"}"#,
+        ));
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["status"], 200);
+        assert_eq!(v["content_type"], "image/png", "a type the text path refuses lands in a file");
+        assert_eq!(v["saved"]["path"], "/embra/workspace/shots/a.png");
+        assert_eq!(v["saved"]["bytes"], 1000);
+        assert!(v.get("body").is_none(), "nothing is read: {v}");
+        assert!(v.get("truncated_at").is_none(), "{v}");
+        let saved = sink.saved.lock().unwrap().clone();
+        assert_eq!(saved, vec![("shots/a.png".to_string(), body, "image/png".to_string())]);
+        assert_eq!(rec.seen()[0].max_bytes, HTTP_SAVE_MAX_BYTES, "the hop reads up to the save cap");
+    }
+
+    #[test]
+    fn a_save_to_over_the_cap_is_refused_and_nothing_is_written() {
+        let rec = BytesRecorder::new(vec![(
+            "https://1.1.1.1/big",
+            200,
+            None,
+            "application/pdf",
+            vec![b'x'; HTTP_SAVE_MAX_BYTES + 1],
+        )]);
+        let sink = Arc::new(RecordingSink::default());
+        let v = parse(&guarded_http_request(
+            &caps(&rec, &sink),
+            r#"{"url":"https://1.1.1.1/big","save_to":"files/big.pdf"}"#,
+        ));
+        assert_eq!(v["ok"], false, "{v}");
+        let err = v["error"].as_str().unwrap();
+        assert!(err.contains("save cap") && err.contains("nothing written"), "{err}");
+        assert!(sink.saved.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_save_to_non_2xx_comes_back_as_text_through_the_content_type_guard() {
+        // An error page is what the model has to read; nothing is saved.
+        let rec = BytesRecorder::new(vec![
+            ("https://1.1.1.1/gone", 404, None, "text/html", b"<p>gone</p>".to_vec()),
+            ("https://1.1.1.1/gone.png", 404, None, "image/png", png(40)),
+            ("https://1.1.1.1/long", 500, None, "text/plain", vec![b'e'; HTTP_RESPONSE_MAX_BYTES + 10]),
+        ]);
+        let sink = Arc::new(RecordingSink::default());
+        let c = caps(&rec, &sink);
+        let v = parse(&guarded_http_request(&c, r#"{"url":"https://1.1.1.1/gone","save_to":"x.html"}"#));
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["status"], 404);
+        assert_eq!(v["body"], "<p>gone</p>");
+        assert!(v.get("saved").is_none(), "{v}");
+        // A binary error answer is refused by name, as any binary text is.
+        let v = parse(&guarded_http_request(&c, r#"{"url":"https://1.1.1.1/gone.png","save_to":"x.png"}"#));
+        assert_eq!(v["ok"], false, "{v}");
+        assert!(v["error"].as_str().unwrap().contains("not allowed"), "{v}");
+        // The hop read up to the save cap; the text comes back under the
+        // response cap, and the cut is named at that cap.
+        let v = parse(&guarded_http_request(&c, r#"{"url":"https://1.1.1.1/long","save_to":"x.txt"}"#));
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["body"].as_str().unwrap().len(), HTTP_RESPONSE_MAX_BYTES);
+        assert_eq!(v["truncated_at"], HTTP_RESPONSE_MAX_BYTES);
+        assert!(sink.saved.lock().unwrap().is_empty(), "a non-2xx never lands in a file");
+    }
+
+    #[test]
+    fn a_save_to_needs_the_file_capability_and_refuses_head() {
+        let rec = BytesRecorder::new(vec![("https://1.1.1.1/shot", 200, None, "image/png", png(16))]);
+        let transport: Arc<dyn HttpTransport> = rec.clone();
+        let without = Capabilities::with_http(transport, EgressPolicy::default());
+        let v = parse(&guarded_http_request(&without, r#"{"url":"https://1.1.1.1/shot","save_to":"a.png"}"#));
+        assert_eq!(v["ok"], false, "{v}");
+        assert!(v["error"].as_str().unwrap().contains("not granted"), "{v}");
+        let sink = Arc::new(RecordingSink::default());
+        let v = parse(&guarded_http_request(
+            &caps(&rec, &sink),
+            r#"{"url":"https://1.1.1.1/shot","method":"HEAD","save_to":"a.png"}"#,
+        ));
+        assert_eq!(v["ok"], false, "{v}");
+        assert!(v["error"].as_str().unwrap().contains("HEAD"), "{v}");
+        let v = parse(&guarded_http_request(&caps(&rec, &sink), r#"{"url":"https://1.1.1.1/shot","save_to":7}"#));
+        assert_eq!(v["ok"], false, "{v}");
+        let v = parse(&guarded_http_request(&caps(&rec, &sink), r#"{"url":"https://1.1.1.1/shot","save_to":"  "}"#));
+        assert_eq!(v["ok"], false, "{v}");
+        assert!(rec.seen().is_empty(), "no refusal costs a request");
+    }
+
+    #[test]
+    fn a_refused_save_path_costs_no_request() {
+        let rec = BytesRecorder::new(vec![("https://1.1.1.1/shot", 200, None, "image/png", png(16))]);
+        let sink = Arc::new(RecordingSink { refuse: Some("the path is outside the workspace"), ..Default::default() });
+        let v = parse(&guarded_http_request(&caps(&rec, &sink), r#"{"url":"https://1.1.1.1/shot","save_to":"../a.png"}"#));
+        assert_eq!(v["ok"], false, "{v}");
+        assert!(v["error"].as_str().unwrap().contains("outside the workspace"), "{v}");
+        assert!(rec.seen().is_empty(), "the pre-flight runs before the first hop");
+        assert!(sink.saved.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_save_to_follows_a_redirect_and_saves_the_final_body_once() {
+        let body = png(64);
+        let rec = BytesRecorder::new(vec![
+            ("https://1.1.1.1/old.jpg", 302, Some("https://1.1.1.1/new.jpg"), "text/html", Vec::new()),
+            ("https://1.1.1.1/new.jpg", 200, None, "image/jpeg", body.clone()),
+        ]);
+        let sink = Arc::new(RecordingSink::default());
+        let v = parse(&guarded_http_request(&caps(&rec, &sink), r#"{"url":"https://1.1.1.1/old.jpg","save_to":"a.jpg"}"#));
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(v["url"], "https://1.1.1.1/new.jpg");
+        assert_eq!(v["redirects"], 1);
+        assert_eq!(v["saved"]["bytes"], 64);
+        let saved = sink.saved.lock().unwrap().clone();
+        assert_eq!(saved.len(), 1, "the final body, once");
+        assert_eq!(saved[0].1, body);
+        assert_eq!(saved[0].2, "image/jpeg");
+    }
+
+    #[test]
+    fn the_save_cap_is_the_default_and_the_ceiling_with_save_to() {
+        let rec = BytesRecorder::new(vec![("https://1.1.1.1/shot", 200, None, "image/png", png(16))]);
+        let sink = Arc::new(RecordingSink::default());
+        let c = caps(&rec, &sink);
+        let _ = guarded_http_request(&c, r#"{"url":"https://1.1.1.1/shot","save_to":"a.png"}"#);
+        let _ = guarded_http_request(&c, r#"{"url":"https://1.1.1.1/shot","save_to":"b.png","max_bytes":1099511627776}"#);
+        let _ = guarded_http_request(&c, r#"{"url":"https://1.1.1.1/shot","save_to":"c.png","max_bytes":10}"#);
+        let _ = guarded_http_request(&c, r#"{"url":"https://1.1.1.1/shot"}"#);
+        let seen = rec.seen();
+        assert_eq!(seen[0].max_bytes, HTTP_SAVE_MAX_BYTES, "the default with save_to");
+        assert_eq!(seen[1].max_bytes, HTTP_SAVE_MAX_BYTES, "the ceiling with save_to");
+        assert_eq!(seen[2].max_bytes, 10, "an asked cap under it stands");
+        assert_eq!(seen[3].max_bytes, EgressPolicy::default().max_bytes, "without save_to nothing moved");
+    }
+
+    /// The save cap sits above the response cap, or a save would read less
+    /// than a page.
+    const _: () = assert!(HTTP_SAVE_MAX_BYTES > HTTP_RESPONSE_MAX_BYTES);
+
+    #[test]
+    fn a_secret_rides_a_saving_hop() {
+        let rec = BytesRecorder::new(vec![("https://1.1.1.1/shot", 200, None, "image/png", png(16))]);
+        let sink = Arc::new(RecordingSink::default());
+        let mut c = caps(&rec, &sink);
+        c.secrets = vec![SecretHeader { host: "1.1.1.1".into(), name: "authorization".into(), value: "Bearer t".into() }];
+        let text = guarded_http_request(&c, r#"{"url":"https://1.1.1.1/shot","save_to":"a.png"}"#);
+        let v = parse(&text);
+        assert_eq!(v["ok"], true, "{v}");
+        let seen = rec.seen();
+        let auth = seen[0].headers.iter().find(|(n, _)| n == "authorization").map(|(_, v)| v.as_str());
+        assert_eq!(auth, Some("Bearer t"));
+        assert!(!text.contains("Bearer"), "the envelope never echoes a request header: {text}");
     }
 }

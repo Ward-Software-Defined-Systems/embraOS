@@ -36,8 +36,8 @@ mod html_text {
 }
 
 pub use caps::{
-    Capabilities, EgressPolicy, HttpRequest, HttpResponse, HttpTransport, Method, SearchProvider,
-    SearchRequest, SearchResponse, SearchResult, SecretHeader,
+    Capabilities, EgressPolicy, FileSink, HttpRequest, HttpResponse, HttpTransport, Method,
+    SavedFile, SearchProvider, SearchRequest, SearchResponse, SearchResult, SecretHeader,
 };
 pub use error::GuardianError;
 pub use overlay::{runtime, CompiledTool, GuardianRuntime};
