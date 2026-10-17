@@ -1,0 +1,40 @@
+# A headless browser beside embraOS: Browserless (Chromium) behind Caddy.
+# Embra reaches https://${BROWSER_HOST}/… with the shipped http_request;
+# Browserless itself is never published. See ../BROWSER-SERVICE.md.
+#
+#   cp .env.example .env     # BROWSER_HOST, BROWSERLESS_TOKEN
+#   docker compose up -d
+#   docker compose exec caddy cat /data/caddy/pki/authorities/local/root.crt   # tls internal only
+
+services:
+  browserless:
+    image: ghcr.io/browserless/chromium:v2.57.1
+    restart: unless-stopped
+    shm_size: 2g                      # Chrome crashes on Docker's 64 MB /dev/shm
+    environment:
+      TOKEN: ${BROWSERLESS_TOKEN:?set BROWSERLESS_TOKEN in .env}
+      STRICT_TOKEN_USE: "true"        # the token on every route (v2.57.0+)
+      CONCURRENT: "2"                 # browser sessions at once; the rest queue
+      QUEUED: "4"                     # queued requests before a 429
+      TIMEOUT: "60000"                # ms per session; http_request asks up to 60 s with timeout_ms
+      HEALTH: "true"                  # a 503 instead of a crash under memory or CPU pressure
+      # ALLOW_GET and ALLOW_FILE_PROTOCOL keep their defaults: false.
+    # No ports: reachable from caddy on the compose network only.
+
+  caddy:
+    image: caddy:2.11.7
+    restart: unless-stopped
+    depends_on: [browserless]
+    ports:
+      - "443:443"                     # the one published port; BROWSER_HOST resolves here
+    environment:
+      BROWSER_HOST: ${BROWSER_HOST:?set BROWSER_HOST in .env}
+    volumes:
+      - ./caddy:/etc/caddy:ro         # the Caddyfile (mount the directory, not the file)
+      - caddy_data:/data              # the internal CA and its certificates persist here
+      - caddy_config:/config
+      # - ./certs:/certs:ro           # your own certificate: see caddy/Caddyfile
+
+volumes:
+  caddy_data:
+  caddy_config:

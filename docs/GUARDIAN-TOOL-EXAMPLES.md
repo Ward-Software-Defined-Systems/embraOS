@@ -150,9 +150,14 @@ host::http_request(request_json: &str) -> String
 //                                 // application/json unless given;
 //                                 // GET and HEAD carry no body; 256 KiB
 //    "max_bytes":262144,          // response cap: default 256 KiB, ≤ 1 MiB
-//    "timeout_ms":10000}          // the whole call; ≤ the budget: 10 s, or
+//    "timeout_ms":10000,          // the whole call; ≤ the budget: 10 s, or
 //                                 // a top-level timeout_ms in the call's
 //                                 // input, up to 60 s
+//    "save_to":"shots/a.png"}     // a 2xx body of ANY type lands in this
+//                                 // file under /embra/workspace, whole
+//                                 // (12 MiB cap) or not at all, never over
+//                                 // an existing file; MEDIA/ and .guardian/
+//                                 // refused; the brain's sink resolves it
 // Envelope:
 //   {"ok":true,"status":<u16>,"url":"<the URL that answered>",
 //    "redirects":<n>,             // when the guard followed one: GET and
@@ -164,7 +169,9 @@ host::http_request(request_json: &str) -> String
 //    "headers":{"<lowercase>":"…"}, // no cookies; 32 headers / 8 KiB
 //    "body":"…",                  // text, JSON, XML, NDJSON, form data;
 //                                 // a binary body is refused by name
-//    "truncated_at":<max_bytes>}  // present when the body was cut there
+//    "truncated_at":<max_bytes>,  // present when the body was cut there
+//    "saved":{"path":"…","bytes":<n>}} // with save_to, a 2xx written: no
+//                                 // body, no truncated_at, nothing read
 //   {"ok":false,"error":"…"}
 // The host runs http_get's egress policy on every hop and adds the
 // operator's secrets (/guardian secret <host> <header> <value>) to a hop

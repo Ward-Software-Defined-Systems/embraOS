@@ -1,0 +1,24 @@
+# The TLS front for Browserless. {$BROWSER_HOST} comes from .env.
+#
+# Two certificate paths; keep one `tls` line:
+#   tls internal
+#       Caddy's own CA signs a certificate for BROWSER_HOST (a name or an IP
+#       literal). Copy its root into the OS, with the VM stopped:
+#         docker compose exec caddy cat /data/caddy/pki/authorities/local/root.crt > ca/browser-root.crt
+#         ./scripts/seed-state.sh --ca-dir ca
+#   tls /certs/fullchain.pem /certs/privkey.pem
+#       a certificate from your own CA, mounted at /certs (the commented
+#       volume in docker-compose.yml); no reseed when that CA's root is
+#       already in /embra/state/ca-certificates/.
+{
+	# Never touch the Docker host's trust store.
+	skip_install_trust
+	# Nothing listens on :80; the compose publishes 443 alone.
+	auto_https disable_redirects
+}
+
+{$BROWSER_HOST} {
+	tls internal
+	# tls /certs/fullchain.pem /certs/privkey.pem
+	reverse_proxy browserless:3000
+}

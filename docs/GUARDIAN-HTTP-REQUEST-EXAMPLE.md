@@ -134,7 +134,8 @@ admit it, and a credential header in the input names `/guardian secret`.
 `save_to` names a file under `/embra/workspace` (relative to it, or absolute
 under it) that takes the body in place of the answer: any content type, a
 binary one included, a 2xx only, up to 12 MiB, never over an existing file.
-A screenshot from a headless-browser service reached over HTTPS:
+A screenshot from a headless-browser service reached over HTTPS
+([BROWSER-SERVICE.md](./BROWSER-SERVICE.md)):
 
 ```json
 { "url": "https://browser.example.lan/screenshot", "method": "POST",
@@ -339,6 +340,8 @@ fn err(msg: &str) -> String {
 #    tell me the star count"
 #   "POST a note to issue 17 on our GitLab with http_request"  (after the
 #    egress and secret setup above)
+#   "take a screenshot of https://example.com/ with the browser service and
+#    show me"  (BROWSER-SERVICE.md; save_to, then image_view)
 ```
 
 To change the tool, `/guardian-define` with your version of the module under
