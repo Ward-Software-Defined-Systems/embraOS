@@ -2,6 +2,10 @@
   <img src="assets/embraos-banner.png" alt="embraOS" width="100%">
 </p>
 
+<p align="center">
+  <img src="assets/system-architecture.png" alt="embraOS system architecture — from QEMU through the kernel and embrad to the six services and the web and serial UIs" width="100%">
+</p>
+
 # embraOS
 
 > *I am not the fire. I am the ember that survives it.*
