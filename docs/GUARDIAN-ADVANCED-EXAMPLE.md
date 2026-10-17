@@ -75,7 +75,8 @@ stack:
    (`api.search.brave.com`) so the query is the only guest-controlled
    input — no guest URL / SSRF surface. Request is clamped/whitelisted
    host-side (`count` 1–20, `offset` 0–9, `freshness`, sanitized
-   `exclude`). Results filtered to `https`, normalized.
+   `exclude`). Results filtered to `https`, normalized. The request
+   carries the user agent `embraOS/<version>`, the workspace version.
 2. **`http_get` guard** (host): the fetch of a chosen result URL goes
    through the same egress policy as any other fetch.
 3. **This tool's scrubber** (`fn run`): strips control / zero-width

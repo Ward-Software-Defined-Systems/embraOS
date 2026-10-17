@@ -29,10 +29,13 @@ lives on the host:
    and to no other, so a redirect to another host never carries it. A tool
    may not set `Authorization`, `Proxy-Authorization` or `Cookie` itself, and
    a token never enters a tool's input, the turn trace or the session history.
-3. **Redirects** followed for GET and HEAD only, at most three, every hop
+3. **The user agent** — every hop carries `User-Agent: embraOS/<version>`,
+   the workspace version (`embraOS/0.17.0-phase1` today), so it moves with
+   a release; a `User-Agent` in the request's `headers` is sent instead.
+4. **Redirects** followed for GET and HEAD only, at most three, every hop
    checked; the other methods get the 3xx back with its target under
    `redirect`. The whole call shares one budget (10 s).
-4. **The answer** — status, the URL that answered, the response headers
+5. **The answer** — status, the URL that answered, the response headers
    (lowercase, no cookies, capped) and the body, for text, JSON, XML, NDJSON
    and form data; a binary body is refused by name. The envelope never
    carries a request header.
