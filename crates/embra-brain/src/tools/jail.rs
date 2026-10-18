@@ -185,6 +185,15 @@ impl std::fmt::Display for ReadRefusal {
 /// returned is the real one.
 pub(crate) async fn readable(path: &str) -> Result<PathBuf, ReadRefusal> {
     let lexical = crate::media::store::resolve_read_path(path);
+    // The path as written first: a refused place is refused whether or
+    // not the file exists, so a refusal says nothing about what STATE
+    // holds. The real path is checked again below, for a link.
+    if let Some(reason) = read_denied(&lexical) {
+        return Err(ReadRefusal::Denied(format!(
+            "Denied: {} is {reason}; nothing is read",
+            lexical.display()
+        )));
+    }
     let canonical = match tokio::fs::canonicalize(&lexical).await {
         Ok(p) => p,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -436,6 +445,21 @@ mod read_tests {
         assert_eq!(err.to_string(), "File not found: /definitely/not/here");
         let err = readable("relative/not/here").await.unwrap_err();
         assert_eq!(err.to_string(), "File not found: /embra/workspace/relative/not/here");
+    }
+
+    /// A refusal is no existence oracle: a path under a refused place is
+    /// refused the same way whether or not the file is there (the dev
+    /// host has no `/embra/state` at all).
+    #[tokio::test]
+    async fn a_missing_file_under_a_refused_place_is_refused_not_reported_missing() {
+        for path in ["/embra/state/api_key_gemini", "/embra/state/no-such-file", "/embra/data/wardsondb/x"] {
+            let err = readable(path).await.unwrap_err();
+            assert!(matches!(&err, ReadRefusal::Denied(_)), "{path}: {err}");
+            assert!(!err.to_string().contains("not found"), "{path}: {err}");
+        }
+        // A readable STATE file that is absent is "not found", as before.
+        let err = readable("/embra/state/halt_reason").await.unwrap_err();
+        assert!(matches!(&err, ReadRefusal::NotFound(_)), "{err}");
     }
 
     #[tokio::test]
