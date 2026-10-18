@@ -163,12 +163,18 @@ loop-mounted partition.
      — the **doc** only (the resume-seed reads it by id).
    - `memory.user` — **deliberately untouched.**
 6. Stop wardsondb cleanly; unmount DATA.
-7. Mount partition 3 (STATE): `rm soul.sha256`; place the graph file in
-   `imported-intelligence/` (create the dir if absent). Unmount.
+7. Mount partition 3 (STATE): `rm soul.sha256` — this step is not
+   optional. A stored hash with no soul document is what trustd reports
+   as tamper or data loss (`Soul document missing but a sealed hash is
+   stored`), and embrad halts on it; the two deletions belong to the same
+   stopped window. Place the graph file in `imported-intelligence/`
+   (create the dir if absent). Unmount.
 8. Boot. trustd reports "no soul exists" → embrad allows the learning
-   boot (no HALT). The resume-seed finds `memory.user` intact, skips
-   Phase 1, and lands directly on the import selector. Import → confirm →
-   Phase 4/5 → Operational.
+   boot (no HALT). If the machine halts instead, the hash was left in
+   place: read `/embra/state/halt_reason` (QUICK-START, "Halted boot"),
+   remove `soul.sha256` and boot again. The resume-seed finds
+   `memory.user` intact, skips Phase 1, and lands directly on the import
+   selector. Import → confirm → Phase 4/5 → Operational.
 9. Verify: `/soul` shows the grouped graph; `introspect` shows all three
    sections graph-aware; `knowledge_graph_stats` counts the identity
    nodes and edges alongside the pre-existing graph; reboot once more and

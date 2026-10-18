@@ -16,6 +16,13 @@ use tracing::debug;
 /// verification would read as a first boot.
 const NO_SOUL_ERROR: &str = "Soul document not found — no soul exists (first run or data loss)";
 
+/// The report for a soul document that is gone while a sealed hash is
+/// stored: tamper or data loss, never a first run. It carries none of the
+/// words embrad reads as a first run (`is_first_run`: "no soul", "not
+/// found"), so embrad halts on it. Guard
+/// `a_missing_soul_with_a_stored_hash_halts_and_without_one_is_a_first_run`.
+const SEALED_HASH_WITHOUT_SOUL_ERROR: &str = "Soul document missing but a sealed hash is stored";
+
 pub struct SoulVerifier {
     wardsondb_url: String,
     hash_path: std::path::PathBuf,
@@ -46,7 +53,21 @@ impl SoulVerifier {
 
     async fn verify_inner(&self) -> Result<(String, String)> {
         // Read soul from WardSONDB
-        let soul_json = self.read_soul_from_db().await?;
+        let soul_json = match self.read_soul_from_db().await? {
+            Some(doc) => doc,
+            None => {
+                // A missing document is a first run only when nothing was
+                // ever sealed. With a stored hash it is tamper or data
+                // loss, and embrad halts on this report.
+                if self.read_stored_hash().is_ok() {
+                    anyhow::bail!(
+                        "{SEALED_HASH_WITHOUT_SOUL_ERROR} at {} — restore DATA, or remove the hash to start over",
+                        self.hash_path.display()
+                    );
+                }
+                anyhow::bail!(NO_SOUL_ERROR);
+            }
+        };
 
         // Compute SHA-256
         let computed_hash = self.compute_hash(&soul_json);
@@ -59,7 +80,8 @@ impl SoulVerifier {
         Ok((computed_hash, stored_hash))
     }
 
-    async fn read_soul_from_db(&self) -> Result<serde_json::Value> {
+    /// The soul document, or `None` when the database has no such document.
+    async fn read_soul_from_db(&self) -> Result<Option<serde_json::Value>> {
         let client = reqwest::Client::new();
         let url = format!("{}/soul.invariant/docs/soul", self.wardsondb_url);
 
@@ -67,7 +89,7 @@ impl SoulVerifier {
             .context("Failed to connect to WardSONDB")?;
 
         if response.status() == reqwest::StatusCode::NOT_FOUND {
-            anyhow::bail!(NO_SOUL_ERROR);
+            return Ok(None);
         }
 
         let envelope: serde_json::Value = response.json().await
@@ -83,7 +105,7 @@ impl SoulVerifier {
             anyhow::bail!("Soul document is null");
         }
 
-        Ok(doc)
+        Ok(Some(doc))
     }
 
     fn compute_hash(&self, soul_json: &serde_json::Value) -> String {
@@ -152,6 +174,41 @@ mod tests {
     fn the_no_soul_report_carries_the_words_embrad_looks_for() {
         assert!(NO_SOUL_ERROR.contains("no soul"));
         assert!(NO_SOUL_ERROR.contains("not found"));
+        assert!(
+            !SEALED_HASH_WITHOUT_SOUL_ERROR.contains("no soul")
+                && !SEALED_HASH_WITHOUT_SOUL_ERROR.contains("not found"),
+            "embrad must halt on it"
+        );
+    }
+
+    /// A 404 for the soul document is a first run only without a stored
+    /// hash. With one it is tamper or data loss, reported in words embrad
+    /// halts on (#9).
+    #[tokio::test]
+    async fn a_missing_soul_with_a_stored_hash_halts_and_without_one_is_a_first_run() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/soul.invariant/docs/soul"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let dir = std::env::temp_dir().join(format!("embra-trustd-h5-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hash = dir.join("soul.sha256");
+        std::fs::write(&hash, "abc123\n").unwrap();
+
+        let (valid, _, _, err) = SoulVerifier::new(server.uri(), hash.clone()).verify().await;
+        assert!(!valid);
+        assert!(err.starts_with(SEALED_HASH_WITHOUT_SOUL_ERROR), "{err}");
+        assert!(err.contains(hash.to_str().unwrap()), "{err}");
+        assert!(!err.contains("no soul") && !err.contains("not found"), "embrad must halt on it: {err}");
+
+        let (valid, _, _, err) = SoulVerifier::new(server.uri(), dir.join("absent.sha256")).verify().await;
+        assert!(!valid);
+        assert_eq!(err, NO_SOUL_ERROR, "no hash: a first run");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A soul without its stored hash is a failed verification, and embrad

@@ -1,7 +1,13 @@
+use std::path::Path;
+
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 
 use crate::db::WardsonDbClient;
+
+/// Where the seal's hash lives on STATE. `embra-trustd` reads it at every
+/// boot, and a stored hash with no soul document halts the boot.
+pub(crate) const SOUL_HASH_PATH: &str = "/embra/state/soul.sha256";
 
 pub async fn seal_soul(db: &WardsonDbClient, soul: &serde_json::Value) -> Result<()> {
     if !db.collection_exists("soul.invariant").await? {
@@ -25,15 +31,22 @@ pub async fn seal_soul(db: &WardsonDbClient, soul: &serde_json::Value) -> Result
     db.write("soul.invariant", &sealed_doc).await?;
 
     // Write hash to STATE partition for boot-time verification by embra-trustd
-    let hash_path = "/embra/state/soul.sha256";
-    if let Some(parent) = std::path::Path::new(hash_path).parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    std::fs::write(hash_path, &hash)
-        .map_err(|e| anyhow::anyhow!("Failed to write soul hash to STATE: {}", e))?;
-    tracing::info!("Soul hash written to {}", hash_path);
+    write_soul_hash(Path::new(SOUL_HASH_PATH), &hash).await?;
+    tracing::info!("Soul hash written to {}", SOUL_HASH_PATH);
 
     Ok(())
+}
+
+/// The hash file, written atomically (`file_patch::write_atomic_create`: a
+/// same-directory temp, fsync, rename), so a crash mid-write leaves the
+/// old file or none and never a truncated hash that halts every boot.
+pub(crate) async fn write_soul_hash(hash_path: &Path, hash: &str) -> Result<()> {
+    if let Some(parent) = hash_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    crate::tools::file_patch::write_atomic_create(hash_path, hash.as_bytes())
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to write soul hash to STATE: {}", e))
 }
 
 pub async fn is_soul_sealed(db: &WardsonDbClient) -> Result<bool> {
@@ -95,5 +108,61 @@ mod parity_tests {
     fn the_seal_hash_is_the_one_trustd_computes() {
         let soul: serde_json::Value = serde_json::from_str(PARITY_SOUL).unwrap();
         assert_eq!(compute_soul_hash(&soul).unwrap(), PARITY_HASH);
+    }
+}
+
+#[cfg(test)]
+mod hash_file_tests {
+    //! The seal's hash file (#53 b6): whole or absent, never truncated.
+    use super::write_soul_hash;
+    use std::path::PathBuf;
+
+    fn temp(tag: &str) -> PathBuf {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let d = std::env::temp_dir().join(format!(
+            "embra-soul-hash-test-{tag}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn names(dir: &std::path::Path) -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[tokio::test]
+    async fn the_hash_file_is_written_atomically() {
+        let dir = temp("write");
+        let path = dir.join("soul.sha256");
+        write_soul_hash(&path, "abc123").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "abc123");
+        // A re-seal replaces it, and no temp is left beside it.
+        write_soul_hash(&path, "def456").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "def456");
+        assert_eq!(names(&dir), vec!["soul.sha256".to_string()]);
+        // A missing parent is created.
+        let nested = dir.join("state").join("soul.sha256");
+        write_soul_hash(&nested, "789").await.unwrap();
+        assert_eq!(std::fs::read_to_string(&nested).unwrap(), "789");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_failed_hash_write_leaves_no_temp() {
+        // The parent is a file, so no temp can be created in it.
+        let dir = temp("fail");
+        std::fs::write(dir.join("state"), "a file where the directory should be").unwrap();
+        let err = write_soul_hash(&dir.join("state").join("soul.sha256"), "abc").await.unwrap_err();
+        assert!(err.to_string().starts_with("Failed to write soul hash to STATE"), "{err}");
+        assert_eq!(names(&dir), vec!["state".to_string()], "nothing else was created");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

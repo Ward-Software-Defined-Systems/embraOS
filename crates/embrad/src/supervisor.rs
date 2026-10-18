@@ -945,6 +945,9 @@ mod first_run_tests {
             "Failed to parse WardSONDB response",
             "Soul document is null",
             "Expected hash aa but computed bb",
+            // trustd's `SEALED_HASH_WITHOUT_SOUL_ERROR`: the document is gone
+            // while a hash is stored — tamper or data loss, never a first run.
+            "Soul document missing but a sealed hash is stored at /embra/state/soul.sha256 — restore DATA, or remove the hash to start over",
         ] {
             assert!(!is_first_run(failed), "{failed}");
         }

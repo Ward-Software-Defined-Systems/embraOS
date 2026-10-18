@@ -73,8 +73,11 @@ Two rules hold on both paths:
 
 - **Fail closed.** If the verdict call errors or returns an unparseable verdict, **nothing compiles** — the system never defaults to allow.
 - **Skipped only before the soul is sealed.** During first-boot setup there is no soul to evaluate against, so an operator define proceeds; an intelligence proposal, by contrast, fails closed in that state (the intelligence must never self-author ungated).
+- **A database error is an error, not an unsealed soul.** When the soul cannot be read, every path refuses — `guardian_propose`, `/guardian-define` and `/guardian rebuild` alike — instead of reading the failure as "nothing to check against".
 
 The verdict is persisted with the tool (`ReplicantRecord`: `verdict`, `touched_lines`, `rationale`, `model`, `judged_at`) and shown at `/guardian show <name>` and `/guardian status <name>`, so the operator sees *why* something passed when deciding whether to approve it.
+
+`/guardian approve <name>` runs the check again, against the soul as it is sealed at that moment, and stores the new verdict; it refuses a record whose stored source no longer matches its recorded hash. A name that has a pending proposal cannot be proposed again until the operator approves or rejects it.
 
 ### Rebuilds are checked again
 

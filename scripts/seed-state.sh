@@ -74,6 +74,8 @@ seeding, so a clean first boot and a fresh seed are one command:
 
 Wiping STATE destroys the soul hash, PKI and API keys; wiping DATA destroys
 WardSONDB — all memory, sessions and the workspace. Both are irreversible.
+Wiping DATA alone also removes STATE/soul.sha256: a sealed hash with no soul
+document halts the next boot.
 
 Environment:
   EMBRAOS_IMAGE   Disk image path (overridden by the argument/--image)
@@ -275,6 +277,9 @@ if [ -n "$WIPE" ]; then
     echo "WIPE — reformats these partitions in $IMAGE:"
     [ "$wipe_state" -eq 1 ] && echo "  STATE (p3) — soul hash, PKI, API keys, config"
     [ "$wipe_data" -eq 1 ]  && echo "  DATA  (p4) — WardSONDB: all memory, sessions, workspace"
+    if [ "$wipe_data" -eq 1 ] && [ "$wipe_state" -eq 0 ]; then
+        echo "  and STATE/soul.sha256 (a sealed hash with no soul document halts the boot)"
+    fi
     echo "Everything on the listed partition(s) is destroyed. This cannot be undone."
 
     if [ "$ASSUME_YES" -eq 0 ]; then
@@ -312,6 +317,13 @@ mount_partition "$DATA_PART_NUM" "$MOUNT_DATA"
 
 echo "STATE mounted at $MOUNT_STATE"
 echo "DATA mounted at $MOUNT_DATA"
+
+# A DATA wipe without a STATE wipe would leave the seal's hash behind, and
+# a stored hash with no soul document halts the next boot (embra-trustd).
+if [ "${wipe_data:-0}" -eq 1 ] && [ "${wipe_state:-0}" -eq 0 ] && [ -f "$MOUNT_STATE/soul.sha256" ]; then
+    $SUDO rm -f "$MOUNT_STATE/soul.sha256"
+    echo "Removed STATE/soul.sha256 (DATA was wiped; the next boot enters Learning Mode)."
+fi
 
 # Seed WardSONDB data from Phase 0
 if [ -n "$PHASE0_DATA" ]; then

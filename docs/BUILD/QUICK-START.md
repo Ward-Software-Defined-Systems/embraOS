@@ -136,7 +136,9 @@ The following apply once the image is built. They are not part of the build pipe
 > Reformats the named partitions in place as ext4 with their original labels, after a
 > typed confirmation. Wiping STATE destroys the soul hash, PKI and API keys; wiping DATA
 > destroys WardSONDB — all memory, sessions and the workspace. Neither is reversible, and
-> the VM must be stopped.
+> the VM must be stopped. `--wipe data` alone also removes STATE's `soul.sha256`: a sealed
+> hash with no soul document halts the next boot (the tamper check), and a wiped DATA is
+> meant to start over.
 >
 > Use `--wipe state` or `--wipe data` to reset just one (`--wipe all` = `state,data`), `--yes` to skip the prompt, and
 > combine with the seeding flags to reset and re-seed in a single pass:

@@ -408,46 +408,70 @@ fn extract_last_json_document(history: &[crate::brain::Message]) -> Option<serde
     None
 }
 
+/// The JSON document in a model turn: the last fenced ```json block that
+/// parses, else the last balanced top-level object that parses. A brace
+/// inside a string does not count and a string's escapes are honoured
+/// (`object_spans`), and an object is taken whole: `{"a":{"b":1}}` is the
+/// outer object, never `{"b":1}`. This decides what `seal_soul` seals, so
+/// `extraction_tests` pins it.
 fn extract_json_from_text(text: &str) -> Option<serde_json::Value> {
-    // Look for ```json ... ``` blocks
+    let mut fenced = None;
     let mut search = text;
     while let Some(start) = search.find("```json") {
         let after_marker = &search[start + 7..];
         if let Some(end) = after_marker.find("```") {
             let json_str = after_marker[..end].trim();
-            if let Ok(val) = serde_json::from_str(json_str) {
-                return Some(val);
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                fenced = Some(val);
             }
         }
-        search = &search[start + 7..];
+        search = after_marker;
     }
+    if fenced.is_some() {
+        return fenced;
+    }
+    object_spans(text)
+        .into_iter()
+        .rev()
+        .find_map(|(start, end)| serde_json::from_str(&text[start..end]).ok())
+}
 
-    // Fallback: try to find any JSON object in the text
-    if let Some(start) = text.rfind('{') {
-        // Find matching closing brace
-        let mut depth = 0;
-        let mut end = None;
-        for (i, ch) in text[start..].char_indices() {
-            match ch {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        end = Some(start + i + 1);
-                        break;
+/// The byte spans of every balanced `{…}` at the top level of `text`,
+/// string-aware: a brace inside a string does not count, and an escaped
+/// quote does not end the string (`db/client.rs::literal_end` is the same
+/// walk). An object left open yields nothing.
+fn object_spans(text: &str) -> Vec<(usize, usize)> {
+    let bytes = text.as_bytes();
+    let mut spans = Vec::new();
+    let (mut depth, mut start, mut i) = (0usize, 0usize, 0usize);
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' if depth > 0 => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b'"' {
+                    if bytes[i] == b'\\' {
+                        i += 1;
                     }
+                    i += 1;
                 }
-                _ => {}
             }
+            b'{' => {
+                if depth == 0 {
+                    start = i;
+                }
+                depth += 1;
+            }
+            b'}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    spans.push((start, i + 1));
+                }
+            }
+            _ => {}
         }
-        if let Some(end) = end
-            && let Ok(val) = serde_json::from_str(&text[start..end])
-        {
-            return Some(val);
-        }
+        i += 1;
     }
-
-    None
+    spans
 }
 
 #[cfg(test)]
@@ -543,5 +567,70 @@ mod tests {
             "flat seal warning present"
         );
         assert!(!prompt.contains("imported"), "import wording leaked");
+    }
+}
+
+#[cfg(test)]
+mod extraction_tests {
+    //! What becomes the sealed soul (#53 b5): the fenced block first, a
+    //! bare object whole and string-aware, the last assistant turn that
+    //! carries one, never a user turn.
+    use super::{extract_json_from_text, extract_last_json_document};
+    use crate::brain::Message;
+    use serde_json::json;
+
+    #[test]
+    fn a_fenced_block_is_preferred_over_a_stray_brace() {
+        let text = "Here is the soul { not json. Then:\n```json\n{\"name\":\"Embra\",\"values\":[1,2]}\n```\nDone.";
+        assert_eq!(extract_json_from_text(text), Some(json!({"name":"Embra","values":[1,2]})));
+    }
+
+    #[test]
+    fn a_bare_object_parses_without_a_fence() {
+        assert_eq!(extract_json_from_text("the document {\"k\":\"v\"} ends here"), Some(json!({"k":"v"})));
+    }
+
+    #[test]
+    fn a_brace_inside_a_string_does_not_end_the_object() {
+        let text = r#"{"purpose":"end a sentence} like this","x":1}"#;
+        assert_eq!(
+            extract_json_from_text(text),
+            Some(json!({"purpose":"end a sentence} like this","x":1}))
+        );
+        let text = r#"{"q":"she said \"}\"","x":1}"#;
+        assert_eq!(extract_json_from_text(text), Some(json!({"q":"she said \"}\"","x":1})));
+    }
+
+    #[test]
+    fn a_nested_object_is_taken_whole() {
+        assert_eq!(extract_json_from_text(r#"{"a":{"b":1}}"#), Some(json!({"a":{"b":1}})));
+        assert_eq!(
+            extract_json_from_text(r#"prose {"a":{"b":{"c":[1,{"d":2}]}}} prose"#),
+            Some(json!({"a":{"b":{"c":[1,{"d":2}]}}}))
+        );
+    }
+
+    #[test]
+    fn the_last_assistant_turn_with_json_wins_and_a_user_turn_is_never_read() {
+        let history = [
+            Message::assistant("no json here"),
+            Message::user("```json\n{\"from\":\"user\"}\n```"),
+            Message::assistant("```json\n{\"pick\":\"me\"}\n```"),
+            Message::assistant("no json"),
+        ];
+        assert_eq!(extract_last_json_document(&history), Some(json!({"pick":"me"})));
+        let only_user = [Message::user("```json\n{\"from\":\"user\"}\n```")];
+        assert_eq!(extract_last_json_document(&only_user), None);
+    }
+
+    #[test]
+    fn the_last_fenced_block_that_parses_wins_and_open_text_yields_nothing() {
+        let text = "```json\n{\"draft\":1}\n```\ncorrected:\n```json\n{\"final\":2}\n```";
+        assert_eq!(extract_json_from_text(text), Some(json!({"final":2})));
+        let text = "```json\n{\"first\":1}\n```\nthen a broken one:\n```json\n{broken\n```";
+        assert_eq!(extract_json_from_text(text), Some(json!({"first":1})));
+        assert_eq!(extract_json_from_text("open { and never closed \"}\""), None);
+        assert_eq!(extract_json_from_text("```json\n{broken\n```"), None);
+        assert_eq!(extract_json_from_text("no object at all"), None);
     }
 }

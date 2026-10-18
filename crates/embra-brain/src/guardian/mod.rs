@@ -763,7 +763,9 @@ async fn run_replicant_check(
 ) -> Result<Option<(replicant::ReplicantVerdict, String)>, String> {
     let soul = match crate::learning::load_soul(db).await {
         Ok(Some(s)) => s,
-        _ => return Ok(None),
+        Ok(None) => return Ok(None),
+        // A database error is not "no soul": every caller fails closed.
+        Err(e) => return Err(format!("soul read failed — {e}")),
     };
     let provider =
         crate::grpc_service::build_provider_from_config(cfg, &provider_state_key(cfg), None)
@@ -782,6 +784,22 @@ fn replicant_record(v: &replicant::ReplicantVerdict, model: &str, now: &str) -> 
         rationale: v.rationale.clone(),
         model: model.to_string(),
         judged_at: now.to_string(),
+    }
+}
+
+/// Why a proposal may not take a name that has a record: a working or
+/// building tool is the operator's, and a pending proposal waits for the
+/// operator's verdict and is not replaced under them (#11). A failed build
+/// may be proposed again.
+fn proposal_is_blocked_by(status: &ToolStatus) -> Option<&'static str> {
+    match status {
+        ToolStatus::Ready | ToolStatus::Building => Some(
+            "already exists; choose a different name, or ask the operator to /guardian delete it first",
+        ),
+        ToolStatus::Proposed => Some(
+            "is a pending proposal; the operator decides it with /guardian approve or /guardian reject before another is made under this name",
+        ),
+        ToolStatus::Failed => None,
     }
 }
 
@@ -815,13 +833,13 @@ pub async fn propose(
         ))
     })?;
 
-    // Don't let a proposal clobber a working (or building) operator tool.
+    // A proposal never clobbers a working (or building) operator tool, and
+    // never replaces a pending proposal under the operator.
     if let Some(existing) = load_doc(db, &module.name).await
-        && matches!(existing.status, ToolStatus::Ready | ToolStatus::Building)
+        && let Some(why) = proposal_is_blocked_by(&existing.status)
     {
         return Err(DispatchError::Handler(format!(
-            "guardian: a tool named '{}' already exists (status: {}). Choose a different name, \
-             or ask the operator to /guardian delete it first.",
+            "guardian: a tool named '{}' {why} (status: {}).",
             module.name,
             format!("{:?}", existing.status).to_lowercase()
         )));
@@ -940,9 +958,47 @@ async fn approve(db: &Arc<WardsonDbClient>, name: &str) -> String {
             );
         }
     };
+    // The approval is bound to the source the operator reviewed: a record
+    // whose stored source no longer matches its recorded hash is not built.
+    if !doc.source_matches(&doc.source) {
+        return format!(
+            "guardian: proposal '{name}' changed since it was recorded (its source no longer \
+             matches its hash). Not built — have the intelligence re-propose."
+        );
+    }
+    // The replicant check runs again, against the soul as it is sealed now;
+    // a check that cannot run fails closed.
+    let cfg = match crate::config::load_config(db).await {
+        Ok(c) => c,
+        Err(e) => {
+            return format!(
+                "guardian: could not load config for the replicant check ({e}). '{name}' not built."
+            );
+        }
+    };
+    let now = chrono::Utc::now().to_rfc3339();
+    let record = match run_replicant_check(db, &cfg, &module).await {
+        Ok(Some((verdict, model))) => {
+            if verdict.is_refuse() {
+                let touched = if verdict.touched_lines.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (touched: {})", verdict.touched_lines.join("; "))
+                };
+                return format!(
+                    "guardian: '{name}' did not pass the replicant check{touched} — {}. Not built.",
+                    verdict.rationale
+                );
+            }
+            Some(replicant_record(&verdict, &model, &now))
+        }
+        Ok(None) => return format!("guardian: no sealed soul to check '{name}' against. Not built."),
+        Err(e) => return format!("guardian: {e}. '{name}' not built — try again."),
+    };
     let mut d = doc.clone();
     d.status = ToolStatus::Building;
-    d.updated_at = chrono::Utc::now().to_rfc3339();
+    d.replicant = record;
+    d.updated_at = now;
     if let Err(e) = upsert(db, &d).await {
         return format!("guardian: could not start build for '{name}' — {e}");
     }
@@ -2240,5 +2296,49 @@ mod budget_tests {
             Duration::from_secs(50),
             "the deadline follows the asked budget"
         );
+    }
+}
+
+#[cfg(test)]
+mod replicant_gate_tests {
+    //! The replicant gate fails closed on a database error on every path,
+    //! and a pending proposal is not replaced under the operator (#11).
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // Deserialized, not a struct literal: see `learning::phases` tests.
+    fn config() -> SystemConfig {
+        serde_json::from_value(serde_json::json!({
+            "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase1",
+            "created_at": "", "version": "test", "api_provider": "anthropic"
+        }))
+        .expect("minimal config deserializes")
+    }
+
+    #[tokio::test]
+    async fn a_soul_read_error_fails_the_gate_closed() {
+        let module = embra_guardian::validate(embra_guardian::shipped::HTTP_REQUEST.source, &reserved_names())
+            .expect("the shipped source validates");
+        // The database fails: not "no soul", an error every caller refuses on.
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/soul.invariant")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+        Mock::given(method("GET")).and(path("/soul.invariant/docs/soul")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let err = run_replicant_check(&db, &config(), &module).await.unwrap_err();
+        assert!(err.starts_with("soul read failed"), "{err}");
+        // No collection at all is "no soul": nothing to check against.
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/soul.invariant")).respond_with(ResponseTemplate::new(404)).mount(&server).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        assert!(matches!(run_replicant_check(&db, &config(), &module).await, Ok(None)));
+    }
+
+    #[test]
+    fn a_pending_proposal_cannot_be_overwritten() {
+        assert!(proposal_is_blocked_by(&ToolStatus::Proposed).is_some_and(|w| w.contains("pending proposal")));
+        assert!(proposal_is_blocked_by(&ToolStatus::Ready).is_some_and(|w| w.contains("already exists")));
+        assert!(proposal_is_blocked_by(&ToolStatus::Building).is_some());
+        assert!(proposal_is_blocked_by(&ToolStatus::Failed).is_none(), "a failed build may be proposed again");
     }
 }

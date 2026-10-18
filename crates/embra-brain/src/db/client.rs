@@ -292,13 +292,25 @@ impl WardsonDbClient {
         Ok(())
     }
 
+    /// Whether a collection exists: a 2xx is yes, a 404 is no. Any other
+    /// answer is an error, never an absence: a caller that creates on
+    /// "absent" or gates on "sealed" must not read a failing server as an
+    /// empty one (the replicant check fails closed on it).
     pub async fn collection_exists(&self, name: &str) -> Result<bool> {
         let resp = self
             .http_client
             .get(self.url(&[Segment::Collection(name)])?)
             .send()
             .await?;
-        Ok(resp.status().is_success())
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(true);
+        }
+        if status.as_u16() == 404 {
+            return Ok(false);
+        }
+        let body = resp.text().await.unwrap_or_default();
+        Err(WardsonDbError::Api { status: status.as_u16(), body }.into())
     }
 
     /// Drop an entire collection (docs, indexes, and registry entry).
@@ -1285,5 +1297,27 @@ mod name_grammar_tests {
         ] {
             assert!(segment_ok(Segment::Collection(coll)).is_ok(), "{coll}");
         }
+    }
+}
+
+#[cfg(test)]
+mod collection_exists_tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// A failing server is an error, not an absent collection: the soul
+    /// gates and the replicant check read `Err` as "fail closed".
+    #[tokio::test]
+    async fn a_server_error_on_collection_exists_is_an_error_not_an_absence() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/present")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+        Mock::given(method("GET")).and(path("/absent")).respond_with(ResponseTemplate::new(404)).mount(&server).await;
+        Mock::given(method("GET")).and(path("/broken")).respond_with(ResponseTemplate::new(500).set_body_string("boom")).mount(&server).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        assert!(db.collection_exists("present").await.unwrap());
+        assert!(!db.collection_exists("absent").await.unwrap());
+        let err = db.collection_exists("broken").await.unwrap_err().to_string();
+        assert!(err.contains("500") && err.contains("boom"), "{err}");
     }
 }
