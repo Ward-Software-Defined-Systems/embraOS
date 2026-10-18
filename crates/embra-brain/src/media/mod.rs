@@ -23,6 +23,7 @@ pub mod offer;
 pub mod replay;
 pub mod store;
 pub mod text;
+pub mod tiles;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use embra_tools_core::ToolImage;
@@ -44,6 +45,15 @@ pub const MEDIA_INLINE_MAX: usize = 1_572_864;
 /// tier (Claude 4.7+): the API downscales anything larger server-side, so
 /// more pixels are pure payload.
 pub const MEDIA_LONG_EDGE_MAX: u32 = 2576;
+/// Longest edge shown whole: twice the vision box. Measured 2026-10-17 on
+/// page captures 800 px wide: whole at 1.7× down (4,385 px) stays
+/// readable; at 3.1× (8,000 px) the body text is gone. Past this edge
+/// `image_view` shows an image in tiles at full scale (`tiles`).
+pub const MEDIA_TILE_PAST: u32 = 2 * MEDIA_LONG_EDGE_MAX;
+/// Tiles one `image_view` call hands the model: the dispatcher's
+/// per-result image cap (`tools::registry::MAX_TOOL_RESULT_IMAGES`; the
+/// relation is asserted beside the tool). The rest come part by part.
+pub const MEDIA_TILES_PER_VIEW: usize = 4;
 /// Pixel ceiling, checked from the header BEFORE decode: 64 megapixels,
 /// the area of the former 8000×8000 per-edge cap, in any shape. A
 /// full-page screenshot is tall and narrow (800×20,000 px is 16
@@ -212,6 +222,8 @@ mod tests {
         assert_eq!(MEDIA_INLINE_MAX, 1_572_864);
         assert_eq!(MEDIA_LONG_EDGE_MAX, 2576);
         assert_eq!(MEDIA_DECODE_PIXELS_MAX, 64_000_000);
+        assert_eq!(MEDIA_TILE_PAST, 5152);
+        assert_eq!(MEDIA_TILES_PER_VIEW, 4);
         // A decoded RGBA buffer at the pixel cap fits under the decoder's
         // allocation ceiling with room for the decoder's own buffers.
         const { assert!(MEDIA_DECODE_PIXELS_MAX * 4 * 2 <= MEDIA_DECODE_ALLOC_MAX) };

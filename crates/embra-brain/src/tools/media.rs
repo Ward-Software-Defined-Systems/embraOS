@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use super::registry::DispatchContext;
 use crate::media::store::{self, MediaOrigin, MediaStore};
-use crate::media::{ingest, MEDIA_UPLOAD_MAX};
+use crate::media::{ingest, tiles, MEDIA_LONG_EDGE_MAX, MEDIA_TILES_PER_VIEW, MEDIA_UPLOAD_MAX};
 use crate::provider::image::{
     self as image_provider, ImageGenError, ImageGenRequest, ImageProvider, OutputFormat, IMAGE_GEN_TIMEOUT,
 };
@@ -20,19 +20,27 @@ use crate::provider::image::{
 /// Reference images accepted per generation call.
 pub const IMAGE_GENERATE_MAX_REFERENCES: usize = 4;
 
+// One part of a tiled view is one tool result: the dispatcher's image cap
+// must hold every tile, or `apply_caps` would drop the last ones with a note.
+const _: () = assert!(MEDIA_TILES_PER_VIEW <= super::registry::MAX_TOOL_RESULT_IMAGES);
+
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "image_view",
-    description = "Look at an image file (PNG, JPEG, GIF or WebP) — the image itself is returned to you as an image block, not text. Use this instead of file_read for any image: screenshots, diagrams, photos, rendered charts, images the operator mentioned by path. path may be absolute or workspace-relative (/embra/workspace). The file is normalized to the vision tier before you see it (long edge ≤ 2576 px, ≤ 1.5 MiB; originals untouched). Images already in /embra/workspace/MEDIA keep their id; any other file gets a content-addressed view-<hash> copy there so the operator's UI can show what you looked at (viewing the same file twice reuses the copy). Files over 12 MiB and non-image files are refused with an explanation."
+    description = "Look at an image file (PNG, JPEG, GIF or WebP) — the image itself is returned to you as an image block, not text. Use this instead of file_read for any image: screenshots, diagrams, photos, rendered charts, images the operator mentioned by path. path may be absolute or workspace-relative (/embra/workspace). The file is normalized to the vision tier before you see it (long edge ≤ 2576 px, ≤ 1.5 MiB; originals untouched). A long image, such as a full-page screenshot with a long edge over 5152 px, is cut along that axis into tiles that keep full scale, four tiles per call: the header names each tile's coordinates and the parts, and part=2, 3, … shows the next four. Images over 64 megapixels are refused. Images already in /embra/workspace/MEDIA keep their id; any other file gets a content-addressed view-<hash> copy there (one per tile) so the operator's UI can show what you looked at (viewing the same file twice reuses the copy). Files over 12 MiB and non-image files are refused with an explanation."
 )]
 pub struct ImageViewArgs {
     /// Path to the image file — absolute, or relative to /embra/workspace.
     pub path: String,
+    /// For a long image shown in tiles: which group of four tiles to show, counting from 1 (the default).
+    #[serde(default)]
+    pub part: Option<u32>,
 }
 
 impl ImageViewArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<ToolOutput, DispatchError> {
-        image_view(&MediaStore::default_store(), &self.path, ctx.session_name).await
+        let part = self.part.map_or(1, |p| p as usize);
+        image_view(&MediaStore::default_store(), &self.path, part, ctx.session_name).await
     }
 }
 
@@ -56,7 +64,12 @@ async fn readable_by_every_provider(
 /// Store-parameterized core (unit-tested against a temp store). User-facing
 /// problems come back as `Ok(text)` per house style; only store corruption
 /// is a hard `DispatchError::Handler`.
-pub async fn image_view(store: &MediaStore, path: &str, session: &str) -> Result<ToolOutput, DispatchError> {
+pub async fn image_view(
+    store: &MediaStore,
+    path: &str,
+    part: usize,
+    session: &str,
+) -> Result<ToolOutput, DispatchError> {
     let resolved = store::resolve_read_path(path);
     let md = match tokio::fs::metadata(&resolved).await {
         Ok(md) => md,
@@ -96,15 +109,16 @@ pub async fn image_view(store: &MediaStore, path: &str, session: &str) -> Result
             Ok(b) => b,
             Err(e) => return Ok(ToolOutput::text(format!("image_view: {} — {}", resolved.display(), e))),
         };
-        let normalized = match ingest::normalize(bytes).await {
-            Ok(n) => n,
-            Err(e) => return Ok(ToolOutput::text(format!("image_view: {} — {}", resolved.display(), e))),
-        };
         let name = resolved
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("image")
             .to_string();
+        let normalized = match tiles::view(bytes, part).await {
+            Ok(tiles::View::Whole(n)) => n,
+            Ok(tiles::View::Tiled(tiled)) => return tiled_output(store, &resolved, &name, session, tiled).await,
+            Err(e) => return Ok(ToolOutput::text(format!("image_view: {} — {}", resolved.display(), e))),
+        };
         let data = normalized.bytes.clone();
         let meta = store
             .put(MediaOrigin::Viewed, &name, session, normalized)
@@ -113,7 +127,7 @@ pub async fn image_view(store: &MediaStore, path: &str, session: &str) -> Result
         (meta, data)
     };
 
-    let header = format!(
+    let mut header = format!(
         "=== image {} ({}×{}, {} bytes, {}; media id {}) ===\nThe image follows as an image block.",
         resolved.display(),
         meta.width,
@@ -122,6 +136,9 @@ pub async fn image_view(store: &MediaStore, path: &str, session: &str) -> Result
         meta.media_type,
         meta.id
     );
+    if part > 1 {
+        header.push_str("\n(part applies to a long image shown in tiles; this image is shown whole.)");
+    }
     let image = ToolImage {
         media_type: meta.media_type.clone(),
         width: meta.width,
@@ -131,6 +148,76 @@ pub async fn image_view(store: &MediaStore, path: &str, session: &str) -> Result
         data,
     };
     Ok(ToolOutput::text(header).with_image(image))
+}
+
+/// The tiled form of `image_view`: every tile a `Viewed` copy in the store
+/// and an image block, the header naming where each tile was cut and
+/// which parts remain.
+async fn tiled_output(
+    store: &MediaStore,
+    resolved: &std::path::Path,
+    name: &str,
+    session: &str,
+    tiled: tiles::Tiled,
+) -> Result<ToolOutput, DispatchError> {
+    let plan = tiled.plan;
+    let coord = plan.axis.coordinate();
+    let (tile_w, tile_h) = plan.tile_size();
+    let scale = if plan.scale_percent() == 100 {
+        "at full scale".to_string()
+    } else {
+        format!("scaled to {}% ({} px on the short edge)", plan.scale_percent(), MEDIA_LONG_EDGE_MAX)
+    };
+    let mut text = format!(
+        "=== image {} ({}×{} px; shown in {} tiles of {}×{} px, {}, {}) ===\nPart {} of {}: {}.\n",
+        resolved.display(),
+        plan.width,
+        plan.height,
+        plan.total,
+        tile_w,
+        tile_h,
+        plan.axis.order(),
+        scale,
+        tiled.part,
+        plan.parts(),
+        plan.tiles_text(tiled.part)
+    );
+    let mut images = Vec::with_capacity(tiled.tiles.len());
+    for tile in tiled.tiles {
+        let (a, b) = plan.span(&tile.rect);
+        // The store keeps a name's basename, so no slash in it.
+        let tile_name = format!("{name} [tile {} of {}]", tile.rect.index, plan.total);
+        let caption = format!("tile {}/{}, {coord} {a}–{b}", tile.rect.index, plan.total);
+        let data = tile.image.bytes.clone();
+        let meta = store
+            .put(MediaOrigin::Viewed, &tile_name, session, tile.image)
+            .await
+            .map_err(|e| DispatchError::Handler(format!("image_view: store copy failed: {e}")))?;
+        text.push_str(&format!(
+            "Tile {} ({coord} {a}–{b}): {}×{}, {} bytes, {}; media id {}\n",
+            tile.rect.index,
+            meta.width,
+            meta.height,
+            data.len(),
+            meta.media_type,
+            meta.id
+        ));
+        images.push(ToolImage {
+            media_type: meta.media_type.clone(),
+            width: meta.width,
+            height: meta.height,
+            name: meta.name.clone(),
+            media_ref: Some(store::to_ref_meta(&meta, store.dir(), &caption)),
+            data,
+        });
+    }
+    if plan.parts() > 1 {
+        text.push_str(&format!("Parts: {}; ask with part=N.\n", plan.parts_text()));
+    }
+    text.push_str("The tiles follow as image blocks, in this order.");
+    let mut out = ToolOutput::text(text);
+    out.images = images;
+    Ok(out)
 }
 
 
@@ -394,7 +481,7 @@ mod tests {
         let meta = store.put(MediaOrigin::Attached, "anim.gif", "s", old).await.unwrap();
         assert_eq!(meta.media_type, "image/gif");
         let stored = store::to_attachment_ref(&meta, store.dir()).path;
-        let out = image_view(&store, &stored, "s").await.unwrap();
+        let out = image_view(&store, &stored, 1, "s").await.unwrap();
         assert_eq!(out.images.len(), 1);
         assert_eq!(out.images[0].media_type, "image/png");
         assert_eq!((out.images[0].width, out.images[0].height), (5, 2));
@@ -402,8 +489,54 @@ mod tests {
 
         let src = dir.0.join("loop.gif");
         std::fs::write(&src, gif_fixture(3, 3)).unwrap();
-        let out = image_view(&store, src.to_str().unwrap(), "s").await.unwrap();
+        let out = image_view(&store, src.to_str().unwrap(), 1, "s").await.unwrap();
         assert_eq!(out.images[0].media_type, "image/png");
+    }
+
+    /// A long image comes back in tiles at full scale, four per part, each
+    /// a `view-` copy; the header names the cuts and the parts.
+    #[tokio::test]
+    async fn image_view_shows_a_long_image_in_tiles_four_per_part() {
+        let dir = TempDir::new();
+        let store = MediaStore::at(dir.0.join("MEDIA"));
+        let src = dir.0.join("page.png");
+        std::fs::write(&src, crate::media::tiles::tests::banded_png(600, 11_000)).unwrap();
+        let out = image_view(&store, src.to_str().unwrap(), 1, "s").await.unwrap();
+        assert_eq!(out.images.len(), 4, "{}", out.text);
+        assert!(
+            out.text.contains("shown in 5 tiles of 600×2200 px, top to bottom, at full scale"),
+            "{}",
+            out.text
+        );
+        assert!(out.text.contains("Part 1 of 2: tiles 1–4."), "{}", out.text);
+        assert!(out.text.contains("Tile 4 (y 6600–8799): 600×2200"), "{}", out.text);
+        assert!(
+            out.text.contains("Parts: 1 = tiles 1–4 (y 0–8799), 2 = tile 5 (y 8800–10999); ask with part=N."),
+            "{}",
+            out.text
+        );
+        for (i, img) in out.images.iter().enumerate() {
+            assert_eq!((img.width, img.height), (600, 2200));
+            assert_eq!(img.name, format!("page.png [tile {} of 5]", i + 1));
+            let r = img.media_ref.as_ref().expect("store ref");
+            assert!(r.id.starts_with("view-"));
+            assert_eq!(r.caption, format!("tile {}/5, y {}–{}", i + 1, i * 2200, (i + 1) * 2200 - 1));
+            assert!(out.text.contains(&r.id));
+        }
+        assert_eq!(store.usage().await.unwrap().0, 4);
+        let out = image_view(&store, src.to_str().unwrap(), 2, "s").await.unwrap();
+        assert_eq!(out.images.len(), 1, "{}", out.text);
+        assert!(out.text.contains("Part 2 of 2: tile 5."), "{}", out.text);
+        assert_eq!(store.usage().await.unwrap().0, 5);
+        let out = image_view(&store, src.to_str().unwrap(), 3, "s").await.unwrap();
+        assert!(out.images.is_empty());
+        assert!(out.text.contains("part 3 does not exist; the image has 2 parts"), "{}", out.text);
+        // A short image is shown whole whatever part is asked, and says so.
+        let short = dir.0.join("short.png");
+        std::fs::write(&short, png_fixture(6, 4)).unwrap();
+        let out = image_view(&store, short.to_str().unwrap(), 2, "s").await.unwrap();
+        assert_eq!(out.images.len(), 1);
+        assert!(out.text.contains("shown whole"), "{}", out.text);
     }
 
     #[tokio::test]
@@ -412,13 +545,13 @@ mod tests {
         let store = MediaStore::at(dir.0.join("MEDIA"));
         let svg = dir.0.join("x.png");
         std::fs::write(&svg, b"<svg/>").unwrap();
-        let out = image_view(&store, svg.to_str().unwrap(), "s").await.unwrap();
+        let out = image_view(&store, svg.to_str().unwrap(), 1, "s").await.unwrap();
         assert!(out.images.is_empty());
         assert!(out.text.contains("not a supported image"), "{}", out.text);
-        let out = image_view(&store, dir.0.join("nope.png").to_str().unwrap(), "s").await.unwrap();
+        let out = image_view(&store, dir.0.join("nope.png").to_str().unwrap(), 1, "s").await.unwrap();
         assert!(out.images.is_empty());
         assert!(out.text.starts_with("image_view:"));
-        let out = image_view(&store, dir.0.to_str().unwrap(), "s").await.unwrap();
+        let out = image_view(&store, dir.0.to_str().unwrap(), 1, "s").await.unwrap();
         assert!(out.text.contains("is not a file"));
     }
 
@@ -428,7 +561,7 @@ mod tests {
         let store = MediaStore::at(dir.0.join("MEDIA"));
         let src = dir.0.join("diagram.png");
         std::fs::write(&src, png_fixture(6, 4)).unwrap();
-        let out = image_view(&store, src.to_str().unwrap(), "s").await.unwrap();
+        let out = image_view(&store, src.to_str().unwrap(), 1, "s").await.unwrap();
         assert_eq!(out.images.len(), 1);
         let img = &out.images[0];
         assert_eq!(img.media_type, "image/png");
@@ -440,12 +573,12 @@ mod tests {
         assert!(out.text.starts_with("=== image "));
         assert!(out.text.contains(&r.id));
         // Second view of the same bytes → same id, one file.
-        let again = image_view(&store, src.to_str().unwrap(), "s").await.unwrap();
+        let again = image_view(&store, src.to_str().unwrap(), 1, "s").await.unwrap();
         assert_eq!(again.images[0].media_ref.as_ref().unwrap().id, r.id);
         assert_eq!(store.usage().await.unwrap().0, 1);
         // Viewing the stored copy itself keeps its id (no new file).
         let stored_path = r.path.clone();
-        let third = image_view(&store, &stored_path, "s").await.unwrap();
+        let third = image_view(&store, &stored_path, 1, "s").await.unwrap();
         assert_eq!(third.images[0].media_ref.as_ref().unwrap().id, r.id);
         assert_eq!(store.usage().await.unwrap().0, 1);
     }

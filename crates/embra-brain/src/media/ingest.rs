@@ -110,6 +110,8 @@ pub enum IngestError {
     PixelLimit { width: u32, height: u32 },
     #[error("image decode failed: {0}")]
     Decode(String),
+    #[error("part {part} does not exist; the image has {parts} parts (part=1 to part={parts})")]
+    NoSuchPart { part: usize, parts: usize },
 }
 
 /// Output of [`normalize`]: the bytes to store / send, plus what they are.
@@ -128,11 +130,19 @@ static NORMALIZE_SLOTS: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(MEDIA_NORM
 /// Normalize on a blocking thread, at most [`MEDIA_NORMALIZE_CONCURRENCY`]
 /// at a time (decode is CPU- and memory-heavy; the VM has 4 GB).
 pub async fn normalize(bytes: Vec<u8>) -> Result<Normalized, IngestError> {
+    on_blocking_thread(move || normalize_blocking(bytes)).await
+}
+
+/// Runs a decode on a blocking thread behind the normalize semaphore: the
+/// one seat for every pixel decode, `tiles::view` included.
+pub(super) async fn on_blocking_thread<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, IngestError> + Send + 'static,
+) -> Result<T, IngestError> {
     let _permit = NORMALIZE_SLOTS
         .acquire()
         .await
         .map_err(|e| IngestError::Decode(e.to_string()))?;
-    tokio::task::spawn_blocking(move || normalize_blocking(bytes))
+    tokio::task::spawn_blocking(work)
         .await
         .map_err(|e| IngestError::Decode(format!("normalize task failed: {e}")))?
 }
@@ -162,81 +172,91 @@ fn megapixels(w: &u32, h: &u32) -> String {
     format!("{}.{}", pixels / 1_000_000, (pixels % 1_000_000) / 100_000)
 }
 
-/// Header dimensions only (no pixel decode) — used to register a
-/// generated image at FULL resolution in the store while the model gets
-/// the normalized copy. Same limits/bomb guard as [`normalize_blocking`].
-pub fn probe_dimensions(bytes: &[u8]) -> Result<(ImageKind, u32, u32), IngestError> {
+/// What the header says, before any pixel buffer exists: the format, the
+/// dimensions as stored (before the EXIF orientation) and the orientation.
+pub(super) struct Probe {
+    pub kind: ImageKind,
+    pub width: u32,
+    pub height: u32,
+    pub orientation: Orientation,
+}
+
+/// The header probe, shared by every decode path: the byte gate, the
+/// sniff, the decoder's header read under [`decode_limits`], then this
+/// module's size check. A decode bomb is refused here, by a message that
+/// names its size; the decoder's allocation ceiling on the pixel decode is
+/// the belt to this brace.
+pub(super) fn probe(bytes: &[u8]) -> Result<Probe, IngestError> {
     if bytes.len() > MEDIA_UPLOAD_MAX {
         return Err(IngestError::TooLarge(bytes.len(), MEDIA_UPLOAD_MAX));
     }
     let kind = sniff(bytes).ok_or(IngestError::NotAnImage)?;
     let mut reader = ImageReader::with_format(Cursor::new(bytes), kind.format());
     reader.limits(decode_limits());
-    let decoder = reader
+    let mut decoder = reader
         .into_decoder()
         .map_err(|e| IngestError::Decode(e.to_string()))?;
-    let (w, h) = decoder.dimensions();
-    if over_pixel_cap(w, h) {
-        return Err(IngestError::PixelLimit { width: w, height: h });
+    let (width, height) = decoder.dimensions();
+    if over_pixel_cap(width, height) {
+        return Err(IngestError::PixelLimit { width, height });
     }
-    Ok((kind, w, h))
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    Ok(Probe { kind, width, height, orientation })
 }
 
-/// Synchronous core of [`normalize`] (unit-tested directly).
-pub fn normalize_blocking(bytes: Vec<u8>) -> Result<Normalized, IngestError> {
-    if bytes.len() > MEDIA_UPLOAD_MAX {
-        return Err(IngestError::TooLarge(bytes.len(), MEDIA_UPLOAD_MAX));
-    }
-    let kind = sniff(&bytes).ok_or(IngestError::NotAnImage)?;
+/// Header dimensions only (no pixel decode) — used to register a
+/// generated image at FULL resolution in the store while the model gets
+/// the normalized copy. Same limits/bomb guard as [`normalize_blocking`].
+pub fn probe_dimensions(bytes: &[u8]) -> Result<(ImageKind, u32, u32), IngestError> {
+    let p = probe(bytes)?;
+    Ok((p.kind, p.width, p.height))
+}
 
-    // Probe pass: header dimensions + orientation come from the decoder
-    // BEFORE any pixel buffer exists (a decode bomb is refused here, by a
-    // message that names its size; the decoder's limits on the pixel decode
-    // below are the belt to this brace). The probe borrows `bytes`, so it
-    // lives in its own scope and the untouched bytes can move out below.
-    let (w, h, orientation) = {
-        let mut reader = ImageReader::with_format(Cursor::new(&bytes), kind.format());
-        reader.limits(decode_limits());
-        let mut decoder = reader
-            .into_decoder()
-            .map_err(|e| IngestError::Decode(e.to_string()))?;
-        let (w, h) = decoder.dimensions();
-        if over_pixel_cap(w, h) {
-            return Err(IngestError::PixelLimit { width: w, height: h });
-        }
-        let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
-        (w, h, orientation)
-    };
-    let needs_rotate = orientation != Orientation::NoTransforms;
-    let needs_scale = w.max(h) > MEDIA_LONG_EDGE_MAX;
-    // A GIF never stays a GIF (module doc): the ladder below writes its
-    // first frame as PNG.
-    let needs_reencode = kind == ImageKind::Gif;
-    if !needs_rotate && !needs_scale && !needs_reencode && bytes.len() <= MEDIA_INLINE_MAX {
-        return Ok(Normalized {
-            bytes,
-            kind,
-            width: w,
-            height: h,
-            transformed: false,
-        });
-    }
-
-    let mut reader = ImageReader::with_format(Cursor::new(&bytes), kind.format());
+/// The pixel decode under [`decode_limits`], the orientation applied. The
+/// probe has run, so the size is under the cap.
+pub(super) fn decode(bytes: &[u8], probe: &Probe) -> Result<DynamicImage, IngestError> {
+    let mut reader = ImageReader::with_format(Cursor::new(bytes), probe.kind.format());
     reader.limits(decode_limits());
     let decoder = reader
         .into_decoder()
         .map_err(|e| IngestError::Decode(e.to_string()))?;
     let mut img = DynamicImage::from_decoder(decoder).map_err(|e| IngestError::Decode(e.to_string()))?;
-    if needs_rotate {
-        img.apply_orientation(orientation);
+    if probe.orientation != Orientation::NoTransforms {
+        img.apply_orientation(probe.orientation);
     }
-    if needs_scale {
+    Ok(img)
+}
+
+/// A decoded image brought into the vision tier's box: the long edge to
+/// [`MEDIA_LONG_EDGE_MAX`] when it is over, then the encode ladder.
+pub(super) fn fit_whole(mut img: DynamicImage, kind: ImageKind) -> Result<Normalized, IngestError> {
+    if img.width().max(img.height()) > MEDIA_LONG_EDGE_MAX {
         // `resize` fits within the box preserving aspect ratio — exactly
         // "long edge ≤ cap".
         img = img.resize(MEDIA_LONG_EDGE_MAX, MEDIA_LONG_EDGE_MAX, FilterType::Lanczos3);
     }
     encode_ladder(img, kind)
+}
+
+/// Synchronous core of [`normalize`] (unit-tested directly).
+pub fn normalize_blocking(bytes: Vec<u8>) -> Result<Normalized, IngestError> {
+    let p = probe(&bytes)?;
+    let needs_rotate = p.orientation != Orientation::NoTransforms;
+    let needs_scale = p.width.max(p.height) > MEDIA_LONG_EDGE_MAX;
+    // A GIF never stays a GIF (module doc): the ladder below writes its
+    // first frame as PNG.
+    let needs_reencode = p.kind == ImageKind::Gif;
+    if !needs_rotate && !needs_scale && !needs_reencode && bytes.len() <= MEDIA_INLINE_MAX {
+        return Ok(Normalized {
+            bytes,
+            kind: p.kind,
+            width: p.width,
+            height: p.height,
+            transformed: false,
+        });
+    }
+    let img = decode(&bytes, &p)?;
+    fit_whole(img, p.kind)
 }
 
 /// Encode ladder: lossless sources (PNG/GIF/WebP) try PNG first; anything
