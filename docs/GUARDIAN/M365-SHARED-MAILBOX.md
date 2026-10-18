@@ -11,7 +11,8 @@ sees it. Reading and sending mail is then a plain-language ask.
 
 **Validated:** in use with embraOS since 2026-10-09: listing, reading and
 sending through `http_request` with the token stored as below (Steps 1, 2,
-4 and 5). Step 3's scope test: TBD.
+4 and 5). Step 3's scope test, 2026-10-18: in scope for the shared mailbox,
+out of scope for another.
 
 ## What the OS enforces, and what it trusts
 
