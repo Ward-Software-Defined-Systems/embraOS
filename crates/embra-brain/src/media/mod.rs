@@ -44,10 +44,17 @@ pub const MEDIA_INLINE_MAX: usize = 1_572_864;
 /// tier (Claude 4.7+): the API downscales anything larger server-side, so
 /// more pixels are pure payload.
 pub const MEDIA_LONG_EDGE_MAX: u32 = 2576;
-/// Header-declared dimension ceiling checked BEFORE decode (the vision
-/// API's own 8000×8000 limit; a decode bomb is refused here).
-pub const MEDIA_DECODE_DIM_MAX: u32 = 8000;
-/// Decoder allocation ceiling (`image::Limits::max_alloc`).
+/// Pixel ceiling, checked from the header BEFORE decode: 64 megapixels,
+/// the area of the former 8000×8000 per-edge cap, in any shape. A
+/// full-page screenshot is tall and narrow (800×20,000 px is 16
+/// megapixels, 61 MiB decoded); the per-edge cap refused it while it
+/// admitted ten times that memory in a square. A decoded RGBA buffer at
+/// this cap is 256 MiB, half the decoder's allocation ceiling below. The
+/// vision API's own 8000×8000 limit applies to what is sent, and nothing
+/// is sent above [`MEDIA_LONG_EDGE_MAX`].
+pub const MEDIA_DECODE_PIXELS_MAX: u64 = 64_000_000;
+/// Decoder allocation ceiling (`image::Limits::max_alloc`): the belt to
+/// the header check's brace.
 pub const MEDIA_DECODE_ALLOC_MAX: u64 = 512 * 1024 * 1024;
 /// Images accepted on one user message (explicit ids ∪ staged).
 pub const MEDIA_MAX_PER_MESSAGE: usize = 10;
@@ -204,6 +211,10 @@ mod tests {
         assert_eq!(MEDIA_UPLOAD_MAX, 12 * 1024 * 1024);
         assert_eq!(MEDIA_INLINE_MAX, 1_572_864);
         assert_eq!(MEDIA_LONG_EDGE_MAX, 2576);
+        assert_eq!(MEDIA_DECODE_PIXELS_MAX, 64_000_000);
+        // A decoded RGBA buffer at the pixel cap fits under the decoder's
+        // allocation ceiling with room for the decoder's own buffers.
+        const { assert!(MEDIA_DECODE_PIXELS_MAX * 4 * 2 <= MEDIA_DECODE_ALLOC_MAX) };
         assert_eq!(MEDIA_MAX_PER_MESSAGE, 10);
         assert_eq!(MEDIA_HISTORY_MAX_IMAGES, 20);
         assert_eq!(MEDIA_HISTORY_MAX_BYTES, 16 * 1024 * 1024);

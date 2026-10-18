@@ -22,7 +22,7 @@ use once_cell::sync::Lazy;
 use tokio::sync::Semaphore;
 
 use super::{
-    JPEG_QUALITY, MEDIA_DECODE_ALLOC_MAX, MEDIA_DECODE_DIM_MAX, MEDIA_INLINE_MAX, MEDIA_LONG_EDGE_MAX,
+    JPEG_QUALITY, MEDIA_DECODE_ALLOC_MAX, MEDIA_DECODE_PIXELS_MAX, MEDIA_INLINE_MAX, MEDIA_LONG_EDGE_MAX,
     MEDIA_NORMALIZE_CONCURRENCY, MEDIA_UPLOAD_MAX,
 };
 
@@ -102,8 +102,12 @@ pub enum IngestError {
     NotAnImage,
     #[error("image is {0} bytes; the limit is {1} bytes")]
     TooLarge(usize, usize),
-    #[error("image is {0}x{1} px; the limit is {2}x{2} px")]
-    DimensionLimit(u32, u32, u32),
+    #[error(
+        "image is {width}x{height} px, {mp} megapixels; the limit is {limit} megapixels (8000x8000, or any shape of that area)",
+        mp = megapixels(.width, .height),
+        limit = MEDIA_DECODE_PIXELS_MAX / 1_000_000
+    )]
+    PixelLimit { width: u32, height: u32 },
     #[error("image decode failed: {0}")]
     Decode(String),
 }
@@ -133,24 +137,29 @@ pub async fn normalize(bytes: Vec<u8>) -> Result<Normalized, IngestError> {
         .map_err(|e| IngestError::Decode(format!("normalize task failed: {e}")))?
 }
 
-/// The decoder's limits for the pixel decode: the belt to the header
-/// check's brace, with the same numbers.
+/// The decoder's limits: the allocation ceiling alone, the belt to the
+/// header check's brace. The size check is this module's
+/// ([`MEDIA_DECODE_PIXELS_MAX`], an area, which the decoder's per-edge
+/// limits cannot express), and it runs on the header before any pixel
+/// buffer exists, so a refusal names the image's size and the cap. A
+/// per-edge limit set here would refuse while the decoder is being made,
+/// before this module gets to look, with "Image size exceeds limit" and
+/// no number.
 fn decode_limits() -> Limits {
-    let mut limits = probe_limits();
-    limits.max_image_width = Some(MEDIA_DECODE_DIM_MAX);
-    limits.max_image_height = Some(MEDIA_DECODE_DIM_MAX);
-    limits
-}
-
-/// The limits for the header probe: the allocation ceiling alone. The
-/// dimension check there is this module's, so that a refusal names the
-/// image's size and the cap. With the dimension limits set as well, the
-/// decoder refuses while it is being made, before this module gets to
-/// look, and says "Image size exceeds limit" without a number.
-fn probe_limits() -> Limits {
     let mut limits = Limits::default();
     limits.max_alloc = Some(MEDIA_DECODE_ALLOC_MAX);
     limits
+}
+
+/// The header check: the pixel count against [`MEDIA_DECODE_PIXELS_MAX`].
+fn over_pixel_cap(w: u32, h: u32) -> bool {
+    u64::from(w) * u64::from(h) > MEDIA_DECODE_PIXELS_MAX
+}
+
+/// Megapixels with one decimal, for the refusal's text.
+fn megapixels(w: &u32, h: &u32) -> String {
+    let pixels = u64::from(*w) * u64::from(*h);
+    format!("{}.{}", pixels / 1_000_000, (pixels % 1_000_000) / 100_000)
 }
 
 /// Header dimensions only (no pixel decode) — used to register a
@@ -162,13 +171,13 @@ pub fn probe_dimensions(bytes: &[u8]) -> Result<(ImageKind, u32, u32), IngestErr
     }
     let kind = sniff(bytes).ok_or(IngestError::NotAnImage)?;
     let mut reader = ImageReader::with_format(Cursor::new(bytes), kind.format());
-    reader.limits(probe_limits());
+    reader.limits(decode_limits());
     let decoder = reader
         .into_decoder()
         .map_err(|e| IngestError::Decode(e.to_string()))?;
     let (w, h) = decoder.dimensions();
-    if w > MEDIA_DECODE_DIM_MAX || h > MEDIA_DECODE_DIM_MAX {
-        return Err(IngestError::DimensionLimit(w, h, MEDIA_DECODE_DIM_MAX));
+    if over_pixel_cap(w, h) {
+        return Err(IngestError::PixelLimit { width: w, height: h });
     }
     Ok((kind, w, h))
 }
@@ -187,13 +196,13 @@ pub fn normalize_blocking(bytes: Vec<u8>) -> Result<Normalized, IngestError> {
     // lives in its own scope and the untouched bytes can move out below.
     let (w, h, orientation) = {
         let mut reader = ImageReader::with_format(Cursor::new(&bytes), kind.format());
-        reader.limits(probe_limits());
+        reader.limits(decode_limits());
         let mut decoder = reader
             .into_decoder()
             .map_err(|e| IngestError::Decode(e.to_string()))?;
         let (w, h) = decoder.dimensions();
-        if w > MEDIA_DECODE_DIM_MAX || h > MEDIA_DECODE_DIM_MAX {
-            return Err(IngestError::DimensionLimit(w, h, MEDIA_DECODE_DIM_MAX));
+        if over_pixel_cap(w, h) {
+            return Err(IngestError::PixelLimit { width: w, height: h });
         }
         let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
         (w, h, orientation)
@@ -437,33 +446,48 @@ pub(crate) mod tests {
 
     #[test]
     fn normalize_rejects_oversized_dimensions_before_decode() {
-        // The header check is this module's and speaks first, naming the
-        // size and the cap. The decoder's own limits would refuse while the
-        // decoder is made, with "Image size exceeds limit" and no number
-        // (what a full-page screenshot got until 2026-10-17). No pixel
-        // buffer exists either way.
+        // The size check is this module's and speaks first, naming the
+        // size and the cap. A per-edge limit on the decoder would refuse
+        // while the decoder is made, with "Image size exceeds limit" and no
+        // number (what a full-page screenshot got until 2026-10-17). No
+        // pixel buffer exists either way.
         match normalize_blocking(png_header_claiming(9000, 9000)) {
-            Err(e @ IngestError::DimensionLimit(9000, 9000, MEDIA_DECODE_DIM_MAX)) => {
-                assert_eq!(e.to_string(), "image is 9000x9000 px; the limit is 8000x8000 px");
+            Err(e @ IngestError::PixelLimit { width: 9000, height: 9000 }) => {
+                assert_eq!(
+                    e.to_string(),
+                    "image is 9000x9000 px, 81.0 megapixels; the limit is 64 megapixels (8000x8000, or any shape of that area)"
+                );
             }
             other => panic!("expected a refusal naming its size, got {other:?}"),
         }
-        // One edge over the cap is enough: a tall, narrow page capture.
+        // The cap is an area: a tall, narrow page capture far over the
+        // former 8000 px edge is under it, so the probe admits it and what
+        // fails is the pixel decode of a header with a 2×2 image's data
+        // behind it, not the size.
         assert!(matches!(
-            normalize_blocking(png_header_claiming(800, 8001)),
-            Err(IngestError::DimensionLimit(800, 8001, MEDIA_DECODE_DIM_MAX))
+            normalize_blocking(png_header_claiming(800, 20_000)),
+            Err(IngestError::Decode(_))
         ));
     }
 
     #[test]
-    fn probe_dimensions_refuses_an_oversized_header_by_its_size_and_reads_one_at_the_cap() {
-        assert!(matches!(
-            probe_dimensions(&png_header_claiming(800, 8001)),
-            Err(IngestError::DimensionLimit(800, 8001, MEDIA_DECODE_DIM_MAX))
-        ));
-        let (kind, w, h) = probe_dimensions(&png_header_claiming(800, MEDIA_DECODE_DIM_MAX)).unwrap();
-        assert_eq!(kind, ImageKind::Png);
-        assert_eq!((w, h), (800, MEDIA_DECODE_DIM_MAX));
+    fn the_pixel_cap_is_an_area_in_any_shape() {
+        // At the cap in three shapes, and one pixel row or column over.
+        for (w, h) in [(8000, 8000), (800, 80_000), (80_000, 800)] {
+            let (kind, pw, ph) = probe_dimensions(&png_header_claiming(w, h)).unwrap();
+            assert_eq!((kind, pw, ph), (ImageKind::Png, w, h));
+        }
+        for (w, h) in [(8001, 8000), (800, 80_001), (80_001, 800)] {
+            assert!(
+                matches!(
+                    probe_dimensions(&png_header_claiming(w, h)),
+                    Err(IngestError::PixelLimit { width, height }) if width == w && height == h
+                ),
+                "{w}x{h}"
+            );
+        }
+        assert_eq!(megapixels(&800, &20_000), "16.0");
+        assert_eq!(megapixels(&800, &4385), "3.5");
     }
 
     /// CRC-32 as PNG uses it, bit by bit: for the 17 bytes of one header.

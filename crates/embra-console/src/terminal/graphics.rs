@@ -235,14 +235,14 @@ impl std::fmt::Debug for MediaPane {
 
 /// Decode stored bytes for the pane, thumbnailed to `target_px` (the
 /// pane's pixel box × 2 for HiDPI headroom; ratatui-image fits the rest).
-/// Decode limits mirror the brain's ingest guards.
+/// Decode limits mirror the brain's ingest guards: the allocation ceiling
+/// alone. The brain's cap on what the store holds is an area (64
+/// megapixels), which a per-edge limit cannot express.
 pub fn decode_for_pane(bytes: &[u8], target_px: (u32, u32)) -> Result<DynamicImage, String> {
     let mut reader = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| e.to_string())?;
     let mut limits = Limits::default();
-    limits.max_image_width = Some(8000);
-    limits.max_image_height = Some(8000);
     limits.max_alloc = Some(512 * 1024 * 1024);
     reader.limits(limits);
     let img = reader.decode().map_err(|e| e.to_string())?;
