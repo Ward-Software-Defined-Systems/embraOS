@@ -127,9 +127,11 @@ Ask in plain language; these are the inputs Embra sends:
   (1.7×); one 8,000 px tall shown whole was not (3.1×), and is four tiles
   now, readable down to the reference markers (2026-10-18). A `fullPage`
   capture shows only what had loaded: lazy-loaded pictures below the fold
-  came out as empty frames and scroll-triggered fades as blank cards
-  (2026-10-18). Browserless's top-level `scrollPage: true` scrolls the
-  page before the capture for that; untried here (TBD). Text is still read
+  came out as empty frames and scroll-triggered fades as blank cards. The
+  top-level `"scrollPage": true` together with
+  `"gotoOptions": {"waitUntil": "networkidle0"}` scrolls the page and
+  waits before the capture; on a long article every lazy-loaded picture
+  was present (2026-10-18, the two options together). Text is still read
   through `/content`; the viewport or a top-level `selector` suit a single
   picture.
 - **A PDF** (`/pdf`):
