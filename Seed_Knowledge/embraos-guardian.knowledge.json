@@ -1,7 +1,7 @@
 {
   "format": "knowledge.v1",
   "name": "embraos-guardian",
-  "description": "Reference knowledge for authoring Guardian dynamic tools — the sandbox contract, the vendored guest APIs, and the pitfalls where general Rust training conflicts with the scoped no_std environment. Distilled from the validator contract and docs/GUARDIAN-TOOL-EXAMPLES.md.",
+  "description": "Reference knowledge for authoring Guardian dynamic tools — the sandbox contract, the vendored guest APIs, and the pitfalls where general Rust training conflicts with the scoped no_std environment. Distilled from the validator contract and docs/GUARDIAN/GUARDIAN-TOOL-EXAMPLES.md.",
   "nodes": [
     { "_comment": "── the contract ──────────────────────────────────────" },
     {

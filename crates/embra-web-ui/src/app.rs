@@ -19,7 +19,7 @@ use crate::tools::{self, ToolCall, ToolSheet, ToolsTab};
 /// rendered as-is (no re-sort), so each group leads with its entry point
 /// (`/guardian-define`; `/provider --setup` beside `/provider`). The
 /// chat-mobile picker (`chat.rs::SLASH_GROUPS`), the console `/help`
-/// headers and `docs/COMMAND-REFERENCE.md` mirror these titles — a change
+/// headers and `docs/OPERATIONS/COMMAND-REFERENCE.md` mirror these titles — a change
 /// here is a change there. Every command is a `SPECS` key, one of the two
 /// editor strings, or a plain injection (see `dispatch`).
 const GROUPS: &[(&str, &[(&str, &str)])] = &[

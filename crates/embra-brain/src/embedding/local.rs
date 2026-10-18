@@ -317,7 +317,7 @@ mod measure {
     //! the model's output instead of the compile-time constant, and the
     //! expansion of a weak query applied by the production rule. Ignored;
     //! run by hand in release — the recipe (a scratch WardSONDB on a copy of
-    //! a backup, the config shape) is in `docs/KNOWLEDGE-GRAPH.md`,
+    //! a backup, the config shape) is in `docs/MULTI-GRAPH/KNOWLEDGE-GRAPH.md`,
     //! "Measuring an embedding model":
     //!
     //! `EMBRA_MEASURE=<config.json> cargo test -p embra-brain --release -- \

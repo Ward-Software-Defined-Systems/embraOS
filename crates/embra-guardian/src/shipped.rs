@@ -30,7 +30,7 @@ impl ShippedTool {
 }
 
 /// The flagship: prompt-injection-hardened web search over the Brave guard
-/// (`docs/GUARDIAN-ADVANCED-EXAMPLE.md`). Inert until the operator sets a
+/// (`docs/GUARDIAN/GUARDIAN-ADVANCED-EXAMPLE.md`). Inert until the operator sets a
 /// key with `/guardian key brave`.
 pub const WEB_SEARCH: ShippedTool = ShippedTool {
     name: "web_search",
@@ -38,7 +38,7 @@ pub const WEB_SEARCH: ShippedTool = ShippedTool {
 };
 
 /// A guarded curl: one HTTP request with headers, query pairs and a body,
-/// for pages, resources and API work (`docs/GUARDIAN-HTTP-REQUEST-EXAMPLE.md`).
+/// for pages, resources and API work (`docs/GUARDIAN/GUARDIAN-HTTP-REQUEST-EXAMPLE.md`).
 /// Needs no key: credentials come from `/guardian secret`, private hosts
 /// from `/guardian egress allow`.
 pub const HTTP_REQUEST: ShippedTool = ShippedTool {
@@ -100,8 +100,8 @@ pub const KNOWN_HTTP_REQUEST_SHA256: &[&str] = &[
 #[cfg(test)]
 fn doc_of(name: &str) -> &'static str {
     match name {
-        "web_search" => include_str!("../../../docs/GUARDIAN-ADVANCED-EXAMPLE.md"),
-        "http_request" => include_str!("../../../docs/GUARDIAN-HTTP-REQUEST-EXAMPLE.md"),
+        "web_search" => include_str!("../../../docs/GUARDIAN/GUARDIAN-ADVANCED-EXAMPLE.md"),
+        "http_request" => include_str!("../../../docs/GUARDIAN/GUARDIAN-HTTP-REQUEST-EXAMPLE.md"),
         other => panic!("no doc for the shipped tool {other}"),
     }
 }

@@ -22,7 +22,7 @@ The table says which *server* runs where, not that every model fits on every hos
 
 **The picks.** **Qwen3.8 27B** is the current recommendation. **Qwen3.6 27B** remains vetted and fully supported; an instance that works needs no migration. Each was vetted against the complete tool surface of its date, not a subset: Qwen3.6 27B on 2026-07-10 (95 tools), Qwen3.8 27B on 2026-09-08 (116 tools; 117 today: `check_update` was removed, `file_offer` and `reminder_list` added). Qwen3.8 27B works on Ollama and on LM Studio (operator-verified 2026-10-08).
 
-**The `guardian_call` fix.** Both vettings predate the fix of 2026-10-07 ([CHANGE-LOG.md](CHANGE-LOG.md)): before it, on Ollama, the input of a dynamic-tool invoke arrived as JSON text and never reached the tool as an object. On the fixed build, `gemma4:12b` and `glm-5.3:cloud` on Ollama each sent the input as an object and the search returned results (2026-10-07; the CHANGE-LOG entry has the traces). Those `gemma4:12b` runs used a GGUF build on a 16 GB NVIDIA GPU at Ollama's default context of 4,096 tokens, where Ollama trims every request to fit ([below](#when-a-session-outgrows-the-context-length)): they show how the input arrived, not how Gemma 4 works with embraOS.
+**The `guardian_call` fix.** Both vettings predate the fix of 2026-10-07 ([CHANGE-LOG.md](../CHANGE-LOG.md)): before it, on Ollama, the input of a dynamic-tool invoke arrived as JSON text and never reached the tool as an object. On the fixed build, `gemma4:12b` and `glm-5.3:cloud` on Ollama each sent the input as an object and the search returned results (2026-10-07; the CHANGE-LOG entry has the traces). Those `gemma4:12b` runs used a GGUF build on a 16 GB NVIDIA GPU at Ollama's default context of 4,096 tokens, where Ollama trims every request to fit ([below](#when-a-session-outgrows-the-context-length)): they show how the input arrived, not how Gemma 4 works with embraOS.
 
 ### Local (Ollama / LM Studio)
 
@@ -51,7 +51,7 @@ A `:cloud` tag is served by ollama.com through the local Ollama daemon, so it re
 | GLM 5.3 | `glm-5.3:cloud` | 753B | 1M | text | under evaluation |
 | Kimi K3 | `kimi-k3:cloud` | 2.8T (MoE) | 1M | text, image | under evaluation |
 
-Figures are the Ollama library's, read 2026-10-08. Only `kimi-k3:cloud` takes image input. `deepseek-v4-pro:cloud` gets `reasoning_effort: max` from the brain unless `/effort` sets a level (see [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md)).
+Figures are the Ollama library's, read 2026-10-08. Only `kimi-k3:cloud` takes image input. `deepseek-v4-pro:cloud` gets `reasoning_effort: max` from the brain unless `/effort` sets a level (see [COMMAND-REFERENCE.md](../OPERATIONS/COMMAND-REFERENCE.md)).
 
 ---
 
@@ -140,7 +140,7 @@ Every turn replays the whole session: the system prompt, the history, the turn's
 | Qwen3.8 | `low`, `medium`, `xhigh` (`high` is not valid for this model) | `xhigh` |
 | Qwen3.6 | no field | — |
 
-Set it with `/effort <level>` while the Ollama or LM Studio preset is active. The level is sent verbatim, the server validates it, and `/effort` warns when a level is outside the model's documented set. Unset (the default) sends no field, so the server's per-model default applies; `/effort reset` clears a stored level. See [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md).
+Set it with `/effort <level>` while the Ollama or LM Studio preset is active. The level is sent verbatim, the server validates it, and `/effort` warns when a level is outside the model's documented set. Unset (the default) sends no field, so the server's per-model default applies; `/effort reset` clears a stored level. See [COMMAND-REFERENCE.md](../OPERATIONS/COMMAND-REFERENCE.md).
 
 ### Bearer auth
 
@@ -167,7 +167,7 @@ tool round-trips, not tokens). Interrupt it with **`/stop`** (console: press
 **Esc** while the turn streams; mobile: the **■** button that replaces Send).
 Generation stops immediately — the connection to the Ollama/LM Studio server
 is severed — and the partial response stays in history marked as interrupted.
-See [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md).
+See [COMMAND-REFERENCE.md](../OPERATIONS/COMMAND-REFERENCE.md).
 
 ---
 

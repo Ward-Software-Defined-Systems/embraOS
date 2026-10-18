@@ -1,7 +1,7 @@
 {
   "format": "knowledge.v1",
   "name": "embraos-kg",
-  "description": "Baseline operational knowledge about the embraOS knowledge graph itself — how memory is stored, retrieved, tagged, and curated. Distilled from docs/KNOWLEDGE-GRAPH.md; loaded at every boot so the intelligence can answer questions about its own memory without the document in the system prompt.",
+  "description": "Baseline operational knowledge about the embraOS knowledge graph itself — how memory is stored, retrieved, tagged, and curated. Distilled from docs/MULTI-GRAPH/KNOWLEDGE-GRAPH.md; loaded at every boot so the intelligence can answer questions about its own memory without the document in the system prompt.",
   "nodes": [
     { "_comment": "── architecture ──────────────────────────────────────" },
     {

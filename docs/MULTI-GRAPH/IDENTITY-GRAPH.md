@@ -4,7 +4,7 @@
 > projection, rendering, the Learning-Mode import, and the migration
 > ceremony for pre-existing instances. The **authoring contract** for
 > `.graph.json` files (grammar, validation rules, crafting guidance) lives
-> in [`Imported_Intelligence/README.md`](../Imported_Intelligence/README.md).
+> in [`Imported_Intelligence/README.md`](../../Imported_Intelligence/README.md).
 
 ## What changed
 

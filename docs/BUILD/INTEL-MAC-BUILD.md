@@ -28,7 +28,7 @@
 > host (auto-detects musl.cc's `/opt/x86_64-linux-musl-cross`, expects `xz` and
 > `sha256sum` on PATH). On Intel Mac you stage equivalent toolchain bits from
 > Homebrew + GNU coreutils via a one-time env-var prelude. The Apple-Silicon flow
-> (`build-image-aarch64.sh` + `docs/AARCH64-BUILD.md`) automates the same
+> (`build-image-aarch64.sh` + `docs/BUILD/AARCH64-BUILD.md`) automates the same
 > staging; Intel Mac uses the canonical script directly.
 
 ---
@@ -171,7 +171,7 @@ Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, LLM
 provider + credentials, timezone), then Learning Mode forms and seals the soul.
 Once the soul is sealed, run `/embeddings backfill` once: the seed knowledge packs
 load before the wizard writes a configuration, so their nodes have no vectors until
-backfilled (see `docs/QUICK-START.md`).
+backfilled (see `docs/BUILD/QUICK-START.md`).
 
 > **Upgrading from the pre-volume flow? Delete the stale Mac-side
 > `buildroot-src/`.** `run-qemu.sh` prefers `buildroot-src/output/images/` over

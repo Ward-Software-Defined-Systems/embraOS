@@ -40,7 +40,7 @@ use crate::proactive::{Notification, Priority};
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The smallest context window, in tokens, the docs ask for on a server
-/// that trims (`docs/RECOMMENDED-LOCAL-MODELS.md`; Ollama's own figure
+/// that trims (`docs/LOCAL-MODELS/RECOMMENDED-LOCAL-MODELS.md`; Ollama's own figure
 /// for agents). A GGUF model Ollama loads with less is announced.
 pub const CONTEXT_FLOOR_TOKENS: u64 = 64_000;
 

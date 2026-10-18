@@ -35,7 +35,7 @@ the check before relying on a route.
 ## Start it
 
 ```text
-cd docs/BROWSER-SERVICE
+cd docs/GUARDIAN/BROWSER-SERVICE
 cp .env.example .env            # BROWSER_HOST, BROWSERLESS_TOKEN (openssl rand -hex 16)
 docker compose up -d
 ```
@@ -54,7 +54,7 @@ forwards DNS to the host's resolver.
 
 The OS trusts the operator's CA drop-ins in `/embra/state/ca-certificates/`
 on the Guardian transport
-([QUICK-START.md — Self-hosted git servers (private CA)](./QUICK-START.md#self-hosted-git-servers-private-ca)).
+([QUICK-START.md — Self-hosted git servers (private CA)](../BUILD/QUICK-START.md#self-hosted-git-servers-private-ca)).
 Two ways, one `tls` line in `caddy/Caddyfile`:
 
 - **Your own CA.** Issue a certificate for `BROWSER_HOST`, mount it at
@@ -95,7 +95,7 @@ The first lists the routes; the second answers the rendered page as
 
 The first admits the private host; the second stores the bearer the host
 adds to every `http_request` to that host
-([COMMAND-REFERENCE.md](./COMMAND-REFERENCE.md)). The token never enters a
+([COMMAND-REFERENCE.md](../OPERATIONS/COMMAND-REFERENCE.md)). The token never enters a
 tool's input, the turn trace or the session history. Browserless also takes
 `?token=`; do not use it, a URL is logged.
 
@@ -143,5 +143,5 @@ Ask in plain language; these are the inputs Embra sends:
   `/guardian egress`.
 - Sessions do not persist between calls: `/function` is scripted
   interaction, not a browsing session. A persistent session is a Phase 3
-  question ([ROADMAP.md](./ROADMAP.md), the MCP server modules under the
+  question ([ROADMAP.md](../ROADMAP.md), the MCP server modules under the
   governance proxy).

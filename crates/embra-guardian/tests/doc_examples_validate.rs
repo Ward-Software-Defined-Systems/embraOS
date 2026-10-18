@@ -1,12 +1,12 @@
-//! Guards `docs/GUARDIAN-TOOL-EXAMPLES.md`: every fenced ```rust module
+//! Guards `docs/GUARDIAN/GUARDIAN-TOOL-EXAMPLES.md`: every fenced ```rust module
 //! in the operator doc must pass the real `embra_guardian::validate`
 //! gate, so the published examples can never silently drift out of spec.
 
 const DOCS: &[&str] = &[
-    include_str!("../../../docs/GUARDIAN-TOOL-EXAMPLES.md"),
-    include_str!("../../../docs/GUARDIAN-ADVANCED-EXAMPLE.md"),
-    include_str!("../../../docs/GUARDIAN-KG-SCAN-EXAMPLE.md"),
-    include_str!("../../../docs/GUARDIAN-HTTP-REQUEST-EXAMPLE.md"),
+    include_str!("../../../docs/GUARDIAN/GUARDIAN-TOOL-EXAMPLES.md"),
+    include_str!("../../../docs/GUARDIAN/GUARDIAN-ADVANCED-EXAMPLE.md"),
+    include_str!("../../../docs/GUARDIAN/GUARDIAN-KG-SCAN-EXAMPLE.md"),
+    include_str!("../../../docs/GUARDIAN/GUARDIAN-HTTP-REQUEST-EXAMPLE.md"),
 ];
 
 #[test]

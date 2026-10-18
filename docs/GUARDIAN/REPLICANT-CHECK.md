@@ -149,4 +149,4 @@ The replicant check is Pillar 1 of soul-as-enforced-runtime, scoped to the self-
 - **A signed decision ledger** — hash-chaining each verdict and signing it with the `embra-trustd` key, so the system accumulates a tamper-evident record of every soul judgment it made. Verdicts are stored with the tool today, but not yet cryptographically chained.
 - **Gating all side-effectful tool dispatch**, not just tool authoring — the same independent-verdict primitive applied at the point any world-touching tool runs.
 
-See also: [Guardian Tool Examples](GUARDIAN-TOOL-EXAMPLES.md) · [Guardian Advanced Example](GUARDIAN-ADVANCED-EXAMPLE.md) · [Tool Reference](TOOL-REFERENCE.md) · [System Design](SYSTEM-DESIGN.md).
+See also: [Guardian Tool Examples](GUARDIAN-TOOL-EXAMPLES.md) · [Guardian Advanced Example](GUARDIAN-ADVANCED-EXAMPLE.md) · [Tool Reference](../OPERATIONS/TOOL-REFERENCE.md) · [System Design](../SYSTEM-DESIGN.md).

@@ -8,7 +8,7 @@ build host without a browser. Run from the repository root:
 
 The node labels are illustrative. The numbers in the right-hand panel are
 measured: the structure counts come from the 2026-10-02 backup of the
-production instance (see docs/KNOWLEDGE-GRAPH.md), the timings from the
+production instance (see docs/MULTI-GRAPH/KNOWLEDGE-GRAPH.md), the timings from the
 measurements recorded there.
 """
 import math

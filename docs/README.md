@@ -1,41 +1,46 @@
 # embraOS Manual
 
-The operating manual for embraOS. The project landing page is [../README.md](../README.md).
+The operating manual for embraOS. The project landing page is [../README.md](../README.md). The manual is in five directories, one per subject, and the project-level documents at the top.
 
 ## Project
 
 - [ROADMAP.md](ROADMAP.md) — Phase 0–5 delivery status, sprint by sprint, the post-Sprint-5 increments and the code-review pit stop.
 - [CHANGE-LOG.md](CHANGE-LOG.md) — Chronological merge log for `main`, anchored on tagged releases.
-
-## Getting Started
-
-- [QUICK-START.md](QUICK-START.md) — Build the QEMU image from source (Ubuntu 24.04 / 26.04), the musl cross-toolchain, the build pipeline, the Config Wizard, and operational notes (build overrides, terminal size, image search order, clean first boot, port forwarding, backup & restore).
-- [AARCH64-BUILD.md](AARCH64-BUILD.md) — Apple Silicon hosts: the aarch64 image via `build-image-aarch64.sh` and the named-volume Docker Buildroot flow, HVF-accelerated QEMU, the Mac backup and seeding wrappers.
-- [INTEL-MAC-BUILD.md](INTEL-MAC-BUILD.md) — Intel Mac hosts: the x86_64 image through the same Docker Buildroot flow, HVF-accelerated QEMU, the Mac backup wrapper.
-- [OPERATION.md](OPERATION.md) — What running it feels like, the session model, keyboard shortcuts, current limitations.
-
-## Reference
-
-- [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md) — Every slash command.
-- [TOOL-REFERENCE.md](TOOL-REFERENCE.md) — All 117 built-in tools by category, plus workspace/GitHub/SSH safety notes.
-- [RECOMMENDED-LOCAL-MODELS.md](RECOMMENDED-LOCAL-MODELS.md) — Vetted models and server configuration for the Ollama / LM Studio backends.
-- [LOCAL_MODEL_SETTINGS/](LOCAL_MODEL_SETTINGS/) — Importable server-side presets for the local backends: the LM Studio preset for Qwen3.8 27B.
-
-## Internals
-
 - [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md) — The 7-layer continuity architecture, the four LLM providers, reasoning controls, prompt caching.
-- [KNOWLEDGE-GRAPH.md](KNOWLEDGE-GRAPH.md) — Cross-session memory graph: auto-derived edges, density rationale, promotion at creation, link candidates, auto-enrichment, retrieval ranking, the in-OS semantic-similarity layer, the 12 `knowledge_*` tools.
-- [IDENTITY-GRAPH.md](IDENTITY-GRAPH.md) — The KG-native identity: sealed IDENTITY+SOUL graph, projection + boot reconcile, prompt rendering, the Learning-Mode import, and the re-seal migration ceremony. Authoring contract: `Imported_Intelligence/README.md`.
 - [OPEN-PROBLEMS.md](OPEN-PROBLEMS.md) — Unresolved Phase 1–3 design questions tracked at the architecture level.
 
-## Guardian — Dynamic Tools & the Replicant Check
+## Build — `BUILD/`
 
-- [REPLICANT-CHECK.md](REPLICANT-CHECK.md) — The soul-spec gate every dynamic tool passes before it compiles: how it works, both authoring paths, and how to test it.
-- [GUARDIAN-TOOL-EXAMPLES.md](GUARDIAN-TOOL-EXAMPLES.md) — Paste-ready dynamic-tool modules (embra-guardian-v1).
-- [GUARDIAN-ADVANCED-EXAMPLE.md](GUARDIAN-ADVANCED-EXAMPLE.md) — The shipped flagship: a worked, prompt-injection-hardened end-to-end Guardian tool.
-- [GUARDIAN-HTTP-REQUEST-EXAMPLE.md](GUARDIAN-HTTP-REQUEST-EXAMPLE.md) — The second shipped tool: `http_request`, a guarded curl for pages, resources and API work; credentials host-side, private hosts by allowlist, `save_to` for a file into the workspace.
-- [BROWSER-SERVICE.md](BROWSER-SERVICE.md) — A headless browser beside the OS: Browserless behind Caddy in Docker Compose ([`BROWSER-SERVICE/`](BROWSER-SERVICE/)), reached with `http_request`; pages as text, screenshots and PDFs into the workspace with `save_to`.
-- [GUARDIAN-KG-SCAN-EXAMPLE.md](GUARDIAN-KG-SCAN-EXAMPLE.md) — `kg_scan`, the first intelligence-proposed tool: scans a `knowledge_dump` JSONL for structural patterns, fed through `guardian_call`'s `data_file` bridge.
+- [BUILD/QUICK-START.md](BUILD/QUICK-START.md) — Build the QEMU image from source (Ubuntu 24.04 / 26.04), the musl cross-toolchain, the build pipeline, the Config Wizard, and operational notes (build overrides, terminal size, image search order, clean first boot, port forwarding, backup & restore).
+- [BUILD/AARCH64-BUILD.md](BUILD/AARCH64-BUILD.md) — Apple Silicon hosts: the aarch64 image via `build-image-aarch64.sh` and the named-volume Docker Buildroot flow, HVF-accelerated QEMU, the Mac backup and seeding wrappers.
+- [BUILD/INTEL-MAC-BUILD.md](BUILD/INTEL-MAC-BUILD.md) — Intel Mac hosts: the x86_64 image through the same Docker Buildroot flow, HVF-accelerated QEMU, the Mac backup wrapper.
+
+## Operations — `OPERATIONS/`
+
+- [OPERATIONS/OPERATION.md](OPERATIONS/OPERATION.md) — What running it feels like, the session model, keyboard shortcuts, current limitations.
+- [OPERATIONS/COMMAND-REFERENCE.md](OPERATIONS/COMMAND-REFERENCE.md) — Every slash command.
+- [OPERATIONS/TOOL-REFERENCE.md](OPERATIONS/TOOL-REFERENCE.md) — All 117 built-in tools by category, plus workspace/GitHub/SSH safety notes.
+
+## Local models — `LOCAL-MODELS/`
+
+- [LOCAL-MODELS/RECOMMENDED-LOCAL-MODELS.md](LOCAL-MODELS/RECOMMENDED-LOCAL-MODELS.md) — Vetted models and server configuration for the Ollama / LM Studio backends.
+- [LOCAL-MODELS/LOCAL_MODEL_SETTINGS/](LOCAL-MODELS/LOCAL_MODEL_SETTINGS/) — Importable server-side presets for the local backends: the LM Studio preset for Qwen3.8 27B.
+
+## The two graphs — `MULTI-GRAPH/`
+
+- [MULTI-GRAPH/KNOWLEDGE-GRAPH.md](MULTI-GRAPH/KNOWLEDGE-GRAPH.md) — Cross-session memory graph: auto-derived edges, density rationale, promotion at creation, link candidates, auto-enrichment, retrieval ranking, the in-OS semantic-similarity layer, the 12 `knowledge_*` tools.
+- [MULTI-GRAPH/IDENTITY-GRAPH.md](MULTI-GRAPH/IDENTITY-GRAPH.md) — The KG-native identity: sealed IDENTITY+SOUL graph, projection + boot reconcile, prompt rendering, the Learning-Mode import, and the re-seal migration ceremony. Authoring contract: [`Imported_Intelligence/README.md`](../Imported_Intelligence/README.md).
+
+## Guardian — `GUARDIAN/`
+
+Dynamic tools and the replicant check.
+
+- [GUARDIAN/REPLICANT-CHECK.md](GUARDIAN/REPLICANT-CHECK.md) — The soul-spec gate every dynamic tool passes before it compiles: how it works, both authoring paths, and how to test it.
+- [GUARDIAN/GUARDIAN-TOOL-EXAMPLES.md](GUARDIAN/GUARDIAN-TOOL-EXAMPLES.md) — Paste-ready dynamic-tool modules (embra-guardian-v1).
+- [GUARDIAN/GUARDIAN-ADVANCED-EXAMPLE.md](GUARDIAN/GUARDIAN-ADVANCED-EXAMPLE.md) — The shipped flagship: a worked, prompt-injection-hardened end-to-end Guardian tool.
+- [GUARDIAN/GUARDIAN-HTTP-REQUEST-EXAMPLE.md](GUARDIAN/GUARDIAN-HTTP-REQUEST-EXAMPLE.md) — The second shipped tool: `http_request`, a guarded curl for pages, resources and API work; credentials host-side, private hosts by allowlist, `save_to` for a file into the workspace.
+- [GUARDIAN/BROWSER-SERVICE.md](GUARDIAN/BROWSER-SERVICE.md) — A headless browser beside the OS: Browserless behind Caddy in Docker Compose ([`GUARDIAN/BROWSER-SERVICE/`](GUARDIAN/BROWSER-SERVICE/)), reached with `http_request`; pages as text, screenshots and PDFs into the workspace with `save_to`.
+- [GUARDIAN/GUARDIAN-KG-SCAN-EXAMPLE.md](GUARDIAN/GUARDIAN-KG-SCAN-EXAMPLE.md) — `kg_scan`, the first intelligence-proposed tool: scans a `knowledge_dump` JSONL for structural patterns, fed through `guardian_call`'s `data_file` bridge.
 
 ## Appendix
 

@@ -1,6 +1,6 @@
 # embraOS Quick Start
 
-Build a QEMU-bootable embraOS disk image from source and boot it. The project landing page is [../README.md](../README.md).
+Build a QEMU-bootable embraOS disk image from source and boot it. The project landing page is [../README.md](../../README.md).
 
 > **Default UI.** The browser-based **embra-web** console is the default UI, served
 > over HTTPS at **https://localhost:3345/embraOS** — open it from the URL embraOS
@@ -103,7 +103,7 @@ EMBRA_TUI=1 EMBRA_GRAPHICS=sixel ./scripts/run-qemu.sh  # serial TUI image pane:
 
 > **In-OS Rust toolchain:** Guardian dynamic tools compile inside the image, so `build-image.sh` Step 3.5 downloads a pinned toolchain (musl host + `wasm32` std, SHA-256-verified) from `static.rust-lang.org`, caches it under `vendor/rust-toolchain`, and bakes it into the rootfs at `/opt/rust`. The first build needs network for this. The toolchain is the largest item in the image: about 320 MiB of a root filesystem of about 475 MiB, as compressed in the SquashFS (x86_64, measured 2026-09-27). The pin is `1.98.1` — the same version as the host compiler in `rust-toolchain.toml`, but a separate setting; override it with `RUST_TOOLCHAIN_VERSION=... ./scripts/build-image.sh ...`. The brain loads a Guardian tool only when it was built by the toolchain the image carries, so an image with a different pin leaves the existing tools unloaded (`/guardian list` marks them `NOT LOADED`) until the operator runs `/guardian rebuild --all`.
 
-> **Two tools ship ready:** the image carries the prompt-injection-hardened `web_search` Guardian tool and `http_request`, a guarded curl for pages, resources and API work, and the brain builds both at boot. `web_search` stays inert until you set a Brave Search key with `/guardian key brave <token>` ([GUARDIAN-ADVANCED-EXAMPLE.md](GUARDIAN-ADVANCED-EXAMPLE.md)). `http_request` needs no key: a credential for a host goes in with `/guardian secret <host> <header> <value>` and is injected host-side, and a private host is admitted with `/guardian egress allow <host>` ([GUARDIAN-HTTP-REQUEST-EXAMPLE.md](GUARDIAN-HTTP-REQUEST-EXAMPLE.md)).
+> **Two tools ship ready:** the image carries the prompt-injection-hardened `web_search` Guardian tool and `http_request`, a guarded curl for pages, resources and API work, and the brain builds both at boot. `web_search` stays inert until you set a Brave Search key with `/guardian key brave <token>` ([GUARDIAN-ADVANCED-EXAMPLE.md](../GUARDIAN/GUARDIAN-ADVANCED-EXAMPLE.md)). `http_request` needs no key: a credential for a host goes in with `/guardian secret <host> <header> <value>` and is injected host-side, and a private host is admitted with `/guardian egress allow <host>` ([GUARDIAN-HTTP-REQUEST-EXAMPLE.md](../GUARDIAN/GUARDIAN-HTTP-REQUEST-EXAMPLE.md)).
 
 > **Embedding model:** Semantic knowledge-graph retrieval runs in-process, so `build-image.sh` **Step 3.6** downloads `BAAI/bge-small-en-v1.5` (~133 MB, SHA-256-verified against a pin), caches it under `vendor/embedding-model`, and bakes it into the rootfs at `/usr/share/embra/models/`. Like the toolchain above, the first build needs network for it; later builds skip the download when the cached copy still matches the pin. The build **fails** if the model is missing from the rootfs rather than shipping an image whose retrieval silently falls back to keyword-only. Operators can override the baked copy per instance by seeding `/embra/state/models/<name>` on STATE.
 
@@ -146,7 +146,7 @@ The following apply once the image is built. They are not part of the build pipe
 > Partition geometry is read from the GPT at run time, so this stays correct as partitions
 > shift between builds.
 
-> **Port Forwarding:** QEMU forwards 50000 (gRPC) and 8443 (REST) on the host's loopback only, and 3345 (the HTTPS web console — https://localhost:3345/embraOS, behind this boot's access token) on every host interface, in both UI modes; only the launch banner differs. Other machines on the host's network reach the web console and nothing else, and only with the URL embraOS printed at boot; the per-port table is in [SYSTEM-DESIGN.md](SYSTEM-DESIGN.md#network-exposure). apid's REST surface is `/health`, `/version` and `/status` — `/status` proxies the brain's `GetSystemStatus` (2-second timeout, HTTP 503 while the brain is away) and carries the active LLM provider's last endpoint probe as `llm-provider` / `llm-provider.detail`. Test with:
+> **Port Forwarding:** QEMU forwards 50000 (gRPC) and 8443 (REST) on the host's loopback only, and 3345 (the HTTPS web console — https://localhost:3345/embraOS, behind this boot's access token) on every host interface, in both UI modes; only the launch banner differs. Other machines on the host's network reach the web console and nothing else, and only with the URL embraOS printed at boot; the per-port table is in [SYSTEM-DESIGN.md](../SYSTEM-DESIGN.md#network-exposure). apid's REST surface is `/health`, `/version` and `/status` — `/status` proxies the brain's `GetSystemStatus` (2-second timeout, HTTP 503 while the brain is away) and carries the active LLM provider's last endpoint probe as `llm-provider` / `llm-provider.detail`. Test with:
 > ```bash
 > curl http://localhost:8443/health
 > curl http://localhost:8443/status
@@ -200,4 +200,4 @@ At the next boot, embrad merges the drop-ins with the stock CA bundle (public ho
 
 ---
 
-The day-to-day session model, slash commands, and keyboard shortcuts live in [OPERATION.md](OPERATION.md) and [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md). GitHub and SSH setup are slash commands run from the conversational TUI after boot — see [COMMAND-REFERENCE.md](COMMAND-REFERENCE.md) (`/github-token`, `/git-token`, `/ssh-keygen`, `/ssh-copy-id`, `/git-setup`).
+The day-to-day session model, slash commands, and keyboard shortcuts live in [OPERATION.md](../OPERATIONS/OPERATION.md) and [COMMAND-REFERENCE.md](../OPERATIONS/COMMAND-REFERENCE.md). GitHub and SSH setup are slash commands run from the conversational TUI after boot — see [COMMAND-REFERENCE.md](../OPERATIONS/COMMAND-REFERENCE.md) (`/github-token`, `/git-token`, `/ssh-keygen`, `/ssh-copy-id`, `/git-setup`).

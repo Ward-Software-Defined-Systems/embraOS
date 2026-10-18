@@ -9,7 +9,7 @@ intelligence's identity and soul instead of building them conversationally.
 This document is the canonical **authoring contract**: what a valid file
 looks like and how to craft one. What the OS does with an import (sealing,
 projection, rendering, the migration ceremony) is documented in
-[`docs/IDENTITY-GRAPH.md`](../docs/IDENTITY-GRAPH.md).
+[`docs/MULTI-GRAPH/IDENTITY-GRAPH.md`](../docs/MULTI-GRAPH/IDENTITY-GRAPH.md).
 
 ## Where files are read from at runtime
 

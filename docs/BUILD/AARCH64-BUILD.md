@@ -29,7 +29,7 @@
 > in-tree (`scripts/`, `buildroot/configs/`) and the arch-parameterized Buildroot
 > tree (commit `f6a684a`) is end-to-end QEMU-verified on **both** x86_64 and
 > aarch64. The former standalone Apple-Silicon build bundle has been retired —
-> this guide now lives at `docs/AARCH64-BUILD.md`, its scripts in `scripts/`.
+> this guide now lives at `docs/BUILD/AARCH64-BUILD.md`, its scripts in `scripts/`.
 
 ---
 
@@ -127,7 +127,7 @@ Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, LLM p
 + credentials, timezone), then Learning Mode forms and seals the soul.
 Once the soul is sealed, run `/embeddings backfill` once: the seed knowledge packs
 load before the wizard writes a configuration, so their nodes have no vectors until
-backfilled (see `docs/QUICK-START.md`).
+backfilled (see `docs/BUILD/QUICK-START.md`).
 
 > **Upgrading from the pre-volume flow? Delete the stale Mac-side `buildroot-src/`.**
 > `run-qemu-aarch64.sh` prefers `buildroot-src/output/images/` over `output/images/`

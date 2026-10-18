@@ -8,7 +8,7 @@
 //! `knowledge_link` leaves to the intelligence, and nothing here writes an
 //! edge.
 //!
-//! The floor and the cap are measured, not chosen: `docs/KNOWLEDGE-GRAPH.md`,
+//! The floor and the cap are measured, not chosen: `docs/MULTI-GRAPH/KNOWLEDGE-GRAPH.md`,
 //! "Link candidates", and the harness `measure_link_candidate_cosines`
 //! (`embedding/local.rs`).
 
