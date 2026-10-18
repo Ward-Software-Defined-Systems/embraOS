@@ -1,12 +1,20 @@
 //! embrad — PID 1 init for embraOS.
 //!
 //! Boot sequence:
-//! 1. Install signal handlers
+//! 1. Install the panic hook (PID 1 only)
 //! 2. Mount pseudo-filesystems
 //! 3. Verify partition mounts
 //! 4. Start services in dependency order
 //! 5. Verify soul (HALT on failure)
 //! 6. Enter reconciliation loop
+//!
+//! PID 1 never exits. A fatal boot error and a panic both end in
+//! `supervisor::halt_system`, with the reason written to
+//! `/embra/state/halt_reason` on STATE, where the intelligence can read it
+//! with `file_read` and the operator by loop-mounting the partition. An
+//! exit of PID 1 is a kernel panic ("Attempted to kill init!") with the
+//! reason lost in the kernel log. In development mode (not PID 1) a fatal
+//! error is returned as before.
 
 mod ca_bundle;
 mod mount;
@@ -14,16 +22,43 @@ mod reconcile;
 mod supervisor;
 
 use anyhow::Result;
-use tracing::{info, error, warn};
+use tracing::{error, info, warn};
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    // Initialize logging — write to /dev/kmsg if available (kernel log),
-    // fall back to stderr. In a real OS, this is the only reliable output
-    // before services are up.
+use supervisor::{halt_system, reboot_system, HALT_REASON_PATH};
+
+fn main() -> Result<()> {
     init_logging();
 
     let pid = std::process::id();
+    if pid == 1 {
+        install_panic_hook();
+    }
+
+    // The runtime is built by hand, so a failure is a halt with its reason
+    // and not an unwinding panic inside `#[tokio::main]`.
+    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(e) if pid == 1 => halt_system(&format!("boot failed: tokio runtime: {e}")),
+        Err(e) => return Err(e.into()),
+    };
+
+    match runtime.block_on(run(pid)) {
+        Ok(()) => {}
+        Err(e) if pid == 1 => halt_system(&fatal_reason(&e)),
+        Err(e) => return Err(e),
+    }
+
+    if pid == 1 {
+        // PID 1 should reboot or halt
+        reboot_system();
+    }
+
+    Ok(())
+}
+
+/// The boot and the reconciliation loop. An `Err` is fatal: PID 1 halts
+/// with it as the reason, development mode returns it.
+async fn run(pid: u32) -> Result<()> {
     info!("embrad starting as PID {}", pid);
 
     if pid != 1 {
@@ -56,14 +91,10 @@ async fn main() -> Result<()> {
     supervisor.register_services();
 
     // Start all services — this calls embra-trustd for soul verification
-    // and HALTs the system if it fails
+    // and HALTs the system if it fails. Any other startup failure comes
+    // back here and halts PID 1 with its reason.
     supervisor.start_all().await.map_err(|e| {
         error!("Service startup failed: {}", e);
-        if pid == 1 {
-            // Give tracing time to flush to serial before halting
-            std::thread::sleep(std::time::Duration::from_secs(2));
-            halt_system("Service startup failure");
-        }
         e
     })?;
 
@@ -77,55 +108,67 @@ async fn main() -> Result<()> {
     // If we get here, we're shutting down
     info!("embrad shutting down");
     supervisor.stop_all().await;
-
-    if pid == 1 {
-        // PID 1 should reboot or halt
-        reboot_system();
-    }
-
     Ok(())
+}
+
+/// The panic hook for PID 1. The reason goes to STATE and is synced before
+/// anything else: `halt_system` logs through tracing, and a panic raised
+/// inside the subscriber must not re-enter it before the reason is on disk.
+fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let reason = panic_reason(
+            info.payload_as_str(),
+            info.location().map(|l| (l.file(), l.line())),
+        );
+        let _ = std::fs::write(HALT_REASON_PATH, &reason);
+        // SAFETY: sync(2) takes no arguments and cannot fail.
+        unsafe { libc::sync() };
+        halt_system(&reason);
+    }));
+}
+
+/// The halt reason for a panic: its message and where it was raised.
+fn panic_reason(message: Option<&str>, location: Option<(&str, u32)>) -> String {
+    let message = message.unwrap_or("no message");
+    match location {
+        Some((file, line)) => format!("panic: {message} ({file}:{line})"),
+        None => format!("panic: {message}"),
+    }
+}
+
+/// The halt reason for a fatal boot error: the error with its context chain.
+fn fatal_reason(e: &anyhow::Error) -> String {
+    format!("boot failed: {e:#}")
 }
 
 fn init_logging() {
     // Try /dev/kmsg first (kernel log ring buffer)
     // Fall back to stderr
-    tracing_subscriber::fmt()
+    // `try_init`: a subscriber already set must not panic PID 1.
+    let _ = tracing_subscriber::fmt()
         .with_target(true)
         .with_level(true)
         .with_ansi(false) // No ANSI in kernel log
-        .init();
+        .try_init();
 }
 
-#[cfg(target_os = "linux")]
-fn halt_system(reason: &str) -> ! {
-    error!("SYSTEM HALT: {}", reason);
-    // Write reason to STATE partition for post-mortem
-    let _ = std::fs::write("/embra/state/halt_reason", reason);
-    // Sync filesystems
-    unsafe { libc::sync(); }
-    // Halt
-    unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_HALT); }
-    // If reboot() fails, loop forever
-    loop { std::thread::sleep(std::time::Duration::from_secs(3600)); }
-}
+#[cfg(test)]
+mod halt_reason_tests {
+    use super::{fatal_reason, panic_reason};
 
-#[cfg(not(target_os = "linux"))]
-fn halt_system(reason: &str) -> ! {
-    error!("SYSTEM HALT (dev mode, would halt on Linux): {}", reason);
-    let _ = std::fs::write("/tmp/embra-halt-reason", reason);
-    std::process::exit(1);
-}
+    #[test]
+    fn panic_reason_names_the_message_and_the_location() {
+        assert_eq!(
+            panic_reason(Some("mount failed"), Some(("crates/embrad/src/mount.rs", 42))),
+            "panic: mount failed (crates/embrad/src/mount.rs:42)"
+        );
+        assert_eq!(panic_reason(Some("x"), None), "panic: x");
+        assert_eq!(panic_reason(None, None), "panic: no message");
+    }
 
-#[cfg(target_os = "linux")]
-fn reboot_system() -> ! {
-    info!("Rebooting system");
-    unsafe { libc::sync(); }
-    unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_RESTART); }
-    loop { std::thread::sleep(std::time::Duration::from_secs(3600)); }
-}
-
-#[cfg(not(target_os = "linux"))]
-fn reboot_system() -> ! {
-    info!("Reboot requested (dev mode, would reboot on Linux)");
-    std::process::exit(0);
+    #[test]
+    fn a_fatal_boot_error_is_a_halt_reason_with_its_chain() {
+        let e = anyhow::anyhow!("No such file or directory").context("mount /embra/state");
+        assert_eq!(fatal_reason(&e), "boot failed: mount /embra/state: No such file or directory");
+    }
 }

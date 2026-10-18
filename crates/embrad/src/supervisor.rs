@@ -502,20 +502,27 @@ impl Supervisor {
         }
         // embra-console gets stdin/stdout for the TUI (serial console)
         // stderr goes to log file to prevent embrad log bleed-through
+        // A log file that cannot be opened (or cloned for the second
+        // stream) sends that stream nowhere; nothing here can panic PID 1.
         if svc.def.name == "embra-console" {
             cmd.stdin(Stdio::inherit());
             cmd.stdout(Stdio::inherit());
             let log_path = "/embra/ephemeral/embra-console.log";
-            let log_file = std::fs::File::create(log_path)
-                .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
-            cmd.stderr(Stdio::from(log_file));
+            cmd.stderr(match std::fs::File::create(log_path) {
+                Ok(f) => Stdio::from(f),
+                Err(_) => Stdio::null(),
+            });
         } else {
             let log_path = format!("/embra/ephemeral/{}.log", svc.def.name);
-            let log_file = std::fs::File::create(&log_path)
-                .unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
-            let log_file2 = log_file.try_clone().unwrap_or_else(|_| std::fs::File::create("/dev/null").unwrap());
-            cmd.stdout(Stdio::from(log_file));
-            cmd.stderr(Stdio::from(log_file2));
+            let (out, err) = match std::fs::File::create(&log_path) {
+                Ok(f) => match f.try_clone() {
+                    Ok(f2) => (Stdio::from(f), Stdio::from(f2)),
+                    Err(_) => (Stdio::from(f), Stdio::null()),
+                },
+                Err(_) => (Stdio::null(), Stdio::null()),
+            };
+            cmd.stdout(out);
+            cmd.stderr(err);
         }
         cmd.kill_on_drop(true);
 
@@ -821,13 +828,23 @@ impl Supervisor {
     }
 }
 
+/// Where a halt leaves its reason, on STATE: a soul verification failure, a
+/// fatal boot error, a panic in PID 1. The intelligence reads it with
+/// `file_read`; the operator by loop-mounting STATE.
+pub(crate) const HALT_REASON_PATH: &str = "/embra/state/halt_reason";
+
+/// Halt the machine with `reason` written to STATE. Every fatal path of
+/// PID 1 ends here (`main.rs`: the panic hook, a fatal `run()` error, the
+/// soul gate); PID 1 never exits.
 #[cfg(target_os = "linux")]
-fn halt_system(reason: &str) -> ! {
+pub(crate) fn halt_system(reason: &str) -> ! {
     error!("SYSTEM HALT: {}", reason);
     // Write reason to STATE partition for post-mortem
-    let _ = std::fs::write("/embra/state/halt_reason", reason);
+    let _ = std::fs::write(HALT_REASON_PATH, reason);
     // Sync filesystems
     unsafe { libc::sync(); }
+    // Let the serial console drain the log line before the halt.
+    std::thread::sleep(Duration::from_secs(2));
     // Halt
     unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_HALT); }
     // If reboot() fails, loop forever
@@ -835,10 +852,24 @@ fn halt_system(reason: &str) -> ! {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn halt_system(reason: &str) -> ! {
+pub(crate) fn halt_system(reason: &str) -> ! {
     error!("SYSTEM HALT (dev mode, would halt on Linux): {}", reason);
     let _ = std::fs::write("/tmp/embra-halt-reason", reason);
     std::process::exit(1);
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn reboot_system() -> ! {
+    info!("Rebooting system");
+    unsafe { libc::sync(); }
+    unsafe { libc::reboot(libc::LINUX_REBOOT_CMD_RESTART); }
+    loop { std::thread::sleep(Duration::from_secs(3600)); }
+}
+
+#[cfg(not(target_os = "linux"))]
+pub(crate) fn reboot_system() -> ! {
+    info!("Reboot requested (dev mode, would reboot on Linux)");
+    std::process::exit(0);
 }
 
 /// Whether trustd's report says there is no soul yet, as on a first boot.

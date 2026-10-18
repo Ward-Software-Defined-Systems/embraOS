@@ -146,6 +146,8 @@ The following apply once the image is built. They are not part of the build pipe
 > Partition geometry is read from the GPT at run time, so this stays correct as partitions
 > shift between builds.
 
+> **Halted boot:** embrad (PID 1) never exits. A failed soul verification, a fatal boot error (a partition that does not mount, a service that cannot start) or a panic in embrad halts the machine and writes the reason to `/embra/state/halt_reason` on STATE. After the next boot, ask the intelligence to read `/embra/state/halt_reason` (`file_read` reaches that file; the rest of STATE is refused to the tools, except the operator's drop-in directories). When the machine does not boot at all, stop the VM and take a backup — `sudo ./scripts/embraos-backup.sh backup --label halted` — and read `STATE/halt_reason` in it under `~/embraOS_BACKUPS/`.
+
 > **Port Forwarding:** QEMU forwards 50000 (gRPC) and 8443 (REST) on the host's loopback only, and 3345 (the HTTPS web console — https://localhost:3345/embraOS, behind this boot's access token) on every host interface, in both UI modes; only the launch banner differs. Other machines on the host's network reach the web console and nothing else, and only with the URL embraOS printed at boot; the per-port table is in [SYSTEM-DESIGN.md](../SYSTEM-DESIGN.md#network-exposure). apid's REST surface is `/health`, `/version` and `/status` — `/status` proxies the brain's `GetSystemStatus` (2-second timeout, HTTP 503 while the brain is away) and carries the active LLM provider's last endpoint probe as `llm-provider` / `llm-provider.detail`. Test with:
 > ```bash
 > curl http://localhost:8443/health

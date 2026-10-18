@@ -3,13 +3,15 @@
 //! Continuously monitors service health and restarts failed services.
 //! Also handles SIGTERM/SIGINT for graceful shutdown.
 
-use crate::supervisor::{Supervisor, ServiceStatus};
-use tokio::signal::unix::{signal, SignalKind};
-use tracing::{info, warn, error};
+use crate::supervisor::{ServiceStatus, Supervisor};
+use tokio::signal::unix::{signal, Signal, SignalKind};
+use tracing::{error, info, warn};
 
 pub async fn run(supervisor: &mut Supervisor) {
-    let mut sigterm = signal(SignalKind::terminate()).expect("Failed to install SIGTERM handler");
-    let mut sigint = signal(SignalKind::interrupt()).expect("Failed to install SIGINT handler");
+    // A handler that cannot be installed is logged once and that signal is
+    // never awaited; PID 1 does not panic for it.
+    let mut sigterm = install(SignalKind::terminate(), "SIGTERM");
+    let mut sigint = install(SignalKind::interrupt(), "SIGINT");
 
     let health_interval = tokio::time::Duration::from_secs(5);
     let mut health_tick = tokio::time::interval(health_interval);
@@ -18,11 +20,11 @@ pub async fn run(supervisor: &mut Supervisor) {
 
     loop {
         tokio::select! {
-            _ = sigterm.recv() => {
+            _ = recv_or_pending(&mut sigterm) => {
                 info!("Received SIGTERM — initiating shutdown");
                 break;
             }
-            _ = sigint.recv() => {
+            _ = recv_or_pending(&mut sigint) => {
                 info!("Received SIGINT — initiating shutdown");
                 break;
             }
@@ -43,5 +45,27 @@ pub async fn run(supervisor: &mut Supervisor) {
                 }
             }
         }
+    }
+}
+
+/// The handler for one signal, or `None` with the failure logged.
+fn install(kind: SignalKind, name: &str) -> Option<Signal> {
+    match signal(kind) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            error!("Failed to install the {name} handler: {e}; {name} will not be handled");
+            None
+        }
+    }
+}
+
+/// The next delivery of a signal, or a future that never completes when
+/// its handler could not be installed.
+async fn recv_or_pending(sig: &mut Option<Signal>) {
+    match sig {
+        Some(s) => {
+            s.recv().await;
+        }
+        None => std::future::pending::<()>().await,
     }
 }
