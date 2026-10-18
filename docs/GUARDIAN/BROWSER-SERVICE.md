@@ -13,7 +13,9 @@ rendered pages as text, screenshots and PDFs into the workspace with
 Docker Compose on an Ubuntu 24.04 host, Caddy's internal CA seeded into
 STATE; from a QEMU image, every use and refusal on this page, the 60 s
 budget, and the full-page measurements under *A screenshot*. The tiles of
-`image_view` named there: TBD.
+`image_view` named there: validated 2026-10-18 on the same captures (seven
+tiles of 800×2378 px for a 16,642 px page, `part=2`, the refusals, the
+mobile UI).
 
 ## What runs
 
@@ -123,7 +125,7 @@ Ask in plain language; these are the inputs Embra sends:
   four. An image over 64 megapixels is refused before decode. Measured
   2026-10-17: a capture 4,385 px tall is shown whole and stays readable
   (1.7×); one 8,000 px tall shown whole was not (3.1×), and is four tiles
-  now. Text is still read through `/content`; the viewport or a top-level
+  now, readable down to the reference markers (2026-10-18). Text is still read through `/content`; the viewport or a top-level
   `selector` suit a single picture.
 - **A PDF** (`/pdf`):
   `{"url":"https://browser.example.lan/pdf","method":"POST","json":{"url":"https://example.com/","options":{"printBackground":true,"format":"A4"}},"save_to":"files/example.pdf"}`,
