@@ -9,7 +9,10 @@ rendered pages as text, screenshots and PDFs into the workspace with
 `save_to`, scripted interaction in one request. The files under
 [`BROWSER-SERVICE/`](./BROWSER-SERVICE/) run it with Docker Compose.
 
-**Validated:** TBD.
+**Validated:** 2026-10-17. Browserless `v2.57.1` behind Caddy `2.11.7` with
+Docker Compose on an Ubuntu 24.04 host, Caddy's internal CA seeded into
+STATE; from a QEMU image, every use and refusal on this page, the 60 s
+budget, and the full-page measurements under *A screenshot*.
 
 ## What runs
 
@@ -112,9 +115,14 @@ Ask in plain language; these are the inputs Embra sends:
 - **A screenshot** (`/screenshot`):
   `{"url":"https://browser.example.lan/screenshot","method":"POST","json":{"url":"https://example.com/","options":{"type":"png"}},"save_to":"shots/example.png"}`.
   The PNG lands under `/embra/workspace/shots/`; `image_view` on that path
-  shows it to Embra and to you. `image_view` normalizes to 2576 px on the
-  long edge and 1.5 MiB, so a `fullPage` capture of a long page shrinks;
-  the viewport, `options.clip` or a top-level `selector` suit the model.
+  shows it to Embra and to you. `image_view` keeps the long edge at 2576 px
+  and the file under 1.5 MiB, and refuses an edge over 8000 px before it
+  decodes, naming the size and the cap. Measured 2026-10-17: a `fullPage`
+  capture 4,385 px tall stayed readable at 1.7×; a clip 8,000 px tall did
+  not (3.1×, the body text gone); a `fullPage` capture of a long article
+  was refused. A clip of at most 2576 px on each edge is shown as captured:
+  read a long page as a sequence of `options.clip` regions, or as text
+  through `/content`. The viewport or a top-level `selector` suit the model.
 - **A PDF** (`/pdf`):
   `{"url":"https://browser.example.lan/pdf","method":"POST","json":{"url":"https://example.com/","options":{"printBackground":true,"format":"A4"}},"save_to":"files/example.pdf"}`,
   then `file_offer` on that path for a download in the web console. Nothing
