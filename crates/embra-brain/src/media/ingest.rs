@@ -17,6 +17,7 @@ use std::io::Cursor;
 use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
 use image::metadata::Orientation;
+use image::codecs::png::{CompressionType, FilterType as PngFilter, PngEncoder};
 use image::{DynamicImage, ImageDecoder, ImageFormat, ImageReader, Limits};
 use once_cell::sync::Lazy;
 use tokio::sync::Semaphore;
@@ -110,7 +111,7 @@ pub enum IngestError {
     PixelLimit { width: u32, height: u32 },
     #[error("image decode failed: {0}")]
     Decode(String),
-    #[error("part {part} does not exist; the image has {parts} parts (part=1 to part={parts})")]
+    #[error("{}", no_such_part(.part, .parts))]
     NoSuchPart { part: usize, parts: usize },
 }
 
@@ -170,6 +171,15 @@ fn over_pixel_cap(w: u32, h: u32) -> bool {
 fn megapixels(w: &u32, h: &u32) -> String {
     let pixels = u64::from(*w) * u64::from(*h);
     format!("{}.{}", pixels / 1_000_000, (pixels % 1_000_000) / 100_000)
+}
+
+/// The refusal of a part that does not exist, with the range that does.
+fn no_such_part(part: &usize, parts: &usize) -> String {
+    if *parts == 1 {
+        format!("part {part} does not exist; the image has 1 part (only part=1)")
+    } else {
+        format!("part {part} does not exist; the image has {parts} parts (part=1 to part={parts})")
+    }
 }
 
 /// What the header says, before any pixel buffer exists: the format, the
@@ -259,6 +269,21 @@ pub fn normalize_blocking(bytes: Vec<u8>) -> Result<Normalized, IngestError> {
     fit_whole(img, p.kind)
 }
 
+/// PNG at the library's default compression level with adaptive filtering.
+/// `DynamicImage::write_to` encodes at the fastest level, which on a page
+/// capture writes ten times the bytes of this one to save a few
+/// milliseconds (measured 2026-10-18 on a text-like 800×2000 tile:
+/// 508,864 B in 3 ms against 50,490 B in 21 ms; the best level 35,574 B in
+/// 28 ms). The bytes go to the model inline and into the store, and the
+/// size cap and the replay budgets count them.
+fn encode_png(img: &DynamicImage) -> Result<Vec<u8>, IngestError> {
+    let mut out = Cursor::new(Vec::new());
+    let encoder = PngEncoder::new_with_quality(&mut out, CompressionType::Default, PngFilter::Adaptive);
+    img.write_with_encoder(encoder)
+        .map_err(|e| IngestError::Decode(e.to_string()))?;
+    Ok(out.into_inner())
+}
+
 /// Encode ladder: lossless sources (PNG/GIF/WebP) try PNG first; anything
 /// that does not fit under [`MEDIA_INLINE_MAX`] falls to JPEG at
 /// [`JPEG_QUALITY`], then progressively smaller/lower-quality JPEGs down
@@ -266,10 +291,7 @@ pub fn normalize_blocking(bytes: Vec<u8>) -> Result<Normalized, IngestError> {
 fn encode_ladder(img: DynamicImage, kind: ImageKind) -> Result<Normalized, IngestError> {
     let (w, h) = (img.width(), img.height());
     if matches!(kind, ImageKind::Png | ImageKind::Gif | ImageKind::Webp) {
-        let mut out = Cursor::new(Vec::new());
-        img.write_to(&mut out, ImageFormat::Png)
-            .map_err(|e| IngestError::Decode(e.to_string()))?;
-        let out = out.into_inner();
+        let out = encode_png(&img)?;
         if out.len() <= MEDIA_INLINE_MAX {
             return Ok(Normalized {
                 bytes: out,
@@ -488,6 +510,60 @@ pub(crate) mod tests {
             normalize_blocking(png_header_claiming(800, 20_000)),
             Err(IngestError::Decode(_))
         ));
+    }
+
+    /// Glyph-like boxes on ruled lines: what a page capture looks like to
+    /// an encoder (repetitive, not trivial).
+    pub(crate) fn text_like_png(w: u32, h: u32) -> DynamicImage {
+        let mut img: ImageBuffer<Rgba<u8>, Vec<u8>> = ImageBuffer::from_pixel(w, h, Rgba([255, 255, 255, 255]));
+        for y in 0..h {
+            let (row, yy) = (y / 22, y % 22);
+            if !(4..=17).contains(&yy) || row % 9 == 8 {
+                continue;
+            }
+            for x in 40..w.saturating_sub(40) {
+                let (col, xx) = ((x - 40) / 9, (x - 40) % 9);
+                if xx >= 7 {
+                    continue;
+                }
+                let ink = match (col * 31 + row * 17) % 7 {
+                    0 => xx == 0 || xx == 6 || yy == 4 || yy == 17,
+                    1 => yy % 4 == 0,
+                    2 => xx % 3 == 0,
+                    3 => (xx + yy) % 5 == 0,
+                    4 => xx == 3,
+                    5 => yy == 10 || xx == 0,
+                    _ => (xx * yy) % 4 == 0,
+                };
+                if ink {
+                    img.put_pixel(x, y, Rgba([20, 20, 20, 255]));
+                }
+            }
+        }
+        DynamicImage::ImageRgba8(img)
+    }
+
+    #[test]
+    fn a_png_is_encoded_at_the_default_level_not_the_fastest() {
+        let img = text_like_png(400, 600);
+        let mut fast = Cursor::new(Vec::new());
+        img.write_to(&mut fast, ImageFormat::Png).unwrap();
+        let ours = encode_ladder(img.clone(), ImageKind::Png).unwrap();
+        assert_eq!(ours.kind, ImageKind::Png);
+        assert!(
+            ours.bytes.len() * 3 < fast.get_ref().len(),
+            "default level {} B against the fastest {} B",
+            ours.bytes.len(),
+            fast.get_ref().len()
+        );
+        let back = image::load_from_memory(&ours.bytes).unwrap();
+        assert_eq!(back.to_rgba8(), img.to_rgba8(), "lossless");
+    }
+
+    #[test]
+    fn a_missing_part_is_refused_with_the_range_that_exists() {
+        assert_eq!(no_such_part(&2, &1), "part 2 does not exist; the image has 1 part (only part=1)");
+        assert_eq!(no_such_part(&9, &2), "part 9 does not exist; the image has 2 parts (part=1 to part=2)");
     }
 
     #[test]
