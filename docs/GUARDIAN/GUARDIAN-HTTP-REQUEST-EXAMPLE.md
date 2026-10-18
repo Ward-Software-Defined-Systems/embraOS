@@ -151,8 +151,9 @@ A screenshot from a headless-browser service reached over HTTPS
 
 Nothing was read, so the answer carries no `body`, no `truncated` and no
 `injection_*` field, and `as` is ignored. `image_view` then shows the
-picture to the intelligence and to the operator, and `file_offer` offers
-the file for download. A body over the cap answers `{"error": "the body is
+picture to the intelligence and to the operator (a long capture comes
+back in tiles, four per call), and `file_offer` offers the file for
+download. A body over the cap answers `{"error": "the body is
 larger than the save cap of 12582912 bytes; nothing written"}`; an existing
 target, a path outside the workspace, `MEDIA/…`, `.guardian/…` and a path
 that names no file are refused in the sink's words before any request is

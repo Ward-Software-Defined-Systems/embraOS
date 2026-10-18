@@ -13,9 +13,10 @@ rendered pages as text, screenshots and PDFs into the workspace with
 Docker Compose on an Ubuntu 24.04 host, Caddy's internal CA seeded into
 STATE; from a QEMU image, every use and refusal on this page, the 60 s
 budget, and the full-page measurements under *A screenshot*. The tiles of
-`image_view` named there: validated 2026-10-18 on the same captures (seven
-tiles of 800×2378 px for a 16,642 px page, `part=2`, the refusals, the
-mobile UI).
+`image_view` named there: validated 2026-10-18 in three rounds on the same
+captures (seven tiles of 800×2366–2383 px for a 16,642 px page, the cuts
+on blank lines and in the gap beside a figure, `part=2`, the refusals, the
+mobile UI, the recapture with `scrollPage`).
 
 ## What runs
 
