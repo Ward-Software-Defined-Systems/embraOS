@@ -10,6 +10,11 @@ pub enum WardsonDbError {
 
     #[error("Document not found: {collection}/{id}")]
     DocumentNotFound { collection: String, id: String },
+
+    /// A collection or document id that cannot stand in a URL as itself
+    /// (`client::segment_ok`); nothing was sent.
+    #[error("{0}")]
+    InvalidName(String),
 }
 
 impl WardsonDbError {

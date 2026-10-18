@@ -3,6 +3,55 @@ use serde::{Deserialize, Serialize};
 
 use super::error::WardsonDbError;
 
+/// One segment of a WardSONDB URL. A `Fixed` segment is the route's own
+/// word (`docs`, `query`, `_delete_by_query`, `ttl`, `indexes`, `_bulk`,
+/// `aggregate`) and is never checked. A `Collection` or an `Id` is the
+/// caller's name and is checked by [`segment_ok`] before it is placed in a
+/// URL: reqwest parses the URL with the `url` crate, which removes `..` and
+/// `%2e%2e` segments, reads `\` as `/`, and starts a query at `?` and a
+/// fragment at `#`, so an id such as `../../soul.invariant/docs/soul`
+/// would otherwise reach another collection's document.
+#[derive(Debug, Clone, Copy)]
+pub enum Segment<'a> {
+    Fixed(&'static str),
+    Collection(&'a str),
+    Id(&'a str),
+}
+
+/// The longest name the server stores (`engine/document.rs`).
+const SEGMENT_MAX_BYTES: usize = 512;
+
+/// The name grammar: what can stand in a URL path as itself. Unicode
+/// letters pass (identity slugs are lowercased Unicode); `/ \ ? # %`,
+/// whitespace, control characters, `.` and `..` do not; a collection has no
+/// leading `_`, the server's own rule for its reserved routes.
+pub fn segment_ok(seg: Segment<'_>) -> Result<()> {
+    let (kind, s) = match seg {
+        Segment::Fixed(_) => return Ok(()),
+        Segment::Collection(s) => ("collection", s),
+        Segment::Id(s) => ("document id", s),
+    };
+    let why = if s.is_empty() {
+        Some("it is empty")
+    } else if s.len() > SEGMENT_MAX_BYTES {
+        Some("it is longer than 512 bytes")
+    } else if s == "." || s == ".." {
+        Some("it is a dot segment")
+    } else if s.chars().any(|c| matches!(c, '/' | '\\' | '?' | '#' | '%')) {
+        Some("it contains one of / \\ ? # %")
+    } else if s.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        Some("it contains whitespace or a control character")
+    } else if kind == "collection" && s.starts_with('_') {
+        Some("a collection name cannot start with '_'")
+    } else {
+        None
+    };
+    match why {
+        None => Ok(()),
+        Some(why) => Err(WardsonDbError::InvalidName(format!("{kind} '{s}' is not a valid name: {why}")).into()),
+    }
+}
+
 /// Recency window for memory search/scan fetches (FIX-2/3/4/6).
 ///
 /// Every windowed fetch over the memory collections goes through
@@ -166,6 +215,23 @@ impl WardsonDbClient {
         }
     }
 
+    /// The URL of a route: every caller's name checked by [`segment_ok`]
+    /// before it is joined, so a request is never built from a name the
+    /// `url` crate would rewrite.
+    fn url(&self, segments: &[Segment<'_>]) -> Result<String> {
+        let mut out = self.base_url.clone();
+        for seg in segments {
+            segment_ok(*seg)?;
+            let s = match seg {
+                Segment::Fixed(s) => *s,
+                Segment::Collection(s) | Segment::Id(s) => *s,
+            };
+            out.push('/');
+            out.push_str(s);
+        }
+        Ok(out)
+    }
+
     pub async fn health(&self) -> Result<bool> {
         let resp = self
             .http_client
@@ -209,6 +275,7 @@ impl WardsonDbClient {
     }
 
     pub async fn create_collection(&self, name: &str) -> Result<()> {
+        segment_ok(Segment::Collection(name))?;
         let resp = self
             .http_client
             .post(format!("{}/_collections", self.base_url))
@@ -228,7 +295,7 @@ impl WardsonDbClient {
     pub async fn collection_exists(&self, name: &str) -> Result<bool> {
         let resp = self
             .http_client
-            .get(format!("{}/{}", self.base_url, name))
+            .get(self.url(&[Segment::Collection(name)])?)
             .send()
             .await?;
         Ok(resp.status().is_success())
@@ -243,7 +310,7 @@ impl WardsonDbClient {
     pub async fn drop_collection(&self, name: &str) -> Result<()> {
         let resp = self
             .http_client
-            .delete(format!("{}/{}", self.base_url, name))
+            .delete(self.url(&[Segment::Collection(name)])?)
             .send()
             .await?;
         if resp.status().is_success() || resp.status().as_u16() == 404 {
@@ -262,7 +329,7 @@ impl WardsonDbClient {
         let started = std::time::Instant::now();
         let resp = self
             .http_client
-            .post(format!("{}/{}/docs", self.base_url, collection))
+            .post(self.url(&[Segment::Collection(collection), Segment::Fixed("docs")])?)
             .json(doc)
             .send()
             .await?;
@@ -290,7 +357,7 @@ impl WardsonDbClient {
         let started = std::time::Instant::now();
         let resp = self
             .http_client
-            .get(format!("{}/{}/docs/{}", self.base_url, collection, id))
+            .get(self.url(&[Segment::Collection(collection), Segment::Fixed("docs"), Segment::Id(id)])?)
             .send()
             .await?;
         crate::activity::db_op(collection, crate::activity::DbVerb::Read, started);
@@ -330,7 +397,7 @@ impl WardsonDbClient {
         let started = std::time::Instant::now();
         let resp = self
             .http_client
-            .post(format!("{}/{}/query", self.base_url, collection))
+            .post(self.url(&[Segment::Collection(collection), Segment::Fixed("query")])?)
             .json(query)
             .send()
             .await?;
@@ -427,7 +494,7 @@ impl WardsonDbClient {
         let started = std::time::Instant::now();
         let resp = self
             .http_client
-            .put(format!("{}/{}/docs/{}", self.base_url, collection, id))
+            .put(self.url(&[Segment::Collection(collection), Segment::Fixed("docs"), Segment::Id(id)])?)
             .json(doc)
             .send()
             .await?;
@@ -444,7 +511,7 @@ impl WardsonDbClient {
         let started = std::time::Instant::now();
         let resp = self
             .http_client
-            .delete(format!("{}/{}/docs/{}", self.base_url, collection, id))
+            .delete(self.url(&[Segment::Collection(collection), Segment::Fixed("docs"), Segment::Id(id)])?)
             .send()
             .await?;
         crate::activity::db_op(collection, crate::activity::DbVerb::Delete, started);
@@ -509,7 +576,7 @@ impl WardsonDbClient {
         let started = std::time::Instant::now();
         let resp = self
             .http_client
-            .patch(format!("{}/{}/docs/{}", self.base_url, collection, id))
+            .patch(self.url(&[Segment::Collection(collection), Segment::Fixed("docs"), Segment::Id(id)])?)
             .json(patch)
             .send()
             .await?;
@@ -535,7 +602,7 @@ impl WardsonDbClient {
         filter: &serde_json::Value,
     ) -> Result<u64> {
         let started = std::time::Instant::now();
-        let url = format!("{}/{}/docs/_delete_by_query", self.base_url, collection);
+        let url = self.url(&[Segment::Collection(collection), Segment::Fixed("docs"), Segment::Fixed("_delete_by_query")])?;
         let body = serde_json::json!({"filter": filter});
         let resp = self
             .http_client
@@ -563,7 +630,7 @@ impl WardsonDbClient {
         retention_days: u64,
         field: &str,
     ) -> Result<()> {
-        let url = format!("{}/{}/ttl", self.base_url, collection);
+        let url = self.url(&[Segment::Collection(collection), Segment::Fixed("ttl")])?;
         let body = serde_json::json!({"retention_days": retention_days, "field": field});
         let resp = self
             .http_client
@@ -588,7 +655,7 @@ impl WardsonDbClient {
     pub async fn delete_ttl(&self, collection: &str) -> Result<()> {
         let resp = self
             .http_client
-            .delete(format!("{}/{}/ttl", self.base_url, collection))
+            .delete(self.url(&[Segment::Collection(collection), Segment::Fixed("ttl")])?)
             .send()
             .await?;
         if resp.status().is_success() || resp.status().as_u16() == 404 {
@@ -607,7 +674,7 @@ impl WardsonDbClient {
         let started = std::time::Instant::now();
         let resp = self
             .http_client
-            .post(format!("{}/{}/query", self.base_url, collection))
+            .post(self.url(&[Segment::Collection(collection), Segment::Fixed("query")])?)
             .json(query_body)
             .send()
             .await?;
@@ -634,7 +701,7 @@ impl WardsonDbClient {
     ) -> Result<()> {
         let resp = self
             .http_client
-            .post(format!("{}/{}/indexes", self.base_url, collection))
+            .post(self.url(&[Segment::Collection(collection), Segment::Fixed("indexes")])?)
             .json(body)
             .send()
             .await?;
@@ -657,7 +724,7 @@ impl WardsonDbClient {
         let started = std::time::Instant::now();
         let resp = self
             .http_client
-            .post(format!("{}/{}/docs/_bulk", self.base_url, collection))
+            .post(self.url(&[Segment::Collection(collection), Segment::Fixed("docs"), Segment::Fixed("_bulk")])?)
             .json(&serde_json::json!({ "documents": documents }))
             .send()
             .await?;
@@ -686,7 +753,7 @@ impl WardsonDbClient {
         let started = std::time::Instant::now();
         let resp = self
             .http_client
-            .post(format!("{}/{}/aggregate", self.base_url, collection))
+            .post(self.url(&[Segment::Collection(collection), Segment::Fixed("aggregate")])?)
             .json(&serde_json::json!({ "pipeline": pipeline }))
             .send()
             .await?;
@@ -1153,5 +1220,70 @@ mod ttl_policy_tests {
         assert!(db.delete_ttl("kept").await.is_ok());
         let err = db.delete_ttl("broken").await.unwrap_err().to_string();
         assert!(err.contains("500"), "the status is in the error: {err}");
+    }
+}
+
+#[cfg(test)]
+mod name_grammar_tests {
+    //! A collection or document id reaches a URL only as itself. The
+    //! `url` crate would rewrite a traversal id onto another collection's
+    //! document (the review's H0); the client refuses it before any request.
+    use super::*;
+    use wiremock::MockServer;
+
+    #[tokio::test]
+    async fn a_traversal_id_is_refused_before_any_request() {
+        let server = MockServer::start().await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let id = "../../soul.invariant/docs/soul";
+        for result in [
+            db.delete("tasks", id).await.map(|_| ()),
+            db.read("memory.semantic", id).await.map(|_| ()),
+            db.update("memory.semantic", id, &serde_json::json!({})).await.map(|_| ()),
+            db.patch_document("memory.semantic", id, &serde_json::json!({})).await.map(|_| ()),
+        ] {
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("document id") && err.contains("is not a valid name"), "{err}");
+        }
+        for result in [
+            db.collection_exists("../soul.invariant").await.map(|_| ()),
+            db.drop_collection("a#b").await,
+            db.create_collection("a b").await,
+        ] {
+            let err = result.unwrap_err().to_string();
+            assert!(err.contains("collection") && err.contains("is not a valid name"), "{err}");
+        }
+        assert!(server.received_requests().await.unwrap_or_default().is_empty(), "nothing was sent");
+    }
+
+    #[test]
+    fn a_collection_with_a_separator_or_a_fragment_is_refused() {
+        for bad in ["a/b", "a#b", "a?b", "a\\b", "a%2eb", " a", "a b", "a\tb", "", ".", "..", "_collections"] {
+            assert!(segment_ok(Segment::Collection(bad)).is_err(), "{bad:?} should be refused");
+        }
+        for bad in ["a/b", "../x", "", ".", "..", "a\nb", "a?b", "a#b"] {
+            assert!(segment_ok(Segment::Id(bad)).is_err(), "{bad:?} should be refused");
+        }
+        // The route's own words are never checked.
+        assert!(segment_ok(Segment::Fixed("_delete_by_query")).is_ok());
+        let long = "x".repeat(SEGMENT_MAX_BYTES + 1);
+        assert!(segment_ok(Segment::Id(&long)).is_err());
+    }
+
+    #[test]
+    fn every_name_the_brain_writes_passes() {
+        for id in [
+            "soul", "config", "summary", "user", "learning", "current", "identity",
+            "seed_core_docs_map", "embraOS", "0199abcd-0000-7000-8000-000000000000", "état_civil", "_id_is_fine_for_a_document",
+        ] {
+            assert!(segment_ok(Segment::Id(id)).is_ok(), "{id}");
+        }
+        for coll in [
+            "memory.entries", "memory.semantic", "memory.edges", "soul.invariant", "guardian.tools",
+            "config.system", "tools.turn_trace", "sessions.code-review-debug_v11.meta", "sessions.main.history",
+            "system.migrations", "activity.tap",
+        ] {
+            assert!(segment_ok(Segment::Collection(coll)).is_ok(), "{coll}");
+        }
     }
 }

@@ -2782,8 +2782,17 @@ async fn handle_request(
 
             // Ensure session exists
             let new_session = !mgr.session_exists(&session_name).await.unwrap_or(false);
-            if new_session {
-                let _ = mgr.create(&session_name).await;
+            if new_session && let Err(e) = mgr.create(&session_name).await {
+                drop(mgr);
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::System(SystemMessage {
+                            content: format!("Could not create session '{}': {}", session_name, e),
+                            msg_type: SystemMessageType::Error as i32,
+                        })),
+                    }))
+                    .await;
+                return Ok(());
             }
 
             // Soft-deleted sessions are unattachable during their grace

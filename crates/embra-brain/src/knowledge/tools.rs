@@ -605,7 +605,8 @@ pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String
 
     let node_doc = match db.read(coll, id).await {
         Ok(doc) => doc,
-        Err(_) => return format!("Error: Node {}:{} not found", coll, id),
+        Err(e) if crate::db::error::is_not_found(&e) => return format!("Error: Node {}:{} not found", coll, id),
+        Err(e) => return format!("Error: could not read {}:{}: {}", coll, id, e),
     };
 
     let preview_src = node_doc

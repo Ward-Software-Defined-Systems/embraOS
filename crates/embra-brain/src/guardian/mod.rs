@@ -1258,6 +1258,11 @@ async fn delete(db: &Arc<WardsonDbClient>, name: &str) -> String {
     if name.is_empty() {
         return "Usage: /guardian delete <name>".to_string();
     }
+    // The name is a directory under `.guardian/tools/` and a document id:
+    // the tool-name grammar, before the database or the filesystem is touched.
+    if embra_guardian::scaffold::safe_tool_dir(base(), name).is_err() {
+        return format!("guardian: '{name}' is not a tool name ([a-z][a-z0-9_]{{2,39}}); nothing deleted.");
+    }
     if let Some(rt) = embra_guardian::runtime() {
         rt.remove(name);
     }
@@ -1847,6 +1852,19 @@ pub async fn guardian_call(
 #[cfg(test)]
 mod secret_and_egress_tests {
     use super::*;
+
+    /// `/guardian delete ../x` names nothing: the grammar refuses before the
+    /// database or the filesystem is touched.
+    #[tokio::test]
+    async fn a_guardian_delete_of_a_bad_name_touches_nothing() {
+        let server = wiremock::MockServer::start().await;
+        let db = Arc::new(WardsonDbClient::from_url(&server.uri()));
+        for bad in ["../x", "a/b", "..", "UPPER", "no", "has space"] {
+            let out = delete(&db, bad).await;
+            assert!(out.contains("is not a tool name"), "{bad}: {out}");
+        }
+        assert!(server.received_requests().await.unwrap_or_default().is_empty());
+    }
 
     #[test]
     fn secret_args_parse_every_form_and_keep_the_value_whole() {

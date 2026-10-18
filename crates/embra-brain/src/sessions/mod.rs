@@ -301,6 +301,7 @@ impl SessionManager {
     }
 
     pub async fn create(&mut self, name: &str) -> Result<SessionMeta> {
+        valid_session_name(name).map_err(|e| anyhow::anyhow!(e))?;
         let meta_collection = format!("sessions.{}.meta", name);
         let history_collection = format!("sessions.{}.history", name);
 
@@ -1233,5 +1234,38 @@ mod staged_media_tests {
         assert!(mgr.staged_media("alpha").is_empty());
         assert_eq!(mgr.staged_media("beta").len(), 1);
         assert!(mgr.take_staged_media("alpha").is_empty(), "drained once");
+    }
+}
+
+/// A session name becomes a collection name and a URL path segment:
+/// `[A-Za-z0-9][A-Za-z0-9_-]{0,63}`. Checked once, when the session is
+/// created; a name that already exists in the database is read as it is.
+pub fn valid_session_name(name: &str) -> Result<(), String> {
+    let ok = !name.is_empty()
+        && name.len() <= 64
+        && name.bytes().next().is_some_and(|b| b.is_ascii_alphanumeric())
+        && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-');
+    if ok {
+        Ok(())
+    } else {
+        Err(format!(
+            "'{name}' is not a session name: letters, digits, '_' and '-', starting with a letter or a digit, at most 64 characters"
+        ))
+    }
+}
+
+#[cfg(test)]
+mod name_tests {
+    use super::valid_session_name;
+
+    #[test]
+    fn a_session_name_is_a_collection_segment() {
+        for ok in ["main", "learning", "test", "cron", "ops", "new-session", "research", "monitoring", "code-review-debug_v11", "a", "A1"] {
+            assert!(valid_session_name(ok).is_ok(), "{ok}");
+        }
+        let long = "x".repeat(65);
+        for bad in ["", "a b", "a/b", "..", "-x", "_x", "a.b", "a#b", "état", long.as_str()] {
+            assert!(valid_session_name(bad).is_err(), "{bad:?}");
+        }
     }
 }

@@ -1284,7 +1284,8 @@ pub async fn task_delete(db: &WardsonDbClient, task_id: &str) -> String {
             .and_then(|v| v.as_str())
             .unwrap_or("(no title)")
             .to_string(),
-        Err(e) => return format!("Task not found: {}", e),
+        Err(e) if crate::db::error::is_not_found(&e) => return format!("Task not found: {}", id),
+        Err(e) => return format!("Failed to read task {}: {}", id, e),
     };
     match db.delete("tasks", id).await {
         Ok(()) => format!("Task deleted: '{}' (ID: {})", title, id),

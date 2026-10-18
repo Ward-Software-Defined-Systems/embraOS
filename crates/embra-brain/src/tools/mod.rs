@@ -3758,3 +3758,30 @@ mod reminder_tests {
         assert!(due_reminders(&docs, NOW, 0).is_empty());
     }
 }
+
+#[cfg(test)]
+mod id_gate_tests {
+    //! A model-supplied id that cannot stand in a URL is refused by the
+    //! database client before any request; the tools carry the refusal.
+    use super::{forget, get};
+    use crate::db::WardsonDbClient;
+    use wiremock::MockServer;
+
+    #[tokio::test]
+    async fn a_traversal_id_is_refused_by_every_entry_tool_before_the_database() {
+        let server = MockServer::start().await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let id = "../../soul.invariant/docs/soul";
+        let outs = [
+            get(&db, &format!("memory.entries {id}")).await,
+            forget(&db, id).await,
+            crate::tools::engineering::task_delete(&db, id).await,
+            crate::knowledge::tools::knowledge_unlink_node(&format!("memory.semantic:{id}"), &db).await,
+        ];
+        for out in &outs {
+            assert!(out.contains("is not a valid name"), "{out}");
+            assert!(!out.contains("not found"), "a refused id is not 'not found': {out}");
+        }
+        assert!(server.received_requests().await.unwrap_or_default().is_empty(), "nothing was sent");
+    }
+}
