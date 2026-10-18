@@ -6,9 +6,8 @@
 //! At first access, [`REGISTRY`] collects every submission into a
 //! `HashMap<&'static str, &'static ToolDescriptor>` for O(1) lookup.
 //!
-//! Stage 2 of the migration populates the registry in parallel with the
-//! legacy string dispatcher at `tools/mod.rs`. Stage 3 removes the legacy
-//! dispatcher and makes [`dispatch`] the single entry point.
+//! [`dispatch`] is the one entry point: the gRPC tool loop and the cron
+//! loop both call it; the string dispatcher it replaced is gone.
 
 use embra_tools_core::{BoxFut, DispatchError, JsonValue, ToolOutput, TurnTraceHandle};
 use once_cell::sync::Lazy;
@@ -212,8 +211,8 @@ fn outbound_refusal(name: &str, input: &JsonValue, config: &SystemConfig) -> Opt
 /// Looks up `name` in [`REGISTRY`], refuses an outbound input that carries
 /// a stored secret ([`OUTBOUND_TOOLS`]), runs the handler with the typed
 /// context under the [`MAX_TOOL_DURATION`] ceiling, and applies the
-/// 2 MiB text cap + the image COUNT cap. Stage 3 wires this into the gRPC
-/// dispatch loop; `tools/cron.rs` consumes `.text` only.
+/// 2 MiB text cap + the image COUNT cap. The gRPC tool loop calls it;
+/// `tools/cron.rs` consumes `.text` only.
 pub async fn dispatch(
     name: &str,
     input: JsonValue,

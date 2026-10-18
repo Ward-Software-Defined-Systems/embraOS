@@ -211,7 +211,12 @@ impl WardsonDbClient {
     pub fn from_url(url: &str) -> Self {
         Self {
             base_url: url.trim_end_matches('/').to_string(),
-            http_client: reqwest::Client::new(),
+            // A loopback API that redirects is a fault: no redirect is
+            // followed (`crate::net` has the policy of the other clients).
+            http_client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()
+                .expect("a reqwest client with no redirects builds"),
         }
     }
 
@@ -1021,16 +1026,44 @@ mod window_query_tests {
         );
     }
 
-    /// Whether a manifest line makes the vendored crate a dependency.
+    /// Whether a manifest line makes the vendored crate a dependency: a
+    /// plain, dotted (`wardsondb.path = ..`) or quoted key, a dotted table
+    /// header, or a renamed dependency on the package.
     fn names_the_database_crate(line: &str) -> bool {
         let line = line.trim();
         if line.starts_with('#') {
             return false;
         }
-        let key = line.split(['=', ' ']).next().unwrap_or("");
+        let key = line.split(['=', ' ']).next().unwrap_or("").trim_matches('"');
         key == "wardsondb"
+            || key.starts_with("wardsondb.")
             || line.contains("dependencies.wardsondb")
             || (line.contains("package") && line.contains("\"wardsondb\""))
+    }
+
+    /// The `[[package]]` blocks of a lockfile whose `dependencies` list
+    /// names `dep` (as `"dep"` or `"dep <version>"`), by package name. The
+    /// lock is what cargo resolved, whatever the manifests spell.
+    fn lock_packages_depending_on(lock: &str, dep: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for block in lock.split("[[package]]").skip(1) {
+            let name = block
+                .lines()
+                .find_map(|l| l.trim().strip_prefix("name = "))
+                .map(|v| v.trim_matches('"').to_string())
+                .unwrap_or_default();
+            let Some(start) = block.find("dependencies = [") else { continue };
+            let deps = &block[start..];
+            let deps = &deps[..deps.find(']').unwrap_or(deps.len())];
+            let names_it = deps.lines().skip(1).any(|l| {
+                let d = l.trim().trim_end_matches(',').trim_matches('"');
+                d == dep || d.starts_with(&format!("{dep} "))
+            });
+            if names_it {
+                out.push(name);
+            }
+        }
+        out
     }
 
     #[test]
@@ -1039,6 +1072,9 @@ mod window_query_tests {
             r#"wardsondb = { path = "../wardsondb" }"#,
             r#"wardsondb={ path = "../wardsondb" }"#,
             r#"  wardsondb = "0.9""#,
+            r#"wardsondb.path = "../wardsondb""#,
+            "wardsondb.workspace = true",
+            r#""wardsondb" = { path = "../wardsondb" }"#,
             "[dependencies.wardsondb]",
             "[dev-dependencies.wardsondb]",
             r#"db = { package = "wardsondb", path = "../wardsondb" }"#,
@@ -1051,9 +1087,51 @@ mod window_query_tests {
             "# HTTP client (for WardSONDB REST API)",
             r#"reqwest = { version = "0.12" }"#,
             r#"name = "wardsondb-client""#,
+            r#"wardsondb-client = "1""#,
         ] {
             assert!(!names_the_database_crate(line), "{line}");
         }
+    }
+
+    #[test]
+    fn the_lock_reader_finds_a_dependent_package() {
+        let lock = r#"
+[[package]]
+name = "embra-brain"
+version = "0.18.0-phase1"
+dependencies = [
+ "anyhow",
+ "reqwest 0.12.28",
+]
+
+[[package]]
+name = "embra-evil"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "wardsondb",
+]
+
+[[package]]
+name = "embra-sly"
+version = "0.1.0"
+dependencies = [
+ "wardsondb 0.9.0",
+]
+
+[[package]]
+name = "wardsondb"
+version = "0.9.0"
+dependencies = [
+ "axum",
+]
+
+[[package]]
+name = "wardsondb-client"
+version = "1.0.0"
+"#;
+        assert_eq!(lock_packages_depending_on(lock, "wardsondb"), vec!["embra-evil", "embra-sly"]);
+        assert!(lock_packages_depending_on(lock, "axum").contains(&"wardsondb".to_string()));
     }
 
     /// The services reach WardSONDB over REST, through this client. The
@@ -1083,6 +1161,14 @@ mod window_query_tests {
         }
         assert!(manifests.len() > 10, "manifests found: {}", manifests.len());
         assert!(hits.is_empty(), "a crate depends on wardsondb:\n{}", hits.join("\n"));
+        // And what cargo resolved, whatever the manifests spell.
+        let lock = std::fs::read_to_string(crates.parent().expect("workspace root").join("Cargo.lock"))
+            .expect("the workspace lock");
+        let dependents: Vec<String> = lock_packages_depending_on(&lock, "wardsondb")
+            .into_iter()
+            .filter(|n| n != "wardsondb")
+            .collect();
+        assert!(dependents.is_empty(), "the lock resolves wardsondb into: {dependents:?}");
     }
 
     #[test]

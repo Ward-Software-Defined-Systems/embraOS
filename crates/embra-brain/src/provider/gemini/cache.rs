@@ -96,7 +96,7 @@ pub fn compute_fingerprint(
 impl GeminiCacheManager {
     pub fn new(api_key: String, db: Arc<WardsonDbClient>, model_id: String) -> Self {
         Self {
-            http: Client::new(),
+            http: crate::net::client(),
             api_key,
             db,
             model_id,

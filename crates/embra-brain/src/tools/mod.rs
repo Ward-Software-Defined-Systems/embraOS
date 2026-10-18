@@ -2763,10 +2763,8 @@ fn get_memory_usage_mb() -> Option<u64> {
 //
 // Typed args structs for every tool whose implementation lives in this
 // module. Each `#[embra_tool(name, description)]` attribute submits a
-// `ToolDescriptor` into the global inventory at compile time. The legacy
-// string dispatcher at the top of this file remains the active call path
-// through Stage 2; Stage 3 removes it and routes exclusively through
-// `registry::dispatch`.
+// `ToolDescriptor` into the global inventory at compile time;
+// `registry::dispatch` is the one call path.
 
 use embra_tool_macro::embra_tool;
 use embra_tools_core::DispatchError;

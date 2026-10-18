@@ -238,14 +238,21 @@ pub(crate) fn load_operator_ca_certs() -> Vec<reqwest::Certificate> {
 /// Only this client adds them. The other reqwest clients in this file keep
 /// the compiled-in roots, deliberately.
 fn gitlab_client() -> reqwest::Client {
-    let mut builder = reqwest::Client::builder();
+    let mut builder = crate::net::builder();
     for cert in load_operator_ca_certs() {
         builder = builder.add_root_certificate(cert);
     }
     builder.build().unwrap_or_else(|e| {
-        tracing::warn!("GitLab client builder failed ({}); using stock client", e);
-        reqwest::Client::new()
+        tracing::warn!("GitLab client builder failed ({}); using the stock client", e);
+        crate::net::client()
     })
+}
+
+/// The reqwest client for GitHub API calls: the compiled-in roots and the
+/// brain's redirect policy (`crate::net`: the same origin only, so the
+/// bearer never travels to a third host).
+fn github_client() -> reqwest::Client {
+    crate::net::client()
 }
 
 /// Percent-encode a GitLab project path (`namespace/project`) for use as a
@@ -1340,7 +1347,7 @@ pub async fn gh_issues(db: &WardsonDbClient, param: &str) -> String {
 
     let url = format!("https://api.github.com/repos/{}/issues?state=open&per_page=10", param);
 
-    let client = reqwest::Client::new();
+    let client = github_client();
     match client
         .get(&url)
         .header("User-Agent", USER_AGENT)
@@ -1437,7 +1444,7 @@ pub async fn gh_issue_view(db: &WardsonDbClient, param: &str) -> String {
     let repo = parts[0];
     let number = parts[1];
 
-    let client = reqwest::Client::new();
+    let client = github_client();
 
     let issue_url = format!("https://api.github.com/repos/{}/issues/{}", repo, number);
     let issue: serde_json::Value = match client
@@ -1515,7 +1522,7 @@ pub async fn gh_prs(db: &WardsonDbClient, param: &str) -> String {
 
     let url = format!("https://api.github.com/repos/{}/pulls?state=open&per_page=10", param);
 
-    let client = reqwest::Client::new();
+    let client = github_client();
     match client
         .get(&url)
         .header("User-Agent", USER_AGENT)
@@ -1563,7 +1570,7 @@ pub async fn gh_pr_view(db: &WardsonDbClient, param: &str) -> String {
     let repo = parts[0];
     let number = parts[1];
 
-    let client = reqwest::Client::new();
+    let client = github_client();
 
     let pr_url = format!("https://api.github.com/repos/{}/pulls/{}", repo, number);
     let pr: serde_json::Value = match client
@@ -2072,7 +2079,7 @@ pub async fn gh_issue_create(db: &WardsonDbClient, param: &str) -> String {
         "body": body,
     });
 
-    let client = reqwest::Client::new();
+    let client = github_client();
     match client
         .post(&url)
         .header("User-Agent", USER_AGENT)
@@ -2111,7 +2118,7 @@ async fn post_github_comment(
     );
     let payload = serde_json::json!({ "body": body });
 
-    let client = reqwest::Client::new();
+    let client = github_client();
     match client
         .post(&url)
         .header("User-Agent", USER_AGENT)
@@ -2238,7 +2245,7 @@ async fn patch_issue_or_pr_state(
     let url = format!("https://api.github.com/repos/{}/{}/{}", repo, kind, number);
     let payload = serde_json::json!({ "state": new_state });
 
-    let client = reqwest::Client::new();
+    let client = github_client();
     match client
         .patch(&url)
         .header("User-Agent", USER_AGENT)
@@ -2290,7 +2297,7 @@ pub async fn gh_pr_create(db: &WardsonDbClient, param: &str) -> String {
         "base": base,
     });
 
-    let client = reqwest::Client::new();
+    let client = github_client();
     match client
         .post(&url)
         .header("User-Agent", USER_AGENT)
@@ -2346,7 +2353,7 @@ pub async fn gh_pr_merge(db: &WardsonDbClient, param: &str) -> String {
     );
     let payload = serde_json::json!({ "merge_method": method });
 
-    let client = reqwest::Client::new();
+    let client = github_client();
     match client
         .put(&url)
         .header("User-Agent", USER_AGENT)
@@ -2396,7 +2403,7 @@ enum ProjectsFetch {
 /// and falling back to the org endpoint on 404. Projects v2 is NOT supported;
 /// this only talks to the classic REST API.
 async fn fetch_classic_projects(token: &str, owner: &str) -> ProjectsFetch {
-    let client = reqwest::Client::new();
+    let client = github_client();
     let endpoints = [
         format!("https://api.github.com/users/{}/projects", owner),
         format!("https://api.github.com/orgs/{}/projects", owner),

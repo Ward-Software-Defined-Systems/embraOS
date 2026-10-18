@@ -1,8 +1,8 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
-use tokio::sync::Semaphore;
+use futures::StreamExt;
 
 // SSH paths on the writable DATA partition (rootfs is read-only SquashFS)
 const SSH_KEY_PATH: &str = "/embra/workspace/.ssh/id_ed25519";
@@ -155,6 +155,13 @@ fn port_label(p: u16) -> String {
 /// Presets (`low`, `all`) are exempt — the operator has explicitly asked for them.
 const MAX_USER_PORTS: usize = 2048;
 
+/// The scan's own budget. An `all` scan is 65,535 connects at two seconds
+/// each under [`PORT_SCAN_IN_FLIGHT`], far past what the dispatcher allows;
+/// the scan reports what it found by this point, with the count checked.
+const PORT_SCAN_MAX: Duration = Duration::from_secs(120);
+/// Connections in flight at once.
+const PORT_SCAN_IN_FLIGHT: usize = 50;
+
 /// Parse a port specification into a list of (port, label) pairs. Accepts:
 /// - empty → default 17 common ports
 /// - `web` / `db` → named presets
@@ -270,7 +277,7 @@ pub async fn port_scan(param: &str) -> String {
                   port_scan localhost web          — preset: 80, 443, 8080, 8443\n  \
                   port_scan localhost db           — preset: 3306, 5432, 6379, 27017, 5984\n  \
                   port_scan localhost low          — well-known 1-1024\n  \
-                  port_scan localhost all          — exhaustive 1-65535 (may take many minutes)\n\
+                  port_scan localhost all          — exhaustive 1-65535 (cut at 120 s with what was found)\n\
                 Custom ranges/lists are capped at 2048 distinct ports; presets are exempt.\n\
                 Restricted to private/loopback addresses only."
             .into();
@@ -293,48 +300,34 @@ pub async fn port_scan(param: &str) -> String {
         return format!("Could not parse port spec: '{}'", port_spec);
     }
 
-    let mut output = format!("=== Port Scan: {} ({} ports) ===\n", host, ports.len());
+    let total = ports.len();
+    let mut output = format!("=== Port Scan: {} ({} ports) ===\n", host, total);
 
-    // Use semaphore for concurrency control (max 50 concurrent connections)
-    let semaphore = Arc::new(Semaphore::new(50));
+    // At most PORT_SCAN_IN_FLIGHT connects at once, as a stream rather than
+    // one task per port (an `all` scan is 65,535 of them), under the scan's
+    // own budget: what was found by then is reported, with the count.
     let host_str = host.to_string();
-
-    let handles: Vec<_> = ports
-        .into_iter()
+    let mut probes = futures::stream::iter(ports)
         .map(|(port, label)| {
-            let sem = semaphore.clone();
             let h = host_str.clone();
-            tokio::spawn(async move {
-                let _permit = sem.acquire().await.unwrap();
-                let addr = format!("{}:{}", h, port);
-                let result = tokio::time::timeout(
-                    Duration::from_secs(2),
-                    TcpStream::connect(&addr),
-                )
-                .await;
-
-                match result {
-                    Ok(Ok(_stream)) => {
-                        drop(_stream);
-                        // Try banner grab
-                        let banner = grab_banner(&h, port).await;
-                        let banner_str = banner
-                            .map(|b| format!(" [{}]", b))
-                            .unwrap_or_default();
-                        Some(format!("  {:>5} ({}) — OPEN{}", port, label, banner_str))
-                    }
-                    _ => None,
-                }
-            })
+            async move { probe_port(&h, port, &label).await }
         })
-        .collect();
-
+        .buffer_unordered(PORT_SCAN_IN_FLIGHT);
+    let deadline = tokio::time::Instant::now() + PORT_SCAN_MAX;
     let mut open_ports = Vec::new();
-    for handle in handles {
-        if let Ok(Some(result)) = handle.await {
-            open_ports.push(result);
+    let mut checked = 0usize;
+    let cut = loop {
+        match tokio::time::timeout_at(deadline, probes.next()).await {
+            Ok(Some(found)) => {
+                checked += 1;
+                if let Some(line) = found {
+                    open_ports.push(line);
+                }
+            }
+            Ok(None) => break false,
+            Err(_) => break true,
         }
-    }
+    };
 
     // Sort by port number (extracted from the formatted string)
     open_ports.sort();
@@ -348,8 +341,35 @@ pub async fn port_scan(param: &str) -> String {
             output.push('\n');
         }
     }
+    if cut {
+        output.push_str(&cut_note(checked, total));
+    }
 
     output
+}
+
+/// One port: a connect under a two-second timeout, then a banner grab on
+/// an open one. `Some(line)` for an open port.
+async fn probe_port(host: &str, port: u16, label: &str) -> Option<String> {
+    let addr = format!("{}:{}", host, port);
+    let result = tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(&addr)).await;
+    match result {
+        Ok(Ok(stream)) => {
+            drop(stream);
+            let banner = grab_banner(host, port).await;
+            let banner_str = banner.map(|b| format!(" [{}]", b)).unwrap_or_default();
+            Some(format!("  {:>5} ({}) — OPEN{}", port, label, banner_str))
+        }
+        _ => None,
+    }
+}
+
+/// The line a scan that ran out of its budget ends with.
+fn cut_note(checked: usize, total: usize) -> String {
+    format!(
+        "Scan cut at {} s: {checked} of {total} ports checked. Narrow the port list to finish.\n",
+        PORT_SCAN_MAX.as_secs()
+    )
 }
 
 // ── SSH Remote Admin (EXPERIMENTAL) ──
@@ -1019,5 +1039,28 @@ mod native_args_tests {
             })
             .collect();
         assert_eq!(names.len(), 6, "all 6 security tools registered: {:?}", names);
+    }
+}
+
+#[cfg(test)]
+mod scan_budget_tests {
+    use super::{cut_note, port_scan, PORT_SCAN_IN_FLIGHT, PORT_SCAN_MAX};
+
+    #[test]
+    fn the_cut_note_names_the_budget_and_the_count() {
+        assert_eq!(PORT_SCAN_MAX.as_secs(), 120);
+        assert_eq!(PORT_SCAN_IN_FLIGHT, 50);
+        let note = cut_note(3, 65535);
+        assert!(note.starts_with("Scan cut at 120 s: 3 of 65535 ports checked."), "{note}");
+    }
+
+    /// The stream path end to end on a port that answers at once: the
+    /// scan completes, counts its one port and is not cut.
+    #[tokio::test]
+    async fn a_scan_of_one_loopback_port_completes_within_its_budget() {
+        let out = port_scan("127.0.0.1 1").await;
+        assert!(out.starts_with("=== Port Scan: 127.0.0.1 (1 ports) ==="), "{out}");
+        assert!(out.contains("No open ports found.") || out.contains("open port(s) found"), "{out}");
+        assert!(!out.contains("Scan cut"), "{out}");
     }
 }

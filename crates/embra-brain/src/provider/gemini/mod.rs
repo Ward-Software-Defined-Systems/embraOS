@@ -142,7 +142,7 @@ impl GeminiProvider {
         let display_name = display_name_for(&model_id);
         Self {
             api_key,
-            http: Client::new(),
+            http: crate::net::client(),
             model_id,
             display_name,
             thinking_level: THINKING_LEVEL.to_string(),
@@ -206,7 +206,7 @@ impl LlmProvider for GeminiProvider {
         if key.is_empty() {
             return ValidationResult::InvalidKey;
         }
-        let client = match Client::builder().timeout(VALIDATE_TIMEOUT).build() {
+        let client = match crate::net::builder().timeout(VALIDATE_TIMEOUT).build() {
             Ok(c) => c,
             Err(_) => return ValidationResult::Unknown,
         };

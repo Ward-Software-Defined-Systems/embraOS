@@ -41,8 +41,5 @@ base64 = "0.22"
 tract-onnx = "0.23"
 tokenizers = { version = "0.23", default-features = false, features = ["fancy-regex"] }
 
-[build-dependencies]
-tonic-build = { workspace = true }
-
 [dev-dependencies]
 wiremock = "0.6"

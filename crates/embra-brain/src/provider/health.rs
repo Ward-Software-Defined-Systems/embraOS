@@ -25,7 +25,6 @@ use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
@@ -272,7 +271,7 @@ pub async fn probe(target: Option<&ProbeTarget>) -> ProviderProbe {
 /// parameter (not derived) so tests can point it at a mock server.
 async fn probe_model_url(t: &ProbeTarget, url: &str, endpoint_label: &str) -> ProviderProbe {
     let mut out = ProviderProbe::base(t, endpoint_label.to_string());
-    let client = match Client::builder().timeout(PROBE_TIMEOUT).build() {
+    let client = match crate::net::builder().timeout(PROBE_TIMEOUT).build() {
         Ok(c) => c,
         Err(e) => {
             out.error = Some(format!("http client: {e}"));
@@ -426,7 +425,7 @@ struct PsDetails {
 /// serve the list: a 4xx, or a body that is not one.
 async fn read_context_window(t: &ProbeTarget) -> Option<ContextWindow> {
     let url = format!("{}/api/ps", t.endpoint.trim_end_matches('/'));
-    let client = Client::builder().timeout(PROBE_TIMEOUT).build().ok()?;
+    let client = crate::net::builder().timeout(PROBE_TIMEOUT).build().ok()?;
     let mut req = client.get(&url);
     if !t.key.is_empty() {
         req = req.bearer_auth(&t.key);

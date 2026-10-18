@@ -119,14 +119,13 @@ impl AnthropicProvider {
     pub fn with_model(api_key: String, model: String, display_name: String) -> Self {
         // Hardened streaming client: bounded connect + per-read idle
         // timeouts only (see the const docs — a total timeout is
-        // deliberately absent). Builder failure is not expected with
-        // these options; fall back to the stock client rather than
-        // panic in PID-1-adjacent code.
-        let http = Client::builder()
+        // deliberately absent), and a redirect followed to the same origin
+        // only (`crate::net`). The builder cannot fail on these options.
+        let http = crate::net::builder()
             .connect_timeout(CONNECT_TIMEOUT)
             .read_timeout(READ_IDLE_TIMEOUT)
             .build()
-            .unwrap_or_else(|_| Client::new());
+            .expect("a reqwest client with two timeouts and a redirect policy builds");
         Self {
             api_key,
             model,
@@ -239,7 +238,7 @@ impl LlmProvider for AnthropicProvider {
         if !key.starts_with("sk-") {
             return ValidationResult::InvalidKey;
         }
-        let client = match Client::builder().timeout(VALIDATE_TIMEOUT).build() {
+        let client = match crate::net::builder().timeout(VALIDATE_TIMEOUT).build() {
             Ok(c) => c,
             Err(_) => return ValidationResult::Unknown,
         };

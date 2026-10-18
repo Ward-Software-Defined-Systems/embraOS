@@ -112,7 +112,7 @@ impl OpenAICompatProvider {
             preset,
             base_url,
             bearer_token: bearer,
-            http: Client::new(),
+            http: crate::net::client(),
             model_id: model,
             display_name,
             reasoning_effort_override: None,
@@ -144,7 +144,7 @@ impl OpenAICompatProvider {
     ) -> Result<Vec<String>, ProviderError> {
         let _ = preset; // reserved for preset-specific behavior
         let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
-        let client = Client::builder()
+        let client = crate::net::builder()
             .timeout(PROBE_TIMEOUT)
             .build()
             .map_err(|e| ProviderError::Network(e.to_string()))?;

@@ -32,11 +32,11 @@ impl GeminiImageProvider {
     }
 
     pub fn with_endpoint(api_key: String, model: String, endpoint: String) -> Self {
-        let http = reqwest::Client::builder()
+        let http = crate::net::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(super::IMAGE_GEN_TIMEOUT)
             .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+            .expect("a reqwest client with two timeouts and a redirect policy builds");
         Self { api_key, model, endpoint, http }
     }
 

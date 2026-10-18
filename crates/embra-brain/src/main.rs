@@ -1,8 +1,8 @@
 //! embra-brain — Headless AI runtime service.
 //!
-//! Extracted from Phase 0 embrad. Contains:
-//! - Brain (Anthropic API integration)
-//! - Tool dispatch (~63 tools)
+//! - The providers: Anthropic, Gemini, and Ollama and LM Studio over the
+//!   OpenAI-compatible wire (`provider/`)
+//! - The tool registry and its dispatcher (`tools/registry.rs`)
 //! - Session manager
 //! - Proactive engine
 //! - WardSONDB client
@@ -29,6 +29,7 @@ mod setup;
 mod guardian;
 mod media;
 mod embedding;
+mod net;
 mod secrets;
 
 use grpc_service::BrainGrpcService;
