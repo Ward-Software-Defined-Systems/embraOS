@@ -133,10 +133,22 @@ pub async fn normalize(bytes: Vec<u8>) -> Result<Normalized, IngestError> {
         .map_err(|e| IngestError::Decode(format!("normalize task failed: {e}")))?
 }
 
+/// The decoder's limits for the pixel decode: the belt to the header
+/// check's brace, with the same numbers.
 fn decode_limits() -> Limits {
-    let mut limits = Limits::default();
+    let mut limits = probe_limits();
     limits.max_image_width = Some(MEDIA_DECODE_DIM_MAX);
     limits.max_image_height = Some(MEDIA_DECODE_DIM_MAX);
+    limits
+}
+
+/// The limits for the header probe: the allocation ceiling alone. The
+/// dimension check there is this module's, so that a refusal names the
+/// image's size and the cap. With the dimension limits set as well, the
+/// decoder refuses while it is being made, before this module gets to
+/// look, and says "Image size exceeds limit" without a number.
+fn probe_limits() -> Limits {
+    let mut limits = Limits::default();
     limits.max_alloc = Some(MEDIA_DECODE_ALLOC_MAX);
     limits
 }
@@ -150,7 +162,7 @@ pub fn probe_dimensions(bytes: &[u8]) -> Result<(ImageKind, u32, u32), IngestErr
     }
     let kind = sniff(bytes).ok_or(IngestError::NotAnImage)?;
     let mut reader = ImageReader::with_format(Cursor::new(bytes), kind.format());
-    reader.limits(decode_limits());
+    reader.limits(probe_limits());
     let decoder = reader
         .into_decoder()
         .map_err(|e| IngestError::Decode(e.to_string()))?;
@@ -169,12 +181,13 @@ pub fn normalize_blocking(bytes: Vec<u8>) -> Result<Normalized, IngestError> {
     let kind = sniff(&bytes).ok_or(IngestError::NotAnImage)?;
 
     // Probe pass: header dimensions + orientation come from the decoder
-    // BEFORE any pixel buffer exists (a decode bomb is refused here; the
-    // limits are the belt to this brace). The probe borrows `bytes`, so it
+    // BEFORE any pixel buffer exists (a decode bomb is refused here, by a
+    // message that names its size; the decoder's limits on the pixel decode
+    // below are the belt to this brace). The probe borrows `bytes`, so it
     // lives in its own scope and the untouched bytes can move out below.
     let (w, h, orientation) = {
         let mut reader = ImageReader::with_format(Cursor::new(&bytes), kind.format());
-        reader.limits(decode_limits());
+        reader.limits(probe_limits());
         let mut decoder = reader
             .into_decoder()
             .map_err(|e| IngestError::Decode(e.to_string()))?;
@@ -407,28 +420,50 @@ pub(crate) mod tests {
         assert_eq!(n.bytes, upright);
     }
 
-    #[test]
-    fn normalize_rejects_oversized_dimensions_before_decode() {
-        // A PNG header declaring 9000×9000 with no real pixel data behind
-        // it: the header check must refuse it without decoding.
+    /// A valid PNG header that claims `w`×`h`, with a 2×2 image's data
+    /// behind it: what a decode bomb looks like to the header probe.
+    fn png_header_claiming(w: u32, h: u32) -> Vec<u8> {
         let mut bomb = png_fixture(2, 2);
         // IHDR width/height live at bytes 16..24 (big-endian u32 each).
-        bomb[16..20].copy_from_slice(&9000u32.to_be_bytes());
-        bomb[20..24].copy_from_slice(&9000u32.to_be_bytes());
+        bomb[16..20].copy_from_slice(&w.to_be_bytes());
+        bomb[20..24].copy_from_slice(&h.to_be_bytes());
         // The chunk's checksum covers its type and data (bytes 12..29) and
         // follows them. Made right again, so that the header is a valid one
         // and what refuses the image is its size, not a broken checksum.
         let crc = crc32(&bomb[12..29]);
         bomb[29..33].copy_from_slice(&crc.to_be_bytes());
-        match normalize_blocking(bomb) {
-            // The brace: this module's own look at the header.
-            Err(IngestError::DimensionLimit(9000, 9000, _)) => {}
-            // The belt: the decoder's limits carry the same numbers, and for
-            // a PNG they refuse when the decoder is made, before this module
-            // gets to look. Either way no pixel buffer exists yet.
-            Err(IngestError::Decode(msg)) if msg.contains("exceeds limit") => {}
-            other => panic!("expected a refusal for its size, got {other:?}"),
+        bomb
+    }
+
+    #[test]
+    fn normalize_rejects_oversized_dimensions_before_decode() {
+        // The header check is this module's and speaks first, naming the
+        // size and the cap. The decoder's own limits would refuse while the
+        // decoder is made, with "Image size exceeds limit" and no number
+        // (what a full-page screenshot got until 2026-10-17). No pixel
+        // buffer exists either way.
+        match normalize_blocking(png_header_claiming(9000, 9000)) {
+            Err(e @ IngestError::DimensionLimit(9000, 9000, MEDIA_DECODE_DIM_MAX)) => {
+                assert_eq!(e.to_string(), "image is 9000x9000 px; the limit is 8000x8000 px");
+            }
+            other => panic!("expected a refusal naming its size, got {other:?}"),
         }
+        // One edge over the cap is enough: a tall, narrow page capture.
+        assert!(matches!(
+            normalize_blocking(png_header_claiming(800, 8001)),
+            Err(IngestError::DimensionLimit(800, 8001, MEDIA_DECODE_DIM_MAX))
+        ));
+    }
+
+    #[test]
+    fn probe_dimensions_refuses_an_oversized_header_by_its_size_and_reads_one_at_the_cap() {
+        assert!(matches!(
+            probe_dimensions(&png_header_claiming(800, 8001)),
+            Err(IngestError::DimensionLimit(800, 8001, MEDIA_DECODE_DIM_MAX))
+        ));
+        let (kind, w, h) = probe_dimensions(&png_header_claiming(800, MEDIA_DECODE_DIM_MAX)).unwrap();
+        assert_eq!(kind, ImageKind::Png);
+        assert_eq!((w, h), (800, MEDIA_DECODE_DIM_MAX));
     }
 
     /// CRC-32 as PNG uses it, bit by bit: for the 17 bytes of one header.
