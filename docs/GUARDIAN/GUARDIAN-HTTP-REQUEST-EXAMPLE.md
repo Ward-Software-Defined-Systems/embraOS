@@ -343,6 +343,8 @@ fn err(msg: &str) -> String {
 #    egress and secret setup above)
 #   "take a screenshot of https://example.com/ with the browser service and
 #    show me"  (BROWSER-SERVICE.md; save_to, then image_view)
+#   "list the unread mail in the shared mailbox and summarize it"
+#    (M365-SHARED-MAILBOX.md; the bearer from /guardian secret)
 ```
 
 To change the tool, `/guardian-define` with your version of the module under

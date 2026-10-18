@@ -39,6 +39,7 @@ Dynamic tools and the replicant check.
 - [GUARDIAN/GUARDIAN-TOOL-EXAMPLES.md](GUARDIAN/GUARDIAN-TOOL-EXAMPLES.md) — Paste-ready dynamic-tool modules (embra-guardian-v1).
 - [GUARDIAN/GUARDIAN-ADVANCED-EXAMPLE.md](GUARDIAN/GUARDIAN-ADVANCED-EXAMPLE.md) — The shipped flagship: a worked, prompt-injection-hardened end-to-end Guardian tool.
 - [GUARDIAN/GUARDIAN-HTTP-REQUEST-EXAMPLE.md](GUARDIAN/GUARDIAN-HTTP-REQUEST-EXAMPLE.md) — The second shipped tool: `http_request`, a guarded curl for pages, resources and API work; credentials host-side, private hosts by allowlist, `save_to` for a file into the workspace.
+- [GUARDIAN/M365-SHARED-MAILBOX.md](GUARDIAN/M365-SHARED-MAILBOX.md) — One Microsoft 365 shared mailbox for `http_request`: an Entra application scoped with Exchange Online RBAC for Applications, the token stored with `/guardian secret`, and what the Graph requests look like.
 - [GUARDIAN/BROWSER-SERVICE.md](GUARDIAN/BROWSER-SERVICE.md) — A headless browser beside the OS: Browserless behind Caddy in Docker Compose ([`GUARDIAN/BROWSER-SERVICE/`](GUARDIAN/BROWSER-SERVICE/)), reached with `http_request`; pages as text, screenshots and PDFs into the workspace with `save_to`.
 - [GUARDIAN/GUARDIAN-KG-SCAN-EXAMPLE.md](GUARDIAN/GUARDIAN-KG-SCAN-EXAMPLE.md) — `kg_scan`, the first intelligence-proposed tool: scans a `knowledge_dump` JSONL for structural patterns, fed through `guardian_call`'s `data_file` bridge.
 
