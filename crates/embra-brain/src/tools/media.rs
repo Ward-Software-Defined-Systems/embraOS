@@ -27,13 +27,14 @@ const _: () = assert!(MEDIA_TILES_PER_VIEW <= super::registry::MAX_TOOL_RESULT_I
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "image_view",
-    description = "Look at an image file (PNG, JPEG, GIF or WebP) — the image itself is returned to you as an image block, not text. Use this instead of file_read for any image: screenshots, diagrams, photos, rendered charts, images the operator mentioned by path. path may be absolute or workspace-relative (/embra/workspace). The file is normalized to the vision tier before you see it (long edge ≤ 2576 px, ≤ 1.5 MiB; originals untouched). A long image, such as a full-page screenshot with a long edge over 5152 px, is cut along that axis into tiles that keep full scale, four tiles per call: the header names each tile's coordinates and the parts, and part=2, 3, … shows the next four. Images over 64 megapixels are refused. Images already in /embra/workspace/MEDIA keep their id; any other file gets a content-addressed view-<hash> copy there (one per tile) so the operator's UI can show what you looked at (viewing the same file twice reuses the copy). Files over 12 MiB and non-image files are refused with an explanation."
+    description = "Look at an image file (PNG, JPEG, GIF or WebP) — the image itself is returned to you as an image block, not text. Use this instead of file_read for any image: screenshots, diagrams, photos, rendered charts, images the operator mentioned by path. path may be absolute or workspace-relative (/embra/workspace). The file is normalized to the vision tier before you see it (long edge ≤ 2576 px, ≤ 1.5 MiB; originals untouched; the header names the source size when it was shrunk). A long image, such as a full-page screenshot with a long edge over 5152 px, is cut along that axis into tiles that keep full scale, four tiles per call, the cuts on blank lines where there are any: the header names each tile's coordinates and the parts; part counts from 1 and part=2, 3, … shows the next group; on an image shown whole, part is ignored and the header says so. Images over 64 megapixels are refused. Images already in /embra/workspace/MEDIA keep their id; any other file gets a content-addressed view-<hash> copy there (one per tile) so the operator's UI can show what you looked at (viewing the same file twice reuses the copy). Files over 12 MiB and non-image files are refused with an explanation."
 )]
 pub struct ImageViewArgs {
     /// Path to the image file — absolute, or relative to /embra/workspace.
     pub path: String,
-    /// For a long image shown in tiles: which group of four tiles to show, counting from 1 (the default).
+    /// For a long image shown in tiles: which group of four tiles to show, counting from 1 (the default). Ignored on an image shown whole.
     #[serde(default)]
+    #[schemars(range(min = 1))]
     pub part: Option<u32>,
 }
 
@@ -87,6 +88,13 @@ pub async fn image_view(
         )));
     }
 
+    if part == 0 {
+        return Ok(ToolOutput::text(format!(
+            "image_view: {} — part counts from 1; part=1 is the first group of tiles",
+            resolved.display()
+        )));
+    }
+
     // A file that IS a store entry keeps its id (no copy); anything else
     // is normalized into a content-addressed `view-` copy.
     let in_store = resolved.parent() == Some(store.dir())
@@ -94,14 +102,14 @@ pub async fn image_view(
             .file_stem()
             .and_then(|s| s.to_str())
             .is_some_and(|stem| store::parse_media_id(stem).is_ok());
-    let (meta, data) = if in_store {
+    let (meta, data, source) = if in_store {
         let id = resolved.file_stem().and_then(|s| s.to_str()).unwrap_or_default().to_string();
         let (meta, data) = match store.get(&id).await {
             Ok(pair) => pair,
             Err(e) => return Err(DispatchError::Handler(format!("image_view: {e}"))),
         };
         match readable_by_every_provider(meta, data).await {
-            Ok(pair) => pair,
+            Ok((meta, data)) => (meta, data, None),
             Err(e) => return Ok(ToolOutput::text(format!("image_view: {} — {}", resolved.display(), e))),
         }
     } else {
@@ -114,8 +122,8 @@ pub async fn image_view(
             .and_then(|n| n.to_str())
             .unwrap_or("image")
             .to_string();
-        let normalized = match tiles::view(bytes, part).await {
-            Ok(tiles::View::Whole(n)) => n,
+        let (normalized, source) = match tiles::view(bytes, part).await {
+            Ok(tiles::View::Whole { image, source_width, source_height }) => (image, Some((source_width, source_height))),
             Ok(tiles::View::Tiled(tiled)) => return tiled_output(store, &resolved, &name, session, tiled).await,
             Err(e) => return Ok(ToolOutput::text(format!("image_view: {} — {}", resolved.display(), e))),
         };
@@ -124,18 +132,33 @@ pub async fn image_view(
             .put(MediaOrigin::Viewed, &name, session, normalized)
             .await
             .map_err(|e| DispatchError::Handler(format!("image_view: store copy failed: {e}")))?;
-        (meta, data)
+        (meta, data, source)
     };
 
-    let mut header = format!(
-        "=== image {} ({}×{}, {} bytes, {}; media id {}) ===\nThe image follows as an image block.",
-        resolved.display(),
-        meta.width,
-        meta.height,
-        data.len(),
-        meta.media_type,
-        meta.id
-    );
+    // A source brought down to the box is named with its size and the
+    // scale, so a reader can tell a shrunk page from one shown as it is.
+    let shrunk = source.filter(|&(sw, sh)| (sw, sh) != (meta.width, meta.height));
+    let mut header = match shrunk {
+        Some((sw, sh)) => format!(
+            "=== image {} ({sw}×{sh} px, shown at {}×{}, {}%; {} bytes, {}; media id {}) ===\nThe image follows as an image block.",
+            resolved.display(),
+            meta.width,
+            meta.height,
+            u64::from(meta.width.max(meta.height)) * 100 / u64::from(sw.max(sh)),
+            data.len(),
+            meta.media_type,
+            meta.id
+        ),
+        None => format!(
+            "=== image {} ({}×{}, {} bytes, {}; media id {}) ===\nThe image follows as an image block.",
+            resolved.display(),
+            meta.width,
+            meta.height,
+            data.len(),
+            meta.media_type,
+            meta.id
+        ),
+    };
     if part > 1 {
         header.push_str("\n(part applies to a long image shown in tiles; this image is shown whole.)");
     }
@@ -162,20 +185,22 @@ async fn tiled_output(
 ) -> Result<ToolOutput, DispatchError> {
     let plan = tiled.plan;
     let coord = plan.axis.coordinate();
-    let (tile_w, tile_h) = plan.tile_size();
-    let scale = if plan.scale_percent() == 100 {
+    let any_capped = tiled.tiles.iter().any(|t| brought_down(&t.rect, &t.image));
+    let mut scale = if plan.scale_percent() == 100 {
         "at full scale".to_string()
     } else {
         format!("scaled to {}% ({} px on the short edge)", plan.scale_percent(), MEDIA_LONG_EDGE_MAX)
     };
+    if any_capped {
+        scale.push_str(" except where noted");
+    }
     let mut text = format!(
-        "=== image {} ({}×{} px; shown in {} tiles of {}×{} px, {}, {}) ===\nPart {} of {}: {}.\n",
+        "=== image {} ({}×{} px; shown in {} tiles of {} px, {}, {}) ===\nPart {} of {}: {}.\n",
         resolved.display(),
         plan.width,
         plan.height,
         plan.total,
-        tile_w,
-        tile_h,
+        plan.tile_size_text(&tiled.cuts),
         plan.axis.order(),
         scale,
         tiled.part,
@@ -185,6 +210,7 @@ async fn tiled_output(
     let mut images = Vec::with_capacity(tiled.tiles.len());
     for tile in tiled.tiles {
         let (a, b) = plan.span(&tile.rect);
+        let capped = if brought_down(&tile.rect, &tile.image) { " (brought down to fit the 1.5 MiB cap)" } else { "" };
         // The store keeps a name's basename, so no slash in it.
         let tile_name = format!("{name} [tile {} of {}]", tile.rect.index, plan.total);
         let caption = format!("tile {}/{}, {coord} {a}–{b}", tile.rect.index, plan.total);
@@ -194,7 +220,7 @@ async fn tiled_output(
             .await
             .map_err(|e| DispatchError::Handler(format!("image_view: store copy failed: {e}")))?;
         text.push_str(&format!(
-            "Tile {} ({coord} {a}–{b}): {}×{}, {} bytes, {}; media id {}\n",
+            "Tile {} ({coord} {a}–{b}): {}×{}, {} bytes, {}; media id {}{capped}\n",
             tile.rect.index,
             meta.width,
             meta.height,
@@ -212,12 +238,19 @@ async fn tiled_output(
         });
     }
     if plan.parts() > 1 {
-        text.push_str(&format!("Parts: {}; ask with part=N.\n", plan.parts_text()));
+        text.push_str(&format!("Parts: {}; ask with part=N.\n", plan.parts_text(&tiled.cuts)));
     }
     text.push_str("The tiles follow as image blocks, in this order.");
     let mut out = ToolOutput::text(text);
     out.images = images;
     Ok(out)
+}
+
+/// A tile the encode ladder had to bring below its box to fit the inline
+/// cap: its long edge is under what the box allows a tile of that size.
+fn brought_down(rect: &tiles::TileRect, image: &ingest::Normalized) -> bool {
+    let box_edge = MEDIA_LONG_EDGE_MAX.min(rect.width.max(rect.height));
+    image.width.max(image.height) < box_edge
 }
 
 
@@ -537,6 +570,27 @@ mod tests {
         let out = image_view(&store, short.to_str().unwrap(), 2, "s").await.unwrap();
         assert_eq!(out.images.len(), 1);
         assert!(out.text.contains("shown whole"), "{}", out.text);
+        assert!(out.text.contains("(6×4, "), "a source shown as it is names one size: {}", out.text);
+        // part counts from 1 on every path: 0 is refused before the split.
+        for path in [src.to_str().unwrap(), short.to_str().unwrap()] {
+            let out = image_view(&store, path, 0, "s").await.unwrap();
+            assert!(out.images.is_empty());
+            assert!(out.text.contains("part counts from 1"), "{}", out.text);
+        }
+    }
+
+    /// A source brought down to the box names its own size and the scale,
+    /// so a reader can tell a shrunk page from one shown as it is.
+    #[tokio::test]
+    async fn image_view_names_the_source_size_and_the_scale_of_a_shrunk_image() {
+        let dir = TempDir::new();
+        let store = MediaStore::at(dir.0.join("MEDIA"));
+        let src = dir.0.join("tall.png");
+        std::fs::write(&src, png_fixture(300, 4000)).unwrap();
+        let out = image_view(&store, src.to_str().unwrap(), 1, "s").await.unwrap();
+        assert_eq!(out.images.len(), 1);
+        assert_eq!((out.images[0].width, out.images[0].height), (193, 2576));
+        assert!(out.text.contains("(300×4000 px, shown at 193×2576, 64%; "), "{}", out.text);
     }
 
     #[tokio::test]

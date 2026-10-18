@@ -54,6 +54,11 @@ pub const MEDIA_TILE_PAST: u32 = 2 * MEDIA_LONG_EDGE_MAX;
 /// per-result image cap (`tools::registry::MAX_TOOL_RESULT_IMAGES`; the
 /// relation is asserted beside the tool). The rest come part by part.
 pub const MEDIA_TILES_PER_VIEW: usize = 4;
+/// How far a cut between two tiles may move, in source pixels each way, to
+/// land on a blank line (a row or column of one colour) instead of through
+/// a line of text. Bounded further by the room a tile has under its box
+/// (`tiles::TilePlan::snap_window`).
+pub const MEDIA_TILE_SNAP: u32 = 48;
 /// Pixel ceiling, checked from the header BEFORE decode: 64 megapixels,
 /// the area of the former 8000×8000 per-edge cap, in any shape. A
 /// full-page screenshot is tall and narrow (800×20,000 px is 16
@@ -224,6 +229,7 @@ mod tests {
         assert_eq!(MEDIA_DECODE_PIXELS_MAX, 64_000_000);
         assert_eq!(MEDIA_TILE_PAST, 5152);
         assert_eq!(MEDIA_TILES_PER_VIEW, 4);
+        assert_eq!(MEDIA_TILE_SNAP, 48);
         // A decoded RGBA buffer at the pixel cap fits under the decoder's
         // allocation ceiling with room for the decoder's own buffers.
         const { assert!(MEDIA_DECODE_PIXELS_MAX * 4 * 2 <= MEDIA_DECODE_ALLOC_MAX) };

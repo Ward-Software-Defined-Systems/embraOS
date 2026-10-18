@@ -152,7 +152,7 @@ mod tests {
             .collect();
         assert_eq!(
             sha256_hex(&canonical),
-            "a6398c42cf74d61df3e9295c617001252a5f98d1124e8a87ed40addea5f0ca53",
+            "9cb46145e6ca8088cb0e562e1706e03b3a60cfd614e73a727f841cc0cc5bdad5",
             "TOOL MANIFEST BYTES MOVED. Do not update the pinned hash unless \
              the tool surface was changed on purpose.\n---\n{}",
             per_tool.join("\n")

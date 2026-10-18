@@ -191,6 +191,20 @@ pub(super) struct Probe {
     pub orientation: Orientation,
 }
 
+impl Probe {
+    /// The dimensions once the orientation is applied: a quarter turn
+    /// swaps them.
+    pub fn oriented_dimensions(&self) -> (u32, u32) {
+        match self.orientation {
+            Orientation::Rotate90
+            | Orientation::Rotate270
+            | Orientation::Rotate90FlipH
+            | Orientation::Rotate270FlipH => (self.height, self.width),
+            _ => (self.width, self.height),
+        }
+    }
+}
+
 /// The header probe, shared by every decode path: the byte gate, the
 /// sniff, the decoder's header read under [`decode_limits`], then this
 /// module's size check. A decode bomb is refused here, by a message that

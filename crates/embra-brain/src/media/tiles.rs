@@ -12,13 +12,16 @@
 //! 1.7× down stays readable, 3.1× does not). Past it the long axis is
 //! cut into equal tiles no longer than `max(2576, short edge)`, so every
 //! tile fits the box at the short edge's scale: unscaled when the short
-//! edge is within the box. One call hands the model
+//! edge is within the box. Each cut then moves to the nearest blank line
+//! within [`MEDIA_TILE_SNAP`] pixels, so a line of text is not split
+//! between two tiles (the review of 2026-10-18); without a blank line
+//! nearby the even cut stands. One call hands the model
 //! [`MEDIA_TILES_PER_VIEW`] tiles; the rest come part by part.
 
-use image::DynamicImage;
+use image::{DynamicImage, GenericImageView};
 
 use super::ingest::{self, IngestError, Normalized};
-use super::{MEDIA_LONG_EDGE_MAX, MEDIA_TILES_PER_VIEW, MEDIA_TILE_PAST};
+use super::{MEDIA_LONG_EDGE_MAX, MEDIA_TILES_PER_VIEW, MEDIA_TILE_PAST, MEDIA_TILE_SNAP};
 
 /// The long axis: the order the tiles are read in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,8 +57,8 @@ pub struct TilePlan {
     pub width: u32,
     pub height: u32,
     pub axis: Axis,
-    /// A tile's length along the axis, in source pixels; the last tile
-    /// takes what is left, which is shorter or equal.
+    /// The even tile length along the axis, in source pixels, before the
+    /// cuts move; the last tile takes what is left.
     pub tile_len: u32,
     pub total: usize,
 }
@@ -98,12 +101,10 @@ impl TilePlan {
         self.width.min(self.height)
     }
 
-    /// A tile's size as cut, width × height.
-    pub fn tile_size(&self) -> (u32, u32) {
-        match self.axis {
-            Axis::Down => (self.width, self.tile_len),
-            Axis::Right => (self.tile_len, self.height),
-        }
+    /// The longest a tile may be along the axis and still fit the box at
+    /// the short edge's scale.
+    pub fn tile_max(&self) -> u32 {
+        MEDIA_LONG_EDGE_MAX.max(self.short())
     }
 
     /// Percent of the source scale a tile is shown at: 100 when the short
@@ -121,10 +122,65 @@ impl TilePlan {
         self.total.div_ceil(MEDIA_TILES_PER_VIEW)
     }
 
-    /// Tile `index` (1-based, within `total`).
-    pub fn rect(&self, index: usize) -> TileRect {
-        let start = (index - 1) as u32 * self.tile_len;
-        let len = self.tile_len.min(self.long() - start);
+    /// How far a cut may move each way: [`MEDIA_TILE_SNAP`], or less when
+    /// a tile has less room under its box (two cuts moving apart lengthen
+    /// the tile between them by twice the window).
+    pub fn snap_window(&self) -> u32 {
+        MEDIA_TILE_SNAP.min((self.tile_max() - self.tile_len) / 2)
+    }
+
+    /// The even cuts: `total + 1` positions from 0 to the long edge.
+    pub fn nominal_cuts(&self) -> Vec<u32> {
+        (0..=self.total)
+            .map(|i| (i as u32 * self.tile_len).min(self.long()))
+            .collect()
+    }
+
+    /// The cuts for `img`: each interior cut moved to the nearest blank
+    /// line within the snap window, the even cut where there is none.
+    pub fn cuts(&self, img: &DynamicImage) -> Vec<u32> {
+        let window = self.snap_window();
+        let mut cuts = self.nominal_cuts();
+        for cut in &mut cuts[1..self.total] {
+            *cut = self.snap(img, *cut, window);
+        }
+        cuts
+    }
+
+    fn snap(&self, img: &DynamicImage, nominal: u32, window: u32) -> u32 {
+        for d in 0..=window {
+            if self.is_blank_line(img, nominal + d) {
+                return nominal + d;
+            }
+            if d > 0 && nominal > d && self.is_blank_line(img, nominal - d) {
+                return nominal - d;
+            }
+        }
+        nominal
+    }
+
+    /// A line of one colour across the short edge: a row for `Down`, a
+    /// column for `Right`. The edges of the image are never cuts.
+    fn is_blank_line(&self, img: &DynamicImage, at: u32) -> bool {
+        if at == 0 || at >= self.long() {
+            return false;
+        }
+        match self.axis {
+            Axis::Down => {
+                let first = img.get_pixel(0, at);
+                (1..img.width()).all(|x| img.get_pixel(x, at) == first)
+            }
+            Axis::Right => {
+                let first = img.get_pixel(at, 0);
+                (1..img.height()).all(|y| img.get_pixel(at, y) == first)
+            }
+        }
+    }
+
+    /// Tile `index` (1-based) between its cuts.
+    pub fn rect_at(&self, cuts: &[u32], index: usize) -> TileRect {
+        let start = cuts[index - 1];
+        let len = cuts[index] - start;
         match self.axis {
             Axis::Down => TileRect { index, x: 0, y: start, width: self.width, height: len },
             Axis::Right => TileRect { index, x: start, y: 0, width: len, height: self.height },
@@ -132,13 +188,13 @@ impl TilePlan {
     }
 
     /// The tiles of `part` (1-based), or `None` for a part that does not exist.
-    pub fn part(&self, part: usize) -> Option<Vec<TileRect>> {
+    pub fn part_rects(&self, cuts: &[u32], part: usize) -> Option<Vec<TileRect>> {
         if part == 0 || part > self.parts() {
             return None;
         }
         let first = (part - 1) * MEDIA_TILES_PER_VIEW;
         let last = (first + MEDIA_TILES_PER_VIEW).min(self.total);
-        Some((first..last).map(|i| self.rect(i + 1)).collect())
+        Some((first..last).map(|i| self.rect_at(cuts, i + 1)).collect())
     }
 
     /// A tile's first and last coordinate along the axis.
@@ -156,9 +212,22 @@ impl TilePlan {
         if first == last { format!("tile {first}") } else { format!("tiles {first}–{last}") }
     }
 
+    /// The tiles' size as cut: "800×2000" when every tile has the same
+    /// length, "800×1970–2030" when the cuts moved or the last is shorter.
+    pub fn tile_size_text(&self, cuts: &[u32]) -> String {
+        let lens = cuts.windows(2).map(|w| w[1] - w[0]);
+        let lo = lens.clone().min().unwrap_or(0);
+        let hi = lens.max().unwrap_or(0);
+        let along = if lo == hi { format!("{lo}") } else { format!("{lo}–{hi}") };
+        match self.axis {
+            Axis::Down => format!("{}×{along}", self.width),
+            Axis::Right => format!("{along}×{}", self.height),
+        }
+    }
+
     /// Every part with its tiles and its span, for the header: at most
     /// twelve listed, the rest counted.
-    pub fn parts_text(&self) -> String {
+    pub fn parts_text(&self, cuts: &[u32]) -> String {
         const LISTED: usize = 12;
         let coord = self.axis.coordinate();
         let parts = self.parts();
@@ -166,8 +235,8 @@ impl TilePlan {
             .map(|part| {
                 let first = (part - 1) * MEDIA_TILES_PER_VIEW + 1;
                 let last = (part * MEDIA_TILES_PER_VIEW).min(self.total);
-                let (a, _) = self.span(&self.rect(first));
-                let (_, b) = self.span(&self.rect(last));
+                let (a, _) = self.span(&self.rect_at(cuts, first));
+                let (_, b) = self.span(&self.rect_at(cuts, last));
                 format!("{part} = {} ({coord} {a}–{b})", self.tiles_text(part))
             })
             .collect();
@@ -185,19 +254,21 @@ pub struct Tile {
     pub image: Normalized,
 }
 
-/// The tiles of one part.
+/// The tiles of one part, with the cuts of the whole image.
 #[derive(Debug, Clone)]
 pub struct Tiled {
     pub plan: TilePlan,
     pub part: usize,
+    pub cuts: Vec<u32>,
     pub tiles: Vec<Tile>,
 }
 
-/// What `image_view` shows: the image whole, as `normalize` makes it, or
-/// one part of its tiles.
+/// What `image_view` shows: the image whole, as `normalize` makes it,
+/// with the source's dimensions after orientation; or one part of its
+/// tiles.
 #[derive(Debug, Clone)]
 pub enum View {
-    Whole(Normalized),
+    Whole { image: Normalized, source_width: u32, source_height: u32 },
     Tiled(Tiled),
 }
 
@@ -212,37 +283,57 @@ pub async fn view(bytes: Vec<u8>, part: usize) -> Result<View, IngestError> {
 /// planned on its real dimensions and cut.
 pub fn view_blocking(bytes: Vec<u8>, part: usize) -> Result<View, IngestError> {
     let probe = ingest::probe(&bytes)?;
-    if probe.width.max(probe.height) <= MEDIA_TILE_PAST {
-        return ingest::normalize_blocking(bytes).map(View::Whole);
+    let (source_width, source_height) = probe.oriented_dimensions();
+    if source_width.max(source_height) <= MEDIA_TILE_PAST {
+        return ingest::normalize_blocking(bytes).map(|image| View::Whole { image, source_width, source_height });
     }
     let img = ingest::decode(&bytes, &probe)?;
-    let Some(plan) = TilePlan::plan(img.width(), img.height()) else {
-        return ingest::fit_whole(img, probe.kind).map(View::Whole);
+    let (source_width, source_height) = (img.width(), img.height());
+    let Some(plan) = TilePlan::plan(source_width, source_height) else {
+        return ingest::fit_whole(img, probe.kind).map(|image| View::Whole { image, source_width, source_height });
     };
-    let rects = plan.part(part).ok_or(IngestError::NoSuchPart { part, parts: plan.parts() })?;
+    let cuts = plan.cuts(&img);
+    let rects = plan
+        .part_rects(&cuts, part)
+        .ok_or(IngestError::NoSuchPart { part, parts: plan.parts() })?;
     let mut tiles = Vec::with_capacity(rects.len());
     for rect in rects {
         let piece: DynamicImage = img.crop_imm(rect.x, rect.y, rect.width, rect.height);
         let image = ingest::fit_whole(piece, probe.kind)?;
         tiles.push(Tile { rect, image });
     }
-    Ok(View::Tiled(Tiled { plan, part, tiles }))
+    Ok(View::Tiled(Tiled { plan, part, cuts, tiles }))
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use image::{GenericImageView, ImageBuffer, ImageFormat, Rgba};
+    use image::{ImageBuffer, ImageFormat, Rgba};
     use std::io::Cursor;
 
     /// A PNG whose rows carry their band in the red channel (`y / 1000`),
-    /// so a tile's first pixel tells where it was cut from.
+    /// so a tile's first pixel tells where it was cut from. Every row is
+    /// one colour, so every row is a blank line and the cuts stay even.
     pub(crate) fn banded_png(w: u32, h: u32) -> Vec<u8> {
         let img: ImageBuffer<Rgba<u8>, Vec<u8>> =
             ImageBuffer::from_fn(w, h, |_, y| Rgba([(y / 1000) as u8, 0, 0, 255]));
         let mut out = Cursor::new(Vec::new());
         DynamicImage::ImageRgba8(img).write_to(&mut out, ImageFormat::Png).unwrap();
         out.into_inner()
+    }
+
+    /// Vertical stripes everywhere (no row is one colour) except the rows
+    /// `blank` says are, which are white.
+    fn striped(w: u32, h: u32, blank: impl Fn(u32) -> bool) -> DynamicImage {
+        DynamicImage::ImageRgba8(ImageBuffer::from_fn(w, h, |x, y| {
+            if blank(y) {
+                Rgba([255, 255, 255, 255])
+            } else if x % 2 == 0 {
+                Rgba([0, 0, 0, 255])
+            } else {
+                Rgba([255, 255, 255, 255])
+            }
+        }))
     }
 
     #[test]
@@ -254,13 +345,14 @@ pub(crate) mod tests {
         // The measured unreadable case: four tiles of 800×2000, unscaled.
         let p = TilePlan::plan(800, 8000).unwrap();
         assert_eq!((p.axis, p.total, p.tile_len, p.parts(), p.scale_percent()), (Axis::Down, 4, 2000, 1, 100));
-        assert_eq!(p.tile_size(), (800, 2000));
+        assert_eq!(p.tile_size_text(&p.nominal_cuts()), "800×2000");
         // A long page: eight tiles in two parts.
         let p = TilePlan::plan(800, 20_000).unwrap();
         assert_eq!((p.axis, p.total, p.tile_len, p.parts()), (Axis::Down, 8, 2500, 2));
         // The same page on its side runs left to right.
         let p = TilePlan::plan(20_000, 800).unwrap();
-        assert_eq!((p.axis, p.total, p.tile_len, p.tile_size()), (Axis::Right, 8, 2500, (2500, 800)));
+        assert_eq!((p.axis, p.total, p.tile_len), (Axis::Right, 8, 2500));
+        assert_eq!(p.tile_size_text(&p.nominal_cuts()), "2500×800");
         // One pixel past the edge: three equal tiles, not 2576 + 2576 + 1.
         let p = TilePlan::plan(800, MEDIA_TILE_PAST + 1).unwrap();
         assert_eq!((p.total, p.tile_len), (3, 1718));
@@ -269,20 +361,26 @@ pub(crate) mod tests {
         assert_eq!((p.total, p.tile_len, p.scale_percent()), (10, 3000, 85));
         let p = TilePlan::plan(6000, 12_000).unwrap();
         assert_eq!((p.total, p.tile_len, p.scale_percent()), (2, 6000, 42));
+        // The last tile is shorter when the length does not divide: the
+        // size text says so.
+        let p = TilePlan::plan(800, 16_642).unwrap();
+        assert_eq!((p.total, p.tile_len), (7, 2378));
+        assert_eq!(p.tile_size_text(&p.nominal_cuts()), "800×2374–2378");
     }
 
     #[test]
     fn the_tiles_cover_the_long_axis_without_a_gap_or_an_overlap() {
         for (w, h) in [(800, 8000), (800, 20_000), (20_000, 800), (800, 5153), (3000, 30_000), (1, 64_000_000)] {
             let p = TilePlan::plan(w, h).unwrap();
+            let cuts = p.nominal_cuts();
+            assert_eq!(cuts.len(), p.total + 1);
             let mut next = 0u32;
             for i in 1..=p.total {
-                let r = p.rect(i);
+                let r = p.rect_at(&cuts, i);
                 let (a, b) = p.span(&r);
                 assert_eq!(a, next, "{w}x{h} tile {i} starts where the last ended");
                 assert!(b >= a && b - a < p.tile_len, "{w}x{h} tile {i} is at most a tile long");
-                let (tw, th) = (r.width, r.height);
-                assert_eq!(if p.axis == Axis::Down { tw } else { th }, p.short(), "{w}x{h} tile {i} keeps the short edge");
+                assert_eq!(if p.axis == Axis::Down { r.width } else { r.height }, p.short(), "{w}x{h} tile {i} keeps the short edge");
                 next = b + 1;
             }
             assert_eq!(next, p.long(), "{w}x{h}: the last tile ends at the edge");
@@ -292,22 +390,58 @@ pub(crate) mod tests {
     #[test]
     fn a_part_holds_four_tiles_and_the_last_part_the_rest() {
         let p = TilePlan::plan(800, 20_000).unwrap();
-        let one: Vec<usize> = p.part(1).unwrap().iter().map(|r| r.index).collect();
-        let two: Vec<usize> = p.part(2).unwrap().iter().map(|r| r.index).collect();
+        let cuts = p.nominal_cuts();
+        let one: Vec<usize> = p.part_rects(&cuts, 1).unwrap().iter().map(|r| r.index).collect();
+        let two: Vec<usize> = p.part_rects(&cuts, 2).unwrap().iter().map(|r| r.index).collect();
         assert_eq!((one, two), (vec![1, 2, 3, 4], vec![5, 6, 7, 8]));
-        assert_eq!(p.part(0), None);
-        assert_eq!(p.part(3), None);
-        assert_eq!(p.parts_text(), "1 = tiles 1–4 (y 0–9999), 2 = tiles 5–8 (y 10000–19999)");
+        assert_eq!(p.part_rects(&cuts, 0), None);
+        assert_eq!(p.part_rects(&cuts, 3), None);
+        assert_eq!(p.parts_text(&cuts), "1 = tiles 1–4 (y 0–9999), 2 = tiles 5–8 (y 10000–19999)");
         // Nine tiles: the third part is one tile.
         let p = TilePlan::plan(800, 22_000).unwrap();
+        let cuts = p.nominal_cuts();
         assert_eq!((p.total, p.parts()), (9, 3));
-        assert_eq!(p.part(3).unwrap().len(), 1);
+        assert_eq!(p.part_rects(&cuts, 3).unwrap().len(), 1);
         assert_eq!(p.tiles_text(3), "tile 9");
-        assert!(p.parts_text().ends_with("3 = tile 9 (y 19560–21999)"), "{}", p.parts_text());
+        assert!(p.parts_text(&cuts).ends_with("3 = tile 9 (y 19560–21999)"), "{}", p.parts_text(&cuts));
         // Many parts are counted, not all listed.
         let p = TilePlan::plan(800, 200_000).unwrap();
+        let cuts = p.nominal_cuts();
         assert!(p.parts() > 12);
-        assert!(p.parts_text().ends_with(&format!("… and {} more", p.parts() - 12)), "{}", p.parts_text());
+        assert!(p.parts_text(&cuts).ends_with(&format!("… and {} more", p.parts() - 12)), "{}", p.parts_text(&cuts));
+    }
+
+    #[test]
+    fn a_cut_moves_to_the_nearest_blank_line_within_the_window_and_otherwise_stays() {
+        let p = TilePlan::plan(400, 6000).unwrap();
+        assert_eq!((p.total, p.tile_len, p.snap_window()), (3, 2000, MEDIA_TILE_SNAP));
+        // Blank rows 30 px past each even cut: the cuts move there.
+        let img = striped(400, 6000, |y| y % 1000 == 30);
+        assert_eq!(p.cuts(&img), vec![0, 2030, 4030, 6000]);
+        assert_eq!(p.tile_size_text(&p.cuts(&img)), "400×1970–2030");
+        // Blank rows 60 px past: outside the window, the even cuts stand.
+        let img = striped(400, 6000, |y| y % 1000 == 60);
+        assert_eq!(p.cuts(&img), p.nominal_cuts());
+        // Blank rows on both sides: the nearer wins, the later one at a tie.
+        let img = striped(400, 6000, |y| y % 2000 == 1990 || y % 2000 == 5);
+        assert_eq!(p.cuts(&img), vec![0, 2005, 4005, 6000]);
+        // No blank row at all: the even cuts.
+        let img = striped(400, 6000, |_| false);
+        assert_eq!(p.cuts(&img), p.nominal_cuts());
+        // Left to right: blank columns.
+        let p = TilePlan::plan(6000, 400).unwrap();
+        let img = DynamicImage::ImageRgba8(ImageBuffer::from_fn(6000, 400, |x, y| {
+            if x % 1000 == 30 || y % 2 == 1 { Rgba([255, 255, 255, 255]) } else { Rgba([0, 0, 0, 255]) }
+        }));
+        assert_eq!(p.cuts(&img), vec![0, 2030, 4030, 6000]);
+        // The window shrinks when a tile has little room under its box.
+        let p = TilePlan::plan(800, 9997).unwrap();
+        assert_eq!((p.tile_len, p.snap_window()), (2500, 38));
+        // The edges are never cuts, whatever the window.
+        let p = TilePlan::plan(400, 5160).unwrap();
+        assert_eq!((p.total, p.tile_len), (3, 1720));
+        let img = striped(400, 5160, |_| true);
+        assert_eq!(p.cuts(&img)[3], 5160);
     }
 
     #[test]
@@ -315,6 +449,7 @@ pub(crate) mod tests {
         let png = banded_png(600, 11_000);
         let View::Tiled(t) = view_blocking(png.clone(), 1).unwrap() else { panic!("a long image is tiled") };
         assert_eq!((t.plan.total, t.plan.tile_len, t.plan.parts(), t.part), (5, 2200, 2, 1));
+        assert_eq!(t.cuts, vec![0, 2200, 4400, 6600, 8800, 11_000], "every row is blank: the even cuts stand");
         assert_eq!(t.tiles.len(), 4);
         for (i, tile) in t.tiles.iter().enumerate() {
             assert_eq!(tile.rect, TileRect { index: i + 1, x: 0, y: i as u32 * 2200, width: 600, height: 2200 });
@@ -329,10 +464,14 @@ pub(crate) mod tests {
         assert_eq!(t.tiles[0].rect, TileRect { index: 5, x: 0, y: 8800, width: 600, height: 2200 });
         let err = view_blocking(png, 3).unwrap_err();
         assert_eq!(err.to_string(), "part 3 does not exist; the image has 2 parts (part=1 to part=2)");
-        // A short image takes normalize's path, whatever part is asked.
-        let View::Whole(n) = view_blocking(ingest::tests::png_fixture(800, 4385), 2).unwrap() else {
+        // A short image takes normalize's path, whatever part is asked,
+        // and names its source size.
+        let View::Whole { image, source_width, source_height } =
+            view_blocking(ingest::tests::png_fixture(800, 4385), 2).unwrap()
+        else {
             panic!("a short image is whole")
         };
-        assert_eq!((n.width, n.height), (470, 2576));
+        assert_eq!((source_width, source_height), (800, 4385));
+        assert_eq!((image.width, image.height), (470, 2576));
     }
 }
