@@ -122,11 +122,16 @@ Ask in plain language; these are the inputs Embra sends:
   and the file under 1.5 MiB. A `fullPage` capture of a long page, with a
   long edge over 5152 px, comes back in tiles at full scale, four per call,
   the header naming each tile's coordinates; `part=2, 3, …` shows the next
-  four. An image over 64 megapixels is refused before decode. Measured
+  group. An image over 64 megapixels is refused before decode. Measured
   2026-10-17: a capture 4,385 px tall is shown whole and stays readable
   (1.7×); one 8,000 px tall shown whole was not (3.1×), and is four tiles
-  now, readable down to the reference markers (2026-10-18). Text is still read through `/content`; the viewport or a top-level
-  `selector` suit a single picture.
+  now, readable down to the reference markers (2026-10-18). A `fullPage`
+  capture shows only what had loaded: lazy-loaded pictures below the fold
+  came out as empty frames and scroll-triggered fades as blank cards
+  (2026-10-18). Browserless's top-level `scrollPage: true` scrolls the
+  page before the capture for that; untried here (TBD). Text is still read
+  through `/content`; the viewport or a top-level `selector` suit a single
+  picture.
 - **A PDF** (`/pdf`):
   `{"url":"https://browser.example.lan/pdf","method":"POST","json":{"url":"https://example.com/","options":{"printBackground":true,"format":"A4"}},"save_to":"files/example.pdf"}`,
   then `file_offer` on that path for a download in the web console. Nothing
