@@ -8,9 +8,9 @@
 //! the refused directories (the media store, whose files all carry
 //! sidecars; the Guardian build tree, where a planted `build.rs` would run
 //! at the next rebuild), the canonical check of the nearest existing
-//! ancestor that `file_copy` runs (the string jail does not see a
-//! symlinked directory), no overwrite, and the one atomic writer
-//! (`file_patch::write_atomic_create`).
+//! ancestor that every writer runs (`tools::jail::real`; the string jail
+//! does not see a symlinked directory), no overwrite, and the one atomic
+//! writer (`file_patch::write_atomic_create`).
 //!
 //! The broker runs on a blocking-pool thread (`spawn_blocking` in the
 //! invoke arm), so the sink drives the async writer with
@@ -26,8 +26,8 @@ use crate::media::offer::FILE_DOWNLOAD_MAX;
 use crate::media::store::MediaStore;
 use crate::media::MEDIA_UPLOAD_MAX;
 use crate::tools::engineering::{ensure_parent_dirs, resolve_in, WORKSPACE_ROOT};
-use crate::tools::file_copy::nearest_existing_ancestor;
 use crate::tools::file_patch::write_atomic_create;
+use crate::tools::jail;
 
 /// The save cap is the download and media ceiling: what `http_request`
 /// saves, `file_offer` can offer and `image_view` can show.
@@ -72,49 +72,33 @@ pub(crate) fn resolve_save_target(root: &str, media_dir: &Path, path: &str) -> R
 /// Where the file will land, once the filesystem has been asked: the
 /// target must not exist (a file, a directory or a dangling link counts),
 /// and the nearest existing ancestor is canonicalized and checked against
-/// the canonical root, media store and build tree before any directory is
-/// created. `resolved` has passed [`resolve_save_target`].
+/// the canonical root (`jail::real`), the media store and the build tree
+/// before any directory is created. `resolved` has passed
+/// [`resolve_save_target`].
 async fn plan_save(root: &Path, media_dir: &Path, resolved: &str) -> Result<PathBuf, String> {
     let target = Path::new(resolved);
-    let anc = nearest_existing_ancestor(target).await;
-    if anc == target {
+    if tokio::fs::symlink_metadata(target).await.is_ok() {
         return Err(exists(resolved));
     }
-    let anc_canon = tokio::fs::canonicalize(&anc)
-        .await
-        .map_err(|e| format!("failed to resolve {}: {e}", anc.display()))?;
-    let root_canon = tokio::fs::canonicalize(root)
-        .await
-        .map_err(|e| format!("failed to resolve {}: {e}", root.display()))?;
-    if !anc_canon.starts_with(&root_canon) {
-        return Err(format!(
-            "'{resolved}' resolves outside {} (real path {})",
-            root.display(),
-            anc_canon.display()
-        ));
-    }
+    let real = jail::real(root, target).await?;
     if let Ok(media_canon) = tokio::fs::canonicalize(media_dir).await
-        && anc_canon.starts_with(&media_canon)
+        && real.ancestor.starts_with(&media_canon)
     {
         return Err(format!(
             "'{resolved}' resolves into the media store (real path {})",
-            anc_canon.display()
+            real.ancestor.display()
         ));
     }
-    if anc_canon.starts_with(root_canon.join(GUARDIAN_DIR_NAME)) {
+    if real.ancestor.starts_with(real.root.join(GUARDIAN_DIR_NAME)) {
         return Err(format!(
             "'{resolved}' resolves into the Guardian build tree (real path {})",
-            anc_canon.display()
+            real.ancestor.display()
         ));
     }
-    let rest = target
-        .strip_prefix(&anc)
-        .map_err(|e| format!("'{resolved}': {e}"))?;
-    let final_path = anc_canon.join(rest);
-    if tokio::fs::symlink_metadata(&final_path).await.is_ok() {
+    if tokio::fs::symlink_metadata(&real.path).await.is_ok() {
         return Err(exists(resolved));
     }
-    Ok(final_path)
+    Ok(real.path)
 }
 
 /// The write, after [`plan_save`]: the missing parents under the canonical
@@ -128,9 +112,9 @@ pub(crate) async fn save_at(
     bytes: &[u8],
 ) -> Result<SavedFile, String> {
     let final_path = plan_save(root, media_dir, resolved).await?;
-    let shown = final_path.display().to_string();
-    ensure_parent_dirs(&shown).await?;
+    ensure_parent_dirs(&final_path).await?;
     write_atomic_create(&final_path, bytes).await?;
+    let shown = final_path.display().to_string();
     Ok(SavedFile { path: shown, bytes: bytes.len() })
 }
 

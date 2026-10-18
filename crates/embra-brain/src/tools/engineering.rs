@@ -1,21 +1,27 @@
+use std::path::{Path, PathBuf};
+
 use chrono::Utc;
 use embra_tools_core::USER_AGENT;
 
 use crate::db::WardsonDbClient;
 
-// `pub(crate)`: file_patch re-verifies its canonicalized (symlink-resolved)
-// target against this root.
+// `pub(crate)`: every writer's canonical check (`jail::real`) and
+// file_patch's re-verification run against this root.
 pub(crate) const WORKSPACE_ROOT: &str = "/embra/workspace";
 
-/// Resolve a workspace-scoped tool path. Accepts either an absolute path
-/// under `/embra/workspace/` or a path relative to `/embra/workspace/`
+/// Resolve a workspace-scoped tool path: the lexical half of the jail
+/// (`jail::lexical` under `WORKSPACE_ROOT`). Accepts either an absolute
+/// path under `/embra/workspace/` or a path relative to `/embra/workspace/`
 /// (so `repo`, `./repo`, and `/embra/workspace/repo` all resolve to the
-/// same canonical form). Returns the canonical absolute path or a uniform
-/// `Denied:` rejection message.
+/// same form). Returns the absolute path as text or a uniform `Denied:`
+/// rejection message.
 ///
 /// Empty input resolves to the workspace root. Leading `./` is stripped
 /// before joining so `./repo` and `repo` are equivalent. `..` segments
 /// in either form are rejected outright as a defense against traversal.
+/// The check is lexical: a writer runs `jail::real` (or `jail::real_parent`
+/// for a removal) on the result before it touches the filesystem, so a
+/// symlink that leaves the workspace is refused by its real path.
 ///
 /// Every git_*, file_*, and dir_* tool routes through this resolver so the
 /// accepted path shapes are uniform across the tool surface. Closes
@@ -33,34 +39,23 @@ pub(crate) fn resolve_workspace_path(path: &str) -> Result<String, String> {
 /// Guardian's workspace sink can run under a temporary directory in a test.
 /// Production callers go through `resolve_workspace_path`.
 pub(crate) fn resolve_in(root: &str, path: &str) -> Result<String, String> {
-    let trimmed = path.trim();
-    let resolved = if trimmed.is_empty() {
-        root.to_string()
-    } else if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        let rel = trimmed.trim_start_matches("./");
-        format!("{}/{}", root, rel)
-    };
-    // Defeat path traversal in either form: `../etc/passwd` (relative) and
-    // `/embra/workspace/../etc/passwd` (absolute) both contain a `..` segment
-    // that would let the resolved path escape WORKSPACE_ROOT after kernel
-    // canonicalization. The `starts_with(WORKSPACE_ROOT)` check below is a
-    // string-prefix check, not a filesystem-canonical one — so we reject `..`
-    // outright to keep the contract honest.
-    if resolved.split('/').any(|seg| seg == "..") {
-        return Err(format!(
-            "Denied: path '{}' contains a '..' component",
-            resolved
-        ));
-    }
-    if !resolved.starts_with(root) {
-        return Err(format!(
-            "Denied: path '{}' resolves outside {}",
-            resolved, root
-        ));
-    }
-    Ok(resolved)
+    super::jail::lexical(root, path)
+}
+
+/// The two jail steps of a writer: the lexical check, then the canonical
+/// check of what exists (`jail::real`). The path returned is the one to
+/// write or create.
+async fn jailed_write_path(root: &str, raw: &str) -> Result<PathBuf, String> {
+    let lexical = super::jail::lexical(root, raw)?;
+    Ok(super::jail::real(Path::new(root), Path::new(&lexical)).await?.path)
+}
+
+/// The two jail steps of a remover: the lexical check, then the canonical
+/// check of the parent (`jail::real_parent`). The entry itself is named,
+/// never followed.
+async fn jailed_remove_path(root: &str, raw: &str) -> Result<PathBuf, String> {
+    let lexical = super::jail::lexical(root, raw)?;
+    super::jail::real_parent(Path::new(root), Path::new(&lexical)).await
 }
 
 /// Resolve `base` to a ref usable by `merge-base --is-ancestor`. Prefers the
@@ -1016,12 +1011,15 @@ pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
         derived_name
     };
 
-    let dest = match resolve_workspace_path(&subpath_input) {
-        Ok(p) => p,
+    // The lexical jail, then the canonical check of what exists: a
+    // destination under a symlinked directory that leaves the workspace is
+    // refused before anything is created.
+    let dest = match jailed_write_path(WORKSPACE_ROOT, &subpath_input).await {
+        Ok(p) => p.display().to_string(),
         Err(e) => return e,
     };
 
-    if std::path::Path::new(&dest).exists() {
+    if std::path::Path::new(&dest).symlink_metadata().is_ok() {
         return format!("Directory already exists: {}", dest);
     }
 
@@ -2809,10 +2807,10 @@ pub(crate) fn expand_escapes(s: &str) -> String {
     result
 }
 
-/// Ensure parent directories exist for a path. Workspace restricted.
-pub(crate) async fn ensure_parent_dirs(path: &str) -> Result<(), String> {
-    let file_path = std::path::Path::new(path);
-    if let Some(parent) = file_path.parent()
+/// Ensure parent directories exist for a path. The caller has run the jail
+/// (`jail::real`), so the parents are created under the canonical ancestor.
+pub(crate) async fn ensure_parent_dirs(path: &Path) -> Result<(), String> {
+    if let Some(parent) = path.parent()
         && !parent.exists()
     {
         tokio::fs::create_dir_all(parent)
@@ -2842,12 +2840,18 @@ pub async fn file_write(param: &str) -> String {
     let raw_path = parts[0].trim();
     let content = expand_escapes(parts[1]);
 
-    let path = match resolve_workspace_path(raw_path) {
+    file_write_in(WORKSPACE_ROOT, raw_path, &content).await
+}
+
+/// [`file_write`] under a root: the lexical jail, the canonical check of
+/// what exists, then [`write_at`] on the real path. Production passes
+/// `WORKSPACE_ROOT`; the jail tests pass a temporary directory.
+pub(crate) async fn file_write_in(root: &str, raw_path: &str, content: &str) -> String {
+    let path = match jailed_write_path(root, raw_path).await {
         Ok(p) => p,
         Err(e) => return e,
     };
-
-    write_at(&path, &content).await
+    write_at(&path, content).await
 }
 
 /// Post-jail core of [`file_write`]: parent-dir creation + atomic
@@ -2857,20 +2861,20 @@ pub async fn file_write(param: &str) -> String {
 /// create-capable form) closes the F-19 failure class: a failed write can no
 /// longer leave a partial file — the target is either fully replaced or
 /// byte-identical to before the call.
-pub(crate) async fn write_at(path: &str, content: &str) -> String {
+pub(crate) async fn write_at(path: &Path, content: &str) -> String {
     if let Err(e) = ensure_parent_dirs(path).await {
         return e;
     }
 
-    match crate::tools::file_patch::write_atomic_create(
-        std::path::Path::new(path),
-        content.as_bytes(),
-    )
-    .await
-    {
+    match crate::tools::file_patch::write_atomic_create(path, content.as_bytes()).await {
         Ok(()) => {
             let line_count = content.lines().count();
-            format!("Written {} bytes ({} lines) to {}", content.len(), line_count, path)
+            format!(
+                "Written {} bytes ({} lines) to {}",
+                content.len(),
+                line_count,
+                path.display()
+            )
         }
         Err(e) => format!("Failed to write file: {} — target left unchanged", e),
     }
@@ -2899,12 +2903,23 @@ pub async fn file_append(param: &str) -> String {
     let raw_path = parts[0].trim();
     let content = expand_escapes(parts[1]);
 
-    let path = match resolve_workspace_path(raw_path) {
+    file_append_in(WORKSPACE_ROOT, raw_path, &content).await
+}
+
+/// [`file_append`] under a root: the lexical jail, the canonical check of
+/// what exists, then [`append_at`] on the real path.
+pub(crate) async fn file_append_in(root: &str, raw_path: &str, content: &str) -> String {
+    let path = match jailed_write_path(root, raw_path).await {
         Ok(p) => p,
         Err(e) => return e,
     };
+    append_at(&path, content).await
+}
 
-    if let Err(e) = ensure_parent_dirs(&path).await {
+/// Post-jail core of [`file_append`]: parent-dir creation, then an
+/// append-mode write. Not atomic.
+pub(crate) async fn append_at(path: &Path, content: &str) -> String {
+    if let Err(e) = ensure_parent_dirs(path).await {
         return e;
     }
 
@@ -2912,12 +2927,12 @@ pub async fn file_append(param: &str) -> String {
     let result = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
         .await;
 
     match result {
         Ok(mut file) => match file.write_all(content.as_bytes()).await {
-            Ok(()) => format!("Appended {} bytes to {}", content.len(), path),
+            Ok(()) => format!("Appended {} bytes to {}", content.len(), path.display()),
             Err(e) => format!("Failed to append: {}", e),
         },
         Err(e) => format!("Failed to open file for append: {}", e),
@@ -2931,19 +2946,23 @@ pub async fn mkdir(param: &str) -> String {
         return "Usage: mkdir <path>\nExample: mkdir /embra/workspace/repos/myrepo/src/utils".into();
     }
 
-    let raw_path = param.trim();
+    mkdir_in(WORKSPACE_ROOT, param.trim()).await
+}
 
-    let path = match resolve_workspace_path(raw_path) {
+/// [`mkdir`] under a root: the lexical jail, the canonical check of what
+/// exists, then the directories under the real ancestor.
+pub(crate) async fn mkdir_in(root: &str, raw_path: &str) -> String {
+    let path = match jailed_write_path(root, raw_path).await {
         Ok(p) => p,
         Err(e) => return e,
     };
 
-    if std::path::Path::new(&path).exists() {
-        return format!("Directory already exists: {}", path);
+    if tokio::fs::symlink_metadata(&path).await.is_ok() {
+        return format!("Directory already exists: {}", path.display());
     }
 
     match tokio::fs::create_dir_all(&path).await {
-        Ok(()) => format!("Created directory: {}", path),
+        Ok(()) => format!("Created directory: {}", path.display()),
         Err(e) => format!("Failed to create directory: {}", e),
     }
 }
@@ -2968,21 +2987,32 @@ pub async fn file_symlink(param: &str) -> String {
         return "file_symlink rejected (link path is empty after the '|')".into();
     }
 
-    let target = match resolve_workspace_path(raw_target) {
+    file_symlink_in(WORKSPACE_ROOT, raw_target, raw_link).await
+}
+
+/// [`file_symlink`] under a root. The target keeps the lexical check alone
+/// (a dangling target is allowed, so there may be nothing to resolve); the
+/// link path runs the canonical check, so a link is never created under a
+/// directory that leaves the workspace.
+pub(crate) async fn file_symlink_in(root: &str, raw_target: &str, raw_link: &str) -> String {
+    let target = match super::jail::lexical(root, raw_target) {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let link = match resolve_workspace_path(raw_link) {
+    let link = match jailed_write_path(root, raw_link).await {
         Ok(p) => p,
         Err(e) => return e,
     };
 
-    if std::path::Path::new(&link).exists() {
-        return format!("file_symlink rejected (link path already exists: {})", link);
+    if tokio::fs::symlink_metadata(&link).await.is_ok() {
+        return format!(
+            "file_symlink rejected (link path already exists: {})",
+            link.display()
+        );
     }
 
     match tokio::fs::symlink(&target, &link).await {
-        Ok(()) => format!("Symlink created: {} → {}", link, target),
+        Ok(()) => format!("Symlink created: {} → {}", link.display(), target),
         Err(e) => format!("file_symlink failed: {}", e),
     }
 }
@@ -3002,38 +3032,46 @@ pub async fn file_delete(param: &str) -> String {
         return "Usage: file_delete <path>\nExample: file_delete /embra/workspace/repos/myrepo/old_file.txt".into();
     }
 
-    let raw_path = param.trim();
+    file_delete_in(WORKSPACE_ROOT, param.trim()).await
+}
 
-    let path = match resolve_workspace_path(raw_path) {
+/// [`file_delete`] under a root: the lexical jail, then the canonical check
+/// of the parent (`jail::real_parent`), so the entry is unlinked by its
+/// name and a link is never followed.
+pub(crate) async fn file_delete_in(root: &str, raw_path: &str) -> String {
+    let path = match jailed_remove_path(root, raw_path).await {
         Ok(p) => p,
         Err(e) => return e,
     };
+    let shown = path.display();
 
     // symlink_metadata does NOT follow symlinks — critical for correct handling
     // of dangling links and links pointing at directories.
     let meta = match tokio::fs::symlink_metadata(&path).await {
         Ok(m) => m,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return format!("File not found: {}", path);
+            return format!("File not found: {shown}");
         }
-        Err(e) => return format!("Failed to stat {}: {}", path, e),
+        Err(e) => return format!("Failed to stat {shown}: {e}"),
     };
 
     if meta.file_type().is_symlink() {
         // Unlink the link itself. Target state is irrelevant.
         return match tokio::fs::remove_file(&path).await {
-            Ok(()) => format!("Deleted symlink: {}", path),
-            Err(e) => format!("Failed to delete {}: {}", path, e),
+            Ok(()) => format!("Deleted symlink: {shown}"),
+            Err(e) => format!("Failed to delete {shown}: {e}"),
         };
     }
 
     if meta.is_dir() {
-        return format!("Cannot delete directory with file_delete (use a shell command for recursive removal): {}", path);
+        return format!(
+            "Cannot delete directory with file_delete (use dir_delete for directories): {shown}"
+        );
     }
 
     match tokio::fs::remove_file(&path).await {
-        Ok(()) => format!("Deleted: {}", path),
-        Err(e) => format!("Failed to delete {}: {}", path, e),
+        Ok(()) => format!("Deleted: {shown}"),
+        Err(e) => format!("Failed to delete {shown}: {e}"),
     }
 }
 
@@ -3045,24 +3083,29 @@ pub async fn file_move(param: &str) -> String {
         return "Usage: file_move <source> | <destination>\nExample: file_move /embra/workspace/repos/myrepo/old.rs | /embra/workspace/repos/myrepo/new.rs".into();
     }
 
-    let raw_src = parts[0].trim();
-    let raw_dst = parts[1].trim();
+    file_move_in(WORKSPACE_ROOT, parts[0].trim(), parts[1].trim()).await
+}
 
-    let src = match resolve_workspace_path(raw_src) {
+/// [`file_move`] under a root. The source runs the canonical check of its
+/// parent (a link is moved as a link, never followed); the destination runs
+/// the canonical check of what exists (no parent is created under a
+/// directory that leaves the workspace).
+pub(crate) async fn file_move_in(root: &str, raw_src: &str, raw_dst: &str) -> String {
+    let src = match jailed_remove_path(root, raw_src).await {
         Ok(p) => p,
         Err(e) => return e,
     };
-    let dst = match resolve_workspace_path(raw_dst) {
+    let dst = match jailed_write_path(root, raw_dst).await {
         Ok(p) => p,
         Err(e) => return e,
     };
 
-    if !std::path::Path::new(&src).exists() {
-        return format!("Source not found: {}", src);
+    if tokio::fs::symlink_metadata(&src).await.is_err() {
+        return format!("Source not found: {}", src.display());
     }
 
-    if std::path::Path::new(&dst).exists() {
-        return format!("Destination already exists: {}", dst);
+    if tokio::fs::symlink_metadata(&dst).await.is_ok() {
+        return format!("Destination already exists: {}", dst.display());
     }
 
     // Ensure parent directory of destination exists
@@ -3071,8 +3114,13 @@ pub async fn file_move(param: &str) -> String {
     }
 
     match tokio::fs::rename(&src, &dst).await {
-        Ok(()) => format!("Moved: {} → {}", src, dst),
-        Err(e) => format!("Failed to move {} → {}: {}", src, dst, e),
+        Ok(()) => format!("Moved: {} → {}", src.display(), dst.display()),
+        Err(e) => format!(
+            "Failed to move {} → {}: {}",
+            src.display(),
+            dst.display(),
+            e
+        ),
     }
 }
 
@@ -3163,45 +3211,73 @@ pub async fn dir_delete(param: &str) -> String {
         return "Usage: dir_delete <path> or dir_delete <path> --force\nWithout --force, only empty directories are removed.".into();
     }
 
-    let (raw_path, force) = if param.trim_end().ends_with("--force") {
-        (param.trim_end().trim_end_matches("--force").trim(), true)
-    } else {
-        (param.trim(), false)
-    };
+    dir_delete_in(WORKSPACE_ROOT, param).await
+}
 
-    let path = match resolve_workspace_path(raw_path) {
+/// `--force` is a flag only as the last whitespace-separated token of the
+/// parameter; a directory named `build--force` is a directory.
+fn split_force_flag(param: &str) -> (&str, bool) {
+    let trimmed = param.trim();
+    match trimmed.strip_suffix("--force") {
+        Some(rest) if rest.is_empty() || rest.ends_with(char::is_whitespace) => {
+            (rest.trim(), true)
+        }
+        _ => (trimmed, false),
+    }
+}
+
+/// [`dir_delete`] under a root: the flag split, the lexical jail, the root
+/// refused by name, then the canonical check of the parent
+/// (`jail::real_parent`), so a symlink to a directory is not a directory
+/// here and nothing is followed.
+pub(crate) async fn dir_delete_in(root: &str, param: &str) -> String {
+    let (raw_path, force) = split_force_flag(param);
+
+    let lexical = match super::jail::lexical(root, raw_path) {
         Ok(p) => p,
         Err(e) => return e,
     };
-
-    let p = std::path::Path::new(&path);
-    if !p.exists() {
-        return format!("Directory not found: {}", path);
+    if Path::new(&lexical) == Path::new(root) {
+        return format!(
+            "Refusing to delete the workspace itself ({root}); name a directory under it."
+        );
     }
+    let path = match super::jail::real_parent(Path::new(root), Path::new(&lexical)).await {
+        Ok(p) => p,
+        Err(e) => return e,
+    };
+    let shown = path.display();
 
-    if !p.is_dir() {
-        return format!("Not a directory (use file_delete for files): {}", path);
+    let meta = match tokio::fs::symlink_metadata(&path).await {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return format!("Directory not found: {shown}");
+        }
+        Err(e) => return format!("Failed to stat {shown}: {e}"),
+    };
+
+    if !meta.is_dir() {
+        return format!("Not a directory (use file_delete for files and links): {shown}");
     }
 
     if force {
         match tokio::fs::remove_dir_all(&path).await {
-            Ok(()) => format!("Deleted directory and all contents: {}", path),
-            Err(e) => format!("Failed to delete directory {}: {}", path, e),
+            Ok(()) => format!("Deleted directory and all contents: {shown}"),
+            Err(e) => format!("Failed to delete directory {shown}: {e}"),
         }
     } else {
         match tokio::fs::remove_dir(&path).await {
-            Ok(()) => format!("Deleted empty directory: {}", path),
+            Ok(()) => format!("Deleted empty directory: {shown}"),
             Err(e) => {
                 if e.kind() == std::io::ErrorKind::DirectoryNotEmpty
                     || e.to_string().contains("not empty")
                     || e.to_string().contains("Directory not empty")
                 {
                     format!(
-                        "Directory is not empty: {}. Use dir_delete {} --force to remove with contents.",
-                        path, path
+                        "Directory is not empty: {shown}. Use dir_delete {shown} --force to remove with contents."
                     )
                 } else {
-                    format!("Failed to delete directory {}: {}", path, e)
+                    format!("Failed to delete directory {shown}: {e}")
                 }
             }
         }
@@ -5215,7 +5291,7 @@ mod file_io_caps_tests {
         let target = dir.0.join("nested").join("notes.txt");
         let path = target.to_str().unwrap();
 
-        let out = write_at(path, "line 1\nline 2").await;
+        let out = write_at(&target, "line 1\nline 2").await;
         assert_eq!(out, format!("Written 13 bytes (2 lines) to {}", path));
         assert_eq!(std::fs::read(&target).unwrap(), b"line 1\nline 2");
     }
@@ -5225,9 +5301,8 @@ mod file_io_caps_tests {
         let dir = TempDir::new("overwrite");
         let target = dir.0.join("f.txt");
         std::fs::write(&target, "the old content is much longer than the new").unwrap();
-        let path = target.to_str().unwrap();
 
-        let out = write_at(path, "short").await;
+        let out = write_at(&target, "short").await;
         assert!(out.starts_with("Written 5 bytes"), "{out}");
         assert_eq!(std::fs::read(&target).unwrap(), b"short");
     }
@@ -5561,5 +5636,176 @@ mod user_agent_tests {
         }
         assert!(literals.is_empty(), "a literal user agent at {literals:?}; send embra_tools_core::USER_AGENT");
         assert!(sites > 0, "no User-Agent header under src/");
+    }
+}
+
+#[cfg(test)]
+mod write_jail_tests {
+    //! The canonical half of the writer jail (`jail::real`, `jail::real_parent`)
+    //! through the tools themselves, under a temporary root (#53 b3, #28 b2).
+    use super::*;
+
+    struct TempDir(PathBuf);
+    impl TempDir {
+        fn new(tag: &str) -> Self {
+            static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let d = std::env::temp_dir().join(format!(
+                "embra-write-jail-test-{}-{}-{}",
+                tag,
+                std::process::id(),
+                SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            std::fs::create_dir_all(&d).unwrap();
+            TempDir(std::fs::canonicalize(&d).unwrap())
+        }
+        fn root(&self) -> &str {
+            self.0.to_str().unwrap()
+        }
+        fn join(&self, rel: &str) -> PathBuf {
+            self.0.join(rel)
+        }
+    }
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn link(target: &Path, at: &Path) {
+        std::os::unix::fs::symlink(target, at).unwrap();
+    }
+
+    fn is_link(p: &Path) -> bool {
+        std::fs::symlink_metadata(p).map(|m| m.file_type().is_symlink()).unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn an_in_jail_symlink_to_the_outside_is_not_written_through() {
+        let t = TempDir::new("escape");
+        let outside = TempDir::new("escape-outside");
+        let sentinel = outside.join("sentinel.txt");
+        std::fs::write(&sentinel, "keep").unwrap();
+        link(&outside.0, &t.join("esc"));
+        link(&sentinel, &t.join("esc_file"));
+        std::fs::write(t.join("inside.txt"), "x").unwrap();
+
+        let refused = [
+            file_write_in(t.root(), "esc_file", "pwned").await,
+            file_write_in(t.root(), "esc/new.txt", "pwned").await,
+            file_append_in(t.root(), "esc_file", "pwned").await,
+            file_append_in(t.root(), "esc/log.txt", "pwned").await,
+            mkdir_in(t.root(), "esc/sub/dir").await,
+            file_symlink_in(t.root(), "inside.txt", "esc/link").await,
+            file_move_in(t.root(), "inside.txt", "esc/moved.txt").await,
+        ];
+        for out in &refused {
+            assert!(
+                out.starts_with("Denied:") && out.contains("outside"),
+                "{out}"
+            );
+        }
+
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep", "the sentinel is byte-identical");
+        let created: Vec<_> = std::fs::read_dir(&outside.0)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(created.len(), 1, "nothing created outside: {created:?}");
+        assert!(t.join("inside.txt").exists(), "the source of the refused move stays");
+    }
+
+    #[tokio::test]
+    async fn a_link_inside_the_jail_is_written_through_and_kept() {
+        let t = TempDir::new("inside");
+        std::fs::write(t.join("real.txt"), "old").unwrap();
+        link(&t.join("real.txt"), &t.join("link.txt"));
+        std::fs::create_dir(t.join("realdir")).unwrap();
+        link(&t.join("realdir"), &t.join("dirlink"));
+
+        let out = file_write_in(t.root(), "link.txt", "new").await;
+        assert!(out.starts_with("Written 3 bytes"), "{out}");
+        assert_eq!(std::fs::read(t.join("real.txt")).unwrap(), b"new");
+        assert!(is_link(&t.join("link.txt")), "the link stays a link");
+
+        let out = file_append_in(t.root(), "link.txt", "er").await;
+        assert!(out.starts_with("Appended 2 bytes"), "{out}");
+        assert_eq!(std::fs::read(t.join("real.txt")).unwrap(), b"newer");
+
+        let out = mkdir_in(t.root(), "dirlink/sub").await;
+        assert!(out.starts_with("Created directory"), "{out}");
+        assert!(t.join("realdir/sub").is_dir());
+
+        let out = file_write_in(t.root(), "dirlink/sub/f.txt", "x").await;
+        assert!(out.starts_with("Written"), "{out}");
+        assert_eq!(std::fs::read(t.join("realdir/sub/f.txt")).unwrap(), b"x");
+    }
+
+    #[tokio::test]
+    async fn a_delete_or_a_move_names_a_link_and_never_follows_it() {
+        let t = TempDir::new("unlink");
+        let outside = TempDir::new("unlink-outside");
+        let sentinel = outside.join("sentinel.txt");
+        std::fs::write(&sentinel, "keep").unwrap();
+        link(&sentinel, &t.join("link"));
+        link(&outside.0, &t.join("dirlink"));
+
+        let out = file_delete_in(t.root(), "link").await;
+        assert!(out.starts_with("Deleted symlink"), "{out}");
+        assert!(std::fs::symlink_metadata(t.join("link")).is_err());
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep");
+
+        // A link to a directory is not a directory for dir_delete ...
+        let out = dir_delete_in(t.root(), "dirlink --force").await;
+        assert!(out.starts_with("Not a directory"), "{out}");
+        assert!(outside.0.is_dir() && sentinel.exists(), "the outside tree stands");
+        // ... and file_delete removes the link itself.
+        let out = file_delete_in(t.root(), "dirlink").await;
+        assert!(out.starts_with("Deleted symlink"), "{out}");
+        assert!(sentinel.exists());
+
+        // A move of a link moves the link.
+        link(&sentinel, &t.join("link2"));
+        let out = file_move_in(t.root(), "link2", "moved").await;
+        assert!(out.starts_with("Moved"), "{out}");
+        assert!(is_link(&t.join("moved")));
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep");
+    }
+
+    #[tokio::test]
+    async fn a_directory_named_force_is_not_a_flag() {
+        assert_eq!(split_force_flag("build --force"), ("build", true));
+        assert_eq!(split_force_flag("build\t--force"), ("build", true));
+        assert_eq!(split_force_flag("build--force"), ("build--force", false));
+        assert_eq!(split_force_flag("--force"), ("", true));
+        assert_eq!(split_force_flag("build"), ("build", false));
+
+        let t = TempDir::new("force");
+        std::fs::create_dir(t.join("build--force")).unwrap();
+        std::fs::write(t.join("build--force/keep.txt"), "x").unwrap();
+        let out = dir_delete_in(t.root(), "build--force").await;
+        assert!(out.starts_with("Directory is not empty"), "{out}");
+        assert!(t.join("build--force/keep.txt").exists(), "nothing deleted");
+        let out = dir_delete_in(t.root(), "build--force --force").await;
+        assert!(out.starts_with("Deleted directory and all contents"), "{out}");
+        assert!(!t.join("build--force").exists());
+    }
+
+    #[tokio::test]
+    async fn dir_delete_never_takes_the_workspace_root() {
+        let t = TempDir::new("root");
+        std::fs::write(t.join("keep.txt"), "x").unwrap();
+        let root_abs = format!("{} --force", t.root());
+        for param in ["", " --force", "--force", ". --force", "./", root_abs.as_str()] {
+            let out = dir_delete_in(t.root(), param).await;
+            assert!(
+                out.starts_with("Refusing to delete the workspace itself"),
+                "{param:?}: {out}"
+            );
+        }
+        assert!(t.join("keep.txt").exists());
+        // A path that leaves is refused by the lexical jail.
+        let out = dir_delete_in(t.root(), "/ --force").await;
+        assert!(out.starts_with("Denied:"), "{out}");
     }
 }

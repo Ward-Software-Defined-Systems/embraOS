@@ -14,6 +14,7 @@ pub mod file_copy;
 pub mod file_offer;
 pub mod file_patch;
 pub mod guardian;
+pub mod jail;
 pub mod media;
 pub mod registry;
 pub mod security;

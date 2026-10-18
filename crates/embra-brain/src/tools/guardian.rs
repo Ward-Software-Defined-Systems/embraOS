@@ -5,6 +5,8 @@
 //! NEVER injected into the schema — the prompt-cache invariant holds).
 //! Backends live in `crate::guardian`.
 
+use std::path::{Path, PathBuf};
+
 use embra_tool_macro::embra_tool;
 use embra_tools_core::DispatchError;
 use schemars::JsonSchema;
@@ -86,38 +88,48 @@ fn object_input_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::sc
 const GUARDIAN_DATA_FILE_MAX: u64 = 2 * 1024 * 1024;
 
 /// Pure gate for a data_file request: only action="invoke" may carry one,
-/// and the path must resolve inside the workspace jail (the shared
-/// resolver's uniform `Denied:` messages pass through).
-fn validate_data_file_request(action: &str, path: &str) -> Result<String, String> {
+/// and the path must resolve inside the jail under `root` (the shared
+/// resolver's uniform `Denied:` messages pass through). The canonical
+/// check follows in [`jailed_data_file`].
+fn validate_data_file_in(action: &str, path: &str, root: &str) -> Result<String, String> {
     if action != "invoke" {
         return Err(format!(
             "guardian_call: data_file is only valid with action=\"invoke\" (got \"{action}\")"
         ));
     }
-    crate::tools::engineering::resolve_workspace_path(path)
+    crate::tools::engineering::resolve_in(root, path)
+}
+
+/// The data_file by its real path: the pure gate, then the canonical check
+/// of the jail (`jail::real`), so a file reached through a link that leaves
+/// the workspace is refused before the read.
+async fn jailed_data_file(action: &str, path: &str, root: &str) -> Result<PathBuf, String> {
+    let resolved = validate_data_file_in(action, path, root)?;
+    Ok(crate::tools::jail::real(Path::new(root), Path::new(&resolved)).await?.path)
 }
 
 /// Size-gated read of an already-resolved data_file path. `max` is a
 /// parameter so tests exercise the gate without multi-MiB fixtures.
-async fn load_data_file(path: &str, max: u64) -> Result<String, String> {
+async fn load_data_file(path: &Path, max: u64) -> Result<String, String> {
+    let shown = path.display();
     let meta = tokio::fs::metadata(path)
         .await
-        .map_err(|e| format!("guardian_call: data_file '{path}' is not readable: {e}"))?;
+        .map_err(|e| format!("guardian_call: data_file '{shown}' is not readable: {e}"))?;
     if !meta.is_file() {
         return Err(format!(
-            "guardian_call: data_file '{path}' is not a regular file"
+            "guardian_call: data_file '{shown}' is not a regular file"
         ));
     }
     if meta.len() > max {
         return Err(format!(
-            "guardian_call: data_file '{path}' is {} bytes — exceeds the {max}-byte limit. \
+            "guardian_call: data_file '{shown}' is {} bytes — exceeds the {max}-byte limit. \
              Dump slim/filtered instead (knowledge_dump include_payload=false + edge_types).",
             meta.len()
         ));
     }
     tokio::fs::read_to_string(path)
         .await
-        .map_err(|e| format!("guardian_call: failed reading data_file '{path}': {e}"))
+        .map_err(|e| format!("guardian_call: failed reading data_file '{shown}': {e}"))
 }
 
 /// Inject file content as `input.data`. Omitted input (Null) upgrades to an
@@ -213,7 +225,9 @@ impl GuardianCallArgs {
         // null input reaches the guest as the text `null`, as it always has.
         if let Some(path) = self.data_file.as_deref() {
             let resolved =
-                validate_data_file_request(&self.action, path).map_err(DispatchError::Handler)?;
+                jailed_data_file(&self.action, path, crate::tools::engineering::WORKSPACE_ROOT)
+                    .await
+                    .map_err(DispatchError::Handler)?;
             let content = load_data_file(&resolved, GUARDIAN_DATA_FILE_MAX)
                 .await
                 .map_err(DispatchError::Handler)?;
@@ -270,6 +284,11 @@ impl GuardianProposeArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pure gate under the production root.
+    fn validate_data_file_request(action: &str, path: &str) -> Result<String, String> {
+        validate_data_file_in(action, path, crate::tools::engineering::WORKSPACE_ROOT)
+    }
 
     #[test]
     fn args_deserialize() {
@@ -386,9 +405,7 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("guardian_data_file_{}.jsonl", std::process::id()));
         tokio::fs::write(&path, "{\"type\":\"node\"}\n").await.unwrap();
-        let content = load_data_file(path.to_str().unwrap(), GUARDIAN_DATA_FILE_MAX)
-            .await
-            .unwrap();
+        let content = load_data_file(&path, GUARDIAN_DATA_FILE_MAX).await.unwrap();
         assert_eq!(content, "{\"type\":\"node\"}\n");
         let _ = tokio::fs::remove_file(&path).await;
     }
@@ -398,14 +415,48 @@ mod tests {
         let path = std::env::temp_dir()
             .join(format!("guardian_data_file_big_{}.jsonl", std::process::id()));
         tokio::fs::write(&path, "0123456789").await.unwrap();
-        let err = load_data_file(path.to_str().unwrap(), 4).await.unwrap_err();
+        let err = load_data_file(&path, 4).await.unwrap_err();
         assert!(err.contains("10 bytes"), "{err}");
         let _ = tokio::fs::remove_file(&path).await;
 
-        let err = load_data_file("/nonexistent/definitely_missing.jsonl", 100)
+        let err = load_data_file(Path::new("/nonexistent/definitely_missing.jsonl"), 100)
             .await
             .unwrap_err();
         assert!(err.contains("not readable"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn a_data_file_through_a_link_that_leaves_the_workspace_is_refused() {
+        // The pure gate sees `<root>/esc/secret` as inside; the canonical
+        // check (`jail::real`) sees where the link leads and refuses it.
+        let root = std::env::temp_dir().join(format!(
+            "guardian_data_file_jail_{}",
+            std::process::id()
+        ));
+        let outside = std::env::temp_dir().join(format!(
+            "guardian_data_file_jail_outside_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let outside = std::fs::canonicalize(&outside).unwrap();
+        std::fs::write(outside.join("secret"), "s").unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("esc")).unwrap();
+        std::fs::write(root.join("data.jsonl"), "{}\n").unwrap();
+        let root_str = root.to_str().unwrap();
+
+        let err = jailed_data_file("invoke", "esc/secret", root_str).await.unwrap_err();
+        assert!(err.starts_with("Denied:") && err.contains("outside"), "{err}");
+        let ok = jailed_data_file("invoke", "data.jsonl", root_str).await.unwrap();
+        assert_eq!(ok, root.join("data.jsonl"));
+        let err = jailed_data_file("status", "data.jsonl", root_str).await.unwrap_err();
+        assert!(err.contains("only valid with action"), "{err}");
+
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
     }
 
     #[test]

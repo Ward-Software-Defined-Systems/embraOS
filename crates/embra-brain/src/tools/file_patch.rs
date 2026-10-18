@@ -31,7 +31,7 @@ use embra_tools_core::DispatchError;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
-use super::engineering::{resolve_workspace_path, WORKSPACE_ROOT};
+use super::engineering::{resolve_in, WORKSPACE_ROOT};
 use super::sessions::truncate_str;
 use crate::tools::registry::DispatchContext;
 
@@ -996,27 +996,38 @@ impl FilePatchArgs {
 }
 
 async fn file_patch_impl(args: FilePatchArgs) -> String {
-    // Writer-family jail (resolve_workspace_path), NOT file_read's permissive
+    file_patch_in(WORKSPACE_ROOT, args).await
+}
+
+/// [`file_patch_impl`] under a root, so the jail is tested under a
+/// temporary directory. Production passes `WORKSPACE_ROOT`.
+pub(crate) async fn file_patch_in(root: &str, args: FilePatchArgs) -> String {
+    // Writer-family jail (the lexical check), NOT file_read's permissive
     // resolution — a read-modify-write tool with unrestricted paths would be
     // an arbitrary-file-write escape hatch.
-    let resolved = match resolve_workspace_path(&args.path) {
+    let resolved = match resolve_in(root, &args.path) {
         Ok(p) => p,
         Err(e) => return e,
     };
 
     // §5 symlink rule: resolve, then re-verify the REAL path is still inside
     // the workspace, and operate on the resolved target so a symlink is never
-    // silently replaced by a regular file. Component-wise starts_with, so
-    // /embra/workspace-evil does not pass. Deliberately stronger than the
-    // family's string-prefix jail.
+    // silently replaced by a regular file. The canonical path is compared
+    // with the CANONICAL root, component-wise (`jail::within`), so
+    // /embra/workspace-evil does not pass and a root reached through a link
+    // compares as itself.
     let canonical = match tokio::fs::canonicalize(&resolved).await {
         Ok(p) => p,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return not_found_msg(&resolved),
         Err(e) => return format!("Error: failed to resolve {resolved}: {e}\nFile unchanged."),
     };
-    if !canonical.starts_with(WORKSPACE_ROOT) {
+    let root_canon = match tokio::fs::canonicalize(root).await {
+        Ok(p) => p,
+        Err(e) => return format!("Error: failed to resolve {root}: {e}\nFile unchanged."),
+    };
+    if !super::jail::within(&canonical, &root_canon) {
         return format!(
-            "Denied: path '{resolved}' resolves outside {WORKSPACE_ROOT} (symlink target {})",
+            "Denied: path '{resolved}' resolves outside {root} (symlink target {})",
             canonical.display()
         );
     }
@@ -1385,6 +1396,61 @@ mod file_patch_tests {
         assert!(out.starts_with("Patched"), "{out}");
         assert_eq!(std::fs::read(&real).unwrap(), b"hello there");
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    }
+
+    #[tokio::test]
+    async fn a_patch_through_a_link_that_leaves_the_jail_is_denied() {
+        // #53 b2: the canonical path is compared with the CANONICAL root,
+        // component-wise. A link inside the jail to a file outside it is
+        // refused by its real path, and the file outside is untouched.
+        let dir = TempDir::new("escape");
+        let outside = TempDir::new("escape-outside");
+        let victim = outside.0.join("victim.md");
+        std::fs::write(&victim, "hello world").unwrap();
+        let link = dir.0.join("link.md");
+        std::os::unix::fs::symlink(&victim, &link).unwrap();
+        let root = dir.0.to_str().unwrap();
+
+        let args: FilePatchArgs = serde_json::from_value(serde_json::json!({
+            "path": link.display().to_string(),
+            "old_string": "world",
+            "new_string": "there",
+        }))
+        .unwrap();
+        let out = file_patch_in(root, args).await;
+        assert!(out.starts_with("Denied:") && out.contains("symlink target"), "{out}");
+        assert_eq!(std::fs::read(&victim).unwrap(), b"hello world");
+
+        // A sibling directory whose name starts with the root's is outside.
+        let sibling = PathBuf::from(format!("{root}-evil"));
+        std::fs::create_dir_all(&sibling).unwrap();
+        std::fs::write(sibling.join("f.md"), "hello world").unwrap();
+        let args: FilePatchArgs = serde_json::from_value(serde_json::json!({
+            "path": sibling.join("f.md").display().to_string(),
+            "old_string": "world",
+            "new_string": "there",
+        }))
+        .unwrap();
+        let out = file_patch_in(root, args).await;
+        assert!(out.starts_with("Denied:"), "{out}");
+        assert_eq!(std::fs::read(sibling.join("f.md")).unwrap(), b"hello world");
+        let _ = std::fs::remove_dir_all(&sibling);
+
+        // The same edit through a link that stays inside lands on the target.
+        let real = dir.0.join("real.md");
+        std::fs::write(&real, "hello world").unwrap();
+        let inner = dir.0.join("inner.md");
+        std::os::unix::fs::symlink(&real, &inner).unwrap();
+        let args: FilePatchArgs = serde_json::from_value(serde_json::json!({
+            "path": inner.display().to_string(),
+            "old_string": "world",
+            "new_string": "there",
+        }))
+        .unwrap();
+        let out = file_patch_in(root, args).await;
+        assert!(out.starts_with("Patched"), "{out}");
+        assert_eq!(std::fs::read(&real).unwrap(), b"hello there");
+        assert!(std::fs::symlink_metadata(&inner).unwrap().file_type().is_symlink());
     }
 
     #[tokio::test]

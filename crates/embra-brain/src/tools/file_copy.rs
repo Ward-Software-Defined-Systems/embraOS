@@ -762,22 +762,6 @@ async fn execute_tree(
     })
 }
 
-/// Walk up from `p` until a component exists (by `symlink_metadata`, so a
-/// dangling link counts as existing and the later `create_dir_all` reports
-/// it instead of silently building beside it).
-pub(crate) async fn nearest_existing_ancestor(p: &Path) -> PathBuf {
-    let mut cur = p.to_path_buf();
-    loop {
-        if tokio::fs::symlink_metadata(&cur).await.is_ok() {
-            return cur;
-        }
-        match cur.parent() {
-            Some(parent) if !parent.as_os_str().is_empty() => cur = parent.to_path_buf(),
-            _ => return PathBuf::from("/"),
-        }
-    }
-}
-
 fn nothing(msg: impl std::fmt::Display) -> String {
     format!("Error: {msg}\nNothing copied.")
 }
@@ -870,29 +854,17 @@ pub(crate) async fn copy_at(src: &Path, dst: &Path, opts: &CopyOptions) -> Strin
 
     // -- destination canonicalization + jail re-verify -----------------------
     // The nearest existing ancestor is canonicalized and checked BEFORE any
-    // directory is created (a symlinked ancestor pointing outside the jail
-    // must not get parents built under it); the write path then creates the
-    // missing parents under the canonical ancestor.
-    let anc = nearest_existing_ancestor(dst).await;
-    let anc_canon = match tokio::fs::canonicalize(&anc).await {
-        Ok(p) => p,
-        Err(e) => return nothing(format!("failed to resolve {}: {e}", anc.display())),
+    // directory is created (`jail::real`, the check every writer runs: a
+    // symlinked ancestor pointing outside the jail gets no parents built
+    // under it); the write path then creates the missing parents under the
+    // canonical ancestor. An existing destination is the canonical target
+    // itself, so a copy over a link replaces the target and keeps the link.
+    let real = match super::jail::real(&opts.jail_root, dst).await {
+        Ok(r) => r,
+        Err(e) => return format!("{e}\nNothing copied."),
     };
-    if !anc_canon.starts_with(&opts.jail_root) {
-        return format!(
-            "Denied: destination '{}' resolves outside {} (real path {})\nNothing copied.",
-            dst.display(),
-            opts.jail_root.display(),
-            anc_canon.display()
-        );
-    }
-    let dst_final = match dst.strip_prefix(&anc) {
-        // An empty remainder (the destination itself exists) must not be
-        // joined: `join("")` appends a trailing separator, and rename(2)
-        // refuses `file/` with ENOTDIR.
-        Ok(rest) if !rest.as_os_str().is_empty() => anc_canon.join(rest),
-        _ => anc_canon.clone(),
-    };
+    let anc_canon = real.ancestor;
+    let dst_final = real.path;
     if dst_final == src {
         return nothing(format!(
             "source and destination are the same path ({})",
