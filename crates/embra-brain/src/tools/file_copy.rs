@@ -1075,12 +1075,13 @@ fn sha256_bounded_blocking(src: &Path, limit: u64) -> Result<(u64, String), Stri
 #[embra_tool(
     name = "file_copy",
     is_side_effectful = true,
-    description = "Copy a file or a directory tree host-side — contents never enter the conversation, so size is decoupled from the 2 MiB read ceiling and binary files (images, archives) copy intact; this is how a generated image in /embra/workspace/MEDIA/ reaches a repo. source may be ANY readable path (like file_read); destination must resolve under /embra/workspace (workspace-relative or absolute) and is the exact final path — file_copy never copies INTO a directory, so name the target file or directory yourself. Files: atomic (same-directory temp + fsync + rename); an existing destination is refused unless overwrite=true (files only — replaced atomically, keeping its mode and ownership; the way to restore from a backup). Directories need recursive=true; the destination must not exist (trees never merge); symlinks are recreated, not followed (links whose target would resolve outside /embra/workspace are skipped and reported); special files are skipped; .git is copied unless listed in exclude (exact basenames, no globs); a failure part-way removes everything written — all-or-nothing. Per-call budgets: 512 MiB, 100000 entries, and 256 MiB must stay free on the data partition. dry_run=true walks, validates and reports (bytes, counts, skips) without writing anything. The report gives absolute byte counts, mode, and for single files a sha256 of source and destination."
+    description = "Copy a file or a directory tree host-side — contents never enter the conversation, so size is decoupled from the 2 MiB read ceiling and binary files (images, archives) copy intact; this is how a generated image in /embra/workspace/MEDIA/ reaches a repo. source may be any path file_read can read (the same read rule, checked on the real path); destination must resolve under /embra/workspace (workspace-relative or absolute) and is the exact final path — file_copy never copies INTO a directory, so name the target file or directory yourself. Files: atomic (same-directory temp + fsync + rename); an existing destination is refused unless overwrite=true (files only — replaced atomically, keeping its mode and ownership; the way to restore from a backup). Directories need recursive=true; the destination must not exist (trees never merge); symlinks are recreated, not followed (links whose target would resolve outside /embra/workspace are skipped and reported); special files are skipped; .git is copied unless listed in exclude (exact basenames, no globs); a failure part-way removes everything written — all-or-nothing. Per-call budgets: 512 MiB, 100000 entries, and 256 MiB must stay free on the data partition. dry_run=true walks, validates and reports (bytes, counts, skips) without writing anything. The report gives absolute byte counts, mode, and for single files a sha256 of source and destination."
 )]
 #[serde(deny_unknown_fields)]
 pub struct FileCopyArgs {
-    /// File or directory to copy. Any readable absolute path, or
-    /// workspace-relative. A symlink source is followed.
+    /// File or directory to copy: any path file_read can read, absolute or
+    /// workspace-relative. A symlink source is followed, and its real path
+    /// is what is checked.
     pub source: String,
     /// The exact final path (never a directory to copy INTO), under
     /// /embra/workspace. Missing parent directories are created.
@@ -1119,13 +1120,15 @@ pub(crate) async fn file_copy_impl(args: FileCopyArgs) -> String {
     if args.source.trim().is_empty() {
         return nothing("source is empty");
     }
-    let src_path = crate::media::store::resolve_read_path(&args.source);
-    let src = match tokio::fs::canonicalize(&src_path).await {
+    let src = match crate::tools::jail::readable(&args.source).await {
         Ok(p) => p,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return nothing(format!("source not found: {}", src_path.display()))
+        Err(crate::tools::jail::ReadRefusal::NotFound(p)) => {
+            return nothing(format!("source not found: {}", p.display()))
         }
-        Err(e) => return nothing(format!("failed to resolve source {}: {e}", src_path.display())),
+        Err(crate::tools::jail::ReadRefusal::Denied(msg)) => return format!("{msg}\nNothing copied."),
+        Err(crate::tools::jail::ReadRefusal::Io(p, e)) => {
+            return nothing(format!("failed to resolve source {}: {e}", p.display()))
+        }
     };
     let opts = CopyOptions::production(&args);
     copy_at(&src, Path::new(&dst), &opts).await

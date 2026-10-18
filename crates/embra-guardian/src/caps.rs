@@ -15,6 +15,8 @@ use std::net::{IpAddr, Ipv4Addr, ToSocketAddrs};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use embra_tools_core::SecretSet;
+
 /// Minimal HTTP response the guard inspects + forwards to the guest.
 pub struct HttpResponse {
     pub status: u16,
@@ -200,6 +202,11 @@ pub struct Capabilities {
     /// request that asks to save is refused by name. Granted with the
     /// secrets, to a tool with `http_request`.
     pub files: Option<Arc<dyn FileSink>>,
+    /// The operator's stored secrets, by value: a request whose URL, query,
+    /// header or body carries one is refused before the transport, naming
+    /// the kind and never the value (`SecretSet::found_in`). The brain
+    /// fills it for every tool with a network capability.
+    pub outbound_secrets: Arc<SecretSet>,
 }
 
 impl Capabilities {
@@ -209,7 +216,14 @@ impl Capabilities {
     }
     /// Grant `http_get` backed by `transport` under `policy`.
     pub fn with_http(transport: Arc<dyn HttpTransport>, policy: EgressPolicy) -> Self {
-        Self { http: Some(transport), http_policy: policy, secrets: Vec::new(), search: None, files: None }
+        Self {
+            http: Some(transport),
+            http_policy: policy,
+            secrets: Vec::new(),
+            search: None,
+            files: None,
+            outbound_secrets: Arc::default(),
+        }
     }
     /// Grant `web_search` backed by `provider`.
     pub fn with_search(provider: Arc<dyn SearchProvider>) -> Self {
@@ -219,6 +233,21 @@ impl Capabilities {
 
 fn err_json(msg: &str) -> String {
     serde_json::json!({ "ok": false, "error": msg }).to_string()
+}
+
+/// The outbound secret guard: `Err` when one of `texts` carries one of the
+/// operator's stored secrets (`Capabilities::outbound_secrets`), naming the
+/// kind. It runs before the save pre-flight, the DNS lookup and the
+/// transport, so a refused request costs nothing and resolves no name.
+fn carries_secret(caps: &Capabilities, texts: &[&str]) -> Result<(), String> {
+    for text in texts {
+        if let Some(kind) = caps.outbound_secrets.found_in(text) {
+            return Err(format!(
+                "refused: the request carries {kind}; a stored credential is sent only by /guardian secret, never in a tool's input"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// What an address is, for the egress guard. `Public` is the only class
@@ -417,6 +446,9 @@ pub fn guarded_http_get(caps: &Capabilities, url: &str) -> String {
     let Some(http) = caps.http.as_ref() else {
         return err_json("capability 'http_get' not granted to this tool");
     };
+    if let Err(e) = carries_secret(caps, &[url]) {
+        return err_json(&e);
+    }
     let mut current = url.to_string();
     let mut hops = 0usize;
     let budget = caps.http_policy.timeout;
@@ -737,6 +769,16 @@ pub fn guarded_http_request(caps: &Capabilities, input: &str) -> String {
         Ok(r) => r,
         Err(e) => return err_json(&e),
     };
+    // A stored secret anywhere in the request is refused here: the input
+    // as the guest sent it, then the URL with its query, every header
+    // value and the body, so an encoding the parser applied is seen too.
+    let body_text = req.body.as_deref().map(String::from_utf8_lossy);
+    let mut texts: Vec<&str> = vec![input, req.url.as_str()];
+    texts.extend(req.headers.iter().map(|(_, v)| v.as_str()));
+    texts.extend(body_text.as_deref());
+    if let Err(e) = carries_secret(caps, &texts) {
+        return err_json(&e);
+    }
     // A save needs the store, and the store's pre-flight runs before the
     // first hop: a path the jail refuses costs no request.
     let sink = match req.save_to.as_deref() {
@@ -1027,6 +1069,9 @@ pub fn guarded_web_search(caps: &Capabilities, input: &str) -> String {
     let Some(provider) = caps.search.as_ref() else {
         return err_json("search capability not configured (no Brave API key set)");
     };
+    if let Err(e) = carries_secret(caps, &[input]) {
+        return err_json(&e);
+    }
     let req = parse_request(input);
     if req.q.is_empty() {
         return err_json("empty search query");
@@ -1721,6 +1766,62 @@ mod request_tests {
         req.headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str())
     }
 
+    /// The caps with one of the operator's secrets known to the guard.
+    fn caps_knowing(rec: &Arc<Recorder>) -> Capabilities {
+        let mut caps = caps_with(rec);
+        let mut known = SecretSet::new();
+        known.add("the GitHub token", "ghp_0123456789abcdefghij");
+        caps.outbound_secrets = Arc::new(known);
+        caps
+    }
+
+    #[test]
+    fn a_request_that_carries_a_stored_secret_is_refused_before_the_transport() {
+        let rec = Recorder::new(vec![("https://1.1.1.1/api", 200, None, "{}", "application/json")]);
+        let caps = caps_knowing(&rec);
+        let in_body_b64 = format!(
+            r#"{{"url":"https://1.1.1.1/api","method":"post","body":"{}"}}"#,
+            embra_tools_core::base64_standard_unpadded(b"ghp_0123456789abcdefghij")
+        );
+        for input in [
+            r#"{"url":"https://1.1.1.1/api/ghp_0123456789abcdefghij"}"#,
+            r#"{"url":"https://1.1.1.1/api","query":{"token":"ghp_0123456789abcdefghij"}}"#,
+            r#"{"url":"https://1.1.1.1/api","headers":{"X-Token":"ghp_0123456789abcdefghij"}}"#,
+            r#"{"url":"https://1.1.1.1/api","method":"post","json":{"note":"my token is ghp_0123456789abcdefghij"}}"#,
+            in_body_b64.as_str(),
+        ] {
+            let v = parse(&guarded_http_request(&caps, input));
+            assert_eq!(v["ok"], false, "{v}");
+            let e = v["error"].as_str().unwrap();
+            assert!(e.contains("the GitHub token") && e.contains("/guardian secret"), "{e}");
+            assert!(!v.to_string().contains("ghp_"), "the value is never echoed: {v}");
+        }
+        assert!(rec.seen().is_empty(), "nothing reached the transport");
+        // The same request without the secret goes through.
+        let v = parse(&guarded_http_request(
+            &caps,
+            r#"{"url":"https://1.1.1.1/api","headers":{"X-Token":"not-a-secret-value"}}"#,
+        ));
+        assert_eq!(v["ok"], true, "{v}");
+        assert_eq!(rec.seen().len(), 1);
+    }
+
+    #[test]
+    fn the_secret_refusal_comes_before_the_dns_lookup() {
+        // A host that does not resolve plus a secret: the secret's refusal,
+        // not a DNS error, on both entry points.
+        let rec = Recorder::new(vec![]);
+        let caps = caps_knowing(&rec);
+        let v = parse(&guarded_http_request(
+            &caps,
+            r#"{"url":"https://no-such-host.invalid/x?k=ghp_0123456789abcdefghij"}"#,
+        ));
+        assert!(v["error"].as_str().unwrap().contains("the GitHub token"), "{v}");
+        let v = parse(&guarded_http_get(&caps, "https://no-such-host.invalid/ghp_0123456789abcdefghij"));
+        assert!(v["error"].as_str().unwrap().contains("the GitHub token"), "{v}");
+        assert!(rec.seen().is_empty());
+    }
+
     #[test]
     fn a_post_carries_its_method_headers_and_body() {
         let rec = Recorder::new(vec![("https://1.1.1.1/api", 201, None, r#"{"id":7}"#, "application/json")]);
@@ -2037,6 +2138,24 @@ mod search_tests {
         let v = parse(&guarded_web_search(&Capabilities::none(), "rust async"));
         assert_eq!(v["ok"], false);
         assert!(v["error"].as_str().unwrap().contains("not configured"));
+    }
+
+    #[test]
+    fn a_query_that_carries_a_stored_secret_is_refused() {
+        let mut caps = Capabilities::with_search(Arc::new(MockSearch(Ok(vec![sr(
+            "t",
+            "https://a/",
+            "d",
+        )]))));
+        let mut known = SecretSet::new();
+        known.add("the Brave key", "BSA0123456789abcdef");
+        caps.outbound_secrets = Arc::new(known);
+        let v = parse(&guarded_web_search(&caps, "what is BSA0123456789abcdef"));
+        assert_eq!(v["ok"], false, "{v}");
+        assert!(v["error"].as_str().unwrap().contains("the Brave key"), "{v}");
+        assert!(!v.to_string().contains("BSA0"), "{v}");
+        let v = parse(&guarded_web_search(&caps, "rust async"));
+        assert_eq!(v["ok"], true, "{v}");
     }
 
     #[test]

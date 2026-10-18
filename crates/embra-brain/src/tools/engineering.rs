@@ -1657,32 +1657,24 @@ pub async fn git_add(param: &str) -> String {
     }
 }
 
-/// Run `git commit`. Write operation — workspace restricted.
+/// Run `git commit -m <message>` in a workspace repository. The message is
+/// passed to git exactly as given: JSON carries real newlines, so a blank
+/// line after the first line separates the subject from the body.
+///
 /// Param format: `<path> | <message>`
-///
-/// The tool-tag parser collapses literal newlines inside a tag to single
-/// spaces, so multi-paragraph commit messages entered as real newlines
-/// would arrive here as one line. To get a multi-line commit message
-/// through, use `\n` escape sequences (and `\t` for tabs, `\\` for a
-/// literal backslash) — `expand_escapes` turns them into real whitespace
-/// right before the `git commit -m` invocation. Same pattern as
-/// `file_write` / `file_append`.
-///
-/// Example: `git_commit /path | Subject line\n\nBody paragraph`
-/// produces a commit with a proper subject/body split.
 pub async fn git_commit(param: &str) -> String {
     let parts: Vec<&str> = param.splitn(2, " | ").collect();
     if parts.len() < 2 {
-        return "Usage: git_commit <path> | <message>\nUse \\n in the message for line breaks (multi-paragraph commits).".into();
+        return "Usage: git_commit <path> | <message>\nA blank line after the first line separates the subject from the body.".into();
     }
     let dir = match resolve_workspace_path(parts[0].trim()) {
         Ok(d) => d,
         Err(e) => return e,
     };
-    let message = expand_escapes(parts[1].trim());
+    let message = parts[1].trim();
 
     match tokio::process::Command::new("git")
-        .args(["-C", &dir, "commit", "-m", &message])
+        .args(["-C", &dir, "commit", "-m", message])
         .output()
         .await
     {
@@ -2548,10 +2540,12 @@ const FILE_READ_MAX: usize =
 /// message and the value cannot drift.
 const DIR_LIST_MAX: u32 = 1000;
 
-/// Read a file's contents. Reads are unrestricted — absolute paths can reach
-/// anywhere on the system (/etc, /proc, /var/log, etc.). Relative paths
-/// resolve against `/embra/workspace/` so the call shape matches the rest of
-/// the file_* family post #53. Closes Embra_Debug #57.
+/// Read a file's contents. An absolute path reaches anything on the system
+/// but the places that hold the operator's secrets (`jail::read_denied`:
+/// /proc, STATE except its drop-ins, the database files, the workspace SSH
+/// key), checked on the real path. Relative paths resolve against
+/// `/embra/workspace/` so the call shape matches the rest of the file_*
+/// family post #53. Closes Embra_Debug #57.
 ///
 /// Param format: `<path>[|<offset>[|<limit>]]`
 /// - `path`: absolute path (anywhere) or workspace-relative
@@ -2581,21 +2575,16 @@ pub async fn file_read(params: &str) -> String {
         return "Usage: file_read <path>[|<offset>[|<limit>]]".into();
     }
 
-    // Relative paths resolve to /embra/workspace/<path> so callers can match
-    // the shape of file_write / mkdir / the rest of the file_* family.
-    // Absolute paths pass through untouched — reads remain unrestricted by
-    // design so /etc, /proc, /var/log, etc. still work.
-    let path: String = if raw_path.starts_with('/') {
-        raw_path.to_string()
-    } else {
-        format!("{}/{}", WORKSPACE_ROOT, raw_path.trim_start_matches("./"))
+    // The read jail: a relative path resolves under /embra/workspace, an
+    // absolute path is read as given, and the real path is checked against
+    // the places the model's readers do not reach (`jail::read_denied`).
+    // From here on the path shown is the real one.
+    let path = match super::jail::readable(raw_path).await {
+        Ok(p) => p.display().to_string(),
+        Err(e) => return e.to_string(),
     };
-
     let file_path = std::path::Path::new(&path);
 
-    if !file_path.exists() {
-        return format!("File not found: {}", path);
-    }
     if file_path.is_dir() {
         // List directory contents instead — offset/limit are meaningless here.
         match tokio::fs::read_dir(&path).await {
@@ -2782,31 +2771,6 @@ fn cut_character_len(window: &[u8]) -> usize {
     0
 }
 
-/// Expand escape sequences in tool content: `\\n` → newline, `\\t` → tab, `\\\\` → backslash.
-/// `pub(crate)` so file_patch applies the identical expansion to old_string/
-/// new_string (symmetric with file_write's content handling; spec §6).
-pub(crate) fn expand_escapes(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars();
-    while let Some(ch) = chars.next() {
-        if ch == '\\' {
-            match chars.next() {
-                Some('n') => result.push('\n'),
-                Some('t') => result.push('\t'),
-                Some('\\') => result.push('\\'),
-                Some(other) => {
-                    result.push('\\');
-                    result.push(other);
-                }
-                None => result.push('\\'),
-            }
-        } else {
-            result.push(ch);
-        }
-    }
-    result
-}
-
 /// Ensure parent directories exist for a path. The caller has run the jail
 /// (`jail::real`), so the parents are created under the canonical ancestor.
 pub(crate) async fn ensure_parent_dirs(path: &Path) -> Result<(), String> {
@@ -2822,13 +2786,12 @@ pub(crate) async fn ensure_parent_dirs(path: &Path) -> Result<(), String> {
 
 /// Write content to a file (overwrite). Workspace restricted.
 /// Param format: `<path> | <content>`
-/// Supports `\n` for newlines and `\t` for tabs in content.
+/// The content is written exactly as given; nothing is expanded.
 /// Creates parent directories if they don't exist.
 pub async fn file_write(param: &str) -> String {
     if param.is_empty() {
         return "Usage: file_write <path> | <content>\n\
-                Use \\n for newlines, \\t for tabs.\n\
-                Example: file_write /embra/workspace/repos/myrepo/notes.txt | line 1\\nline 2\\nline 3"
+                Example: file_write /embra/workspace/repos/myrepo/notes.txt | line 1"
             .into();
     }
 
@@ -2837,10 +2800,7 @@ pub async fn file_write(param: &str) -> String {
         return "Usage: file_write <path> | <content>".into();
     }
 
-    let raw_path = parts[0].trim();
-    let content = expand_escapes(parts[1]);
-
-    file_write_in(WORKSPACE_ROOT, raw_path, &content).await
+    file_write_in(WORKSPACE_ROOT, parts[0].trim(), parts[1]).await
 }
 
 /// [`file_write`] under a root: the lexical jail, the canonical check of
@@ -2890,8 +2850,7 @@ pub(crate) async fn write_at(path: &Path, content: &str) -> String {
 pub async fn file_append(param: &str) -> String {
     if param.is_empty() {
         return "Usage: file_append <path> | <content>\n\
-                Use \\n for newlines, \\t for tabs.\n\
-                Example: file_append /embra/workspace/repos/myrepo/log.txt | New entry\\n"
+                Example: file_append /embra/workspace/repos/myrepo/log.txt | New entry"
             .into();
     }
 
@@ -2900,10 +2859,7 @@ pub async fn file_append(param: &str) -> String {
         return "Usage: file_append <path> | <content>".into();
     }
 
-    let raw_path = parts[0].trim();
-    let content = expand_escapes(parts[1]);
-
-    file_append_in(WORKSPACE_ROOT, raw_path, &content).await
+    file_append_in(WORKSPACE_ROOT, parts[0].trim(), parts[1]).await
 }
 
 /// [`file_append`] under a root: the lexical jail, the canonical check of
@@ -3383,7 +3339,7 @@ impl GitAddArgs {
 #[embra_tool(
     name = "git_commit",
     is_side_effectful = true,
-    description = "Commit staged changes in a workspace repository. The message may include \\n for newlines (expanded before git invocation) to create multi-paragraph messages with subject line + body. path may be absolute (`/embra/workspace/repo`) or relative (`repo`)."
+    description = "Commit staged changes in a workspace repository. The message is passed to git exactly as given: a blank line after the first line separates the subject from the body. path may be absolute (`/embra/workspace/repo`) or relative (`repo`)."
 )]
 pub struct GitCommitArgs {
     pub path: String,
@@ -4333,7 +4289,7 @@ impl GhProjectViewArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "file_read",
-    description = "Read a file or list a directory. A directory listing shows every entry, hidden ones (names starting with a dot) included. path may be absolute (reads are unrestricted — `/etc`, `/proc`, `/var/log` all work) or workspace-relative (resolves under /embra/workspace/, matching file_write / mkdir / etc.). Read files WHOLE by default: omit offset and limit — one call returns up to the per-call ceiling (~2 MiB), and a larger file ends with a continuation trailer naming the exact offset to resume from. Pass offset (byte position) and limit (byte count) only when resuming from that trailer or when you deliberately need a specific slice — reading in small chunks wastes turns."
+    description = "Read a file or list a directory. A directory listing shows every entry, hidden ones (names starting with a dot) included. path may be absolute (`/etc`, `/var/log` and the service logs all work; refused by their real path: `/proc`, the operator's STATE partition except its drop-in directories, the database files and the workspace SSH key) or workspace-relative (resolves under /embra/workspace/, matching file_write / mkdir / etc.). Read files WHOLE by default: omit offset and limit — one call returns up to the per-call ceiling (~2 MiB), and a larger file ends with a continuation trailer naming the exact offset to resume from. Pass offset (byte position) and limit (byte count) only when resuming from that trailer or when you deliberately need a specific slice — reading in small chunks wastes turns."
 )]
 pub struct FileReadArgs {
     pub path: String,
@@ -4363,7 +4319,7 @@ impl FileReadArgs {
 #[embra_tool(
     name = "file_write",
     is_side_effectful = true,
-    description = "Write (overwrite) a file under /embra/workspace. path may be absolute (`/embra/workspace/repo/notes.txt`) or workspace-relative (`repo/notes.txt`). Use \\n for newlines, \\t for tabs — these are expanded before writing."
+    description = "Write (overwrite) a file under /embra/workspace. path may be absolute (`/embra/workspace/repo/notes.txt`) or workspace-relative (`repo/notes.txt`). content is written exactly as given: a newline in it is a newline in the file, and nothing is expanded."
 )]
 pub struct FileWriteArgs {
     pub path: String,
@@ -4381,7 +4337,7 @@ impl FileWriteArgs {
 #[embra_tool(
     name = "file_append",
     is_side_effectful = true,
-    description = "Append to a file under /embra/workspace (creates if missing). path may be absolute or workspace-relative. Use \\n for newlines."
+    description = "Append to a file under /embra/workspace (creates if missing). path may be absolute or workspace-relative. content is appended exactly as given; nothing is expanded."
 )]
 pub struct FileAppendArgs {
     pub path: String,
@@ -4473,7 +4429,7 @@ impl FileSymlinkArgs {
 #[embra_tool(
     name = "dir_delete",
     is_side_effectful = true,
-    description = "Remove a directory under /embra/workspace. path may be absolute or workspace-relative. By default refuses non-empty directories; force=true recursively deletes contents."
+    description = "Remove a directory under /embra/workspace. path may be absolute or workspace-relative. By default refuses non-empty directories; force=true recursively deletes contents. The workspace root itself is never deleted."
 )]
 pub struct DirDeleteArgs {
     pub path: String,
@@ -5677,6 +5633,20 @@ mod write_jail_tests {
 
     fn is_link(p: &Path) -> bool {
         std::fs::symlink_metadata(p).map(|m| m.file_type().is_symlink()).unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn a_literal_backslash_n_in_content_lands_verbatim() {
+        // The dispatcher is JSON-only and JSON carries real newlines; a
+        // `\n` inside code the model writes is two characters, not a line
+        // break (#28 b3).
+        let t = TempDir::new("verbatim");
+        let out = file_write_in(t.root(), "code.rs", r#"println!("a\nb");"#).await;
+        assert!(out.starts_with("Written 17 bytes (1 lines)"), "{out}");
+        assert_eq!(std::fs::read(t.join("code.rs")).unwrap(), br#"println!("a\nb");"#);
+        let out = file_append_in(t.root(), "code.rs", r"\t").await;
+        assert!(out.starts_with("Appended 2 bytes"), "{out}");
+        assert_eq!(std::fs::read(t.join("code.rs")).unwrap(), br#"println!("a\nb");\t"#);
     }
 
     #[tokio::test]

@@ -27,7 +27,7 @@ const _: () = assert!(MEDIA_TILES_PER_VIEW <= super::registry::MAX_TOOL_RESULT_I
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "image_view",
-    description = "Look at an image file (PNG, JPEG, GIF or WebP) — the image itself is returned to you as an image block, not text. Use this instead of file_read for any image: screenshots, diagrams, photos, rendered charts, images the operator mentioned by path. path may be absolute or workspace-relative (/embra/workspace). The file is normalized to the vision tier before you see it (long edge ≤ 2576 px, ≤ 1.5 MiB; originals untouched; the header names the source size when it was shrunk). A long image, such as a full-page screenshot with a long edge over 5152 px, is cut along that axis into tiles that keep full scale, four tiles per call, the cuts on blank lines where there are any: the header names each tile's coordinates and the parts; part counts from 1 and part=2, 3, … shows the next group; on an image shown whole, part is ignored and the header says so. Images over 64 megapixels are refused. Images already in /embra/workspace/MEDIA keep their id; any other file gets a content-addressed view-<hash> copy there (one per tile) so the operator's UI can show what you looked at (viewing the same file twice reuses the copy). Files over 12 MiB and non-image files are refused with an explanation."
+    description = "Look at an image file (PNG, JPEG, GIF or WebP) — the image itself is returned to you as an image block, not text. Use this instead of file_read for any image: screenshots, diagrams, photos, rendered charts, images the operator mentioned by path. path may be absolute or workspace-relative (/embra/workspace), under file_read's read rule (/proc, the operator's STATE partition and the database files are refused by their real path). The file is normalized to the vision tier before you see it (long edge ≤ 2576 px, ≤ 1.5 MiB; originals untouched; the header names the source size when it was shrunk). A long image, such as a full-page screenshot with a long edge over 5152 px, is cut along that axis into tiles that keep full scale, four tiles per call, the cuts on blank lines where there are any: the header names each tile's coordinates and the parts; part counts from 1 and part=2, 3, … shows the next group; on an image shown whole, part is ignored and the header says so. Images over 64 megapixels are refused. Images already in /embra/workspace/MEDIA keep their id; any other file gets a content-addressed view-<hash> copy there (one per tile) so the operator's UI can show what you looked at (viewing the same file twice reuses the copy). Files over 12 MiB and non-image files are refused with an explanation."
 )]
 pub struct ImageViewArgs {
     /// Path to the image file — absolute, or relative to /embra/workspace.
@@ -71,7 +71,11 @@ pub async fn image_view(
     part: usize,
     session: &str,
 ) -> Result<ToolOutput, DispatchError> {
-    let resolved = store::resolve_read_path(path);
+    // The read jail (`jail::readable`): the real path, or the refusal.
+    let resolved = match crate::tools::jail::readable(path).await {
+        Ok(p) => p,
+        Err(e) => return Ok(ToolOutput::text(format!("image_view: {e}"))),
+    };
     let md = match tokio::fs::metadata(&resolved).await {
         Ok(md) => md,
         Err(e) => return Ok(ToolOutput::text(format!("image_view: {} — {}", resolved.display(), e))),
@@ -277,7 +281,7 @@ pub struct ImageGenerateArgs {
     /// png (default) or jpeg.
     #[serde(default)]
     pub output_format: Option<String>,
-    /// Media ids (att-/gen-/view-…) or workspace image paths, max 4.
+    /// Media ids (att-/gen-/view-…) or image paths file_read can read, max 4.
     #[serde(default)]
     pub reference_images: Option<Vec<String>>,
     /// Return the generated image to you as an image block (default true).
@@ -319,13 +323,13 @@ pub fn slug_from_prompt(prompt: &str, ext: &str) -> String {
     }
 }
 
-/// Load one reference image (media id or workspace path — `file_read`'s
-/// unjailed read policy), normalized so the request stays small.
+/// Load one reference image (media id or a path under `file_read`'s read
+/// rule, `jail::readable`), normalized so the request stays small.
 async fn load_reference(store: &MediaStore, spec: &str) -> Result<(String, Vec<u8>), String> {
     let bytes = if store::parse_media_id(spec).is_ok() {
         store.get(spec).await.map(|(_, b)| b).map_err(|e| e.to_string())?
     } else {
-        let resolved = store::resolve_read_path(spec);
+        let resolved = crate::tools::jail::readable(spec).await.map_err(|e| e.to_string())?;
         let md = tokio::fs::metadata(&resolved)
             .await
             .map_err(|e| format!("{}: {e}", resolved.display()))?;

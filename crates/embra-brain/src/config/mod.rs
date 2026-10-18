@@ -284,6 +284,44 @@ impl SystemConfig {
     }
 }
 
+/// The configuration document as the `get` tool shows it: the fields that
+/// hold a credential replaced by `"[redacted]"`, every other field as
+/// stored. Guard `redact_replaces_the_credential_fields_and_keeps_the_rest`.
+pub(crate) fn redact(mut doc: serde_json::Value) -> serde_json::Value {
+    const REDACTED: &str = "[redacted]";
+    if let Some(obj) = doc.as_object_mut() {
+        for key in ["api_key", "anthropic_api_key", "gemini_api_key", "github_token"] {
+            if let Some(v) = obj.get_mut(key)
+                && v.as_str().is_some_and(|s| !s.is_empty())
+            {
+                *v = REDACTED.into();
+            }
+        }
+        if let Some(tokens) = obj.get_mut("git_tokens").and_then(|v| v.as_object_mut()) {
+            for v in tokens.values_mut() {
+                *v = REDACTED.into();
+            }
+        }
+        if let Some(hosts) = obj.get_mut("guardian_secrets").and_then(|v| v.as_object_mut()) {
+            for headers in hosts.values_mut().filter_map(|h| h.as_object_mut()) {
+                for v in headers.values_mut() {
+                    *v = REDACTED.into();
+                }
+            }
+        }
+    }
+    doc
+}
+
+/// A key as the setup wizard's summary shows it: its length and its last
+/// four characters, by character, never a byte slice (a slice could cut a
+/// character). Guard `the_key_summary_never_cuts_a_character`.
+pub(crate) fn key_summary(key: &str) -> String {
+    let n = key.chars().count();
+    let tail: String = key.chars().skip(n.saturating_sub(4)).collect();
+    format!("{n} characters, ending …{tail}")
+}
+
 fn default_kg_temporal_window() -> u64 { 1800 }
 fn default_kg_max_depth() -> u32 { 3 }
 fn default_kg_depth_ceiling() -> u32 { 5 }
@@ -772,10 +810,10 @@ pub async fn run_config_wizard_grpc(
 
     // Step 5: Confirmation
     let summary = format!(
-        "Configuration summary:\n  Name: {}\n  Provider: {}\n  API Key: {}...\n  Timezone: {}\n\nConfirm?",
+        "Configuration summary:\n  Name: {}\n  Provider: {}\n  API Key: {}\n  Timezone: {}\n\nConfirm?",
         name,
         provider_choice,
-        &api_key[..std::cmp::min(10, api_key.len())],
+        key_summary(&api_key),
         timezone,
     );
     let _ = tx.send(Ok(ConversationResponse {
@@ -1610,5 +1648,45 @@ mod anthropic_effort_serde_tests {
             back.git_tokens.unwrap().get("gitlab.example.com").map(|s| s.as_str()),
             Some("glpat-x")
         );
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::{key_summary, redact};
+
+    #[test]
+    fn redact_replaces_the_credential_fields_and_keeps_the_rest() {
+        let doc = serde_json::json!({
+            "name": "Embra", "api_provider": "gemini", "api_key": "sk-0123456789",
+            "anthropic_api_key": "", "gemini_api_key": "AIza0123456789", "github_token": "ghp_0123456789",
+            "git_tokens": {"a.example": "glpat-1", "b.example": "glpat-2"},
+            "guardian_secrets": {"h.example": {"Authorization": "Bearer t", "X-Key": "k"}},
+            "kg_temporal_window_secs": 1800,
+        });
+        let out = redact(doc);
+        assert_eq!(out["name"], "Embra");
+        assert_eq!(out["api_provider"], "gemini");
+        assert_eq!(out["kg_temporal_window_secs"], 1800);
+        assert_eq!(out["api_key"], "[redacted]");
+        assert_eq!(out["anthropic_api_key"], "", "an empty field hides nothing and stays empty");
+        assert_eq!(out["gemini_api_key"], "[redacted]");
+        assert_eq!(out["github_token"], "[redacted]");
+        assert_eq!(out["git_tokens"]["a.example"], "[redacted]");
+        assert_eq!(out["git_tokens"]["b.example"], "[redacted]");
+        assert_eq!(out["guardian_secrets"]["h.example"]["Authorization"], "[redacted]");
+        assert_eq!(out["guardian_secrets"]["h.example"]["X-Key"], "[redacted]");
+        let text = out.to_string();
+        for secret in ["sk-0123", "AIza0123", "ghp_0123", "glpat-", "Bearer t", "\"k\""] {
+            assert!(!text.contains(secret), "{secret} leaked: {text}");
+        }
+    }
+
+    #[test]
+    fn the_key_summary_never_cuts_a_character() {
+        assert_eq!(key_summary("sk-ant-api03-abcd"), "17 characters, ending …abcd");
+        assert_eq!(key_summary("ключ"), "4 characters, ending …ключ");
+        assert_eq!(key_summary("é"), "1 characters, ending …é");
+        assert_eq!(key_summary(""), "0 characters, ending …");
     }
 }

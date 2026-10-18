@@ -29,6 +29,7 @@ mod setup;
 mod guardian;
 mod media;
 mod embedding;
+mod secrets;
 
 use grpc_service::BrainGrpcService;
 
@@ -131,7 +132,7 @@ async fn main() -> anyhow::Result<()> {
             warn!("No API key provided (--api-key or ANTHROPIC_API_KEY). Brain calls will fail until config wizard runs.");
         }
     } else {
-        info!("API key configured ({}...)", &api_key[..std::cmp::min(10, api_key.len())]);
+        info!("API key configured ({} characters)", api_key.chars().count());
     }
 
     info!("embra-brain starting on port {}", port);

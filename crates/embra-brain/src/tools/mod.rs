@@ -2682,7 +2682,16 @@ async fn get(db: &WardsonDbClient, param: &str) -> String {
     let (collection, id) = (parts[0], parts[1].trim());
 
     match db.read(collection, id).await {
-        Ok(doc) => serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "Failed to format document".into()),
+        Ok(doc) => {
+            // The configuration holds the operator's credentials; the model
+            // gets the document with those fields redacted.
+            let doc = if collection == "config.system" && id == "config" {
+                crate::config::redact(doc)
+            } else {
+                doc
+            };
+            serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "Failed to format document".into())
+        }
         Err(e) => format!("Failed to read {}/{}: {}", collection, id, e),
     }
 }
@@ -3343,7 +3352,7 @@ impl DraftArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "get",
-    description = "Read a specific document from WardSONDB by collection and id."
+    description = "Read a specific document from WardSONDB by collection and id. The configuration document (config.system/config) comes back with its credential fields redacted."
 )]
 pub struct GetArgs {
     /// WardSONDB collection name (e.g. `memory.entries`, `soul.invariant`).
@@ -3784,5 +3793,45 @@ mod id_gate_tests {
             assert!(!out.contains("not found"), "a refused id is not 'not found': {out}");
         }
         assert!(server.received_requests().await.unwrap_or_default().is_empty(), "nothing was sent");
+    }
+}
+
+#[cfg(test)]
+mod get_tests {
+    //! `get` on the configuration document: the credential fields come
+    //! back redacted, everything else as stored.
+    use super::get;
+    use crate::db::WardsonDbClient;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn get_redacts_the_configuration_secrets() {
+        let server = MockServer::start().await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let doc = serde_json::json!({
+            "_id": "config", "name": "Embra", "timezone": "UTC", "api_provider": "anthropic",
+            "api_key": "sk-ant-api03-0123456789",
+            "anthropic_api_key": "sk-ant-second-0123456789",
+            "gemini_api_key": "AIzaSy-0123456789",
+            "github_token": "ghp_0123456789abcdefghij",
+            "git_tokens": {"gitlab.ops.wsds": "glpat-0123456789"},
+            "guardian_secrets": {"graph.microsoft.com": {"Authorization": "Bearer eyJ0eXAi.body"}},
+        });
+        Mock::given(method("GET"))
+            .and(path("/config.system/docs/config"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok": true, "data": doc, "meta": {}})),
+            )
+            .mount(&server)
+            .await;
+
+        let out = get(&db, "config.system config").await;
+        for secret in ["sk-ant-", "AIzaSy", "ghp_", "glpat-", "eyJ0eXAi"] {
+            assert!(!out.contains(secret), "{secret} leaked: {out}");
+        }
+        assert_eq!(out.matches("[redacted]").count(), 6, "{out}");
+        assert!(out.contains("\"name\": \"Embra\"") && out.contains("gitlab.ops.wsds") && out.contains("Authorization"), "{out}");
     }
 }

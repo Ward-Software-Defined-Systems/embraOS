@@ -27,6 +27,7 @@ use embra_guardian::caps::{
 };
 use embra_guardian::host::{DEADLINE_WITH_HTTP, WasmHost};
 use embra_guardian::shipped;
+use embra_tools_core::SecretSet;
 
 const WASM: &[u8] = include_bytes!("fixtures/http_request.wasm");
 const SOURCE_SHA: &str = include_str!("fixtures/http_request.wasm.source-sha256");
@@ -118,6 +119,42 @@ fn run(
 
 fn call(rec: &Arc<Recorder>, input: &str) -> serde_json::Value {
     run(rec, input, vec![], vec![])
+}
+
+/// `run` with the operator's stored secrets known to the broker, as the
+/// brain grants them to every tool with a network capability.
+fn run_knowing(rec: &Arc<Recorder>, input: &str, known: SecretSet) -> serde_json::Value {
+    let host = WasmHost::new().unwrap();
+    let m = host.precompile(WASM).unwrap();
+    let transport: Arc<dyn HttpTransport> = rec.clone();
+    let mut caps = Capabilities::with_http(transport, EgressPolicy::default());
+    caps.outbound_secrets = Arc::new(known);
+    let out = host.call(&m, input, caps, DEADLINE_WITH_HTTP, MEM).unwrap();
+    serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"))
+}
+
+#[test]
+fn a_request_that_carries_a_secret_is_refused_before_the_transport() {
+    let rec = Recorder::new(vec![("https://1.1.1.1/api", 200, None, "application/json", b"{}".to_vec())]);
+    let known = || {
+        let mut k = SecretSet::new();
+        k.add("the GitHub token", "ghp_0123456789abcdefghij");
+        k
+    };
+    for input in [
+        r#"{"url":"https://1.1.1.1/api","method":"POST","json":{"text":"my token is ghp_0123456789abcdefghij"}}"#,
+        r#"{"url":"https://1.1.1.1/api?t=ghp_0123456789abcdefghij"}"#,
+        r#"{"url":"https://1.1.1.1/api","headers":{"X-Api-Key":"ghp_0123456789abcdefghij"}}"#,
+    ] {
+        let v = run_knowing(&rec, input, known());
+        let e = v["error"].as_str().unwrap_or_else(|| panic!("an error envelope: {v}"));
+        assert!(e.contains("the GitHub token") && e.contains("/guardian secret"), "{e}");
+        assert!(!v.to_string().contains("ghp_"), "the value is never echoed: {v}");
+    }
+    assert!(rec.seen().is_empty(), "nothing reached the transport");
+    let v = run_knowing(&rec, r#"{"url":"https://1.1.1.1/api"}"#, known());
+    assert_eq!(v["status"], 200, "{v}");
+    assert_eq!(rec.seen().len(), 1);
 }
 
 /// The host's store, recorded: what was asked, what arrived, as what. The

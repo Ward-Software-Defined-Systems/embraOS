@@ -156,7 +156,7 @@ fn availability_now(doc: &ToolDoc) -> Availability {
 /// Read the Brave Search API key from STATE. `None` ⇒ not set; the
 /// `web_search` capability then degrades to a structured "not configured"
 /// envelope rather than failing the call.
-fn read_brave_key() -> Option<String> {
+pub(crate) fn read_brave_key() -> Option<String> {
     std::fs::read_to_string(BRAVE_KEY_PATH)
         .ok()
         .map(|s| s.trim().to_string())
@@ -1749,13 +1749,20 @@ pub async fn guardian_call(
             } else {
                 embra_guardian::EgressPolicy::default().timeout
             };
+            let wants_search =
+                compiled.caps.iter().any(|c| c == embra_guardian::abi::CAP_WEB_SEARCH);
+            // Before setup there is no config: public hosts only and no
+            // secrets, never a failed call.
+            let cfg = if wants_http || wants_request || wants_search {
+                crate::config::load_config(db).await.ok()
+            } else {
+                None
+            };
             if wants_http || wants_request {
                 // The transport takes the operator's CA drop-ins (an internal
                 // host on the allowlist behind an internal CA); the policy
                 // takes the allowlist, and a tool with http_request the
-                // secrets. Before setup there is no config: public hosts only
-                // and no secrets, never a failed call.
-                let cfg = crate::config::load_config(db).await.ok();
+                // secrets.
                 let roots = crate::tools::engineering::load_operator_ca_certs();
                 match embra_guardian::caps::ReqwestTransport::with_roots(roots) {
                     Ok(tr) => {
@@ -1787,12 +1794,7 @@ pub async fn guardian_call(
                     }
                 }
             }
-            if compiled
-                .caps
-                .iter()
-                .any(|c| c == embra_guardian::abi::CAP_WEB_SEARCH)
-                && let Some(key) = read_brave_key()
-            {
+            if wants_search && let Some(key) = read_brave_key() {
                 match embra_guardian::caps::BraveSearch::new(&key) {
                     Ok(bs) => caps.search = Some(Arc::new(bs)),
                     Err(e) => {
@@ -1801,6 +1803,12 @@ pub async fn guardian_call(
                         )));
                     }
                 }
+            }
+            // A request that carries one of the operator's stored secrets is
+            // refused by the broker before the transport, whatever capability
+            // carries it (`Capabilities.outbound_secrets`).
+            if wants_http || wants_request || wants_search {
+                caps.outbound_secrets = Arc::new(crate::secrets::collect(cfg.as_ref()));
             }
             let input_str = serde_json::to_string(&input).unwrap_or_else(|_| "{}".into());
             let module = compiled.module.clone();

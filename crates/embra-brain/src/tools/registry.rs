@@ -177,9 +177,40 @@ where
     }
 }
 
+/// The tools whose input leaves the OS: a GitHub or GitLab request, a
+/// commit message, a push, a clone, a remote command, an image prompt, a
+/// Guardian call. [`dispatch`] refuses an input that carries one of the
+/// operator's stored secrets (`crate::secrets::collect`) before the handler
+/// runs. Guard `every_outbound_tool_is_listed`.
+pub(crate) const OUTBOUND_TOOLS: &[&str] = &[
+    "gh_issue_close", "gh_issue_comment", "gh_issue_create", "gh_issue_reopen", "gh_issue_view",
+    "gh_issues", "gh_pr_close", "gh_pr_comment", "gh_pr_create", "gh_pr_merge", "gh_pr_view",
+    "gh_prs", "gh_project_list", "gh_project_view",
+    "gl_board_view", "gl_boards", "gl_issue_close", "gl_issue_comment", "gl_issue_create",
+    "gl_issue_reopen", "gl_issue_view", "gl_issues", "gl_mr_close", "gl_mr_comment",
+    "gl_mr_create", "gl_mr_merge", "gl_mr_view", "gl_mrs",
+    "git_clone", "git_commit", "git_push",
+    "ssh_remote_admin", "ssh_session_end", "ssh_session_exec", "ssh_session_start",
+    "image_generate", "guardian_call",
+];
+
+/// The refusal for an outbound tool whose input carries a stored secret:
+/// the kind, never the value.
+fn outbound_refusal(name: &str, input: &JsonValue, config: &SystemConfig) -> Option<String> {
+    if !OUTBOUND_TOOLS.contains(&name) {
+        return None;
+    }
+    let text = serde_json::to_string(input).unwrap_or_default();
+    let kind = crate::secrets::collect(Some(config)).found_in(&text)?;
+    Some(format!(
+        "refused: the input of {name} carries {kind}; a stored credential is never sent in a tool's input — the OS attaches it where it is needed"
+    ))
+}
+
 /// Native-tool-use dispatcher.
 ///
-/// Looks up `name` in [`REGISTRY`], runs the handler with the typed
+/// Looks up `name` in [`REGISTRY`], refuses an outbound input that carries
+/// a stored secret ([`OUTBOUND_TOOLS`]), runs the handler with the typed
 /// context under the [`MAX_TOOL_DURATION`] ceiling, and applies the
 /// 2 MiB text cap + the image COUNT cap. Stage 3 wires this into the gRPC
 /// dispatch loop; `tools/cron.rs` consumes `.text` only.
@@ -196,6 +227,10 @@ pub async fn dispatch(
     // abandons it (`grpc_service.rs`).
     let origin = crate::activity::ToolOrigin::from_session(ctx.session_name);
     let span = crate::activity::ToolSpan::start(name, origin);
+    if let Some(refusal) = outbound_refusal(name, &input, ctx.config) {
+        span.finish(true);
+        return Err(DispatchError::Handler(refusal));
+    }
     let raw = enforce_timeout((desc.handler)(input, ctx), name, MAX_TOOL_DURATION).await;
     span.finish(raw.is_err());
     Ok(apply_caps(raw?))
@@ -444,5 +479,98 @@ pub async fn write_snapshot(db: &crate::db::WardsonDbClient) -> anyhow::Result<(
                 .context("write tools.registry snapshot")?;
             Ok(())
         }
+    }
+}
+
+#[cfg(test)]
+mod outbound_tests {
+    //! The outbound secret guard in the dispatcher: which tools it covers,
+    //! and that the refusal comes before the handler, with no request.
+    use super::*;
+
+    fn config_with_token() -> SystemConfig {
+        serde_json::from_value(serde_json::json!({
+            "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase1",
+            "created_at": "", "version": "test", "api_provider": "anthropic",
+            "github_token": "ghp_0123456789abcdefghij",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn every_outbound_tool_is_listed() {
+        for name in REGISTRY.keys() {
+            let outbound = name.starts_with("gh_")
+                || name.starts_with("gl_")
+                || name.starts_with("ssh_")
+                || matches!(*name, "git_clone" | "git_commit" | "git_push" | "image_generate" | "guardian_call");
+            assert_eq!(OUTBOUND_TOOLS.contains(name), outbound, "{name}");
+        }
+        for name in OUTBOUND_TOOLS {
+            assert!(REGISTRY.contains_key(name), "{name} is not a registered tool");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_github_comment_that_carries_the_token_is_refused_without_a_request() {
+        let config = config_with_token();
+        let db = WardsonDbClient::from_url("http://127.0.0.1:1");
+        let trace = embra_tools_core::new_turn_trace_handle();
+        for body in [
+            "here it is: ghp_0123456789abcdefghij",
+            // base64 of the token
+            "see Z2hwXzAxMjM0NTY3ODlhYmNkZWZnaGlq",
+        ] {
+            let ctx = DispatchContext {
+                db: &db,
+                config: &config,
+                session_name: "main",
+                config_tz: "UTC",
+                trace: &trace,
+                turn_index: 0,
+                deleting_session: None,
+            };
+            let out = dispatch(
+                "gh_issue_comment",
+                serde_json::json!({"repo": "o/r", "number": 1, "body": body}),
+                ctx,
+            )
+            .await;
+            match out {
+                Err(DispatchError::Handler(m)) => {
+                    assert!(m.starts_with("refused: the input of gh_issue_comment carries the GitHub token"), "{m}");
+                    assert!(!m.contains("ghp_") && !m.contains("Z2hw"), "the value is never echoed: {m}");
+                }
+                other => panic!("the handler ran: {other:?}"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn the_same_text_in_a_workspace_write_is_not_refused() {
+        let config = config_with_token();
+        let db = WardsonDbClient::from_url("http://127.0.0.1:1");
+        let trace = embra_tools_core::new_turn_trace_handle();
+        let ctx = DispatchContext {
+            db: &db,
+            config: &config,
+            session_name: "main",
+            config_tz: "UTC",
+            trace: &trace,
+            turn_index: 0,
+            deleting_session: None,
+        };
+        // file_write is not an outbound tool: the handler runs (and on a
+        // developer host answers for the missing workspace root).
+        let out = dispatch(
+            "file_write",
+            serde_json::json!({"path": "notes.txt", "content": "ghp_0123456789abcdefghij"}),
+            ctx,
+        )
+        .await;
+        assert!(
+            !matches!(&out, Err(DispatchError::Handler(m)) if m.starts_with("refused: the input")),
+            "{out:?}"
+        );
     }
 }

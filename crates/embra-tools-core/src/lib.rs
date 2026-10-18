@@ -247,3 +247,196 @@ mod output_tests {
         assert!(from_string.files.is_empty());
     }
 }
+
+// ── Stored secrets, matched by value ───────────────────────────────────────
+
+/// The operator's stored secrets, held so a text that is about to leave the
+/// OS can be checked for one. Each secret is kept in the forms it could take
+/// on the wire (as stored, percent-encoded, base64 in both alphabets), and a
+/// match answers the KIND of secret, never its value. The brain fills one
+/// from its configuration and STATE before an outbound dispatch; the
+/// Guardian broker checks every request against it before the transport.
+#[derive(Default)]
+pub struct SecretSet {
+    entries: Vec<SecretEntry>,
+}
+
+struct SecretEntry {
+    kind: &'static str,
+    forms: Vec<String>,
+}
+
+/// A value shorter than this is not treated as a secret: it would match
+/// ordinary text.
+pub const SECRET_MIN_BYTES: usize = 8;
+
+impl SecretSet {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add one secret under its kind (a short phrase such as "the GitHub
+    /// token", which the refusal names). A value under `SECRET_MIN_BYTES`
+    /// is ignored. A header value of the form `Bearer <token>` adds the bare
+    /// token as well.
+    pub fn add(&mut self, kind: &'static str, value: &str) {
+        let value = value.trim();
+        if value.len() < SECRET_MIN_BYTES {
+            return;
+        }
+        let mut forms: Vec<String> = Vec::new();
+        for v in std::iter::once(value).chain(bare_bearer_token(value)) {
+            for form in [
+                v.to_string(),
+                percent_encode(v),
+                base64_standard_unpadded(v.as_bytes()),
+                base64_url_unpadded(v.as_bytes()),
+            ] {
+                if form.len() >= SECRET_MIN_BYTES && !forms.contains(&form) {
+                    forms.push(form);
+                }
+            }
+        }
+        self.entries.push(SecretEntry { kind, forms });
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// The kind of the first stored secret that appears in `text` in any of
+    /// its forms. The value itself is never returned.
+    pub fn found_in(&self, text: &str) -> Option<&'static str> {
+        self.entries
+            .iter()
+            .find(|e| e.forms.iter().any(|f| text.contains(f.as_str())))
+            .map(|e| e.kind)
+    }
+}
+
+fn bare_bearer_token(value: &str) -> Option<&str> {
+    let (scheme, token) = value.split_once(char::is_whitespace)?;
+    scheme
+        .eq_ignore_ascii_case("bearer")
+        .then(|| token.trim())
+        .filter(|t| !t.is_empty())
+}
+
+/// RFC 3986 percent-encoding of every byte but the unreserved characters.
+pub fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Standard base64 (RFC 4648 §4) without padding: the padded form has it
+/// as a prefix, so the one form matches both.
+pub fn base64_standard_unpadded(bytes: &[u8]) -> String {
+    base64_with(
+        bytes,
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/",
+    )
+}
+
+/// URL-safe base64 (RFC 4648 §5) without padding.
+pub fn base64_url_unpadded(bytes: &[u8]) -> String {
+    base64_with(
+        bytes,
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_",
+    )
+}
+
+fn base64_with(bytes: &[u8], alphabet: &[u8; 64]) -> String {
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let n = (u32::from(chunk[0]) << 16)
+            | (u32::from(chunk.get(1).copied().unwrap_or(0)) << 8)
+            | u32::from(chunk.get(2).copied().unwrap_or(0));
+        out.push(alphabet[(n >> 18) as usize & 63] as char);
+        out.push(alphabet[(n >> 12) as usize & 63] as char);
+        if chunk.len() > 1 {
+            out.push(alphabet[(n >> 6) as usize & 63] as char);
+        }
+        if chunk.len() > 2 {
+            out.push(alphabet[n as usize & 63] as char);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod secret_set_tests {
+    use super::*;
+
+    #[test]
+    fn the_encoders_match_the_rfc_vectors() {
+        // RFC 4648 §10.
+        for (plain, b64) in [
+            ("", ""),
+            ("f", "Zg"),
+            ("fo", "Zm8"),
+            ("foo", "Zm9v"),
+            ("foob", "Zm9vYg"),
+            ("fooba", "Zm9vYmE"),
+            ("foobar", "Zm9vYmFy"),
+        ] {
+            assert_eq!(base64_standard_unpadded(plain.as_bytes()), b64, "{plain:?}");
+        }
+        assert_eq!(base64_standard_unpadded(&[0xfb, 0xff, 0xbf]), "+/+/");
+        assert_eq!(base64_url_unpadded(&[0xfb, 0xff, 0xbf]), "-_-_");
+        // RFC 3986 §2.3: the unreserved characters pass, everything else is
+        // encoded in upper-case hex.
+        assert_eq!(percent_encode("AZaz09-._~"), "AZaz09-._~");
+        assert_eq!(percent_encode("a b/c?d=e&f+g"), "a%20b%2Fc%3Fd%3De%26f%2Bg");
+        assert_eq!(percent_encode("é"), "%C3%A9");
+    }
+
+    #[test]
+    fn a_secret_is_found_in_each_of_its_forms_and_answered_by_kind() {
+        let mut set = SecretSet::new();
+        let token = "ghp_abc/DEF+ghi0123456789";
+        set.add("the GitHub token", token);
+        for text in [
+            format!("posting {token} here"),
+            format!("https://h/x?t={}", percent_encode(token)),
+            format!("{{\"k\":\"{}\"}}", base64_standard_unpadded(token.as_bytes())),
+            format!("{}=", base64_standard_unpadded(token.as_bytes())),
+            base64_url_unpadded(token.as_bytes()),
+        ] {
+            let kind = set.found_in(&text);
+            assert_eq!(kind, Some("the GitHub token"), "{text}");
+            assert!(!kind.unwrap().contains(token), "the kind is not the value");
+        }
+        assert_eq!(set.found_in("nothing of the sort"), None);
+        assert_eq!(set.found_in("ghp_abc/DEF"), None, "a prefix is not the secret");
+    }
+
+    #[test]
+    fn a_bearer_header_adds_its_bare_token() {
+        let mut set = SecretSet::new();
+        set.add("a /guardian secret", "Bearer eyJhbGciOiJIUzI1NiJ9.payload");
+        assert_eq!(set.found_in("token=eyJhbGciOiJIUzI1NiJ9.payload"), Some("a /guardian secret"));
+        assert_eq!(set.found_in("Bearer eyJhbGciOiJIUzI1NiJ9.payload"), Some("a /guardian secret"));
+    }
+
+    #[test]
+    fn a_short_value_is_not_a_secret_and_an_empty_set_matches_nothing() {
+        let mut set = SecretSet::new();
+        set.add("the provider API key", "k");
+        set.add("the provider API key", "1234567");
+        set.add("the provider API key", "   ");
+        assert!(set.is_empty());
+        assert_eq!(set.found_in("k 1234567"), None);
+        assert_eq!(SecretSet::new().found_in("anything at all"), None);
+        set.add("the provider API key", "12345678");
+        assert!(!set.is_empty());
+        assert_eq!(set.found_in("x12345678y"), Some("the provider API key"));
+    }
+}

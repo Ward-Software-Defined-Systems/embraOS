@@ -20,7 +20,9 @@
 //! [`within`] is the component-wise comparison of a canonical path with a
 //! canonical root, for a caller that canonicalized itself (`file_patch`).
 //!
-//! The model's reads are not jailed here (`media::store::resolve_read_path`).
+//! [`readable`] is the read jail: the model's readers reach every path by
+//! its real path except the places that hold the operator's secrets
+//! ([`read_denied`]).
 
 use std::path::{Path, PathBuf};
 
@@ -149,6 +151,99 @@ pub(crate) async fn nearest_existing_ancestor(p: &Path) -> PathBuf {
             _ => return PathBuf::from("/"),
         }
     }
+}
+
+// ── The read jail ─────────────────────────────────────────────────────────
+
+/// Why a read was refused.
+#[derive(Debug)]
+pub(crate) enum ReadRefusal {
+    /// The path does not exist. The caller words it as it always has.
+    NotFound(PathBuf),
+    /// Its real path is one the model's readers do not reach.
+    Denied(String),
+    /// The path could not be resolved for another reason.
+    Io(PathBuf, std::io::Error),
+}
+
+impl std::fmt::Display for ReadRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ReadRefusal::NotFound(p) => write!(f, "File not found: {}", p.display()),
+            ReadRefusal::Denied(msg) => f.write_str(msg),
+            ReadRefusal::Io(p, e) => write!(f, "Failed to resolve {}: {e}", p.display()),
+        }
+    }
+}
+
+/// The read jail, for every path the model reads (`file_read`, `file_copy`'s
+/// source, `image_view`, `image_generate`'s references). The path resolves
+/// as `file_read` always resolved it (`media::store::resolve_read_path`:
+/// absolute as given, relative under the workspace), is canonicalized, and
+/// is refused when its real path is one of [`read_denied`]'s. Everything
+/// else stays readable: `/etc`, the service logs, the workspace. The path
+/// returned is the real one.
+pub(crate) async fn readable(path: &str) -> Result<PathBuf, ReadRefusal> {
+    let lexical = crate::media::store::resolve_read_path(path);
+    let canonical = match tokio::fs::canonicalize(&lexical).await {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ReadRefusal::NotFound(lexical));
+        }
+        Err(e) => return Err(ReadRefusal::Io(lexical, e)),
+    };
+    if let Some(reason) = read_denied(&canonical) {
+        let real = if canonical == lexical {
+            String::new()
+        } else {
+            format!(" (real path {})", canonical.display())
+        };
+        return Err(ReadRefusal::Denied(format!(
+            "Denied: {} is {reason}{real}; nothing is read",
+            lexical.display()
+        )));
+    }
+    Ok(canonical)
+}
+
+/// The operator's STATE partition.
+const STATE_ROOT: &str = "/embra/state";
+/// The operator's drop-in directories under STATE, readable: the CA
+/// certificates, the seed packs, the importable identities, the models.
+const STATE_READABLE_DIRS: &[&str] =
+    &["ca-certificates", "seed-knowledge", "imported-intelligence", "models"];
+/// The plain STATE files that hold no secret, readable. `halt_reason` is
+/// read through the intelligence: the OS has no shell.
+const STATE_READABLE_FILES: &[&str] = &["halt_reason", "timezone", "api_provider", "guardian_declined"];
+
+/// The places the model's readers do not reach, by canonical path: the
+/// process tables (a service's command line and environment carry keys),
+/// STATE except the operator's drop-ins and four plain files, the
+/// database's own files, and the workspace SSH key. `Some` names the rule.
+pub(crate) fn read_denied(canonical: &Path) -> Option<&'static str> {
+    if canonical.starts_with("/proc") {
+        return Some("the process tables");
+    }
+    if canonical.starts_with("/embra/data/wardsondb") {
+        return Some("the database files");
+    }
+    if canonical == Path::new("/embra/workspace/.ssh/id_ed25519") {
+        return Some("the workspace SSH key");
+    }
+    if let Ok(rest) = canonical.strip_prefix(STATE_ROOT) {
+        let mut parts = rest.components();
+        let first = parts.next().map(|c| c.as_os_str().to_string_lossy().into_owned());
+        let readable = match first.as_deref() {
+            None => false,
+            Some(name) if STATE_READABLE_DIRS.contains(&name) => true,
+            Some(name) if STATE_READABLE_FILES.contains(&name) => parts.next().is_none(),
+            Some(_) => false,
+        };
+        if !readable {
+            return Some("the operator's STATE partition");
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -282,5 +377,84 @@ mod tests {
         assert!(within(Path::new("/embra/workspace"), root));
         assert!(!within(Path::new("/embra/workspace-evil/x"), root));
         assert!(!within(Path::new("/embra"), root));
+    }
+}
+
+#[cfg(test)]
+mod read_tests {
+    use super::*;
+
+    #[test]
+    fn the_readers_refuse_the_state_partition_the_database_and_proc() {
+        for (path, reason) in [
+            ("/proc", "the process tables"),
+            ("/proc/1/cmdline", "the process tables"),
+            ("/proc/1/environ", "the process tables"),
+            ("/embra/state", "the operator's STATE partition"),
+            ("/embra/state/api_key", "the operator's STATE partition"),
+            ("/embra/state/api_key_anthropic", "the operator's STATE partition"),
+            ("/embra/state/github_token", "the operator's STATE partition"),
+            ("/embra/state/soul.sha256", "the operator's STATE partition"),
+            ("/embra/state/pki/ca.key", "the operator's STATE partition"),
+            ("/embra/state/halt_reason/x", "the operator's STATE partition"),
+            ("/embra/data/wardsondb", "the database files"),
+            ("/embra/data/wardsondb/fjall/journal", "the database files"),
+            ("/embra/workspace/.ssh/id_ed25519", "the workspace SSH key"),
+        ] {
+            assert_eq!(read_denied(Path::new(path)), Some(reason), "{path}");
+        }
+        for path in [
+            "/etc/hostname",
+            "/var/log/embra-brain.log",
+            "/embra/workspace/notes.txt",
+            "/embra/workspace/.ssh/id_ed25519.pub",
+            "/embra/workspace/.ssh",
+            "/embra/data/other",
+            "/embra/state/ca-certificates/internal.crt",
+            "/embra/state/seed-knowledge/pack.json",
+            "/embra/state/imported-intelligence/meridian.graph.json",
+            "/embra/state/models/m/model.onnx",
+            "/embra/state/halt_reason",
+            "/embra/state/timezone",
+            "/embra/state/api_provider",
+            "/embra/state/guardian_declined",
+            "/embra/statex/api_key",
+            "/procx",
+        ] {
+            assert_eq!(read_denied(Path::new(path)), None, "{path}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_read_of_proc_is_refused_end_to_end_and_a_missing_path_is_not_found() {
+        // `/proc/self` canonicalizes to `/proc/<pid>` on every Linux host.
+        let err = readable("/proc/self/environ").await.unwrap_err();
+        assert!(matches!(&err, ReadRefusal::Denied(m) if m.contains("the process tables")), "{err}");
+        assert!(err.to_string().starts_with("Denied: /proc/self/environ is the process tables"), "{err}");
+        let err = readable("/definitely/not/here").await.unwrap_err();
+        assert!(matches!(&err, ReadRefusal::NotFound(p) if p == Path::new("/definitely/not/here")), "{err}");
+        assert_eq!(err.to_string(), "File not found: /definitely/not/here");
+        let err = readable("relative/not/here").await.unwrap_err();
+        assert_eq!(err.to_string(), "File not found: /embra/workspace/relative/not/here");
+    }
+
+    #[tokio::test]
+    async fn a_symlink_into_a_refused_place_is_refused_by_its_real_path() {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "embra-read-jail-test-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let link = dir.join("innocent.txt");
+        std::os::unix::fs::symlink("/proc/self/environ", &link).unwrap();
+        let err = readable(link.to_str().unwrap()).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.starts_with("Denied:") && msg.contains("real path /proc/"), "{msg}");
+        let plain = dir.join("plain.txt");
+        std::fs::write(&plain, "x").unwrap();
+        assert_eq!(readable(plain.to_str().unwrap()).await.unwrap(), std::fs::canonicalize(&plain).unwrap());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
