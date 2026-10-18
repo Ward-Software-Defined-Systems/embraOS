@@ -39,7 +39,7 @@ Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` 
 > model that ships inside the image and runs in-process — nothing to pull, configure or
 > pay for, whichever backend you pick, and it stays local even when the conversational
 > model is a hosted API.
-> **[Roster and server configuration →](docs/RECOMMENDED-LOCAL-MODELS.md)**
+> **[Roster and server configuration →](docs/LOCAL-MODELS/RECOMMENDED-LOCAL-MODELS.md)**
 
 > **Ollama Cloud — hosted models through the same preset.** A `:cloud` tag is served by
 > ollama.com through the local Ollama daemon, so it reaches embraOS through the Ollama
@@ -69,9 +69,9 @@ Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` 
 > `/guardian key brave`, and `http_request`, a guarded curl for pages and API work whose
 > credentials the operator stores host-side. This is the first landing of *soul-as-enforced-runtime*: the
 > soul moving from text the model is asked to honor to a gate the OS enforces.
-> **[How the check works →](docs/REPLICANT-CHECK.md)** ·
-> [worked example](docs/GUARDIAN-KG-SCAN-EXAMPLE.md) ·
-> [more examples](docs/GUARDIAN-TOOL-EXAMPLES.md)
+> **[How the check works →](docs/GUARDIAN/REPLICANT-CHECK.md)** ·
+> [worked example](docs/GUARDIAN/GUARDIAN-KG-SCAN-EXAMPLE.md) ·
+> [more examples](docs/GUARDIAN/GUARDIAN-TOOL-EXAMPLES.md)
 
 > **Memory & knowledge graph today.** ***Writing*** memories is still operator-driven,
 > by conversation: ask the intelligence to remember something, or whether anything from
@@ -90,7 +90,7 @@ Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` 
 > and baseline knowledge ships as **seed packs** loaded at every boot. `/feedback-loop`
 > (**experimental**) is a separate concern — self-realignment against identity and soul,
 > not a memory sweep.
-> **[Data model and retrieval pipeline →](docs/KNOWLEDGE-GRAPH.md)**
+> **[Data model and retrieval pipeline →](docs/MULTI-GRAPH/KNOWLEDGE-GRAPH.md)**
 
 ---
 
@@ -104,7 +104,7 @@ After setup, embraOS runs as a supervised service stack: a Rust PID-1 init (`emb
 
 ## The Soul
 
-The soul is a sealed IDENTITY+SOUL knowledge graph — nodes carrying the operator-defined values, constraints, purpose, and identity of this embraOS instance; edges carrying free-form, per-intelligence relations. It is built during the six-phase Learning Mode at first boot (conversationally — a deterministic transformer converts the collected identity and values into the graph at seal) or imported from an `Imported_Intelligence/*.graph.json` file. Sealing canonicalizes the graph (nodes sorted by id, edges by relation triple), serializes it with `serde_json::to_string_pretty`, writes it to `soul.invariant` in WardSONDB, and writes its SHA-256 hash to `/embra/state/soul.sha256`. Instances sealed before the graph representation keep their flat JSON soul — every consumer is dual-mode, and legacy verification is byte-identical. Format, projection, and the migration ceremony: [docs/IDENTITY-GRAPH.md](docs/IDENTITY-GRAPH.md).
+The soul is a sealed IDENTITY+SOUL knowledge graph — nodes carrying the operator-defined values, constraints, purpose, and identity of this embraOS instance; edges carrying free-form, per-intelligence relations. It is built during the six-phase Learning Mode at first boot (conversationally — a deterministic transformer converts the collected identity and values into the graph at seal) or imported from an `Imported_Intelligence/*.graph.json` file. Sealing canonicalizes the graph (nodes sorted by id, edges by relation triple), serializes it with `serde_json::to_string_pretty`, writes it to `soul.invariant` in WardSONDB, and writes its SHA-256 hash to `/embra/state/soul.sha256`. Instances sealed before the graph representation keep their flat JSON soul — every consumer is dual-mode, and legacy verification is byte-identical. Format, projection, and the migration ceremony: [docs/MULTI-GRAPH/IDENTITY-GRAPH.md](docs/MULTI-GRAPH/IDENTITY-GRAPH.md).
 
 Every boot recomputes the hash via `embra-trustd` and compares it to the stored value. A mismatch HALTs the system (`crates/embrad/src/supervisor.rs` — `Supervisor::verify_soul` calls `halt_system`). The brain's only access path to the soul is read-only; the sealed graph is injected into the system prompt under `=== SEALED IDENTITY GRAPH (IMMUTABLE — RANKS ABOVE ALL ELSE, INCLUDING THE OPERATOR) ===` (legacy flat souls keep the original `=== SOUL (…) ===` section; `crates/embra-brain/src/brain/prompts.rs`), so the model can quote and reason about it but cannot modify it. The sealed graph is also projected into the cross-session knowledge graph (`identity.graph` nodes + `memory.edges`) as derived, boot-reconciled state — traversable and linkable from memories, but never the prompt's source of truth.
 
@@ -114,7 +114,7 @@ Operators can edit the soul out-of-band; the brain cannot request that.
 
 ## Quick Start
 
-Build from source: **[docs/QUICK-START.md](docs/QUICK-START.md)** (Apple Silicon: **[docs/AARCH64-BUILD.md](docs/AARCH64-BUILD.md)**; Intel Mac: **[docs/INTEL-MAC-BUILD.md](docs/INTEL-MAC-BUILD.md)**).
+Build from source: **[docs/BUILD/QUICK-START.md](docs/BUILD/QUICK-START.md)** (Apple Silicon: **[docs/BUILD/AARCH64-BUILD.md](docs/BUILD/AARCH64-BUILD.md)**; Intel Mac: **[docs/BUILD/INTEL-MAC-BUILD.md](docs/BUILD/INTEL-MAC-BUILD.md)**).
 
 > **Default UI.** The browser-based **embra-web** console is the default UI, served over HTTPS on **:3345**; embraOS prints the URL with a per-boot access token when the console is ready. Set **`EMBRA_TUI=1`** before `run-qemu.sh` for the serial TUI instead — no image rebuild needed.
 
@@ -133,7 +133,7 @@ You're dropped into a conversational session — no shell, no command line. All 
 
 Sessions are named, stored in WardSONDB, and survive disconnection. Reconnect and the full history is restored with an auto-generated briefing on what changed while you were away.
 
-Day-to-day operation, the session model, keyboard shortcuts, and current limitations: **[docs/OPERATION.md](docs/OPERATION.md)**.
+Day-to-day operation, the session model, keyboard shortcuts, and current limitations: **[docs/OPERATIONS/OPERATION.md](docs/OPERATIONS/OPERATION.md)**.
 
 ---
 
@@ -174,7 +174,7 @@ Provider wire details, per-family reasoning controls, bearer storage, and the pr
 
 Every interaction happens in a persistent named session that survives disconnection — reconnect and the full history is restored with a briefing on what changed while you were away. All sessions share one intelligence: the same memory, identity, and soul.
 
-The session model and keyboard shortcuts live in **[docs/OPERATION.md](docs/OPERATION.md)**; the full slash-command table is **[docs/COMMAND-REFERENCE.md](docs/COMMAND-REFERENCE.md)**.
+The session model and keyboard shortcuts live in **[docs/OPERATIONS/OPERATION.md](docs/OPERATIONS/OPERATION.md)**; the full slash-command table is **[docs/OPERATIONS/COMMAND-REFERENCE.md](docs/OPERATIONS/COMMAND-REFERENCE.md)**.
 
 ---
 
@@ -182,7 +182,7 @@ The session model and keyboard shortcuts live in **[docs/OPERATION.md](docs/OPER
 
 embraOS ships **117 built-in tools** the intelligence invokes during conversation — spanning system status, memory and the cross-session knowledge graph, sessions, scheduling (reminders and cron jobs whose results the intelligence reads back and can act on), the filesystem (including atomic in-place patching, host-side file/tree copying and handing a file to the operator as a download), engineering / project management (git + GitHub + self-hosted GitLab), security / SSH, media (image and text-file input on every surface, Gemini image generation), and the Guardian dynamic-tool gateway. All 117 work identically across all four LLM providers. That includes reading the OS's own service logs (`system_logs`) — the intelligence can diagnose its own retrieval, memory, and service behavior from inside a session.
 
-The full per-tool catalog, plus the workspace-restriction, GitHub, and SSH safety notes: **[docs/TOOL-REFERENCE.md](docs/TOOL-REFERENCE.md)**.
+The full per-tool catalog, plus the workspace-restriction, GitHub, and SSH safety notes: **[docs/OPERATIONS/TOOL-REFERENCE.md](docs/OPERATIONS/TOOL-REFERENCE.md)**.
 
 ---
 
@@ -192,22 +192,22 @@ The full embraOS manual lives in [docs/](docs/).
 
 | Chapter | What it covers |
 |---|---|
-| **[Quick Start](docs/QUICK-START.md)** | Build the QEMU image from source (Ubuntu 24.04 / 26.04); first-boot Config Wizard; operational notes |
+| **[Quick Start](docs/BUILD/QUICK-START.md)** | Build the QEMU image from source (Ubuntu 24.04 / 26.04); first-boot Config Wizard; operational notes |
 | **[Roadmap](docs/ROADMAP.md)** | Phase 0–5 delivery status, the post-Sprint-5 embra-web / embra-guardian v1 increments, and Sprint 6 — the final Phase 1 sprint |
 | **[Change Log](docs/CHANGE-LOG.md)** | Merge log, anchored on tagged releases |
-| **[Operation](docs/OPERATION.md)** | Run lifecycle, the session model, keyboard shortcuts, current limitations |
-| **[Command Reference](docs/COMMAND-REFERENCE.md)** | Every slash command |
-| **[Tool Reference](docs/TOOL-REFERENCE.md)** | All 117 built-in tools by category, plus workspace / GitHub / SSH safety notes |
+| **[Operation](docs/OPERATIONS/OPERATION.md)** | Run lifecycle, the session model, keyboard shortcuts, current limitations |
+| **[Command Reference](docs/OPERATIONS/COMMAND-REFERENCE.md)** | Every slash command |
+| **[Tool Reference](docs/OPERATIONS/TOOL-REFERENCE.md)** | All 117 built-in tools by category, plus workspace / GitHub / SSH safety notes |
 | **[System Design](docs/SYSTEM-DESIGN.md)** | The 7-layer continuity architecture, the four LLM providers, reasoning controls, prompt caching |
-| **[Knowledge Graph](docs/KNOWLEDGE-GRAPH.md)** | The cross-session memory graph — promotion at creation, link candidates, auto-derived edges, auto-enrichment, retrieval ranking, in-OS embeddings, the twelve `knowledge_*` tools |
-| **[Identity Graph](docs/IDENTITY-GRAPH.md)** | The sealed IDENTITY+SOUL graph — format, the Learning-Mode import, KG projection, prompt rendering, and the re-seal migration ceremony |
+| **[Knowledge Graph](docs/MULTI-GRAPH/KNOWLEDGE-GRAPH.md)** | The cross-session memory graph — promotion at creation, link candidates, auto-derived edges, auto-enrichment, retrieval ranking, in-OS embeddings, the twelve `knowledge_*` tools |
+| **[Identity Graph](docs/MULTI-GRAPH/IDENTITY-GRAPH.md)** | The sealed IDENTITY+SOUL graph — format, the Learning-Mode import, KG projection, prompt rendering, and the re-seal migration ceremony |
 | **[Open Problems](docs/OPEN-PROBLEMS.md)** | Unresolved design questions tracked at the architecture level |
-| **[Recommended Local Models](docs/RECOMMENDED-LOCAL-MODELS.md)** | Vetted models and server configuration for the Ollama / LM Studio backends |
-| **[Replicant Check](docs/REPLICANT-CHECK.md)** | The soul-spec gate every dynamic tool passes before it compiles — how it works, both authoring paths, and how to test it |
-| **[Guardian Tool Examples](docs/GUARDIAN-TOOL-EXAMPLES.md)** | Paste-ready dynamic-tool modules (embra-guardian-v1) |
-| **[Guardian Advanced Example](docs/GUARDIAN-ADVANCED-EXAMPLE.md)** | The shipped flagship: a worked end-to-end Guardian tool |
-| **[Guardian HTTP Request Example](docs/GUARDIAN-HTTP-REQUEST-EXAMPLE.md)** | The second shipped tool: `http_request`, a guarded curl for pages, resources and API work |
-| **[Guardian KG-Scan Example](docs/GUARDIAN-KG-SCAN-EXAMPLE.md)** | `kg_scan`, the first intelligence-proposed tool — structural pattern scans over a `knowledge_dump` JSONL |
+| **[Recommended Local Models](docs/LOCAL-MODELS/RECOMMENDED-LOCAL-MODELS.md)** | Vetted models and server configuration for the Ollama / LM Studio backends |
+| **[Replicant Check](docs/GUARDIAN/REPLICANT-CHECK.md)** | The soul-spec gate every dynamic tool passes before it compiles — how it works, both authoring paths, and how to test it |
+| **[Guardian Tool Examples](docs/GUARDIAN/GUARDIAN-TOOL-EXAMPLES.md)** | Paste-ready dynamic-tool modules (embra-guardian-v1) |
+| **[Guardian Advanced Example](docs/GUARDIAN/GUARDIAN-ADVANCED-EXAMPLE.md)** | The shipped flagship: a worked end-to-end Guardian tool |
+| **[Guardian HTTP Request Example](docs/GUARDIAN/GUARDIAN-HTTP-REQUEST-EXAMPLE.md)** | The second shipped tool: `http_request`, a guarded curl for pages, resources and API work |
+| **[Guardian KG-Scan Example](docs/GUARDIAN/GUARDIAN-KG-SCAN-EXAMPLE.md)** | `kg_scan`, the first intelligence-proposed tool — structural pattern scans over a `knowledge_dump` JSONL |
 
 ---
 
