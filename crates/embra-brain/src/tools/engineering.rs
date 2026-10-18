@@ -2887,10 +2887,18 @@ pub(crate) async fn append_at(path: &Path, content: &str) -> String {
         .await;
 
     match result {
-        Ok(mut file) => match file.write_all(content.as_bytes()).await {
-            Ok(()) => format!("Appended {} bytes to {}", content.len(), path.display()),
-            Err(e) => format!("Failed to append: {}", e),
-        },
+        Ok(mut file) => {
+            // tokio's File hands a write to the blocking pool and returns;
+            // `flush` waits for it, so the report is true when it is given.
+            let written = match file.write_all(content.as_bytes()).await {
+                Ok(()) => file.flush().await,
+                Err(e) => Err(e),
+            };
+            match written {
+                Ok(()) => format!("Appended {} bytes to {}", content.len(), path.display()),
+                Err(e) => format!("Failed to append: {}", e),
+            }
+        }
         Err(e) => format!("Failed to open file for append: {}", e),
     }
 }
