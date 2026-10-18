@@ -127,7 +127,11 @@ cut at 1 MiB.
 
 A refused request or a guard error answers `{"error": "…"}` in the guard's
 words: the reason a private host was refused names the command that would
-admit it, and a credential header in the input names `/guardian secret`.
+admit it, and a credential header in the input names `/guardian secret`. A
+request that carries one of the operator's stored secrets — in its URL, a
+header or its body, as stored or encoded — is refused before any network,
+naming the kind (`the GitHub token`) and never the value; a credential
+reaches a host through `/guardian secret` alone.
 
 ### `save_to`
 

@@ -20,7 +20,9 @@ out of scope for another.
   request guard sets the `Authorization` header on a request whose host is
   `graph.microsoft.com` and on no other, a redirect to another host never
   carries it, the envelope never echoes it, and a tool cannot set the
-  header itself (`/guardian secret` is the only way in). See
+  header itself (`/guardian secret` is the only way in). A request whose
+  input carries the token itself — pasted into a header or a body — is
+  refused before any network, by kind and never by value. See
   [COMMAND-REFERENCE.md](../OPERATIONS/COMMAND-REFERENCE.md).
 - Which mailboxes the token reaches is Exchange Online's decision, made by
   the RBAC scope below. The OS trusts the token for what it is; the scope
