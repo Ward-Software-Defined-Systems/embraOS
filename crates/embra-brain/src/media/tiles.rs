@@ -12,10 +12,13 @@
 //! 1.7× down stays readable, 3.1× does not). Past it the long axis is
 //! cut into equal tiles no longer than `max(2576, short edge)`, so every
 //! tile fits the box at the short edge's scale: unscaled when the short
-//! edge is within the box. Each cut then moves to the nearest blank line
-//! within [`MEDIA_TILE_SNAP`] pixels, so a line of text is not split
-//! between two tiles (the review of 2026-10-18); without a blank line
-//! nearby the even cut stands. One call hands the model
+//! edge is within the box. Each cut then moves to the line with the
+//! least ink within [`MEDIA_TILE_SNAP`] pixels, the nearer one at a tie,
+//! so a line of text is not split between two tiles (the review of
+//! 2026-10-18): a blank line wins outright, and beside a figure that
+//! crosses every line in the window the gap between two lines of text
+//! wins over a line of text (the recheck: a cut next to a floated figure
+//! fell back to the even cut and split both). One call hands the model
 //! [`MEDIA_TILES_PER_VIEW`] tiles; the rest come part by part.
 
 use image::{DynamicImage, GenericImageView};
@@ -136,8 +139,8 @@ impl TilePlan {
             .collect()
     }
 
-    /// The cuts for `img`: each interior cut moved to the nearest blank
-    /// line within the snap window, the even cut where there is none.
+    /// The cuts for `img`: each interior cut moved to the line with the
+    /// least ink within the snap window, the even cut when none has less.
     pub fn cuts(&self, img: &DynamicImage) -> Vec<u32> {
         let window = self.snap_window();
         let mut cuts = self.nominal_cuts();
@@ -147,34 +150,50 @@ impl TilePlan {
         cuts
     }
 
+    /// The line with the least ink within `window` of `nominal`, the
+    /// nearer one at a tie and the later one at the same distance; the
+    /// even cut when no line has less. The edges of the image are never
+    /// cuts.
     fn snap(&self, img: &DynamicImage, nominal: u32, window: u32) -> u32 {
-        for d in 0..=window {
-            if self.is_blank_line(img, nominal + d) {
-                return nominal + d;
-            }
-            if d > 0 && nominal > d && self.is_blank_line(img, nominal - d) {
-                return nominal - d;
+        let mut best = (self.ink(img, nominal), 0u32, nominal);
+        for d in 1..=window {
+            for at in [nominal + d, nominal.saturating_sub(d)] {
+                if at == 0 || at >= self.long() {
+                    continue;
+                }
+                let ink = self.ink(img, at);
+                if (ink, d) < (best.0, best.1) {
+                    best = (ink, d, at);
+                }
             }
         }
-        nominal
+        best.2
     }
 
-    /// A line of one colour across the short edge: a row for `Down`, a
-    /// column for `Right`. The edges of the image are never cuts.
-    fn is_blank_line(&self, img: &DynamicImage, at: u32) -> bool {
-        if at == 0 || at >= self.long() {
-            return false;
+    /// The ink on a line across the short edge (a row for `Down`, a
+    /// column for `Right`): the pixels that differ from the line's first
+    /// pixel or from its last, whichever count is smaller, so a figure at
+    /// one margin is counted against the background at the other. Zero on
+    /// a line of one colour.
+    fn ink(&self, img: &DynamicImage, at: u32) -> u32 {
+        let (first, last, pixels): (_, _, Box<dyn Iterator<Item = image::Rgba<u8>>>) = match self.axis {
+            Axis::Down => (
+                img.get_pixel(0, at),
+                img.get_pixel(img.width() - 1, at),
+                Box::new((0..img.width()).map(move |x| img.get_pixel(x, at))),
+            ),
+            Axis::Right => (
+                img.get_pixel(at, 0),
+                img.get_pixel(at, img.height() - 1),
+                Box::new((0..img.height()).map(move |y| img.get_pixel(at, y))),
+            ),
+        };
+        let (mut not_first, mut not_last) = (0u32, 0u32);
+        for p in pixels {
+            not_first += u32::from(p != first);
+            not_last += u32::from(p != last);
         }
-        match self.axis {
-            Axis::Down => {
-                let first = img.get_pixel(0, at);
-                (1..img.width()).all(|x| img.get_pixel(x, at) == first)
-            }
-            Axis::Right => {
-                let first = img.get_pixel(at, 0);
-                (1..img.height()).all(|y| img.get_pixel(at, y) == first)
-            }
-        }
+        not_first.min(not_last)
     }
 
     /// Tile `index` (1-based) between its cuts.
@@ -336,6 +355,25 @@ pub(crate) mod tests {
         }))
     }
 
+    /// A page with a floated figure down its left margin (a checker in
+    /// columns 0..220 on the rows `figure` says) beside lines of text
+    /// (stripes in columns 260..760 on 18 of every 22 rows; the other 4
+    /// are the gap between two lines). No row in the figure's band is one
+    /// colour.
+    fn text_beside_a_figure(w: u32, h: u32, figure: impl Fn(u32) -> bool) -> DynamicImage {
+        DynamicImage::ImageRgba8(ImageBuffer::from_fn(w, h, |x, y| {
+            let white = Rgba([255, 255, 255, 255]);
+            let black = Rgba([0, 0, 0, 255]);
+            if x < 220 && figure(y) {
+                if (x / 10 + y / 10) % 2 == 0 { black } else { white }
+            } else if (260..760).contains(&x) && y % 22 >= 4 && x % 2 == 0 {
+                black
+            } else {
+                white
+            }
+        }))
+    }
+
     #[test]
     fn a_short_image_is_whole_and_a_long_one_is_cut_evenly_along_its_long_axis() {
         // Within a 2× shrink: whole. The measured readable case among them.
@@ -442,6 +480,44 @@ pub(crate) mod tests {
         assert_eq!((p.total, p.tile_len), (3, 1720));
         let img = striped(400, 5160, |_| true);
         assert_eq!(p.cuts(&img)[3], 5160);
+    }
+
+    #[test]
+    fn beside_a_figure_the_cut_falls_in_the_gap_between_two_lines_of_text() {
+        // The recheck of 2026-10-18: a floated figure filled the whole
+        // window at two cuts, so no row was one colour and the even cut
+        // stood, through a line of text and the figure. The least ink in
+        // the window is a gap between two lines beside the figure.
+        let p = TilePlan::plan(800, 8000).unwrap();
+        let img = text_beside_a_figure(800, 8000, |y| (1800..2200).contains(&y));
+        let cuts = p.cuts(&img);
+        // 2000 is a text row (2000 % 22 = 20); the nearest gap rows are
+        // 2002..2005, and the nearer wins.
+        assert_eq!(cuts[1], 2002, "{cuts:?}");
+        // The other cuts have no figure: a gap row within the window
+        // (4000 % 22 = 18 -> 4004; 6000 % 22 = 16 -> 6006).
+        assert_eq!(&cuts[2..], &[4004, 6006, 8000], "{cuts:?}");
+        // Every row equally busy: the even cut stands.
+        let img = striped(800, 8000, |_| false);
+        assert_eq!(p.cuts(&img), p.nominal_cuts());
+    }
+
+    #[test]
+    fn a_cut_never_lengthens_a_tile_past_its_box() {
+        // Four tiles of exactly 2576: the window is zero and blank rows a
+        // pixel off the even cuts do not move them.
+        let p = TilePlan::plan(800, 10_304).unwrap();
+        assert_eq!((p.total, p.tile_len, p.snap_window()), (4, 2576, 0));
+        let img = striped(800, 10_304, |y| y % 2576 == 1 || y % 2576 == 2575);
+        assert_eq!(p.cuts(&img), vec![0, 2576, 5152, 7728, 10_304]);
+        // With room under the box the window is bounded by half of it, so
+        // two cuts moving apart stay within a tile of the box's length.
+        let p = TilePlan::plan(800, 9997).unwrap();
+        let img = striped(800, 9997, |y| y % 2500 == 2500 - 38 || y % 2500 == 38);
+        let cuts = p.cuts(&img);
+        let longest = cuts.windows(2).map(|w| w[1] - w[0]).max().unwrap();
+        assert!(longest <= p.tile_max(), "{cuts:?}");
+        assert_eq!(cuts, vec![0, 2538, 5038, 7538, 9997]);
     }
 
     #[test]

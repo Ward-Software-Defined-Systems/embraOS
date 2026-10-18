@@ -144,7 +144,7 @@ pub async fn image_view(
             resolved.display(),
             meta.width,
             meta.height,
-            u64::from(meta.width.max(meta.height)) * 100 / u64::from(sw.max(sh)),
+            percent(meta.width.max(meta.height), sw.max(sh)),
             data.len(),
             meta.media_type,
             meta.id
@@ -244,6 +244,11 @@ async fn tiled_output(
     let mut out = ToolOutput::text(text);
     out.images = images;
     Ok(out)
+}
+
+/// `part` of `whole` in percent, rounded to the nearest.
+fn percent(part: u32, whole: u32) -> u64 {
+    (u64::from(part) * 100 + u64::from(whole) / 2) / u64::from(whole)
 }
 
 /// A tile the encode ladder had to bring below its box to fit the inline
@@ -796,6 +801,13 @@ mod tests {
         assert!(schema.get("oneOf").is_none() && schema.get("anyOf").is_none() && schema.get("allOf").is_none());
         assert_eq!(schema["properties"]["prompt"]["type"], "string");
         assert_eq!(schema["required"], serde_json::json!(["prompt"]));
+    }
+
+    #[test]
+    fn the_scale_percent_rounds_to_the_nearest() {
+        assert_eq!(percent(2576, 4385), 59, "58.75 rounds up");
+        assert_eq!(percent(2576, 4000), 64, "64.4 rounds down");
+        assert_eq!(percent(2576, 2576), 100);
     }
 
     #[test]
