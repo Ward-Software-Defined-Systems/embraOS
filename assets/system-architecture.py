@@ -132,8 +132,9 @@ box(60, 400, 680, 124, "embra-brain", [
     "Ollama, LM Studio) · 117 tools · sessions · Learning Mode",
     "knowledge graph + in-OS embeddings (tract · bge-small)",
     "proactive: reminders, cron · media (images in and out)",
-    "tools write under /embra/workspace only · SSH to private",
-    "addresses only · prompt and manifest fixed between turns",
+    "tools write under /embra/workspace only · read everything",
+    "but the operator's secrets · a stored secret never leaves",
+    "SSH to private only · prompt and manifest fixed between turns",
 ], BRAIN, order=4, port="gRPC :50002", size=9.9, lead=12)
 box(420, 428, 308, 86, "embra-guardian · in-process", [
     "syn validator · wasmtime sandbox, a fresh instance per call",

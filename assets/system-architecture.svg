@@ -65,8 +65,9 @@
 <text x="72" y="447" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">Ollama, LM Studio) · 117 tools · sessions · Learning Mode</text>
 <text x="72" y="459" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">knowledge graph + in-OS embeddings (tract · bge-small)</text>
 <text x="72" y="471" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">proactive: reminders, cron · media (images in and out)</text>
-<text x="72" y="483" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">tools write under /embra/workspace only · SSH to private</text>
-<text x="72" y="495" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">addresses only · prompt and manifest fixed between turns</text>
+<text x="72" y="483" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">tools write under /embra/workspace only · read everything</text>
+<text x="72" y="495" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">but the operator's secrets · a stored secret never leaves</text>
+<text x="72" y="507" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">SSH to private only · prompt and manifest fixed between turns</text>
 <rect x="420" y="428" width="308" height="86" rx="8" fill="#14131a" stroke="#c2410c" stroke-width="1.2"/>
 <text x="432" y="447" font-family="DejaVu Sans, sans-serif" font-size="12.5" font-weight="bold" fill="#e6e4df" text-anchor="start">embra-guardian · in-process</text>
 <text x="432" y="463.0" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#aaa8b3" text-anchor="start">syn validator · wasmtime sandbox, a fresh instance per call</text>
