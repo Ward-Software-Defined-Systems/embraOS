@@ -545,6 +545,44 @@ mod outbound_tests {
         }
     }
 
+    /// The input of the live check of 2026-10-18 (item 7), with the
+    /// throwaway secret stored where that run had not stored it: a
+    /// `/guardian secret` value in a GitLab comment body is refused by
+    /// kind before the handler, like the GitHub token.
+    #[tokio::test]
+    async fn a_gitlab_comment_that_carries_a_guardian_secret_is_refused_without_a_request() {
+        let config: SystemConfig = serde_json::from_value(serde_json::json!({
+            "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase1",
+            "created_at": "", "version": "test", "api_provider": "anthropic",
+            "guardian_secrets": {"echo.example.test": {"x-test-token": "test-secret-0123456789"}},
+        }))
+        .unwrap();
+        let db = WardsonDbClient::from_url("http://127.0.0.1:1");
+        let trace = embra_tools_core::new_turn_trace_handle();
+        let ctx = DispatchContext {
+            db: &db,
+            config: &config,
+            session_name: "code-review-sec-debug_v1",
+            config_tz: "UTC",
+            trace: &trace,
+            turn_index: 0,
+            deleting_session: None,
+        };
+        let out = dispatch(
+            "gl_issue_comment",
+            serde_json::json!({"body": "probe: test-secret-0123456789", "host": "gitlab.ops.wsds", "iid": 23, "project": "embraOS/Embra"}),
+            ctx,
+        )
+        .await;
+        match out {
+            Err(DispatchError::Handler(m)) => {
+                assert!(m.starts_with("refused: the input of gl_issue_comment carries a /guardian secret"), "{m}");
+                assert!(!m.contains("test-secret"), "the value is never echoed: {m}");
+            }
+            other => panic!("the handler ran: {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn the_same_text_in_a_workspace_write_is_not_refused() {
         let config = config_with_token();

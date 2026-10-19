@@ -303,31 +303,8 @@ pub async fn port_scan(param: &str) -> String {
     let total = ports.len();
     let mut output = format!("=== Port Scan: {} ({} ports) ===\n", host, total);
 
-    // At most PORT_SCAN_IN_FLIGHT connects at once, as a stream rather than
-    // one task per port (an `all` scan is 65,535 of them), under the scan's
-    // own budget: what was found by then is reported, with the count.
-    let host_str = host.to_string();
-    let mut probes = futures::stream::iter(ports)
-        .map(|(port, label)| {
-            let h = host_str.clone();
-            async move { probe_port(&h, port, &label).await }
-        })
-        .buffer_unordered(PORT_SCAN_IN_FLIGHT);
     let deadline = tokio::time::Instant::now() + PORT_SCAN_MAX;
-    let mut open_ports = Vec::new();
-    let mut checked = 0usize;
-    let cut = loop {
-        match tokio::time::timeout_at(deadline, probes.next()).await {
-            Ok(Some(found)) => {
-                checked += 1;
-                if let Some(line) = found {
-                    open_ports.push(line);
-                }
-            }
-            Ok(None) => break false,
-            Err(_) => break true,
-        }
-    };
+    let Scanned { mut open_ports, checked, cut } = scan_ports(host, ports, deadline).await;
 
     // Sort by port number (extracted from the formatted string)
     open_ports.sort();
@@ -346,6 +323,45 @@ pub async fn port_scan(param: &str) -> String {
     }
 
     output
+}
+
+/// What a scan found by its deadline.
+struct Scanned {
+    /// One formatted line per open port, unsorted.
+    open_ports: Vec<String>,
+    /// How many ports were probed before the scan ended or was cut.
+    checked: usize,
+    /// Whether the deadline ended the scan with ports unchecked.
+    cut: bool,
+}
+
+/// The ports, probed at most [`PORT_SCAN_IN_FLIGHT`] at once as a stream
+/// rather than one task per port (an `all` scan is 65,535 of them), until
+/// the last answers or `deadline` passes. Guard
+/// `a_scan_past_its_deadline_is_cut_with_the_count_checked`.
+async fn scan_ports(host: &str, ports: Vec<(u16, String)>, deadline: tokio::time::Instant) -> Scanned {
+    let host_str = host.to_string();
+    let mut probes = futures::stream::iter(ports)
+        .map(|(port, label)| {
+            let h = host_str.clone();
+            async move { probe_port(&h, port, &label).await }
+        })
+        .buffer_unordered(PORT_SCAN_IN_FLIGHT);
+    let mut open_ports = Vec::new();
+    let mut checked = 0usize;
+    let cut = loop {
+        match tokio::time::timeout_at(deadline, probes.next()).await {
+            Ok(Some(found)) => {
+                checked += 1;
+                if let Some(line) = found {
+                    open_ports.push(line);
+                }
+            }
+            Ok(None) => break false,
+            Err(_) => break true,
+        }
+    };
+    Scanned { open_ports, checked, cut }
 }
 
 /// One port: a connect under a two-second timeout, then a banner grab on
@@ -1044,7 +1060,27 @@ mod native_args_tests {
 
 #[cfg(test)]
 mod scan_budget_tests {
-    use super::{cut_note, port_scan, PORT_SCAN_IN_FLIGHT, PORT_SCAN_MAX};
+    use super::{cut_note, port_scan, scan_ports, PORT_SCAN_IN_FLIGHT, PORT_SCAN_MAX};
+
+    /// The budget path itself, without a network that drops packets: a
+    /// deadline already reached cuts the scan on its first poll, and the
+    /// report counts what was checked; a deadline far away lets the same
+    /// loopback ports finish.
+    #[tokio::test]
+    async fn a_scan_past_its_deadline_is_cut_with_the_count_checked() {
+        let ports = |n: u16| (1..=n).map(|p| (p, format!("port-{p}"))).collect::<Vec<_>>();
+        let cut = scan_ports("127.0.0.1", ports(300), tokio::time::Instant::now()).await;
+        assert!(cut.cut, "a deadline already reached cuts the scan");
+        assert!(cut.checked < 300, "ports were left unchecked: {}", cut.checked);
+        let done = scan_ports(
+            "127.0.0.1",
+            ports(3),
+            tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+        )
+        .await;
+        assert!(!done.cut);
+        assert_eq!(done.checked, 3);
+    }
 
     #[test]
     fn the_cut_note_names_the_budget_and_the_count() {
