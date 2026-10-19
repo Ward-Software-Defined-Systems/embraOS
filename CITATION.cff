@@ -26,7 +26,7 @@ identifiers:
     value: "10.5281/zenodo.20673525"
     description: "Concept DOI — resolves to the latest version"
   - type: doi
-    value: "10.5281/zenodo.23441386"
+    value: "10.5281/zenodo.23465600"
     description: "Version DOI — v0.18.0-phase1"
 keywords:
   - "operating system"
