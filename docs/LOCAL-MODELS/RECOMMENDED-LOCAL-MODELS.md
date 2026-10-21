@@ -10,7 +10,7 @@ The wizard's selector reads `GET /v1/models` from the configured server, so any 
 |---|---|---|
 | M1 Mac Mini | Ollama | 16 GB unified |
 | Mac Studio M4 Max | LM Studio and Ollama | 128 GB unified |
-| x86_64 server (Ubuntu 24.04) | Ollama | NVIDIA RTX 3080 Ti, 12 GB of VRAM; the smaller models on x86_64 and NVIDIA, under evaluation |
+| x86_64 server (Ubuntu 24.04), AMD Ryzen 7 5800X: 8 cores, 16 threads | Ollama | 128 GB DDR4 system memory; NVIDIA RTX 3080 Ti, 12 GB of VRAM; the smaller models on x86_64 and NVIDIA, under evaluation |
 
 The table says which *server* runs where, not that every model fits on every host; the fit is under each table below.
 
@@ -26,32 +26,36 @@ The table says which *server* runs where, not that every model fits on every hos
 
 ### Local (Ollama / LM Studio)
 
-| Server | Model | Tag | Size | Context | Status |
-|--------|-------|-----|------|---------|--------|
-| Ollama | Qwen3.8 27B (dense) | `qwen3.8:27b-mlx` | 18GB | 256K | vetted |
-| Ollama | Qwen3.6 27B (dense) | `qwen3.6:27b-mlx` | 19GB | 256K | vetted |
-| Ollama | Gemma 4 12B (dense) | `gemma4:12b-mlx` | 7.7GB | 256K | under evaluation |
-| Ollama | Gemma 4 31B (dense) | `gemma4:31b-mlx` | 19GB | 256K | under evaluation |
-| Ollama | Gemma 4 12B (dense, Q4_K_M GGUF) | `gemma4:12b` | 8.0GB | 256K | under evaluation |
-| LM Studio | Qwen3.8 27B (dense, 8-bit) | `qwen/qwen3.8-27b` | 30GB | 256K | vetted |
-| LM Studio | Qwen3.6 27B (dense, 8-bit) | `qwen/qwen3.6-27b` | 30GB | 256K | vetted |
+| Server | Model | Tag | Size | Context | Effort sent (default) | Status |
+|--------|-------|-----|------|---------|-----------------------|--------|
+| Ollama | Qwen3.8 27B (dense) | `qwen3.8:27b-mlx` | 18GB | 256K | none (`medium`) | vetted |
+| Ollama | Qwen3.6 27B (dense) | `qwen3.6:27b-mlx` | 19GB | 256K | none (thinking on) | vetted |
+| Ollama | Gemma 4 12B (dense) | `gemma4:12b-mlx` | 7.7GB | 256K | none (thinking on) | under evaluation |
+| Ollama | Gemma 4 31B (dense) | `gemma4:31b-mlx` | 19GB | 256K | none (thinking on) | under evaluation |
+| Ollama | Gemma 4 12B (dense, Q4_K_M GGUF) | `gemma4:12b` | 8.0GB | 256K | none (thinking on) | under evaluation |
+| Ollama | Nemotron 3.5 Super 120B (MoE, 12B active, NVFP4 MLX) | `nemotron-3.5-super:120b-a12b-nvfp4` | 80GB | 1M | none (thinking on) | under evaluation |
+| LM Studio | Qwen3.8 27B (dense, 8-bit) | `qwen/qwen3.8-27b` | 30GB | 256K | none (`xhigh`) | vetted |
+| LM Studio | Qwen3.6 27B (dense, 8-bit) | `qwen/qwen3.6-27b` | 30GB | 256K | none (thinking on) | vetted |
 
-- **Builds.** The `-mlx` tags are the MLX builds, which the Macs run. The plain tag of each of the four models (`gemma4:12b`, `qwen3.8:27b`, …) lists both builds, and a pull takes one by platform: the MLX build on an Apple Silicon Mac, the GGUF build anywhere else (`runnerPreferences` in Ollama's `manifest/manifest.go`). So `gemma4:12b` is a GGUF build on the x86_64 server. The `RUNNER` column of `ollama ps` shows which build is loaded. On a GGUF build, Ollama trims a request to fit its context window without an error ([Ollama](#ollama-mac-mini-mac-studio-x86_64-server) under Server Configuration).
-- **Figures.** Sizes and context lengths are the Ollama library's own for the tags listed, read 2026-10-13; for `gemma4:12b`, the figure of its GGUF build (`gemma4:12b-it-q4_K_M`). The LM Studio sizes are the weights of the 8-bit MLX builds (`lmstudio-community/Qwen3.8-27B-MLX-8bit` and `…/Qwen3.6-27B-MLX-8bit`, 29.5 GB each).
+- **Builds.** The `-mlx` tags are the MLX builds, which the Macs run; `nemotron-3.5-super:120b-a12b-nvfp4` is an MLX build too (the library marks it MLX). The plain tag of each of the four `-mlx` models (`gemma4:12b`, `qwen3.8:27b`, …) lists both builds, and a pull takes one by platform: the MLX build on an Apple Silicon Mac, the GGUF build anywhere else (`runnerPreferences` in Ollama's `manifest/manifest.go`). So `gemma4:12b` is a GGUF build on the x86_64 server. The `RUNNER` column of `ollama ps` shows which build is loaded. On a GGUF build, Ollama trims a request to fit its context window without an error ([Ollama](#ollama-mac-mini-mac-studio-x86_64-server) under Server Configuration).
+- **Figures.** Sizes and context lengths are the Ollama library's own for the tags listed, read 2026-10-13; for `gemma4:12b`, the figure of its GGUF build (`gemma4:12b-it-q4_K_M`). For `nemotron-3.5-super:120b-a12b-nvfp4`, read 2026-10-20, the library shows no context; 1M is the model's own (`max_position_embeddings` 1,048,576 in the tag's `config.json`). The LM Studio sizes are the weights of the 8-bit MLX builds (`lmstudio-community/Qwen3.8-27B-MLX-8bit` and `…/Qwen3.6-27B-MLX-8bit`, 29.5 GB each).
 - **Gemma 4.** 12B and 31B are dense; the family's MoE is the `gemma4:26b` tag (25.2B total, 3.8B active), below the active-parameter threshold above. The three Gemma 4 rows are under evaluation by the operator and not yet vetted against the tool surface.
-- **Fit.** The 27B tags and `gemma4:31b-mlx` need more than the Mac Mini's 16 GB of unified memory and run on the Mac Studio; `gemma4:12b-mlx` fits the Mac Mini. On the x86_64 server, `gemma4:12b` loads entirely onto the 12 GB GPU at 4,096 tokens (2026-10-13). Whether it stays there at the 64000 tokens it needs ([Ollama](#ollama-mac-mini-mac-studio-x86_64-server)) is TBD.
+- **Nemotron 3.5 Super.** A MoE: 120B total, 12B active per token, below the active-parameter threshold above. The tag needs Ollama 0.40.5 or later (`requires` in its config). The row is under evaluation by the operator and not yet vetted against the tool surface.
+- **Fit.** The 27B tags and `gemma4:31b-mlx` need more than the Mac Mini's 16 GB of unified memory and run on the Mac Studio; `gemma4:12b-mlx` fits the Mac Mini. `nemotron-3.5-super:120b-a12b-nvfp4` needs 80GB, more than the Mac Mini or the x86_64 server's GPU holds; it fits the Mac Studio. On the x86_64 server, `gemma4:12b` loads entirely onto the 12 GB GPU at 4,096 tokens (2026-10-13). Whether it stays there at the 64000 tokens it needs ([Ollama](#ollama-mac-mini-mac-studio-x86_64-server)) is TBD.
+- **Effort.** The column is what the brain sends as `reasoning_effort` while `/effort` is unset, and in parentheses what the server then uses. The brain sends nothing to a local row: `reasoning_effort_for_model` (`crates/embra-brain/src/provider/openai_compat/mod.rs`) names none of them. Ollama then uses the model's `thinking.default` from `/api/show` ([docs.ollama.com/capabilities/thinking](https://docs.ollama.com/capabilities/thinking)): thinking on, and `medium` for Qwen3.8, which Ollama sets in `server/model_thinking.go`. LM Studio uses the model's own fields: Reasoning Effort `xhigh` for Qwen3.8, Enable Thinking on for Qwen3.6. `/effort xhigh` gives Qwen3.8 `xhigh` on Ollama too. Read 2026-10-20; the levels are under [Reasoning effort](#reasoning-effort).
 
 ### Ollama Cloud
 
 A `:cloud` tag is served by ollama.com through the local Ollama daemon, so it reaches embraOS through the Ollama preset like any pulled model: nothing to fit in local memory, and nothing local about the inference either. The active-parameter rule above applies the same way.
 
-| Model | Tag | Parameters | Context | Input | Status |
-|---|---|---|---|---|---|
-| DeepSeek V4 Pro | `deepseek-v4-pro:cloud` | 1.6T total, 49B active (MoE) | 1M | text | vetted, preferred |
-| GLM 5.3 | `glm-5.3:cloud` | 753B | 1M | text | under evaluation |
-| Kimi K3 | `kimi-k3:cloud` | 2.8T (MoE) | 1M | text, image | under evaluation |
+| Model | Tag | Parameters | Context | Input | Effort sent (default) | Status |
+|---|---|---|---|---|---|---|
+| DeepSeek V4 Pro | `deepseek-v4-pro:cloud` | 1.6T total, 49B active (MoE) | 1M | text | `max` | vetted, preferred |
+| DeepSeek V4.1 Flash | `deepseek-v4.1-flash:cloud` | 763B total; 8B active in prefill, 16B in decode (MoE) | 1M | text, image | none (`high`) | under evaluation |
+| GLM 5.3 | `glm-5.3:cloud` | 753B | 1M | text | none (`max`) | under evaluation |
+| Kimi K3 | `kimi-k3:cloud` | 2.8T (MoE) | 1M | text, image | none (`max`) | under evaluation |
 
-Figures are the Ollama library's, read 2026-10-08. Only `kimi-k3:cloud` takes image input. `deepseek-v4-pro:cloud` gets `reasoning_effort: max` from the brain unless `/effort` sets a level (see [COMMAND-REFERENCE.md](../OPERATIONS/COMMAND-REFERENCE.md)).
+Figures are the Ollama library's, read 2026-10-08 (`deepseek-v4.1-flash:cloud` 2026-10-20). `kimi-k3:cloud` and `deepseek-v4.1-flash:cloud` take image input. The brain sends `reasoning_effort: max` to `deepseek-v4-pro:cloud`, whose own default on ollama.com is `low`, and nothing to the other three, which run at ollama.com's default in parentheses (its `/api/show`, 2026-10-20). `/effort` sets a level for any of them (see [COMMAND-REFERENCE.md](../OPERATIONS/COMMAND-REFERENCE.md)).
 
 ---
 
@@ -65,9 +69,6 @@ Per-model load config in LM Studio's "My Models":
 
 ```
 Context length:        262144
-Flash attention:       enabled
-KV cache:              f16
-GPU offload:           Max
 ```
 
 The preset `embraOS_Qwen3.8-27B` in [`LOCAL_MODEL_SETTINGS/LM-Studio-Examples/`](LOCAL_MODEL_SETTINGS/LM-Studio-Examples/) pins the three prediction settings that matter for a tool-calling session. Import it in "My Models", then select it for the model. It carries no load settings; the load configuration above stays as it is.
@@ -99,7 +100,7 @@ Then check `ollama ps`: the `CONTEXT` column is the window the model is loaded w
 
 | Build | Which tags | The window | A request past it |
 |---|---|---|---|
-| MLX | the `-mlx` tags; a plain tag pulled on an Apple Silicon Mac | the model's own maximum, 256K for the four `-mlx` tags; `OLLAMA_CONTEXT_LENGTH` and the default change only the figure `ollama ps` shows | refused (HTTP 400); Ollama never trims an MLX request |
+| MLX | the `-mlx` tags and `nemotron-3.5-super:120b-a12b-nvfp4`; a plain tag pulled on an Apple Silicon Mac | the model's own maximum: 256K for the four `-mlx` tags, 1M for the Nemotron tag; `OLLAMA_CONTEXT_LENGTH` and the default change only the figure `ollama ps` shows | refused (HTTP 400); Ollama never trims an MLX request |
 | GGUF | a plain tag pulled anywhere else, such as `gemma4:12b` on the x86_64 server | `OLLAMA_CONTEXT_LENGTH`; or a Modelfile's `PARAMETER num_ctx`, which overrides it; or else Ollama's default from the GPU memory it detects: 4,096 tokens under 24 GiB, 32,768 from 24 to 48 GiB, 262,144 from 48 GiB; never more than the length the model was trained for | trimmed to fit, without an error |
 
 The server logs its default at startup as `vram-based default context`; on the x86_64 server, `total_vram="11.6 GiB" default_num_ctx=4096`. The tool list the brain sends is 78 KB of JSON, about 20,000 tokens, so the 4,096 default cannot hold even the tools, and Ollama trims every request to fit ([below](#when-a-session-outgrows-the-context-length)).
@@ -135,12 +136,16 @@ Every turn replays the whole session: the system prompt, the history, the turn's
 
 ### Reasoning effort
 
-| Model | `reasoning_effort` | Default |
-|---|---|---|
-| Qwen3.8 | `low`, `medium`, `xhigh` (`high` is not valid for this model) | `xhigh` |
-| Qwen3.6 | no field | — |
+| Model | Levels |
+|---|---|
+| Qwen3.8 | `low`, `medium`, `xhigh` (`high` is not valid for this model) |
+| Nemotron 3.5 Super | `medium` |
+| DeepSeek V4 Pro, DeepSeek V4.1 Flash, GLM 5.3, Kimi K3 | `low`, `high`, `max` |
+| Qwen3.6, Gemma 4 | none: thinking is on or off |
 
-Set it with `/effort <level>` while the Ollama or LM Studio preset is active. The level is sent verbatim, the server validates it, and `/effort` warns when a level is outside the model's documented set. Unset (the default) sends no field, so the server's per-model default applies; `/effort reset` clears a stored level. See [COMMAND-REFERENCE.md](../OPERATIONS/COMMAND-REFERENCE.md).
+The levels are each server's own, read 2026-10-20: Ollama's `/api/show`, from the model's renderer in Ollama's source; ollama.com's `/api/show` for the `:cloud` tags; LM Studio's model pages. What the brain sends while no level is set, and the default the server then uses, is the Effort column of each table above.
+
+Set a level with `/effort <level>` while the Ollama or LM Studio preset is active. The level is sent verbatim and the server validates it; Ollama runs a level the model does not list at the model's default ([docs.ollama.com/capabilities/thinking](https://docs.ollama.com/capabilities/thinking)). `/effort` warns when a level is outside the set the brain knows for the model (`known_effort_ladder`). Unset (the default), the brain sends `max` to DeepSeek V4 Pro and no field to any other model; `/effort reset` clears a stored level. See [COMMAND-REFERENCE.md](../OPERATIONS/COMMAND-REFERENCE.md).
 
 ### Bearer auth
 
@@ -171,4 +176,4 @@ See [COMMAND-REFERENCE.md](../OPERATIONS/COMMAND-REFERENCE.md).
 
 ---
 
-*Last updated: 2026-10-15.*
+*Last updated: 2026-10-20.*
