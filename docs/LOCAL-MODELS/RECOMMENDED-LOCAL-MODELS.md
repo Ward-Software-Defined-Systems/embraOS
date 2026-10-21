@@ -89,6 +89,8 @@ OLLAMA_FLASH_ATTENTION=1        # depending on the age and number of GPUs you ar
 OLLAMA_KV_CACHE_TYPE=q8_0       # halves the cache's memory against f16, Ollama's default; needs flash attention
 ```
 
+An MLX build, which is what the Macs run, takes none of the three: Ollama passes `OLLAMA_FLASH_ATTENTION` and `OLLAMA_KV_CACHE_TYPE` only to llama-server, its GGUF runner (`llm/llama_server.go`), and `OLLAMA_CONTEXT_LENGTH` changes only the figure `ollama ps` shows (the window table below).
+
 | Where Ollama runs | How to set them |
 |---|---|
 | macOS, the Ollama application | `launchctl setenv OLLAMA_CONTEXT_LENGTH 64000`, one command per variable, then restart Ollama |
