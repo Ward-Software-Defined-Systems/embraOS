@@ -46,16 +46,20 @@ Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` 
 > preset like any pulled model: nothing to fit in local memory, and nothing local about the
 > inference either (it is not the offline tier of the roadmap). The rule on active
 > parameters applies the same way. Operator-vetted for the full toolset and the preferred
-> pick: **`deepseek-v4-pro:cloud`**. Under evaluation: `glm-5.3:cloud` and `kimi-k3:cloud`.
+> pick: **`deepseek-v4-pro:cloud`**. Under evaluation: `deepseek-v4.1-flash:cloud`,
+> `glm-5.3:cloud` and `kimi-k3:cloud`.
 >
-> | Model | Tag | Parameters | Context | Input | Status |
-> |---|---|---|---|---|---|
-> | DeepSeek V4 Pro | `deepseek-v4-pro:cloud` | 1.6T total, 49B active (MoE) | 1M | text | vetted, preferred |
-> | GLM 5.3 | `glm-5.3:cloud` | 753B | 1M | text | under evaluation |
-> | Kimi K3 | `kimi-k3:cloud` | 2.8T (MoE) | 1M | text, image | under evaluation |
+> | Model | Tag | Parameters | Context | Input | Effort sent (default) | Status |
+> |---|---|---|---|---|---|---|
+> | DeepSeek V4 Pro | `deepseek-v4-pro:cloud` | 1.6T total, 49B active (MoE) | 1M | text | `max` | vetted, preferred |
+> | DeepSeek V4.1 Flash | `deepseek-v4.1-flash:cloud` | 763B total; 8B active in prefill, 16B in decode (MoE) | 1M | text, image | none (`high`) | under evaluation |
+> | GLM 5.3 | `glm-5.3:cloud` | 753B | 1M | text | none (`max`) | under evaluation |
+> | Kimi K3 | `kimi-k3:cloud` | 2.8T (MoE) | 1M | text, image | none (`max`) | under evaluation |
 >
-> Figures are the Ollama library's (2026-10-08). Only `kimi-k3:cloud` takes image input;
-> an image attached under the other two needs a vision-capable model.
+> Figures are the Ollama library's (2026-10-08; `deepseek-v4.1-flash:cloud` and the effort
+> defaults 2026-10-20). `kimi-k3:cloud` and `deepseek-v4.1-flash:cloud` take image input; an
+> image attached under the other two needs a vision-capable model. The brain sends
+> `reasoning_effort` to `deepseek-v4-pro:cloud` only; the others run at ollama.com's default.
 
 > **Soul-gated dynamic tools: the replicant check.** *(Experimental.)* The intelligence
 > proposes its own dynamic tools (`guardian_propose`); operators paste them
