@@ -81,12 +81,12 @@ The preset `embraOS_Qwen3.8-27B` in [`LOCAL_MODEL_SETTINGS/LM-Studio-Examples/`]
 
 ### Ollama (Mac Mini, Mac Studio, x86_64 server)
 
-**Recommended settings.** Three environment variables on the Ollama server, set together:
+**Recommended GGUF model settings.** Three environment variables on the Ollama server, set together:
 
 ```
 OLLAMA_CONTEXT_LENGTH=64000     # at least 64000, Ollama's own figure for agents; the brain warns below it
-OLLAMA_FLASH_ATTENTION=1
-OLLAMA_KV_CACHE_TYPE=f16        # Ollama's default; q8_0 halves the cache's memory
+OLLAMA_FLASH_ATTENTION=1        # depending on the age and number of GPUs you are running, this can be left unset and Ollama will auto-configure
+OLLAMA_KV_CACHE_TYPE=q8_0       # halves the cache's memory against f16, Ollama's default; needs flash attention
 ```
 
 | Where Ollama runs | How to set them |
@@ -176,4 +176,4 @@ See [COMMAND-REFERENCE.md](../OPERATIONS/COMMAND-REFERENCE.md).
 
 ---
 
-*Last updated: 2026-10-20.*
+*Last updated: 2026-10-21.*
