@@ -6,7 +6,7 @@ Long-context benchmark of local models for embraOS on a Mac Studio, in four part
 - **Qwen3.8 8-bit and 16-bit on LM Studio.**
 - **A repeat test** on how long Qwen3.8 reasons in each setup.
 
-Every configuration ran twice, once with thinking off and once at the highest reasoning level the model offers, which is what embraOS's max-reasoning presets will send.
+Each configuration ran with thinking off and at the highest reasoning level the model offers, except LM Studio's 16-bit build, which ran at that level only. embraOS reaches that level with `/effort xhigh`. With `/effort` unset, Ollama runs Qwen3.8 at `medium`, which this benchmark did not measure, and LM Studio runs it at `xhigh` (see [Test setup](#test-setup)).
 
 *Measured 2026-10-21 and 22 · Mac Studio M4 Max, 128 GB · Ollama 0.40.6 · LM Studio 0.4.12 with MLX runtime 1.13.1 · identical documents throughout*
 
@@ -132,13 +132,15 @@ Every configuration ran twice, once with thinking off and once at the highest re
 - **Prompt.** Each document is followed by a question: *"Write a detailed, multi-paragraph overview of the modules it contains and what each one is for."* Each prompt starts with a random line, so no request can reuse another's cache.
 - **Follow-up.** After the 32K and 256K documents, a follow-up is sent with the whole conversation, to measure prefix-cache reuse: *"In one short paragraph: which of those modules would you use to parse command-line arguments, and why?"*
 - **Sequence for each build and pass.** Warmup, 32K, 32K follow-up, 128K, 256K, 256K follow-up. Both 16-bit builds started their 256K request from a fresh load, with nothing else cached. Ollama's build was reloaded just before the request. LM Studio's ran 256K and its follow-up separately, after a fresh load and the warmup.
-- **Ollama requests.** Native `/api/chat` with streaming, using each model's default sampling. Qwen3.8 ships temperature 1.0, top_k 20 and top_p 0.95. Nemotron has no presets, so it gets Ollama's defaults of 0.8, 40 and 0.9.
+- **Ollama requests.** Native `/api/chat` with streaming, using each model's default sampling. Qwen3.8 ships temperature 1.0, top_k 20 and top_p 0.95. Nemotron's tag ships none, so it gets Ollama's defaults of 0.8, 40 and 0.9.
   - **Thinking off:** `think: false`, with 200 output tokens (64 for follow-ups).
   - **Thinking on:** Nemotron `think: true`, Qwen3.8 `think: "xhigh"`. Output was capped at 16,384 tokens (8,192 for follow-ups), thinking included.
 - **LM Studio requests.** Native `/api/v1/chat` with streaming and `reasoning: "off"` or `"xhigh"`. Sampling was pinned to Qwen3.8's values above (with min_p 0 and repeat penalty 1), and follow-ups were chained with `previous_response_id`. The model was loaded at 262,144 context with LM Studio's default of 4 parallel slots and KV cache quantization off.
-- **Why those levels match embraOS.** embraOS sends `reasoning_effort` through the OpenAI-compatible endpoint.
+- **How these requests compare with embraOS's.** embraOS uses the OpenAI-compatible endpoint, `/v1/chat/completions`, on both servers. It sends `reasoning_effort` only when `/effort` sets a level, and it sends no sampling parameters ([RECOMMENDED-LOCAL-MODELS.md](RECOMMENDED-LOCAL-MODELS.md)).
+  - **Reasoning level.** With `/effort` unset, Ollama runs Qwen3.8 at `medium` and LM Studio runs it at `xhigh`. So the `xhigh` runs here match LM Studio's default and Ollama under `/effort xhigh`; Ollama's default level was not measured.
   - On Ollama, `xhigh` reaches Qwen3.8 as a system instruction: "Reasoning effort is set to xhigh. Please think carefully…". LM Studio's template adds the same instruction.
-  - Nemotron has no level above on, so `max` or `xhigh` falls back to its default, which is on (`ThinkingFromReasoningEffort` and `ResolveThinking` in Ollama's source).
+  - A level the model does not list runs at the model's default. So `/effort max` gives Qwen3.8 `medium` on Ollama, and Nemotron, which has no level above on, runs with thinking on under `max` or `xhigh` (`ThinkingFromReasoningEffort` and `ResolveThinking` in Ollama's source).
+  - **Sampling.** Ollama's OpenAI-compatible endpoint sets `temperature` and `top_p` to 1.0 when a request sends none, and the request's options override the model's own (`FromChatRequest`, `modelOptions`). Through embraOS, Qwen3.8 runs at top_p 1.0 instead of 0.95, and Nemotron at temperature 1.0 and top_p 1.0 instead of 0.8 and 0.9. Sampling affects draft acceptance, and so generation speed, and may affect reasoning length; neither was measured at embraOS's sampling.
 - **Measurements.**
   - **Ollama:**
     - Prompt and generation durations are Ollama's own (`prompt_eval_duration` and `eval_duration`).
@@ -244,7 +246,7 @@ The same benchmark was run on Ollama's 8-bit (`qwen3.8:27b-mxfp8`) and 16-bit (`
 | 16-bit | 3.18 ms + 44.2 ns × position | **306 tok/s** | **216 tok/s** | **111 tok/s** | **72 tok/s** |
 
 - **Reading.** The 16-bit build reads fastest at short contexts because its weights skip dequantization. By 240K the attention cost, which is the same for every build, dominates and the three converge.
-- **Generating.** Generation is limited by how much weight data each token reads, so 4-bit leads: 1.3–1.7× faster than 8-bit and 1.5–2.3× faster than 16-bit with `xhigh`. The gap narrows at long contexts, where reading the KV cache (about 16 GiB per token at 250K, the same for every build) takes over.
+- **Generating.** Generation is limited by how much weight data each token reads, so 4-bit leads: 1.3–1.7× faster than 8-bit and 1.5–2.3× faster than 16-bit with `xhigh`. The gap narrows at long contexts, where reading the KV cache takes over: about 16 GiB at 250K, read in full for every token and the same for every build.
 - **Memory.** The fresh-session peaks are the resident weights (17.5, 30.1 and 52.3 GiB) plus the same context-related memory: about 8.5, 23.5 and 46.5 GiB at 32K, 128K and 256K.
 - **Memory pressure.**
   - 8-bit: the critical moment above, then a 15-second "warning" during its `xhigh` 256K read with 3 GiB of swap added.
@@ -253,7 +255,7 @@ The same benchmark was run on Ollama's 8-bit (`qwen3.8:27b-mxfp8`) and 16-bit (`
 
 ## LM Studio: Qwen3.8 27B (8-bit)
 
-The same documents, sequence and output caps were run on LM Studio from 15:09 to 17:31 on 2026-10-21. LM Studio is the server embraOS vets Qwen3.8 on. The closest Ollama comparison is the 8-bit MXFP8 build. Both are 8-bit, though in different formats: MLX affine integers for LM Studio, 8-bit floats for Ollama.
+The same documents, sequence and output caps were run on LM Studio from 15:09 to 17:31 on 2026-10-21. embraOS lists Qwen3.8 as vetted on both servers ([RECOMMENDED-LOCAL-MODELS.md](RECOMMENDED-LOCAL-MODELS.md)). The closest Ollama comparison is the 8-bit MXFP8 build. Both are 8-bit, though in different formats: MLX affine integers for LM Studio, 8-bit floats for Ollama.
 
 **Thinking off**
 
@@ -326,7 +328,7 @@ The same documents, sequence and output caps were run on LM Studio from 15:09 to
   - With one sample each, this doesn't show that the 8-bit build is more prone to looping.
 - **Past the window, silently.**
   - The 247,589-token prompt plus 16,383 output tokens comes to 263,972, about 1,800 tokens past the 262,144-token context the model was loaded with. LM Studio raised no error and logged nothing.
-  - These requests set no overflow policy. embraOS's LM Studio preset sets `contextOverflowPolicy: stopAtLimit`, which would have ended the turn at the window with an error.
+  - These requests set no overflow policy. embraOS's LM Studio preset sets `contextOverflowPolicy: stopAtLimit`. With it, LM Studio refuses a prompt that does not fit with an error; what it sends when generation reaches the window is untested.
 - **The follow-up changed shape.** Chaining replays the previous turn.
   - At 32K that replay included the reasoning: 5,249 new tokens to read, against 2,109 in the Ollama 4-bit run, which sent back only the answer.
   - At 256K the replay would not have fit, so LM Studio silently dropped the 16,383 reasoning tokens. The follow-up was exactly the size of the original prompt, and the model answered in 750 tokens without reasoning, despite `xhigh`.
@@ -381,7 +383,7 @@ Exact two-sided Mann-Whitney tests, five samples per side:
 ### Reading the prompt
 
 - **Reading cost grows in a straight line with position.** The fits are in the tables above. Nemotron is 2.14 ms + 11.6 ns × position per token; Qwen3.8 is 3.2–3.8 ms + 43–45 ns × position.
-- **Why Qwen3.8 is slower to read.** It's dense, so it reads with all 27.8B parameters against Nemotron's 12B. Its 16 full-attention layers also cost about 3.7× more per position than Nemotron's 8: 24 query heads of width 256 against 32 of width 128.
+- **Why Qwen3.8 is slower to read.** It's dense, so it reads with all 27.8B parameters against Nemotron's 12B. Its 16 full-attention layers also do 3× the attention work per position of Nemotron's 8: 24 query heads of width 256 per layer against 32 of width 128. The fitted per-position costs differ by 3.7–3.9×.
 - **The results repeat.** Read times in the thinking-off and thinking-on passes matched within about 1% for every build, including the 8-bit 256K run that overlapped a download.
 - **Nemotron beyond 256K, extrapolated.** About 45 minutes for 512K and 2.4 hours for 1M on a cold read. Peak memory is about 79 GiB + 29 KiB per token, which reaches the GPU limit near 1M, so the practical ceiling on this Mac is about 850K tokens with a margin.
 
@@ -412,7 +414,7 @@ Exact two-sided Mann-Whitney tests, five samples per side:
   - Ollama's MLX runner refuses a prompt at or above the window; embraOS sees this as HTTP 400 (`mlxrunner/pipeline.go`). It also stops generating when the window fills.
   - LM Studio, without a stop-at-limit policy, kept generating past it in the 8-bit 256K run.
 - **At 256K there was little room left.** The 256K document took about 247,600 tokens, leaving about 14,500 for thinking and answer. The Ollama builds used 3,600–4,400 of them. A hard agentic turn would not fit.
-- **embraOS's fixed overhead.** Each embraOS request carries about 20,000 tokens of tool manifest (RECOMMENDED-LOCAL-MODELS.md). The history and tool results then share the remaining ~240K with each turn's reasoning.
+- **embraOS's fixed overhead.** Each embraOS request carries about 20,000 tokens of tool manifest ([RECOMMENDED-LOCAL-MODELS.md](RECOMMENDED-LOCAL-MODELS.md)). The history and tool results then share the remaining ~240K with each turn's reasoning.
 - **What to plan around.** To keep max-reasoning turns from hitting the window, a Qwen3.8 session needs tens of thousands of tokens free. In practice, start a new session well before 200K. A warning from the brain at a threshold like that, as it already does for short GGUF windows, would make this visible.
 - **Nemotron has headroom.** Its 1M window (about 850K usable here) leaves plenty, at the cost of long cold reads.
 
@@ -474,7 +476,7 @@ Artificial Analysis Intelligence Index v4.3.2, read 2026-10-21:
    - It reasons like the unquantized model, where the 4-bit build reasoned less than half as long.
    - It fits 256K: 76 GiB in a fresh session, about 90 GiB with earlier conversations cached.
    - It generates 1.4–1.6× faster than LM Studio's 8-bit build, thanks to MTP.
-   - Re-check it against the tool surface, since the vetting was done on the 4-bit Ollama and 8-bit LM Studio builds.
+   - embraOS lists it as vetted, as a build of the vetted Qwen3.8. The tool-surface runs of the vetting used the 4-bit Ollama and 8-bit LM Studio builds.
 2. **Use the 16-bit build for maximum fidelity up to about 128K.** It reads fastest and is the model as trained. It generates slowest. At 256K it needs 98 GiB on Ollama (106 GiB on LM Studio) with nothing else cached, which long embraOS sessions would exceed.
 3. **Expect longer turns at higher precision.** With `xhigh` on a cached 32K prompt, turns took 66–81 s on the 4-bit build, 2–4 minutes on 8-bit and 2–5 minutes on 16-bit. Most of that comes from the model reasoning longer, not just generating more slowly.
 4. **Budget Qwen3.8 sessions for max reasoning.** The window is shared with thinking. A session near 250K has about 14K tokens left for a turn, so warn or start a new session well before that.
@@ -482,19 +484,20 @@ Artificial Analysis Intelligence Index v4.3.2, read 2026-10-21:
    - At 256K, LM Studio's 8-bit build on `xhigh` reasoned for 63 minutes without answering. Its 16-bit build answered, but after 6× Ollama's reasoning.
    - At 128K and 256K, LM Studio reasoned 6–11× longer than Ollama with the same weights. On LM Studio, expect long turns at large contexts.
    - On LM Studio, keep the `stopAtLimit` preset, since without it the window overflows silently.
-   - Consider a per-turn output-token cap for local max-reasoning presets; the brain sends none today.
+   - Consider a per-turn output-token cap for local turns at `xhigh`; the brain sends none today (`max_tokens: None` in `openai_compat/mod.rs`).
    - `/stop` remains the manual escape.
 6. **Keep models resident.** With `OLLAMA_KEEP_ALIVE=-1`, each turn costs only its new tokens. A reload re-reads the whole session: 34–39 minutes at 250K.
-7. **Decide whether earlier reasoning is replayed.**
+7. **Earlier reasoning is not replayed.**
    - Sending previous turns' reasoning back lengthens every follow-up (5,249 vs 2,109 new tokens at 32K) and fills the window faster.
-   - With the OpenAI-compatible endpoint embraOS uses, that is the brain's choice.
+   - The brain keeps reasoning out of the text it stores for the session, so no later turn replays it (guard `reasoning_delta_does_not_leak_into_full_response` in `grpc_service.rs`). Within one turn, it sends each tool-call step's reasoning back in the assistant message's `reasoning` field (`assistant_blocks_to_wire` in `openai_compat/conv.rs`).
+   - So an embraOS follow-up sends back the answer only, on both servers, like this benchmark's Ollama follow-ups. The LM Studio follow-ups here were chained with `previous_response_id`, which embraOS does not use.
    - LM Studio's own definition for Qwen3.8 turns "Preserve Thinking" on by default. That keeps the reasoning of every earlier turn in the template, whenever it is sent back.
-8. **Nemotron 3.5 Super is the fast, long-context option, but unvetted.** It reads 2–2.6× faster, generates up to 1.8× faster with thinking on, and goes past 262K. It stays "under evaluation": 12B active parameters puts it below embraOS's active-parameter threshold, and its agentic scores are well below Qwen3.8's. It is a candidate for long-document or "fast" presets once it has been run against the tool surface.
+8. **Nemotron 3.5 Super is the fast, long-context option, but unvetted.** It reads 2–2.6× faster, generates up to 1.8× faster with thinking on, and goes past 262K. It stays "under evaluation": 12B active parameters puts it below embraOS's active-parameter threshold, and its agentic scores are well below Qwen3.8's. It is a candidate for long documents, or where speed matters, once it has been run against the tool surface.
 
 ### LM Studio notes
 
 - **Qwen3.8 16-bit.**
-  - LM Studio has no official 16-bit build; lmstudio-community publishes only 4-, 6- and 8-bit. The build used here is `mlx-community/Qwen3.8-27B-bf16`.
+  - LM Studio has no official 16-bit build; lmstudio-community publishes 4-, 5-, 6- and 8-bit. The build used here is `mlx-community/Qwen3.8-27B-bf16`.
   - To expose reasoning levels through the API, it would need a model definition like the one for `qwen/qwen3.8-27b` in `~/.lmstudio/hub/models/`.
 - **Nemotron (not runnable yet).** The matching build is `nativ-community/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4` (80.2 GB).
   - It comes from the same NVIDIA NVFP4 checkpoint as the Ollama tag, includes the MTP head and vision encoder, and its greedy output matched NVIDIA's checkpoint token for token.
@@ -511,7 +514,7 @@ Artificial Analysis Intelligence Index v4.3.2, read 2026-10-21:
   - Read times repeated within about 1%. Reasoning length varied up to 5× between samples of one prompt, so single-run reasoning comparisons, including everything at 128K and 256K, are indicative only.
 - **One task.** The task was a document overview, not tool calling. How long a model thinks depends heavily on the task, and agentic turns usually think far longer.
 - **Estimated split on Ollama.** The thinking/answer token split is estimated from streamed chunks, because speculative decoding emits several tokens per chunk. LM Studio's split is exact.
-- **Sampling.** Each model used its own default sampling, which affects speculative-decoding acceptance and so generation speed. LM Studio was pinned to Qwen3.8's Ollama defaults.
+- **Sampling.** Each model used its own default sampling, which affects speculative-decoding acceptance and so generation speed. LM Studio was pinned to Qwen3.8's Ollama defaults. embraOS's requests to Ollama run at `temperature` and `top_p` 1.0 instead (see [Test setup](#test-setup)).
 - **Two different 8-bit formats.** Ollama's MXFP8 (8-bit floats with shared scales) and LM Studio's MLX affine 8-bit integers are both near-lossless, but not identical.
 - **Memory measurement.**
   - Ollama's figures are the MLX runner's own peaks. "Fresh session" subtracts earlier cached conversations, except for the 16-bit 256K runs, which really did start fresh.
@@ -521,7 +524,7 @@ Artificial Analysis Intelligence Index v4.3.2, read 2026-10-21:
   - The 8-bit thinking-off 256K run overlapped a 55 GB download.
   - The start of the LM Studio thinking-off pass overlapped a Nemotron download.
   - Both used disk and network only, but macOS memory behavior differed, so the pressure observations are indicative.
-- **Follow-ups were built differently on each server.** LM Studio's response chaining replays earlier reasoning when it fits, while Ollama's follow-ups sent back only the answer.
+- **Follow-ups were built differently on each server.** LM Studio's response chaining replays earlier reasoning when it fits, while Ollama's follow-ups sent back only the answer, as embraOS's do on both servers.
 - **LM Studio's 16-bit build ran a reduced set.** It ran only the `xhigh` pass, because its repo exposes no reasoning setting and thinking could not be turned off. Its 256K request ran separately, from a fresh load.
 - **Module coverage is a crude check.** It counts module names in backticks, bold or headings; it is not a quality score.
 - **Third-party scores change.** The Artificial Analysis figures may change as evaluations are updated.
@@ -531,11 +534,12 @@ Artificial Analysis Intelligence Index v4.3.2, read 2026-10-21:
 - Artificial Analysis comparisons: [Nemotron 3.5 Super VL vs Qwen3.8 27B](https://artificialanalysis.ai/models/comparisons/nemotron-3-5-super-vl-vs-qwen3-8-27b), [Qwen3.8 27B (medium)](https://artificialanalysis.ai/models/qwen3-8-27b-medium), [launch article](https://artificialanalysis.ai/articles/nemotron-3-5-super-and-bolt)
 - [NVIDIA Nemotron 3.5 Super VL model card](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-BF16) and [NVFP4 release](https://huggingface.co/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4)
 - [NVIDIA Developer Forums: early DGX Spark tester thread](https://forums.developer.nvidia.com/t/nvidia-nemotron-3-5-super-vl-120b-a12b-released-with-spark-dedicated-vllm-config-lilicorr-speculative-decoding-model/385969)
-- [embraOS: RECOMMENDED-LOCAL-MODELS.md](https://github.com/Ward-Software-Defined-Systems/embraOS/blob/main/docs/LOCAL-MODELS/RECOMMENDED-LOCAL-MODELS.md)
+- embraOS: [RECOMMENDED-LOCAL-MODELS.md](RECOMMENDED-LOCAL-MODELS.md), and `crates/embra-brain/src/provider/openai_compat/` (`conv.rs`, `mod.rs`)
 - Ollama library tags: [qwen3.8](https://ollama.com/library/qwen3.8/tags) and [qwen3.6](https://ollama.com/library/qwen3.6/tags)
 - Ollama v0.40.6 source:
-  - `openai/openai.go` (`ThinkingFromReasoningEffort`)
+  - `openai/openai.go` (`ThinkingFromReasoningEffort`; `FromChatRequest`, which sets `temperature` and `top_p` to 1.0 when a request sends none)
   - `model/renderers/thinking.go` (`ResolveThinking`)
+  - `server/routes.go` (`modelOptions`, which applies the request's options after the model's)
   - `model/renderers/qwen35.go` (the `xhigh` instruction)
   - `mlxrunner/pipeline.go` (context limit, memory log)
   - `mlxrunner/mtp.go` and `mlxrunner/speculate.go` (draft sampling and acceptance)
