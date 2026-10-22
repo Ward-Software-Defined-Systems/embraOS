@@ -38,7 +38,8 @@ Since the fast-forward of 2026-10-03 `main` also carries the code-review pit sto
   - **Reasoning replay.** Reasoning is never replayed to a later turn, and within a turn it goes back in the `reasoning` field.
   - **Vetting.** The vetting lines match the models doc.
   - **`stopAtLimit`.** The claim about generation that reaches the window is marked untested.
-  - **Smaller corrections.** lmstudio-community's 5-bit build; the attention arithmetic, 3× by head count and 3.7–3.9× fitted; the KV-cache wording; LM Studio's 16-bit build ran at `xhigh` only; relative links.
+  - **Draft head.** Neither LM Studio Qwen3.8 build carries the MTP head. Each holds 1,184 of the 1,199 tensors in Qwen's release, all but the head's 15 (`mtp.*` in its `model.safetensors.index.json`), so the BF16 repo is 27.36B parameters against 27.78B; Ollama's builds hold all 1,199. The doc had given only LM Studio's vision-model path as the reason it runs no speculative decoding; the models doc's summary now says so too.
+  - **Smaller corrections.** lmstudio-community's 5-bit build; the attention arithmetic, 3× by head count and 3.7–3.9× fitted; the KV-cache wording; LM Studio's 16-bit build ran at `xhigh` only; recommendation 1 no longer calls the 8-bit build a default, since embraOS has no default local model; the 8-bit generation lead over LM Studio is the `xhigh` figure (1.1× with thinking off at 256K); relative links.
 - The models doc's local table gains `nativ-community/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4` on LM Studio, pending.
   - It is an MLX conversion of NVIDIA's NVFP4 release: 80.2 GB of weights and 1,048,576 tokens of context in its `config.json`.
   - It does not load yet, because LM Studio's MLX runtime 1.13.1 has no `nemotron_h_omni` package.

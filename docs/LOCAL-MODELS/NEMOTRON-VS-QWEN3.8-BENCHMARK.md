@@ -41,9 +41,9 @@ Each configuration ran with thinking off and at the highest reasoning level the 
 - **The 16-bit build fits at 256K only from a fresh session.** It peaked at 98.1 GiB, 9 GiB under the Mac's 107.5 GiB GPU limit. With earlier conversations cached it would go over.
 
 **LM Studio (Qwen3.8 8-bit and 16-bit)**
-- **With the same 16-bit weights on both servers, Ollama generates 1.7–2× faster, and LM Studio reads prompts 2–7% faster.**
-  - The generation gap is speculative decoding: Ollama uses Qwen3.8's MTP draft head, and LM Studio runs vision models without it.
-  - At 8-bit the gaps are 1.4–1.6× and 6–15%.
+- **With the same 16-bit model weights on both servers, Ollama generates 1.7–2× faster, and LM Studio reads prompts 2–7% faster.**
+  - The generation gap is speculative decoding: Ollama uses Qwen3.8's MTP draft head. Neither LM Studio build carries one, and LM Studio runs vision models without one.
+  - At 8-bit the gaps are 1.4–1.6× with `xhigh` and 6–15%. With thinking off, Ollama's generation lead shrank to 1.1× at 256K.
 - **At long context, LM Studio reasoned far longer than Ollama.**
   - At 128K, both LM Studio builds used about 2,700–2,800 reasoning tokens, against about 210–250 for all three Ollama builds: about 11×.
   - At 256K, LM Studio's 16-bit build used 3,916, against about 650 for Ollama's: 6×.
@@ -53,7 +53,7 @@ Each configuration ran with thinking off and at the highest reasoning level the 
   - The 8-bit build spent the whole 16,384-token output cap enumerating modules. That took 63 minutes, and it ran about 1,800 tokens past the window without an error.
   - The 16-bit build answered in 49.8 minutes and named all 42 modules. Ollama's 16-bit build took 42.4 minutes and named 41.
   - Every Ollama build answered after 500–650 reasoning tokens.
-- **LM Studio's 16-bit build fits at 256K from a fresh load, with almost no margin.** Its engine peaked at 106 GiB, 1.5 GiB under the GPU limit, against 98.1 GiB for Ollama's identical weights. Swap didn't grow, and the follow-up stayed under that peak.
+- **LM Studio's 16-bit build fits at 256K from a fresh load, with almost no margin.** Its engine peaked at 106 GiB, 1.5 GiB under the GPU limit, against 98.1 GiB for Ollama's build, which adds the MTP head to the same weights. Swap didn't grow, and the follow-up stayed under that peak.
 
 ## Results at a glance
 
@@ -113,8 +113,8 @@ Each configuration ran with thinking off and at the highest reasoning level the 
 | Qwen3.8 4-bit, Ollama¹ | `qwen3.8:27b-mlx` (= `27b-nvfp4`) | NVFP4 | 18.2 GB | 17.5 GiB | 3.3–3.6 s | yes |
 | Qwen3.8 8-bit, Ollama | `qwen3.8:27b-mxfp8` | MXFP8 (8-bit float, shared scales) | 31.7 GB | 30.1 GiB | 2.3–5.6 s | yes |
 | Qwen3.8 16-bit, Ollama | `qwen3.8:27b-mlx-bf16` | BF16, unquantized | 55.6 GB | 52.3 GiB | 8.0–9.6 s | yes |
-| Qwen3.8 8-bit, LM Studio | `qwen/qwen3.8-27b` (lmstudio-community MLX 8-bit) | MLX affine 8-bit | 29.5 GB | 27.5 GiB | 9.0 s | no (not on LM Studio's vision-model path) |
-| Qwen3.8 16-bit, LM Studio | `qwen3.8-27b` (`mlx-community/Qwen3.8-27B-bf16`) | BF16, unquantized | 54.7 GB | 52 GiB | 15 s | no |
+| Qwen3.8 8-bit, LM Studio | `qwen/qwen3.8-27b` (lmstudio-community MLX 8-bit) | MLX affine 8-bit | 29.5 GB | 27.5 GiB | 9.0 s | no: the build has no MTP head, and LM Studio's vision-model path runs none |
+| Qwen3.8 16-bit, LM Studio | `qwen3.8-27b` (`mlx-community/Qwen3.8-27B-bf16`) | BF16, unquantized | 54.7 GB | 52 GiB | 15 s | no: the repo has no MTP head |
 
 ¹ The 4-bit build was removed from this Mac after testing, replaced by the 8-bit and 16-bit builds.
 
@@ -273,7 +273,7 @@ The same documents, sequence and output caps were run on LM Studio from 15:09 to
 | 128K | **11.7** / 12.8 min | 2,675 / ~210 | 12.1 / **18.9 tok/s** | 18.2 / **16.4 min** | — | 59 GiB | 14/14 |
 | 256K | **33.8** / 38.5 min | 16,383 (the cap) / ~500 | 9.4 / **12.9 tok/s** | **no answer** after 62.7 min / 44.1 min | **99** / 135 s | 88 GiB; 104 GiB in the follow-up | 0/42 (no answer) |
 
-- **Speed.** LM Studio reads prompts 6–15% faster than Ollama's 8-bit build. Ollama generates 1.4–1.6× faster with `xhigh`, because it uses its MTP draft head and LM Studio's vision-model path runs no speculative decoding.
+- **Speed.** LM Studio reads prompts 6–15% faster than Ollama's 8-bit build. Ollama generates 1.4–1.6× faster with `xhigh`, because it uses its MTP draft head. LM Studio's build has none, and its vision-model path runs no speculative decoding.
 - **Memory.** It is about the same once weights are counted: LM Studio's 8-bit weights are 2.6 GiB smaller, and its peaks match Ollama's raw peaks within about 2 GiB.
 - **Measurement differences.** LM Studio's reasoning counts are exact and Ollama's are estimates. LM Studio's memory is the engine process's footprint. Its first two thinking-off figures are estimated from wired memory, because the footprint sampler started later.
 
@@ -307,7 +307,7 @@ The same documents, sequence and output caps were run on LM Studio from 15:09 to
 | 256K | Peak memory (fresh load) | 106 GiB | **98 GiB** |
 | 256K | Modules named | **42/42** | 41/42 |
 
-- **Same weights, different servers.** Ollama generates 1.7–2× faster, which is the effect of its MTP draft head. LM Studio reads prompts 2–7% faster. Both named every module at 32K and 128K.
+- **Same model weights, different servers.** Ollama generates 1.7–2× faster, which is the effect of its MTP draft head. This repo has none: it holds 1,184 of the 1,199 tensors in Qwen's release, all but the draft head's 15, so 27.36B parameters against 27.78B. LM Studio reads prompts 2–7% faster. Both named every module at 32K and 128K.
 - **Memory is close up to 128K and tight at 256K.**
   - LM Studio's engine footprint was 3 GiB above Ollama's raw MLX peak at 32K and 128K.
   - At 256K, both from a fresh load, LM Studio peaked at 106 GiB against Ollama's 98.1 GiB.
@@ -393,7 +393,7 @@ Exact two-sided Mann-Whitney tests, five samples per side:
 - **What sets the speed.** Each new token reads the weights and the whole KV cache.
   - For Qwen3.8 the weights are about 15, 28 or 50 GiB depending on precision, and the cache about 16 GiB at 250K.
   - For Nemotron the active weights are about 7 GiB and its cache about 2 GiB at 242K.
-- **MTP draft acceptance** was highest on Nemotron (0.90–0.93 with thinking on). On Qwen3.8 it ran 0.47–0.88 across builds, partly because Qwen3.8 samples at temperature 1.0 against Nemotron's 0.8. LM Studio doesn't use the draft head at all. With identical 16-bit weights, that alone made Ollama 1.7–2× faster at generating.
+- **MTP draft acceptance** was highest on Nemotron (0.90–0.93 with thinking on). On Qwen3.8 it ran 0.47–0.88 across builds, partly because Qwen3.8 samples at temperature 1.0 against Nemotron's 0.8. LM Studio doesn't use a draft head at all, and neither of its builds carries one. With the same 16-bit model weights, that alone made Ollama 1.7–2× faster at generating.
 
 ### Thinking at max effort
 
@@ -472,10 +472,10 @@ Artificial Analysis Intelligence Index v4.3.2, read 2026-10-21:
 
 ### What this means for embraOS's local presets
 
-1. **Make the 8-bit Ollama build the default local brain** (`qwen3.8:27b-mxfp8`).
+1. **Pick the 8-bit Ollama build for the local brain** (`qwen3.8:27b-mxfp8`). embraOS has no default local model: the wizard and `/model` list what the server serves.
    - It reasons like the unquantized model, where the 4-bit build reasoned less than half as long.
    - It fits 256K: 76 GiB in a fresh session, about 90 GiB with earlier conversations cached.
-   - It generates 1.4–1.6× faster than LM Studio's 8-bit build, thanks to MTP.
+   - With `xhigh` it generates 1.4–1.6× faster than LM Studio's 8-bit build, thanks to MTP.
    - embraOS lists it as vetted, as a build of the vetted Qwen3.8. The tool-surface runs of the vetting used the 4-bit Ollama and 8-bit LM Studio builds.
 2. **Use the 16-bit build for maximum fidelity up to about 128K.** It reads fastest and is the model as trained. It generates slowest. At 256K it needs 98 GiB on Ollama (106 GiB on LM Studio) with nothing else cached, which long embraOS sessions would exceed.
 3. **Expect longer turns at higher precision.** With `xhigh` on a cached 32K prompt, turns took 66–81 s on the 4-bit build, 2–4 minutes on 8-bit and 2–5 minutes on 16-bit. Most of that comes from the model reasoning longer, not just generating more slowly.
@@ -505,6 +505,7 @@ Artificial Analysis Intelligence Index v4.3.2, read 2026-10-21:
   - `Duckets/…-MLX-4bit` (69.4 GB) is a different quantization, standard MLX 4-bit made from the BF16 release, with no MTP head.
 - **LM Studio's vision path.**
   - LM Studio loads every model with a `vision_config`, which includes Qwen3.8 and Nemotron VL, through its batched vision path. That path runs no speculative decoding.
+  - Neither Qwen3.8 build used here carries a draft head anyway. `lmstudio-community/Qwen3.8-27B-MLX-8bit` and `mlx-community/Qwen3.8-27B-bf16` each hold 1,184 of the 1,199 tensors in Qwen's release; the 15 missing are the MTP head's (`mtp.*` in the release's `model.safetensors.index.json`). Ollama's three builds hold all 1,199.
   - It also refuses KV cache quantization: "The mlx-vlm batched vision path does not support KV cache quantization yet".
 
 ## Caveats
@@ -546,4 +547,5 @@ Artificial Analysis Intelligence Index v4.3.2, read 2026-10-21:
   - `mlxrunner/sample/sample.go` (sampler order)
 - LM Studio MLX engine (runtime 1.13.1): `mlx_engine/generate.py`, `mlx_engine/utils/sampling.py`, `mlx_engine/model_kit/batched_vision/prompt_cache/`
 - LM Studio REST API: [`POST /api/v1/chat`](https://lmstudio.ai/docs/developer/rest/chat) and [streaming events](https://lmstudio.ai/docs/developer/rest/streaming-events)
-- MLX builds: [mlx-community Qwen3.8-27B-bf16](https://huggingface.co/mlx-community/Qwen3.8-27B-bf16), [nativ-community Nemotron NVFP4](https://huggingface.co/nativ-community/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4), [Duckets Nemotron MLX-4bit](https://huggingface.co/Duckets/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-MLX-4bit)
+- Qwen's release, for the tensor count: [Qwen/Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B)
+- MLX builds: [lmstudio-community Qwen3.8-27B-MLX-8bit](https://huggingface.co/lmstudio-community/Qwen3.8-27B-MLX-8bit), [mlx-community Qwen3.8-27B-bf16](https://huggingface.co/mlx-community/Qwen3.8-27B-bf16), [nativ-community Nemotron NVFP4](https://huggingface.co/nativ-community/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4), [Duckets Nemotron MLX-4bit](https://huggingface.co/Duckets/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-MLX-4bit)
