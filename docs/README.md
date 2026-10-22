@@ -24,6 +24,7 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 ## Local models — `LOCAL-MODELS/`
 
 - [LOCAL-MODELS/RECOMMENDED-LOCAL-MODELS.md](LOCAL-MODELS/RECOMMENDED-LOCAL-MODELS.md) — Vetted models and server configuration for the Ollama / LM Studio backends.
+- [LOCAL-MODELS/NEMOTRON-VS-QWEN3.8-BENCHMARK.md](LOCAL-MODELS/NEMOTRON-VS-QWEN3.8-BENCHMARK.md) — A long-context benchmark on the Mac Studio: Nemotron 3.5 Super against Qwen3.8 27B, and Qwen3.8 at 4, 8 and 16 bits on Ollama and LM Studio.
 - [LOCAL-MODELS/LOCAL_MODEL_SETTINGS/](LOCAL-MODELS/LOCAL_MODEL_SETTINGS/) — Importable server-side presets for the local backends: the LM Studio preset for Qwen3.8 27B.
 
 ## The two graphs — `MULTI-GRAPH/`
