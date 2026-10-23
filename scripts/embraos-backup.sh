@@ -38,6 +38,9 @@
 # as long as the VM was shut down cleanly (embrad sends SIGTERM → WardSONDB flushes).
 
 set -euo pipefail
+# A backup holds the soul hash, the CA key and the database: every file and
+# directory this script creates is readable by its owner alone.
+umask 077
 
 # --- Configuration ---
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

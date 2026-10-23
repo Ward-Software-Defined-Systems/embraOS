@@ -1,8 +1,12 @@
 #!/bin/bash
 # Post-build: prepare rootfs before SquashFS creation
 
+# A failed step stops the build, and an unset or empty target directory
+# stops it here: every `rm -rf` below is rooted on it (#33).
+set -euo pipefail
+
 BOARD_DIR="$(dirname "$0")"
-TARGET_DIR="$1"
+TARGET_DIR="${1:?post_build.sh needs the target directory as its argument}"
 
 # Remove unnecessary files for minimal rootfs
 rm -rf "${TARGET_DIR}/usr/share/man"

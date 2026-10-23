@@ -7,6 +7,13 @@
 # config into BUILD_DIR. One committed config builds both arches — no
 # per-arch sed.
 
+# A failed step stops the build; the three directories Buildroot exports
+# must be set, since `rm -rf` and genimage are rooted on them (#33).
+set -euo pipefail
+: "${BUILD_DIR:?post_image.sh runs under Buildroot, which exports BUILD_DIR}"
+: "${BINARIES_DIR:?post_image.sh runs under Buildroot, which exports BINARIES_DIR}"
+: "${TARGET_DIR:?post_image.sh runs under Buildroot, which exports TARGET_DIR}"
+
 BOARD_DIR="$(dirname "$0")"
 GENIMAGE_CFG_IN="${BOARD_DIR}/genimage.cfg.in"
 GENIMAGE_CFG="${BUILD_DIR}/genimage.cfg"
