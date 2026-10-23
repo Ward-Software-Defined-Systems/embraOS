@@ -3675,19 +3675,17 @@ async fn handle_slash_command(
         }
         "/git-setup" => {
             if args.is_empty() {
-                let name_out = crate::tools::engineering::git::git_command()
-                    .args(["config", "--global", "user.name"]).output().await
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    .unwrap_or_default();
-                let email_out = crate::tools::engineering::git::git_command()
-                    .args(["config", "--global", "user.email"]).output().await
-                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                    .unwrap_or_default();
-                send_msg(tx, format!(
-                    "Git config:\n  user.name:  {}\n  user.email: {}\n\nUsage: /git-setup <name> | <email>",
-                    if name_out.is_empty() { "(not set)".to_string() } else { name_out },
-                    if email_out.is_empty() { "(not set)".to_string() } else { email_out },
-                )).await;
+                match crate::tools::engineering::git::identity().await {
+                    Ok((name, email)) => {
+                        let shown = |v: String| if v.is_empty() { "(not set)".to_string() } else { v };
+                        send_msg(tx, format!(
+                            "Git config:\n  user.name:  {}\n  user.email: {}\n\nUsage: /git-setup <name> | <email>",
+                            shown(name),
+                            shown(email),
+                        )).await;
+                    }
+                    Err(e) => send_msg(tx, format!("Git config could not be read: {e}")).await,
+                }
             } else {
                 let parts: Vec<&str> = args.splitn(2, " | ").collect();
                 if parts.len() < 2 {
@@ -3696,11 +3694,19 @@ async fn handle_slash_command(
                 }
                 let name = parts[0].trim();
                 let email = parts[1].trim();
-                let _ = crate::tools::engineering::git::git_command()
-                    .args(["config", "--global", "user.name", name]).output().await;
-                let _ = crate::tools::engineering::git::git_command()
-                    .args(["config", "--global", "user.email", email]).output().await;
-                send_msg(tx, format!("Git config updated: user.name='{}', user.email='{}'", name, email)).await;
+                // The result is reported as it is: a failed write is said,
+                // never "updated" (William's live check of 2026-10-23 found
+                // no trace of the command either; the change is logged).
+                match crate::tools::engineering::git::set_identity(name, email).await {
+                    Ok(()) => {
+                        info!("git identity set by the operator: user.name='{name}', user.email='{email}'");
+                        send_msg(tx, format!("Git config updated: user.name='{}', user.email='{}'", name, email)).await;
+                    }
+                    Err(e) => {
+                        warn!("git identity not written: {e}");
+                        send_msg(tx, format!("Git config not updated: {e}")).await;
+                    }
+                }
             }
         }
         _ => {

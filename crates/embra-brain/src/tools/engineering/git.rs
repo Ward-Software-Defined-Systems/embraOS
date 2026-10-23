@@ -81,6 +81,58 @@ fn git_command_for(global: &Path, hooks: &Path, config: &[(String, String)]) -> 
     cmd
 }
 
+/// The operator's identity from `/git-setup`: both keys written to the
+/// global file under STATE, live for the next git. A failed write is an
+/// error naming the key; nothing is reported written that was not.
+pub(crate) async fn set_identity(name: &str, email: &str) -> Result<(), String> {
+    set_identity_in(Path::new(GIT_CONFIG_GLOBAL), Path::new(GIT_HOOKS_DIR), name, email).await
+}
+
+/// [`set_identity`] against the given files, for a test.
+async fn set_identity_in(global: &Path, hooks: &Path, name: &str, email: &str) -> Result<(), String> {
+    for (key, value) in [("user.name", name), ("user.email", email)] {
+        let out = git_command_for(global, hooks, &[])
+            .args(["config", "--global", key, value])
+            .output()
+            .await
+            .map_err(|e| format!("{key}: {e}"))?;
+        if !out.status.success() {
+            return Err(format!("{key}: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        }
+    }
+    Ok(())
+}
+
+/// The identity git resolves from the global file (`user.name`,
+/// `user.email`), each empty when unset or when the file does not exist
+/// yet. An unreadable file is an error.
+pub(crate) async fn identity() -> Result<(String, String), String> {
+    identity_in(Path::new(GIT_CONFIG_GLOBAL), Path::new(GIT_HOOKS_DIR)).await
+}
+
+/// [`identity`] against the given files, for a test.
+async fn identity_in(global: &Path, hooks: &Path) -> Result<(String, String), String> {
+    if !global.exists() {
+        return Ok((String::new(), String::new()));
+    }
+    let mut values = Vec::with_capacity(2);
+    for key in ["user.name", "user.email"] {
+        let out = git_command_for(global, hooks, &[])
+            .args(["config", "--global", "--get", key])
+            .output()
+            .await
+            .map_err(|e| format!("{key}: {e}"))?;
+        // Exit status 1 is "unset"; anything else is an error.
+        if !out.status.success() && out.status.code() != Some(1) {
+            return Err(format!("{key}: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        }
+        values.push(String::from_utf8_lossy(&out.stdout).trim().to_string());
+    }
+    let email = values.pop().unwrap_or_default();
+    let name = values.pop().unwrap_or_default();
+    Ok((name, email))
+}
+
 /// Startup: the configuration directory and the empty hooks directory are
 /// created, the operator's identity is adopted from the workspace
 /// `.gitconfig` the first time (a sealed instance set it with `/git-setup`
@@ -1565,6 +1617,29 @@ mod git_command_tests {
         let plain = env_of(&git_command());
         assert_eq!(plain["GIT_CONFIG_COUNT"], "1");
         assert!(!plain.contains_key("GIT_CONFIG_KEY_1"));
+    }
+
+    /// `/git-setup`'s two halves against a temporary global file: the
+    /// identity written reads back, an unset one reads as empty, and a
+    /// write that fails (the global path is a directory) is an error
+    /// naming the key, never reported as done. Needs `git` on the host.
+    #[tokio::test]
+    async fn the_identity_is_written_read_back_and_a_failed_write_is_an_error() {
+        let tmp = std::env::temp_dir().join(format!("embra-git-identity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("hooks")).unwrap();
+        let global = tmp.join("config");
+        let hooks = tmp.join("hooks");
+        assert_eq!(identity_in(&global, &hooks).await.unwrap(), (String::new(), String::new()));
+        set_identity_in(&global, &hooks, "Embra Operator", "op@example.test").await.unwrap();
+        assert_eq!(
+            identity_in(&global, &hooks).await.unwrap(),
+            ("Embra Operator".to_string(), "op@example.test".to_string())
+        );
+        std::fs::create_dir_all(tmp.join("dir-as-config")).unwrap();
+        let err = set_identity_in(&tmp.join("dir-as-config"), &hooks, "x", "y").await.unwrap_err();
+        assert!(err.starts_with("user.name: ") && err.len() > "user.name: ".len(), "{err}");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     /// Startup under a temporary directory: the hooks directory exists and
