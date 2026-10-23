@@ -705,6 +705,25 @@ mod unlink_summary_tests {
     }
 }
 
+/// The fields `knowledge_update` never lets the model write: the identity
+/// and provenance of a node (`_id`, where it came from, when), the counters
+/// the read path keeps, and the embedding fields, which are derived from
+/// the node's own text (a forged vector would poison every similarity
+/// search; the write path and `/embeddings backfill` maintain them). The
+/// guard and its test read this one list.
+const IMMUTABLE: &[&str] = &[
+    "_id",
+    "source_entry_id",
+    "source_session",
+    "created_at",
+    "access_count",
+    "last_accessed",
+    "updated_at",
+    "embedding",
+    "embedding_model",
+    "embedding_updated_at",
+];
+
 /// `knowledge_update <collection>:<id> | <json_patch>` — update a semantic
 /// or procedural node in place while preserving every referencing edge.
 ///
@@ -760,22 +779,6 @@ pub async fn knowledge_update(params: &str, db: &WardsonDbClient, config: &Syste
         return "knowledge_update rejected (JSON patch is empty — nothing to update)".into();
     }
 
-    const IMMUTABLE: &[&str] = &[
-        "_id",
-        "source_entry_id",
-        "source_session",
-        "created_at",
-        "access_count",
-        "last_accessed",
-        "updated_at",
-        // Embedding fields are derived from the node's own text. The model
-        // must never hand-write a vector: it cannot compute one, and a forged
-        // value would silently poison every future similarity search. They are
-        // maintained by the write path and `/embeddings backfill`.
-        "embedding",
-        "embedding_model",
-        "embedding_updated_at",
-    ];
     for field in IMMUTABLE {
         if obj.contains_key(*field) {
             return format!(
@@ -1380,13 +1383,34 @@ mod gate_tests {
     }
 
     #[tokio::test]
-    async fn the_model_cannot_write_an_embedding_field() {
+    async fn the_model_cannot_write_any_immutable_field() {
         let db = nowhere();
-        for field in ["embedding", "embedding_model", "embedding_updated_at"] {
+        assert_eq!(super::IMMUTABLE.len(), 10, "the list the guard reads");
+        for field in super::IMMUTABLE {
             let params = format!(r#"memory.semantic:n1 | {{"{field}":"x"}}"#);
             let out = knowledge_update(&params, &db, &config()).await;
             assert!(out.contains(&format!("'{field}' is immutable")), "{field}: {out}");
         }
+    }
+
+    /// The two input guards of `knowledge_link` run before any read: a
+    /// self-loop and a weight outside (0, 1] are refused in their own
+    /// words, and a valid link clears both and reaches the database stage
+    /// (here an address that answers nothing, so no edge is created).
+    #[tokio::test]
+    async fn knowledge_link_refuses_a_self_loop_and_a_weight_outside_the_range() {
+        let db = nowhere();
+        let out = knowledge_link("memory.semantic:a | related_to | memory.semantic:a | 0.5", &db).await;
+        assert!(out.contains("node to itself"), "{out}");
+        for w in ["0", "1.5", "-0.1"] {
+            let out = knowledge_link(&format!("memory.semantic:a | related_to | memory.semantic:b | {w}"), &db).await;
+            assert!(out.contains("Weight must be"), "{w}: {out}");
+        }
+        let out = knowledge_link("memory.semantic:a | related_to | memory.semantic:b | 0.5", &db).await;
+        assert!(
+            !out.contains("node to itself") && !out.contains("Weight must be") && !out.starts_with("Created edge"),
+            "{out}"
+        );
     }
 
     /// Supersession is an edge now: a value for the old field is refused

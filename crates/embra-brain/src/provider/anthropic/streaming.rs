@@ -543,6 +543,43 @@ mod tests {
         }
     }
 
+
+    /// A tool call cut off mid-arguments (max_tokens) or with no arguments
+    /// at all finalizes as `{}`, so the tool's own required-field check
+    /// refuses the call instead of a side-effectful tool running on a
+    /// corrupted input (#56; the OpenAI-compat parser has the same rule).
+    #[tokio::test]
+    async fn a_truncated_or_empty_tool_input_finalizes_as_an_empty_object() {
+        let truncated = [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"file_delete","input":{}}}"#,
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"a\""}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"max_tokens"}}"#,
+            r#"{"type":"message_stop"}"#,
+        ];
+        let empty = [
+            r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_2","name":"file_delete","input":{}}}"#,
+            r#"{"type":"content_block_stop","index":0}"#,
+            r#"{"type":"message_delta","delta":{"stop_reason":"tool_use"}}"#,
+            r#"{"type":"message_stop"}"#,
+        ];
+        for events in [&truncated[..], &empty[..]] {
+            let out = run_stream(events).await;
+            let complete = out
+                .iter()
+                .find_map(|e| match e {
+                    AnthropicStreamEvent::Complete { response } => Some(response.clone()),
+                    _ => None,
+                })
+                .expect("Complete event");
+            match &complete.content[0] {
+                MessageBlock::ToolUse { input, .. } => {
+                    assert_eq!(input, &serde_json::json!({}), "{events:?}");
+                }
+                other => panic!("expected ToolUse, got {other:?}"),
+            }
+        }
+    }
     #[tokio::test]
     async fn multiple_blocks_preserve_order() {
         let events = [
