@@ -243,11 +243,7 @@ fn skips(candidate: &Candidate, new_doc: (&str, &str), except: Option<(&str, &st
 fn doc_to_candidate(doc: &serde_json::Value, collection: &str) -> Option<Candidate> {
     let id = doc.get("_id").and_then(|v| v.as_str())?.to_string();
     let created_at = doc.get("created_at").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let tags = doc
-        .get("tags")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect())
-        .unwrap_or_default();
+    let tags = super::text::string_array(doc, "tags");
     Some(Candidate { id, collection: collection.to_string(), created_at, tags })
 }
 

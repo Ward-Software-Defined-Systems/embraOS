@@ -110,40 +110,53 @@ pub(crate) fn sort_created_desc(docs: &mut [serde_json::Value]) {
 
 /// Build a `GraphNode` from a full stored doc (pure; extracted from the old
 /// `traversal::load_graph_node` so store-backed callers share one mapping).
+/// The text and type of a knowledge node by its collection: a semantic node
+/// (its category parsed, `Fact` when absent), a procedural node (the
+/// description as text, the title in the type) or an identity node.
+/// `None` for an entry or an unknown collection, whose fallbacks each
+/// caller keeps (#35: `graph_node_from_doc` and retrieval's
+/// `insert_collected` carried this match twice).
+pub(crate) fn classify_knowledge_node(doc: &serde_json::Value, collection: &str) -> Option<(String, NodeType)> {
+    match collection {
+        "memory.semantic" => {
+            let category = doc.get("category").and_then(|v| v.as_str())
+                .and_then(SemanticCategory::from_str)
+                .unwrap_or(SemanticCategory::Fact);
+            Some((
+                doc.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                NodeType::Semantic { category },
+            ))
+        }
+        "memory.procedural" => {
+            let title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let desc = doc.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            Some((desc, NodeType::Procedural { title }))
+        }
+        crate::identity_graph::IDENTITY_COLLECTION => {
+            let node_type = doc.get("node_type").and_then(|v| v.as_str())
+                .unwrap_or("").to_string();
+            Some((
+                doc.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                NodeType::Identity { node_type },
+            ))
+        }
+        _ => None,
+    }
+}
+
 pub(crate) fn graph_node_from_doc(
     doc: &serde_json::Value,
     collection: &str,
     id: &str,
     depth: u32,
 ) -> GraphNode {
-    let (preview_source, node_type) = match collection {
-        "memory.entries" => (
+    let (preview_source, node_type) = match classify_knowledge_node(doc, collection) {
+        Some(classified) => classified,
+        None if collection == "memory.entries" => (
             doc.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             NodeType::Episodic,
         ),
-        "memory.semantic" => {
-            let category = doc.get("category").and_then(|v| v.as_str())
-                .and_then(SemanticCategory::from_str)
-                .unwrap_or(SemanticCategory::Fact);
-            (
-                doc.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                NodeType::Semantic { category },
-            )
-        }
-        "memory.procedural" => {
-            let title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let desc = doc.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            (desc, NodeType::Procedural { title })
-        }
-        crate::identity_graph::IDENTITY_COLLECTION => {
-            let node_type = doc.get("node_type").and_then(|v| v.as_str())
-                .unwrap_or("").to_string();
-            (
-                doc.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                NodeType::Identity { node_type },
-            )
-        }
-        _ => (String::new(), NodeType::Episodic),
+        None => (String::new(), NodeType::Episodic),
     };
     GraphNode {
         id: id.to_string(),

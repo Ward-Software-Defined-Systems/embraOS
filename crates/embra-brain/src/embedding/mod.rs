@@ -168,6 +168,11 @@ pub async fn provider(cfg: &SystemConfig) -> Option<Arc<dyn EmbeddingProvider>> 
     if !embedding_enabled(cfg) {
         return None;
     }
+    // Loaded already: the common case on every turn. The name and the
+    // directory below are read for the first load alone (#44).
+    if let Some(p) = PROVIDER.get() {
+        return p.clone();
+    }
     let name = model_id(cfg);
     let dir = resolve_model_dir(cfg);
     PROVIDER

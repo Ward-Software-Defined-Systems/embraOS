@@ -502,10 +502,7 @@ async fn build_merge_plan(
     }
 
     let tags_of = |doc: &serde_json::Value| -> Vec<String> {
-        doc.get("tags")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|t| t.as_str()).map(String::from).collect())
-            .unwrap_or_default()
+        super::text::string_array(doc, "tags")
     };
     let (unioned_tags, tags_to_add) = union_tags(&tags_of(tgt_doc), &tags_of(src_doc));
 

@@ -161,9 +161,24 @@ pub async fn ensure_current(db: &WardsonDbClient, provider: &dyn EmbeddingProvid
 /// above `min_similarity`, best first, capped at `top_k`.
 pub async fn search(query: &[f32], top_k: usize, min_similarity: f32) -> Vec<(String, String, f32)> {
     let idx = index().await.read().await;
+    scan(&idx, query, top_k, min_similarity, None)
+}
+
+/// The one cosine pass behind `search` and `neighbors`: every vector of the
+/// index against `query`, those at or above `min_similarity` kept, `exclude`
+/// (a node's own key) left out, ranked best first under `top_k`. Brute
+/// force by decision (`embedding/mod.rs`).
+fn scan(
+    idx: &VectorIndex,
+    query: &[f32],
+    top_k: usize,
+    min_similarity: f32,
+    exclude: Option<&(String, String)>,
+) -> Vec<(String, String, f32)> {
     let hits: Vec<(String, String, f32)> = idx
         .vecs
         .iter()
+        .filter(|(key, _)| exclude != Some(*key))
         .filter_map(|((coll, id), v)| {
             let s = super::cosine(query, v);
             (s >= min_similarity).then(|| (coll.clone(), id.clone(), s))
@@ -197,16 +212,7 @@ pub async fn neighbors(
     let idx = index().await.read().await;
     let key = (collection.to_string(), id.to_string());
     let own = idx.vecs.get(&key)?;
-    let hits: Vec<(String, String, f32)> = idx
-        .vecs
-        .iter()
-        .filter(|(other, _)| **other != key)
-        .filter_map(|((coll, id), v)| {
-            let s = super::cosine(own, v);
-            (s >= min_similarity).then(|| (coll.clone(), id.clone(), s))
-        })
-        .collect();
-    Some(ranked(hits, top_k))
+    Some(scan(&idx, own, top_k, min_similarity, Some(&key)))
 }
 
 /// Write-through from the embed-on-write paths, so a freshly embedded node is

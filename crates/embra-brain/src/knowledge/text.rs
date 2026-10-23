@@ -48,6 +48,16 @@ pub(crate) fn content_tokens(s: &str) -> HashSet<String> {
         .collect()
 }
 
+/// The strings of an array field, in order, non-strings skipped; an absent
+/// or non-array field is empty. One helper for the tag and precondition
+/// reads that were copied across the module (#35).
+pub(crate) fn string_array(doc: &serde_json::Value, key: &str) -> Vec<String> {
+    doc.get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

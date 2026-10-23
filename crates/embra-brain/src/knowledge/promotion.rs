@@ -80,10 +80,7 @@ pub(crate) fn parse_procedure(procedure_json: &str) -> Result<Procedure> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| missing("description"))?
         .to_string();
-    let preconditions: Vec<String> = parsed.get("preconditions")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
-        .unwrap_or_default();
+    let preconditions: Vec<String> = super::text::string_array(&parsed, "preconditions");
     let steps = parsed.get("steps").ok_or_else(|| missing("steps"))?.clone();
     let outcomes = parsed.get("outcomes").ok_or_else(|| missing("outcomes"))?;
     let success = outcomes
@@ -284,10 +281,7 @@ async fn unpromoted_source(db: &WardsonDbClient, entry_id: &str) -> Result<Sourc
     }
 
     let content = doc.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let tags: Vec<String> = doc.get("tags")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
-        .unwrap_or_default();
+    let tags: Vec<String> = super::text::string_array(&doc, "tags");
     let session = doc.get("session").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
     Ok(SourceEntry { content, tags, session })

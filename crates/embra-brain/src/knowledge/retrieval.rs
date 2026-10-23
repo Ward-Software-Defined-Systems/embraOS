@@ -28,10 +28,10 @@ use crate::config::SystemConfig;
 use crate::db::WardsonDbClient;
 
 use super::idf::DocFreq;
-use super::node_store::{doc_tag_contains, sort_created_desc, NodeStore};
+use super::node_store::{doc_tag_contains, sort_created_desc, NodeStore, classify_knowledge_node};
 use super::text::content_tokens;
 use super::traversal::spawn_access_touches;
-use super::types::{content_preview, GraphNode, NodeType, RankedNode, SemanticCategory};
+use super::types::{content_preview, GraphNode, NodeType, RankedNode};
 
 /// Step-1 window: newest matches admitted per tag per collection. Raised
 /// 20 → 100 (2026-07-31): 20 was the old per-tag SERVER query's window;
@@ -700,44 +700,20 @@ fn insert_collected(
     // 0.9 for un-annotated semantic docs and a synthesized 1.0 for the other
     // three collections, i.e. a constant ~0.095 offset every candidate
     // received. The stored document field is untouched.
-    let (content, node_type) = match collection {
-        "memory.semantic" => {
-            let category = doc.get("category").and_then(|v| v.as_str())
-                .and_then(SemanticCategory::from_str)
-                .unwrap_or(SemanticCategory::Fact);
-            (
-                doc.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                NodeType::Semantic { category },
-            )
-        }
-        "memory.procedural" => {
-            let title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let desc = doc.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            (desc, NodeType::Procedural { title })
-        }
-        crate::identity_graph::IDENTITY_COLLECTION => {
-            // Identity nodes no longer reach retrieval at all: graph expansion
-            // was their only entry point and it is gone (2026-09-08). That is
-            // correct — the full sealed graph already rides the system prompt
-            // via `operational_mode_graph`, and identity docs carry `tags: []`
-            // so they could never produce a tag hit. The arm stays to mirror
-            // `node_store::graph_node_from_doc`'s classification.
-            let node_type = doc.get("node_type").and_then(|v| v.as_str())
-                .unwrap_or("").to_string();
-            (
-                doc.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                NodeType::Identity { node_type },
-            )
-        }
-        _ => (
+    // The three knowledge arms are `node_store::classify_knowledge_node`,
+    // the one classification (identity nodes no longer reach retrieval:
+    // graph expansion was their only entry point and it is gone, 2026-09-08,
+    // and the sealed graph rides the system prompt). The fallback here is
+    // retrieval's own: an entry, or an unknown collection, keeps its
+    // `content` for the rank-time preview.
+    let (content, node_type) = classify_knowledge_node(doc, collection).unwrap_or_else(|| {
+        (
             doc.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string(),
             NodeType::Episodic,
-        ),
-    };
+        )
+    });
 
-    let tags = doc.get("tags").and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect())
-        .unwrap_or_default();
+    let tags = super::text::string_array(doc, "tags");
     let created_at = doc.get("created_at").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let access_count = doc.get("access_count").and_then(|v| v.as_u64()).unwrap_or(0);
 
@@ -1076,6 +1052,7 @@ mod scoring_tests {
     //! the module doc comment at the top of this file is now wrong too: they
     //! are a matched pair.
     use super::*;
+    use crate::knowledge::types::SemanticCategory;
 
     fn item(
         id: &str,
