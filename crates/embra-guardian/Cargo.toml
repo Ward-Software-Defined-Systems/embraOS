@@ -31,7 +31,7 @@ proc-macro2 = { version = "1", features = ["span-locations"] }
 # syn (validator) is added in the core-modules step.
 # The version is on an LTS line. A bump goes to the next LTS line, not to the
 # newest release; tests/sandbox_limits.rs pins what it has to keep.
-wasmtime = { version = "48.0.3", default-features = false, features = ["cranelift", "runtime", "std"] }
+wasmtime = { version = "48.0.7", default-features = false, features = ["cranelift", "runtime", "std"] }
 
 [dev-dependencies]
 # `wat` compiles the small ABI fixture used by host/abi round-trip tests
