@@ -41,7 +41,10 @@ pub async fn gh_issues(db: &WardsonDbClient, param: &str) -> String {
             if !resp.status().is_success() {
                 return format!("GitHub API error: {}", resp.status());
             }
-            let issues: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
+            let issues: Vec<serde_json::Value> = match resp.json().await {
+                Ok(v) => v,
+                Err(e) => return format!("Failed to parse GitHub response: {}", e),
+            };
             if issues.is_empty() {
                 return format!("No open issues for {}.", param);
             }
@@ -95,6 +98,8 @@ async fn fetch_issue_thread_comments(
         .header("Authorization", format!("Bearer {}", token))
         .send()
         .await;
+    // Best-effort enrichment: the issue itself was read; a thread that
+    // cannot be fetched or decoded is shown as no comments.
     let raw: Vec<serde_json::Value> = match resp {
         Ok(r) if r.status().is_success() => r.json().await.unwrap_or_default(),
         _ => Vec::new(),
@@ -216,7 +221,10 @@ pub async fn gh_prs(db: &WardsonDbClient, param: &str) -> String {
             if !resp.status().is_success() {
                 return format!("GitHub API error: {}", resp.status());
             }
-            let prs: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
+            let prs: Vec<serde_json::Value> = match resp.json().await {
+                Ok(v) => v,
+                Err(e) => return format!("Failed to parse GitHub response: {}", e),
+            };
             if prs.is_empty() {
                 return format!("No open PRs for {}.", param);
             }
@@ -351,7 +359,10 @@ pub async fn gh_issue_create(db: &WardsonDbClient, param: &str) -> String {
                 let body = resp.text().await.unwrap_or_default();
                 return format!("GitHub API error {}: {}", status, body);
             }
-            let issue: serde_json::Value = resp.json().await.unwrap_or_default();
+            let issue: serde_json::Value = match resp.json().await {
+                Ok(v) => v,
+                Err(e) => return format!("Failed to parse GitHub response: {}", e),
+            };
             let number = issue.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
             let html_url = issue.get("html_url").and_then(|v| v.as_str()).unwrap_or("");
             format!("Issue #{} created: {}\n{}", number, title, html_url)
@@ -390,7 +401,10 @@ async fn post_github_comment(
                 let body_text = resp.text().await.unwrap_or_default();
                 return Err(format!("GitHub API error {}: {}", status, body_text));
             }
-            let v: serde_json::Value = resp.json().await.unwrap_or_default();
+            let v: serde_json::Value = match resp.json().await {
+                Ok(v) => v,
+                Err(e) => return Err(format!("Failed to parse GitHub response: {}", e)),
+            };
             let id = v.get("id").and_then(|x| x.as_u64()).unwrap_or(0);
             let html_url = v
                 .get("html_url")
@@ -517,7 +531,10 @@ async fn patch_issue_or_pr_state(
                 let body = resp.text().await.unwrap_or_default();
                 return format!("{} failed: GitHub API {}: {}", tool_name, status, body);
             }
-            let v: serde_json::Value = resp.json().await.unwrap_or_default();
+            let v: serde_json::Value = match resp.json().await {
+                Ok(v) => v,
+                Err(e) => return format!("Failed to parse GitHub response: {}", e),
+            };
             let html_url = v.get("html_url").and_then(|x| x.as_str()).unwrap_or("");
             if html_url.is_empty() {
                 format!("{} #{} {} in {}", artifact_label, number, verb, repo)
@@ -569,7 +586,10 @@ pub async fn gh_pr_create(db: &WardsonDbClient, param: &str) -> String {
                 let body = resp.text().await.unwrap_or_default();
                 return format!("GitHub API error {}: {}", status, body);
             }
-            let pr: serde_json::Value = resp.json().await.unwrap_or_default();
+            let pr: serde_json::Value = match resp.json().await {
+                Ok(v) => v,
+                Err(e) => return format!("Failed to parse GitHub response: {}", e),
+            };
             let number = pr.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
             let html_url = pr.get("html_url").and_then(|v| v.as_str()).unwrap_or("");
             format!("PR #{} created: {}\n{}", number, title, html_url)
@@ -623,7 +643,10 @@ pub async fn gh_pr_merge(db: &WardsonDbClient, param: &str) -> String {
             let status = resp.status();
             match status.as_u16() {
                 200 => {
-                    let v: serde_json::Value = resp.json().await.unwrap_or_default();
+                    let v: serde_json::Value = match resp.json().await {
+                        Ok(v) => v,
+                        Err(e) => return format!("Failed to parse GitHub response: {}", e),
+                    };
                     let sha = v.get("sha").and_then(|x| x.as_str()).unwrap_or("");
                     let sha_short = if sha.len() >= 7 { &sha[..7] } else { sha };
                     let merged = v.get("merged").and_then(|x| x.as_bool()).unwrap_or(false);
@@ -678,8 +701,10 @@ async fn fetch_classic_projects(token: &str, owner: &str) -> ProjectsFetch {
             Ok(resp) => {
                 let status = resp.status();
                 if status.is_success() {
-                    let body: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
-                    return ProjectsFetch::Ok(body);
+                    return match resp.json().await {
+                        Ok(body) => ProjectsFetch::Ok(body),
+                        Err(e) => ProjectsFetch::Err(format!("Failed to parse GitHub response: {}", e)),
+                    };
                 }
                 if status.as_u16() == 404 {
                     last_status = Some(status);

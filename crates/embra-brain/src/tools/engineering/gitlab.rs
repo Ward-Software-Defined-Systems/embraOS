@@ -175,47 +175,37 @@ pub async fn gl_issues(db: &WardsonDbClient, host: Option<&str>, project: &str) 
         Ok(t) => t,
         Err(e) => return e,
     };
-    let url = format!(
-        "https://{}/api/v4/projects/{}/issues?state=opened&per_page=10",
-        host,
-        encode_gitlab_project(project)
-    );
-    match gitlab_client()
-        .get(&url)
-        .header("User-Agent", USER_AGENT)
-        .header("PRIVATE-TOKEN", &token)
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            if !resp.status().is_success() {
-                return format!("GitLab API error: {}", resp.status());
-            }
-            let issues: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
-            if issues.is_empty() {
-                return format!("No open issues for {} on {}.", project, host);
-            }
-            let mut output = format!("=== Open Issues: {} ({}) ===\n", project, issues.len());
-            for issue in &issues {
-                let iid = issue.get("iid").and_then(|v| v.as_u64()).unwrap_or(0);
-                let title = issue.get("title").and_then(|v| v.as_str()).unwrap_or("?");
-                // GitLab labels are plain strings, not {name} objects.
-                let labels: Vec<&str> = issue
-                    .get("labels")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| arr.iter().filter_map(|l| l.as_str()).collect())
-                    .unwrap_or_default();
-                let label_str = if labels.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [{}]", labels.join(", "))
-                };
-                output.push_str(&format!("  #{} {}{}\n", iid, title, label_str));
-            }
-            output
-        }
-        Err(e) => format!("Failed to fetch issues: {}", e),
+    let path = format!("projects/{}/issues?state=opened&per_page=10", encode_gitlab_project(project));
+    // Through the shared read plumbing (#47): a failed read or decode is
+    // reported as itself, never as "no issues" (#60).
+    let issues = match gl_get(&host, &token, &path).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let Some(issues) = issues.as_array() else {
+        return "Failed to parse GitLab response: expected a list of issues".into();
+    };
+    if issues.is_empty() {
+        return format!("No open issues for {} on {}.", project, host);
     }
+    let mut output = format!("=== Open Issues: {} ({}) ===\n", project, issues.len());
+    for issue in issues {
+        let iid = issue.get("iid").and_then(|v| v.as_u64()).unwrap_or(0);
+        let title = issue.get("title").and_then(|v| v.as_str()).unwrap_or("?");
+        // GitLab labels are plain strings, not {name} objects.
+        let labels: Vec<&str> = issue
+            .get("labels")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|l| l.as_str()).collect())
+            .unwrap_or_default();
+        let label_str = if labels.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", labels.join(", "))
+        };
+        output.push_str(&format!("  #{} {}{}\n", iid, title, label_str));
+    }
+    output
 }
 
 /// List open GitLab merge requests for a project on a configured host.
@@ -224,46 +214,34 @@ pub async fn gl_mrs(db: &WardsonDbClient, host: Option<&str>, project: &str) -> 
         Ok(t) => t,
         Err(e) => return e,
     };
-    let url = format!(
-        "https://{}/api/v4/projects/{}/merge_requests?state=opened&per_page=10",
-        host,
-        encode_gitlab_project(project)
-    );
-    match gitlab_client()
-        .get(&url)
-        .header("User-Agent", USER_AGENT)
-        .header("PRIVATE-TOKEN", &token)
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            if !resp.status().is_success() {
-                return format!("GitLab API error: {}", resp.status());
-            }
-            let mrs: Vec<serde_json::Value> = resp.json().await.unwrap_or_default();
-            if mrs.is_empty() {
-                return format!("No open merge requests for {} on {}.", project, host);
-            }
-            let mut output = format!("=== Open MRs: {} ({}) ===\n", project, mrs.len());
-            for mr in &mrs {
-                let iid = mr.get("iid").and_then(|v| v.as_u64()).unwrap_or(0);
-                let title = mr.get("title").and_then(|v| v.as_str()).unwrap_or("?");
-                let author = mr
-                    .get("author")
-                    .and_then(|u| u.get("username"))
-                    .and_then(|l| l.as_str())
-                    .unwrap_or("?");
-                let branches = format!(
-                    "{} → {}",
-                    mr.get("source_branch").and_then(|v| v.as_str()).unwrap_or("?"),
-                    mr.get("target_branch").and_then(|v| v.as_str()).unwrap_or("?")
-                );
-                output.push_str(&format!("  !{} {} (by {}, {})\n", iid, title, author, branches));
-            }
-            output
-        }
-        Err(e) => format!("Failed to fetch merge requests: {}", e),
+    let path = format!("projects/{}/merge_requests?state=opened&per_page=10", encode_gitlab_project(project));
+    let mrs = match gl_get(&host, &token, &path).await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let Some(mrs) = mrs.as_array() else {
+        return "Failed to parse GitLab response: expected a list of merge requests".into();
+    };
+    if mrs.is_empty() {
+        return format!("No open merge requests for {} on {}.", project, host);
     }
+    let mut output = format!("=== Open MRs: {} ({}) ===\n", project, mrs.len());
+    for mr in mrs {
+        let iid = mr.get("iid").and_then(|v| v.as_u64()).unwrap_or(0);
+        let title = mr.get("title").and_then(|v| v.as_str()).unwrap_or("?");
+        let author = mr
+            .get("author")
+            .and_then(|u| u.get("username"))
+            .and_then(|l| l.as_str())
+            .unwrap_or("?");
+        let branches = format!(
+            "{} → {}",
+            mr.get("source_branch").and_then(|v| v.as_str()).unwrap_or("?"),
+            mr.get("target_branch").and_then(|v| v.as_str()).unwrap_or("?")
+        );
+        output.push_str(&format!("  !{} {} (by {}, {})\n", iid, title, author, branches));
+    }
+    output
 }
 
 /// Create a GitLab issue.
@@ -304,7 +282,10 @@ pub async fn gl_issue_create(
                 let body = resp.text().await.unwrap_or_default();
                 return format!("GitLab API error {}: {}", status, body);
             }
-            let issue: serde_json::Value = resp.json().await.unwrap_or_default();
+            let issue: serde_json::Value = match resp.json().await {
+                Ok(v) => v,
+                Err(e) => return format!("Failed to parse GitLab response: {}", e),
+            };
             let iid = issue.get("iid").and_then(|v| v.as_u64()).unwrap_or(0);
             let web_url = issue.get("web_url").and_then(|v| v.as_str()).unwrap_or("");
             format!("Issue #{} created: {}\n{}", iid, title.trim(), web_url)
@@ -354,7 +335,10 @@ pub async fn gl_mr_create(
                 let body = resp.text().await.unwrap_or_default();
                 return format!("GitLab API error {}: {}", status, body);
             }
-            let mr: serde_json::Value = resp.json().await.unwrap_or_default();
+            let mr: serde_json::Value = match resp.json().await {
+                Ok(v) => v,
+                Err(e) => return format!("Failed to parse GitLab response: {}", e),
+            };
             let iid = mr.get("iid").and_then(|v| v.as_u64()).unwrap_or(0);
             let web_url = mr.get("web_url").and_then(|v| v.as_str()).unwrap_or("");
             format!(

@@ -14,10 +14,10 @@ pub async fn plan(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
         // List plans
         ensure_collection(db, "plans").await;
-        let plans = db
-            .fetch_collection("plans")
-            .await
-            .unwrap_or_default();
+        let plans = match db.fetch_collection("plans").await {
+            Ok(p) => p,
+            Err(e) => return format!("Failed to load plans from the database: {}", e),
+        };
 
         if plans.is_empty() {
             return "No plans found. Create one with: plan <title> | <description>".into();
@@ -60,10 +60,10 @@ pub async fn tasks(db: &WardsonDbClient, param: &str) -> String {
     ensure_collection(db, "tasks").await;
 
     if param.is_empty() {
-        let all_tasks = db
-            .fetch_collection("tasks")
-            .await
-            .unwrap_or_default();
+        let all_tasks = match db.fetch_collection("tasks").await {
+            Ok(t) => t,
+            Err(e) => return format!("Failed to load tasks from the database: {}", e),
+        };
 
         if all_tasks.is_empty() {
             return "No tasks found. Add one with: task_add <title>".into();
@@ -81,10 +81,10 @@ pub async fn tasks(db: &WardsonDbClient, param: &str) -> String {
     }
 
     // Filter by plan_id if param looks like an ID
-    let filtered = db
-        .fetch_collection("tasks")
-        .await
-        .unwrap_or_default();
+    let filtered = match db.fetch_collection("tasks").await {
+        Ok(t) => t,
+        Err(e) => return format!("Failed to load tasks from the database: {}", e),
+    };
 
     let matching: Vec<_> = filtered
         .iter()

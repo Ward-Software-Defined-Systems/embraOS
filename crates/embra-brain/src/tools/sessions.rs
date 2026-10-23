@@ -1129,14 +1129,17 @@ pub async fn memory_scan(db: &WardsonDbClient, param: &str) -> String {
     // the server's default limit:100 over the OLDEST entries, freezing the
     // scan at the first ~9 sessions). Newest-first; saturation warned by the
     // shared helper.
-    let entries = db
+    let entries = match db
         .fetch_recent_with_fields(
             "memory.entries",
             crate::db::MEMORY_FETCH_WINDOW,
             Some(&["content", "tags", "session", "created_at"]),
         )
         .await
-        .unwrap_or_default();
+    {
+        Ok(e) => e,
+        Err(e) => return format!("Failed to load memory entries from the database: {}", e),
+    };
 
     if entries.is_empty() {
         return "No memory entries found.".into();
@@ -1421,10 +1424,10 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
     // on the server's default window of the OLDEST 100 entries. Explicit
     // recency window; every entry it read is compared (the quadratic pass
     // runs on the blocking pool; see MEMORY_SCAN_CANDIDATES_SHOWN).
-    let all_entries = db
-        .fetch_recent("memory.entries", crate::db::MEMORY_FETCH_WINDOW)
-        .await
-        .unwrap_or_default();
+    let all_entries = match db.fetch_recent("memory.entries", crate::db::MEMORY_FETCH_WINDOW).await {
+        Ok(e) => e,
+        Err(e) => return format!("Failed to load memory entries from the database: {}", e),
+    };
 
     if all_entries.is_empty() {
         return "No memory entries to deduplicate.".into();
@@ -1560,10 +1563,11 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
     // froze this check on the oldest-100 semantic nodes. Every node the window
     // read is compared; the comparison is O(unpromoted entries × nodes), and
     // since promotion at creation an entry without a node is rare.
-    let semantic = db
-        .fetch_recent("memory.semantic", crate::db::MEMORY_FETCH_WINDOW)
-        .await
-        .unwrap_or_default();
+    // A failed comparison is reported, never shown as no duplicates.
+    let semantic = match db.fetch_recent("memory.semantic", crate::db::MEMORY_FETCH_WINDOW).await {
+        Ok(s) => s,
+        Err(e) => return format!("Failed to load semantic nodes from the database: {}", e),
+    };
     if !semantic.is_empty() {
         let cross_dupes = cross_collection_overlaps(&normalized, &semantic);
         if !cross_dupes.is_empty() {

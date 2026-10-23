@@ -171,9 +171,15 @@ pub(crate) fn render_reminder_list(
 async fn reminder_list(db: &WardsonDbClient, filter: ReminderFilter, limit: usize, tz: &str) -> String {
     ensure_collection(db, "reminders").await;
     let docs = match reminder_list_query_body(filter, limit) {
-        Some(body) => db.query("reminders", &body).await.unwrap_or_default(),
+        Some(body) => match db.query("reminders", &body).await {
+            Ok(d) => d,
+            Err(e) => return format!("Failed to load reminders from the database: {}", e),
+        },
         None => {
-            let mut all = db.fetch_collection("reminders").await.unwrap_or_default();
+            let mut all = match db.fetch_collection("reminders").await {
+                Ok(d) => d,
+                Err(e) => return format!("Failed to load reminders from the database: {}", e),
+            };
             all.sort_by(|a, b| {
                 let ta = a.get("trigger_at").and_then(|v| v.as_str()).unwrap_or("");
                 let tb = b.get("trigger_at").and_then(|v| v.as_str()).unwrap_or("");
@@ -258,10 +264,14 @@ pub async fn check_reminders(db: &WardsonDbClient, max: usize) -> Vec<FiredRemin
         return Vec::new();
     }
     let now = Utc::now().to_rfc3339();
-    let reminders = db
-        .query("reminders", &due_reminders_query_body(&now, REMINDER_WINDOW))
-        .await
-        .unwrap_or_default();
+    // A tick whose read failed delivers nothing and says so; the loop goes on.
+    let reminders = match db.query("reminders", &due_reminders_query_body(&now, REMINDER_WINDOW)).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(target: "proactive", "due reminders not read this tick: {e}");
+            return Vec::new();
+        }
+    };
     if crate::db::client::window_saturated(reminders.len(), REMINDER_WINDOW) {
         tracing::warn!(
             target: "wardsondb::window",
@@ -279,16 +289,24 @@ pub async fn check_reminders(db: &WardsonDbClient, max: usize) -> Vec<FiredRemin
             .and_then(|v| v.as_str())
             .unwrap_or("Reminder");
 
+        // Marked as fired, and when, BEFORE it is delivered: a mark that
+        // cannot be written leaves the reminder in the store for the next
+        // tick, where a delivered-then-unmarked one would fire on every
+        // tick (#60). Nothing is dropped: it waits.
+        let Some(id) = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()) else {
+            tracing::warn!(target: "proactive", "a due reminder has no id and is not delivered");
+            continue;
+        };
+        if let Err(e) = db.update("reminders", id, &mark_fired(doc, &now)).await {
+            tracing::warn!(target: "proactive", reminder = id, "not marked as fired: {e}; it waits for the next tick");
+            continue;
+        }
+
         fired.push(FiredReminder {
             text: format!("Reminder: {}", message),
             message: message.to_string(),
             act: doc.get("act").and_then(|v| v.as_bool()).unwrap_or(false),
         });
-
-        // Mark as fired, and when.
-        if let Some(id) = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()) {
-            let _ = db.update("reminders", id, &mark_fired(doc, &now)).await;
-        }
     }
 
     fired
@@ -540,5 +558,42 @@ mod reminder_tests {
         assert_eq!(ids(&due_reminders(&docs, NOW, 2)), ["a", "b"]);
         assert_eq!(ids(&due_reminders(&docs, NOW, 3)), ["a", "b", "c"]);
         assert!(due_reminders(&docs, NOW, 0).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod mark_first_tests {
+    use super::check_reminders;
+    use crate::db::WardsonDbClient;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn fired_with(mark: ResponseTemplate) -> Vec<String> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/reminders/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true, "meta": {},
+                "data": [{"_id": "r1", "message": "stretch", "trigger_at": "2020-01-01T00:00:00+00:00", "fired": false}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT")).and(path("/reminders/docs/r1")).respond_with(mark).mount(&server).await;
+        check_reminders(&WardsonDbClient::from_url(&server.uri()), 5)
+            .await
+            .into_iter()
+            .map(|f| f.message)
+            .collect()
+    }
+
+    /// A reminder is delivered only once its mark is written; a mark that
+    /// fails leaves it in the store, undelivered, for the next tick (#60).
+    #[tokio::test]
+    async fn a_reminder_is_delivered_only_once_it_is_marked_as_fired() {
+        assert_eq!(fired_with(ResponseTemplate::new(500)).await, Vec::<String>::new());
+        assert_eq!(
+            fired_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true}))).await,
+            vec!["stretch".to_string()]
+        );
     }
 }

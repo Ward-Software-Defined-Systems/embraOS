@@ -398,10 +398,10 @@ pub(crate) fn render_cron_list(
 pub async fn cron_list(db: &WardsonDbClient, runs: usize, config_tz: &str) -> String {
     ensure_collection(db).await;
 
-    let crons = db
-        .fetch_collection("crons")
-        .await
-        .unwrap_or_default();
+    let crons = match db.fetch_collection("crons").await {
+        Ok(c) => c,
+        Err(e) => return format!("Failed to read cron jobs from the database: {}", e),
+    };
 
     if crons.is_empty() {
         return "No cron jobs configured. Add one with: cron_add <schedule> | <command>"
@@ -542,10 +542,14 @@ impl CronFired {
 /// Returns what fired: the report of each run, and its trigger when the
 /// job asked for one.
 pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<CronFired> {
-    let crons = db
-        .fetch_collection("crons")
-        .await
-        .unwrap_or_default();
+    // A tick whose read failed runs nothing and says so; the loop goes on.
+    let crons = match db.fetch_collection("crons").await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(target: "proactive", "cron jobs not read this tick: {e}");
+            return Vec::new();
+        }
+    };
 
     let now = Utc::now().to_rfc3339();
     let mut results = Vec::new();
@@ -669,7 +673,11 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<CronFired
             let mut updated = doc.clone();
             updated["last_run"] = serde_json::json!(Utc::now().to_rfc3339());
             updated["next_run"] = serde_json::json!(next_run_from_now(interval_secs));
-            let _ = db.update("crons", id, &updated).await;
+            // A write that failed is said: the job fires again next tick
+            // until `next_run` advances (#60).
+            if let Err(e) = db.update("crons", id, &updated).await {
+                tracing::warn!(target: "proactive", job = id, "next_run not advanced: {e}; the job fires again next tick");
+            }
         }
     }
 
