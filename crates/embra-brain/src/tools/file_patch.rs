@@ -1009,6 +1009,9 @@ pub(crate) async fn file_patch_in(root: &str, args: FilePatchArgs) -> String {
         Ok(p) => p,
         Err(e) => return e,
     };
+    if let Err(e) = super::jail::fence_git_dir(std::path::Path::new(&resolved)) {
+        return e;
+    }
 
     // §5 symlink rule: resolve, then re-verify the REAL path is still inside
     // the workspace, and operate on the resolved target so a symlink is never
@@ -1030,6 +1033,9 @@ pub(crate) async fn file_patch_in(root: &str, args: FilePatchArgs) -> String {
             "Denied: path '{resolved}' resolves outside {root} (symlink target {})",
             canonical.display()
         );
+    }
+    if let Err(e) = super::jail::fence_git_dir(&canonical) {
+        return e;
     }
 
     let edits = match effective_edits(&args) {
@@ -1396,6 +1402,30 @@ mod file_patch_tests {
         assert!(out.starts_with("Patched"), "{out}");
         assert_eq!(std::fs::read(&real).unwrap(), b"hello there");
         assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    }
+
+    /// A file under `.git` is not patched, named directly or through a
+    /// link; the file is unchanged (#6).
+    #[tokio::test]
+    async fn a_patch_inside_a_git_directory_is_denied() {
+        let dir = TempDir::new("git-fence");
+        std::fs::create_dir_all(dir.0.join("repo/.git")).unwrap();
+        let config = dir.0.join("repo/.git/config");
+        std::fs::write(&config, "[core]\n\tbare = false\n").unwrap();
+        let link = dir.0.join("repo/cfg-link");
+        std::os::unix::fs::symlink(&config, &link).unwrap();
+        let root = dir.0.to_str().unwrap();
+        for path in [config.display().to_string(), link.display().to_string()] {
+            let args: FilePatchArgs = serde_json::from_value(serde_json::json!({
+                "path": path,
+                "old_string": "false",
+                "new_string": "true",
+            }))
+            .unwrap();
+            let out = file_patch_in(root, args).await;
+            assert!(out.starts_with("Denied:") && out.contains(".git directory"), "{path}: {out}");
+        }
+        assert_eq!(std::fs::read(&config).unwrap(), b"[core]\n\tbare = false\n");
     }
 
     #[tokio::test]

@@ -47,6 +47,7 @@ fn exists(resolved: &str) -> String {
 /// and a path that names no file (a trailing `/`, or the root itself).
 pub(crate) fn resolve_save_target(root: &str, media_dir: &Path, path: &str) -> Result<String, String> {
     let resolved = resolve_in(root, path)?;
+    jail::fence_git_dir(Path::new(&resolved))?;
     if path.trim_end().ends_with('/') || resolved == root || Path::new(&resolved).file_name().is_none() {
         return Err(format!("'{path}' names no file; save_to takes a file path under {root}"));
     }
@@ -81,6 +82,7 @@ async fn plan_save(root: &Path, media_dir: &Path, resolved: &str) -> Result<Path
         return Err(exists(resolved));
     }
     let real = jail::real(root, target).await?;
+    jail::fence_git_dir(&real.path)?;
     if let Ok(media_canon) = tokio::fs::canonicalize(media_dir).await
         && real.ancestor.starts_with(&media_canon)
     {
@@ -276,6 +278,7 @@ mod tests {
             "MEDIA/x.png",
             "/embra/workspace/MEDIA",
             ".guardian/tools/x/build.rs",
+            "repo/.git/hooks/pre-commit",
             "shots/",
             "",
             "/embra/workspace",

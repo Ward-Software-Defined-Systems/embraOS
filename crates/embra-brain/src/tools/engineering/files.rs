@@ -612,6 +612,9 @@ pub(crate) async fn dir_delete_in(root: &str, param: &str) -> String {
         Ok(p) => p,
         Err(e) => return e,
     };
+    if let Err(e) = super::jail::fence_git_dir(Path::new(&lexical)) {
+        return e;
+    }
     if Path::new(&lexical) == Path::new(root) {
         return format!(
             "Refusing to delete the workspace itself ({root}); name a directory under it."
@@ -621,6 +624,9 @@ pub(crate) async fn dir_delete_in(root: &str, param: &str) -> String {
         Ok(p) => p,
         Err(e) => return e,
     };
+    if let Err(e) = super::jail::fence_git_dir(&path) {
+        return e;
+    }
     let shown = path.display();
 
     let meta = match tokio::fs::symlink_metadata(&path).await {
@@ -1447,6 +1453,40 @@ mod write_jail_tests {
         let out = file_append_in(t.root(), "code.rs", r"\t").await;
         assert!(out.starts_with("Appended 2 bytes"), "{out}");
         assert_eq!(std::fs::read(t.join("code.rs")).unwrap(), br#"println!("a\nb");\t"#);
+    }
+
+    /// Nothing under a `.git` component is written, appended, created,
+    /// linked, moved into or removed, by its own path or through a link that
+    /// leads there; the repository itself can still be removed (#6).
+    #[tokio::test]
+    async fn a_writer_never_reaches_a_git_directory_even_through_a_link() {
+        let t = TempDir::new("git-fence");
+        std::fs::create_dir_all(t.join("repo/.git/hooks")).unwrap();
+        std::fs::write(t.join("repo/.git/config"), "[core]\n").unwrap();
+        std::fs::write(t.join("repo/note.txt"), "x").unwrap();
+        link(&t.join("repo/.git/hooks"), &t.join("repo/hooks-link"));
+
+        let refused = [
+            file_write_in(t.root(), "repo/.git/hooks/pre-commit", "pwned").await,
+            file_write_in(t.root(), "repo/hooks-link/pre-commit", "pwned").await,
+            file_append_in(t.root(), "repo/.git/config", "[x]").await,
+            mkdir_in(t.root(), "repo/.git/x").await,
+            file_symlink_in(t.root(), "repo/note.txt", "repo/.git/hooks/post-commit").await,
+            file_move_in(t.root(), "repo/note.txt", "repo/.git/hooks/pre-push").await,
+            file_delete_in(t.root(), "repo/.git/config").await,
+            dir_delete_in(t.root(), "repo/.git/hooks --force").await,
+        ];
+        for out in &refused {
+            assert!(out.starts_with("Denied:") && out.contains(".git directory"), "{out}");
+        }
+        assert_eq!(std::fs::read_dir(t.join("repo/.git/hooks")).unwrap().count(), 0, "no hook");
+        assert_eq!(std::fs::read(t.join("repo/.git/config")).unwrap(), b"[core]\n");
+        assert!(t.join("repo/note.txt").exists());
+
+        // The repository as a whole is the writer's to remove.
+        let out = dir_delete_in(t.root(), "repo --force").await;
+        assert!(!out.starts_with("Denied:"), "{out}");
+        assert!(!t.join("repo").exists());
     }
 
     #[tokio::test]

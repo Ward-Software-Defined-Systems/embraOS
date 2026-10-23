@@ -137,6 +137,26 @@ pub(crate) fn within(canonical: &Path, root: &Path) -> bool {
     canonical.starts_with(root)
 }
 
+/// The directory git owns. A writer never creates, changes or removes
+/// anything under a `.git` component: a hook planted there would run as
+/// root the next time a git tool touched the repository, and a
+/// `.git/config` could point git anywhere. Reads are not fenced, and a
+/// repository as a whole can still be removed or moved.
+pub(crate) const GIT_DIR: &str = ".git";
+
+/// Refuses a path with a `.git` component. Every writer runs it on the
+/// path as resolved and on the real path (a link into `.git` is refused by
+/// where it leads); the git tools reach the directory through git.
+pub(crate) fn fence_git_dir(path: &Path) -> Result<(), String> {
+    if path.components().any(|c| c.as_os_str() == GIT_DIR) {
+        return Err(format!(
+            "Denied: path '{}' is inside a .git directory, which the git tools own; nothing is written there",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Walk up from `p` until a component exists (by `symlink_metadata`, so a
 /// dangling link counts as existing and is refused by [`real`] instead of
 /// silently built beside).
@@ -297,7 +317,10 @@ pub(crate) fn resolve_in(root: &str, path: &str) -> Result<String, String> {
 /// write or create.
 pub(crate) async fn jailed_write_path(root: &str, raw: &str) -> Result<PathBuf, String> {
     let lexical = super::jail::lexical(root, raw)?;
-    Ok(super::jail::real(Path::new(root), Path::new(&lexical)).await?.path)
+    fence_git_dir(Path::new(&lexical))?;
+    let path = super::jail::real(Path::new(root), Path::new(&lexical)).await?.path;
+    fence_git_dir(&path)?;
+    Ok(path)
 }
 
 /// The two jail steps of a remover: the lexical check, then the canonical
@@ -305,12 +328,28 @@ pub(crate) async fn jailed_write_path(root: &str, raw: &str) -> Result<PathBuf, 
 /// never followed.
 pub(crate) async fn jailed_remove_path(root: &str, raw: &str) -> Result<PathBuf, String> {
     let lexical = super::jail::lexical(root, raw)?;
-    super::jail::real_parent(Path::new(root), Path::new(&lexical)).await
+    fence_git_dir(Path::new(&lexical))?;
+    let path = super::jail::real_parent(Path::new(root), Path::new(&lexical)).await?;
+    fence_git_dir(&path)?;
+    Ok(path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Any `.git` component is fenced; `.gitignore` and a repository's own
+    /// path are not.
+    #[test]
+    fn the_fence_refuses_any_git_component() {
+        for refused in ["/r/repo/.git/hooks/pre-commit", "/r/repo/.git", "/r/a/.git/config", ".git/x"] {
+            let err = fence_git_dir(Path::new(refused)).unwrap_err();
+            assert!(err.starts_with("Denied:") && err.contains(".git directory"), "{refused}: {err}");
+        }
+        for ok in ["/r/repo/.gitignore", "/r/repo/src/x", "/r/repo", "/r/.github/workflows/ci.yml"] {
+            assert!(fence_git_dir(Path::new(ok)).is_ok(), "{ok}");
+        }
+    }
 
     struct TempDir(PathBuf);
     impl TempDir {

@@ -859,10 +859,16 @@ pub(crate) async fn copy_at(src: &Path, dst: &Path, opts: &CopyOptions) -> Strin
     // under it); the write path then creates the missing parents under the
     // canonical ancestor. An existing destination is the canonical target
     // itself, so a copy over a link replaces the target and keeps the link.
+    if let Err(e) = super::jail::fence_git_dir(dst) {
+        return e;
+    }
     let real = match super::jail::real(&opts.jail_root, dst).await {
         Ok(r) => r,
         Err(e) => return format!("{e}\nNothing copied."),
     };
+    if let Err(e) = super::jail::fence_git_dir(&real.path) {
+        return e;
+    }
     let anc_canon = real.ancestor;
     let dst_final = real.path;
     if dst_final == src {
@@ -1181,6 +1187,22 @@ mod file_copy_tests {
             // T19 exercises the refusal explicitly.
             available_override: Some(u64::MAX / 4),
         }
+    }
+
+    /// The destination is never under a `.git` component, by its path or
+    /// through a link that leads there (#6).
+    #[tokio::test]
+    async fn a_copy_never_lands_in_a_git_directory() {
+        let dir = TempDir::new("git-fence");
+        let src = dir.0.join("note.txt");
+        std::fs::write(&src, "x").unwrap();
+        std::fs::create_dir_all(dir.0.join("repo/.git/hooks")).unwrap();
+        std::os::unix::fs::symlink(dir.0.join("repo/.git/hooks"), dir.0.join("repo/hooks-link")).unwrap();
+        for dst in [dir.0.join("repo/.git/hooks/pre-commit"), dir.0.join("repo/hooks-link/pre-commit")] {
+            let out = copy_at(&src, &dst, &opts(&dir)).await;
+            assert!(out.starts_with("Denied:") && out.contains(".git directory"), "{}: {out}", dst.display());
+        }
+        assert_eq!(std::fs::read_dir(dir.0.join("repo/.git/hooks")).unwrap().count(), 0, "no hook");
     }
 
     fn write(p: &Path, bytes: &[u8]) {
