@@ -1047,21 +1047,27 @@ pub async fn knowledge_query(
     out.push('\n');
     let superseders = super::supersession::superseders(db).await;
     for (i, r) in results.iter().enumerate() {
-        out.push_str(&format!(
-            "{}. [{}] {} (score: {:.2}){}\n   Source: {}\n\n",
-            i + 1,
-            r.node.collection,
-            r.node.content_preview,
-            r.score,
-            super::supersession::superseded_note(super::supersession::successor_of(
-                &superseders,
-                &r.node.collection,
-                &r.node.id,
-            )),
-            r.source
+        let note = super::supersession::superseded_note(super::supersession::successor_of(
+            &superseders,
+            &r.node.collection,
+            &r.node.id,
         ));
+        out.push_str(&query_result_line(i + 1, r, &note));
     }
     out
+}
+
+/// One result of `knowledge_query`. The node is named as `collection:id`,
+/// the form `knowledge_traverse` prints and the id tools take
+/// (`knowledge_update`, `knowledge_link`, `knowledge_merge`,
+/// `knowledge_traverse`, `forget`), so a node found here is acted on
+/// without a second lookup through `recall`. Enrichment's
+/// `retrieved_context_block` names a node the same way.
+fn query_result_line(index: usize, r: &super::types::RankedNode, superseded_note: &str) -> String {
+    format!(
+        "{}. [{}:{}] {} (score: {:.2}){}\n   Source: {}\n\n",
+        index, r.node.collection, r.node.id, r.node.content_preview, r.score, superseded_note, r.source
+    )
 }
 
 /// `knowledge_graph_stats` — windowless. Totals come from server-side
@@ -3257,5 +3263,38 @@ mod orphan_tests {
         let limit = schema["properties"]["limit"]["description"].as_str().unwrap();
         assert!(limit.starts_with("Most orphan edges removed in one call"), "{limit}");
         assert!(limit.contains("Every edge is checked on every call"), "{limit}");
+    }
+}
+
+#[cfg(test)]
+mod query_result_line_tests {
+    use super::query_result_line;
+    use crate::knowledge::types::{GraphNode, NodeType, RankedNode};
+
+    /// A query result names its node as `collection:id`, the form the id
+    /// tools take, so the model acts on a node it found without a second
+    /// lookup; the superseded note follows the score as before.
+    #[test]
+    fn a_query_result_names_its_node_as_collection_and_id() {
+        let r = RankedNode {
+            node: GraphNode {
+                id: "n1".to_string(),
+                collection: "memory.semantic".to_string(),
+                content_preview: "the clone lives in repos/".to_string(),
+                node_type: NodeType::Episodic,
+                depth: 0,
+            },
+            score: 0.62,
+            source: "direct_query".to_string(),
+            relevance: 0.5,
+        };
+        assert_eq!(
+            query_result_line(1, &r, ""),
+            "1. [memory.semantic:n1] the clone lives in repos/ (score: 0.62)\n   Source: direct_query\n\n"
+        );
+        assert_eq!(
+            query_result_line(2, &r, " — superseded by memory.semantic:n2"),
+            "2. [memory.semantic:n1] the clone lives in repos/ (score: 0.62) — superseded by memory.semantic:n2\n   Source: direct_query\n\n"
+        );
     }
 }

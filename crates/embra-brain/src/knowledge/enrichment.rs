@@ -189,7 +189,10 @@ pub async fn build_turn_context(
     retrieved_context_block(&qualifying, &superseders, user_message)
 }
 
-/// The `<retrieved_context>` block and the operator's message after it. A
+/// The `<retrieved_context>` block and the operator's message after it.
+/// Every line names its node as `collection:id`, the form the id tools
+/// take (`knowledge_update`, `knowledge_link`, `knowledge_traverse`,
+/// `forget`), so the model acts on an injected node without a lookup; a
 /// superseded node's line names its successor.
 fn retrieved_context_block(
     qualifying: &[&RankedNode],
@@ -202,9 +205,10 @@ fn retrieved_context_block(
     );
     for (i, r) in qualifying.iter().enumerate() {
         ctx.push_str(&format!(
-            "{}. [{}] {} (score: {:.2}){}\n",
+            "{}. [{}:{}] {} (score: {:.2}){}\n",
             i + 1,
             r.node.collection,
+            r.node.id,
             r.node.content_preview,
             r.score,
             superseded_note(successor_of(superseders, &r.node.collection, &r.node.id)),
@@ -378,7 +382,8 @@ mod injection_gate_tests {
     }
 
     /// A superseded node keeps its place in the block and names its
-    /// successor; a live one reads as before.
+    /// successor; a live one reads as before. Every line names its node as
+    /// `collection:id`.
     #[test]
     fn a_superseded_node_is_injected_with_its_successor_named() {
         let mut old = ranked(0.62, MIN_RELEVANCE);
@@ -394,10 +399,10 @@ mod injection_gate_tests {
         );
         let block = retrieved_context_block(&[&old, &live], &superseders, "where is the clone?");
         assert!(
-            block.contains("1. [memory.semantic] the clone lives in repos/ (score: 0.62) — superseded by memory.semantic:live\n"),
+            block.contains("1. [memory.semantic:old] the clone lives in repos/ (score: 0.62) — superseded by memory.semantic:live\n"),
             "{block}"
         );
-        assert!(block.contains("2. [memory.semantic] the clone was deleted (score: 0.55)\n"), "{block}");
+        assert!(block.contains("2. [memory.semantic:live] the clone was deleted (score: 0.55)\n"), "{block}");
         assert!(block.ends_with("</retrieved_context>\n\nwhere is the clone?"), "{block}");
     }
 
