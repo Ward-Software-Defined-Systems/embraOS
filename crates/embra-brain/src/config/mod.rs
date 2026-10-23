@@ -198,15 +198,26 @@ pub struct OpenAiCompatConfig {
     /// Operator `reasoning_effort` override per preset (`/effort` while
     /// that preset is active), sent VERBATIM — the accepted set belongs
     /// to the model (Qwen3.8: low|medium|xhigh; gpt-oss: low|medium|high;
-    /// DeepSeek-V4-Pro: max) and the server validates. `None` = the
-    /// per-model auto-map (`reasoning_effort_for_model`), byte-identical
-    /// to before the field existed. Serde-additive `Option`s — the four
+    /// the four Ollama Cloud models: low|high|max) and the server
+    /// validates. `None` = the per-model auto-map
+    /// (`reasoning_effort_for_model`). Serde-additive `Option`s — the four
     /// String fields above stay plain `default` so persisted docs keep
-    /// their shape.
+    /// their shape. Since levels are kept per model (below), these hold
+    /// only a level stored before that, or before any model was chosen:
+    /// it applies to the model in use until a switch files it under that
+    /// model ([`Self::set_model`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ollama_effort: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lm_studio_effort: Option<String>,
+    /// The `/effort` level per model, keyed by the model id as configured.
+    /// A switch never carries a level to a model that may not list it, and
+    /// switching back brings each model's own level back; a model without
+    /// an entry gets the auto-map. Serde-additive, absent when empty.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub ollama_effort_by_model: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub lm_studio_effort_by_model: std::collections::BTreeMap<String, String>,
 }
 
 impl OpenAiCompatConfig {
@@ -228,15 +239,81 @@ impl OpenAiCompatConfig {
         }
     }
 
-    /// The operator's stored effort override for the preset, if any.
+    /// The operator's stored effort override for the preset's active
+    /// model, if any: its own entry, else a level stored the old way.
     pub fn effort_for_preset(
         &self,
         preset: crate::provider::openai_compat::OpenAiCompatPreset,
     ) -> Option<&str> {
         use crate::provider::openai_compat::OpenAiCompatPreset;
+        let (model, legacy, by_model) = match preset {
+            OpenAiCompatPreset::Ollama => {
+                (&self.ollama_model, &self.ollama_effort, &self.ollama_effort_by_model)
+            }
+            OpenAiCompatPreset::LmStudio => {
+                (&self.lm_studio_model, &self.lm_studio_effort, &self.lm_studio_effort_by_model)
+            }
+        };
+        by_model.get(model).or(legacy.as_ref()).map(String::as_str)
+    }
+
+    /// Store (`Some`) or clear (`None`) the `/effort` level of the
+    /// preset's active model. A level stored the old way belonged to that
+    /// model and goes. With no model chosen yet the level is kept the old
+    /// way, for the first model chosen.
+    pub fn set_effort(
+        &mut self,
+        preset: crate::provider::openai_compat::OpenAiCompatPreset,
+        level: Option<String>,
+    ) {
+        let (model, legacy, by_model) = self.effort_parts(preset);
+        if model.is_empty() {
+            *legacy = level;
+            return;
+        }
+        *legacy = None;
+        match level {
+            Some(level) => {
+                by_model.insert(model.clone(), level);
+            }
+            None => {
+                by_model.remove(model.as_str());
+            }
+        }
+    }
+
+    /// Point the preset at `new_model`. A level stored the old way belonged
+    /// to the model in use until now and is filed under it, so the new
+    /// model starts at its own level, or its auto-map.
+    pub fn set_model(
+        &mut self,
+        preset: crate::provider::openai_compat::OpenAiCompatPreset,
+        new_model: &str,
+    ) {
+        let (model, legacy, by_model) = self.effort_parts(preset);
+        if !model.is_empty()
+            && let Some(level) = legacy.take()
+        {
+            by_model.entry(model.clone()).or_insert(level);
+        }
+        *model = new_model.to_string();
+    }
+
+    /// The preset's model, its old single level and its per-model levels.
+    fn effort_parts(
+        &mut self,
+        preset: crate::provider::openai_compat::OpenAiCompatPreset,
+    ) -> (&mut String, &mut Option<String>, &mut std::collections::BTreeMap<String, String>) {
+        use crate::provider::openai_compat::OpenAiCompatPreset;
         match preset {
-            OpenAiCompatPreset::Ollama => self.ollama_effort.as_deref(),
-            OpenAiCompatPreset::LmStudio => self.lm_studio_effort.as_deref(),
+            OpenAiCompatPreset::Ollama => {
+                (&mut self.ollama_model, &mut self.ollama_effort, &mut self.ollama_effort_by_model)
+            }
+            OpenAiCompatPreset::LmStudio => (
+                &mut self.lm_studio_model,
+                &mut self.lm_studio_effort,
+                &mut self.lm_studio_effort_by_model,
+            ),
         }
     }
 }
@@ -850,13 +927,12 @@ pub async fn run_config_wizard_grpc(
         match setup.preset {
             OpenAiCompatPreset::Ollama => {
                 openai_compat.ollama_endpoint = setup.endpoint.clone();
-                openai_compat.ollama_model = setup.model_id.clone();
             }
             OpenAiCompatPreset::LmStudio => {
                 openai_compat.lm_studio_endpoint = setup.endpoint.clone();
-                openai_compat.lm_studio_model = setup.model_id.clone();
             }
         }
+        openai_compat.set_model(setup.preset, &setup.model_id);
     }
     let config = SystemConfig {
         name,
@@ -1511,7 +1587,7 @@ mod anthropic_effort_serde_tests {
     //! `/effort` config field: serde-additive `Option<String>`, same
     //! pattern as `max_tool_iterations` — pre-existing config docs lack
     //! it and must deserialize to `None` (no schema bump).
-    use super::SystemConfig;
+    use super::{OpenAiCompatConfig, SystemConfig};
     use serde_json::json;
 
     #[test]
@@ -1573,6 +1649,8 @@ mod anthropic_effort_serde_tests {
         let oc = json.get("openai_compat").unwrap();
         assert!(oc.get("ollama_effort").is_none(), "{oc:?}");
         assert!(oc.get("lm_studio_effort").is_none(), "{oc:?}");
+        assert!(oc.get("ollama_effort_by_model").is_none(), "{oc:?}");
+        assert!(oc.get("lm_studio_effort_by_model").is_none(), "{oc:?}");
         // The pre-existing String leaves keep serializing (shape stable).
         assert_eq!(oc.get("ollama_endpoint").and_then(|v| v.as_str()), Some(""));
 
@@ -1587,6 +1665,79 @@ mod anthropic_effort_serde_tests {
             Some("xhigh")
         );
         assert!(back.openai_compat.ollama_effort.is_none());
+
+        // A per-model level round-trips under its model.
+        let mut cfg = back;
+        cfg.openai_compat.ollama_effort_by_model.insert("gpt-oss:20b".into(), "low".into());
+        let back: SystemConfig = serde_json::from_value(serde_json::to_value(&cfg).unwrap()).unwrap();
+        assert_eq!(
+            back.openai_compat.ollama_effort_by_model.get("gpt-oss:20b").map(String::as_str),
+            Some("low")
+        );
+    }
+
+    #[test]
+    fn a_level_is_kept_per_model_and_a_switch_brings_back_each_ones_own() {
+        use crate::provider::openai_compat::OpenAiCompatPreset::{LmStudio, Ollama};
+        let mut oc = OpenAiCompatConfig::default();
+        oc.set_model(Ollama, "qwen3.8:27b-mxfp8");
+        oc.set_effort(Ollama, Some("low".into()));
+        assert_eq!(oc.effort_for_preset(Ollama), Some("low"));
+        // The switch leaves Qwen3.8's level behind: V4 Pro gets its auto-map.
+        oc.set_model(Ollama, "deepseek-v4-pro:cloud");
+        assert_eq!(oc.effort_for_preset(Ollama), None);
+        oc.set_effort(Ollama, Some("high".into()));
+        oc.set_model(Ollama, "qwen3.8:27b-mxfp8");
+        assert_eq!(oc.effort_for_preset(Ollama), Some("low"));
+        oc.set_model(Ollama, "deepseek-v4-pro:cloud");
+        assert_eq!(oc.effort_for_preset(Ollama), Some("high"));
+        // LM Studio keeps its own.
+        assert_eq!(oc.effort_for_preset(LmStudio), None);
+    }
+
+    #[test]
+    fn a_level_stored_the_old_way_stays_with_the_model_it_was_set_for() {
+        use crate::provider::openai_compat::OpenAiCompatPreset::Ollama;
+        // An instance from before levels were kept per model.
+        let mut oc = OpenAiCompatConfig {
+            ollama_model: "qwen3.8:27b-mxfp8".into(),
+            ollama_effort: Some("low".into()),
+            ..Default::default()
+        };
+        assert_eq!(oc.effort_for_preset(Ollama), Some("low"));
+        oc.set_model(Ollama, "deepseek-v4-pro:cloud");
+        assert_eq!(oc.effort_for_preset(Ollama), None);
+        assert!(oc.ollama_effort.is_none());
+        oc.set_model(Ollama, "qwen3.8:27b-mxfp8");
+        assert_eq!(oc.effort_for_preset(Ollama), Some("low"));
+    }
+
+    #[test]
+    fn effort_reset_clears_the_active_models_level_only() {
+        use crate::provider::openai_compat::OpenAiCompatPreset::Ollama;
+        let mut oc = OpenAiCompatConfig::default();
+        oc.set_model(Ollama, "a");
+        oc.set_effort(Ollama, Some("low".into()));
+        oc.set_model(Ollama, "b");
+        oc.set_effort(Ollama, Some("high".into()));
+        oc.set_effort(Ollama, None);
+        assert_eq!(oc.effort_for_preset(Ollama), None);
+        oc.set_model(Ollama, "a");
+        assert_eq!(oc.effort_for_preset(Ollama), Some("low"));
+    }
+
+    #[test]
+    fn a_level_set_before_any_model_applies_to_the_first_one_chosen() {
+        use crate::provider::openai_compat::OpenAiCompatPreset::Ollama;
+        let mut oc = OpenAiCompatConfig::default();
+        oc.set_effort(Ollama, Some("medium".into()));
+        oc.set_model(Ollama, "qwen3.8:27b-mxfp8");
+        assert_eq!(oc.effort_for_preset(Ollama), Some("medium"));
+        // The next switch files it under that model.
+        oc.set_model(Ollama, "glm-5.3:cloud");
+        assert_eq!(oc.effort_for_preset(Ollama), None);
+        oc.set_model(Ollama, "qwen3.8:27b-mxfp8");
+        assert_eq!(oc.effort_for_preset(Ollama), Some("medium"));
     }
 
     #[test]

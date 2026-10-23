@@ -5049,7 +5049,7 @@ async fn complete_openai_compat_setup(
         let outcome = match config::save_config(db, &cfg).await {
             Ok(()) => {
                 crate::provider::health::request_probe();
-                (local_model_set_message(state.preset, &model), SystemMessageType::Info, SetupStepOutcome::Complete)
+                (local_model_set_message(&cfg, state.preset, &model), SystemMessageType::Info, SetupStepOutcome::Complete)
             }
             Err(e) => (format!("Failed to persist config: {e}"), SystemMessageType::Error, SetupStepOutcome::Error),
         };
@@ -5067,13 +5067,12 @@ async fn complete_openai_compat_setup(
     match state.preset {
         OpenAiCompatPreset::Ollama => {
             cfg.openai_compat.ollama_endpoint = endpoint.clone();
-            cfg.openai_compat.ollama_model = model.clone();
         }
         OpenAiCompatPreset::LmStudio => {
             cfg.openai_compat.lm_studio_endpoint = endpoint.clone();
-            cfg.openai_compat.lm_studio_model = model.clone();
         }
     }
+    set_local_model(&mut cfg, state.preset, &model);
     if let Err(e) = config::save_config(db, &cfg).await {
         let _ = tx
             .send(Ok(ConversationResponse {
@@ -5691,13 +5690,23 @@ fn resolve_optional_effort_inner(env: Option<&str>, cfg_field: Option<&str>) -> 
         .map(str::to_string)
 }
 
-/// Persist an effort level (or clear it) into the active provider's field.
+/// Persist an effort level (or clear it) into the active provider's field;
+/// on Ollama and LM Studio, the active model's (`OpenAiCompatConfig::set_effort`).
 fn set_effort_field(cfg: &mut config::SystemConfig, kind: ProviderKind, level: Option<String>) {
+    use crate::provider::openai_compat::OpenAiCompatPreset;
     match kind {
         ProviderKind::Anthropic => cfg.anthropic_effort = level,
         ProviderKind::Gemini => cfg.gemini_effort = level,
-        ProviderKind::Ollama => cfg.openai_compat.ollama_effort = level,
-        ProviderKind::LmStudio => cfg.openai_compat.lm_studio_effort = level,
+        ProviderKind::Ollama => cfg.openai_compat.set_effort(OpenAiCompatPreset::Ollama, level),
+        ProviderKind::LmStudio => cfg.openai_compat.set_effort(OpenAiCompatPreset::LmStudio, level),
+    }
+}
+
+/// What the brain sends `model` while no `/effort` level is set.
+fn automatic_effort_phrase(model: &str) -> String {
+    match crate::provider::openai_compat::reasoning_effort_for_model(model) {
+        Some(auto) => format!("embraOS sends reasoning_effort={auto} automatically"),
+        None => "nothing is sent; the server's per-model default applies".to_string(),
     }
 }
 
@@ -5968,7 +5977,7 @@ async fn handle_local_model_command(
         return;
     }
     crate::provider::health::request_probe();
-    send(local_model_set_message(preset, &model), SystemMessageType::Info).await;
+    send(local_model_set_message(&cfg, preset, &model), SystemMessageType::Info).await;
     send_brain_status(tx, &cfg, session_mgr, &model).await;
 }
 
@@ -5989,20 +5998,36 @@ fn local_endpoint_and_model(
     )
 }
 
+/// Point the preset at `model`. Each model keeps its own `/effort` level;
+/// one stored the old way stays with the model in use until now
+/// (`OpenAiCompatConfig::set_model`).
 fn set_local_model(
     cfg: &mut config::SystemConfig,
     preset: crate::provider::openai_compat::OpenAiCompatPreset,
     model: &str,
 ) {
-    use crate::provider::openai_compat::OpenAiCompatPreset;
-    match preset {
-        OpenAiCompatPreset::Ollama => cfg.openai_compat.ollama_model = model.to_string(),
-        OpenAiCompatPreset::LmStudio => cfg.openai_compat.lm_studio_model = model.to_string(),
-    }
+    cfg.openai_compat.set_model(preset, model);
 }
 
-fn local_model_set_message(preset: crate::provider::openai_compat::OpenAiCompatPreset, model: &str) -> String {
-    format!("{} model set to {model}. Takes effect on your next message.", preset.label())
+/// The switch's answer, with the level the new model runs at.
+fn local_model_set_message(
+    cfg: &config::SystemConfig,
+    preset: crate::provider::openai_compat::OpenAiCompatPreset,
+    model: &str,
+) -> String {
+    use crate::provider::openai_compat::OpenAiCompatPreset;
+    let kind = match preset {
+        OpenAiCompatPreset::Ollama => ProviderKind::Ollama,
+        OpenAiCompatPreset::LmStudio => ProviderKind::LmStudio,
+    };
+    let effort = match resolve_provider_effort(kind, cfg) {
+        Some(level) => format!("{level}, set with /effort for this model"),
+        None => format!("not set — {}", automatic_effort_phrase(model)),
+    };
+    format!(
+        "{} model set to {model}. Effort: {effort}. Takes effect on your next message.",
+        preset.label()
+    )
 }
 
 /// How many of the server's models a refusal names.
@@ -6641,12 +6666,13 @@ async fn handle_image_provider_command(
 
 /// `/effort [<low|medium|high|xhigh|max> | reset]` — show or set the effort
 /// level of the ACTIVE provider. Each provider has its own field
-/// (`anthropic_effort`, `gemini_effort`, `openai_compat.ollama_effort` /
-/// `lm_studio_effort`), and its own wire form: Anthropic sends the level as
-/// `output_config.effort`, Gemini clamps it to a `thinkingLevel`, the
-/// OpenAI-compatible presets send it verbatim as `reasoning_effort` — the
-/// accepted set is the model's, so nothing is clamped there. `reset` clears
-/// the active provider's field.
+/// (`anthropic_effort`, `gemini_effort`; on the OpenAI-compatible presets one
+/// level per model, `openai_compat.ollama_effort_by_model` /
+/// `lm_studio_effort_by_model`), and its own wire form: Anthropic sends the
+/// level as `output_config.effort`, Gemini clamps it to a `thinkingLevel`,
+/// the OpenAI-compatible presets send it verbatim as `reasoning_effort` —
+/// the accepted set is the model's, so nothing is clamped there. `reset`
+/// clears the active provider's field (the active model's level).
 ///
 /// The loop driver rebuilds the provider from config every turn, so a
 /// change takes effect on the next user message. No ModeChange is emitted:
@@ -6732,18 +6758,12 @@ async fn handle_effort_command(
                 )
             }
             ProviderKind::Ollama | ProviderKind::LmStudio => {
+                // The level is the active model's: each model keeps its own.
                 let level = resolve_provider_effort(kind, &cfg);
                 let sent = match (&level, &local_model) {
                     (Some(l), _) => format!("sent as reasoning_effort={l}"),
-                    (None, Some(m)) => match reasoning_effort_for_model(m) {
-                        Some(auto) => format!(
-                            "not set — embraOS sends reasoning_effort={auto} for {m} automatically"
-                        ),
-                        None => format!(
-                            "not set — nothing is sent for {m}; the server's per-model default applies"
-                        ),
-                    },
-                    (None, None) => "not set (no model configured)".to_string(),
+                    (None, Some(m)) => automatic_effort_phrase(m),
+                    (None, None) => "no model configured".to_string(),
                 };
                 let hint = local_model
                     .as_deref()
@@ -6751,10 +6771,12 @@ async fn handle_effort_command(
                     .map(|(m, l)| format!(" {m} documents: {}.", l.join(", ")))
                     .unwrap_or_default();
                 let shown = level.clone().unwrap_or_else(|| "not set".to_string());
+                let whose = local_model.as_deref().map(|m| format!(" for {m}")).unwrap_or_default();
                 format!(
-                    "{label} effort: {shown} — {sent}.{hint} Options: low, medium, high, \
+                    "{label} effort{whose}: {shown} — {sent}.{hint} Options: low, medium, high, \
                      xhigh, max — sent verbatim; the server validates. `/effort <level>` \
-                     takes effect on your next message; `/effort reset` clears the override."
+                     sets this model's level and takes effect on your next message; \
+                     `/effort reset` clears it."
                 )
             }
         };
@@ -6772,11 +6794,15 @@ async fn handle_effort_command(
             .await;
             return;
         }
-        send(
-            format!("{label} effort reset to the default. Takes effect on your next message."),
-            SystemMessageType::Info,
-        )
-        .await;
+        // On Ollama and LM Studio only the active model's level goes.
+        let msg = match local_model.as_deref() {
+            Some(m) => format!(
+                "{label} effort for {m} cleared — {}. Takes effect on your next message.",
+                automatic_effort_phrase(m)
+            ),
+            None => format!("{label} effort reset to the default. Takes effect on your next message."),
+        };
+        send(msg, SystemMessageType::Info).await;
         return;
     }
 
@@ -6822,13 +6848,13 @@ async fn handle_effort_command(
             .await;
         }
         ProviderKind::Ollama | ProviderKind::LmStudio => {
-            let to_model = local_model
+            let whose = local_model
                 .as_deref()
-                .map(|m| format!(" to {m}"))
+                .map(|m| format!(" for {m}"))
                 .unwrap_or_default();
             send(
                 format!(
-                    "{label} effort set to {level} (sent as reasoning_effort={level}{to_model}). \
+                    "{label} effort{whose} set to {level} (sent as reasoning_effort={level}). \
                      Takes effect on your next message."
                 ),
                 SystemMessageType::Info,
@@ -8911,6 +8937,30 @@ mod native_loop_tests {
     }
 
     #[test]
+    fn a_switch_never_carries_a_level_and_says_what_the_new_model_runs_at() {
+        use crate::provider::openai_compat::OpenAiCompatPreset::Ollama;
+        // William, 2026-10-22: `/effort low` on Qwen3.8, then a switch to
+        // V4 Pro. V4 Pro gets its own preset, and Qwen3.8 keeps `low`.
+        let mut cfg = empty_config();
+        set_local_model(&mut cfg, Ollama, "qwen3.8:27b-mxfp8");
+        set_effort_field(&mut cfg, ProviderKind::Ollama, Some("low".into()));
+        set_local_model(&mut cfg, Ollama, "deepseek-v4-pro:cloud");
+        assert_eq!(resolve_provider_effort(ProviderKind::Ollama, &cfg), None);
+        assert_eq!(
+            local_model_set_message(&cfg, Ollama, "deepseek-v4-pro:cloud"),
+            "Ollama model set to deepseek-v4-pro:cloud. Effort: not set — embraOS sends \
+             reasoning_effort=max automatically. Takes effect on your next message."
+        );
+        set_local_model(&mut cfg, Ollama, "qwen3.8:27b-mxfp8");
+        assert_eq!(resolve_provider_effort(ProviderKind::Ollama, &cfg).as_deref(), Some("low"));
+        assert_eq!(
+            local_model_set_message(&cfg, Ollama, "qwen3.8:27b-mxfp8"),
+            "Ollama model set to qwen3.8:27b-mxfp8. Effort: low, set with /effort for this \
+             model. Takes effect on your next message."
+        );
+    }
+
+    #[test]
     fn build_openai_compat_provider_reads_bearer_from_env_per_call() {
         use std::sync::Mutex;
         // Serialize env-var access across tests in this file to avoid
@@ -9625,7 +9675,12 @@ mod setup_reconfigure_tests {
                 said.push(m.content);
             }
         }
-        assert_eq!(said, vec!["Ollama model set to b. Takes effect on your next message.".to_string()]);
+        assert_eq!(
+            said,
+            vec!["Ollama model set to b. Effort: not set — nothing is sent; the server's per-model \
+                  default applies. Takes effect on your next message."
+                .to_string()]
+        );
         let saved: Vec<serde_json::Value> = db_server
             .received_requests()
             .await
