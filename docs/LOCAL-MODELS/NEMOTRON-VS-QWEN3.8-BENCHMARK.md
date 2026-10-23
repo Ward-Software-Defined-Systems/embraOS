@@ -499,7 +499,7 @@ Artificial Analysis Intelligence Index v4.3.2, read 2026-10-21:
 - **Qwen3.8 16-bit.**
   - LM Studio has no official 16-bit build; lmstudio-community publishes 4-, 5-, 6- and 8-bit. The build used here is `mlx-community/Qwen3.8-27B-bf16`.
   - To expose reasoning levels through the API, it would need a model definition like the one for `qwen/qwen3.8-27b` in `~/.lmstudio/hub/models/`.
-  - Through the OpenAI-compatible endpoint that embraOS uses, LM Studio accepts `reasoning_effort` for it and drops it. With `low` sent, the formatted prompt still read "Reasoning effort is set to xhigh" (`lms log stream --filter input`, 2026-10-22).
+  - Through the OpenAI-compatible endpoint that embraOS uses, LM Studio accepts `reasoning_effort` for it and drops it. With `low` sent, the formatted prompt still read "Reasoning effort is set to xhigh" (`lms log stream --filter input`, 2026-10-22). The same check on `qwen/qwen3.8-27b` showed the level switch from `xhigh` to `low` and back.
 - **Nemotron (not runnable yet).** The matching build is `nativ-community/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4` (80.2 GB).
   - It comes from the same NVIDIA NVFP4 checkpoint as the Ollama tag, includes the MTP head and vision encoder, and its greedy output matched NVIDIA's checkpoint token for token.
   - LM Studio's runtime 1.13.1 (mlx-vlm 0.7.3) has no `nemotron_h_omni` model package; importing it in LM Studio's own Python fails with `ModuleNotFoundError`. The build was tested by its maker with mlx-vlm 0.7.8. It was downloaded on 2026-10-21 and will run once an LM Studio runtime adds the architecture.
