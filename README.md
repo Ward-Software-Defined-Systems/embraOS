@@ -33,7 +33,8 @@ Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` 
 > active they have enough stored knowledge to sound authoritative and not enough
 > working memory to track what they have actually done. Dense models have no such
 > split. Operator-vetted for the full toolset: **`Qwen3.6-27b`** and
-> **`Qwen3.8-27b`** — both dense, so 27B means 27B active. Experiment freely with
+> **`Qwen3.8-27b`** — both dense, so 27B means 27B active. The preferred pick is
+> `Qwen3.8-27b` at BF16 on Ollama, `qwen3.8:27b-mlx-bf16`. Experiment freely with
 > others; these are the confirmed two. This is about the **conversational** model only:
 > the knowledge graph's semantic search uses a separate, much smaller sentence-embedding
 > model that ships inside the image and runs in-process — nothing to pull, configure or
@@ -45,14 +46,16 @@ Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` 
 > ollama.com through the local Ollama daemon, so it reaches embraOS through the Ollama
 > preset like any pulled model: nothing to fit in local memory, and nothing local about the
 > inference either (it is not the offline tier of the roadmap). The rule on active
-> parameters applies the same way. Operator-vetted for the full toolset and the preferred
-> pick: **`deepseek-v4-pro:cloud`**. Under evaluation: `deepseek-v4.1-flash:cloud`,
-> `glm-5.3:cloud` and `kimi-k3:cloud`.
+> parameters applies the same way, with one exception: `deepseek-v4.1-flash:cloud` runs
+> 16B active in decode (8B in prefill), below the rule, and the operator vetted it on
+> 2026-10-23. Operator-vetted for the full toolset: **`deepseek-v4.1-flash:cloud`** and
+> **`deepseek-v4-pro:cloud`**. V4.1 Flash is the preferred pick, in part because it takes
+> image input and V4 Pro does not. Under evaluation: `glm-5.3:cloud` and `kimi-k3:cloud`.
 >
 > | Model | Tag | Parameters | Context | Input | Effort sent (default) | Status |
 > |---|---|---|---|---|---|---|
-> | DeepSeek V4 Pro | `deepseek-v4-pro:cloud` | 1.6T total, 49B active (MoE) | 1M | text | `max` | vetted, preferred |
-> | DeepSeek V4.1 Flash | `deepseek-v4.1-flash:cloud` | 763B total; 8B active in prefill, 16B in decode (MoE) | 1M | text, image | `max` | under evaluation |
+> | DeepSeek V4 Pro | `deepseek-v4-pro:cloud` | 1.6T total, 49B active (MoE) | 1M | text | `max` | vetted |
+> | DeepSeek V4.1 Flash | `deepseek-v4.1-flash:cloud` | 763B total; 8B active in prefill, 16B in decode (MoE) | 1M | text, image | `max` | vetted, preferred |
 > | GLM 5.3 | `glm-5.3:cloud` | 753B | 1M | text | `max` | under evaluation |
 > | Kimi K3 | `kimi-k3:cloud` | 2.8T (MoE) | 1M | text, image | `max` | under evaluation |
 >
