@@ -23,6 +23,12 @@ const NO_SOUL_ERROR: &str = "Soul document not found — no soul exists (first r
 /// `a_missing_soul_with_a_stored_hash_halts_and_without_one_is_a_first_run`.
 const SEALED_HASH_WITHOUT_SOUL_ERROR: &str = "Soul document missing but a sealed hash is stored";
 
+/// The report for a soul document that carries no `soul` field: the seal
+/// cannot be checked, and nothing is hashed in its place (#13). Not a
+/// first run.
+const SOUL_FIELD_MISSING_ERROR: &str =
+    "The stored soul document lacks its soul field; the seal cannot be checked";
+
 pub struct SoulVerifier {
     wardsondb_url: String,
     hash_path: std::path::PathBuf,
@@ -70,7 +76,7 @@ impl SoulVerifier {
         };
 
         // Compute SHA-256
-        let computed_hash = self.compute_hash(&soul_json);
+        let computed_hash = self.compute_hash(&soul_json)?;
         debug!("Computed soul hash: {}", computed_hash);
 
         // Read stored hash from STATE
@@ -108,23 +114,34 @@ impl SoulVerifier {
         Ok(Some(doc))
     }
 
-    fn compute_hash(&self, soul_json: &serde_json::Value) -> String {
-        // Extract the "soul" field — hash only the soul content, not metadata
-        let soul_content = &soul_json["soul"];
+    /// The hash of the soul as sealed: the `soul` field of the document
+    /// (not the metadata around it), serialized the way the brain's
+    /// `seal_soul` serializes it. A document without the field, or one that
+    /// does not serialize, is a failed verification, never a hash over a
+    /// stand-in such as `null` or the empty string (#13).
+    fn compute_hash(&self, soul_json: &serde_json::Value) -> Result<String> {
+        let soul_content = soul_json
+            .get("soul")
+            .ok_or_else(|| anyhow::anyhow!("{SOUL_FIELD_MISSING_ERROR}"))?;
 
         // Use to_string_pretty to match embra-brain's seal_soul() serialization
         let canonical = serde_json::to_string_pretty(soul_content)
-            .unwrap_or_default();
+            .context("The stored soul document does not serialize; the seal cannot be checked")?;
 
         let mut hasher = Sha256::new();
         hasher.update(canonical.as_bytes());
-        format!("{:x}", hasher.finalize())
+        Ok(format!("{:x}", hasher.finalize()))
     }
 
     fn read_stored_hash(&self) -> Result<String> {
         if !self.hash_path.exists() {
-            anyhow::bail!("No stored soul hash at {} — first boot or STATE partition issue",
-                self.hash_path.display());
+            // A soul document exists (the 404 path never comes here), so a
+            // missing hash is a lost or tampered STATE, and embrad halts on
+            // this report (#14: the recovery is named).
+            anyhow::bail!(
+                "No stored soul hash at {} while a soul document exists — restore STATE, or remove the soul with seed-state.sh --wipe data to start over",
+                self.hash_path.display()
+            );
         }
 
         let hash = std::fs::read_to_string(&self.hash_path)
@@ -167,7 +184,25 @@ mod tests {
             "sealed_at": "2026-01-01T00:00:00Z",
             "sealed": true,
         });
-        assert_eq!(verifier("/nonexistent").compute_hash(&doc), PARITY_HASH);
+        assert_eq!(verifier("/nonexistent").compute_hash(&doc).unwrap(), PARITY_HASH);
+    }
+
+    /// A document without its `soul` field is a failed verification, not a
+    /// hash over `null` (#13), in words that are not a first run.
+    #[test]
+    fn a_document_without_its_soul_field_does_not_hash() {
+        let doc = serde_json::json!({ "_id": "soul", "sha256": "x" });
+        let err = verifier("/nonexistent").compute_hash(&doc).unwrap_err().to_string();
+        assert_eq!(err, SOUL_FIELD_MISSING_ERROR);
+        assert!(!err.contains("no soul") && !err.contains("not found"), "{err}");
+    }
+
+    /// embrad compares the first-run report with this sentence, exactly
+    /// (`is_first_run` in `embrad/src/supervisor.rs`); every other report
+    /// of this module is some other sentence.
+    #[test]
+    fn the_no_soul_report_is_the_sentence_embrad_compares() {
+        assert_eq!(NO_SOUL_ERROR, "Soul document not found — no soul exists (first run or data loss)");
     }
 
     #[test]
@@ -209,6 +244,82 @@ mod tests {
         assert!(!valid);
         assert_eq!(err, NO_SOUL_ERROR, "no hash: a first run");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn soul_server_doc() -> serde_json::Value {
+        let soul: serde_json::Value = serde_json::from_str(PARITY_SOUL).unwrap();
+        serde_json::json!({ "ok": true, "data": { "_id": "soul", "soul": soul, "sealed": true } })
+    }
+
+    async fn verify_against(body: serde_json::Value, stored: Option<&str>) -> (bool, String, String, String) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/soul.invariant/docs/soul"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "embra-trustd-verify-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hash = dir.join("soul.sha256");
+        if let Some(h) = stored {
+            std::fs::write(&hash, format!("{h}\n")).unwrap();
+        }
+        let out = SoulVerifier::new(server.uri(), hash).verify().await;
+        let _ = std::fs::remove_dir_all(&dir);
+        out
+    }
+
+    /// The verdict end to end: the stored hash equal to the computed one
+    /// verifies; any other stored hash is a mismatch, with both hashes in
+    /// the report for the operator (#52).
+    #[tokio::test]
+    async fn a_hash_mismatch_is_reported_and_a_match_verifies() {
+        let (valid, computed, stored, err) = verify_against(soul_server_doc(), Some(PARITY_HASH)).await;
+        assert!(valid, "{err}");
+        assert_eq!((computed.as_str(), stored.as_str(), err.as_str()), (PARITY_HASH, PARITY_HASH, ""));
+
+        let other = "0".repeat(64);
+        let (valid, computed, stored, err) = verify_against(soul_server_doc(), Some(&other)).await;
+        assert!(!valid);
+        assert_eq!(err, "Hash mismatch");
+        assert_eq!(computed, PARITY_HASH);
+        assert_eq!(stored, other);
+    }
+
+    /// No report of a failing database or a malformed document is the
+    /// first-run sentence, whatever the database says: a verification that
+    /// could not run halts the boot, it never re-seals (#52).
+    #[tokio::test]
+    async fn the_reports_of_a_failing_database_never_read_as_a_first_run() {
+        let soul: serde_json::Value = serde_json::from_str(PARITY_SOUL).unwrap();
+        let cases = [
+            serde_json::json!({ "ok": false, "error": { "message": "collection not found" } }),
+            serde_json::json!({ "ok": false, "error": { "message": "no soul here, boom" } }),
+            serde_json::json!({ "ok": true, "data": null }),
+            serde_json::json!({ "ok": true, "data": { "_id": "soul", "sealed": true } }),
+            serde_json::json!({ "ok": true, "data": { "_id": "soul", "soul": soul } }),
+        ];
+        for body in cases {
+            let (valid, _, _, err) = verify_against(body.clone(), None).await;
+            assert!(!valid, "{body}");
+            assert_ne!(err, NO_SOUL_ERROR, "{body}: {err}");
+            assert!(!err.is_empty(), "{body}");
+        }
+        // The last case is the honest soul with no stored hash: the report
+        // names the recovery and is not a first run either.
+        let (_, _, _, err) = verify_against(soul_server_doc(), None).await;
+        assert!(err.starts_with("No stored soul hash at") && err.contains("seed-state.sh --wipe data"), "{err}");
+        // A database that cannot be reached at all.
+        let (valid, _, _, err) = verifier("/nonexistent/soul.sha256").verify().await;
+        assert!(!valid);
+        assert!(err.starts_with("Failed to connect to WardSONDB"), "{err}");
     }
 
     /// A soul without its stored hash is a failed verification, and embrad

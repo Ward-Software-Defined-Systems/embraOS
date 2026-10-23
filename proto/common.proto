@@ -31,8 +31,12 @@ message HealthCheckResponse {
 
 // Soul status
 message SoulStatus {
+  // A hash is stored for this instance: the operator sealed it.
   bool sealed = 1;
+  // The hash of the soul as stored now.
   string sha256 = 2;
   Timestamp sealed_at = 3;
+  // The soul as stored matches the stored hash. Sealed and not verified is
+  // a tampered or lost soul; neither is a first run.
   bool verified = 4;
 }

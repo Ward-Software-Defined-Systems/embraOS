@@ -31,36 +31,23 @@ impl TrustService for TrustServiceImpl {
     ) -> Result<Response<VerifySoulResponse>, Status> {
         let req = request.into_inner();
         let (valid, computed, stored, error) = self.verifier.verify().await;
-
-        // If caller provided an expected hash, also check against that
-        if !req.expected_hash.is_empty() && computed != req.expected_hash {
-            let error = format!("Expected hash {} but computed {}", req.expected_hash, computed);
-            return Ok(Response::new(VerifySoulResponse {
-                valid: false,
-                computed_hash: computed,
-                stored_hash: stored,
-                error,
-            }));
-        }
-
-        Ok(Response::new(VerifySoulResponse {
-            valid,
-            computed_hash: computed,
-            stored_hash: stored,
-            error,
-        }))
+        Ok(Response::new(apply_expected_hash(&req.expected_hash, valid, computed, stored, error)))
     }
 
     async fn get_soul_status(
         &self,
         _request: Request<GetSoulStatusRequest>,
     ) -> Result<Response<GetSoulStatusResponse>, Status> {
-        let (valid, hash, _, _) = self.verifier.verify().await;
+        let (valid, computed, stored, _) = self.verifier.verify().await;
 
+        // `sealed`: a hash is stored for this instance, so the operator
+        // sealed it. `verified`: the soul as stored matches it now. Both
+        // false on a first run; sealed and not verified is a tampered or
+        // lost soul (#15: `sealed` used to mean "a document exists").
         Ok(Response::new(GetSoulStatusResponse {
             status: Some(common::SoulStatus {
-                sealed: !hash.is_empty(),
-                sha256: hash,
+                sealed: !stored.is_empty(),
+                sha256: computed,
                 sealed_at: None,
                 verified: valid,
             }),
@@ -124,6 +111,28 @@ impl TrustService for TrustServiceImpl {
     }
 }
 
+/// The reply to `VerifySoul`: the verifier's verdict, unless the caller
+/// named the hash it expects and the computed one differs, which fails the
+/// verdict with both hashes kept for the caller's diagnosis. An empty
+/// expectation is no expectation.
+fn apply_expected_hash(
+    expected: &str,
+    valid: bool,
+    computed: String,
+    stored: String,
+    error: String,
+) -> VerifySoulResponse {
+    if !expected.is_empty() && computed != expected {
+        return VerifySoulResponse {
+            valid: false,
+            error: format!("Expected hash {} but computed {}", expected, computed),
+            computed_hash: computed,
+            stored_hash: stored,
+        };
+    }
+    VerifySoulResponse { valid, computed_hash: computed, stored_hash: stored, error }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
@@ -157,4 +166,23 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod expected_hash_tests {
+    use super::apply_expected_hash;
+
+    #[test]
+    fn an_expectation_overrides_the_verdict_only_when_it_differs() {
+        let ok = apply_expected_hash("", true, "aa".into(), "aa".into(), String::new());
+        assert!(ok.valid && ok.error.is_empty(), "no expectation keeps the verdict");
+        let same = apply_expected_hash("aa", true, "aa".into(), "aa".into(), String::new());
+        assert!(same.valid, "an expectation that matches changes nothing");
+        let differs = apply_expected_hash("bb", true, "aa".into(), "aa".into(), String::new());
+        assert!(!differs.valid);
+        assert!(differs.error.contains("Expected hash bb but computed aa"), "{}", differs.error);
+        assert_eq!((differs.computed_hash.as_str(), differs.stored_hash.as_str()), ("aa", "aa"));
+        let failed = apply_expected_hash("", false, "aa".into(), "bb".into(), "Hash mismatch".into());
+        assert!(!failed.valid && failed.error == "Hash mismatch");
+    }
 }

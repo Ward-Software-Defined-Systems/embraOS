@@ -12,6 +12,49 @@ use rcgen::{
 use std::path::{Path, PathBuf};
 use tracing::{info, debug};
 
+/// The Root CA's parameters, one definition for a fresh install
+/// (`generate_ca`) and for every reboot (`load_ca`, which re-signs the
+/// issuer from the stored key): the issuer identity cannot drift between
+/// the two (#41). The validity window is the generator's.
+fn ca_params() -> CertificateParams {
+    let mut params = CertificateParams::default();
+    let mut dn = DistinguishedName::new();
+    dn.push(DnType::CommonName, DnValue::Utf8String("embraOS Root CA".to_string()));
+    dn.push(DnType::OrganizationName, DnValue::Utf8String("embraOS".to_string()));
+    params.distinguished_name = dn;
+    params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    params
+}
+
+/// Writes `bytes` to `path` whole: a temporary file beside it, created
+/// exclusively with `mode`, written, synced and renamed into place.
+fn write_atomic(path: &Path, bytes: &[u8], mode: u32) -> Result<()> {
+    use std::io::Write;
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let tmp = path.with_file_name(format!(".{name}.tmp-{}", std::process::id()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(mode);
+    }
+    #[cfg(not(unix))]
+    let _ = mode;
+    let result = (|| -> Result<()> {
+        let mut f = options.open(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path).with_context(|| format!("rename {} into place", tmp.display()))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
 pub struct PKIManager {
     pki_dir: PathBuf,
     ca_cert: Option<Certificate>,
@@ -51,16 +94,7 @@ impl PKIManager {
     }
 
     fn generate_ca(&mut self) -> Result<()> {
-        let mut params = CertificateParams::default();
-        let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, DnValue::Utf8String("embraOS Root CA".to_string()));
-        dn.push(DnType::OrganizationName, DnValue::Utf8String("embraOS".to_string()));
-        params.distinguished_name = dn;
-        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        params.key_usages = vec![
-            KeyUsagePurpose::KeyCertSign,
-            KeyUsagePurpose::CrlSign,
-        ];
+        let mut params = ca_params();
         // 10 year validity for the CA
         params.not_before = time::OffsetDateTime::now_utc();
         params.not_after = time::OffsetDateTime::now_utc() + time::Duration::days(3650);
@@ -87,18 +121,10 @@ impl PKIManager {
 
         // To sign new certs with a loaded CA, we reconstruct the CA params
         // and re-self-sign with the loaded key. This produces a Certificate
-        // object usable as an issuer in signed_by().
-        let mut ca_params = CertificateParams::default();
-        let mut dn = DistinguishedName::new();
-        dn.push(DnType::CommonName, DnValue::Utf8String("embraOS Root CA".to_string()));
-        dn.push(DnType::OrganizationName, DnValue::Utf8String("embraOS".to_string()));
-        ca_params.distinguished_name = dn;
-        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-        ca_params.key_usages = vec![
-            KeyUsagePurpose::KeyCertSign,
-            KeyUsagePurpose::CrlSign,
-        ];
-        let ca_cert = ca_params.self_signed(&key_pair)
+        // object usable as an issuer in signed_by(). rcgen 0.13 has no
+        // load-a-certificate-as-issuer path; the one `ca_params` keeps the
+        // issuer identity the same on a fresh install and on every reboot.
+        let ca_cert = ca_params().self_signed(&key_pair)
             .context("Failed to reconstruct CA certificate from loaded key")?;
 
         self.ca_cert_pem_bytes = Some(cert_pem.into_bytes());
@@ -109,16 +135,15 @@ impl PKIManager {
         Ok(())
     }
 
+    /// The certificate and the key, each written whole: to a temporary file
+    /// beside its place, created with its final mode (the key is 0600 from
+    /// its first byte, never at the umask and then restricted, #31), synced
+    /// and renamed over. A boot that stops between the two leaves one file
+    /// at most, and `init` generates both again.
     fn save_ca(&self, cert_path: &Path, key_path: &Path) -> Result<()> {
         if let (Some(cert_pem), Some(key)) = (&self.ca_cert_pem_bytes, &self.ca_key) {
-            std::fs::write(cert_path, cert_pem)?;
-            std::fs::write(key_path, key.serialize_pem())?;
-            // Restrict key file permissions
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))?;
-            }
+            write_atomic(cert_path, cert_pem, 0o644)?;
+            write_atomic(key_path, key.serialize_pem().as_bytes(), 0o600)?;
             info!("CA saved to {}", self.pki_dir.display());
         }
         Ok(())
@@ -190,5 +215,68 @@ impl PKIManager {
             let path = self.pki_dir.join("ca.crt");
             Ok(std::fs::read(&path).context("Failed to read CA cert")?)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_pki(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("embra-trustd-pki-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    /// The key is 0600 from its creation, the pair is written whole (no
+    /// temporary file stays behind), a second manager over the same
+    /// directory loads what the first wrote byte for byte, and the loaded
+    /// CA signs a service certificate (#31, #52).
+    #[cfg(unix)]
+    #[test]
+    fn the_ca_key_is_private_from_its_first_byte_and_a_reload_keeps_the_pair() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_pki("mode");
+        let mut first = PKIManager::new(dir.clone());
+        first.init().expect("a fresh CA");
+        let key = dir.join("ca.key");
+        let cert = dir.join("ca.crt");
+        assert_eq!(std::fs::metadata(&key).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::metadata(&cert).unwrap().permissions().mode() & 0o777, 0o644);
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().all(|n| !n.contains(".tmp-")), "{names:?}");
+        let key_bytes = std::fs::read(&key).unwrap();
+        let cert_bytes = std::fs::read(&cert).unwrap();
+
+        let mut second = PKIManager::new(dir.clone());
+        second.init().expect("the CA loads");
+        assert_eq!(std::fs::read(&key).unwrap(), key_bytes);
+        assert_eq!(std::fs::read(&cert).unwrap(), cert_bytes);
+        assert_eq!(second.ca_cert_pem().unwrap(), cert_bytes);
+        let (leaf, leaf_key) = second
+            .generate_service_cert("embra-apid", &["embra-apid".to_string()], &["127.0.0.1".to_string()], true, false)
+            .expect("the loaded CA signs");
+        assert!(String::from_utf8_lossy(&leaf).contains("BEGIN CERTIFICATE"));
+        assert!(String::from_utf8_lossy(&leaf_key).contains("PRIVATE KEY"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `write_atomic` leaves the target untouched when it cannot write: a
+    /// temporary file that cannot be created is no write at all.
+    #[test]
+    fn write_atomic_leaves_the_target_alone_when_it_cannot_write() {
+        let dir = temp_pki("atomic");
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("ca.crt");
+        std::fs::write(&target, b"before").unwrap();
+        let err = write_atomic(&dir.join("missing-dir").join("ca.crt"), b"after", 0o644).unwrap_err();
+        assert!(err.to_string().contains("create"), "{err}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"before");
+        write_atomic(&target, b"after", 0o644).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"after");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
