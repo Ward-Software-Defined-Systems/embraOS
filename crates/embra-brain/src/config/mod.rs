@@ -1139,38 +1139,12 @@ mod key_lookup_tests {
     use super::*;
 
     fn cfg(api_key: &str, provider: &str, anth: Option<&str>, gem: Option<&str>) -> SystemConfig {
-        SystemConfig {
-            name: "Embra".into(),
-            api_key: api_key.into(),
-            timezone: "UTC".into(),
-            deployment_mode: "phase1".into(),
-            created_at: String::new(),
-            version: "test".into(),
-            github_token: None,
-            kg_temporal_window_secs: 1800,
-            kg_max_traversal_depth: 3,
-            kg_traversal_depth_ceiling: 5,
-            kg_edge_candidate_limit: 50,
-            kg_traversal_edge_limit: 500,
-            kg_traversal_node_budget: 1000,
-            api_provider: provider.into(),
-            gemini_model: None,
-            anthropic_model: None,
-            anthropic_effort: None,
-            gemini_effort: None,
-            embedding_enabled: None,
-            embedding_model: None,
-            image_provider: None,
-            image_model: None,
-            git_tokens: None,
-            guardian_secrets: None,
-            guardian_private_hosts: None,
-            anthropic_api_key: anth.map(str::to_string),
-            gemini_api_key: gem.map(str::to_string),
-            max_tool_iterations: None,
-            show_reasoning: None,
-            openai_compat: crate::config::OpenAiCompatConfig::default(),
-        }
+        let mut c = super::tests_support::minimal_cfg();
+        c.api_key = api_key.into();
+        c.api_provider = provider.into();
+        c.anthropic_api_key = anth.map(str::to_string);
+        c.gemini_api_key = gem.map(str::to_string);
+        c
     }
 
     #[test]
@@ -1279,38 +1253,7 @@ mod max_tool_iterations_serde_tests {
     use serde_json::json;
 
     fn minimal_cfg() -> SystemConfig {
-        SystemConfig {
-            name: "Embra".into(),
-            api_key: "k".into(),
-            timezone: "UTC".into(),
-            deployment_mode: "phase1".into(),
-            created_at: String::new(),
-            version: "test".into(),
-            github_token: None,
-            kg_temporal_window_secs: 1800,
-            kg_max_traversal_depth: 3,
-            kg_traversal_depth_ceiling: 5,
-            kg_edge_candidate_limit: 50,
-            kg_traversal_edge_limit: 500,
-            kg_traversal_node_budget: 1000,
-            api_provider: "anthropic".into(),
-            gemini_model: None,
-            anthropic_model: None,
-            anthropic_effort: None,
-            gemini_effort: None,
-            embedding_enabled: None,
-            embedding_model: None,
-            image_provider: None,
-            image_model: None,
-            git_tokens: None,
-            guardian_secrets: None,
-            guardian_private_hosts: None,
-            anthropic_api_key: None,
-            gemini_api_key: None,
-            max_tool_iterations: None,
-            show_reasoning: None,
-            openai_compat: crate::config::OpenAiCompatConfig::default(),
-        }
+        super::tests_support::minimal_cfg()
     }
 
     #[test]

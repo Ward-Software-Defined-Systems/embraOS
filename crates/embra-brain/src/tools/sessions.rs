@@ -3,6 +3,7 @@ use sha2::{Digest, Sha256};
 
 use crate::db::WardsonDbClient;
 
+use futures::StreamExt;
 use super::ensure_collection;
 
 // ── Helpers ──
@@ -92,13 +93,13 @@ async fn session_is_deleted(db: &WardsonDbClient, name: &str) -> bool {
 
 /// The sessions the operator has not deleted, by name.
 pub(crate) async fn live_session_names(db: &WardsonDbClient) -> Vec<String> {
-    let mut live = Vec::new();
-    for name in session_names(db).await {
-        if !session_is_deleted(db, &name).await {
-            live.push(name);
-        }
-    }
-    live
+    let names = session_names(db).await;
+    // The futures are built first and the closure is gone before anything
+    // is awaited: a closure that returns a borrowing future, held inside a
+    // future that must be `Send`, trips the compiler (rust-lang/rust#64552).
+    let reads: Vec<_> = names.iter().map(|name| async move { session_is_deleted(db, name).await }).collect();
+    let deleted: Vec<bool> = futures::stream::iter(reads).buffered(SESSION_READ_FANOUT).collect().await;
+    names.into_iter().zip(deleted).filter(|(_, gone)| !gone).map(|(name, _)| name).collect()
 }
 
 /// What a session tool answers for a session the operator has deleted.
@@ -151,15 +152,21 @@ mod deleted_session_tests {
 }
 
 /// Fetch the turns array for a session. Returns (turns_vec, total_count).
-async fn fetch_turns(db: &WardsonDbClient, name: &str) -> (Vec<serde_json::Value>, usize) {
+/// How many of a session's per-session reads run at once in a listing or a
+/// search: the reads are independent round trips to a loopback database,
+/// and the order of the results is kept (#48).
+const SESSION_READ_FANOUT: usize = 8;
+
+/// The one history document of a session, or none. The single-document
+/// invariant is load-bearing: any extra documents are silently dropped,
+/// so a violation is made loud (FIX-5). The one read behind `fetch_turns`
+/// and `fetch_turn_count`.
+async fn fetch_history_doc(db: &WardsonDbClient, name: &str) -> Option<serde_json::Value> {
     let collection = format!("sessions.{}.history", name);
     let results = db
         .query(&collection, &history_query_body())
         .await
         .unwrap_or_default();
-
-    // The single-doc-per-session invariant is load-bearing here: any extra
-    // documents are silently dropped, so make a violation loud (FIX-5).
     if results.len() > 1 {
         tracing::warn!(
             target: "sessions",
@@ -168,8 +175,21 @@ async fn fetch_turns(db: &WardsonDbClient, name: &str) -> (Vec<serde_json::Value
             "history collection holds multiple documents; only the first is read"
         );
     }
+    results.into_iter().next()
+}
 
-    if let Some(doc) = results.into_iter().next()
+/// A session's turn count without its turns: for a meta document from
+/// before `turn_count` was stamped, and for the summary's staleness check
+/// (#48: `fetch_turns` cloned every turn to count them).
+async fn fetch_turn_count(db: &WardsonDbClient, name: &str) -> usize {
+    fetch_history_doc(db, name)
+        .await
+        .and_then(|doc| doc.get("turns").and_then(|t| t.as_array()).map(|a| a.len()))
+        .unwrap_or(0)
+}
+
+async fn fetch_turns(db: &WardsonDbClient, name: &str) -> (Vec<serde_json::Value>, usize) {
+    if let Some(doc) = fetch_history_doc(db, name).await
         && let Some(turns) = doc.get("turns").and_then(|v| v.as_array())
     {
         let len = turns.len();
@@ -559,55 +579,53 @@ pub async fn session_list(db: &WardsonDbClient) -> String {
         return "No sessions found.".into();
     }
 
-    let mut sessions = Vec::new();
+    // One row per session, the per-session reads a few at a time; a deleted
+    // session is no row. The stamped `turn_count` is read from the meta
+    // document; a document from before the stamp is counted without its
+    // turns being cloned (#48).
+    let reads: Vec<_> = names
+        .iter()
+        .map(|name| async move {
+            let meta_col = format!("sessions.{}.meta", name);
+            // One meta document per session: read like every single-document
+            // collection, with a limit and an order, so the first document
+            // returned is the canonical one.
+            let meta_docs = db
+                .query(&meta_col, &history_query_body())
+                .await
+                .unwrap_or_default();
 
-    for name in &names {
-        let meta_col = format!("sessions.{}.meta", name);
-        // One meta document per session: read like every single-document
-        // collection, with a limit and an order, so the first document
-        // returned is the canonical one.
-        let meta_docs = db
-            .query(&meta_col, &history_query_body())
-            .await
-            .unwrap_or_default();
+            let (status, provider, last_active, created_at, stamped) =
+                if let Some(meta) = meta_docs.into_iter().next() {
+                    // Deleted by the operator: not listed, as in the operator's own
+                    // session list.
+                    if meta_says_deleted(&meta) {
+                        return None;
+                    }
+                    let (status, provider, last_active, created_at) = meta_display_fields(name, &meta, "—");
+                    let stamped = meta.get("turn_count").and_then(|v| v.as_u64()).map(|n| n as usize);
+                    (status, provider, last_active, created_at, stamped)
+                } else {
+                    ("unknown".into(), "—".into(), "—".into(), "—".into(), None)
+                };
 
-        let (status, provider, last_active, created_at) = if let Some(meta) = meta_docs.into_iter().next() {
-            // Deleted by the operator: not listed, as in the operator's own
-            // session list.
-            if meta_says_deleted(&meta) {
-                continue;
-            }
-            (
-                meta.get("state")
-                    .or_else(|| meta.get("status"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown")
-                    .to_string(),
-                crate::sessions::recorded_provider_in(name, &meta).unwrap_or("—").to_string(),
-                meta.get("last_active")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("—")
-                    .to_string(),
-                meta.get("created_at")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("—")
-                    .to_string(),
-            )
-        } else {
-            ("unknown".into(), "—".into(), "—".into(), "—".into())
-        };
+            let turn_count = match stamped {
+                Some(n) => n,
+                None => fetch_turn_count(db, name).await,
+            };
 
-        let (_, turn_count) = fetch_turns(db, name).await;
-
-        sessions.push(SessionRow {
-            name: name.clone(),
-            status,
-            provider,
-            turns: turn_count,
-            last_active,
-            created_at,
-        });
-    }
+            Some(SessionRow {
+                name: name.clone(),
+                status,
+                provider,
+                turns: turn_count,
+                last_active,
+                created_at,
+            })
+        })
+        .collect();
+    let rows: Vec<Option<SessionRow>> = futures::stream::iter(reads).buffered(SESSION_READ_FANOUT).collect().await;
+    let mut sessions: Vec<SessionRow> = rows.into_iter().flatten().collect();
 
     if sessions.is_empty() {
         return "No sessions found.".into();
@@ -616,6 +634,38 @@ pub async fn session_list(db: &WardsonDbClient) -> String {
     // Sort by last_active descending
     sessions.sort_by(|a, b| b.last_active.cmp(&a.last_active));
     session_table(&sessions)
+}
+
+/// The four display fields of a session's meta document: its state (the
+/// legacy `status` key read as well; `unknown` without either), its
+/// provider pin, and `last_active` and `created_at`, each `missing` when
+/// absent. `session_list` and `session_meta` read the same fields (#48).
+fn meta_display_fields(name: &str, meta: &serde_json::Value, missing: &str) -> (String, String, String, String) {
+    (
+        meta.get("state")
+            .or_else(|| meta.get("status"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+        crate::sessions::recorded_provider_in(name, meta).unwrap_or("—").to_string(),
+        meta.get("last_active").and_then(|v| v.as_str()).unwrap_or(missing).to_string(),
+        meta.get("created_at").and_then(|v| v.as_str()).unwrap_or(missing).to_string(),
+    )
+}
+
+/// The characters around a match: `pad` bytes each side of `pos..pos+len`,
+/// each edge moved to a character boundary so the slice never cuts a
+/// multi-byte character. One definition for the two search passes (#48).
+fn snippet_around(text: &str, pos: usize, len: usize, pad: usize) -> &str {
+    let mut start = pos.saturating_sub(pad);
+    while start > 0 && !text.is_char_boundary(start) {
+        start -= 1;
+    }
+    let mut end = (pos + len + pad).min(text.len());
+    while end < text.len() && !text.is_char_boundary(end) {
+        end += 1;
+    }
+    &text[start..end]
 }
 
 /// One row of `session_list`, as read from a session's meta.
@@ -754,8 +804,11 @@ pub async fn session_search(
 
     let mut results = Vec::new();
 
-    for name in &names_to_search {
-        let (turns, _) = fetch_turns(db, name).await;
+    // The histories a few at a time, in order (#48).
+    let reads: Vec<_> = names_to_search.iter().map(|name| async move { fetch_turns(db, name).await.0 }).collect();
+    let histories: Vec<Vec<serde_json::Value>> =
+        futures::stream::iter(reads).buffered(SESSION_READ_FANOUT).collect().await;
+    for (name, turns) in names_to_search.iter().zip(histories) {
         for (i, turn) in turns.iter().enumerate() {
             let content = turn
                 .get("content")
@@ -766,15 +819,7 @@ pub async fn session_search(
             if let Some((anchor_pos, anchor_len)) = plan.match_turn(&content_lower) {
                 let role = turn.get("role").and_then(|r| r.as_str()).unwrap_or("?");
 
-                let mut start = anchor_pos.saturating_sub(50);
-                while start > 0 && !content.is_char_boundary(start) {
-                    start -= 1;
-                }
-                let mut end = (anchor_pos + anchor_len + 50).min(content.len());
-                while end < content.len() && !content.is_char_boundary(end) {
-                    end += 1;
-                }
-                let snippet = &content[start..end];
+                let snippet = snippet_around(content, anchor_pos, anchor_len, 50);
 
                 results.push(format!(
                     "{} turn #{} [{}]: ...{}...",
@@ -832,15 +877,7 @@ pub async fn session_search(
                 );
                 let haystack_lower = haystack.to_lowercase();
                 if let Some((anchor_pos, anchor_len)) = plan.match_turn(&haystack_lower) {
-                    let mut start = anchor_pos.saturating_sub(50);
-                    while start > 0 && !haystack.is_char_boundary(start) {
-                        start -= 1;
-                    }
-                    let mut end = (anchor_pos + anchor_len + 50).min(haystack.len());
-                    while end < haystack.len() && !haystack.is_char_boundary(end) {
-                        end += 1;
-                    }
-                    let snippet = &haystack[start..end];
+                    let snippet = snippet_around(&haystack, anchor_pos, anchor_len, 50);
 
                     results.push(format!(
                         "{} turn #{} [tool/{}]: ...{}...",
@@ -955,22 +992,7 @@ pub async fn session_meta(db: &WardsonDbClient, param: &str) -> String {
     }
 
     let (status, provider, last_active, created_at) = if let Some(meta) = meta_docs.into_iter().next() {
-        (
-            meta.get("state")
-                .or_else(|| meta.get("status"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string(),
-            crate::sessions::recorded_provider_in(name, &meta).unwrap_or("—").to_string(),
-            meta.get("last_active")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string(),
-            meta.get("created_at")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown")
-                .to_string(),
-        )
+        meta_display_fields(name, &meta, "unknown")
     } else {
         return format!("Session '{}' not found.", name);
     };
@@ -1078,6 +1100,20 @@ pub async fn session_delta(db: &WardsonDbClient, param: &str) -> String {
 /// 10,000-entry window about 25 s. It runs on the blocking pool.
 const MEMORY_SCAN_CANDIDATES_SHOWN: usize = 10;
 
+/// The text of a memory as the duplicate checks compare it: lowercase, its
+/// whitespace runs folded to one space. One definition for `memory_scan`,
+/// `memory_dedup` and the cross-collection pass (#48).
+fn normalize_content(text: &str) -> String {
+    text.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Whether one normalized text contains the other, the shorter inside the
+/// longer; an empty text matches nothing.
+fn is_subset_match(a: &str, b: &str) -> bool {
+    let (shorter, longer) = if a.len() <= b.len() { (a, b) } else { (b, a) };
+    !shorter.is_empty() && longer.contains(shorter)
+}
+
 /// Every entry pair where one entry's normalized text contains the other's:
 /// `(id, normalized text)` in, one report line per pair out.
 fn subset_candidates(normalized: &[(String, String)]) -> Vec<String> {
@@ -1089,7 +1125,7 @@ fn subset_candidates(normalized: &[(String, String)]) -> Vec<String> {
             } else {
                 (&normalized[j], &normalized[i])
             };
-            if !shorter.1.is_empty() && longer.1.contains(&shorter.1) {
+            if is_subset_match(&shorter.1, &longer.1) {
                 dupes.push(format!("  Subset: [{}] is contained in [{}]", shorter.0, longer.0));
             }
         }
@@ -1239,11 +1275,8 @@ pub async fn memory_scan(db: &WardsonDbClient, param: &str) -> String {
             let content = doc
                 .get("content")
                 .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_lowercase()
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
+                .map(normalize_content)
+                .unwrap_or_default();
             (id, content)
         })
         .collect();
@@ -1338,15 +1371,7 @@ fn duplicate_groups(normalized: &[NormalizedEntry]) -> Vec<(String, Vec<usize>)>
                 group.push(j);
                 strategy = "Identical".into();
             } else {
-                let (shorter, longer) = if normalized[i].normalized.len()
-                    <= normalized[j].normalized.len()
-                {
-                    (&normalized[i].normalized, &normalized[j].normalized)
-                } else {
-                    (&normalized[j].normalized, &normalized[i].normalized)
-                };
-
-                if longer.contains(shorter.as_str()) {
+                if is_subset_match(&normalized[i].normalized, &normalized[j].normalized) {
                     group.push(j);
                     strategy = "Subset".into();
                 }
@@ -1390,14 +1415,8 @@ fn cross_collection_overlaps(entries: &[NormalizedEntry], semantic: &[serde_json
         for sem in semantic {
             let sem_id = sem.get("_id").and_then(|v| v.as_str()).unwrap_or("");
             let sem_content = sem.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            let sem_norm: String = sem_content.to_lowercase().split_whitespace().collect::<Vec<_>>().join(" ");
-            if sem_norm.is_empty() { continue; }
-            let (shorter, longer) = if entry.normalized.len() <= sem_norm.len() {
-                (&entry.normalized, &sem_norm)
-            } else {
-                (&sem_norm, &entry.normalized)
-            };
-            if longer.contains(shorter.as_str()) {
+            let sem_norm = normalize_content(sem_content);
+            if is_subset_match(&entry.normalized, &sem_norm) {
                 cross_dupes.push(format!(
                     "  Potential cross-collection duplicate: entry {} ≈ semantic node {}",
                     entry.id, sem_id
@@ -1472,11 +1491,7 @@ pub async fn memory_dedup(db: &WardsonDbClient, param: &str) -> String {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let norm = content
-                .to_lowercase()
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
+            let norm = normalize_content(&content);
             let tags = match doc.get("tags") {
                 Some(v) if v.is_array() => v.as_array().unwrap().iter()
                     .filter_map(|t| t.as_str()).collect::<Vec<_>>().join(", "),
@@ -1721,7 +1736,7 @@ pub async fn session_summarize(db: &WardsonDbClient, param: &str) -> String {
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as usize;
 
-            let (_, current_count) = fetch_turns(db, name).await;
+            let current_count = fetch_turn_count(db, name).await;
 
             if cached_count == current_count && cached_count > 0 {
                 // Return cached summary
