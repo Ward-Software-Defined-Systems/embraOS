@@ -106,7 +106,10 @@ fn err_at(rule: &'static str, msg: impl Into<String>, sp: proc_macro2::Span) -> 
     }
 }
 
-fn ident_ok(name: &str) -> bool {
+/// The tool-name rule, `[a-z][a-z0-9_]{2,39}`, which the validator and the
+/// scaffold's path jail (`safe_tool_dir`) both apply: one definition, so a
+/// name the validator accepts is one the jail can never read as a path.
+pub(crate) fn valid_tool_name(name: &str) -> bool {
     let b = name.as_bytes();
     (3..=40).contains(&name.len())
         && b[0].is_ascii_lowercase()
@@ -125,7 +128,7 @@ pub fn validate(source: &str, reserved: &[&str]) -> Result<ValidatedModule, Vali
         .ok_or_else(|| {
             err("marker", "first line must be `// guardian-tool: <name>`")
         })?;
-    if !ident_ok(marker) {
+    if !valid_tool_name(marker) {
         return Err(err(
             "name",
             format!("tool name `{marker}` must match ^[a-z][a-z0-9_]{{2,39}}$"),
@@ -375,6 +378,7 @@ impl<'ast> Visit<'ast> for Deny {
                 self.flag(err_at("macro", format!("`{n}!` is not allowed"), m.span()));
             }
         }
+        self.scan_tokens(m.tokens.clone());
         syn::visit::visit_macro(self, m);
     }
     fn visit_item_use(&mut self, u: &'ast syn::ItemUse) {
@@ -393,14 +397,7 @@ impl<'ast> Visit<'ast> for Deny {
     fn visit_path(&mut self, p: &'ast syn::Path) {
         let segs: Vec<String> =
             p.segments.iter().map(|s| s.ident.to_string()).collect();
-        let two = (segs.first().map(String::as_str), segs.get(1).map(String::as_str));
-        let denied = matches!(
-            two,
-            (Some("std"), Some("process" | "fs" | "net" | "os" | "env" | "thread" | "ffi" | "arch"))
-                | (Some("core"), Some("arch"))
-        ) || segs.first().map(String::as_str) == Some("proc_macro")
-            || (segs.first().map(String::as_str) == Some("std") && segs.len() == 1);
-        if denied {
+        if denied_path(&segs) {
             self.flag(err_at(
                 "forbidden_path",
                 format!("path `{}` is not allowed", segs.join("::")),
@@ -412,6 +409,16 @@ impl<'ast> Visit<'ast> for Deny {
     fn visit_attribute(&mut self, a: &'ast syn::Attribute) {
         if let Some(seg) = a.path().segments.last() {
             let n = seg.ident.to_string();
+            // `#[unsafe(no_mangle)]` is the edition-2024 spelling of an ABI
+            // attribute: the last segment is `unsafe`, not the name inside
+            // it, so the wrapper is refused outright (#12).
+            if n == "unsafe" {
+                self.flag(err_at(
+                    "attribute",
+                    "`#[unsafe(...)]` is not allowed (the scaffold owns ABI/runtime attrs)",
+                    a.span(),
+                ));
+            }
             if matches!(
                 n.as_str(),
                 "no_mangle" | "export_name" | "link" | "link_section"
@@ -425,6 +432,80 @@ impl<'ast> Visit<'ast> for Deny {
             }
         }
         syn::visit::visit_attribute(self, a);
+    }
+}
+
+/// The path rule `visit_path` and the token scan share: `std::{process, fs,
+/// net, os, env, thread, ffi, arch}`, `core::arch`, anything under
+/// `proc_macro`, and a bare `std`.
+fn denied_path(segs: &[String]) -> bool {
+    let two = (segs.first().map(String::as_str), segs.get(1).map(String::as_str));
+    matches!(
+        two,
+        (Some("std"), Some("process" | "fs" | "net" | "os" | "env" | "thread" | "ffi" | "arch"))
+            | (Some("core"), Some("arch"))
+    ) || segs.first().map(String::as_str) == Some("proc_macro")
+        || (segs.first().map(String::as_str) == Some("std") && segs.len() == 1)
+}
+
+/// Every token of a stream, groups opened, in order.
+fn flatten(tokens: proc_macro2::TokenStream, out: &mut Vec<proc_macro2::TokenTree>) {
+    for tt in tokens {
+        match tt {
+            proc_macro2::TokenTree::Group(g) => flatten(g.stream(), out),
+            other => out.push(other),
+        }
+    }
+}
+
+impl Deny {
+    /// The tokens of a macro invocation, which `syn` leaves unparsed: an
+    /// `unsafe` block, a denied path and a denied macro name inside
+    /// `vec![…]`, `format!(…)` or any other invocation are refused as their
+    /// parsed forms are (#12). The scan is over tokens, so nothing a macro
+    /// accepts escapes it; what passes here is what a plain statement would
+    /// pass.
+    fn scan_tokens(&mut self, tokens: proc_macro2::TokenStream) {
+        use proc_macro2::TokenTree;
+        let mut flat = Vec::new();
+        flatten(tokens, &mut flat);
+        let is_colon = |tt: Option<&TokenTree>| matches!(tt, Some(TokenTree::Punct(p)) if p.as_char() == ':');
+        let mut i = 0;
+        while i < flat.len() {
+            let TokenTree::Ident(id) = &flat[i] else {
+                i += 1;
+                continue;
+            };
+            let name = id.to_string();
+            if name == "unsafe" {
+                self.flag(err_at("unsafe", "`unsafe` inside a macro invocation is not allowed", id.span()));
+            }
+            if DENIED_MACROS.contains(&name.as_str())
+                && matches!(flat.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == '!')
+            {
+                self.flag(err_at("macro", format!("`{name}!` is not allowed"), id.span()));
+            }
+            // A path: `ident (:: ident)*`.
+            let mut segs = vec![name];
+            let mut j = i;
+            while is_colon(flat.get(j + 1)) && is_colon(flat.get(j + 2)) {
+                match flat.get(j + 3) {
+                    Some(TokenTree::Ident(next)) => {
+                        segs.push(next.to_string());
+                        j += 3;
+                    }
+                    _ => break,
+                }
+            }
+            if denied_path(&segs) {
+                self.flag(err_at(
+                    "forbidden_path",
+                    format!("path `{}` is not allowed", segs.join("::")),
+                    id.span(),
+                ));
+            }
+            i = j + 1;
+        }
     }
 }
 
@@ -560,6 +641,14 @@ fn run(input: &str) -> String {
             ("module", "mod sneaky { }\nfn run(input: &str) -> String { String::new() }"),
             ("attribute", "#[no_mangle] fn run(input: &str) -> String { String::new() }"),
             ("extern_crate", "extern crate alloc;\nfn run(input: &str) -> String { String::new() }"),
+            // Inside a macro invocation, which `syn` does not parse (#12).
+            ("unsafe", "fn run(input: &str) -> String { let _ = vec![unsafe { core::ptr::read(0 as *const u8) }]; String::new() }"),
+            ("forbidden_path", "fn run(input: &str) -> String { let _ = vec![std::fs::read(\"/x\")]; String::new() }"),
+            ("macro", "fn run(input: &str) -> String { format!(\"{}\", include_str!(\"/etc/passwd\")) }"),
+            ("forbidden_path", "fn run(input: &str) -> String { let _ = format!(\"{}\", std::env::var(\"HOME\").unwrap()); String::new() }"),
+            // The edition-2024 spelling of an ABI attribute.
+            ("attribute", "#[unsafe(no_mangle)] fn run(input: &str) -> String { String::new() }"),
+            ("attribute", "#[unsafe(export_name = \"galloc\")] fn run(input: &str) -> String { String::new() }"),
         ];
         for (rule, body) in cases {
             let src = format!(
@@ -569,6 +658,19 @@ fn run(input: &str) -> String {
             );
             assert_eq!(reject(&src).rule, rule, "case `{rule}` body: {body}");
         }
+    }
+
+    /// The token scan refuses what a statement would refuse and nothing
+    /// else: ordinary macro arguments, `alloc` and `core` paths and the
+    /// scaffold's `host` and `json` helpers still pass.
+    #[test]
+    fn a_macro_with_ordinary_arguments_still_passes() {
+        let src = "// guardian-tool: demo\nconst GUARDIAN_NAME: &str=\"demo\";\
+                   const GUARDIAN_DESC: &str=\"d\";\
+                   const GUARDIAN_SCHEMA: &str=r#\"{\"type\":\"object\"}\"#;\n\
+                   fn run(input: &str) -> String { let v = vec![1, 2]; let s = alloc::format!(\"{} {}\", v.len(), core::cmp::max(1, 2)); format!(\"{s} {input}\") }";
+        let m = validate(src, &[]).expect("ordinary macro arguments pass");
+        assert_eq!(m.name, "demo");
     }
 
     #[test]
