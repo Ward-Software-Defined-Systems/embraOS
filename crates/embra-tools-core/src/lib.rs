@@ -312,6 +312,22 @@ impl SecretSet {
             .find(|e| e.forms.iter().any(|f| text.contains(f.as_str())))
             .map(|e| e.kind)
     }
+
+    /// `text` with every occurrence of every stored secret, in any of its
+    /// forms, replaced by `[<kind> redacted]`; `None` when none appears, so
+    /// a caller keeps its text as it is.
+    pub fn redact(&self, text: &str) -> Option<String> {
+        let mut out: Option<String> = None;
+        for e in &self.entries {
+            for form in &e.forms {
+                let current = out.as_deref().unwrap_or(text);
+                if current.contains(form.as_str()) {
+                    out = Some(current.replace(form.as_str(), &format!("[{} redacted]", e.kind)));
+                }
+            }
+        }
+        out
+    }
 }
 
 fn bare_bearer_token(value: &str) -> Option<&str> {
@@ -424,6 +440,23 @@ mod secret_set_tests {
         set.add("a /guardian secret", "Bearer eyJhbGciOiJIUzI1NiJ9.payload");
         assert_eq!(set.found_in("token=eyJhbGciOiJIUzI1NiJ9.payload"), Some("a /guardian secret"));
         assert_eq!(set.found_in("Bearer eyJhbGciOiJIUzI1NiJ9.payload"), Some("a /guardian secret"));
+    }
+
+    /// Redaction replaces every form of every secret by its kind and
+    /// leaves a text without one as it is (`None`).
+    #[test]
+    fn redaction_replaces_every_form_by_its_kind_and_leaves_clean_text_alone() {
+        let mut set = SecretSet::new();
+        set.add("the GitHub token", "ghp_0123456789abcdefghij");
+        set.add("a git host token", "glpat-0123456789abcdef");
+        let text = "remote: https://oauth2:glpat-0123456789abcdef@gitlab.example/x.git\nghp_0123456789abcdefghij and Z2hwXzAxMjM0NTY3ODlhYmNkZWZnaGlq";
+        let out = set.redact(text).unwrap();
+        assert_eq!(
+            out,
+            "remote: https://oauth2:[a git host token redacted]@gitlab.example/x.git\n[the GitHub token redacted] and [the GitHub token redacted]"
+        );
+        assert!(set.found_in(&out).is_none());
+        assert!(set.redact("nothing stored appears here").is_none());
     }
 
     #[test]

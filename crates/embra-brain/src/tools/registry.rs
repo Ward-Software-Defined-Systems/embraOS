@@ -9,7 +9,7 @@
 //! [`dispatch`] is the one entry point: the gRPC tool loop and the cron
 //! loop both call it; the string dispatcher it replaced is gone.
 
-use embra_tools_core::{BoxFut, DispatchError, JsonValue, ToolOutput, TurnTraceHandle};
+use embra_tools_core::{BoxFut, DispatchError, JsonValue, SecretSet, ToolOutput, TurnTraceHandle};
 use once_cell::sync::Lazy;
 use std::collections::HashMap;
 
@@ -194,24 +194,54 @@ pub(crate) const OUTBOUND_TOOLS: &[&str] = &[
 
 /// The refusal for an outbound tool whose input carries a stored secret:
 /// the kind, never the value.
-fn outbound_refusal(name: &str, input: &JsonValue, config: &SystemConfig) -> Option<String> {
+fn outbound_refusal(name: &str, input: &JsonValue, secrets: &SecretSet) -> Option<String> {
     if !OUTBOUND_TOOLS.contains(&name) {
         return None;
     }
     let text = serde_json::to_string(input).unwrap_or_default();
-    let kind = crate::secrets::collect(Some(config)).found_in(&text)?;
+    let kind = secrets.found_in(&text)?;
     Some(format!(
         "refused: the input of {name} carries {kind}; a stored credential is never sent in a tool's input — the OS attaches it where it is needed"
     ))
+}
+
+/// A stored secret never leaves through a tool's output either: git echoes
+/// a rewritten remote URL, token included, in some of its failure messages,
+/// and a file a tool read may hold a value the operator also stored. Every
+/// stored value in the text, or in a handler's error, is replaced by its
+/// kind before the loop, the trace and the model see it.
+fn scrub_output(
+    name: &str,
+    raw: Result<ToolOutput, DispatchError>,
+    secrets: &SecretSet,
+) -> Result<ToolOutput, DispatchError> {
+    match raw {
+        Ok(mut out) => {
+            if let Some(clean) = secrets.redact(&out.text) {
+                tracing::warn!("a stored secret in the output of {name} was redacted");
+                out.text = clean;
+            }
+            Ok(out)
+        }
+        Err(DispatchError::Handler(m)) => Err(DispatchError::Handler(match secrets.redact(&m) {
+            Some(clean) => {
+                tracing::warn!("a stored secret in the error of {name} was redacted");
+                clean
+            }
+            None => m,
+        })),
+        Err(e) => Err(e),
+    }
 }
 
 /// Native-tool-use dispatcher.
 ///
 /// Looks up `name` in [`REGISTRY`], refuses an outbound input that carries
 /// a stored secret ([`OUTBOUND_TOOLS`]), runs the handler with the typed
-/// context under the [`MAX_TOOL_DURATION`] ceiling, and applies the
-/// 2 MiB text cap + the image COUNT cap. The gRPC tool loop calls it;
-/// `tools/cron.rs` consumes `.text` only.
+/// context under the [`MAX_TOOL_DURATION`] ceiling, redacts a stored
+/// secret from the output ([`scrub_output`]), and applies the 2 MiB text
+/// cap + the image COUNT cap. The gRPC tool loop calls it; `tools/cron.rs`
+/// consumes `.text` only.
 pub async fn dispatch(
     name: &str,
     input: JsonValue,
@@ -225,13 +255,14 @@ pub async fn dispatch(
     // abandons it (`grpc_service.rs`).
     let origin = crate::activity::ToolOrigin::from_session(ctx.session_name);
     let span = crate::activity::ToolSpan::start(name, origin);
-    if let Some(refusal) = outbound_refusal(name, &input, ctx.config) {
+    let secrets = crate::secrets::collect(Some(ctx.config));
+    if let Some(refusal) = outbound_refusal(name, &input, &secrets) {
         span.finish(true);
         return Err(DispatchError::Handler(refusal));
     }
     let raw = enforce_timeout((desc.handler)(input, ctx), name, MAX_TOOL_DURATION).await;
     span.finish(raw.is_err());
-    Ok(apply_caps(raw?))
+    Ok(apply_caps(scrub_output(name, raw, &secrets)?))
 }
 
 #[cfg(test)]
@@ -580,6 +611,45 @@ mod outbound_tests {
             }
             other => panic!("the handler ran: {other:?}"),
         }
+    }
+
+    /// A stored secret in a tool's output is redacted by kind before the
+    /// dispatcher returns it: here a git host token in a file `file_read`
+    /// reads (William's live check of 2026-10-23 saw the provider gateway
+    /// refuse a turn over a credential-shaped URL in the context).
+    #[tokio::test]
+    async fn a_stored_secret_in_a_tools_output_is_redacted_by_kind() {
+        let config: SystemConfig = serde_json::from_value(serde_json::json!({
+            "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase1",
+            "created_at": "", "version": "test", "api_provider": "anthropic",
+            "git_tokens": {"gitlab.example": "glpat-0123456789abcdef"},
+        }))
+        .unwrap();
+        let file = std::env::temp_dir().join(format!("embra-scrub-{}.txt", std::process::id()));
+        std::fs::write(
+            &file,
+            "fatal: unable to access 'https://oauth2:glpat-0123456789abcdef@gitlab.example/x.git/': 403\n",
+        )
+        .unwrap();
+        let db = WardsonDbClient::from_url("http://127.0.0.1:1");
+        let trace = embra_tools_core::new_turn_trace_handle();
+        let ctx = DispatchContext {
+            db: &db,
+            config: &config,
+            session_name: "main",
+            config_tz: "UTC",
+            trace: &trace,
+            turn_index: 0,
+            deleting_session: None,
+        };
+        let out = dispatch("file_read", serde_json::json!({"path": file.to_str().unwrap()}), ctx).await.unwrap();
+        let _ = std::fs::remove_file(&file);
+        assert!(!out.text.contains("glpat-"), "{}", out.text);
+        assert!(
+            out.text.contains("https://oauth2:[a git host token redacted]@gitlab.example/x.git/"),
+            "{}",
+            out.text
+        );
     }
 
     #[tokio::test]
