@@ -206,6 +206,18 @@ pub struct HealthDetail {
     pub warning: Option<String>,
 }
 
+/// How long a connection to the database may take to open. The database is
+/// a loopback service; a connect that takes longer is a server that is not
+/// accepting (#61).
+const DB_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long a response may stay silent before the request fails: the
+/// longest measured query is a maintenance scan of 5 to 8 minutes over
+/// 99k edges, and the server answers it in one body at the end, so the
+/// idle ceiling is above that. It is not a total timeout; a wedged server
+/// is an error after it, not a hang for the life of the process.
+const DB_READ_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
 impl WardsonDbClient {
     /// Create a client from a full URL (Phase 1: embrad passes --wardsondb-url)
     pub fn from_url(url: &str) -> Self {
@@ -215,6 +227,8 @@ impl WardsonDbClient {
             // followed (`crate::net` has the policy of the other clients).
             http_client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(DB_CONNECT_TIMEOUT)
+                .read_timeout(DB_READ_IDLE_TIMEOUT)
                 .build()
                 .expect("a reqwest client with no redirects builds"),
         }

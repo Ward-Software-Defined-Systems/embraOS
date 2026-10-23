@@ -24,7 +24,7 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
         db.create_collection("system.migrations").await?;
     }
 
-    let current_version = get_schema_version(db).await;
+    let current_version = get_schema_version(db).await?;
     info!("Current schema version: {}, target: {}", current_version, CURRENT_SCHEMA_VERSION);
 
     if current_version < 0 {
@@ -841,17 +841,22 @@ mod hot_path_index_tests {
     }
 }
 
-async fn get_schema_version(db: &WardsonDbClient) -> i32 {
-    let docs = db
-        .fetch_collection("system.migrations")
-        .await
-        .unwrap_or_default();
+/// The highest recorded schema version, or -1 for a ledger that was read
+/// and is empty. A ledger that cannot be read is an error and the boot
+/// stops: -1 would run the whole ladder again, and v0 deletes reminders by
+/// age (#61).
+async fn get_schema_version(db: &WardsonDbClient) -> Result<i32> {
+    use anyhow::Context as _;
+    let docs = db.fetch_collection("system.migrations").await.context(
+        "the migration ledger (system.migrations) could not be read; the boot stops rather than run the ladder again",
+    )?;
 
-    docs.iter()
+    Ok(docs
+        .iter()
         .filter_map(|doc| doc.get("schema_version").and_then(|v| v.as_i64()))
         .max()
         .map(|v| v as i32)
-        .unwrap_or(-1)
+        .unwrap_or(-1))
 }
 
 async fn set_schema_version(db: &WardsonDbClient, version: u32) -> Result<()> {
@@ -2093,5 +2098,33 @@ mod v11_tests {
         let changed2 = stamp_openai_compat(&mut doc);
         assert!(!changed2, "second pass must be no-op");
         assert_eq!(doc, after_first);
+    }
+}
+
+#[cfg(test)]
+mod ledger_tests {
+    use super::get_schema_version;
+    use crate::db::WardsonDbClient;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn ledger(answer: ResponseTemplate) -> anyhow::Result<i32> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/system.migrations/query")).respond_with(answer).mount(&server).await;
+        get_schema_version(&WardsonDbClient::from_url(&server.uri())).await
+    }
+
+    /// A ledger that was read and is empty is -1; a ledger that cannot be
+    /// read is an error, never -1 (#61: -1 runs the destructive v0 again).
+    #[tokio::test]
+    async fn an_unreadable_ledger_is_an_error_and_an_empty_one_is_minus_one() {
+        let err = ledger(ResponseTemplate::new(500)).await.unwrap_err();
+        assert!(err.to_string().contains("migration ledger"), "{err}");
+        let empty = ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "data": [], "meta": {}}));
+        assert_eq!(ledger(empty).await.unwrap(), -1);
+        let recorded = ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "ok": true, "data": [{"schema_version": 3}, {"schema_version": 7}, {"schema_version": 5}], "meta": {}
+        }));
+        assert_eq!(ledger(recorded).await.unwrap(), 7);
     }
 }

@@ -499,11 +499,13 @@ pub async fn save_config(db: &WardsonDbClient, config: &SystemConfig) -> Result<
     }
     match db.write("config.system", &doc).await {
         Ok(_) => Ok(()),
-        Err(_) => {
-            // 409 conflict means doc already exists — update instead
+        // 409: the document exists, so it is updated. Any other failure is
+        // the failure it is (#61: a timeout is not a conflict).
+        Err(e) if e.downcast_ref::<crate::db::WardsonDbError>().is_some_and(|w| w.is_conflict()) => {
             db.update("config.system", "config", &doc).await?;
             Ok(())
         }
+        Err(e) => Err(e),
     }
 }
 
@@ -806,7 +808,15 @@ pub async fn run_config_wizard_grpc(
                             }
                         )),
                     })).await;
-                    (response_rx.recv().await.unwrap_or_default(), false)
+                    // A closed channel is the client gone, not an empty
+                    // answer: the step ends instead of looping (#61).
+                    (
+                        response_rx
+                            .recv()
+                            .await
+                            .ok_or_else(|| anyhow::anyhow!("setup channel closed during the API key step"))?,
+                        false,
+                    )
                 }
             };
             if from_env {
@@ -867,7 +877,10 @@ pub async fn run_config_wizard_grpc(
                 }
             )),
         })).await;
-        let input = response_rx.recv().await.unwrap_or_default();
+        let input = response_rx
+            .recv()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("setup channel closed during the timezone step"))?;
         let candidate = if input.is_empty() { tz_default } else { input };
         match validate_timezone(&candidate) {
             Ok(tz) => break tz,
@@ -904,7 +917,11 @@ pub async fn run_config_wizard_grpc(
         )),
     })).await;
 
-    let confirm = response_rx.recv().await.unwrap_or_default().to_lowercase();
+    let confirm = response_rx
+        .recv()
+        .await
+        .ok_or_else(|| anyhow::anyhow!("setup channel closed during the confirmation step"))?
+        .to_lowercase();
     if confirm.contains("no") || confirm == "2" {
         // Restart — recursive call (simple approach for now)
         return Box::pin(run_config_wizard_grpc(tx, response_rx, db)).await;
@@ -1839,5 +1856,53 @@ mod redact_tests {
         assert_eq!(key_summary("ключ"), "4 characters, ending …ключ");
         assert_eq!(key_summary("é"), "1 characters, ending …é");
         assert_eq!(key_summary(""), "0 characters, ending …");
+    }
+}
+
+#[cfg(test)]
+mod save_config_tests {
+    use super::{save_config, tests_support::minimal_cfg};
+    use crate::db::WardsonDbClient;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// The fall-through to `update` is for a 409 alone; any other write
+    /// failure is returned as itself, and no update is attempted (#61).
+    #[tokio::test]
+    async fn a_conflict_updates_and_any_other_write_failure_is_returned() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/config.system")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/config.system/docs"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("busy"))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/config.system/docs/config"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let err = save_config(&db, &minimal_cfg()).await.unwrap_err();
+        assert!(err.to_string().contains("503"), "{err}");
+        server.verify().await;
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/config.system")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/config.system/docs"))
+            .respond_with(ResponseTemplate::new(409).set_body_string("DOCUMENT_CONFLICT"))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/config.system/docs/config"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        save_config(&db, &minimal_cfg()).await.unwrap();
+        server.verify().await;
     }
 }
