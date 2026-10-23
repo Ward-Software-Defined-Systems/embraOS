@@ -418,7 +418,12 @@ fn ssh_session_lock() -> &'static tokio::sync::Mutex<Option<SshSession>> {
 /// IPv6 bracketed hosts (`[::1]:22`) are deliberately not supported in this
 /// pass — the existing `is_private_address` check only handles v4/v6 without
 /// brackets, and adding full IPv6 URI parsing is out of scope here.
-fn parse_ssh_target(target: &str) -> (String, String, u16) {
+///
+/// A user or host that begins with `-` is refused: ssh would read it as an
+/// option (`-oProxyCommand=…` runs a command locally before any
+/// connection). The user reaches ssh as `-l user` and the host alone, never
+/// as one `user@host` argument.
+fn parse_ssh_target(target: &str) -> Result<(String, String, u16), String> {
     let (user_part, host_port) = if let Some(at_pos) = target.find('@') {
         (target[..at_pos].to_string(), &target[at_pos + 1..])
     } else {
@@ -431,12 +436,19 @@ fn parse_ssh_target(target: &str) -> (String, String, u16) {
         },
         None => (host_port.to_string(), 22),
     };
-    (user_part, host, port)
+    for (what, value) in [("user", user_part.as_str()), ("host", host.as_str())] {
+        if value.starts_with('-') {
+            return Err(format!(
+                "Denied: ssh {what} '{value}' begins with '-', which ssh would read as an option"
+            ));
+        }
+    }
+    Ok((user_part, host, port))
 }
 
 #[cfg(test)]
 mod private_address_tests {
-    use super::{is_private_address, ssh_remote_admin, ssh_session_start};
+    use super::{is_private_address, port_scan, ssh_remote_admin, ssh_session_start};
 
     #[test]
     fn the_private_ranges_and_loopback_pass() {
@@ -498,6 +510,25 @@ mod private_address_tests {
         let out = ssh_session_start("root@8.8.8.8").await;
         assert!(out.starts_with("Denied:"), "{out}");
     }
+
+    /// An option-shaped user is refused before ssh runs: as one `user@host`
+    /// argument it would reach ssh's option parser, and `-oProxyCommand=…`
+    /// runs a command locally before any connection (#8, #56).
+    #[tokio::test]
+    async fn an_option_shaped_ssh_user_is_refused_before_ssh_runs() {
+        let out = ssh_session_start("-oProxyCommand=id@192.168.1.10").await;
+        assert!(out.starts_with("Denied: ssh user"), "{out}");
+        let out = ssh_remote_admin("-oProxyCommand=id@192.168.1.10 uptime").await;
+        assert!(out.starts_with("Denied: ssh user"), "{out}");
+    }
+
+    /// `port_scan` refuses a public host at its call site, before any
+    /// connect; loopback is the positive control (#56).
+    #[tokio::test]
+    async fn port_scan_refuses_a_public_host_before_it_connects() {
+        assert!(port_scan("8.8.8.8 80").await.starts_with("Denied:"));
+        assert!(!port_scan("127.0.0.1 1-2").await.starts_with("Denied:"));
+    }
 }
 
 #[cfg(test)]
@@ -507,7 +538,7 @@ mod parse_ssh_target_tests {
     #[test]
     fn bare_host_defaults_user_and_port() {
         assert_eq!(
-            parse_ssh_target("192.168.1.10"),
+            parse_ssh_target("192.168.1.10").unwrap(),
             ("root".into(), "192.168.1.10".into(), 22)
         );
     }
@@ -515,7 +546,7 @@ mod parse_ssh_target_tests {
     #[test]
     fn user_at_host_keeps_port_default() {
         assert_eq!(
-            parse_ssh_target("will@192.168.1.10"),
+            parse_ssh_target("will@192.168.1.10").unwrap(),
             ("will".into(), "192.168.1.10".into(), 22)
         );
     }
@@ -523,7 +554,7 @@ mod parse_ssh_target_tests {
     #[test]
     fn host_with_port_defaults_user() {
         assert_eq!(
-            parse_ssh_target("192.168.1.10:2222"),
+            parse_ssh_target("192.168.1.10:2222").unwrap(),
             ("root".into(), "192.168.1.10".into(), 2222)
         );
     }
@@ -531,7 +562,7 @@ mod parse_ssh_target_tests {
     #[test]
     fn user_at_host_with_port() {
         assert_eq!(
-            parse_ssh_target("will@192.168.1.10:2222"),
+            parse_ssh_target("will@192.168.1.10:2222").unwrap(),
             ("will".into(), "192.168.1.10".into(), 2222)
         );
     }
@@ -539,7 +570,7 @@ mod parse_ssh_target_tests {
     #[test]
     fn unparseable_port_falls_back_to_22() {
         // "abc" is not a valid port; the whole host_port is treated as the host.
-        let (u, h, p) = parse_ssh_target("192.168.1.10:abc");
+        let (u, h, p) = parse_ssh_target("192.168.1.10:abc").unwrap();
         assert_eq!(u, "root");
         assert_eq!(p, 22);
         assert_eq!(h, "192.168.1.10:abc");
@@ -547,8 +578,21 @@ mod parse_ssh_target_tests {
 
     #[test]
     fn port_zero_falls_back_to_22() {
-        let (_u, _h, p) = parse_ssh_target("host:0");
+        let (_u, _h, p) = parse_ssh_target("host:0").unwrap();
         assert_eq!(p, 22);
+    }
+
+    /// An option-shaped user or host is refused, in the words the tools
+    /// print; a plain target still parses (#8).
+    #[test]
+    fn an_option_shaped_user_or_host_is_refused() {
+        let err = parse_ssh_target("-oProxyCommand=id@192.168.1.10").unwrap_err();
+        assert!(err.starts_with("Denied: ssh user '-oProxyCommand=id'"), "{err}");
+        let err = parse_ssh_target("-h").unwrap_err();
+        assert!(err.starts_with("Denied: ssh host '-h'"), "{err}");
+        let err = parse_ssh_target("will@-x:22").unwrap_err();
+        assert!(err.starts_with("Denied: ssh host '-x'"), "{err}");
+        assert!(parse_ssh_target("will@192.168.1.10:22").is_ok());
     }
 }
 
@@ -566,7 +610,10 @@ pub async fn ssh_remote_admin(param: &str) -> String {
 
     let target = parts[0];
     let command = parts[1];
-    let (user, host, port) = parse_ssh_target(target);
+    let (user, host, port) = match parse_ssh_target(target) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
 
     if !is_private_address(&host) {
         return format!(
@@ -590,7 +637,8 @@ pub async fn ssh_remote_admin(param: &str) -> String {
         .arg("-o").arg("ConnectTimeout=10")
         .arg("-o").arg("BatchMode=yes")
         .arg("-o").arg("PasswordAuthentication=no")
-        .arg(format!("{}@{}", user, host))
+        .arg("-l").arg(&user)
+        .arg(&host)
         .arg(command)
         .output()
         .await;
@@ -628,7 +676,10 @@ pub async fn ssh_session_start(param: &str) -> String {
         return "Usage: ssh_session_start <user@host> or ssh_session_start <user@host:port> or ssh_session_start <host>".into();
     }
 
-    let (user, host, port) = parse_ssh_target(param.trim());
+    let (user, host, port) = match parse_ssh_target(param.trim()) {
+        Ok(t) => t,
+        Err(e) => return e,
+    };
 
     if !is_private_address(&host) {
         return format!(
@@ -666,7 +717,8 @@ pub async fn ssh_session_start(param: &str) -> String {
             .arg("-o").arg("BatchMode=yes")
             .arg("-o").arg("ServerAliveInterval=15")
             .arg("-o").arg("ServerAliveCountMax=3")
-            .arg(&user_host)
+            .arg("-l").arg(&user)
+            .arg(&host)
             .output(),
     )
     .await;
