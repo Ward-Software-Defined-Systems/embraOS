@@ -45,7 +45,8 @@ Rust toolchain) and Step 4 (Buildroot) run in a `linux/arm64` Docker container.
 > carries this boot's access token (`?token=…`; accept the embraOS-CA cert on first
 > visit; the token changes at every boot and is shown nowhere else). Set
 > **`EMBRA_TUI=1`** before `run-qemu-aarch64.sh` to boot the serial TUI on this
-> terminal instead — no image rebuild needed.
+> terminal instead — no image rebuild needed. The serial TUI is functional but is
+> preferred for debugging; the web console is the primary interface.
 
 > **zsh paste gotcha:** macOS's default `zsh` doesn't treat `#` as a comment in
 > interactive shells — pasting a multi-line code block from this guide makes
@@ -119,7 +120,7 @@ docker run --rm -v "$PWD":/work -v embraos-br-aarch64:/work/buildroot-src \
 
 ```bash
 ./scripts/run-qemu-aarch64.sh                  # web console (default) — the URL printed at boot (https://localhost:3345/embraOS?token=…)
-EMBRA_TUI=1 ./scripts/run-qemu-aarch64.sh      # stable Phase 1 serial TUI on this terminal
+EMBRA_TUI=1 ./scripts/run-qemu-aarch64.sh      # serial TUI on this terminal: functional, preferred for debugging
 EMBRA_DB_VERBOSE=1 ./scripts/run-qemu-aarch64.sh   # opt-in per-request WardSONDB log lines
 ```
 

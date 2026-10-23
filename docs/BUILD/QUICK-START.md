@@ -11,7 +11,8 @@ Build a QEMU-bootable embraOS disk image from source and boot it. The project la
 > other path answer 404; a tab left open across a reboot gets 401 until it is
 > opened from the new URL. It wraps the same Phase 1 conversational TUI in xterm.js over a
 > PTY→WebSocket bridge. Set **`EMBRA_TUI=1`** before `run-qemu.sh` to boot the
-> serial TUI instead — no image rebuild needed.
+> serial TUI instead — no image rebuild needed. The serial TUI is functional but is
+> preferred for debugging; the web console is the primary interface.
 
 ## Phase 1 — Build from Source (QEMU Bootable Image)
 
@@ -85,7 +86,7 @@ EOF
 # Default UI is the embra-web console — open the URL embraOS prints at boot (https://localhost:3345/embraOS?token=…)
 ./scripts/run-qemu.sh                                # Boot in QEMU — web console (default)
 
-# Or fall back to the serial TUI on this terminal (no rebuild needed)
+# Or fall back to the serial TUI on this terminal (no rebuild needed; functional, preferred for debugging)
 EMBRA_TUI=1 ./scripts/run-qemu.sh                    # Boot in QEMU — serial TUI
 
 # Optional: per-request WardSONDB log lines (default: lifecycle/warn/error only)
