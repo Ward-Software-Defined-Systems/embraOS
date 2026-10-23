@@ -124,6 +124,40 @@ pub(crate) fn cron_notification(fired: &crate::tools::cron::CronFired) -> Notifi
     }
 }
 
+/// The pause before a proactive loop that died is started again.
+const SUPERVISE_RESTART_PAUSE: Duration = Duration::from_secs(5);
+
+/// Runs a proactive loop under supervision. The loops never return; one
+/// that panicked (a tool handler unwinding through `check_crons`, a probe)
+/// would otherwise die silently and take its subsystem with it until the
+/// next boot (#59). The panic is logged and the loop built again by `make`
+/// after [`SUPERVISE_RESTART_PAUSE`]; a loop that returns is logged the
+/// same way.
+fn supervise<F, Fut>(name: &'static str, make: F)
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    supervise_with(name, SUPERVISE_RESTART_PAUSE, make);
+}
+
+/// [`supervise`] with the pause as a parameter, for a test.
+fn supervise_with<F, Fut>(name: &'static str, pause: Duration, make: F) -> tokio::task::JoinHandle<()>
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        loop {
+            match tokio::spawn(make()).await {
+                Ok(()) => tracing::error!(target: "proactive", loop_name = name, "proactive loop ended; starting it again"),
+                Err(e) => tracing::error!(target: "proactive", loop_name = name, "proactive loop panicked: {e}; starting it again"),
+            }
+            tokio::time::sleep(pause).await;
+        }
+    })
+}
+
 pub fn start_proactive_engine(
     db: &WardsonDbClient,
     config_tz: &str,
@@ -140,17 +174,22 @@ pub fn start_proactive_engine(
     let tx_health = tx.clone();
     let db_health = db.clone();
     let boot_key = boot_api_key.to_string();
-    tokio::spawn(async move {
-        // Initial delay to let the system stabilize
-        tokio::time::sleep(Duration::from_secs(30)).await;
+    supervise("health", move || {
+        let db_health = db_health.clone();
+        let tx_health = tx_health.clone();
+        let boot_key = boot_key.clone();
+        async move {
+            // Initial delay to let the system stabilize
+            tokio::time::sleep(Duration::from_secs(30)).await;
 
-        let mut previous: Option<ProviderProbe> = None;
-        loop {
-            run_health_checks(&db_health, &tx_health).await;
-            previous = run_provider_probe(&db_health, &boot_key, previous, &tx_health).await;
-            tokio::select! {
-                _ = tokio::time::sleep(NORMAL_CHECK_INTERVAL) => {}
-                _ = health::probe_requested() => {}
+            let mut previous: Option<ProviderProbe> = None;
+            loop {
+                run_health_checks(&db_health, &tx_health).await;
+                previous = run_provider_probe(&db_health, &boot_key, previous, &tx_health).await;
+                tokio::select! {
+                    _ = tokio::time::sleep(NORMAL_CHECK_INTERVAL) => {}
+                    _ = health::probe_requested() => {}
+                }
             }
         }
     });
@@ -158,13 +197,17 @@ pub fn start_proactive_engine(
     // Reminder checks every 15 seconds
     let tx_reminders = tx.clone();
     let db_reminders = db.clone();
-    tokio::spawn(async move {
-        // Initial delay
-        tokio::time::sleep(Duration::from_secs(10)).await;
+    supervise("reminders", move || {
+        let db_reminders = db_reminders.clone();
+        let tx_reminders = tx_reminders.clone();
+        async move {
+            // Initial delay
+            tokio::time::sleep(Duration::from_secs(10)).await;
 
-        loop {
-            deliver_due_reminders(&db_reminders, &tx_reminders).await;
-            tokio::time::sleep(Duration::from_secs(15)).await;
+            loop {
+                deliver_due_reminders(&db_reminders, &tx_reminders).await;
+                tokio::time::sleep(Duration::from_secs(15)).await;
+            }
         }
     });
 
@@ -174,16 +217,21 @@ pub fn start_proactive_engine(
     let tx_cron = tx;
     let db_cron = db.clone();
     let config_tz_cron = config_tz;
-    tokio::spawn(async move {
-        // Initial delay
-        tokio::time::sleep(Duration::from_secs(15)).await;
-
-        loop {
-            let fired = crate::tools::cron::check_crons(&db_cron, &config_tz_cron).await;
-            for run in fired {
-                push_notification(&tx_cron, cron_notification(&run));
-            }
+    supervise("cron", move || {
+        let db_cron = db_cron.clone();
+        let tx_cron = tx_cron.clone();
+        let config_tz_cron = config_tz_cron.clone();
+        async move {
+            // Initial delay
             tokio::time::sleep(Duration::from_secs(15)).await;
+
+            loop {
+                let fired = crate::tools::cron::check_crons(&db_cron, &config_tz_cron).await;
+                for run in fired {
+                    push_notification(&tx_cron, cron_notification(&run));
+                }
+                tokio::time::sleep(Duration::from_secs(15)).await;
+            }
         }
     });
 
@@ -472,5 +520,33 @@ mod tests {
         let (tx, _rx) = mpsc::channel(64);
         assert_eq!(reserve_slots(&tx, REMINDER_BATCH_MAX).unwrap().len(), REMINDER_BATCH_MAX);
         assert!(reserve_slots(&tx, 0).is_none());
+    }
+}
+
+#[cfg(test)]
+mod supervise_tests {
+    use super::supervise_with;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// A loop that panics is started again after the pause; one that runs
+    /// is left alone (#59).
+    #[tokio::test]
+    async fn a_proactive_loop_that_panics_is_started_again() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let counter = starts.clone();
+        let handle = supervise_with("probe", Duration::from_millis(20), move || {
+            let counter = counter.clone();
+            async move {
+                if counter.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("the first run dies");
+                }
+                std::future::pending::<()>().await
+            }
+        });
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert_eq!(starts.load(Ordering::SeqCst), 2, "started, died, started again, and then left alone");
+        handle.abort();
     }
 }

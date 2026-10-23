@@ -569,8 +569,14 @@ impl BrainService for BrainGrpcService {
                         // Ensure default session exists and is active
                         {
                             let mut mgr = session_mgr.write().await;
-                            if !mgr.session_exists("main").await.unwrap_or(false) {
-                                let _ = mgr.create("main").await;
+                            match mgr.session_exists("main").await {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    if let Err(e) = mgr.create("main").await {
+                                        error!("Session 'main' not created: {e}");
+                                    }
+                                }
+                                Err(e) => error!("Session 'main' could not be checked: {e}; activating it as it is"),
                             }
                             mgr.active_session = Some("main".to_string());
                             info!("Session 'main' activated for Operational mode");
@@ -1434,10 +1440,27 @@ async fn handle_request(
             // now, so only a StopTurn fired DURING this turn trips it.
             let (in_turn_guard, mut stop_check) = begin_turn(&self_in_turn, stop_rx, &session_name);
 
-            // Load session history
+            // Load session history. A history that cannot be read is not an
+            // empty one: the turn would run without its context and its
+            // appends would graft onto the real document (#59).
             let history = {
                 let mgr = session_mgr.read().await;
-                mgr.load_history(&session_name).await.unwrap_or_default()
+                match mgr.load_history(&session_name).await {
+                    Ok(h) => h,
+                    Err(e) => {
+                        drop(mgr);
+                        send_system(
+                            tx,
+                            format!(
+                                "Could not load the history of session '{}': {}. Nothing was sent to the model; try again.",
+                                session_name, e
+                            ),
+                            SystemMessageType::Error,
+                        )
+                        .await;
+                        return Ok(());
+                    }
+                }
             };
 
             // Resume-briefing branch: SessionAttach sets this flag for
@@ -2579,16 +2602,45 @@ async fn handle_request(
                     &tool_names_in_turn,
                     current_turn.outcome,
                 );
-                let _ = mgr
-                    .append_message(
-                        &session_name,
-                        &Message::assistant_with_attachments(&final_text, turn_assistant_refs.clone()),
+                // A failed append is said, never swallowed (#59): the reply
+                // went out, so the operator is told the history does not
+                // carry this turn. The assistant's half is not written after
+                // a failed operator half (a reply without its question).
+                let not_saved = |what: &str, e: &dyn std::fmt::Display| {
+                    format!(
+                        "{what} was not saved to session '{}': {e}. The reply above stands, but the history does not carry it; try again once the database answers.",
+                        session_name
                     )
-                    .await;
+                };
+                let persisted = match append_outcome {
+                    Ok(_) => {
+                        match mgr
+                            .append_message(
+                                &session_name,
+                                &Message::assistant_with_attachments(&final_text, turn_assistant_refs.clone()),
+                            )
+                            .await
+                        {
+                            Ok(_) => true,
+                            Err(e) => {
+                                warn!(target: "sessions", session = %session_name, "the reply was not saved: {e}");
+                                send_system(tx, not_saved("The reply", &e), SystemMessageType::Warning).await;
+                                false
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(target: "sessions", session = %session_name, "the operator's message was not saved: {e}");
+                        send_system(tx, not_saved("This turn", &e), SystemMessageType::Warning).await;
+                        false
+                    }
+                };
                 // The events watermark moves to this turn's start, after
                 // both appends (each rewrites the meta from storage), so
                 // what happened during the turn is shown next time.
-                if let Err(e) = mgr.stamp_events_seen(&session_name, turn_started).await {
+                if persisted
+                    && let Err(e) = mgr.stamp_events_seen(&session_name, turn_started).await
+                {
                     warn!(target: "sessions", session = %session_name, "events watermark not stamped: {e}");
                 }
             }
@@ -2780,8 +2832,22 @@ async fn handle_request(
                 "main".to_string()
             };
 
-            // Ensure session exists
-            let new_session = !mgr.session_exists(&session_name).await.unwrap_or(false);
+            // Ensure session exists. A probe that failed is not an absent
+            // session: "new" would skip the deleted-session guard and the
+            // cross-provider check and attach the wrong thing (#59).
+            let new_session = match mgr.session_exists(&session_name).await {
+                Ok(exists) => !exists,
+                Err(e) => {
+                    drop(mgr);
+                    send_system(
+                        tx,
+                        format!("Could not check session '{}': {}. Nothing was attached; try again.", session_name, e),
+                        SystemMessageType::Error,
+                    )
+                    .await;
+                    return Ok(());
+                }
+            };
             if new_session && let Err(e) = mgr.create(&session_name).await {
                 drop(mgr);
                 let _ = tx
@@ -2983,6 +3049,23 @@ async fn handle_request(
 
         None => Ok(()),
     }
+}
+
+/// One system frame to the client, of the given kind: the operator is told
+/// what did not happen (#59), in the stream's own vocabulary.
+async fn send_system(
+    tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
+    content: String,
+    kind: SystemMessageType,
+) {
+    let _ = tx
+        .send(Ok(ConversationResponse {
+            response_type: Some(conversation_response::ResponseType::System(SystemMessage {
+                content,
+                msg_type: kind as i32,
+            })),
+        }))
+        .await;
 }
 
 #[expect(
@@ -3305,7 +3388,15 @@ async fn handle_slash_command(
                 send_msg(tx, "Learning session is read-only. Use /soul to view the sealed soul document.".to_string()).await;
             } else {
                 let mut mgr = session_mgr.write().await;
-                if mgr.session_exists(args).await.unwrap_or(false) {
+                let exists = match mgr.session_exists(args).await {
+                    Ok(exists) => exists,
+                    Err(e) => {
+                        drop(mgr);
+                        send_msg(tx, format!("Could not check session '{}': {}. Nothing was switched; try again.", args, e)).await;
+                        return None;
+                    }
+                };
+                if exists {
                     // Soft-deleted sessions are unattachable during their
                     // grace period — reattach would silently resurrect a
                     // half-stamped session; restore is the sanctioned path.
