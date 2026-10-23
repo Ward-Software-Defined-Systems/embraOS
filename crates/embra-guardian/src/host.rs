@@ -147,10 +147,6 @@ impl WasmHost {
         Ok(Self { engine, linker, ticker_stop })
     }
 
-    pub fn engine(&self) -> &Engine {
-        &self.engine
-    }
-
     /// Compile guest wasm bytes once (cranelift). Reused across calls.
     pub fn precompile(&self, wasm: &[u8]) -> Result<Module, GuardianError> {
         Module::new(&self.engine, wasm).map_err(|e| GuardianError::Compile(e.to_string()))
@@ -272,8 +268,9 @@ fn guest_call(
         }
     };
 
-    let caps = caller.data().caps.clone();
-    let result = guard(&caps, &input);
+    // The guard borrows the capabilities; the borrow ends before `galloc`
+    // needs the store again, so nothing is cloned per call.
+    let result = guard(&caller.data().caps, &input);
     let bytes = result.into_bytes();
     let Ok(out_len) = u32::try_from(bytes.len()) else {
         return 0;

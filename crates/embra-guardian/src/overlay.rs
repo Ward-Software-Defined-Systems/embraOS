@@ -95,13 +95,6 @@ impl GuardianRuntime {
             m.remove(name);
         }
     }
-
-    pub fn len(&self) -> usize {
-        self.tools.read().map(|m| m.len()).unwrap_or(0)
-    }
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
-    }
 }
 
 /// Initialize the global runtime (idempotent — safe to call once per

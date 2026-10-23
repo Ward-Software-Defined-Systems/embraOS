@@ -184,19 +184,12 @@ pub struct ScaffoldPaths {
     pub artifact_name: String,
 }
 
-fn valid_name(name: &str) -> bool {
-    let b = name.as_bytes();
-    (3..=40).contains(&name.len())
-        && b[0].is_ascii_lowercase()
-        && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'_')
-}
-
 /// Per-tool project dir, jailed under `base` (`base` is normally
 /// [`GUARDIAN_ROOT`]; tests pass a tempdir). The validated name is
 /// `[a-z0-9_]{3,40}` so it cannot contain `/` or `..` — the join stays
 /// inside `base/tools/`.
 pub fn safe_tool_dir(base: &Path, name: &str) -> Result<PathBuf, GuardianError> {
-    if !valid_name(name) {
+    if !crate::validator::valid_tool_name(name) {
         return Err(GuardianError::PathDenied(format!(
             "tool name `{name}` is not [a-z][a-z0-9_]{{2,39}}"
         )));
