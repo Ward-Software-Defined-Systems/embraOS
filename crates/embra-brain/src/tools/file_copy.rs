@@ -424,52 +424,56 @@ fn available_bytes(dir: &Path) -> Result<u64, String> {
 /// sizes are advisory — procfs reports 0 for files with content). Fsyncs the
 /// temp. Returns `(bytes, sha256 hex)`. Blocking — runs inside
 /// `spawn_blocking`.
-fn copy_bounded_blocking(src: &Path, tmp: &Path, limit: u64) -> Result<(u64, String), String> {
+/// The one streaming pass behind the copy and the two hashes (#47): the
+/// source in `COPY_BUF` chunks, every byte into the hash, into `writer`
+/// when there is one, and counted against `limit` when there is one. The
+/// byte count and the sha256 are what the copy report shows (spec §7/§8).
+fn stream_hash(
+    reader: &mut std::fs::File,
+    mut writer: Option<&mut std::fs::File>,
+    limit: Option<u64>,
+    read_err: &str,
+) -> Result<(u64, String), String> {
     use std::io::{Read, Write};
-    let mut reader =
-        std::fs::File::open(src).map_err(|e| format!("failed to open source: {e}"))?;
-    let mut writer =
-        std::fs::File::create(tmp).map_err(|e| format!("failed to create temp file: {e}"))?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; COPY_BUF];
     let mut total: u64 = 0;
     loop {
-        let n = reader
-            .read(&mut buf)
-            .map_err(|e| format!("failed to read source: {e}"))?;
+        let n = reader.read(&mut buf).map_err(|e| format!("{read_err}: {e}"))?;
         if n == 0 {
             break;
         }
         total += n as u64;
-        if total > limit {
+        if let Some(limit) = limit
+            && total > limit
+        {
             return Err(format!(
                 "source yielded more than {limit} bytes — over the file_copy byte budget (stat size is advisory; the budget counts bytes actually read)"
             ));
         }
         hasher.update(&buf[..n]);
-        writer
-            .write_all(&buf[..n])
-            .map_err(|e| format!("failed to write temp file: {e}"))?;
+        if let Some(w) = writer.as_deref_mut() {
+            w.write_all(&buf[..n]).map_err(|e| format!("failed to write temp file: {e}"))?;
+        }
     }
-    writer
-        .sync_all()
-        .map_err(|e| format!("failed to fsync temp file: {e}"))?;
     Ok((total, hex::encode(hasher.finalize())))
 }
 
+fn copy_bounded_blocking(src: &Path, tmp: &Path, limit: u64) -> Result<(u64, String), String> {
+    let mut reader =
+        std::fs::File::open(src).map_err(|e| format!("failed to open source: {e}"))?;
+    let mut writer =
+        std::fs::File::create(tmp).map_err(|e| format!("failed to create temp file: {e}"))?;
+    let out = stream_hash(&mut reader, Some(&mut writer), Some(limit), "failed to read source")?;
+    writer
+        .sync_all()
+        .map_err(|e| format!("failed to fsync temp file: {e}"))?;
+    Ok(out)
+}
+
 fn sha256_blocking(path: &Path) -> Result<String, String> {
-    use std::io::Read;
     let mut f = std::fs::File::open(path).map_err(|e| format!("failed to open: {e}"))?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; COPY_BUF];
-    loop {
-        let n = f.read(&mut buf).map_err(|e| format!("failed to read: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hex::encode(hasher.finalize()))
+    stream_hash(&mut f, None, None, "failed to read").map(|(_, hex)| hex)
 }
 
 async fn sha256_file(path: &Path) -> Result<String, String> {
@@ -1052,25 +1056,8 @@ fn into_dir_msg(dst: &Path, src: &Path) -> String {
 /// Dry-run probe: hash the source under the same byte ceiling the real copy
 /// enforces.
 fn sha256_bounded_blocking(src: &Path, limit: u64) -> Result<(u64, String), String> {
-    use std::io::Read;
     let mut f = std::fs::File::open(src).map_err(|e| format!("failed to open source: {e}"))?;
-    let mut hasher = Sha256::new();
-    let mut buf = vec![0u8; COPY_BUF];
-    let mut total: u64 = 0;
-    loop {
-        let n = f.read(&mut buf).map_err(|e| format!("failed to read source: {e}"))?;
-        if n == 0 {
-            break;
-        }
-        total += n as u64;
-        if total > limit {
-            return Err(format!(
-                "source yields more than {limit} bytes — over the file_copy byte budget (stat size is advisory; the budget counts bytes actually read)"
-            ));
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok((total, hex::encode(hasher.finalize())))
+    stream_hash(&mut f, None, Some(limit), "failed to read source")
 }
 
 // ---------------------------------------------------------------------------

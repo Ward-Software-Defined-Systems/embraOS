@@ -140,15 +140,19 @@ fn count_exceeds_window(count: Option<u64>, window: usize) -> bool {
 }
 
 pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
-    let healthy = db.health().await.unwrap_or(false);
-    let collections = db.list_collections().await.unwrap_or_default();
-    let soul_status = if db.collection_exists("soul.invariant").await.unwrap_or(false) {
-        "sealed"
-    } else {
-        "unsealed"
-    };
+    // The independent reads at once (#47): the order of the window
+    // warnings below is the only thing that may change.
+    let (healthy, collections, sealed, stats) = tokio::join!(
+        db.health(),
+        db.list_collections(),
+        db.collection_exists("soul.invariant"),
+        db.stats(),
+    );
+    let healthy = healthy.unwrap_or(false);
+    let collections = collections.unwrap_or_default();
+    let soul_status = if sealed.unwrap_or(false) { "sealed" } else { "unsealed" };
 
-    let stats = db.stats().await.ok();
+    let stats = stats.ok();
     let storage_poisoned = stats
         .as_ref()
         .and_then(|s| s.get("storage_poisoned"))
@@ -164,9 +168,10 @@ pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
         });
 
     // FIX-6: parity check — authoritative counts vs the tool fetch window.
+    let counts = futures::future::join_all(MEMORY_STATUS_COLLECTIONS.iter().map(|coll| db.count(coll))).await;
     let mut memory_collections = Vec::with_capacity(MEMORY_STATUS_COLLECTIONS.len());
-    for coll in MEMORY_STATUS_COLLECTIONS {
-        let count = db.count(coll).await.ok();
+    for (coll, count) in MEMORY_STATUS_COLLECTIONS.iter().zip(counts) {
+        let count = count.ok();
         let saturated = count_exceeds_window(count, MEMORY_FETCH_WINDOW);
         if saturated {
             tracing::warn!(
