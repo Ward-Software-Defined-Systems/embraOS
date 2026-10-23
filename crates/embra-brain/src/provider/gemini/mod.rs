@@ -279,12 +279,9 @@ impl LlmProvider for GeminiProvider {
             options,
             &self.thinking_level,
         );
-        let body_with_cache_json = serde_json::to_value(&body_with_cache)
-            .map_err(|e| ProviderError::Decode(format!("request serialization: {e}")))?;
-
         // Whether the request that got the response used the cached
         // content: false after the stale-cache retry below.
-        let (response, explicit_cache) = match send_with_retry(&http, &url, &api_key, &body_with_cache_json).await {
+        let (response, explicit_cache) = match send_with_retry(&http, &url, &api_key, &body_with_cache, RETRY_DELAYS_SECS).await {
             Ok(r) => (r, cache_handle.is_some()),
             Err(ProviderError::Http { status, body })
                 if cache_handle.is_some() && is_cache_stale_error(status, &body) =>
@@ -306,10 +303,7 @@ impl LlmProvider for GeminiProvider {
                     options,
                     &self.thinking_level,
                 );
-                let body_no_cache_json = serde_json::to_value(&body_no_cache).map_err(|e| {
-                    ProviderError::Decode(format!("retry serialization: {e}"))
-                })?;
-                (send_with_retry(&http, &url, &api_key, &body_no_cache_json).await?, false)
+                (send_with_retry(&http, &url, &api_key, &body_no_cache, RETRY_DELAYS_SECS).await?, false)
             }
             Err(e) => return Err(e),
         };
@@ -430,22 +424,29 @@ fn is_cache_stale_error(status: u16, body: &str) -> bool {
         || body.contains("cachedContent")
 }
 
-/// POST the request body and retry on 429 / 5xx with the documented
-/// backoff ladder. Returns the streaming `reqwest::Response` on the
-/// first 2xx status; surfaces 4xx (other than 429) and exhausted
-/// retries as `ProviderError`.
+/// The terminal failure of the last attempt, one value: an exhausted
+/// ladder never pairs the status of one attempt with the body of another
+/// (#58; the Anthropic client's `SendError` is the model).
+enum SendOutcome {
+    Http { status: u16, body: String },
+    Network(String),
+}
+
+/// POST the request body and retry on 429 / 5xx with the backoff ladder
+/// `delays` (production passes `RETRY_DELAYS_SECS`). Returns the streaming
+/// `reqwest::Response` on the first 2xx status; surfaces 4xx (other than
+/// 429) and exhausted retries as `ProviderError`. The typed body is
+/// serialized once, by reqwest.
 async fn send_with_retry(
     http: &Client,
     url: &str,
     api_key: &str,
-    body: &serde_json::Value,
+    body: &impl serde::Serialize,
+    delays: &[u64],
 ) -> Result<reqwest::Response, ProviderError> {
-    let mut last_status: u16 = 0;
-    let mut last_body = String::new();
+    let mut last: Option<SendOutcome> = None;
 
-    for (attempt, delay_secs) in
-        std::iter::once(0).chain(RETRY_DELAYS_SECS.iter().copied()).enumerate()
-    {
+    for (attempt, delay_secs) in std::iter::once(0).chain(delays.iter().copied()).enumerate() {
         if delay_secs > 0 {
             tokio::time::sleep(Duration::from_secs(delay_secs)).await;
         }
@@ -465,7 +466,6 @@ async fn send_with_retry(
                     return Ok(resp);
                 }
                 let code = status.as_u16();
-                last_status = code;
                 // 429 and 5xx are retryable. Honor Retry-After when
                 // present by deferring this iteration's body read.
                 let retryable = code == 429 || (500..=599).contains(&code);
@@ -481,7 +481,7 @@ async fn send_with_retry(
                     .get(reqwest::header::RETRY_AFTER)
                     .and_then(|v| v.to_str().ok())
                     .and_then(|s| s.parse::<u64>().ok());
-                last_body = resp.text().await.unwrap_or_default();
+                last = Some(SendOutcome::Http { status: code, body: resp.text().await.unwrap_or_default() });
                 warn!(
                     target: "gemini::http",
                     attempt = attempt + 1,
@@ -494,20 +494,17 @@ async fn send_with_retry(
                 }
             }
             Err(e) => {
-                last_body = e.to_string();
+                last = Some(SendOutcome::Network(e.to_string()));
                 warn!(target: "gemini::http", attempt = attempt + 1, "network error: {e}");
             }
         }
     }
 
-    if last_status >= 400 {
-        Err(ProviderError::Http {
-            status: last_status,
-            body: last_body,
-        })
-    } else {
-        Err(ProviderError::Network(last_body))
-    }
+    Err(match last {
+        Some(SendOutcome::Http { status, body }) => ProviderError::Http { status, body },
+        Some(SendOutcome::Network(message)) => ProviderError::Network(message),
+        None => ProviderError::Network("no attempt was made".to_string()),
+    })
 }
 
 #[cfg(test)]
@@ -714,5 +711,52 @@ mod tests {
         assert!(!is_cache_stale_error(401, body));
         assert!(!is_cache_stale_error(500, body));
         assert!(!is_cache_stale_error(429, body));
+    }
+
+    /// A listener that answers each accepted connection with the next
+    /// canned response and closes it; after the last one it goes away, so
+    /// a further attempt is refused at the socket.
+    fn serve_then_vanish(responses: Vec<&'static [u8]>) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            use std::io::{Read, Write};
+            for body in responses {
+                let (mut sock, _) = listener.accept().unwrap();
+                let mut buf = [0u8; 8192];
+                let _ = sock.read(&mut buf);
+                let _ = sock.write_all(body);
+                let _ = sock.shutdown(std::net::Shutdown::Both);
+            }
+            drop(listener);
+        });
+        format!("http://{addr}/v1beta/models/x:streamGenerateContent")
+    }
+
+    const BUSY: &[u8] = b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 4\r\nConnection: close\r\n\r\nbusy";
+
+    /// A retryable status followed by network failures ends as `Network`,
+    /// never as the stale 503 wearing a network message as its body (#58).
+    #[tokio::test]
+    async fn an_exhausted_ladder_that_ends_in_a_network_error_is_a_network_error() {
+        let url = serve_then_vanish(vec![BUSY]);
+        let err = send_with_retry(&crate::net::client(), &url, "k", &serde_json::json!({"m": 1}), &[0, 0])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ProviderError::Network(_)), "{err:?}");
+    }
+
+    /// A ladder that ends on a retryable status reports that status with
+    /// its own body.
+    #[tokio::test]
+    async fn an_exhausted_ladder_that_ends_on_a_status_reports_that_status() {
+        let url = serve_then_vanish(vec![BUSY, BUSY]);
+        let err = send_with_retry(&crate::net::client(), &url, "k", &serde_json::json!({"m": 1}), &[0])
+            .await
+            .unwrap_err();
+        match err {
+            ProviderError::Http { status, body } => assert_eq!((status, body.as_str()), (503, "busy")),
+            other => panic!("expected Http, got {other:?}"),
+        }
     }
 }
