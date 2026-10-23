@@ -255,6 +255,59 @@ pub(crate) fn read_denied(canonical: &Path) -> Option<&'static str> {
     None
 }
 
+// `pub(crate)`: every writer's canonical check (`jail::real`) and
+// file_patch's re-verification run against this root.
+pub(crate) const WORKSPACE_ROOT: &str = "/embra/workspace";
+
+/// Resolve a workspace-scoped tool path: the lexical half of the jail
+/// (`jail::lexical` under `WORKSPACE_ROOT`). Accepts either an absolute
+/// path under `/embra/workspace/` or a path relative to `/embra/workspace/`
+/// (so `repo`, `./repo`, and `/embra/workspace/repo` all resolve to the
+/// same form). Returns the absolute path as text or a uniform `Denied:`
+/// rejection message.
+///
+/// Empty input resolves to the workspace root. Leading `./` is stripped
+/// before joining so `./repo` and `repo` are equivalent. `..` segments
+/// in either form are rejected outright as a defense against traversal.
+/// The check is lexical: a writer runs `jail::real` (or `jail::real_parent`
+/// for a removal) on the result before it touches the filesystem, so a
+/// symlink that leaves the workspace is refused by its real path.
+///
+/// Every git_*, file_*, and dir_* tool routes through this resolver so the
+/// accepted path shapes are uniform across the tool surface. Closes
+/// Embra_Debug #45 (git_* unification) and #52/#53 (file_* / dir_*
+/// unification) — prior to these fixes, git_clone took relative subpaths,
+/// the rest of the git family required absolute, and the file/dir family
+/// required absolute with a looser helper that skipped the `..` check.
+/// `pub(crate)` so guardian_call's `data_file` bridge shares the exact same
+/// jail (tools/guardian.rs) instead of growing a second resolver.
+pub(crate) fn resolve_workspace_path(path: &str) -> Result<String, String> {
+    resolve_in(WORKSPACE_ROOT, path)
+}
+
+/// The resolver behind [`resolve_workspace_path`], against any root, so the
+/// Guardian's workspace sink can run under a temporary directory in a test.
+/// Production callers go through `resolve_workspace_path`.
+pub(crate) fn resolve_in(root: &str, path: &str) -> Result<String, String> {
+    super::jail::lexical(root, path)
+}
+
+/// The two jail steps of a writer: the lexical check, then the canonical
+/// check of what exists (`jail::real`). The path returned is the one to
+/// write or create.
+pub(crate) async fn jailed_write_path(root: &str, raw: &str) -> Result<PathBuf, String> {
+    let lexical = super::jail::lexical(root, raw)?;
+    Ok(super::jail::real(Path::new(root), Path::new(&lexical)).await?.path)
+}
+
+/// The two jail steps of a remover: the lexical check, then the canonical
+/// check of the parent (`jail::real_parent`). The entry itself is named,
+/// never followed.
+pub(crate) async fn jailed_remove_path(root: &str, raw: &str) -> Result<PathBuf, String> {
+    let lexical = super::jail::lexical(root, raw)?;
+    super::jail::real_parent(Path::new(root), Path::new(&lexical)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
