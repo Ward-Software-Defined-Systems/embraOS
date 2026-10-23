@@ -11,7 +11,6 @@ embra-tools-core = { path = "../embra-tools-core" }
 embra-guardian = { path = "../embra-guardian" }
 tokio = { workspace = true }
 tonic = { workspace = true }
-prost = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
