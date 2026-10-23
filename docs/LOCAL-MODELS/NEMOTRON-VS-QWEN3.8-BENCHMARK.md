@@ -6,7 +6,7 @@ Long-context benchmark of local models for embraOS on a Mac Studio, in four part
 - **Qwen3.8 8-bit and 16-bit on LM Studio.**
 - **A repeat test** on how long Qwen3.8 reasons in each setup.
 
-Each configuration ran with thinking off and at the highest reasoning level the model offers, except LM Studio's 16-bit build, which ran at that level only. embraOS reaches that level with `/effort xhigh`. With `/effort` unset, Ollama runs Qwen3.8 at `medium`, which this benchmark did not measure, and LM Studio runs it at `xhigh` (see [Test setup](#test-setup)).
+Each configuration ran with thinking off and at the highest reasoning level the model offers, except LM Studio's 16-bit build, which ran at that level only. For Qwen3.8 that level is `xhigh`, which embraOS sends it by default on both servers (see [Test setup](#test-setup)).
 
 *Measured 2026-10-21 and 22 · Mac Studio M4 Max, 128 GB · Ollama 0.40.6 · LM Studio 0.4.12 with MLX runtime 1.13.1 · identical documents throughout*
 
@@ -136,8 +136,8 @@ Each configuration ran with thinking off and at the highest reasoning level the 
   - **Thinking off:** `think: false`, with 200 output tokens (64 for follow-ups).
   - **Thinking on:** Nemotron `think: true`, Qwen3.8 `think: "xhigh"`. Output was capped at 16,384 tokens (8,192 for follow-ups), thinking included.
 - **LM Studio requests.** Native `/api/v1/chat` with streaming and `reasoning: "off"` or `"xhigh"`. Sampling was pinned to Qwen3.8's values above (with min_p 0 and repeat penalty 1), and follow-ups were chained with `previous_response_id`. The model was loaded at 262,144 context with LM Studio's default of 4 parallel slots and KV cache quantization off.
-- **How these requests compare with embraOS's.** embraOS uses the OpenAI-compatible endpoint, `/v1/chat/completions`, on both servers. It sends `reasoning_effort` only when `/effort` sets a level, and it sends no sampling parameters ([RECOMMENDED-LOCAL-MODELS.md](RECOMMENDED-LOCAL-MODELS.md)).
-  - **Reasoning level.** With `/effort` unset, Ollama runs Qwen3.8 at `medium` and LM Studio runs it at `xhigh`. So the `xhigh` runs here match LM Studio's default and Ollama under `/effort xhigh`; Ollama's default level was not measured.
+- **How these requests compare with embraOS's.** embraOS uses the OpenAI-compatible endpoint, `/v1/chat/completions`, on both servers. It sends Qwen3.8 `reasoning_effort` `xhigh` unless `/effort` sets another level, sends Nemotron none, and sends no sampling parameters ([RECOMMENDED-LOCAL-MODELS.md](RECOMMENDED-LOCAL-MODELS.md)).
+  - **Reasoning level.** The `xhigh` runs here match what embraOS sends Qwen3.8 on both servers. Ollama's own default for Qwen3.8, `medium`, applies when nothing is sent; it was not measured.
   - On Ollama, `xhigh` reaches Qwen3.8 as a system instruction: "Reasoning effort is set to xhigh. Please think carefully…". LM Studio's template adds the same instruction.
   - A level the model does not list runs at the model's default. So `/effort max` gives Qwen3.8 `medium` on Ollama, and Nemotron, which has no level above on, runs with thinking on under `max` or `xhigh` (`ThinkingFromReasoningEffort` and `ResolveThinking` in Ollama's source).
   - **Sampling.** Ollama's OpenAI-compatible endpoint sets `temperature` and `top_p` to 1.0 when a request sends none, and the request's options override the model's own (`FromChatRequest`, `modelOptions`). Through embraOS, Qwen3.8 runs at top_p 1.0 instead of 0.95, and Nemotron at temperature 1.0 and top_p 1.0 instead of 0.8 and 0.9. Sampling affects draft acceptance, and so generation speed, and may affect reasoning length; neither was measured at embraOS's sampling.

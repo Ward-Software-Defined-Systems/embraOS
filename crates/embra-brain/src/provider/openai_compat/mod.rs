@@ -121,9 +121,9 @@ impl OpenAICompatProvider {
 
     /// Operator `reasoning_effort` override (`/effort` while this preset
     /// is active), sent VERBATIM — the accepted set belongs to the model
-    /// (Qwen3.8: low|medium|xhigh; gpt-oss: low|medium|high;
-    /// DeepSeek-V4-Pro: max) and the server validates, so nothing here
-    /// clamps. `None` keeps the per-model auto-map
+    /// (Qwen3.8: low|medium|xhigh; gpt-oss: low|medium|high; the four
+    /// Ollama Cloud models: low|high|max) and the server validates, so
+    /// nothing here clamps. `None` keeps the per-model auto-map
     /// ([`reasoning_effort_for_model`]), byte-identical to before the
     /// knob existed.
     pub fn with_reasoning_effort(mut self, level: Option<String>) -> Self {
@@ -235,14 +235,27 @@ impl OpenAICompatProvider {
 ///   per openclaw#71584. Matches `deepseek-v4-pro` and
 ///   `deepseek-v4-pro:cloud`. Checked first so the substring won't
 ///   fall through to a later branch.
+/// - `deepseek-v4.1-flash`, `glm-5.3`, `kimi-k3` → `"max"` — the other
+///   Ollama Cloud models under evaluation get V4-Pro's preset, the top
+///   of their levels (William, 2026-10-22; `OLLAMA_CLOUD_MAX_FAMILIES`).
+///   The daemon passes a `:cloud` body to ollama.com as sent.
+/// - `qwen3.8` → `"xhigh"` — the top of `low|medium|xhigh`, its model
+///   card's default and LM Studio's. Ollama serves it at `medium` when
+///   nothing is sent (`server/model_thinking.go`). Checked before the
+///   `-thinking` arm, whose `"high"` Qwen3.8 does not list.
 /// - `gpt-oss*`, OpenAI o-series (`o1-mini`/`o1-preview`/`o3-mini`/
 ///   `o3-pro`/`o4-mini`), `-thinking`/`_thinking` variants, and
 ///   `deepseek-r1`/`deepseek-r2` → `"high"`.
-/// - Everything else → `None`.
+/// - Everything else → `None`. Of the models under evaluation that is
+///   Qwen3.6, Gemma 4 and Nemotron 3.5 Super: with nothing sent they
+///   think at their highest setting, and no level sits above it.
 pub(crate) fn reasoning_effort_for_model(model_id: &str) -> Option<&'static str> {
     let lower = model_id.to_lowercase();
-    if lower.contains("deepseek-v4-pro") {
+    if OLLAMA_CLOUD_MAX_FAMILIES.iter().any(|f| lower.contains(f)) {
         return Some("max");
+    }
+    if lower.contains("qwen3.8") {
+        return Some("xhigh");
     }
     if lower.starts_with("gpt-oss") || lower.contains("/gpt-oss") {
         return Some("high");
@@ -282,16 +295,24 @@ pub(crate) fn bearer_env_var(preset: OpenAiCompatPreset) -> &'static str {
     }
 }
 
+/// The Ollama Cloud models whose levels are `low|high|max` (ollama.com's
+/// `/api/show`, 2026-10-22, beside off). The auto-map sends each `max`.
+const OLLAMA_CLOUD_MAX_FAMILIES: [&str; 4] =
+    ["deepseek-v4-pro", "deepseek-v4.1-flash", "glm-5.3", "kimi-k3"];
+
 /// The `reasoning_effort` values a model family DOCUMENTS, for `/effort`'s
 /// hint and warning only — nothing clamps to it (the server validates).
 /// Verified against primary docs 2026-09-17: Qwen3.8 model card
 /// (`xhigh` default | `medium` | `low`; no `high`), LM Studio's gpt-oss
-/// responses doc (`low|medium|high`), DeepSeek's thinking-mode doc
-/// (`max`). Unknown families return `None`.
+/// responses doc (`low|medium|high`). Read 2026-10-22: ollama.com's
+/// `/api/show` for the four Ollama Cloud models (`low|high|max`; off is
+/// not an `/effort` level), and Ollama's Nemotron 3.5 Super renderer
+/// (`medium`, beside on and off; its LM Studio build does not load yet).
+/// Unknown families return `None`.
 pub(crate) fn known_effort_ladder(model_id: &str) -> Option<&'static [&'static str]> {
     let lower = model_id.to_lowercase();
-    if lower.contains("deepseek-v4-pro") {
-        return Some(&["max"]);
+    if OLLAMA_CLOUD_MAX_FAMILIES.iter().any(|f| lower.contains(f)) {
+        return Some(&["low", "high", "max"]);
     }
     if lower.contains("gpt-oss")
         || lower.contains("o1-mini")
@@ -304,6 +325,9 @@ pub(crate) fn known_effort_ladder(model_id: &str) -> Option<&'static [&'static s
     }
     if lower.contains("qwen3.8") {
         return Some(&["low", "medium", "xhigh"]);
+    }
+    if lower.contains("nemotron-3.5-super") {
+        return Some(&["medium"]);
     }
     None
 }
@@ -393,10 +417,10 @@ impl LlmProvider for OpenAICompatProvider {
             // Sending to a non-reasoning model produces a `No valid
             // custom reasoning fields found` warning on LM Studio and
             // is silently dropped by Ollama. Omit entirely when
-            // unsupported. V4-Pro routes to "max"; other recognized
-            // reasoning models route to "high" — see
-            // `reasoning_effort_for_model` doc. An operator override
-            // (`/effort`, `with_reasoning_effort`) is sent as-is —
+            // unsupported. The four Ollama Cloud models route to "max",
+            // Qwen3.8 to "xhigh", other recognized reasoning models to
+            // "high" — see `reasoning_effort_for_model` doc. An operator
+            // override (`/effort`, `with_reasoning_effort`) is sent as-is —
             // operator intent wins; `/effort` warns at set time when
             // the model is not known to take the field.
             reasoning_effort: self
@@ -1278,10 +1302,74 @@ mod tests {
         assert_eq!(known_effort_ladder("qwen3.8:27b"), Some(&["low", "medium", "xhigh"][..]));
         assert_eq!(known_effort_ladder("openai/gpt-oss-20b"), Some(&["low", "medium", "high"][..]));
         assert_eq!(known_effort_ladder("o3-mini"), Some(&["low", "medium", "high"][..]));
-        assert_eq!(known_effort_ladder("deepseek-v4-pro:cloud"), Some(&["max"][..]));
-        // Qwen3.6 has no documented reasoning_effort set → no hint, no warning basis.
+        // ollama.com's `/api/show`, 2026-10-22 (off aside: not an `/effort` level).
+        for model in ["deepseek-v4-pro:cloud", "deepseek-v4.1-flash:cloud", "glm-5.3:cloud", "kimi-k3:cloud"] {
+            assert_eq!(known_effort_ladder(model), Some(&["low", "high", "max"][..]), "{model}");
+        }
+        // Ollama's Nemotron 3.5 Super renderer: `medium`, beside on and off.
+        assert_eq!(known_effort_ladder("nemotron-3.5-super:120b-a12b-nvfp4"), Some(&["medium"][..]));
+        // Qwen3.6 and Gemma 4 are on or off → no hint, no warning basis.
         assert_eq!(known_effort_ladder("qwen/qwen3.6-27b"), None);
+        assert_eq!(known_effort_ladder("gemma4:12b-mlx"), None);
         assert_eq!(known_effort_ladder("llama3.3"), None);
+    }
+
+    #[test]
+    fn reasoning_effort_for_model_sends_each_evaluated_model_its_top_level() {
+        // William, 2026-10-22: the models under evaluation get a preset
+        // like V4-Pro's, the top of each one's levels.
+        for model in ["deepseek-v4.1-flash:cloud", "glm-5.3:cloud", "kimi-k3:cloud", "GLM-5.3:cloud"] {
+            assert_eq!(reasoning_effort_for_model(model), Some("max"), "{model}");
+        }
+        // Every Qwen3.8 build on the roster, on either server.
+        for model in [
+            "qwen3.8:27b-mxfp8",
+            "qwen3.8:27b-mlx-bf16",
+            "qwen/qwen3.8-27b",
+            "mlx-community/Qwen3.8-27B-bf16",
+            "qwen3.8-27b",
+        ] {
+            assert_eq!(reasoning_effort_for_model(model), Some("xhigh"), "{model}");
+        }
+    }
+
+    #[test]
+    fn the_models_already_at_their_top_setting_get_no_level() {
+        // With nothing sent these think at their highest setting: a level
+        // changes nothing on Ollama, and Qwen3.6 on LM Studio would log
+        // `No valid custom reasoning fields found`.
+        for model in [
+            "qwen3.6:27b-mxfp8",
+            "qwen/qwen3.6-27b",
+            "gemma4:12b-mlx",
+            "gemma4:31b-mlx",
+            "gemma4:12b",
+            "nemotron-3.5-super:120b-a12b-nvfp4",
+            "nativ-community/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4",
+        ] {
+            assert_eq!(reasoning_effort_for_model(model), None, "{model}");
+        }
+    }
+
+    #[test]
+    fn an_automatic_level_is_on_the_models_own_ladder() {
+        // Ollama runs a level the model does not list at the model's
+        // default (`ResolveThinking`): Qwen3.8 sent `high` would run at
+        // `medium`.
+        for model in [
+            "deepseek-v4-pro:cloud",
+            "deepseek-v4.1-flash:cloud",
+            "glm-5.3:cloud",
+            "kimi-k3:cloud",
+            "qwen3.8:27b-mxfp8",
+            "qwen/qwen3.8-27b",
+            "gpt-oss:20b",
+            "o3-mini",
+        ] {
+            let level = reasoning_effort_for_model(model).expect(model);
+            let ladder = known_effort_ladder(model).expect(model);
+            assert!(ladder.contains(&level), "{model}: {level} is not on {ladder:?}");
+        }
     }
 
     #[test]
@@ -1370,9 +1458,9 @@ mod tests {
             reasoning_effort_for_model("DeepSeek-v4-Pro:cloud"),
             Some("max")
         );
-        // Narrow scope (per user decision): V4-Flash and other V4
-        // siblings stay `None` until separately vetted on the test
-        // fleet.
+        // Narrow scope: V4-Flash, retired from Ollama Cloud on
+        // 2026-08-27, stays `None`; V4.1 Flash has its own entry
+        // (`reasoning_effort_for_model_sends_each_evaluated_model_its_top_level`).
         assert_eq!(reasoning_effort_for_model("deepseek-v4-flash"), None);
         assert_eq!(
             reasoning_effort_for_model("deepseek-v4-flash:cloud"),
@@ -1597,9 +1685,10 @@ mod tests {
 
     #[tokio::test]
     async fn stream_turn_sends_operator_effort_override_verbatim() {
-        // Qwen3.8 on LM Studio: the auto-map omits the field, but an
-        // operator `/effort xhigh` is sent exactly as given — Qwen3.8's
-        // own ladder is low|medium|xhigh, so no clamping may happen here.
+        // Qwen3.8 on LM Studio: the auto-map sends `xhigh`, and an
+        // operator `/effort medium` replaces it exactly as given —
+        // Qwen3.8's own ladder is low|medium|xhigh, so no clamping may
+        // happen here.
         let server = MockServer::start().await;
         let body = sse_body(&[
             r#"{"id":"x","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
@@ -1615,7 +1704,7 @@ mod tests {
             .await;
         let provider =
             OpenAICompatProvider::lm_studio(server.uri(), None, "qwen/qwen3.8-27b".to_string())
-                .with_reasoning_effort(Some("xhigh".to_string()));
+                .with_reasoning_effort(Some("medium".to_string()));
         let _stream = provider
             .stream_turn(
                 &[ApiMessage::user_text("hi")],
@@ -1629,8 +1718,50 @@ mod tests {
         let body_json: JsonValue = serde_json::from_slice(&requests[0].body).unwrap();
         assert_eq!(
             body_json.get("reasoning_effort").and_then(|v| v.as_str()),
-            Some("xhigh")
+            Some("medium")
         );
+    }
+
+    #[tokio::test]
+    async fn stream_turn_sends_the_automatic_level_when_unset() {
+        // No `/effort` set: the auto-map's level reaches the wire, on
+        // both presets and for a `:cloud` tag.
+        for (preset, model, level) in [
+            (OpenAiCompatPreset::Ollama, "qwen3.8:27b-mxfp8", "xhigh"),
+            (OpenAiCompatPreset::Ollama, "glm-5.3:cloud", "max"),
+            (OpenAiCompatPreset::LmStudio, "qwen/qwen3.8-27b", "xhigh"),
+        ] {
+            let server = MockServer::start().await;
+            let body = sse_body(&[
+                r#"{"choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
+            ]);
+            Mock::given(method("POST"))
+                .and(path("/v1/chat/completions"))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_body_string(body)
+                        .insert_header("content-type", "text/event-stream"),
+                )
+                .mount(&server)
+                .await;
+            let provider = OpenAICompatProvider::new(preset, server.uri(), None, model.to_string());
+            let _stream = provider
+                .stream_turn(
+                    &[ApiMessage::user_text("hi")],
+                    &system_bundle(),
+                    &empty_manifest(),
+                    LlmRequestOptions::default(),
+                )
+                .await
+                .unwrap();
+            let requests = server.received_requests().await.unwrap();
+            let body_json: JsonValue = serde_json::from_slice(&requests[0].body).unwrap();
+            assert_eq!(
+                body_json.get("reasoning_effort").and_then(|v| v.as_str()),
+                Some(level),
+                "{model}"
+            );
+        }
     }
 
     #[tokio::test]
