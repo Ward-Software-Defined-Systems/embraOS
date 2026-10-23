@@ -126,8 +126,9 @@ fn positional<'a>(token: &'a str, what: &str) -> Result<&'a str, String> {
 /// the scp form `[user@]host:path`. Refused before git runs: a token that
 /// begins with `-` (an option), a remote-helper transport (`ext::` runs a
 /// command; any `name::`), `file://` and a local path (the rest of the
-/// filesystem into the workspace). `GIT_ALLOW_PROTOCOL` on the command is
-/// the second line.
+/// filesystem into the workspace), and a user, host or port in the URL's
+/// authority that begins with `-` ([`option_shaped_authority`]).
+/// `GIT_ALLOW_PROTOCOL` on the command is the second line.
 pub(crate) fn validate_clone_url(url: &str) -> Result<(), String> {
     if url.starts_with('-') {
         return Err(format!("Denied: '{url}' begins with '-', which git would read as an option"));
@@ -147,8 +148,9 @@ pub(crate) fn validate_clone_url(url: &str) -> Result<(), String> {
     if url.starts_with('/') || url.starts_with('.') || url.starts_with('~') {
         return Err(format!("Denied: '{url}' is a local path; the filesystem is not a clone source"));
     }
-    if ["https://", "http://", "ssh://", "git://"].iter().any(|s| lower.starts_with(s)) {
-        return Ok(());
+    if let Some(scheme) = ["https://", "http://", "ssh://", "git://"].iter().find(|s| lower.starts_with(*s)) {
+        let authority = url[scheme.len()..].split('/').next().unwrap_or("");
+        return option_shaped_authority(url, authority, true);
     }
     // The scp form: a colon before the first slash, after a host.
     if let Some(colon) = url.find(':')
@@ -156,11 +158,47 @@ pub(crate) fn validate_clone_url(url: &str) -> Result<(), String> {
         && !url[..colon].contains('/')
         && !url[colon + 1..].starts_with('/')
     {
-        return Ok(());
+        return option_shaped_authority(url, &url[..colon], false);
     }
     Err(format!(
         "Denied: '{url}' is not a git URL the clone tool accepts (https://, http://, ssh://, git://, or user@host:path)"
     ))
+}
+
+/// The user, host and port of a URL's authority (`user@host:port`; the scp
+/// form's `user@host` carries no port), each refused when it begins with
+/// `-`: git hands the user and the host to ssh, which would read them as
+/// options. Git refuses these itself ("strange hostname"); the tool
+/// refuses them first, so the guarantee is the OS's and not the installed
+/// binary's. An IPv6 literal in brackets is split at its closing bracket.
+fn option_shaped_authority(url: &str, authority: &str, with_port: bool) -> Result<(), String> {
+    let (user, hostport) = match authority.rsplit_once('@') {
+        Some((user, hostport)) => (Some(user), hostport),
+        None => (None, authority),
+    };
+    let (host, port) = if !with_port {
+        (hostport, None)
+    } else if let Some(bracketed) = hostport.strip_prefix('[') {
+        match bracketed.split_once(']') {
+            Some((host, rest)) => (host, rest.strip_prefix(':')),
+            None => (hostport, None),
+        }
+    } else {
+        match hostport.rsplit_once(':') {
+            Some((host, port)) => (host, Some(port)),
+            None => (hostport, None),
+        }
+    };
+    for (what, value) in [("user", user), ("host", Some(host)), ("port", port)] {
+        if let Some(value) = value
+            && value.starts_with('-')
+        {
+            return Err(format!(
+                "Denied: '{url}' names the {what} '{value}', which begins with '-' and would be read as an option"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The flags `git_log` passes on as given: presentation only, nothing that
@@ -1602,6 +1640,8 @@ mod argument_tests {
             "http://h/r",
             "git://h/r",
             "ssh://git@h/r.git",
+            "ssh://git@h:2222/r.git",
+            "ssh://[::1]:22/r",
             "git@github.com:o/r.git",
             "host:path/r",
         ] {
@@ -1618,10 +1658,25 @@ mod argument_tests {
             "./here",
             "~/x",
             "plain-name",
+            // An option-shaped user, host or port in the authority: the live
+            // check of 2026-10-23 found git's own "strange hostname" refusal
+            // was the only line.
+            "ssh://-oProxyCommand=id/r",
+            "ssh://-oProxyCommand=id@h/r",
+            "ssh://git@-h/r",
+            "ssh://h:-1/r",
+            "https://-h/r",
+            "git@-h:o/r.git",
         ] {
             let err = validate_clone_url(bad).unwrap_err();
             assert!(err.starts_with("Denied:"), "{bad}: {err}");
         }
+        let err = validate_clone_url("ssh://-oProxyCommand=id/r").unwrap_err();
+        assert!(err.contains("names the host '-oProxyCommand=id'"), "{err}");
+        let err = validate_clone_url("ssh://-oProxyCommand=id@h/r").unwrap_err();
+        assert!(err.contains("names the user '-oProxyCommand=id'"), "{err}");
+        let err = validate_clone_url("ssh://h:-1/r").unwrap_err();
+        assert!(err.contains("names the port '-1'"), "{err}");
     }
 
     /// Every model-supplied positional of the git family is refused when it
