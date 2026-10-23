@@ -2,7 +2,7 @@
 
 Chronological merge log for `main`, anchored on tagged releases. Each entry's headline summary is pulled from the corresponding sprint section in [../ARCHITECTURE.md](../ARCHITECTURE.md) (local doc, gitignored) — that file remains canonical for design narrative; this file is the navigable release index.
 
-**Last updated:** 2026-10-22.
+**Last updated:** 2026-10-23.
 
 **Release index** — one row per tag inside the section below (commit = the tagged commit, date = the release date the version ladder records); the wave entries follow in reverse order.
 
@@ -57,6 +57,10 @@ Docs:
 - The operator override in `SYSTEM-DESIGN`.
 - The models doc's Reasoning effort section.
 
+Checked live by William, 2026-10-23:
+- A level stored by the old build showed against the model in use, stayed behind at a `/model` switch, and came back with the switch back.
+- His scenario: `/effort low` on `qwen3.8:27b-mxfp8`, then `/model deepseek-v4-pro:cloud`. The switch's answer named `max`, and Ollama's request log (`OLLAMA_DEBUG_LOG_REQUESTS=1`) had `"reasoning_effort":"max"`. Back on Qwen3.8, the answer named `low` and the body carried `"low"`.
+
 **Reasoning-effort presets for the models under evaluation (branch `code-review`, 2026-10-22; on `main` since the third fast-forward of 2026-10-22).** William, 2026-10-22: the models the fleet is evaluating get a preset like DeepSeek V4 Pro's, the top of each one's levels, sent while `/effort` is unset. He chose `xhigh` for Qwen3.8 on both servers, `max` for the three other Ollama Cloud models, and the reasoning level only: no sampling and no output cap.
 - **The levels.** ollama.com's `/api/show` (2026-10-22) lists `low`, `high` and `max` for V4 Pro, V4.1 Flash, GLM 5.3 and Kimi K3, with the defaults `low`, `high`, `max` and `max`. Qwen3.8 lists `low`, `medium` and `xhigh`. Ollama serves it at `medium` when nothing is sent (`server/model_thinking.go`); LM Studio serves it at `xhigh`.
 - **The auto-map.** `reasoning_effort_for_model` (`crates/embra-brain/src/provider/openai_compat/mod.rs`) sends `max` to the four `:cloud` models (`OLLAMA_CLOUD_MAX_FAMILIES`). It sends `xhigh` to Qwen3.8, ahead of the `-thinking` arm, whose `high` Qwen3.8 does not list.
@@ -72,6 +76,12 @@ Docs:
 - The models doc: its Effort columns and notes, the cloud line, and the Reasoning effort section.
 - The `/effort` row of `COMMAND-REFERENCE`, and the reasoning controls in `SYSTEM-DESIGN`.
 - The benchmark's comparison with embraOS's requests. Its `xhigh` runs now match the brain's default.
+
+Checked live by William, 2026-10-23:
+- `/effort` with no level named each model's automatic level: `xhigh` for Qwen3.8, `max` for a `:cloud` tag, and nothing for a Gemma 4 tag and for Nemotron 3.5 Super.
+- Ollama's request log (`OLLAMA_DEBUG_LOG_REQUESTS=1`, which records `:cloud` bodies too) had `"reasoning_effort":"xhigh"` for Qwen3.8, `"max"` for a `:cloud` tag, and no `reasoning_effort` for Gemma 4.
+- `/effort high` warned on Qwen3.8 and not on V4 Pro.
+- On LM Studio, the prompt formatted for `qwen/qwen3.8-27b` (`lms log stream --filter input`) read `Reasoning effort is set to xhigh` with `/effort` unset and `low` after `/effort low`. With the model's Reasoning Effort set to `low` in LM Studio and `/effort` unset, it read `xhigh`: the level in the request wins.
 
 **The command reference: `/effort` on Ollama and LM Studio (branch `code-review`, 2026-10-22; on `main` since the third fast-forward of 2026-10-22).** On William's word. The `/effort` row of `docs/OPERATIONS/COMMAND-REFERENCE.md` gave Qwen3.8's default as `xhigh` and said that an unset level leaves LM Studio's per-model default. On Ollama, Qwen3.8 runs at `medium` (`server/model_thinking.go`), as `docs/SYSTEM-DESIGN.md` has said since 2026-10-20. The row also gave `max` as DeepSeek V4 Pro's accepted set; that is only the set `/effort` checks (`known_effort_ladder`), and ollama.com accepts `low`, `high` and `max`. The row now gives each server's default, calls the checked set what it is, says the level is sent anyway, and links the models doc's Reasoning effort section.
 
