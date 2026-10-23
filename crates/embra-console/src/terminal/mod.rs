@@ -81,8 +81,11 @@ fn open_screen(web_pty: bool, cols: u16, rows: u16) -> Result<Screen> {
 /// terminal back as it was found either way: what `main` prints next —
 /// on a failure, the reason — has to start at the left margin, and the next
 /// console on a serial line finds it in the state this one did.
-pub async fn run(client: BrainClient, device: Option<String>) -> Result<()> {
-    let outcome = run_tui(client, device).await;
+/// `columns` and `rows` are the operator's size override from the command
+/// line (`--columns`, `--rows`), carried as parameters rather than through
+/// the process's own environment (#40).
+pub async fn run(client: BrainClient, device: Option<String>, columns: Option<u16>, rows: Option<u16>) -> Result<()> {
+    let outcome = run_tui(client, device, columns, rows).await;
     if std::env::var("EMBRA_WEB_PTY").is_ok() {
         let _ = stdout().execute(DisableBracketedPaste);
     }
@@ -92,14 +95,17 @@ pub async fn run(client: BrainClient, device: Option<String>) -> Result<()> {
     Ok(())
 }
 
-async fn run_tui(mut client: BrainClient, _device: Option<String>) -> Result<()> {
+async fn run_tui(
+    mut client: BrainClient,
+    _device: Option<String>,
+    override_cols: Option<u16>,
+    override_rows: Option<u16>,
+) -> Result<()> {
     println!("[TUI] opening conversation...");
     let (in_tx, mut out_rx) = client.open_conversation("").await?;
     println!("[TUI] conversation opened");
 
     // Determine terminal size: CLI override > TIOCGWINSZ > default 80x24
-    let override_cols: Option<u16> = std::env::var("EMBRA_COLUMNS").ok().and_then(|v| v.parse().ok());
-    let override_rows: Option<u16> = std::env::var("EMBRA_ROWS").ok().and_then(|v| v.parse().ok());
     let (detected_cols, detected_rows) = terminal::size().unwrap_or((0, 0));
     let cols = override_cols.unwrap_or(if detected_cols > 0 { detected_cols } else { 80 });
     let rows = override_rows.unwrap_or(if detected_rows > 0 { detected_rows } else { 24 });
@@ -174,6 +180,7 @@ async fn run_tui(mut client: BrainClient, _device: Option<String>) -> Result<()>
 
     // Main event loop
     loop {
+        app.trim_history();
         terminal_tui.draw(|f| ui::draw(f, &mut app))?;
 
         if app.should_quit {

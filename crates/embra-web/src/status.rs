@@ -85,15 +85,14 @@ fn parse_version(resp: &str) -> Option<String> {
 }
 
 pub async fn api_status(State(state): State<AppState>) -> Json<Value> {
-    // Probe concurrently; each is bounded by PROBE_TIMEOUT.
-    let (wardson, trustd, apid_grpc, apid_http, brain) = tokio::join!(
+    // Every probe at once, each bounded by PROBE_TIMEOUT: with apid down,
+    // the whole call takes one timeout, not two in a row (#40).
+    let (wardson, trustd, apid_grpc, apid_http, brain, version_resp, brain_status_resp) = tokio::join!(
         http_get("127.0.0.1:8090", "/_health"),
         tcp_ok("127.0.0.1:50001"),
         tcp_ok("127.0.0.1:50000"),
         http_get("127.0.0.1:8443", "/health"),
         tcp_ok("127.0.0.1:50002"),
-    );
-    let (version_resp, brain_status_resp) = tokio::join!(
         http_get("127.0.0.1:8443", "/version"),
         http_get("127.0.0.1:8443", "/status"),
     );

@@ -410,7 +410,22 @@ pub struct AppState {
     pub viewport_rows: u16,
 }
 
+/// The most rows the transcript keeps. Every frame restyles and rewraps
+/// the whole history, so an unbounded history is a per-frame cost that
+/// grows for the life of a web console (#40); the rows past the cap are
+/// the oldest, which no terminal could scroll back to.
+pub const MESSAGE_HISTORY_CAP: usize = 2000;
+
 impl AppState {
+    /// Drops the oldest rows past [`MESSAGE_HISTORY_CAP`]; the scroll
+    /// offset counts from the bottom, so the view does not move.
+    pub fn trim_history(&mut self) {
+        if self.messages.len() > MESSAGE_HISTORY_CAP {
+            let excess = self.messages.len() - MESSAGE_HISTORY_CAP;
+            self.messages.drain(..excess);
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             // Start in Learning mode — brain sends ModeTransition with correct mode
@@ -771,5 +786,22 @@ mod file_card_tests {
         f.path = "/etc/motd".into();
         let row = DisplayMessage::file_with_tz(&f, "UTC");
         assert_eq!(row.content, "[file offered] notes.md (12 KB) — /etc/motd");
+    }
+}
+
+#[cfg(test)]
+mod history_cap_tests {
+    use super::{AppState, DisplayMessage, MESSAGE_HISTORY_CAP};
+
+    #[test]
+    fn a_history_past_the_cap_drops_its_oldest_rows() {
+        let mut app = AppState::new();
+        for i in 0..(MESSAGE_HISTORY_CAP + 7) {
+            app.messages.push(DisplayMessage::system_with_tz(format!("m{i}"), "UTC"));
+        }
+        app.trim_history();
+        assert_eq!(app.messages.len(), MESSAGE_HISTORY_CAP);
+        app.trim_history();
+        assert_eq!(app.messages.len(), MESSAGE_HISTORY_CAP, "a second pass changes nothing");
     }
 }

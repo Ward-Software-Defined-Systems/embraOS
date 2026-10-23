@@ -50,12 +50,6 @@ async fn main() {
         }
     }
 
-    // Set terminal size override via env for the TUI module
-    unsafe {
-        if let Some(c) = columns { std::env::set_var("EMBRA_COLUMNS", c.to_string()); }
-        if let Some(r) = rows { std::env::set_var("EMBRA_ROWS", r.to_string()); }
-    }
-
     println!("[embra-console] connecting to {}", apid_addr);
     let client = match BrainClient::connect(&apid_addr).await {
         Ok(c) => {
@@ -73,7 +67,7 @@ async fn main() {
     };
 
     println!("[embra-console] launching TUI...");
-    match terminal::run(client, device).await {
+    match terminal::run(client, device, columns, rows).await {
         Ok(()) => println!("[embra-console] exited"),
         Err(e) => fail(exit_code::TUI_FAILED, format_args!("TUI error: {e}")),
     }

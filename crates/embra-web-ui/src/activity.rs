@@ -436,7 +436,9 @@ fn hit_test(x: f64, w: f64) -> Option<Station> {
 }
 
 fn tooltip_text(station: Station, v: &Viz) -> String {
-    let snap = v.snapshot.clone().unwrap_or_default();
+    // Borrowed, not cloned: the text is built on every pointer move (#40).
+    let empty = Snapshot::default();
+    let snap = v.snapshot.as_ref().unwrap_or(&empty);
     match station {
         Station::Model => {
             let mut lines = vec![if snap.model.is_empty() {
