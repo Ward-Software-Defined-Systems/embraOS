@@ -46,7 +46,7 @@
 //!   the presence of `functionCall` parts is the continuation signal.
 
 use anyhow::Result;
-use futures_util::{Stream, StreamExt};
+use futures::{Stream, StreamExt};
 use tokio::sync::mpsc;
 
 use crate::provider::ir::{AssistantTurn, Block, EarlyStopReason, TurnOutcome};
@@ -508,7 +508,7 @@ mod tests {
     /// Run the parser over the chunks and collect what it emits.
     async fn run_chunks(chunks: Vec<Vec<u8>>, include_reasoning: bool) -> Vec<StreamEvent> {
         let (tx, mut rx) = mpsc::channel(128);
-        let stream = futures_util::stream::iter(
+        let stream = futures::stream::iter(
             chunks.into_iter().map(Ok::<_, std::convert::Infallible>),
         );
         let parser = tokio::spawn(pump(stream, tx, include_reasoning));
@@ -947,7 +947,7 @@ mod tests {
             let read = Arc::new(AtomicUsize::new(0));
             let counter = read.clone();
             let chunks = vec![first.clone(), text.clone(), text.clone(), text.clone()];
-            let stream = futures_util::stream::iter(
+            let stream = futures::stream::iter(
                 chunks.into_iter().map(Ok::<_, std::convert::Infallible>),
             )
             .inspect(move |_| {
@@ -967,7 +967,7 @@ mod tests {
         let first = sse_body(&[
             r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"one"}]},"index":0}]}"#,
         ]);
-        let stream = futures_util::stream::iter(vec![
+        let stream = futures::stream::iter(vec![
             Ok(first),
             Err(std::io::Error::other("connection reset")),
         ]);
@@ -988,7 +988,7 @@ mod tests {
             r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"one"}]},"index":0}]}"#,
             r#"{"error":{"code":400,"message":"The input token count exceeds the maximum number of tokens allowed","status":"INVALID_ARGUMENT"}}"#,
         ]);
-        let stream = futures_util::stream::iter(vec![Ok::<_, std::convert::Infallible>(body)]);
+        let stream = futures::stream::iter(vec![Ok::<_, std::convert::Infallible>(body)]);
         let (tx, mut rx) = mpsc::channel(8);
         let err = pump(stream, tx, false).await.expect_err("the error frame fails the call");
         let text = err.to_string();
@@ -1004,7 +1004,7 @@ mod tests {
     /// Run the parser over one SSE body and keep what it returns too.
     async fn run_with_usage(events: &[&str]) -> (Vec<StreamEvent>, Option<GeminiUsage>) {
         let (tx, mut rx) = mpsc::channel(128);
-        let stream = futures_util::stream::iter(vec![Ok::<_, std::convert::Infallible>(
+        let stream = futures::stream::iter(vec![Ok::<_, std::convert::Infallible>(
             sse_body(events),
         )]);
         let parser = tokio::spawn(pump(stream, tx, false));

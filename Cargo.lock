@@ -1483,7 +1483,6 @@ dependencies = [
  "embra-tool-macro",
  "embra-tools-core",
  "futures",
- "futures-util",
  "hex",
  "image",
  "inventory",

@@ -55,7 +55,7 @@
 use std::collections::BTreeMap;
 
 use anyhow::Result;
-use futures_util::{Stream, StreamExt};
+use futures::{Stream, StreamExt};
 use serde_json::Value as JsonValue;
 use tokio::sync::mpsc;
 
@@ -457,7 +457,7 @@ mod tests {
         include_reasoning: bool,
     ) -> Vec<StreamEvent> {
         let (tx, mut rx) = mpsc::channel(256);
-        let stream = futures_util::stream::iter(
+        let stream = futures::stream::iter(
             chunks.into_iter().map(Ok::<_, std::convert::Infallible>),
         );
         let parser = tokio::spawn(pump(stream, tx, model_id.to_string(), include_reasoning));
@@ -1114,7 +1114,7 @@ mod tests {
             format!("{}{refusal}", data_frame(assistant_chunk_with_text("one", None)));
         for (body, delivered) in [(delta_then_refusal, vec!["one"]), (refusal, vec![])] {
             let (tx, mut rx) = mpsc::channel(8);
-            let stream = futures_util::stream::iter(vec![Ok::<_, std::convert::Infallible>(
+            let stream = futures::stream::iter(vec![Ok::<_, std::convert::Infallible>(
                 body.into_bytes(),
             )]);
             let err = pump(stream, tx, "test-model".to_string(), false)
@@ -1192,7 +1192,7 @@ mod tests {
             let read = Arc::new(AtomicUsize::new(0));
             let counter = read.clone();
             let chunks = vec![first.clone(), text.clone(), text.clone(), text.clone()];
-            let stream = futures_util::stream::iter(
+            let stream = futures::stream::iter(
                 chunks.into_iter().map(Ok::<_, std::convert::Infallible>),
             )
             .inspect(move |_| {
@@ -1357,7 +1357,7 @@ mod tests {
     #[tokio::test]
     async fn a_transport_error_is_returned_to_the_caller() {
         let first = data_frame(assistant_chunk_with_text("one", None)).into_bytes();
-        let stream = futures_util::stream::iter(vec![
+        let stream = futures::stream::iter(vec![
             Ok(first),
             Err(std::io::Error::other("connection reset")),
         ]);

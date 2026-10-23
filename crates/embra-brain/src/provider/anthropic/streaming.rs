@@ -11,7 +11,7 @@
 //! [`crate::provider::StreamEvent`].
 
 use anyhow::Result;
-use futures_util::{Stream, StreamExt};
+use futures::{Stream, StreamExt};
 use std::collections::BTreeMap;
 use tokio::sync::mpsc;
 
@@ -382,7 +382,7 @@ mod tests {
     /// Run the parser over the chunks and collect what it emits.
     async fn run_chunks(chunks: Vec<Vec<u8>>) -> Vec<AnthropicStreamEvent> {
         let (tx, mut rx) = mpsc::channel(128);
-        let stream = futures_util::stream::iter(
+        let stream = futures::stream::iter(
             chunks.into_iter().map(Ok::<_, std::convert::Infallible>),
         );
         let parser = tokio::spawn(pump(stream, tx));
@@ -898,7 +898,7 @@ mod tests {
             let read = Arc::new(AtomicUsize::new(0));
             let counter = read.clone();
             let chunks = vec![first, more.clone(), more.clone(), more.clone()];
-            let stream = futures_util::stream::iter(
+            let stream = futures::stream::iter(
                 chunks.into_iter().map(Ok::<_, std::convert::Infallible>),
             )
             .inspect(move |_| {
@@ -917,7 +917,7 @@ mod tests {
             r#"{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}"#,
             r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"one"}}"#,
         ]);
-        let stream = futures_util::stream::iter(vec![
+        let stream = futures::stream::iter(vec![
             Ok(first),
             Err(std::io::Error::other("connection reset")),
         ]);

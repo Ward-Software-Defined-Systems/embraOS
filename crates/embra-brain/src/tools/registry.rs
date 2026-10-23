@@ -18,8 +18,8 @@ use crate::db::WardsonDbClient;
 
 /// Runtime context passed to every tool handler.
 ///
-/// Replaces the `(db, config, session_name)` tuple threaded through the
-/// legacy string dispatcher at `tools/mod.rs:34-180`. `config_tz` is hoisted
+/// Replaces the `(db, config, session_name)` tuple the string dispatcher
+/// once threaded through (gone since Stage 3). `config_tz` is hoisted
 /// so tools that need the timezone don't have to re-derive it from `config`.
 ///
 /// `trace` + `turn_index` (NATIVE-TOOLS-01 follow-up) expose the

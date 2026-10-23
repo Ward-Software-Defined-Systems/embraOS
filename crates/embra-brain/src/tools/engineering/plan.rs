@@ -7,6 +7,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::db::WardsonDbClient;
+use crate::tools::ensure_collection;
 use crate::tools::registry::DispatchContext;
 
 /// Create or update a plan in WardSONDB.
@@ -221,11 +222,6 @@ pub async fn plan_delete(db: &WardsonDbClient, plan_id: &str, cascade_tasks: boo
     }
 }
 
-async fn ensure_collection(db: &WardsonDbClient, name: &str) {
-    if !db.collection_exists(name).await.unwrap_or(true) {
-        let _ = db.create_collection(name).await;
-    }
-}
 
 // -- Planning tools -----------------------------------------------------
 

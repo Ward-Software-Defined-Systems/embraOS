@@ -11172,7 +11172,7 @@ mod operator_stop_tests {
     use crate::provider::ir::{EarlyStopReason, TurnOutcome};
     use crate::provider::StreamEvent;
     use embra_common::proto::brain::SystemMessageType;
-    use futures_util::stream::BoxStream;
+    use futures::stream::BoxStream;
     use tokio::sync::{mpsc, watch};
 
     const STOPPED: TurnOutcome = TurnOutcome::EarlyStop(EarlyStopReason::OperatorStop);
@@ -11267,14 +11267,14 @@ mod operator_stop_tests {
     #[tokio::test]
     async fn a_learning_turn_that_is_stopped_says_so() {
         use embra_common::proto::brain::conversation_response::ResponseType;
-        use futures_util::StreamExt;
+        use futures::StreamExt;
 
         let (stop_tx, stop_rx) = watch::channel(0u64);
         let mut check = StopCheck::new(stop_rx);
         stop_tx.send_modify(|v| *v += 1);
 
         // A provider that has nothing to say yet, and never will.
-        let mut silent: BoxStream<'static, StreamEvent> = futures_util::stream::pending().boxed();
+        let mut silent: BoxStream<'static, StreamEvent> = futures::stream::pending().boxed();
         let (tx, mut rx) = mpsc::channel(8);
         let answer = tokio::time::timeout(
             std::time::Duration::from_secs(1),
