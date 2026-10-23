@@ -25,56 +25,39 @@ pub fn phase_kickoff(phase: &LearningPhase) -> String {
     }
 }
 
+/// A collected document pretty-printed for a phase prompt, or nothing.
+fn pretty(v: &Option<serde_json::Value>) -> String {
+    v.as_ref()
+        .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
+        .unwrap_or_default()
+}
+
+/// The operator's name as the profile records it, `User` until then.
+fn user_name(state: &LearningState) -> &str {
+    state
+        .user_profile
+        .as_ref()
+        .and_then(|v| v.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("User")
+}
+
 pub fn system_prompt_for_phase(state: &LearningState, config: &SystemConfig) -> String {
     match state.phase {
         LearningPhase::UserConfiguration => {
             prompts::learning_user_configuration(&config.name)
         }
         LearningPhase::IdentityFormation => {
-            let user_profile = state
-                .user_profile
-                .as_ref()
-                .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
-                .unwrap_or_default();
-            let user_name = state
-                .user_profile
-                .as_ref()
-                .and_then(|v| v.get("name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("User");
-            prompts::learning_identity_formation(&config.name, user_name, &user_profile)
+            prompts::learning_identity_formation(&config.name, user_name(state), &pretty(&state.user_profile))
         }
         LearningPhase::SoulDefinition => {
-            let user_profile = state
-                .user_profile
-                .as_ref()
-                .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
-                .unwrap_or_default();
-            let identity = state
-                .identity
-                .as_ref()
-                .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
-                .unwrap_or_default();
-            prompts::learning_soul_definition(&config.name, &user_profile, &identity)
+            prompts::learning_soul_definition(&config.name, &pretty(&state.user_profile), &pretty(&state.identity))
         }
         LearningPhase::InitialToolset => String::new(),
         LearningPhase::Confirmation => {
-            let user_profile = state
-                .user_profile
-                .as_ref()
-                .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
-                .unwrap_or_default();
-            let user_name = state
-                .user_profile
-                .as_ref()
-                .and_then(|v| v.get("name"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("User");
-            let tools = state
-                .tools_config
-                .as_ref()
-                .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
-                .unwrap_or_default();
+            let user_profile = pretty(&state.user_profile);
+            let user_name = user_name(state);
+            let tools = pretty(&state.tools_config);
             // Import path: `state.soul` is the already-sealed IDENTITY+SOUL
             // graph and `state.identity` is deliberately None — the flat
             // template would show an empty "Your identity:" section (the
@@ -95,16 +78,8 @@ pub fn system_prompt_for_phase(state: &LearningState, config: &SystemConfig) -> 
                     &tools,
                 )
             } else {
-                let identity = state
-                    .identity
-                    .as_ref()
-                    .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
-                    .unwrap_or_default();
-                let soul = state
-                    .soul
-                    .as_ref()
-                    .map(|v| serde_json::to_string_pretty(v).unwrap_or_default())
-                    .unwrap_or_default();
+                let identity = pretty(&state.identity);
+                let soul = pretty(&state.soul);
                 prompts::learning_confirmation(
                     &config.name,
                     user_name,

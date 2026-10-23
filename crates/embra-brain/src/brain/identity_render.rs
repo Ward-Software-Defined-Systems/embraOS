@@ -16,9 +16,10 @@
 //! where identity was simply `to_string_pretty`'d — so no existing install
 //! regresses.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use serde::Deserialize;
+use super::soul_render::{emit_bullets, emit_leftover, emit_lines, trim_trailing_newlines};
 use serde_json::Value;
 
 use crate::brain::soul_render::{scalar_to_string, value_to_list};
@@ -47,7 +48,7 @@ impl IdentitySchema {
     /// or `introspect` contract, so maximizing recovery is safe). Returns
     /// the schema plus the source keys consumed, or `None` when nothing
     /// maps (caller then uses the pretty-JSON fallback). Never panics.
-    fn from_obj(obj: &serde_json::Map<String, Value>) -> Option<(IdentitySchema, BTreeSet<String>)> {
+    fn from_obj(cur: &Value, obj: &serde_json::Map<String, Value>) -> Option<(IdentitySchema, BTreeSet<String>)> {
         const CANON: [&str; 5] = ["name", "personality", "traits", "voice", "values_in_practice"];
 
         let mut schema = IdentitySchema::default();
@@ -56,8 +57,7 @@ impl IdentitySchema {
         // Strict: take canonical keys directly (serde ignores unknowns,
         // e.g. the storage `_id`; #[serde(default)] fills the rest).
         if obj.keys().any(|k| CANON.contains(&k.as_str()))
-            && let Ok(s) =
-                serde_json::from_value::<IdentitySchema>(Value::Object(obj.clone()))
+            && let Ok(s) = IdentitySchema::deserialize(cur)
         {
             schema = s;
             for k in CANON {
@@ -157,7 +157,7 @@ pub fn render_identity(identity: &Value) -> String {
         None => return "(no identity defined)".to_string(),
     };
 
-    match IdentitySchema::from_obj(obj) {
+    match IdentitySchema::from_obj(cur, obj) {
         Some((s, consumed)) => render_portrait(&s, obj, &consumed),
         None => serde_json::to_string_pretty(cur).unwrap_or_else(|_| cur.to_string()),
     }
@@ -177,67 +177,23 @@ fn render_portrait(
     }
 
     out.push_str("Character:\n");
-    if s.personality.trim().is_empty() {
-        out.push_str("  (unspecified)\n");
-    } else {
-        for line in s.personality.trim().lines() {
-            out.push_str("  ");
-            out.push_str(line.trim_end());
-            out.push('\n');
-        }
-    }
+    emit_lines(&mut out, &s.personality);
 
     out.push_str("\nTraits:\n");
-    if s.traits.is_empty() {
-        out.push_str("  (none recorded)\n");
-    } else {
-        for t in &s.traits {
-            out.push_str("  - ");
-            out.push_str(t.trim());
-            out.push('\n');
-        }
-    }
+    emit_bullets(&mut out, &s.traits);
 
     out.push_str("\nVoice:\n");
-    if s.voice.trim().is_empty() {
-        out.push_str("  (unspecified)\n");
-    } else {
-        for line in s.voice.trim().lines() {
-            out.push_str("  ");
-            out.push_str(line.trim_end());
-            out.push('\n');
-        }
-    }
+    emit_lines(&mut out, &s.voice);
 
     out.push_str("\nWhat matters in how you act:\n");
-    if s.values_in_practice.is_empty() {
-        out.push_str("  (none recorded)\n");
-    } else {
-        for v in &s.values_in_practice {
-            out.push_str("  - ");
-            out.push_str(v.trim());
-            out.push('\n');
-        }
-    }
+    emit_bullets(&mut out, &s.values_in_practice);
 
     // Zero content loss — but exclude `_id`, which is a WardSONDB storage
     // artifact (the identity doc is read whole, unlike the soul which is
     // unwrapped from its sealed envelope) and not identity content.
-    let leftover: BTreeMap<&String, &Value> = obj
-        .iter()
-        .filter(|(k, _)| !consumed.contains(*k) && k.as_str() != "_id")
-        .collect();
-    if !leftover.is_empty() {
-        out.push_str("\nAdditional identity fields (verbatim):\n");
-        let pretty =
-            serde_json::to_string_pretty(&leftover).unwrap_or_else(|_| format!("{:?}", leftover));
-        out.push_str(&pretty);
-        out.push('\n');
-    }
+    emit_leftover(&mut out, "\nAdditional identity fields (verbatim):\n", obj, consumed, true);
 
-    while out.ends_with('\n') {
-        out.pop();
-    }
+    trim_trailing_newlines(&mut out);
     out
 }
 

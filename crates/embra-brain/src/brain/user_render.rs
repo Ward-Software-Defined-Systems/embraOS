@@ -14,9 +14,10 @@
 //! pre-redesign `to_string_pretty` behavior so no existing install
 //! regresses.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use serde::Deserialize;
+use super::soul_render::{emit_bullets, emit_leftover, emit_lines, trim_trailing_newlines};
 use serde_json::Value;
 
 use crate::brain::soul_render::{scalar_to_string, value_to_list};
@@ -44,14 +45,14 @@ impl UserSchema {
     /// fields still empty. Returns the schema plus the consumed source
     /// keys, or `None` when nothing maps (caller uses the pretty-JSON
     /// fallback). Never panics.
-    fn from_obj(obj: &serde_json::Map<String, Value>) -> Option<(UserSchema, BTreeSet<String>)> {
+    fn from_obj(cur: &Value, obj: &serde_json::Map<String, Value>) -> Option<(UserSchema, BTreeSet<String>)> {
         const CANON: [&str; 5] = ["name", "role", "background", "communication", "boundaries"];
 
         let mut schema = UserSchema::default();
         let mut consumed: BTreeSet<String> = BTreeSet::new();
 
         if obj.keys().any(|k| CANON.contains(&k.as_str()))
-            && let Ok(s) = serde_json::from_value::<UserSchema>(Value::Object(obj.clone()))
+            && let Ok(s) = UserSchema::deserialize(cur)
         {
             schema = s;
             for k in CANON {
@@ -160,7 +161,7 @@ pub fn render_user_profile(profile: &Value) -> String {
         return crate::brain::render_user_graph(cur);
     }
 
-    match UserSchema::from_obj(obj) {
+    match UserSchema::from_obj(cur, obj) {
         Some((s, consumed)) => render_profile(&s, obj, &consumed),
         None => serde_json::to_string_pretty(cur).unwrap_or_else(|_| cur.to_string()),
     }
@@ -189,55 +190,19 @@ fn render_profile(
     }
 
     out.push_str("\nBackground:\n");
-    if s.background.trim().is_empty() {
-        out.push_str("  (unspecified)\n");
-    } else {
-        for line in s.background.trim().lines() {
-            out.push_str("  ");
-            out.push_str(line.trim_end());
-            out.push('\n');
-        }
-    }
+    emit_lines(&mut out, &s.background);
 
     out.push_str("\nCommunication preferences:\n");
-    if s.communication.is_empty() {
-        out.push_str("  (none recorded)\n");
-    } else {
-        for c in &s.communication {
-            out.push_str("  - ");
-            out.push_str(c.trim());
-            out.push('\n');
-        }
-    }
+    emit_bullets(&mut out, &s.communication);
 
     out.push_str("\nOperator boundaries (things to never do):\n");
-    if s.boundaries.is_empty() {
-        out.push_str("  (none recorded)\n");
-    } else {
-        for b in &s.boundaries {
-            out.push_str("  - ");
-            out.push_str(b.trim());
-            out.push('\n');
-        }
-    }
+    emit_bullets(&mut out, &s.boundaries);
 
     // Zero content loss; exclude the `_id` storage artifact (the profile
     // doc is read whole from WardSONDB, like identity).
-    let leftover: BTreeMap<&String, &Value> = obj
-        .iter()
-        .filter(|(k, _)| !consumed.contains(*k) && k.as_str() != "_id")
-        .collect();
-    if !leftover.is_empty() {
-        out.push_str("\nAdditional profile fields (verbatim):\n");
-        let pretty =
-            serde_json::to_string_pretty(&leftover).unwrap_or_else(|_| format!("{:?}", leftover));
-        out.push_str(&pretty);
-        out.push('\n');
-    }
+    emit_leftover(&mut out, "\nAdditional profile fields (verbatim):\n", obj, consumed, true);
 
-    while out.ends_with('\n') {
-        out.pop();
-    }
+    trim_trailing_newlines(&mut out);
     out
 }
 

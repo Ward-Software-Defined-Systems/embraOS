@@ -47,15 +47,15 @@ impl SoulSchema {
     /// Returns the schema plus the set of source keys it consumed, or
     /// `None` when nothing maps (the caller then uses the pretty-JSON
     /// fallback). Never panics.
-    fn from_obj(obj: &serde_json::Map<String, Value>) -> Option<(SoulSchema, BTreeSet<String>)> {
+    fn from_obj(cur: &Value, obj: &serde_json::Map<String, Value>) -> Option<(SoulSchema, BTreeSet<String>)> {
         const CANON: [&str; 4] = ["purpose", "ethical_lines", "values", "surviving_constraints"];
 
         // Strict path: at least one canonical key present. serde ignores
         // unknown keys; #[serde(default)] fills missing ones. A canonical
         // key of the wrong type fails deserialization → None → fallback.
+        // Deserialized from the document by reference: no clone per turn.
         if obj.keys().any(|k| CANON.contains(&k.as_str())) {
-            let schema: SoulSchema =
-                serde_json::from_value(Value::Object(obj.clone())).ok()?;
+            let schema = SoulSchema::deserialize(cur).ok()?;
             let consumed = CANON
                 .iter()
                 .filter(|k| obj.contains_key(**k))
@@ -198,7 +198,7 @@ pub fn render_constitution(soul: &Value) -> String {
         return crate::brain::render_sealed_graph(cur);
     }
 
-    match SoulSchema::from_obj(obj) {
+    match SoulSchema::from_obj(cur, obj) {
         Some((s, consumed)) => render_structured(&s, obj, &consumed),
         None => serde_json::to_string_pretty(cur).unwrap_or_else(|_| cur.to_string()),
     }
@@ -212,15 +212,7 @@ fn render_structured(
     let mut out = String::new();
 
     out.push_str("Purpose:\n");
-    if s.purpose.trim().is_empty() {
-        out.push_str("  (unspecified)\n");
-    } else {
-        for line in s.purpose.trim().lines() {
-            out.push_str("  ");
-            out.push_str(line.trim_end());
-            out.push('\n');
-        }
-    }
+    emit_lines(&mut out, &s.purpose);
 
     out.push_str("\nInviolable lines (these are absolute — never cross them):\n");
     if s.ethical_lines.is_empty() {
@@ -232,45 +224,76 @@ fn render_structured(
     }
 
     out.push_str("\nNon-negotiable values:\n");
-    if s.values.is_empty() {
-        out.push_str("  (none recorded)\n");
-    } else {
-        for v in &s.values {
-            out.push_str("  - ");
-            out.push_str(v.trim());
-            out.push('\n');
-        }
-    }
+    emit_bullets(&mut out, &s.values);
 
     out.push_str("\nConstraints that survive loss of everything else:\n");
-    if s.surviving_constraints.is_empty() {
-        out.push_str("  (none recorded)\n");
-    } else {
-        for c in &s.surviving_constraints {
-            out.push_str("  - ");
-            out.push_str(c.trim());
-            out.push('\n');
-        }
-    }
+    emit_bullets(&mut out, &s.surviving_constraints);
 
     // Zero content loss: every top-level key not consumed by the schema
     // is appended verbatim. BTreeMap → deterministic key order.
+    emit_leftover(&mut out, "\nAdditional sealed fields (verbatim):\n", obj, consumed, false);
+
+    trim_trailing_newlines(&mut out);
+    out
+}
+
+/// The body of a text block: the text as indented lines, trimmed, or
+/// `(unspecified)`. The three renderers (soul, identity, operator) share
+/// these four emitters (#46); every prompt they build is byte-pinned.
+pub(crate) fn emit_lines(out: &mut String, text: &str) {
+    if text.trim().is_empty() {
+        out.push_str("  (unspecified)\n");
+    } else {
+        for line in text.trim().lines() {
+            out.push_str("  ");
+            out.push_str(line.trim_end());
+            out.push('\n');
+        }
+    }
+}
+
+/// The body of a list block: one bullet per item, trimmed, or `(none
+/// recorded)`.
+pub(crate) fn emit_bullets(out: &mut String, items: &[String]) {
+    if items.is_empty() {
+        out.push_str("  (none recorded)\n");
+    } else {
+        for item in items {
+            out.push_str("  - ");
+            out.push_str(item.trim());
+            out.push('\n');
+        }
+    }
+}
+
+/// Every top-level key the schema did not consume, pretty-printed under
+/// `label` in key order (zero content loss); `skip_id` leaves out the
+/// storage `_id` of a document read whole.
+pub(crate) fn emit_leftover(
+    out: &mut String,
+    label: &str,
+    obj: &serde_json::Map<String, Value>,
+    consumed: &BTreeSet<String>,
+    skip_id: bool,
+) {
     let leftover: BTreeMap<&String, &Value> = obj
         .iter()
-        .filter(|(k, _)| !consumed.contains(*k))
+        .filter(|(k, _)| !consumed.contains(*k) && !(skip_id && k.as_str() == "_id"))
         .collect();
     if !leftover.is_empty() {
-        out.push_str("\nAdditional sealed fields (verbatim):\n");
+        out.push_str(label);
         let pretty =
             serde_json::to_string_pretty(&leftover).unwrap_or_else(|_| format!("{:?}", leftover));
         out.push_str(&pretty);
         out.push('\n');
     }
+}
 
+/// The rendering ends on its last line, with no trailing newline.
+pub(crate) fn trim_trailing_newlines(out: &mut String) {
     while out.ends_with('\n') {
         out.pop();
     }
-    out
 }
 
 #[cfg(test)]
