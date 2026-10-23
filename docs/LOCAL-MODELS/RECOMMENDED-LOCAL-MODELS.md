@@ -20,7 +20,7 @@ The table says which *server* runs where, not that every model fits on every hos
 
 **Why the list is short.** MoE models need a minimum active-parameter count for honest instruction-following: below ~27–49B active they become confabulation-prone under complex multi-step protocols, with enough stored knowledge to sound authoritative and not enough working memory to track what they have done. A dense model has no total/active split, so its parameter count is honest. Both vetted picks are dense: Qwen3.6 27B and Qwen3.8 27B (27B = 27B active).
 
-**The picks.** **Qwen3.8 27B** is the current recommendation, and its BF16 build is the preferred one on both servers: `qwen3.8:27b-mlx-bf16` on Ollama, `mlx-community/Qwen3.8-27B-bf16` on LM Studio (the operator's choice, 2026-10-23). **Qwen3.6 27B** remains vetted and fully supported; an instance that works needs no migration. Each was vetted against the complete tool surface of its date, not a subset: Qwen3.6 27B on 2026-07-10 (95 tools), Qwen3.8 27B on 2026-09-08 (116 tools; 117 today: `check_update` was removed, `file_offer` and `reminder_list` added). Qwen3.8 27B works on Ollama and on LM Studio (operator-verified 2026-10-08).
+**The picks.** **Qwen3.8 27B** is the current recommendation, and its BF16 build on Ollama, `qwen3.8:27b-mlx-bf16`, is the preferred one (the operator's choice, 2026-10-23). **Qwen3.6 27B** remains vetted and fully supported; an instance that works needs no migration. Each was vetted against the complete tool surface of its date, not a subset: Qwen3.6 27B on 2026-07-10 (95 tools), Qwen3.8 27B on 2026-09-08 (116 tools; 117 today: `check_update` was removed, `file_offer` and `reminder_list` added). Qwen3.8 27B works on Ollama and on LM Studio (operator-verified 2026-10-08).
 
 **The `guardian_call` fix.** Both vettings predate the fix of 2026-10-07 ([CHANGE-LOG.md](../CHANGE-LOG.md)): before it, on Ollama, the input of a dynamic-tool invoke arrived as JSON text and never reached the tool as an object. On the fixed build, `gemma4:12b` and `glm-5.3:cloud` on Ollama each sent the input as an object and the search returned results (2026-10-07; the CHANGE-LOG entry has the traces). Those `gemma4:12b` runs used a GGUF build on a 16 GB NVIDIA GPU at Ollama's default context of 4,096 tokens, where Ollama trims every request to fit ([below](#when-a-session-outgrows-the-context-length)): they show how the input arrived, not how Gemma 4 works with embraOS.
 
@@ -36,7 +36,7 @@ The table says which *server* runs where, not that every model fits on every hos
 | Ollama | Gemma 4 12B (dense, Q4_K_M GGUF) | `gemma4:12b` | 8.0GB | 256K | none (thinking on) | under evaluation |
 | Ollama | Nemotron 3.5 Super 120B (MoE, 12B active, NVFP4 MLX) | `nemotron-3.5-super:120b-a12b-nvfp4` | 80GB | 1M | none (thinking on) | under evaluation |
 | LM Studio | Qwen3.8 27B (dense, 8-bit) | `qwen/qwen3.8-27b` | 30GB | 256K | `xhigh` | vetted |
-| LM Studio | Qwen3.8 27B (dense, BF16) | `mlx-community/Qwen3.8-27B-bf16` | 55GB | 256K | `xhigh` | vetted, preferred |
+| LM Studio | Qwen3.8 27B (dense, BF16) | `mlx-community/Qwen3.8-27B-bf16` | 55GB | 256K | `xhigh` | vetted |
 | LM Studio | Qwen3.6 27B (dense, 8-bit) | `qwen/qwen3.6-27b` | 30GB | 256K | none (thinking on) | vetted |
 | LM Studio | Nemotron 3.5 Super 120B (MoE, 12B active, NVFP4 MLX) | `nativ-community/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4` | 80GB | 1M | none (TBD) | pending |
 
@@ -60,7 +60,7 @@ One setting differs from the brain's requests. On Ollama, the benchmark used the
 
 ### Ollama Cloud
 
-A `:cloud` tag is served by ollama.com through the local Ollama daemon, so it reaches embraOS through the Ollama preset like any pulled model: nothing to fit in local memory, and nothing local about the inference either. The active-parameter rule above applies the same way. DeepSeek V4.1 Flash is the exception: with 8B active in prefill and 16B in decode it is below the rule, and the operator vetted it on 2026-10-23.
+A `:cloud` tag is served by ollama.com through the local Ollama daemon, so it reaches embraOS through the Ollama preset like any pulled model: nothing to fit in local memory, and nothing local about the inference either. The active-parameter rule above applies the same way. DeepSeek V4.1 Flash is the exception: with 8B active in prefill and 16B in decode it is below the rule, and the operator vetted it on 2026-10-23. It is the preferred pick, in part because it takes image input, which V4 Pro does not.
 
 | Model | Tag | Parameters | Context | Input | Effort sent (default) | Status |
 |---|---|---|---|---|---|---|

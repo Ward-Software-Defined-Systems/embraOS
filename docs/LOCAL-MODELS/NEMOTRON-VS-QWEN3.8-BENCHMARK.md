@@ -477,7 +477,7 @@ Artificial Analysis Intelligence Index v4.3.2, read 2026-10-21:
    - It fits 256K: 76 GiB in a fresh session, about 90 GiB with earlier conversations cached.
    - With `xhigh` it generates 1.4–1.6× faster than LM Studio's 8-bit build, thanks to MTP.
    - embraOS lists it as vetted, as a build of the vetted Qwen3.8. The tool-surface runs of the vetting used the 4-bit Ollama and 8-bit LM Studio builds.
-   - Since 2026-10-23 the operator prefers the BF16 build on both servers ([RECOMMENDED-LOCAL-MODELS.md](RECOMMENDED-LOCAL-MODELS.md)); this recommendation is the benchmark's, as measured.
+   - Since 2026-10-23 the operator prefers the BF16 build on Ollama, `qwen3.8:27b-mlx-bf16` ([RECOMMENDED-LOCAL-MODELS.md](RECOMMENDED-LOCAL-MODELS.md)); this recommendation is the benchmark's, as measured.
 2. **Use the 16-bit build for maximum fidelity up to about 128K.** It reads fastest and is the model as trained. It generates slowest. At 256K it needs 98 GiB on Ollama (106 GiB on LM Studio) with nothing else cached, which long embraOS sessions would exceed.
 3. **Expect longer turns at higher precision.** With `xhigh` on a cached 32K prompt, turns took 66–81 s on the 4-bit build, 2–4 minutes on 8-bit and 2–5 minutes on 16-bit. Most of that comes from the model reasoning longer, not just generating more slowly.
 4. **Budget Qwen3.8 sessions for max reasoning.** The window is shared with thinking. A session near 250K has about 14K tokens left for a turn, so warn or start a new session well before that.
