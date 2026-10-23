@@ -155,10 +155,9 @@ fn apply_caps(mut out: ToolOutput) -> ToolOutput {
 /// [`dispatch`] so the timeout behavior is unit-testable without standing
 /// up a full `DispatchContext` against the live `REGISTRY`.
 ///
-/// Known limitation: the timeout drops the future, and that does not end a
-/// child process the tool started. `tokio::process::Command::output()` does
-/// not kill on drop, so a subprocess tool that times out leaves its child
-/// running until the child exits by itself.
+/// The timeout drops the future, and the child goes with it: every
+/// subprocess a tool starts is built by `tools::subprocess` with
+/// `kill_on_drop`, so a tool that times out leaves no process behind.
 pub(crate) async fn enforce_timeout<T, F>(
     fut: F,
     tool: &str,

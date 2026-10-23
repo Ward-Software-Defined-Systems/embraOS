@@ -197,14 +197,11 @@ async fn main() -> anyhow::Result<()> {
     // SAFETY: called once at startup before multi-threaded work begins
     unsafe { std::env::set_var("HOME", "/embra/workspace"); }
 
-    // Auto-configure git defaults (safe.directory, push.autoSetupRemote)
-    let _ = tokio::process::Command::new("git")
-        .args(["config", "--global", "safe.directory", "*"])
-        .output().await;
-    let _ = tokio::process::Command::new("git")
-        .args(["config", "--global", "push.autoSetupRemote", "true"])
-        .output().await;
-    debug!("Git global config set: safe.directory=*, push.autoSetupRemote=true");
+    // Git's global configuration lives under STATE (`GIT_CONFIG_GLOBAL`),
+    // out of the tools' reach: the directories, the defaults, and the
+    // identity a legacy workspace `.gitconfig` holds, adopted once.
+    tools::engineering::git::prepare_git_config().await;
+    debug!("Git global config prepared under {}", tools::engineering::git::GIT_CONFIG_DIR);
 
     // Load config (or default for first run)
     // Also try to get API key from WardSONDB config if not provided via CLI/env

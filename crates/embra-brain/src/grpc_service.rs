@@ -3621,7 +3621,7 @@ async fn handle_slash_command(
 
             match tokio::time::timeout(
                 std::time::Duration::from_secs(30),
-                tokio::process::Command::new("ssh-copy-id")
+                crate::tools::subprocess("ssh-copy-id")
                     .args([
                         "-i", pub_path,
                         "-o", "StrictHostKeyChecking=accept-new",
@@ -3650,11 +3650,11 @@ async fn handle_slash_command(
         }
         "/git-setup" => {
             if args.is_empty() {
-                let name_out = tokio::process::Command::new("git")
+                let name_out = crate::tools::engineering::git::git_command()
                     .args(["config", "--global", "user.name"]).output().await
                     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                     .unwrap_or_default();
-                let email_out = tokio::process::Command::new("git")
+                let email_out = crate::tools::engineering::git::git_command()
                     .args(["config", "--global", "user.email"]).output().await
                     .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
                     .unwrap_or_default();
@@ -3671,9 +3671,9 @@ async fn handle_slash_command(
                 }
                 let name = parts[0].trim();
                 let email = parts[1].trim();
-                let _ = tokio::process::Command::new("git")
+                let _ = crate::tools::engineering::git::git_command()
                     .args(["config", "--global", "user.name", name]).output().await;
-                let _ = tokio::process::Command::new("git")
+                let _ = crate::tools::engineering::git::git_command()
                     .args(["config", "--global", "user.email", email]).output().await;
                 send_msg(tx, format!("Git config updated: user.name='{}', user.email='{}'", name, email)).await;
             }

@@ -6,16 +6,116 @@ use embra_tools_core::DispatchError;
 use schemars::JsonSchema;
 use serde::Deserialize;
 
+use std::path::Path;
+
+use tracing::{info, warn};
+
 use crate::db::WardsonDbClient;
 use crate::tools::jail::{jailed_write_path, resolve_workspace_path, WORKSPACE_ROOT};
 use crate::tools::registry::DispatchContext;
+use crate::tools::subprocess;
+
+/// Where the brain keeps git's global configuration: under STATE, which the
+/// tools cannot write. `$HOME` stays the workspace for ssh, but git never
+/// reads the workspace's `.gitconfig`, which the model can write.
+pub(crate) const GIT_CONFIG_DIR: &str = "/embra/state/git";
+/// The global configuration file (`GIT_CONFIG_GLOBAL`): the operator's
+/// identity from `/git-setup` and the defaults the brain writes at startup.
+pub(crate) const GIT_CONFIG_GLOBAL: &str = "/embra/state/git/config";
+/// An empty directory, pinned as `core.hooksPath` above any repository's own
+/// configuration, so a hook a repository carries never runs.
+pub(crate) const GIT_HOOKS_DIR: &str = "/embra/state/git/hooks";
+/// The transports git may speak: no `ext::` (a command), no `file://` and
+/// no local path (the rest of the filesystem into the workspace).
+const GIT_ALLOW_PROTOCOL: &str = "https:http:ssh:git";
+/// Where `/git-setup` wrote before the configuration moved under STATE.
+/// Its identity is adopted once; the file is never read again.
+const LEGACY_GIT_CONFIG: &str = "/embra/workspace/.gitconfig";
+
+/// Every git the brain runs. The child is killed with its future
+/// (`subprocess`); git reads no system configuration and only the global
+/// file under STATE; the hooks directory is pinned through the
+/// configuration environment, which outranks a repository's own config;
+/// nothing prompts; and only the network transports are allowed.
+pub(crate) fn git_command() -> tokio::process::Command {
+    git_command_for(Path::new(GIT_CONFIG_GLOBAL), Path::new(GIT_HOOKS_DIR), &[])
+}
+
+/// [`git_command`] with configuration pairs for one call, the token
+/// rewrites of [`git_auth_config`] among them. They travel as
+/// `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` in the environment, never as
+/// `-c` arguments, so a token is not on the command line.
+pub(crate) fn git_command_with(config: &[(String, String)]) -> tokio::process::Command {
+    git_command_for(Path::new(GIT_CONFIG_GLOBAL), Path::new(GIT_HOOKS_DIR), config)
+}
+
+/// The builder behind the two above, with the files as parameters so a
+/// test runs it under a temporary directory.
+fn git_command_for(global: &Path, hooks: &Path, config: &[(String, String)]) -> tokio::process::Command {
+    let mut cmd = subprocess("git");
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", global)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ALLOW_PROTOCOL", GIT_ALLOW_PROTOCOL);
+    let mut pairs: Vec<(String, String)> =
+        vec![("core.hooksPath".to_string(), hooks.to_string_lossy().into_owned())];
+    pairs.extend(config.iter().cloned());
+    cmd.env("GIT_CONFIG_COUNT", pairs.len().to_string());
+    for (i, (key, value)) in pairs.iter().enumerate() {
+        cmd.env(format!("GIT_CONFIG_KEY_{i}"), key).env(format!("GIT_CONFIG_VALUE_{i}"), value);
+    }
+    cmd
+}
+
+/// Startup: the configuration directory and the empty hooks directory are
+/// created, the operator's identity is adopted from the workspace
+/// `.gitconfig` the first time (a sealed instance set it with `/git-setup`
+/// before the move), and the defaults are written. Nothing here is fatal.
+pub(crate) async fn prepare_git_config() {
+    prepare_git_config_in(Path::new(GIT_CONFIG_DIR), Path::new(LEGACY_GIT_CONFIG)).await;
+}
+
+/// [`prepare_git_config`] under a directory, for a test.
+async fn prepare_git_config_in(dir: &Path, legacy: &Path) {
+    let global = dir.join("config");
+    let hooks = dir.join("hooks");
+    if let Err(e) = tokio::fs::create_dir_all(&hooks).await {
+        warn!("git configuration directory {} not created: {e}", dir.display());
+        return;
+    }
+    let git = |config: &[(String, String)]| git_command_for(&global, &hooks, config);
+    if !global.exists() && legacy.exists() {
+        for key in ["user.name", "user.email"] {
+            let read = git(&[])
+                .args(["config", "-f"])
+                .arg(legacy)
+                .args(["--get", key])
+                .output()
+                .await;
+            if let Ok(out) = read
+                && out.status.success()
+            {
+                let value = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !value.is_empty() {
+                    let _ = git(&[]).args(["config", "--global", key, &value]).output().await;
+                }
+            }
+        }
+        info!("git identity adopted from {} into {}", legacy.display(), global.display());
+    }
+    for (key, value) in [("safe.directory", "*"), ("push.autoSetupRemote", "true")] {
+        if let Err(e) = git(&[]).args(["config", "--global", key, value]).output().await {
+            warn!("git config {key} not written: {e}");
+        }
+    }
+}
 
 /// Resolve `base` to a ref usable by `merge-base --is-ancestor`. Prefers the
 /// local branch (`<base>`); falls back to `origin/<base>` if the local copy
 /// is missing. Returns Err with a clear message if neither exists. Used by
 /// `git_branch delete` to enforce the documented merged-into-base contract.
 async fn resolve_base_ref(dir: &str, base: &str) -> Result<String, String> {
-    let local_check = tokio::process::Command::new("git")
+    let local_check = git_command()
         .args(["-C", dir, "rev-parse", "--verify", "--quiet", base])
         .output()
         .await;
@@ -25,7 +125,7 @@ async fn resolve_base_ref(dir: &str, base: &str) -> Result<String, String> {
         return Ok(base.to_string());
     }
     let remote = format!("origin/{}", base);
-    let remote_check = tokio::process::Command::new("git")
+    let remote_check = git_command()
         .args(["-C", dir, "rev-parse", "--verify", "--quiet", &remote])
         .output()
         .await;
@@ -56,15 +156,15 @@ pub async fn resolve_github_token(db: &WardsonDbClient) -> Option<String> {
     None
 }
 
-/// Build git `-c` args to inject GITHUB_TOKEN for HTTPS GitHub remotes.
-/// Returns args like `["-c", "url.https://x-access-token:TOKEN@github.com/.insteadOf=https://github.com/"]`
-/// or an empty vec if no token is available.
-fn github_token_git_args(token: &Option<String>) -> Vec<String> {
+/// The configuration pair that injects GITHUB_TOKEN for HTTPS GitHub
+/// remotes: `url.https://x-access-token:TOKEN@github.com/.insteadOf` =
+/// `https://github.com/`. Empty without a token.
+fn github_token_config(token: &Option<String>) -> Vec<(String, String)> {
     match token {
-        Some(t) => vec![
-            "-c".to_string(),
-            format!("url.https://x-access-token:{}@github.com/.insteadOf=https://github.com/", t),
-        ],
+        Some(t) => vec![(
+            format!("url.https://x-access-token:{}@github.com/.insteadOf", t),
+            "https://github.com/".to_string(),
+        )],
         None => vec![],
     }
 }
@@ -106,28 +206,29 @@ pub fn normalize_git_host(input: &str) -> Result<String, String> {
     Ok(s.to_string())
 }
 
-/// Build git `-c` insteadOf rewrites for per-host tokens. GitLab's PAT
-/// username over HTTPS is `oauth2` (also accepted by Gitea).
-fn host_token_git_args(tokens: &std::collections::BTreeMap<String, String>) -> Vec<String> {
-    let mut args = Vec::with_capacity(tokens.len() * 2);
-    for (host, token) in tokens {
-        args.push("-c".to_string());
-        args.push(format!(
-            "url.https://oauth2:{}@{}/.insteadOf=https://{}/",
-            token, host, host
-        ));
-    }
-    args
+/// The insteadOf rewrite per configured host, as configuration pairs.
+/// GitLab's PAT username over HTTPS is `oauth2` (also accepted by Gitea).
+fn host_token_config(tokens: &std::collections::BTreeMap<String, String>) -> Vec<(String, String)> {
+    tokens
+        .iter()
+        .map(|(host, token)| {
+            (
+                format!("url.https://oauth2:{}@{}/.insteadOf", token, host),
+                format!("https://{}/", host),
+            )
+        })
+        .collect()
 }
 
-/// Combined git auth args for network operations (clone/push/pull):
-/// the github.com token rewrite plus one rewrite per configured host.
-/// BTreeMap iteration keeps host order deterministic.
-pub async fn git_auth_args(db: &WardsonDbClient) -> Vec<String> {
+/// The git auth configuration for a network operation (clone, push,
+/// pull): the github.com rewrite plus one per configured host, for
+/// [`git_command_with`]. BTreeMap iteration keeps host order
+/// deterministic.
+pub async fn git_auth_config(db: &WardsonDbClient) -> Vec<(String, String)> {
     let token = resolve_github_token(db).await;
-    let mut args = github_token_git_args(&token);
-    args.extend(host_token_git_args(&resolve_git_tokens(db).await));
-    args
+    let mut pairs = github_token_config(&token);
+    pairs.extend(host_token_config(&resolve_git_tokens(db).await));
+    pairs
 }
 
 /// Clone a git repository into /embra/workspace/.
@@ -180,14 +281,14 @@ pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
         let _ = std::fs::create_dir_all(parent);
     }
 
-    // Inject tokens via git -c url rewriting (no token in URLs or config files)
-    let mut args = git_auth_args(db).await;
-    args.extend(["clone".to_string(), url.to_string(), dest.clone()]);
+    // The tokens ride the configuration environment (no token in URLs,
+    // config files or argv).
+    let auth = git_auth_config(db).await;
 
     match tokio::time::timeout(
         std::time::Duration::from_secs(120),
-        tokio::process::Command::new("git")
-            .args(&args)
+        git_command_with(&auth)
+            .args(["clone", url, &dest])
             .output(),
     ).await {
         Ok(Ok(out)) => {
@@ -208,7 +309,7 @@ pub async fn git_status(path: &str) -> String {
         Ok(d) => d,
         Err(e) => return e,
     };
-    match tokio::process::Command::new("git")
+    match git_command()
         .args(["-C", &dir, "status", "--short"])
         .output()
         .await
@@ -249,7 +350,7 @@ pub async fn git_log(param: &str) -> String {
         args.push(a);
     }
 
-    match tokio::process::Command::new("git")
+    match git_command()
         .args(&args)
         .output()
         .await
@@ -283,7 +384,7 @@ pub async fn git_add(param: &str) -> String {
     let mut args = vec!["-C", &dir, "add"];
     args.extend(file_args.iter());
 
-    match tokio::process::Command::new("git")
+    match git_command()
         .args(&args)
         .output()
         .await
@@ -315,7 +416,7 @@ pub async fn git_commit(param: &str) -> String {
     };
     let message = parts[1].trim();
 
-    match tokio::process::Command::new("git")
+    match git_command()
         .args(["-C", &dir, "commit", "-m", message])
         .output()
         .await
@@ -340,11 +441,10 @@ pub async fn git_push(db: &WardsonDbClient, param: &str) -> String {
         Err(e) => return e,
     };
 
-    let mut args = git_auth_args(db).await;
-    args.extend(["-C".to_string(), dir.clone(), "push".to_string()]);
+    let auth = git_auth_config(db).await;
 
-    match tokio::process::Command::new("git")
-        .args(&args)
+    match git_command_with(&auth)
+        .args(["-C", &dir, "push"])
         .output()
         .await
     {
@@ -373,11 +473,10 @@ pub async fn git_pull(db: &WardsonDbClient, param: &str) -> String {
         Err(e) => return e,
     };
 
-    let mut args = git_auth_args(db).await;
-    args.extend(["-C".to_string(), dir.clone(), "pull".to_string()]);
+    let auth = git_auth_config(db).await;
 
-    match tokio::process::Command::new("git")
-        .args(&args)
+    match git_command_with(&auth)
+        .args(["-C", &dir, "pull"])
         .output()
         .await
     {
@@ -415,7 +514,7 @@ pub async fn git_diff(param: &str) -> String {
         args.push(f);
     }
 
-    match tokio::process::Command::new("git")
+    match git_command()
         .args(&args)
         .output()
         .await
@@ -473,7 +572,7 @@ pub async fn git_branch(param: &str) -> String {
         let name = parts[2];
 
         if is_delete_force {
-            return match tokio::process::Command::new("git")
+            return match git_command()
                 .args(["-C", &dir, "branch", "-D", name])
                 .output()
                 .await
@@ -499,7 +598,7 @@ pub async fn git_branch(param: &str) -> String {
 
         // merge-base --is-ancestor exits 0 if branch tip is reachable from base,
         // 1 if not. Anything else is an unexpected git error.
-        let ancestor = tokio::process::Command::new("git")
+        let ancestor = git_command()
             .args([
                 "-C",
                 &dir,
@@ -543,7 +642,7 @@ pub async fn git_branch(param: &str) -> String {
         // this is not a force-delete semantically (the merged-into-base
         // guarantee still holds), it just bypasses a redundant narrower
         // check. Closes Embra_Debug #56.
-        return match tokio::process::Command::new("git")
+        return match git_command()
             .args(["-C", &dir, "branch", "-D", name])
             .output()
             .await
@@ -562,7 +661,7 @@ pub async fn git_branch(param: &str) -> String {
     // Create form: `<path> <name>`
     if parts.len() >= 2 {
         let name = parts[1];
-        return match tokio::process::Command::new("git")
+        return match git_command()
             .args(["-C", &dir, "branch", name])
             .output()
             .await
@@ -583,7 +682,7 @@ pub async fn git_branch(param: &str) -> String {
 }
 
 async fn git_branch_list(dir: &str) -> String {
-    match tokio::process::Command::new("git")
+    match git_command()
         .args(["-C", dir, "branch", "-a"])
         .output()
         .await
@@ -613,7 +712,7 @@ pub async fn git_checkout(param: &str) -> String {
     };
     let branch = parts[1];
 
-    match tokio::process::Command::new("git")
+    match git_command()
         .args(["-C", &dir, "checkout", branch])
         .output()
         .await
@@ -661,7 +760,7 @@ pub async fn git_merge(param: &str) -> String {
     }
     args.push(branch.to_string());
 
-    match tokio::process::Command::new("git")
+    match git_command()
         .args(&args)
         .output()
         .await
@@ -707,7 +806,7 @@ pub async fn git_rm(param: &str) -> String {
     let files = parts[1];
     let file_args: Vec<&str> = files.split_whitespace().collect();
 
-    match tokio::process::Command::new("git")
+    match git_command()
         .args(["-C", &dir, "rm"])
         .args(&file_args)
         .output()
@@ -752,7 +851,7 @@ pub async fn git_mv(param: &str) -> String {
     let src = parts[1];
     let dst = parts[2];
 
-    match tokio::process::Command::new("git")
+    match git_command()
         .args(["-C", &dir, "mv", src, dst])
         .output()
         .await
@@ -1203,38 +1302,121 @@ mod git_token_tests {
         assert!(normalize_git_host("user@host.com").is_err());
     }
 
+    /// The github.com rewrite is one configuration pair, the same rewrite
+    /// the `-c` argument carried before the tokens left argv.
     #[test]
-    fn github_rewrite_shape_unchanged() {
-        // The pre-existing github.com flow must stay byte-identical.
-        let args = github_token_git_args(&Some("ghp_abc".to_string()));
+    fn the_github_rewrite_is_one_configuration_pair() {
+        let pairs = github_token_config(&Some("ghp_abc".to_string()));
         assert_eq!(
-            args,
-            vec![
-                "-c".to_string(),
-                "url.https://x-access-token:ghp_abc@github.com/.insteadOf=https://github.com/"
-                    .to_string()
-            ]
+            pairs,
+            vec![(
+                "url.https://x-access-token:ghp_abc@github.com/.insteadOf".to_string(),
+                "https://github.com/".to_string()
+            )]
         );
-        assert!(github_token_git_args(&None).is_empty());
+        assert!(github_token_config(&None).is_empty());
     }
 
     #[test]
-    fn host_token_args_use_oauth2_and_deterministic_order() {
+    fn host_token_pairs_use_oauth2_in_a_deterministic_order() {
         let mut tokens = std::collections::BTreeMap::new();
         tokens.insert("gitlab.b.com".to_string(), "tok-b".to_string());
         tokens.insert("gitlab.a.com".to_string(), "tok-a".to_string());
-        let args = host_token_git_args(&tokens);
+        let pairs = host_token_config(&tokens);
         assert_eq!(
-            args,
+            pairs,
             vec![
-                "-c".to_string(),
-                "url.https://oauth2:tok-a@gitlab.a.com/.insteadOf=https://gitlab.a.com/"
-                    .to_string(),
-                "-c".to_string(),
-                "url.https://oauth2:tok-b@gitlab.b.com/.insteadOf=https://gitlab.b.com/"
-                    .to_string(),
+                (
+                    "url.https://oauth2:tok-a@gitlab.a.com/.insteadOf".to_string(),
+                    "https://gitlab.a.com/".to_string()
+                ),
+                (
+                    "url.https://oauth2:tok-b@gitlab.b.com/.insteadOf".to_string(),
+                    "https://gitlab.b.com/".to_string()
+                ),
             ]
         );
-        assert!(host_token_git_args(&std::collections::BTreeMap::new()).is_empty());
+        assert!(host_token_config(&std::collections::BTreeMap::new()).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod git_command_tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    fn env_of(cmd: &tokio::process::Command) -> std::collections::BTreeMap<String, String> {
+        cmd.as_std()
+            .get_envs()
+            .filter_map(|(k, v)| Some((k.to_string_lossy().into_owned(), v?.to_string_lossy().into_owned())))
+            .collect()
+    }
+
+    /// The builder's contract: no system configuration, the global file
+    /// under STATE, no prompt, the network transports only, the hooks
+    /// directory pinned as the first configuration pair and the caller's
+    /// pairs after it, all in the environment and none in argv.
+    #[test]
+    fn a_git_command_is_hardened_and_carries_its_configuration_in_the_environment() {
+        let cmd = git_command_with(&[(
+            "url.https://oauth2:tok@gitlab.example/.insteadOf".to_string(),
+            "https://gitlab.example/".to_string(),
+        )]);
+        assert_eq!(cmd.as_std().get_program(), OsStr::new("git"));
+        assert_eq!(cmd.as_std().get_args().count(), 0, "nothing in argv");
+        let env = env_of(&cmd);
+        assert_eq!(env["GIT_CONFIG_NOSYSTEM"], "1");
+        assert_eq!(env["GIT_CONFIG_GLOBAL"], GIT_CONFIG_GLOBAL);
+        assert_eq!(env["GIT_TERMINAL_PROMPT"], "0");
+        assert_eq!(env["GIT_ALLOW_PROTOCOL"], "https:http:ssh:git");
+        assert_eq!(env["GIT_CONFIG_COUNT"], "2");
+        assert_eq!(env["GIT_CONFIG_KEY_0"], "core.hooksPath");
+        assert_eq!(env["GIT_CONFIG_VALUE_0"], GIT_HOOKS_DIR);
+        assert_eq!(env["GIT_CONFIG_KEY_1"], "url.https://oauth2:tok@gitlab.example/.insteadOf");
+        assert_eq!(env["GIT_CONFIG_VALUE_1"], "https://gitlab.example/");
+        let plain = env_of(&git_command());
+        assert_eq!(plain["GIT_CONFIG_COUNT"], "1");
+        assert!(!plain.contains_key("GIT_CONFIG_KEY_1"));
+    }
+
+    /// Startup under a temporary directory: the hooks directory exists and
+    /// is empty, the identity of a legacy workspace `.gitconfig` is adopted
+    /// into the new global file, and the defaults are there. A second run
+    /// changes nothing. Needs `git` on the host.
+    #[tokio::test]
+    async fn startup_adopts_the_legacy_identity_and_writes_the_defaults_under_state() {
+        let tmp = std::env::temp_dir().join(format!("embra-git-config-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let legacy = tmp.join("legacy-gitconfig");
+        std::fs::write(&legacy, "[user]\n\tname = Embra Operator\n\temail = op@example.test\n").unwrap();
+        let dir = tmp.join("git");
+        prepare_git_config_in(&dir, &legacy).await;
+        assert!(dir.join("hooks").is_dir());
+        assert_eq!(std::fs::read_dir(dir.join("hooks")).unwrap().count(), 0, "no hook");
+        let global = dir.join("config");
+        let get = |key: &str| {
+            let global = global.clone();
+            let hooks = dir.join("hooks");
+            let key = key.to_string();
+            async move {
+                let out = git_command_for(&global, &hooks, &[])
+                    .args(["config", "--global", "--get", &key])
+                    .output()
+                    .await
+                    .expect("git runs");
+                String::from_utf8_lossy(&out.stdout).trim().to_string()
+            }
+        };
+        assert_eq!(get("user.name").await, "Embra Operator");
+        assert_eq!(get("user.email").await, "op@example.test");
+        assert_eq!(get("safe.directory").await, "*");
+        assert_eq!(get("push.autoSetupRemote").await, "true");
+        let before = std::fs::read_to_string(&global).unwrap();
+        // The legacy file is read once: a changed name there is not adopted again.
+        std::fs::write(&legacy, "[user]\n\tname = Someone Else\n").unwrap();
+        prepare_git_config_in(&dir, &legacy).await;
+        assert_eq!(std::fs::read_to_string(&global).unwrap(), before);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

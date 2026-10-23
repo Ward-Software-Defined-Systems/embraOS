@@ -390,6 +390,12 @@ fn cut_note(checked: usize, total: usize) -> String {
 
 // ── SSH Remote Admin (EXPERIMENTAL) ──
 
+/// Every ssh the tools run: the child is killed with its future
+/// (`tools::subprocess`), so a timed-out connection does not linger.
+fn ssh_command() -> tokio::process::Command {
+    super::subprocess("ssh")
+}
+
 struct SshSession {
     user_host: String,      // "user@host"
     control_path: String,   // "/tmp/embra-ssh-{uuid}"
@@ -576,7 +582,7 @@ pub async fn ssh_remote_admin(param: &str) -> String {
         format!("{}@{}:{}", user, host, port)
     };
 
-    let result = tokio::process::Command::new("ssh")
+    let result = ssh_command()
         .arg("-p").arg(port.to_string())
         .arg("-i").arg(SSH_KEY_PATH)
         .arg("-o").arg(format!("UserKnownHostsFile={}", SSH_KNOWN_HOSTS))
@@ -648,7 +654,7 @@ pub async fn ssh_session_start(param: &str) -> String {
     // Start ControlMaster in background (-MNf): authenticates, then backgrounds itself
     let master_result = tokio::time::timeout(
         Duration::from_secs(15),
-        tokio::process::Command::new("ssh")
+        ssh_command()
             .arg("-MNf")
             .arg("-p").arg(port.to_string())
             .arg("-i").arg(SSH_KEY_PATH)
@@ -672,7 +678,7 @@ pub async fn ssh_session_start(param: &str) -> String {
             // master's port, so `-p` is not needed here.
             let probe_result = tokio::time::timeout(
                 Duration::from_secs(10),
-                tokio::process::Command::new("ssh")
+                ssh_command()
                     .arg("-o").arg(format!("ControlPath={}", control_path))
                     .arg(&user_host)
                     .arg("echo embra_probe_ok")
@@ -694,7 +700,7 @@ pub async fn ssh_session_start(param: &str) -> String {
                         )
                     } else {
                         // Probe didn't return expected output — tear down
-                        let _ = tokio::process::Command::new("ssh")
+                        let _ = ssh_command()
                             .arg("-O").arg("exit")
                             .arg("-o").arg(format!("ControlPath={}", control_path))
                             .arg(&user_host)
@@ -712,7 +718,7 @@ pub async fn ssh_session_start(param: &str) -> String {
                     format!("[EXPERIMENTAL] SSH connection to {} failed: {}", user_host_port_display, e)
                 }
                 Err(_) => {
-                    let _ = tokio::process::Command::new("ssh")
+                    let _ = ssh_command()
                         .arg("-O").arg("exit")
                         .arg("-o").arg(format!("ControlPath={}", control_path))
                         .arg(&user_host)
@@ -762,7 +768,7 @@ pub async fn ssh_session_exec(param: &str) -> String {
     }
 
     // Run command as a discrete SSH process through the ControlMaster socket
-    let result = tokio::process::Command::new("ssh")
+    let result = ssh_command()
         .arg("-o").arg(format!("ControlPath={}", session.control_path))
         .arg("-o").arg("ConnectTimeout=10")
         .arg(&session.user_host)
@@ -811,7 +817,7 @@ pub async fn ssh_session_end() -> String {
             // Send exit signal to ControlMaster
             let exit_result = tokio::time::timeout(
                 Duration::from_secs(5),
-                tokio::process::Command::new("ssh")
+                ssh_command()
                     .arg("-O").arg("exit")
                     .arg("-o").arg(format!("ControlPath={}", session.control_path))
                     .arg(&session.user_host)

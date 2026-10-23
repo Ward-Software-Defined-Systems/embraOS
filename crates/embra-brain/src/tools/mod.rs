@@ -34,6 +34,16 @@ pub(crate) use memory::{remember_record, untag, Recorded};
 pub use reminders::{check_reminders, FiredReminder};
 pub(crate) use reminders::{REMINDER_RETENTION_DAYS, REMINDER_TTL_FIELD};
 pub use status::{init_start_time, system_status};
+
+/// Every subprocess a tool starts begins here: the child is killed when the
+/// future that owns it is dropped, so the dispatcher's timeout
+/// (`registry::enforce_timeout`) ends the process and not only the wait.
+/// `engineering::git::git_command` and `security::ssh_command` build on it.
+pub(crate) fn subprocess(program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(program);
+    cmd.kill_on_drop(true);
+    cmd
+}
 #[cfg(test)]
 pub(crate) use status::ProviderStatus;
 // Reached as `super::…` by sibling modules and by a test of this one.
@@ -1027,5 +1037,31 @@ mod get_tests {
         }
         assert_eq!(out.matches("[redacted]").count(), 6, "{out}");
         assert!(out.contains("\"name\": \"Embra\"") && out.contains("gitlab.ops.wsds") && out.contains("Authorization"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod subprocess_tests {
+    use super::subprocess;
+
+    /// The child goes with the future: a `sleep` started through the
+    /// builder is dead or a zombie once its handle is dropped, never still
+    /// sleeping (Linux reads the state from /proc; tokio reaps the zombie
+    /// in the background).
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_subprocess_is_killed_when_its_handle_is_dropped() {
+        let child = subprocess("sleep").arg("30").spawn().expect("sleep spawns");
+        let pid = child.id().expect("a pid before the drop");
+        drop(child);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Err(_) => {}
+            Ok(stat) => {
+                // `pid (comm) STATE …`: the state follows the closing parenthesis.
+                let state = stat.rsplit(')').next().unwrap_or("").split_whitespace().next().unwrap_or("");
+                assert!(matches!(state, "Z" | "X"), "sleep {pid} is still alive in state {state:?}");
+            }
+        }
     }
 }
