@@ -526,38 +526,7 @@ impl BrainService for BrainGrpcService {
             let soul_sealed = learning::is_soul_sealed(&db).await.unwrap_or(false);
             if !soul_sealed {
                 info!("Soul not sealed — entering Learning Mode");
-                let loaded_config = config::load_config(&db).await.unwrap_or_else(|_| config::SystemConfig {
-                    name: "Embra".to_string(),
-                    api_key: api_key.clone(),
-                    timezone: config_tz.clone(),
-                    deployment_mode: "phase1".into(),
-                    created_at: String::new(),
-                    version: env!("CARGO_PKG_VERSION").into(),
-                    github_token: None,
-                    kg_temporal_window_secs: 1800,
-                    kg_max_traversal_depth: 3,
-                    kg_traversal_depth_ceiling: 5,
-                    kg_edge_candidate_limit: 50,
-                    kg_traversal_edge_limit: 500,
-                    kg_traversal_node_budget: 1000,
-                    api_provider: "anthropic".to_string(),
-                    gemini_model: None,
-                    anthropic_model: None,
-                    anthropic_effort: None,
-                    gemini_effort: None,
-                    embedding_enabled: None,
-                    embedding_model: None,
-                    image_provider: None,
-                    image_model: None,
-                    git_tokens: None,
-                    guardian_secrets: None,
-                    guardian_private_hosts: None,
-                    anthropic_api_key: None,
-                    gemini_api_key: None,
-                    max_tool_iterations: None,
-                    show_reasoning: None,
-                    openai_compat: crate::config::OpenAiCompatConfig::default(),
-                });
+                let loaded_config = config::load_config(&db).await.unwrap_or_else(|_| config::SystemConfig::boot_fallback(api_key.clone(), config_tz.clone()));
                 match run_learning_loop(&tx, &mut incoming, &db, &loaded_config, &api_key, &onboarding_stage, TurnStop { in_turn: &in_turn, stop_rx: &stop_rx }).await {
                     Ok(()) => {
                         info!("Learning Mode complete — transitioning to Operational");
@@ -1252,38 +1221,7 @@ async fn handle_request(
             };
 
             // Load config — api_key comes from --api-key flag or env, not WardSONDB
-            let loaded_config = config::load_config(db).await.unwrap_or_else(|_| config::SystemConfig {
-                name: "Embra".to_string(),
-                api_key: api_key.to_string(),
-                timezone: config_tz.to_string(),
-                deployment_mode: "phase1".into(),
-                created_at: String::new(),
-                version: env!("CARGO_PKG_VERSION").into(),
-                github_token: None,
-                kg_temporal_window_secs: 1800,
-                kg_max_traversal_depth: 3,
-                kg_traversal_depth_ceiling: 5,
-                kg_edge_candidate_limit: 50,
-                kg_traversal_edge_limit: 500,
-                kg_traversal_node_budget: 1000,
-                api_provider: "anthropic".to_string(),
-                gemini_model: None,
-                anthropic_model: None,
-                anthropic_effort: None,
-                gemini_effort: None,
-                embedding_enabled: None,
-                embedding_model: None,
-                image_provider: None,
-                image_model: None,
-                git_tokens: None,
-                guardian_secrets: None,
-                guardian_private_hosts: None,
-                anthropic_api_key: None,
-                gemini_api_key: None,
-                max_tool_iterations: None,
-                show_reasoning: None,
-                openai_compat: crate::config::OpenAiCompatConfig::default(),
-            });
+            let loaded_config = config::load_config(db).await.unwrap_or_else(|_| config::SystemConfig::boot_fallback(api_key.to_string(), config_tz.to_string()));
             let config_name = loaded_config.name.clone();
 
             // Provider-aware credential precheck. For Anthropic/Gemini,
@@ -2361,13 +2299,7 @@ async fn handle_request(
                                             ModeTransition {
                                                 from_mode: OperatingMode::Operational as i32,
                                                 to_mode: OperatingMode::Operational as i32,
-                                                message: format!(
-                                                    "Operational — Name: {} — Session: {} — TZ: {} — Brain: {}",
-                                                    fresh.name,
-                                                    session_name,
-                                                    fresh.timezone,
-                                                    model_display
-                                                ),
+                                                message: operational_status_line(&fresh.name, &session_name, &fresh.timezone, &model_display),
                                             },
                                         ),
                                     ),
@@ -2966,10 +2898,7 @@ async fn handle_request(
                         from_mode: OperatingMode::Unspecified as i32,
                         to_mode: mode as i32,
                         message: if is_sealed {
-                            format!(
-                                "Operational — Name: {} — Session: {} — TZ: {} — Brain: {}",
-                                name, session_name, tz, model
-                            )
+                            operational_status_line(&name, &session_name, &tz, &model)
                         } else {
                             format!("Learning Mode — Name: {} — TZ: {} — Brain: {}", name, tz, model)
                         },
@@ -3051,6 +2980,14 @@ async fn handle_request(
     }
 }
 
+/// The Operational status line the console's status bar parses
+/// (`embra-console/src/terminal/mod.rs`): one literal for the five sites
+/// that build it (#38). The model is passed explicitly, because the
+/// provider-switch site renders the provider being switched to.
+fn operational_status_line(name: &str, session: &str, tz: &str, model: &str) -> String {
+    format!("Operational — Name: {} — Session: {} — TZ: {} — Brain: {}", name, session, tz, model)
+}
+
 /// One system frame to the client, of the given kind: the operator is told
 /// what did not happen (#59), in the stream's own vocabulary.
 async fn send_system(
@@ -3102,37 +3039,34 @@ async fn handle_slash_command(
     // Sprint 4: includes the active model in the message so the
     // console status bar can render it without a separate event.
     let tz = config_tz.to_string();
-    let cfg_loaded = config::load_config(db).await.ok();
-    let config_name = cfg_loaded
-        .as_ref()
-        .map(|c| c.name.clone())
-        .unwrap_or_else(|| "Embra".to_string());
-    let active_provider = cfg_loaded
-        .as_ref()
-        .map(|c| c.api_provider.clone())
-        .unwrap_or_else(|| "anthropic".to_string());
-    let model = match cfg_loaded.as_ref() {
-        Some(c) => display_model_for(&active_provider, c),
-        None => crate::provider::anthropic::DEFAULT_DISPLAY_NAME.to_string(),
-    };
     let send_session_update = {
-        let config_name = config_name.clone();
         move |tx: &mpsc::Sender<Result<ConversationResponse, Status>>, session_name: &str| {
             let tx = tx.clone();
             let session = session_name.to_string();
             let tz = tz.clone();
-            let config_name = config_name.clone();
-            let model = model.clone();
             async move {
+                // The configuration is read here, on `/new` and `/switch`
+                // alone, the two commands that send this frame; every other
+                // command used to pay the read for nothing (#38).
+                let cfg_loaded = config::load_config(db).await.ok();
+                let config_name = cfg_loaded
+                    .as_ref()
+                    .map(|c| c.name.clone())
+                    .unwrap_or_else(|| "Embra".to_string());
+                let active_provider = cfg_loaded
+                    .as_ref()
+                    .map(|c| c.api_provider.clone())
+                    .unwrap_or_else(|| "anthropic".to_string());
+                let model = match cfg_loaded.as_ref() {
+                    Some(c) => display_model_for(&active_provider, c),
+                    None => crate::provider::anthropic::DEFAULT_DISPLAY_NAME.to_string(),
+                };
                 let _ = tx.send(Ok(ConversationResponse {
                     response_type: Some(conversation_response::ResponseType::ModeChange(
                         ModeTransition {
                             from_mode: OperatingMode::Operational as i32,
                             to_mode: OperatingMode::Operational as i32,
-                            message: format!(
-                                "Operational — Name: {} — Session: {} — TZ: {} — Brain: {}",
-                                config_name, session, tz, model
-                            ),
+                            message: operational_status_line(&config_name, &session, &tz, &model),
                         }
                     )),
                 })).await;
@@ -4485,10 +4419,7 @@ async fn perform_provider_swap(
         let session = active_session
             .clone()
             .unwrap_or_else(|| "<none>".to_string());
-        format!(
-            "Operational — Name: {} — Session: {} — TZ: {} — Brain: {}",
-            name, session, tz, model
-        )
+        operational_status_line(&name, &session, &tz, &model)
     } else {
         format!(
             "Learning Mode — Name: {} — TZ: {} — Brain: {}",
@@ -6205,10 +6136,7 @@ async fn send_brain_status(
                 ModeTransition {
                     from_mode: OperatingMode::Operational as i32,
                     to_mode: OperatingMode::Operational as i32,
-                    message: format!(
-                        "Operational — Name: {} — Session: {} — TZ: {} — Brain: {}",
-                        cfg.name, session, cfg.timezone, brain
-                    ),
+                    message: operational_status_line(&cfg.name, &session, &cfg.timezone, brain),
                 },
             )),
         }))

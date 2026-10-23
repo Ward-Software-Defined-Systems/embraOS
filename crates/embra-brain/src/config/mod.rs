@@ -174,6 +174,46 @@ pub struct SystemConfig {
 }
 
 impl SystemConfig {
+    /// The configuration a boot runs on when `load_config` fails (the
+    /// first boot, before the wizard): the defaults, with the key embrad
+    /// handed over and the timezone STATE holds. The one literal the three
+    /// boot paths shared (#38); no `Default` is derived, so a new field is
+    /// still named here and at every other construction.
+    pub fn boot_fallback(api_key: String, timezone: String) -> Self {
+        SystemConfig {
+            name: "Embra".to_string(),
+            api_key,
+            timezone,
+            deployment_mode: "phase1".into(),
+            created_at: String::new(),
+            version: env!("CARGO_PKG_VERSION").into(),
+            github_token: None,
+            kg_temporal_window_secs: 1800,
+            kg_max_traversal_depth: 3,
+            kg_traversal_depth_ceiling: 5,
+            kg_edge_candidate_limit: 50,
+            kg_traversal_edge_limit: 500,
+            kg_traversal_node_budget: 1000,
+            api_provider: "anthropic".to_string(),
+            gemini_model: None,
+            anthropic_model: None,
+            anthropic_effort: None,
+            gemini_effort: None,
+            embedding_enabled: None,
+            embedding_model: None,
+            image_provider: None,
+            image_model: None,
+            git_tokens: None,
+            guardian_secrets: None,
+            guardian_private_hosts: None,
+            anthropic_api_key: None,
+            gemini_api_key: None,
+            max_tool_iterations: None,
+            show_reasoning: None,
+            openai_compat: OpenAiCompatConfig::default(),
+        }
+    }
+
     /// Effective `show_reasoning` decision: default-on when unset,
     /// otherwise honor the operator's explicit setting. Mirrors the
     /// `max_tool_iterations` precedent.

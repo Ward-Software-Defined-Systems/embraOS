@@ -567,38 +567,7 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<CronFired
 
         // Execute the command via tool dispatch. Load config for dispatch; fall back
         // to a minimal in-memory SystemConfig if load fails (e.g., pre-wizard).
-        let cfg = crate::config::load_config(db).await.unwrap_or_else(|_| crate::config::SystemConfig {
-            name: "Embra".to_string(),
-            api_key: String::new(),
-            timezone: config_tz.to_string(),
-            deployment_mode: "phase1".into(),
-            created_at: String::new(),
-            version: env!("CARGO_PKG_VERSION").into(),
-            github_token: None,
-            kg_temporal_window_secs: 1800,
-            kg_max_traversal_depth: 3,
-            kg_traversal_depth_ceiling: 5,
-            kg_edge_candidate_limit: 50,
-            kg_traversal_edge_limit: 500,
-            kg_traversal_node_budget: 1000,
-            api_provider: "anthropic".to_string(),
-            gemini_model: None,
-            anthropic_model: None,
-            anthropic_effort: None,
-            gemini_effort: None,
-            embedding_enabled: None,
-            embedding_model: None,
-            image_provider: None,
-            image_model: None,
-            git_tokens: None,
-            guardian_secrets: None,
-            guardian_private_hosts: None,
-            anthropic_api_key: None,
-            gemini_api_key: None,
-            max_tool_iterations: None,
-            show_reasoning: None,
-            openai_compat: crate::config::OpenAiCompatConfig::default(),
-        });
+        let cfg = crate::config::load_config(db).await.unwrap_or_else(|_| crate::config::SystemConfig::boot_fallback(String::new(), config_tz.to_string()));
         // Direct registry dispatch — no model round-trip. The arguments are
         // the job's own (`cron_dispatch_plan`); a job whose arguments could
         // not be read runs without them and says so, here and in its report.
