@@ -13,6 +13,7 @@ use tracing::{info, warn};
 use crate::db::WardsonDbClient;
 use crate::tools::jail::{jailed_write_path, resolve_workspace_path, WORKSPACE_ROOT};
 use crate::tools::registry::DispatchContext;
+use crate::tools::security::{SSH_KEY_PATH, SSH_KNOWN_HOSTS};
 use crate::tools::subprocess;
 
 /// Where the brain keeps git's global configuration: under STATE, which the
@@ -28,6 +29,17 @@ pub(crate) const GIT_HOOKS_DIR: &str = "/embra/state/git/hooks";
 /// The transports git may speak: no `ext::` (a command), no `file://` and
 /// no local path (the rest of the filesystem into the workspace).
 const GIT_ALLOW_PROTOCOL: &str = "https:http:ssh:git";
+
+/// The ssh git runs for an `ssh://` or scp-form remote (`GIT_SSH_COMMAND`):
+/// no client configuration file (`-F /dev/null`; the one under the
+/// workspace would be the model's, and a configuration can name a command
+/// for ssh to run), the workspace key pair and known-hosts file named
+/// explicitly, the host-key policy of the ssh tools, and no prompt.
+pub(crate) fn git_ssh_command() -> String {
+    format!(
+        "ssh -F /dev/null -i {SSH_KEY_PATH} -o UserKnownHostsFile={SSH_KNOWN_HOSTS} -o StrictHostKeyChecking=accept-new -o BatchMode=yes"
+    )
+}
 /// Where `/git-setup` wrote before the configuration moved under STATE.
 /// Its identity is adopted once; the file is never read again.
 const LEGACY_GIT_CONFIG: &str = "/embra/workspace/.gitconfig";
@@ -36,7 +48,8 @@ const LEGACY_GIT_CONFIG: &str = "/embra/workspace/.gitconfig";
 /// (`subprocess`); git reads no system configuration and only the global
 /// file under STATE; the hooks directory is pinned through the
 /// configuration environment, which outranks a repository's own config;
-/// nothing prompts; and only the network transports are allowed.
+/// nothing prompts; only the network transports are allowed; and the ssh
+/// it runs is [`git_ssh_command`].
 pub(crate) fn git_command() -> tokio::process::Command {
     git_command_for(Path::new(GIT_CONFIG_GLOBAL), Path::new(GIT_HOOKS_DIR), &[])
 }
@@ -56,7 +69,8 @@ fn git_command_for(global: &Path, hooks: &Path, config: &[(String, String)]) -> 
     cmd.env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", global)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_ALLOW_PROTOCOL", GIT_ALLOW_PROTOCOL);
+        .env("GIT_ALLOW_PROTOCOL", GIT_ALLOW_PROTOCOL)
+        .env("GIT_SSH_COMMAND", git_ssh_command());
     let mut pairs: Vec<(String, String)> =
         vec![("core.hooksPath".to_string(), hooks.to_string_lossy().into_owned())];
     pairs.extend(config.iter().cloned());
@@ -1518,7 +1532,8 @@ mod git_command_tests {
     }
 
     /// The builder's contract: no system configuration, the global file
-    /// under STATE, no prompt, the network transports only, the hooks
+    /// under STATE, no prompt, the network transports only, its ssh pinned
+    /// to no client configuration and the workspace key, the hooks
     /// directory pinned as the first configuration pair and the caller's
     /// pairs after it, all in the environment and none in argv.
     #[test]
@@ -1534,6 +1549,14 @@ mod git_command_tests {
         assert_eq!(env["GIT_CONFIG_GLOBAL"], GIT_CONFIG_GLOBAL);
         assert_eq!(env["GIT_TERMINAL_PROMPT"], "0");
         assert_eq!(env["GIT_ALLOW_PROTOCOL"], "https:http:ssh:git");
+        assert_eq!(env["GIT_SSH_COMMAND"], git_ssh_command());
+        assert!(
+            git_ssh_command().starts_with(
+                "ssh -F /dev/null -i /embra/workspace/.ssh/id_ed25519 -o UserKnownHostsFile=/embra/workspace/.ssh/known_hosts -o StrictHostKeyChecking=accept-new"
+            ),
+            "{}",
+            git_ssh_command()
+        );
         assert_eq!(env["GIT_CONFIG_COUNT"], "2");
         assert_eq!(env["GIT_CONFIG_KEY_0"], "core.hooksPath");
         assert_eq!(env["GIT_CONFIG_VALUE_0"], GIT_HOOKS_DIR);

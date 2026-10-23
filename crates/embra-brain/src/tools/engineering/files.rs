@@ -612,7 +612,7 @@ pub(crate) async fn dir_delete_in(root: &str, param: &str) -> String {
         Ok(p) => p,
         Err(e) => return e,
     };
-    if let Err(e) = super::jail::fence_git_dir(Path::new(&lexical)) {
+    if let Err(e) = super::jail::fence_owned_dirs(Path::new(root), Path::new(&lexical)) {
         return e;
     }
     if Path::new(&lexical) == Path::new(root) {
@@ -620,11 +620,11 @@ pub(crate) async fn dir_delete_in(root: &str, param: &str) -> String {
             "Refusing to delete the workspace itself ({root}); name a directory under it."
         );
     }
-    let path = match super::jail::real_parent(Path::new(root), Path::new(&lexical)).await {
+    let (root_canon, path) = match super::jail::real_parent(Path::new(root), Path::new(&lexical)).await {
         Ok(p) => p,
         Err(e) => return e,
     };
-    if let Err(e) = super::jail::fence_git_dir(&path) {
+    if let Err(e) = super::jail::fence_owned_dirs(&root_canon, &path) {
         return e;
     }
     let shown = path.display();
@@ -1487,6 +1487,40 @@ mod write_jail_tests {
         let out = dir_delete_in(t.root(), "repo --force").await;
         assert!(!out.starts_with("Denied:"), "{out}");
         assert!(!t.join("repo").exists());
+    }
+
+    /// Nothing under the workspace `.ssh` directory is written, appended,
+    /// created, linked, moved into or removed, by its own path or through a
+    /// link that leads there; a `.ssh` inside a repository is an ordinary
+    /// directory (William's live check of 2026-10-23).
+    #[tokio::test]
+    async fn a_writer_never_reaches_the_ssh_directory_even_through_a_link() {
+        let t = TempDir::new("ssh-fence");
+        std::fs::create_dir_all(t.join(".ssh")).unwrap();
+        std::fs::write(t.join(".ssh/known_hosts"), "h ssh-ed25519 AAAA\n").unwrap();
+        std::fs::write(t.join("note.txt"), "x").unwrap();
+        link(&t.join(".ssh"), &t.join("ssh-link"));
+
+        let refused = [
+            file_write_in(t.root(), ".ssh/config", "Host *\n").await,
+            file_write_in(t.root(), "ssh-link/config", "Host *\n").await,
+            file_append_in(t.root(), ".ssh/known_hosts", "x\n").await,
+            mkdir_in(t.root(), ".ssh/x").await,
+            file_symlink_in(t.root(), "note.txt", ".ssh/authorized_keys").await,
+            file_move_in(t.root(), "note.txt", ".ssh/rc").await,
+            file_delete_in(t.root(), ".ssh/known_hosts").await,
+            dir_delete_in(t.root(), ".ssh --force").await,
+        ];
+        for out in &refused {
+            assert!(out.starts_with("Denied:") && out.contains("SSH directory"), "{out}");
+        }
+        assert_eq!(std::fs::read_dir(t.join(".ssh")).unwrap().count(), 1, "known_hosts alone");
+        assert_eq!(std::fs::read(t.join(".ssh/known_hosts")).unwrap(), b"h ssh-ed25519 AAAA\n");
+        assert!(t.join("note.txt").exists());
+
+        let out = file_write_in(t.root(), "repo/.ssh/config", "Host example\n").await;
+        assert!(!out.starts_with("Denied:"), "{out}");
+        assert!(t.join("repo/.ssh/config").exists());
     }
 
     #[tokio::test]

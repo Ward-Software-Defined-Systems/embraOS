@@ -17,6 +17,10 @@
 //!   parent goes through [`real`]; the final component stays as named, so
 //!   a symlink is unlinked and never followed.
 //!
+//! [`fence_owned_dirs`] is the writers' fence, run on the path as resolved
+//! and on the real path: nothing under a `.git` component or under the
+//! workspace `.ssh` directory is written, created, moved into or removed.
+//!
 //! [`within`] is the component-wise comparison of a canonical path with a
 //! canonical root, for a caller that canonicalized itself (`file_patch`).
 //!
@@ -112,8 +116,9 @@ pub(crate) async fn real(root: &Path, lexical: &Path) -> Result<Real, String> {
 
 /// The canonical check for a path that is removed or moved away: the
 /// parent through [`real`], the final component as named. The root itself
-/// is refused.
-pub(crate) async fn real_parent(root: &Path, lexical: &Path) -> Result<PathBuf, String> {
+/// is refused. Answers the canonical root with the path, for the caller's
+/// fence ([`fence_owned_dirs`]).
+pub(crate) async fn real_parent(root: &Path, lexical: &Path) -> Result<(PathBuf, PathBuf), String> {
     let (Some(parent), Some(name)) = (lexical.parent(), lexical.file_name()) else {
         return Err(format!(
             "Denied: path '{}' names no entry under {}",
@@ -129,7 +134,7 @@ pub(crate) async fn real_parent(root: &Path, lexical: &Path) -> Result<PathBuf, 
         ));
     }
     let parent = real(root, parent).await?;
-    Ok(parent.path.join(name))
+    Ok((parent.root, parent.path.join(name)))
 }
 
 /// Whether a canonical path lies under a canonical root, component-wise.
@@ -144,13 +149,38 @@ pub(crate) fn within(canonical: &Path, root: &Path) -> bool {
 /// repository as a whole can still be removed or moved.
 pub(crate) const GIT_DIR: &str = ".git";
 
-/// Refuses a path with a `.git` component. Every writer runs it on the
-/// path as resolved and on the real path (a link into `.git` is refused by
-/// where it leads); the git tools reach the directory through git.
+/// Refuses a path with a `.git` component. Every writer runs it, through
+/// [`fence_owned_dirs`], on the path as resolved and on the real path (a
+/// link into `.git` is refused by where it leads); the git tools reach the
+/// directory through git.
 pub(crate) fn fence_git_dir(path: &Path) -> Result<(), String> {
     if path.components().any(|c| c.as_os_str() == GIT_DIR) {
         return Err(format!(
             "Denied: path '{}' is inside a .git directory, which the git tools own; nothing is written there",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// The directory ssh owns, directly under the workspace root (`$HOME` is
+/// the workspace): `/ssh-keygen` writes the key pair there and ssh its
+/// known hosts, and a client configuration there would be read by every
+/// ssh the OS runs, git's included; a configuration can name a command for
+/// ssh to run. A writer never creates, changes or removes anything under
+/// it. The private key is read-jailed besides ([`read_denied`]). A `.ssh`
+/// elsewhere, inside a repository, is an ordinary directory.
+pub(crate) const SSH_DIR: &str = ".ssh";
+
+/// The writers' fence: any `.git` component ([`fence_git_dir`]) and
+/// `<root>/.ssh`. `root` is the jail root `path` is under: the configured
+/// root for a path as resolved, the canonical root (`Real::root`) for a
+/// real path.
+pub(crate) fn fence_owned_dirs(root: &Path, path: &Path) -> Result<(), String> {
+    fence_git_dir(path)?;
+    if path.starts_with(root.join(SSH_DIR)) {
+        return Err(format!(
+            "Denied: path '{}' is inside the workspace SSH directory, which /ssh-keygen and ssh own; nothing is written there",
             path.display()
         ));
     }
@@ -317,10 +347,10 @@ pub(crate) fn resolve_in(root: &str, path: &str) -> Result<String, String> {
 /// write or create.
 pub(crate) async fn jailed_write_path(root: &str, raw: &str) -> Result<PathBuf, String> {
     let lexical = super::jail::lexical(root, raw)?;
-    fence_git_dir(Path::new(&lexical))?;
-    let path = super::jail::real(Path::new(root), Path::new(&lexical)).await?.path;
-    fence_git_dir(&path)?;
-    Ok(path)
+    fence_owned_dirs(Path::new(root), Path::new(&lexical))?;
+    let real = super::jail::real(Path::new(root), Path::new(&lexical)).await?;
+    fence_owned_dirs(&real.root, &real.path)?;
+    Ok(real.path)
 }
 
 /// The two jail steps of a remover: the lexical check, then the canonical
@@ -328,9 +358,9 @@ pub(crate) async fn jailed_write_path(root: &str, raw: &str) -> Result<PathBuf, 
 /// never followed.
 pub(crate) async fn jailed_remove_path(root: &str, raw: &str) -> Result<PathBuf, String> {
     let lexical = super::jail::lexical(root, raw)?;
-    fence_git_dir(Path::new(&lexical))?;
-    let path = super::jail::real_parent(Path::new(root), Path::new(&lexical)).await?;
-    fence_git_dir(&path)?;
+    fence_owned_dirs(Path::new(root), Path::new(&lexical))?;
+    let (root_canon, path) = super::jail::real_parent(Path::new(root), Path::new(&lexical)).await?;
+    fence_owned_dirs(&root_canon, &path)?;
     Ok(path)
 }
 
@@ -349,6 +379,22 @@ mod tests {
         for ok in ["/r/repo/.gitignore", "/r/repo/src/x", "/r/repo", "/r/.github/workflows/ci.yml"] {
             assert!(fence_git_dir(Path::new(ok)).is_ok(), "{ok}");
         }
+    }
+
+    /// The workspace `.ssh` directory is fenced, itself and everything under
+    /// it; a `.ssh` inside a repository is not. The `.git` rule rides along.
+    #[test]
+    fn the_fence_refuses_the_workspace_ssh_directory_and_not_one_elsewhere() {
+        let root = Path::new("/r");
+        for refused in ["/r/.ssh", "/r/.ssh/config", "/r/.ssh/id_ed25519", "/r/.ssh/known_hosts"] {
+            let err = fence_owned_dirs(root, Path::new(refused)).unwrap_err();
+            assert!(err.starts_with("Denied:") && err.contains("SSH directory"), "{refused}: {err}");
+        }
+        for ok in ["/r/.sshx/config", "/r/repo/.ssh/config", "/r/notes/ssh.txt", "/r", "/r/.gitignore"] {
+            assert!(fence_owned_dirs(root, Path::new(ok)).is_ok(), "{ok}");
+        }
+        let err = fence_owned_dirs(root, Path::new("/r/repo/.git/config")).unwrap_err();
+        assert!(err.contains(".git directory"), "{err}");
     }
 
     struct TempDir(PathBuf);
@@ -461,7 +507,7 @@ mod tests {
         // `real` follows the link to the outside and refuses.
         assert!(real(&root.0, &l).await.unwrap_err().contains("outside"));
         // `real_parent` names the link itself.
-        assert_eq!(real_parent(&root.0, &l).await.unwrap(), l);
+        assert_eq!(real_parent(&root.0, &l).await.unwrap().1, l);
         // A link in the parent chain that leaves is still refused.
         link(&outside.0, &root.0.join("esc"));
         let err = real_parent(&root.0, &root.0.join("esc/sentinel.txt")).await.unwrap_err();

@@ -102,10 +102,27 @@ fn validate_data_file_in(action: &str, path: &str, root: &str) -> Result<String,
 
 /// The data_file by its real path: the pure gate, then the canonical check
 /// of the jail (`jail::real`), so a file reached through a link that leaves
-/// the workspace is refused before the read.
+/// the workspace is refused before the read, then the read jail on the real
+/// path (`jail::read_denied`), as `file_read` runs it: what the model's
+/// readers do not reach is not a data file either.
 async fn jailed_data_file(action: &str, path: &str, root: &str) -> Result<PathBuf, String> {
+    jailed_data_file_with(action, path, root, crate::tools::jail::read_denied).await
+}
+
+/// [`jailed_data_file`] with the read jail as a parameter, so a test runs
+/// it under a temporary root.
+async fn jailed_data_file_with(
+    action: &str,
+    path: &str,
+    root: &str,
+    denied: fn(&Path) -> Option<&'static str>,
+) -> Result<PathBuf, String> {
     let resolved = validate_data_file_in(action, path, root)?;
-    Ok(crate::tools::jail::real(Path::new(root), Path::new(&resolved)).await?.path)
+    let real = crate::tools::jail::real(Path::new(root), Path::new(&resolved)).await?.path;
+    if let Some(reason) = denied(&real) {
+        return Err(format!("Denied: guardian_call: data_file '{path}' is {reason}; nothing is read"));
+    }
+    Ok(real)
 }
 
 /// Size-gated read of an already-resolved data_file path. `max` is a
@@ -398,6 +415,29 @@ mod tests {
         let err = inject_data_file_content(serde_json::json!({"data": "inline"}), "x".into())
             .unwrap_err();
         assert!(err.contains("data_file"), "{err}");
+    }
+
+    /// The bridge runs the read jail on the real path, as `file_read` does:
+    /// what the model's readers do not reach is not a data file either (the
+    /// live check of 2026-10-23 found the bridge without it).
+    #[tokio::test]
+    async fn a_data_file_the_read_jail_refuses_is_refused_by_the_bridge() {
+        let root = std::env::temp_dir().join(format!("embra-data-file-jail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        std::fs::write(root.join("secret.txt"), "k").unwrap();
+        std::fs::write(root.join("plain.txt"), "p").unwrap();
+        let root_s = root.to_str().unwrap();
+        fn denied(p: &Path) -> Option<&'static str> {
+            p.file_name().is_some_and(|n| n == "secret.txt").then_some("a test secret")
+        }
+        let err = jailed_data_file_with("invoke", "secret.txt", root_s, denied).await.unwrap_err();
+        assert!(err.starts_with("Denied:") && err.contains("a test secret"), "{err}");
+        assert_eq!(jailed_data_file_with("invoke", "plain.txt", root_s, denied).await.unwrap(), root.join("plain.txt"));
+        // The production bridge carries the read jail itself: the workspace SSH key is in it.
+        assert!(crate::tools::jail::read_denied(Path::new("/embra/workspace/.ssh/id_ed25519")).is_some());
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]

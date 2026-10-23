@@ -5,8 +5,8 @@ use tokio::net::TcpStream;
 use futures::StreamExt;
 
 // SSH paths on the writable DATA partition (rootfs is read-only SquashFS)
-const SSH_KEY_PATH: &str = "/embra/workspace/.ssh/id_ed25519";
-const SSH_KNOWN_HOSTS: &str = "/embra/workspace/.ssh/known_hosts";
+pub(crate) const SSH_KEY_PATH: &str = "/embra/workspace/.ssh/id_ed25519";
+pub(crate) const SSH_KNOWN_HOSTS: &str = "/embra/workspace/.ssh/known_hosts";
 
 /// Run a basic security/system check by reading container info.
 pub async fn security_check() -> String {
@@ -392,8 +392,16 @@ fn cut_note(checked: usize, total: usize) -> String {
 
 /// Every ssh the tools run: the child is killed with its future
 /// (`tools::subprocess`), so a timed-out connection does not linger.
+/// Every ssh a tool runs: the child dies with its future (`subprocess`),
+/// and no client configuration file is read (`-F /dev/null`): the one under
+/// the workspace would be the model's, and a configuration can name a
+/// command for ssh to run. The callers name the key, the known-hosts file
+/// and the host-key policy explicitly. Git's ssh is pinned the same way
+/// (`engineering/git.rs::git_ssh_command`).
 fn ssh_command() -> tokio::process::Command {
-    super::subprocess("ssh")
+    let mut cmd = super::subprocess("ssh");
+    cmd.arg("-F").arg("/dev/null");
+    cmd
 }
 
 struct SshSession {
@@ -1062,6 +1070,16 @@ impl SshSessionEndArgs {
 #[cfg(test)]
 mod native_args_tests {
     use super::*;
+
+    /// Every ssh the tools run ignores the client configuration files; the
+    /// callers' options follow.
+    #[test]
+    fn every_ssh_the_tools_run_reads_no_client_configuration() {
+        let cmd = ssh_command();
+        assert_eq!(cmd.as_std().get_program(), std::ffi::OsStr::new("ssh"));
+        let args: Vec<_> = cmd.as_std().get_args().collect();
+        assert_eq!(args, [std::ffi::OsStr::new("-F"), std::ffi::OsStr::new("/dev/null")]);
+    }
 
     #[test]
     fn port_scan_host_required_ports_optional() {

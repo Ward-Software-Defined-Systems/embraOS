@@ -1009,7 +1009,7 @@ pub(crate) async fn file_patch_in(root: &str, args: FilePatchArgs) -> String {
         Ok(p) => p,
         Err(e) => return e,
     };
-    if let Err(e) = super::jail::fence_git_dir(std::path::Path::new(&resolved)) {
+    if let Err(e) = super::jail::fence_owned_dirs(std::path::Path::new(root), std::path::Path::new(&resolved)) {
         return e;
     }
 
@@ -1034,7 +1034,7 @@ pub(crate) async fn file_patch_in(root: &str, args: FilePatchArgs) -> String {
             canonical.display()
         );
     }
-    if let Err(e) = super::jail::fence_git_dir(&canonical) {
+    if let Err(e) = super::jail::fence_owned_dirs(&root_canon, &canonical) {
         return e;
     }
 

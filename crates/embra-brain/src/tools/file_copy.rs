@@ -863,14 +863,14 @@ pub(crate) async fn copy_at(src: &Path, dst: &Path, opts: &CopyOptions) -> Strin
     // under it); the write path then creates the missing parents under the
     // canonical ancestor. An existing destination is the canonical target
     // itself, so a copy over a link replaces the target and keeps the link.
-    if let Err(e) = super::jail::fence_git_dir(dst) {
+    if let Err(e) = super::jail::fence_owned_dirs(&opts.jail_root, dst) {
         return e;
     }
     let real = match super::jail::real(&opts.jail_root, dst).await {
         Ok(r) => r,
         Err(e) => return format!("{e}\nNothing copied."),
     };
-    if let Err(e) = super::jail::fence_git_dir(&real.path) {
+    if let Err(e) = super::jail::fence_owned_dirs(&real.root, &real.path) {
         return e;
     }
     let anc_canon = real.ancestor;
