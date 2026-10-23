@@ -110,6 +110,101 @@ async fn prepare_git_config_in(dir: &Path, legacy: &Path) {
     }
 }
 
+/// A token the model supplies as a positional (a branch, a ref, a file):
+/// one that begins with `-` would be read by git as an option, so it is
+/// refused before git runs.
+fn positional<'a>(token: &'a str, what: &str) -> Result<&'a str, String> {
+    if token.starts_with('-') {
+        return Err(format!(
+            "Denied: {what} '{token}' begins with '-', which git would read as an option"
+        ));
+    }
+    Ok(token)
+}
+
+/// A URL `git_clone` accepts: `https://`, `http://`, `ssh://`, `git://`, or
+/// the scp form `[user@]host:path`. Refused before git runs: a token that
+/// begins with `-` (an option), a remote-helper transport (`ext::` runs a
+/// command; any `name::`), `file://` and a local path (the rest of the
+/// filesystem into the workspace). `GIT_ALLOW_PROTOCOL` on the command is
+/// the second line.
+pub(crate) fn validate_clone_url(url: &str) -> Result<(), String> {
+    if url.starts_with('-') {
+        return Err(format!("Denied: '{url}' begins with '-', which git would read as an option"));
+    }
+    if let Some((helper, _)) = url.split_once("::")
+        && !helper.contains('/')
+        && !helper.contains(':')
+    {
+        return Err(format!(
+            "Denied: '{url}' names the remote helper '{helper}::'; git_clone takes https://, http://, ssh://, git:// or user@host:path"
+        ));
+    }
+    let lower = url.to_ascii_lowercase();
+    if lower.starts_with("file:") {
+        return Err(format!("Denied: '{url}' is a file:// URL; the filesystem is not a clone source"));
+    }
+    if url.starts_with('/') || url.starts_with('.') || url.starts_with('~') {
+        return Err(format!("Denied: '{url}' is a local path; the filesystem is not a clone source"));
+    }
+    if ["https://", "http://", "ssh://", "git://"].iter().any(|s| lower.starts_with(s)) {
+        return Ok(());
+    }
+    // The scp form: a colon before the first slash, after a host.
+    if let Some(colon) = url.find(':')
+        && colon > 0
+        && !url[..colon].contains('/')
+        && !url[colon + 1..].starts_with('/')
+    {
+        return Ok(());
+    }
+    Err(format!(
+        "Denied: '{url}' is not a git URL the clone tool accepts (https://, http://, ssh://, git://, or user@host:path)"
+    ))
+}
+
+/// The flags `git_log` passes on as given: presentation only, nothing that
+/// names a file to write (`--output` would write anywhere git runs).
+const GIT_LOG_FLAGS: &[&str] = &[
+    "--oneline", "--graph", "--stat", "--decorate", "--no-merges", "--merges", "--reverse", "--all",
+    "--first-parent", "--name-only", "--name-status", "-p", "--patch",
+];
+/// The flags `git_log` passes on with a value attached (`--author=name`).
+const GIT_LOG_VALUE_FLAGS: &[&str] = &[
+    "--author=", "--committer=", "--since=", "--after=", "--until=", "--before=", "--grep=",
+    "--max-count=", "--skip=", "--format=", "--pretty=", "--date=",
+];
+
+/// The git-log arguments the tool passes on: a count (`-n 20`, `-5`), the
+/// flags of [`GIT_LOG_FLAGS`] and [`GIT_LOG_VALUE_FLAGS`], and revisions or
+/// paths (a token that does not begin with `-`). Any other flag is refused
+/// before git runs.
+fn git_log_args<'a>(extra: &[&'a str]) -> Result<Vec<&'a str>, String> {
+    let mut out = Vec::with_capacity(extra.len());
+    let mut tokens = extra.iter().copied().peekable();
+    while let Some(tok) = tokens.next() {
+        let digits = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+        let count_flag = tok == "-n" && tokens.peek().is_some_and(|n| digits(n));
+        let allowed = !tok.starts_with('-')
+            || count_flag
+            || tok.strip_prefix('-').is_some_and(digits)
+            || GIT_LOG_FLAGS.contains(&tok)
+            || GIT_LOG_VALUE_FLAGS.iter().any(|f| tok.starts_with(f));
+        if !allowed {
+            return Err(format!(
+                "Denied: git_log does not pass '{tok}' to git. It takes a count (-n 20, -5), {}, {} with a value, and revisions or paths.",
+                GIT_LOG_FLAGS.join(" "),
+                GIT_LOG_VALUE_FLAGS.join(" ")
+            ));
+        }
+        out.push(tok);
+        if count_flag {
+            out.push(tokens.next().expect("peeked"));
+        }
+    }
+    Ok(out)
+}
+
 /// Resolve `base` to a ref usable by `merge-base --is-ancestor`. Prefers the
 /// local branch (`<base>`); falls back to `origin/<base>` if the local copy
 /// is missing. Returns Err with a clear message if neither exists. Used by
@@ -244,6 +339,9 @@ pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
 
     let parts: Vec<&str> = param.split_whitespace().collect();
     let url = parts[0];
+    if let Err(e) = validate_clone_url(url) {
+        return e;
+    }
 
     let derived_name = url
         .rsplit('/')
@@ -288,7 +386,7 @@ pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
     match tokio::time::timeout(
         std::time::Duration::from_secs(120),
         git_command_with(&auth)
-            .args(["clone", url, &dest])
+            .args(["clone", "--", url, &dest])
             .output(),
     ).await {
         Ok(Ok(out)) => {
@@ -340,15 +438,17 @@ pub async fn git_log(param: &str) -> String {
     } else {
         (parts[0], parts[1..].to_vec())
     };
+    let extra = match git_log_args(&extra_args) {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
     let dir = match resolve_workspace_path(path_token) {
         Ok(d) => d,
         Err(e) => return e,
     };
 
     let mut args = vec!["-C", &dir, "log", "--oneline", "-20"];
-    for a in &extra_args {
-        args.push(a);
-    }
+    args.extend(extra);
 
     match git_command()
         .args(&args)
@@ -381,7 +481,12 @@ pub async fn git_add(param: &str) -> String {
     let files = parts[1];
 
     let file_args: Vec<&str> = files.split_whitespace().collect();
-    let mut args = vec!["-C", &dir, "add"];
+    for f in &file_args {
+        if let Err(e) = positional(f, "file") {
+            return e;
+        }
+    }
+    let mut args = vec!["-C", &dir, "add", "--"];
     args.extend(file_args.iter());
 
     match git_command()
@@ -569,7 +674,10 @@ pub async fn git_branch(param: &str) -> String {
     let is_delete = parts.len() >= 3 && parts[1].eq_ignore_ascii_case("delete");
     let is_delete_force = parts.len() >= 3 && parts[1].eq_ignore_ascii_case("delete-force");
     if is_delete || is_delete_force {
-        let name = parts[2];
+        let name = match positional(parts[2], "branch") {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
 
         if is_delete_force {
             return match git_command()
@@ -588,7 +696,10 @@ pub async fn git_branch(param: &str) -> String {
             };
         }
 
-        let base = parts.get(3).copied().unwrap_or("main");
+        let base = match positional(parts.get(3).copied().unwrap_or("main"), "base") {
+            Ok(b) => b,
+            Err(e) => return e,
+        };
 
         // Resolve a usable base ref: prefer local, fall back to origin/<base>.
         let base_ref = match resolve_base_ref(&dir, base).await {
@@ -660,7 +771,10 @@ pub async fn git_branch(param: &str) -> String {
 
     // Create form: `<path> <name>`
     if parts.len() >= 2 {
-        let name = parts[1];
+        let name = match positional(parts[1], "branch") {
+            Ok(n) => n,
+            Err(e) => return e,
+        };
         return match git_command()
             .args(["-C", &dir, "branch", name])
             .output()
@@ -710,7 +824,10 @@ pub async fn git_checkout(param: &str) -> String {
         Ok(d) => d,
         Err(e) => return e,
     };
-    let branch = parts[1];
+    let branch = match positional(parts[1], "branch") {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
 
     match git_command()
         .args(["-C", &dir, "checkout", branch])
@@ -751,7 +868,10 @@ pub async fn git_merge(param: &str) -> String {
         Ok(d) => d,
         Err(e) => return e,
     };
-    let branch = parts[1];
+    let branch = match positional(parts[1], "branch") {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
     let no_ff = parts.iter().skip(2).any(|p| *p == "--no-ff");
 
     let mut args: Vec<String> = vec!["-C".to_string(), dir.clone(), "merge".to_string()];
@@ -805,9 +925,14 @@ pub async fn git_rm(param: &str) -> String {
 
     let files = parts[1];
     let file_args: Vec<&str> = files.split_whitespace().collect();
+    for f in &file_args {
+        if let Err(e) = positional(f, "file") {
+            return e;
+        }
+    }
 
     match git_command()
-        .args(["-C", &dir, "rm"])
+        .args(["-C", &dir, "rm", "--"])
         .args(&file_args)
         .output()
         .await
@@ -848,11 +973,13 @@ pub async fn git_mv(param: &str) -> String {
         Err(e) => return e,
     };
 
-    let src = parts[1];
-    let dst = parts[2];
+    let (src, dst) = match (positional(parts[1], "source"), positional(parts[2], "destination")) {
+        (Ok(s), Ok(d)) => (s, d),
+        (Err(e), _) | (_, Err(e)) => return e,
+    };
 
     match git_command()
-        .args(["-C", &dir, "mv", src, dst])
+        .args(["-C", &dir, "mv", "--", src, dst])
         .output()
         .await
     {
@@ -875,7 +1002,7 @@ pub async fn git_mv(param: &str) -> String {
 #[embra_tool(
     name = "git_clone",
     is_side_effectful = true,
-    description = "Clone a git repository into /embra/workspace/. HTTPS uses the stored GitHub token; SSH is also supported. subpath may be a bare directory name (`myrepo`), a workspace-relative path (`repos/myrepo`), or an absolute path under the workspace (`/embra/workspace/repos/myrepo`); if omitted, the repo name is derived from the URL."
+    description = "Clone a git repository into /embra/workspace/. HTTPS uses the stored GitHub token; SSH is also supported. url is https://, http://, ssh://, git:// or user@host:path; a local path or a file:// URL is refused. subpath may be a bare directory name (`myrepo`), a workspace-relative path (`repos/myrepo`), or an absolute path under the workspace (`/embra/workspace/repos/myrepo`); if omitted, the repo name is derived from the URL."
 )]
 pub struct GitCloneArgs {
     pub url: String,
@@ -911,7 +1038,7 @@ impl GitStatusArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "git_log",
-    description = "Show recent git log for a directory under /embra/workspace. args is an optional free-form git-log argument string (e.g. `-n 20 --oneline`). path may be absolute (`/embra/workspace/repo`) or relative (`repo`)."
+    description = "Show recent git log for a directory under /embra/workspace. args is optional: a count (`-n 20`, `-5`), `--oneline`, `--graph`, `--stat`, `--decorate`, `--no-merges`, `--merges`, `--reverse`, `--all`, `--first-parent`, `--name-only`, `--name-status`, `-p`, the filters `--author=`, `--committer=`, `--since=`/`--after=`, `--until=`/`--before=`, `--grep=`, `--max-count=`, `--skip=`, `--format=`/`--pretty=`, `--date=`, and revisions or paths; any other flag is refused. path may be absolute (`/embra/workspace/repo`) or relative (`repo`)."
 )]
 pub struct GitLogArgs {
     pub path: String,
@@ -1418,5 +1545,103 @@ mod git_command_tests {
         prepare_git_config_in(&dir, &legacy).await;
         assert_eq!(std::fs::read_to_string(&global).unwrap(), before);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::*;
+
+    /// `git_log` passes a count, the listed flags and revisions or paths,
+    /// and refuses any other flag: `--output` would write a file wherever
+    /// git runs, outside the jail every writer shares (#7).
+    #[test]
+    fn git_log_passes_its_list_and_refuses_every_other_flag() {
+        let accepted: [Vec<&str>; 5] = [
+            vec!["-5"],
+            vec!["-n", "20", "--oneline"],
+            vec!["--author=foo", "--since=yesterday", "main"],
+            vec!["--stat", "-p", "src/lib.rs"],
+            vec![],
+        ];
+        for ok in accepted {
+            assert_eq!(git_log_args(&ok).unwrap(), ok, "{ok:?}");
+        }
+        let refused: [Vec<&str>; 5] = [
+            vec!["--output=/tmp/pwned"],
+            vec!["--output=../escape"],
+            vec!["-n", "x"],
+            vec!["--exec=touch /tmp/x"],
+            vec!["-o", "/tmp/x"],
+        ];
+        for bad in refused {
+            let err = git_log_args(&bad).unwrap_err();
+            assert!(err.starts_with("Denied: git_log does not pass"), "{bad:?}: {err}");
+        }
+    }
+
+    /// The refusal comes before git runs: nothing is written where the flag
+    /// pointed, whether or not the repository exists.
+    #[tokio::test]
+    async fn a_git_log_output_flag_is_refused_and_writes_nothing() {
+        let target = std::env::temp_dir().join(format!("embra-git-log-pwned-{}", std::process::id()));
+        let _ = std::fs::remove_file(&target);
+        let out = git_log(&format!("repo --output={}", target.display())).await;
+        assert!(out.starts_with("Denied:"), "{out}");
+        assert!(!target.exists());
+        let out = git_log("repo --output=../escape").await;
+        assert!(out.starts_with("Denied:"), "{out}");
+    }
+
+    /// The transports pass; a command (`ext::`), a file, a local path and an
+    /// option-shaped token are refused before git runs (#56).
+    #[test]
+    fn validate_clone_url_accepts_the_transports_and_refuses_commands_files_and_options() {
+        for ok in [
+            "https://github.com/o/r.git",
+            "http://h/r",
+            "git://h/r",
+            "ssh://git@h/r.git",
+            "git@github.com:o/r.git",
+            "host:path/r",
+        ] {
+            assert!(validate_clone_url(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "ext::sh -c id",
+            "fd::17",
+            "--upload-pack=touch /tmp/x",
+            "-x",
+            "file:///etc",
+            "FILE://etc",
+            "/embra/state",
+            "./here",
+            "~/x",
+            "plain-name",
+        ] {
+            let err = validate_clone_url(bad).unwrap_err();
+            assert!(err.starts_with("Denied:"), "{bad}: {err}");
+        }
+    }
+
+    /// Every model-supplied positional of the git family is refused when it
+    /// begins with `-`, before git runs (the repository need not exist).
+    #[tokio::test]
+    async fn option_shaped_positionals_are_refused_before_git_runs() {
+        let db = WardsonDbClient::from_url("http://127.0.0.1:1");
+        let cases = [
+            ("checkout", git_checkout("repo -b").await),
+            ("merge", git_merge("repo --abort").await),
+            ("branch delete", git_branch("repo delete -D").await),
+            ("branch base", git_branch("repo delete main -x").await),
+            ("branch create", git_branch("repo -d").await),
+            ("add", git_add("repo --all").await),
+            ("rm", git_rm("repo -r").await),
+            ("mv", git_mv("repo -k x").await),
+            ("clone", git_clone(&db, "--upload-pack=id").await),
+        ];
+        for (what, out) in cases {
+            assert!(out.starts_with("Denied:"), "{what}: {out}");
+        }
     }
 }

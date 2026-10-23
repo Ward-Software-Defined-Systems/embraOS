@@ -99,9 +99,9 @@ For the data model, edge taxonomy, density rationale, promotion path, auto-enric
 
 | Tool | Description |
 |---|---|
-| **git_clone** | Clone a git repository into `/embra/workspace/` — supports HTTPS (with GitHub token) and SSH URLs. Optional second argument accepts a bare dirname (`myrepo`) or a relative path under the workspace (`repos/myrepo`); parent directories are created on demand and `..` segments are rejected |
+| **git_clone** | Clone a git repository into `/embra/workspace/` — `https://`, `http://`, `ssh://`, `git://` or `user@host:path` (HTTPS with the stored token); a local path, a `file://` URL or a remote helper such as `ext::` is refused. Optional second argument accepts a bare dirname (`myrepo`) or a relative path under the workspace (`repos/myrepo`); parent directories are created on demand and `..` segments are rejected |
 | **git_status** | Run `git status` on a directory |
-| **git_log** | Show recent commits for a repository |
+| **git_log** | Show recent commits for a repository. The optional arguments are a count (`-n 20`, `-5`), the presentation flags (`--oneline`, `--graph`, `--stat`, `--decorate`, `--no-merges`, `--merges`, `--reverse`, `--all`, `--first-parent`, `--name-only`, `--name-status`, `-p`), the filters (`--author=`, `--committer=`, `--since=`/`--after=`, `--until=`/`--before=`, `--grep=`, `--max-count=`, `--skip=`, `--format=`/`--pretty=`, `--date=`) and revisions or paths; any other flag is refused before git runs |
 | **git_diff** | View uncommitted changes, optionally for a specific file |
 | **git_add** | Stage files for commit (workspace restricted to `/embra/workspace/`) |
 | **git_commit** | Commit staged changes with a message, passed to git exactly as given — a blank line after the first line separates the subject from the body (workspace restricted) |
