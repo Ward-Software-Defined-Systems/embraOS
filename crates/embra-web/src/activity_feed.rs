@@ -114,6 +114,7 @@ impl ActivityFeed {
             }
         };
         let mut delivered = false;
+        let mut undecodable_said = false;
         while let Some(item) = frames.next().await {
             let frame = match item {
                 Ok(f) => f,
@@ -122,8 +123,17 @@ impl ActivityFeed {
                     break;
                 }
             };
-            let Ok(decoded) = brain::ActivityFrame::decode(frame.payload.as_slice()) else {
-                continue;
+            let decoded = match brain::ActivityFrame::decode(frame.payload.as_slice()) {
+                Ok(d) => d,
+                Err(e) => {
+                    // Said once per connection: a run whose every frame fails
+                    // to decode would otherwise spin without a word (#62).
+                    if !undecodable_said {
+                        undecodable_said = true;
+                        tracing::warn!(error = %e, "activity feed: a frame did not decode; such frames are dropped");
+                    }
+                    continue;
+                }
             };
             if let Some(msg) = frame_to_msg(decoded) {
                 if !delivered && matches!(msg, ActivityMsg::Snapshot(_)) {

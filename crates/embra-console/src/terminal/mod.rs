@@ -28,6 +28,12 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 use std::io::stdout;
 use std::time::Duration;
+
+/// The deadline of the expression poll, a unary the event loop awaits in
+/// place: a slow gateway costs one poll, never the screen.
+const EXPRESSION_POLL_TIMEOUT: Duration = Duration::from_secs(3);
+/// The deadline of the stop unary, awaited in place for the same reason.
+const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 use tokio::sync::mpsc;
 
 /// The console's screen. Its backend never asks the terminal where the
@@ -234,7 +240,10 @@ async fn run_tui(mut client: BrainClient, _device: Option<String>) -> Result<()>
 
             // Expression panel poll (EXPR-01)
             _ = expression_tick.tick() => {
-                if let Ok((content, version)) = client.get_expression().await
+                // Under a deadline: the loop is one task, and a gateway that
+                // stalls would freeze the screen and the keys with it (#62).
+                if let Ok(Ok((content, version))) =
+                    tokio::time::timeout(EXPRESSION_POLL_TIMEOUT, client.get_expression()).await
                     && version != app.expression_version
                 {
                     app.expression_content = content;
@@ -310,10 +319,14 @@ async fn run_tui(mut client: BrainClient, _device: Option<String>) -> Result<()>
         // /stop intercept and by Esc-while-busy.
         if app.stop_requested {
             app.stop_requested = false;
-            let line = match client.stop_turn().await {
-                Ok(true) => "Stop requested — interrupting the current turn…".to_string(),
-                Ok(false) => "No turn in flight — nothing to stop.".to_string(),
-                Err(e) => format!("Stop failed: {}", e),
+            let line = match tokio::time::timeout(STOP_TIMEOUT, client.stop_turn()).await {
+                Ok(Ok(true)) => "Stop requested — interrupting the current turn…".to_string(),
+                Ok(Ok(false)) => "No turn in flight — nothing to stop.".to_string(),
+                Ok(Err(e)) => format!("Stop failed: {}", e),
+                Err(_) => format!(
+                    "Stop failed: the gateway did not answer within {} s.",
+                    STOP_TIMEOUT.as_secs()
+                ),
             };
             app.messages.push(DisplayMessage::system_with_tz(&line, &app.config_tz));
         }

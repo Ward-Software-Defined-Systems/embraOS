@@ -769,7 +769,7 @@ pub fn ChatApp() -> impl IntoView {
             />
             <ChatScroll messages streaming />
             <SetupOverlay current_setup on_submit=send_text />
-            <ChatInput input connected slashes_open pending next_local_id session_name
+            <ChatInput input connected slashes_open pending next_local_id session_name messages
                 busy=Signal::derive(move || !streaming.with(|s| s.is_empty()) || thinking.get())
                 on_send=send_msg />
 
@@ -1794,6 +1794,9 @@ fn ChatInput<F>(
     pending: RwSignal<Vec<PendingAttachment>>,
     next_local_id: RwSignal<u32>,
     session_name: RwSignal<String>,
+    /// The timeline, for the one message the composer adds itself: a stop
+    /// that failed.
+    messages: RwSignal<Vec<Bubble>>,
     busy: Signal<bool>,
     on_send: F,
 ) -> impl IntoView
@@ -1953,8 +1956,24 @@ where
                 }
                 on:click=move |e| {
                     if busy.get_untracked() {
-                        spawn_local(async {
-                            let _ = gloo_net::http::Request::post("/api/stop").send().await;
+                        // A stop that failed is said (#62): the route answers
+                        // 200 with `error` set when the gateway did not take
+                        // it, and a transport failure never reaches the route.
+                        spawn_local(async move {
+                            let failed = match gloo_net::http::Request::post("/api/stop").send().await {
+                                Ok(resp) => resp
+                                    .json::<serde_json::Value>()
+                                    .await
+                                    .ok()
+                                    .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string))
+                                    .filter(|e| !e.is_empty()),
+                                Err(e) => Some(e.to_string()),
+                            };
+                            if let Some(reason) = failed {
+                                messages.update(|m| {
+                                    m.push(Bubble::System { content: format!("stop failed: {reason}"), kind: "error".into() });
+                                });
+                            }
                         });
                     } else {
                         send_click(e);
