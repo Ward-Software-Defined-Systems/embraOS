@@ -125,6 +125,20 @@ fn collect_operator_certs(dir: &std::path::Path) -> Vec<(String, String)> {
     certs
 }
 
+/// The bundle to export, or none: the module's INVARIANT as a function.
+/// `Some` only when the stock base bundle was read and is not empty and
+/// there are operator certificates to add; the merge then starts with the
+/// base, so the exported store is a strict superset of the stock roots.
+/// An unreadable or empty base with extras present is `None`: nothing is
+/// exported, because an extras-only store would refuse every public host.
+fn plan_bundle(base: Option<&str>, extras: &[(String, String)]) -> Option<String> {
+    let base = base.filter(|b| !b.is_empty())?;
+    if extras.is_empty() {
+        return None;
+    }
+    Some(merge_bundle(base, extras))
+}
+
 /// Build the merged CA bundle and export `GIT_SSL_CAINFO` + `SSL_CERT_FILE`.
 ///
 /// Called once from `register_services()` before any service spawns (the TZ
@@ -142,20 +156,16 @@ pub fn setup_operator_ca_trust() {
         return;
     }
 
-    let base = match std::fs::read_to_string(CA_BASE_BUNDLE) {
-        Ok(b) if !b.is_empty() => b,
-        Ok(_) | Err(_) => {
-            // Never export an extras-only bundle — see the module INVARIANT.
-            warn!(
-                "Operator CA trust DISABLED: cannot read base bundle {} — \
-                 exporting operator certs alone would break public-host TLS",
-                CA_BASE_BUNDLE
-            );
-            return;
-        }
+    let base = std::fs::read_to_string(CA_BASE_BUNDLE).ok();
+    let Some(merged) = plan_bundle(base.as_deref(), &extras) else {
+        // Never export an extras-only bundle — see the module INVARIANT.
+        warn!(
+            "Operator CA trust DISABLED: cannot read base bundle {} — \
+             exporting operator certs alone would break public-host TLS",
+            CA_BASE_BUNDLE
+        );
+        return;
     };
-
-    let merged = merge_bundle(&base, &extras);
     if let Err(e) = std::fs::write(CA_MERGED_BUNDLE, &merged) {
         warn!("Operator CA trust DISABLED: cannot write {}: {}", CA_MERGED_BUNDLE, e);
         return;
@@ -184,6 +194,21 @@ mod tests {
 
     const CERT_A: &str = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
     const CERT_B: &str = "-----BEGIN CERTIFICATE-----\nBBBB\n-----END CERTIFICATE-----";
+
+    /// The INVARIANT at the decision: no base, an empty base or no extras
+    /// export nothing; a real base with extras exports a superset that
+    /// starts with the base (#52).
+    #[test]
+    fn plan_bundle_exports_a_superset_of_the_base_or_nothing() {
+        let extras = vec![("op.crt".to_string(), CERT_A.to_string())];
+        assert_eq!(plan_bundle(None, &extras), None);
+        assert_eq!(plan_bundle(Some(""), &extras), None);
+        assert_eq!(plan_bundle(Some("ROOTS"), &[]), None);
+        let merged = plan_bundle(Some("ROOTS\n"), &extras).expect("a bundle");
+        assert!(merged.starts_with("ROOTS"), "{merged}");
+        assert!(merged.contains(CERT_A.trim()), "{merged}");
+        assert_eq!(merged, merge_bundle("ROOTS\n", &extras));
+    }
 
     #[test]
     fn pem_cert_count_counts_pairs() {

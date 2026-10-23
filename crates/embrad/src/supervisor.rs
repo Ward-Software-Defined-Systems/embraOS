@@ -692,27 +692,22 @@ impl Supervisor {
 
         let result = response.into_inner();
 
-        if result.valid {
-            info!("Soul verification PASSED (hash={})", result.computed_hash);
-            Ok(())
-        } else {
-            let reason = if result.error.is_empty() {
-                format!("Soul hash mismatch: computed={}, stored={}",
-                    result.computed_hash, result.stored_hash)
-            } else {
-                result.error
-            };
-            error!("Soul verification FAILED: {}", reason);
-
-            // First run — no soul exists yet. This is expected.
-            if is_first_run(&reason) {
-                warn!("No soul found — this appears to be a first run. Continuing boot for Learning Mode.");
-                return Ok(());
+        match soul_decision(result.valid, &result.error, &result.computed_hash, &result.stored_hash) {
+            SoulDecision::Pass => {
+                info!("Soul verification PASSED (hash={})", result.computed_hash);
+                Ok(())
             }
-
-            // Soul exists but verification failed — this is a HALT condition
-            error!("HALTING: Soul integrity violation. This system cannot be trusted.");
-            halt_system(&format!("Soul verification failed: {}", reason))
+            SoulDecision::FirstRun => {
+                // First run — no soul exists yet. This is expected.
+                warn!("No soul found — this appears to be a first run. Continuing boot for Learning Mode.");
+                Ok(())
+            }
+            SoulDecision::Halt(reason) => {
+                error!("Soul verification FAILED: {}", reason);
+                // Soul exists but verification failed — this is a HALT condition
+                error!("HALTING: Soul integrity violation. This system cannot be trusted.");
+                halt_system(&format!("Soul verification failed: {}", reason))
+            }
         }
     }
 
@@ -839,6 +834,14 @@ pub(crate) const HALT_REASON_PATH: &str = "/embra/state/halt_reason";
 #[cfg(target_os = "linux")]
 pub(crate) fn halt_system(reason: &str) -> ! {
     error!("SYSTEM HALT: {}", reason);
+    if std::process::id() != 1 {
+        // Development: embrad is not PID 1, so the machine is not the OS
+        // and is not ours to halt (#16). The reason goes where the
+        // non-Linux arm puts it, and the process exits.
+        error!("not PID 1 — exiting instead of halting the host");
+        let _ = std::fs::write("/tmp/embra-halt-reason", reason);
+        std::process::exit(1);
+    }
     // Write reason to STATE partition for post-mortem
     let _ = std::fs::write(HALT_REASON_PATH, reason);
     // Sync filesystems
@@ -877,8 +880,46 @@ pub(crate) fn reboot_system() -> ! {
 /// trustd has no code for that case: its report is text, and these are the
 /// words looked for (`embra-trustd/src/soul.rs`, `NO_SOUL_ERROR`). Every
 /// other report is a failed verification and halts the system.
+/// The sentence embra-trustd reports for a soul document that does not
+/// exist while no hash is stored (`NO_SOUL_ERROR` in
+/// `embra-trustd/src/soul.rs`, pinned there as this text): a first boot.
+/// Reword one and the other with it.
+const NO_SOUL_REPORT: &str = "Soul document not found — no soul exists (first run or data loss)";
+
+/// Whether trustd's report is the first-boot sentence. The comparison is
+/// exact: a database error that happens to say "not found", a missing
+/// hash, a document without its soul field — none of them reads as a first
+/// boot, so none re-seals a machine that was sealed (#52).
 fn is_first_run(reason: &str) -> bool {
-    reason.contains("no soul") || reason.contains("not found")
+    reason.trim() == NO_SOUL_REPORT
+}
+
+/// What embrad does with trustd's verdict (`verify_soul`).
+#[derive(Debug, PartialEq)]
+enum SoulDecision {
+    /// The soul as stored matches its hash: the boot continues.
+    Pass,
+    /// trustd's first-boot sentence, exactly: Learning Mode.
+    FirstRun,
+    /// Anything else: the machine halts with this reason (the mismatch
+    /// spelled out when trustd gave no words).
+    Halt(String),
+}
+
+fn soul_decision(valid: bool, error: &str, computed: &str, stored: &str) -> SoulDecision {
+    if valid {
+        return SoulDecision::Pass;
+    }
+    let reason = if error.is_empty() {
+        format!("Soul hash mismatch: computed={computed}, stored={stored}")
+    } else {
+        error.to_string()
+    };
+    if is_first_run(&reason) {
+        SoulDecision::FirstRun
+    } else {
+        SoulDecision::Halt(reason)
+    }
 }
 
 /// 16 bytes of `/dev/urandom` as 32 lowercase hex characters: the web
@@ -938,8 +979,13 @@ mod first_run_tests {
         for failed in [
             "Hash mismatch",
             "Soul hash mismatch: computed=aa, stored=bb",
-            "No stored soul hash at /embra/state/soul.sha256 — first boot or STATE partition issue",
+            "No stored soul hash at /embra/state/soul.sha256 while a soul document exists — restore STATE, or remove the soul with seed-state.sh --wipe data to start over",
             "Stored soul hash is empty",
+            // A database whose own message says "not found", and the
+            // sentence with anything around it: neither is a first boot.
+            "WardSONDB error: collection not found",
+            "The stored soul document lacks its soul field; the seal cannot be checked",
+            "Soul document not found — no soul exists (first run or data loss) at /x",
             "Failed to read stored soul hash",
             "Failed to connect to WardSONDB",
             "Failed to parse WardSONDB response",
@@ -950,6 +996,29 @@ mod first_run_tests {
             "Soul document missing but a sealed hash is stored at /embra/state/soul.sha256 — restore DATA, or remove the hash to start over",
         ] {
             assert!(!is_first_run(failed), "{failed}");
+        }
+    }
+
+    /// The three-way decision the soul gate makes, including the mismatch
+    /// trustd reports with no words of its own (#52).
+    #[test]
+    fn the_soul_gate_passes_continues_a_first_boot_and_halts_everything_else() {
+        use super::{soul_decision, SoulDecision};
+        assert_eq!(soul_decision(true, "", "aa", "aa"), SoulDecision::Pass);
+        assert_eq!(
+            soul_decision(false, "Soul document not found — no soul exists (first run or data loss)", "", ""),
+            SoulDecision::FirstRun
+        );
+        assert_eq!(
+            soul_decision(false, "", "aa", "bb"),
+            SoulDecision::Halt("Soul hash mismatch: computed=aa, stored=bb".to_string())
+        );
+        for failed in [
+            "Hash mismatch",
+            "WardSONDB error: collection not found",
+            "Soul document missing but a sealed hash is stored at /embra/state/soul.sha256 — restore DATA, or remove the hash to start over",
+        ] {
+            assert_eq!(soul_decision(false, failed, "aa", "bb"), SoulDecision::Halt(failed.to_string()), "{failed}");
         }
     }
 }
@@ -980,6 +1049,36 @@ mod restart_budget_tests {
         // Restarted and stable for the window → reset.
         assert!(restart_budget_reset_due(3, window, window));
         assert!(restart_budget_reset_due(9, Duration::from_secs(600), window));
+    }
+
+    /// A service that used its restart budget is marked `Halted` and is not
+    /// started again: the budget bail precedes the spawn, so the test needs
+    /// no binary (#52).
+    #[tokio::test]
+    async fn a_service_past_its_restart_budget_is_halted_and_not_started() {
+        let mut sup = Supervisor::new();
+        sup.services.push(ServiceState {
+            def: ServiceDef {
+                name: "probe".into(),
+                binary: String::new(),
+                args: vec![],
+                env: vec![],
+                health_check: HealthCheck::Http { url: "http://127.0.0.1:1/".into(), timeout: Duration::from_millis(10) },
+                restart_policy: RestartPolicy { max_restarts: 2, ..RestartPolicy::default() },
+            },
+            child: None,
+            pid: None,
+            started_at: None,
+            restart_count: 2,
+            status: ServiceStatus::Failed("exited".into()),
+        });
+        let err = sup.restart_service(0).await.unwrap_err();
+        assert!(err.to_string().contains("permanently failed"), "{err}");
+        assert_eq!(*sup.service_status(0), ServiceStatus::Halted);
+        assert_eq!(sup.services[0].restart_count, 2, "no attempt was counted");
+        // Halted stays halted: a second call is a no-op.
+        assert!(sup.restart_service(0).await.is_ok());
+        assert_eq!(*sup.service_status(0), ServiceStatus::Halted);
     }
 
     #[test]
