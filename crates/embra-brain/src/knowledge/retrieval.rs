@@ -204,7 +204,10 @@ pub async fn retrieve_relevant_knowledge(
             Some(&PREFETCH_FIELDS),
         )
         .await
-        .unwrap_or_default()
+        .unwrap_or_else(|e| {
+            tracing::warn!("retrieval prefetch of memory.entries failed: {}", e);
+            Vec::new()
+        })
     };
 
     // Per-query document frequency (2026-09-08). Counts only the query's own
@@ -267,7 +270,11 @@ pub async fn retrieve_relevant_knowledge(
     // widened take(20) → the full 50-entry window; 50 serial round trips
     // would cost real per-turn latency), then join the store sequentially
     // (it needs &mut).
-    if let Ok(entries) = db.query("memory.entries", &session_entries_query_body(session_name)).await {
+    let session_entries = db.query("memory.entries", &session_entries_query_body(session_name)).await;
+    if let Err(e) = &session_entries {
+        tracing::warn!("retrieval session-entry read failed: {}", e);
+    }
+    if let Ok(entries) = session_entries {
         let walk_ids: Vec<String> = entries
             .iter()
             .filter_map(|d| d.get("_id").and_then(|v| v.as_str()).map(|s| s.to_string()))

@@ -206,10 +206,14 @@ async fn derive_edges_inner(
         let src_id = edge.get("source_id").and_then(|v| v.as_str()).unwrap_or("");
         let tgt_id = edge.get("target_id").and_then(|v| v.as_str()).unwrap_or("");
         let etype = edge.get("edge_type").and_then(|v| v.as_str()).unwrap_or("");
-        if edge_exists(db, src_id, tgt_id, etype).await {
-            continue;
+        // An existence that could not be determined is not an absence: the
+        // edge is not written (a duplicate would be permanent) and the
+        // failure is said (#57).
+        match edge_exists(db, src_id, tgt_id, etype).await {
+            Ok(false) => new_edges.push(edge),
+            Ok(true) => {}
+            Err(e) => warn!("edge {src_id} -[{etype}]-> {tgt_id} not written: its existence could not be checked: {e}"),
         }
-        new_edges.push(edge);
     }
 
     if new_edges.is_empty() {
@@ -279,7 +283,9 @@ fn push_bidirectional(
     }));
 }
 
-async fn edge_exists(db: &WardsonDbClient, source_id: &str, target_id: &str, edge_type: &str) -> bool {
+/// Whether the edge is already stored. A query that failed is an error,
+/// never `false`: the caller does not write on an unknown (#57).
+async fn edge_exists(db: &WardsonDbClient, source_id: &str, target_id: &str, edge_type: &str) -> Result<bool> {
     let filter = json!({
         "filter": {
             "source_id": source_id,
@@ -288,10 +294,7 @@ async fn edge_exists(db: &WardsonDbClient, source_id: &str, target_id: &str, edg
         },
         "limit": 1,
     });
-    match db.query("memory.edges", &filter).await {
-        Ok(docs) => !docs.is_empty(),
-        Err(_) => false,
-    }
+    Ok(!db.query("memory.edges", &filter).await?.is_empty())
 }
 
 #[cfg(test)]
@@ -354,5 +357,29 @@ mod tests {
         // Asymmetric sets: [a,b] vs [a,b,c,d] → 2/4 = 0.5
         let w2 = jaccard(&["a", "b"], &["a", "b", "c", "d"]).unwrap();
         assert!((w2 - 0.5).abs() < 1e-9, "expected 0.5, got {}", w2);
+    }
+}
+
+#[cfg(test)]
+mod edge_exists_tests {
+    use super::edge_exists;
+    use crate::db::WardsonDbClient;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn ask(answer: ResponseTemplate) -> anyhow::Result<bool> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST")).and(path("/memory.edges/query")).respond_with(answer).mount(&server).await;
+        edge_exists(&WardsonDbClient::from_url(&server.uri()), "a", "b", "same_session").await
+    }
+
+    /// A failed existence check is an error, not "does not exist" (#57).
+    #[tokio::test]
+    async fn an_unanswered_existence_check_is_an_error_not_an_absence() {
+        assert!(ask(ResponseTemplate::new(500)).await.is_err());
+        let none = ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "data": [], "meta": {}}));
+        assert!(!ask(none).await.unwrap());
+        let one = ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "data": [{"_id": "e1"}], "meta": {}}));
+        assert!(ask(one).await.unwrap());
     }
 }
