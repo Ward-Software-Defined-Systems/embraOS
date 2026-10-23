@@ -911,10 +911,7 @@ async fn run_v1_baseline(db: &WardsonDbClient) -> Result<()> {
     ];
 
     for collection in &required_collections {
-        if !db.collection_exists(collection).await.unwrap_or(false) {
-            info!("Creating collection: {}", collection);
-            let _ = db.create_collection(collection).await;
-        }
+        ensure_collection(db, collection).await?;
     }
 
     info!("Migration v1: baseline collections ensured");
@@ -925,14 +922,7 @@ async fn run_v1_baseline(db: &WardsonDbClient) -> Result<()> {
 async fn run_v2_consolidation(db: &WardsonDbClient) -> Result<()> {
     info!("Running migration v2: consolidation log");
 
-    if !db
-        .collection_exists("system.consolidation_log")
-        .await
-        .unwrap_or(false)
-    {
-        info!("Creating collection: system.consolidation_log");
-        let _ = db.create_collection("system.consolidation_log").await;
-    }
+    ensure_collection(db, "system.consolidation_log").await?;
 
     info!("Migration v2: consolidation log collection ensured");
     Ok(())
@@ -943,10 +933,7 @@ async fn run_v2_consolidation(db: &WardsonDbClient) -> Result<()> {
 /// `_id == name`). Idempotent — brand-new feature, no data walk.
 async fn run_v12_guardian(db: &WardsonDbClient) -> Result<()> {
     info!("Running migration v12: guardian.tools collection");
-    if !db.collection_exists("guardian.tools").await.unwrap_or(false) {
-        info!("Creating collection: guardian.tools");
-        let _ = db.create_collection("guardian.tools").await;
-    }
+    ensure_collection(db, "guardian.tools").await?;
     info!("Migration v12: guardian.tools collection ensured");
     Ok(())
 }
@@ -958,10 +945,7 @@ async fn run_v12_guardian(db: &WardsonDbClient) -> Result<()> {
 async fn run_v13_identity_graph(db: &WardsonDbClient) -> Result<()> {
     info!("Running migration v13: identity.graph collection");
     let coll = crate::identity_graph::IDENTITY_COLLECTION;
-    if !db.collection_exists(coll).await.unwrap_or(false) {
-        info!("Creating collection: {coll}");
-        let _ = db.create_collection(coll).await;
-    }
+    ensure_collection(db, coll).await?;
     info!("Migration v13: identity.graph collection ensured");
     Ok(())
 }
@@ -1232,16 +1216,7 @@ async fn run_v5_knowledge_graph(db: &WardsonDbClient) -> Result<()> {
 
     // Step 1: Create new collections (idempotent)
     for collection in &["memory.semantic", "memory.procedural", "memory.edges"] {
-        if !db.collection_exists(collection).await.unwrap_or(false) {
-            info!("Creating collection: {}", collection);
-            if let Err(e) = db.create_collection(collection).await {
-                // 409 COLLECTION_EXISTS is idempotent success
-                if !is_conflict_err(&e) {
-                    error!("Migration v5: failed to create collection {}: {}", collection, e);
-                    return Err(e);
-                }
-            }
-        }
+        ensure_collection(db, collection).await?;
     }
 
     // Step 2: Create indexes (idempotent — create_index treats 409 as success)
@@ -1356,6 +1331,25 @@ async fn run_v5_knowledge_graph(db: &WardsonDbClient) -> Result<()> {
     Ok(())
 }
 
+/// Create a collection unless it exists: the one idiom behind seven
+/// migration steps that each wrote their own, three ways (#45). A 409 is
+/// the collection existing (idempotent success); any other failure to
+/// create is returned, where four of the steps used to swallow it. A
+/// probe that fails reads as absent, so the create decides.
+async fn ensure_collection(db: &WardsonDbClient, name: &str) -> Result<()> {
+    if db.collection_exists(name).await.unwrap_or(false) {
+        return Ok(());
+    }
+    info!("Creating collection: {name}");
+    if let Err(e) = db.create_collection(name).await
+        && !is_conflict_err(&e)
+    {
+        error!("Failed to create collection {name}: {e}");
+        return Err(e);
+    }
+    Ok(())
+}
+
 fn is_conflict_err(e: &anyhow::Error) -> bool {
     e.downcast_ref::<WardsonDbError>()
         .map(|w| w.is_conflict())
@@ -1368,15 +1362,7 @@ fn is_conflict_err(e: &anyhow::Error) -> bool {
 async fn run_v6_expression_panel(db: &WardsonDbClient) -> Result<()> {
     info!("Running migration v6: expression panel");
 
-    if !db.collection_exists("ui").await.unwrap_or(false) {
-        info!("Creating collection: ui");
-        if let Err(e) = db.create_collection("ui").await
-            && !is_conflict_err(&e)
-        {
-            error!("Migration v6: failed to create collection ui: {}", e);
-            return Err(e);
-        }
-    }
+    ensure_collection(db, "ui").await?;
 
     // Seed singleton — only if it does not already exist.
     let existing = db.read("ui", "expression").await.ok();
@@ -1572,26 +1558,7 @@ async fn run_v9_pluggable_provider(db: &WardsonDbClient) -> Result<()> {
     info!("Running migration v9: pluggable provider scaffolding");
 
     // 1. Provider cache collection.
-    if !db
-        .collection_exists("provider.gemini_cache")
-        .await
-        .unwrap_or(false)
-    {
-        match db.create_collection("provider.gemini_cache").await {
-            Ok(_) => info!("Migration v9: created provider.gemini_cache"),
-            Err(e) => {
-                let already_exists = matches!(
-                    e.downcast_ref::<WardsonDbError>(),
-                    Some(WardsonDbError::Api { status: 409, .. })
-                );
-                if !already_exists {
-                    error!("Migration v9: create_collection failed: {e}");
-                    return Err(e);
-                }
-                info!("Migration v9: provider.gemini_cache already exists");
-            }
-        }
-    }
+    ensure_collection(db, "provider.gemini_cache").await?;
 
     // 2. Stamp config.system:config with api_provider if missing.
     if let Ok(mut cfg_doc) = db.read("config.system", "config").await {
@@ -2126,5 +2093,44 @@ mod ledger_tests {
             "ok": true, "data": [{"schema_version": 3}, {"schema_version": 7}, {"schema_version": 5}], "meta": {}
         }));
         assert_eq!(ledger(recorded).await.unwrap(), 7);
+    }
+}
+
+#[cfg(test)]
+mod ensure_collection_tests {
+    use super::ensure_collection;
+    use crate::db::WardsonDbClient;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn run(exists: u16, create: Option<(u16, u64)>) -> (anyhow::Result<()>, MockServer) {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/things")).respond_with(ResponseTemplate::new(exists)).mount(&server).await;
+        if let Some((status, expected)) = create {
+            Mock::given(method("POST"))
+                .and(path("/_collections"))
+                .respond_with(ResponseTemplate::new(status).set_body_json(serde_json::json!({"ok": status < 400})))
+                .expect(expected)
+                .mount(&server)
+                .await;
+        }
+        let out = ensure_collection(&WardsonDbClient::from_url(&server.uri()), "things").await;
+        (out, server)
+    }
+
+    /// Present: no create. Absent: created, and a 409 is the collection
+    /// existing after all; any other failure is returned (#45).
+    #[tokio::test]
+    async fn a_collection_is_created_once_a_conflict_is_fine_and_a_failure_is_returned() {
+        let (out, server) = run(200, Some((201, 0))).await;
+        out.unwrap();
+        server.verify().await;
+        let (out, server) = run(404, Some((201, 1))).await;
+        out.unwrap();
+        server.verify().await;
+        let (out, _) = run(404, Some((409, 1))).await;
+        out.unwrap();
+        let (out, _) = run(404, Some((500, 1))).await;
+        assert!(out.is_err());
     }
 }
