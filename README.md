@@ -52,14 +52,15 @@ Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` 
 > | Model | Tag | Parameters | Context | Input | Effort sent (default) | Status |
 > |---|---|---|---|---|---|---|
 > | DeepSeek V4 Pro | `deepseek-v4-pro:cloud` | 1.6T total, 49B active (MoE) | 1M | text | `max` | vetted, preferred |
-> | DeepSeek V4.1 Flash | `deepseek-v4.1-flash:cloud` | 763B total; 8B active in prefill, 16B in decode (MoE) | 1M | text, image | none (`high`) | under evaluation |
-> | GLM 5.3 | `glm-5.3:cloud` | 753B | 1M | text | none (`max`) | under evaluation |
-> | Kimi K3 | `kimi-k3:cloud` | 2.8T (MoE) | 1M | text, image | none (`max`) | under evaluation |
+> | DeepSeek V4.1 Flash | `deepseek-v4.1-flash:cloud` | 763B total; 8B active in prefill, 16B in decode (MoE) | 1M | text, image | `max` | under evaluation |
+> | GLM 5.3 | `glm-5.3:cloud` | 753B | 1M | text | `max` | under evaluation |
+> | Kimi K3 | `kimi-k3:cloud` | 2.8T (MoE) | 1M | text, image | `max` | under evaluation |
 >
-> Figures are the Ollama library's (2026-10-08; `deepseek-v4.1-flash:cloud` and the effort
-> defaults 2026-10-20). `kimi-k3:cloud` and `deepseek-v4.1-flash:cloud` take image input; an
+> Figures are the Ollama library's (2026-10-08; `deepseek-v4.1-flash:cloud` 2026-10-20, the effort
+> defaults 2026-10-22). `kimi-k3:cloud` and `deepseek-v4.1-flash:cloud` take image input; an
 > image attached under the other two needs a vision-capable model. The brain sends
-> `reasoning_effort` to `deepseek-v4-pro:cloud` only; the others run at ollama.com's default.
+> `reasoning_effort: max` to all four; ollama.com's own default is lower for V4 Pro (`low`) and
+> V4.1 Flash (`high`).
 
 > **Soul-gated dynamic tools: the replicant check.** *(Experimental.)* The intelligence
 > proposes its own dynamic tools (`guardian_propose`); operators paste them
