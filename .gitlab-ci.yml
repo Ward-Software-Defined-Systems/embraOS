@@ -1,11 +1,12 @@
 # embraOS CI — Rust-level regression net.
 #
 # Ported from .github/workflows/ci.yml (2026-09-08) when the primary origin
-# moved to gitlab.ops.wsds. Scope is unchanged and deliberate: workspace
-# tests, the musl static cross-build (the ship path, minus Buildroot), and
-# invariant guards. This complements — never replaces — the local pipeline
-# (build-image.sh → Buildroot → QEMU boot against existing DATA), which
-# remains the authority for image/runtime validation.
+# moved to gitlab.ops.wsds. Scope: workspace tests, the musl static
+# cross-builds for both architectures (the ship path, minus Buildroot), the
+# invariant guards and the RustSec audit of both lockfiles. This complements —
+# never replaces — the local pipeline (build-image.sh → Buildroot → QEMU boot
+# against existing DATA), which remains the authority for image/runtime
+# validation.
 #
 # The toolchain is pinned HERE and in rust-toolchain.toml, which every host
 # (and rustup inside this image) reads. Bump both deliberately and together;
@@ -17,8 +18,9 @@
 # workflow it replaced was retired in the same commit — three runs were needed
 # because the port inherited three unstated dependencies on the old runner's
 # Ubuntu image: ~/.cargo on PATH, a preinstalled `file`, and LLVM packaged so
-# libclang could find its own builtin headers. Assume the same class of risk
-# for the queued aarch64 job and for the musl.cc toolchain-parity follow-up.
+# libclang could find its own builtin headers. The aarch64 job landed on
+# 2026-10-24 (#33) after a run of its commands on the build host; the musl.cc
+# toolchain-parity follow-up is still open.
 
 stages: [build, test]
 
@@ -27,6 +29,8 @@ variables:
   RUST_TOOLCHAIN: "1.98.1"
   # Matches the wsds-devops install (cargo install trunk --locked); bump deliberately.
   TRUNK_VERSION: "0.21.14"
+  # The RustSec audit tool the `audit` job installs; bump deliberately.
+  CARGO_AUDIT_VERSION: "0.22.2"
   # GitLab only caches paths inside the project dir, so cargo's home moves here.
   CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
   GIT_DEPTH: "0"
@@ -128,6 +132,40 @@ guards:
       check roaring             0.10.12        || fail=1
       check tikv-jemallocator   0.6.1          || fail=1
       exit $fail
+
+# RustSec advisories over both lockfiles (the workspace's and embra-web-ui's,
+# which has its own). A vulnerability fails the job; an unmaintained crate is a
+# warning (`paste` here, `proc-macro-error2` in the frontend lock). An advisory
+# whose fix moves a package inside the vendored database's dependency tree
+# (`cargo tree -p wardsondb`) is William's decision under the lock rules; until
+# it is taken, the advisory is named below with its fix, one id per line, and
+# the line goes when the bump lands. Nothing else is ignored (#33).
+audit:
+  stage: build
+  timeout: 20m
+  cache:
+    - key: "audit-cargo-$CI_COMMIT_REF_SLUG"
+      paths: [.cargo/bin/, .cargo/registry/index/, .cargo/registry/cache/, .cargo/advisory-db/]
+  script:
+    - |
+      if ! cargo audit --version 2>/dev/null | grep -q "cargo-audit-audit ${CARGO_AUDIT_VERSION}\$"; then
+        cargo install cargo-audit --locked --version "${CARGO_AUDIT_VERSION}" --force
+      fi
+      cargo audit --version
+    - |
+      set -eu
+      # One id per line, each with its crate, the version in the lock and the
+      # fix. The line goes when the bump lands.
+      ignore=""
+      ignore="$ignore --ignore RUSTSEC-2026-0346"   # rustls 0.23.45: Debug impls expose client session secrets; fix >=0.23.46
+      ignore="$ignore --ignore RUSTSEC-2026-0347"   # rustls 0.23.45: buffered data to the outer server after ECH rejection; fix >=0.23.46
+      ignore="$ignore --ignore RUSTSEC-2026-0348"   # rustls 0.23.45: brotli certificate decompression before authentication; fix >=0.23.46
+      ignore="$ignore --ignore RUSTSEC-2026-0349"   # rustls 0.23.45: unauthenticated ServerHello downgrade; fix >=0.23.46
+      ignore="$ignore --ignore RUSTSEC-2026-0382"   # rustls-webpki 0.103.15: distrusted intermediates accepted; fix >=0.103.16
+      ignore="$ignore --ignore RUSTSEC-2026-0381"   # webpki-roots 1.0.6: distrusted emSign intermediates in the bundle; fix >=1.0.10
+      # shellcheck disable=SC2086
+      cargo audit $ignore
+    - cargo audit --file crates/embra-web-ui/Cargo.lock
 
 test:
   stage: test
@@ -243,5 +281,74 @@ musl-cross:
       for bin in embra-init embrad embra-apid embra-trustd embra-brain embra-console embra-web wardsondb; do
         p="target/x86_64-unknown-linux-musl/release/$bin"
         test -x "$p" || { echo "ERROR: missing binary: $bin" >&2; exit 1; }
+        file "$p"
+      done
+
+# The aarch64 ship path (scripts/build-image-aarch64.sh, minus Buildroot), with
+# Bootlin's aarch64 musl toolchain the way `musl-cross` uses the x86-64 one:
+# the same SDK family, the same relocation, the same bindgen resource dir, and
+# the SDK's sysroot for bindgen (the x86-64 job gets by on the host's headers;
+# an aarch64 cross-compile cannot). Validated once on the build host with these
+# exact commands before it landed (#33).
+musl-cross-aarch64:
+  stage: test
+  timeout: 90m
+  needs: [frontend]
+  variables:
+    # Bump the sha256 AND the cache key together, deliberately. Bootlin publishes
+    # no checksum file; this one was taken from the download on 2026-10-24.
+    BOOTLIN_SDK: "aarch64--musl--stable-2025.08-1"
+    BOOTLIN_SHA: "defba831ffa1175236f137069333e21ed46d4d19feb5080a90cf248b6fc2cb08"
+    CROSS: "aarch64-buildroot-linux-musl"
+  cache:
+    - key: "musl-aarch64-cargo-$CI_COMMIT_REF_SLUG"
+      paths: [.cargo/registry/index/, .cargo/registry/cache/, .cargo/git/db/]
+      when: always
+    - key:
+        files: [Cargo.lock]
+        prefix: "musl-aarch64-target-$RUST_TOOLCHAIN"
+      paths: [target/]
+      when: always
+    - key: "bootlin-aarch64-musl-stable-2025.08-1"
+      paths: [.bootlin/]
+      when: always
+  script:
+    - test -f crates/embra-web-ui/dist/index.html
+    - apt-get update && apt-get install -y --no-install-recommends protobuf-compiler libclang-dev clang xz-utils curl file
+    - rustup target add aarch64-unknown-linux-musl
+    - |
+      set -eu
+      if [ ! -x ".bootlin/$BOOTLIN_SDK/bin/$CROSS-gcc" ]; then
+        url="https://toolchains.bootlin.com/downloads/releases/toolchains/aarch64/tarballs/${BOOTLIN_SDK}.tar.xz"
+        for i in 1 2 3; do
+          curl -fSL --connect-timeout 20 --max-time 600 -o /tmp/bootlin-musl.tar.xz "$url" && break
+          [ "$i" = 3 ] && exit 1
+          echo "download attempt $i failed; retrying in $((i * 20))s"; sleep $((i * 20))
+        done
+        echo "$BOOTLIN_SHA  /tmp/bootlin-musl.tar.xz" | sha256sum -c -
+        mkdir -p .bootlin && tar -xJf /tmp/bootlin-musl.tar.xz -C .bootlin
+      fi
+      "./.bootlin/$BOOTLIN_SDK/relocate-sdk.sh"
+    - |
+      set -eu
+      RESOURCE_INC="$(clang -print-resource-dir)/include"
+      test -f "$RESOURCE_INC/stddef.h" || {
+        echo "clang builtin headers not found at $RESOURCE_INC" >&2; exit 1; }
+      SYSROOT="$CI_PROJECT_DIR/.bootlin/$BOOTLIN_SDK/$CROSS/sysroot"
+      test -d "$SYSROOT/usr/include" || { echo "SDK sysroot not found at $SYSROOT" >&2; exit 1; }
+      export BINDGEN_EXTRA_CLANG_ARGS_aarch64_unknown_linux_musl="--sysroot=$SYSROOT -I$RESOURCE_INC"
+    - |
+      export PATH="$CI_PROJECT_DIR/.bootlin/$BOOTLIN_SDK/bin:$PATH"
+      export CC_aarch64_unknown_linux_musl="$CROSS-gcc"
+      export CXX_aarch64_unknown_linux_musl="$CROSS-g++"
+      export AR_aarch64_unknown_linux_musl="$CROSS-ar"
+      export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER="$CROSS-gcc"
+      cargo build --release --target aarch64-unknown-linux-musl --locked
+    - |
+      set -eu
+      for bin in embra-init embrad embra-apid embra-trustd embra-brain embra-console embra-web wardsondb; do
+        p="target/aarch64-unknown-linux-musl/release/$bin"
+        test -x "$p" || { echo "ERROR: missing binary: $bin" >&2; exit 1; }
+        file "$p" | grep -q 'ARM aarch64' || { echo "ERROR: $bin is not an aarch64 binary: $(file "$p")" >&2; exit 1; }
         file "$p"
       done

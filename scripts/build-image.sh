@@ -45,6 +45,8 @@ BUILDROOT_VERSION="${BUILDROOT_VERSION:-2026.02.1}"
 # crates/embra-guardian/tests/fixtures/probe.wasm is built again as well
 # (tests/fixture_roundtrip.rs says how).
 RUST_TOOLCHAIN_VERSION="${RUST_TOOLCHAIN_VERSION:-1.98.1}"
+# The pinned sha256 of each toolchain tarball, beside this script (#33).
+TOOLCHAIN_PINS="$(cd "$(dirname "$0")" && pwd)/rust-toolchain.sha256"
 
 # macOS-compatible nproc
 nproc_compat() {
@@ -175,13 +177,17 @@ else
         curl -fSL --retry 3 -o "$RUST_TMP/${tb}.tar.xz" \
             "$RUST_DIST_BASE/${tb}.tar.xz" \
             || { echo "ERROR: download of ${tb}.tar.xz failed" >&2; exit 1; }
-        curl -fSL --retry 3 -o "$RUST_TMP/${tb}.tar.xz.sha256" \
-            "$RUST_DIST_BASE/${tb}.tar.xz.sha256" \
-            || { echo "ERROR: download of ${tb}.tar.xz.sha256 failed" >&2; exit 1; }
-        ( cd "$RUST_TMP" \
-            && printf '%s  %s\n' "$(awk '{print $1}' "${tb}.tar.xz.sha256")" "${tb}.tar.xz" \
-               | sha256sum -c - ) \
-            || { echo "ERROR: sha256 verification failed for ${tb}.tar.xz" >&2; exit 1; }
+        # The expected hash is the pin in the repository, never a checksum
+        # fetched beside the download (#33).
+        pin="$(grep -F -- "  ${tb}.tar.xz" "$TOOLCHAIN_PINS" | head -n1 || true)"
+        [ -n "$pin" ] || {
+            echo "ERROR: no pinned sha256 for ${tb}.tar.xz in $TOOLCHAIN_PINS" >&2
+            echo "  The pin moves with RUST_TOOLCHAIN_VERSION: take xz_hash from the channel manifest" >&2
+            echo "  ($RUST_DIST_BASE/channel-rust-$RUST_TOOLCHAIN_VERSION.toml) and add the line." >&2
+            exit 1
+        }
+        ( cd "$RUST_TMP" && printf '%s\n' "$pin" | sha256sum -c - ) \
+            || { echo "ERROR: ${tb}.tar.xz does not match its pin in $TOOLCHAIN_PINS" >&2; exit 1; }
         tar -xf "$RUST_TMP/${tb}.tar.xz" -C "$RUST_TMP" \
             || { echo "ERROR: extract of ${tb}.tar.xz failed" >&2; exit 1; }
     done
