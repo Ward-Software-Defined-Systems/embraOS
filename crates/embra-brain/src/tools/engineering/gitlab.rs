@@ -19,7 +19,7 @@ use crate::tools::registry::DispatchContext;
 /// Only this client adds them. The other reqwest clients in this file keep
 /// the compiled-in roots, deliberately.
 fn gitlab_client() -> reqwest::Client {
-    let mut builder = crate::net::builder();
+    let mut builder = crate::net::bounded();
     for cert in load_operator_ca_certs() {
         builder = builder.add_root_certificate(cert);
     }

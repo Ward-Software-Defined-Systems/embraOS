@@ -34,17 +34,35 @@ pub(crate) fn same_origin_redirect_policy() -> Policy {
     })
 }
 
+/// TCP + TLS establishment bound for every client built here.
+pub(crate) const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Per-read idle bound for every client built here (#26). It resets on
+/// every byte, so a response that keeps flowing never trips it; it only
+/// unsticks a connection that has gone dead. Long on purpose: a local
+/// model's prompt processing on a large context is silent for minutes
+/// before the first token, so this is the database client's figure, set
+/// for a measured 5–8 min worst case. Never a total `.timeout()`: a turn
+/// legitimately runs many minutes.
+pub(crate) const READ_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
 /// A client builder with the redirect policy set; the caller adds its
-/// timeouts and roots.
+/// timeouts (`bounded()` for the two standard ones) and roots. Guard
+/// `every_net_builder_sets_a_timeout`.
 pub(crate) fn builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder().redirect(same_origin_redirect_policy())
 }
 
-/// A client with the redirect policy and nothing else.
+/// `builder()` with the two standard bounds, for a caller that adds roots.
+pub(crate) fn bounded() -> reqwest::ClientBuilder {
+    builder().connect_timeout(CONNECT_TIMEOUT).read_timeout(READ_IDLE_TIMEOUT)
+}
+
+/// A client with the redirect policy and the two bounds (#26). The
+/// Gemini and OpenAI-compat chat clients and the GitHub client are this.
 pub(crate) fn client() -> reqwest::Client {
-    builder()
+    bounded()
         .build()
-        .expect("a reqwest client with a redirect policy and no other option builds")
+        .expect("a reqwest client with a redirect policy and the two bounds builds")
 }
 
 #[cfg(test)]
@@ -110,5 +128,44 @@ mod tests {
         let err = db.read("memory.entries", "e1").await.unwrap_err().to_string();
         assert!(err.contains("302"), "the redirect is an error, not a document: {err}");
         assert_eq!(server.received_requests().await.unwrap().len(), 1, "one request, no hop");
+    }
+
+    fn rust_sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// #26: a client built from the bare `builder()` sets a timeout itself —
+    /// the validate and probe clients a total one, the streaming and API
+    /// clients the two bounds — so no reqwest client of the brain can hang
+    /// on a connection that has gone dead. `client()` and `bounded()` carry
+    /// the bounds already; this reads every other use.
+    #[test]
+    fn every_net_builder_sets_a_timeout() {
+        let mut files = Vec::new();
+        rust_sources(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        // Spelled in two pieces so this test does not read itself.
+        let call = ["crate::net::", "builder()"].concat();
+        let mut seen = 0;
+        for file in files {
+            let source = std::fs::read_to_string(&file).unwrap();
+            for (at, _) in source.match_indices(&call) {
+                seen += 1;
+                let rest = &source[at..];
+                let statement = &rest[..rest.find(".build()").unwrap_or(rest.len().min(600))];
+                assert!(
+                    statement.contains("timeout"),
+                    "{}: a client built from net::builder() sets no timeout:\n{statement}",
+                    file.display()
+                );
+            }
+        }
+        assert!(seen >= 5, "the scan found {seen} builder sites; the pattern or the tree moved");
     }
 }
