@@ -1452,18 +1452,12 @@ async fn ensure_collection(db: &WardsonDbClient, name: &str) -> Result<()> {
     }
     info!("Creating collection: {name}");
     if let Err(e) = db.create_collection(name).await
-        && !is_conflict_err(&e)
+        && !crate::db::error::is_conflict(&e)
     {
         error!("Failed to create collection {name}: {e}");
         return Err(e);
     }
     Ok(())
-}
-
-fn is_conflict_err(e: &anyhow::Error) -> bool {
-    e.downcast_ref::<WardsonDbError>()
-        .map(|w| w.is_conflict())
-        .unwrap_or(false)
 }
 
 /// Migration v6: Expression panel (EXPR-01).
@@ -1495,7 +1489,7 @@ async fn run_v6_expression_panel(db: &WardsonDbClient) -> Result<()> {
         );
         match db.write("ui", &seed).await {
             Ok(_) => info!("Migration v6: seeded ui.expression singleton"),
-            Err(e) if is_conflict_err(&e) => {
+            Err(e) if crate::db::error::is_conflict(&e) => {
                 info!("Migration v6: ui.expression already exists (409)");
             }
             Err(e) => {

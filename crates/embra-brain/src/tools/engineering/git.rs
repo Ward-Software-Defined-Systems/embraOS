@@ -54,6 +54,43 @@ pub(crate) fn git_command() -> tokio::process::Command {
     git_command_for(Path::new(GIT_CONFIG_GLOBAL), Path::new(GIT_HOOKS_DIR), &[])
 }
 
+/// One git run, both streams decoded. The tools classify the status and
+/// pick the stream themselves; what they share is the spawn, the decode and
+/// the one sentence for a git that could not start.
+struct GitRun {
+    status: std::process::ExitStatus,
+    stdout: String,
+    stderr: String,
+}
+
+impl GitRun {
+    /// What a failed git said, trimmed.
+    fn failure(&self) -> &str {
+        self.stderr.trim()
+    }
+
+    /// What git reported, trimmed: stdout, or stderr when stdout is empty
+    /// (push, checkout and merge write their report to stderr).
+    fn report(&self) -> &str {
+        let out = self.stdout.trim();
+        if out.is_empty() { self.stderr.trim() } else { out }
+    }
+}
+
+/// Runs a built git command and decodes both streams. A git that could not
+/// be started is `Failed to run <what>: <error>`, `what` being `git` or the
+/// subcommand a tool names (`git clone`, `git merge-base`).
+async fn run_git(cmd: &mut tokio::process::Command, what: &str) -> Result<GitRun, String> {
+    match cmd.output().await {
+        Ok(out) => Ok(GitRun {
+            status: out.status,
+            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        }),
+        Err(e) => Err(format!("Failed to run {what}: {e}")),
+    }
+}
+
 /// [`git_command`] with configuration pairs for one call, the token
 /// rewrites of [`git_auth_config`] among them. They travel as
 /// `GIT_CONFIG_KEY_n`/`GIT_CONFIG_VALUE_n` in the environment, never as
@@ -314,22 +351,16 @@ fn git_log_args<'a>(extra: &[&'a str]) -> Result<Vec<&'a str>, String> {
 /// is missing. Returns Err with a clear message if neither exists. Used by
 /// `git_branch delete` to enforce the documented merged-into-base contract.
 async fn resolve_base_ref(dir: &str, base: &str) -> Result<String, String> {
-    let local_check = git_command()
-        .args(["-C", dir, "rev-parse", "--verify", "--quiet", base])
-        .output()
-        .await;
-    if let Ok(out) = &local_check
-        && out.status.success()
+    if run_git(git_command().args(["-C", dir, "rev-parse", "--verify", "--quiet", base]), "git")
+        .await
+        .is_ok_and(|run| run.status.success())
     {
         return Ok(base.to_string());
     }
     let remote = format!("origin/{}", base);
-    let remote_check = git_command()
-        .args(["-C", dir, "rev-parse", "--verify", "--quiet", &remote])
-        .output()
-        .await;
-    if let Ok(out) = &remote_check
-        && out.status.success()
+    if run_git(git_command().args(["-C", dir, "rev-parse", "--verify", "--quiet", &remote]), "git")
+        .await
+        .is_ok_and(|run| run.status.success())
     {
         return Ok(remote);
     }
@@ -489,18 +520,15 @@ pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
 
     match tokio::time::timeout(
         std::time::Duration::from_secs(120),
-        git_command_with(&auth)
-            .args(["clone", "--", url, &dest])
-            .output(),
+        run_git(git_command_with(&auth).args(["clone", "--", url, &dest]), "git clone"),
     ).await {
-        Ok(Ok(out)) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if !out.status.success() {
-                return format!("git clone failed: {}", stderr.trim());
+        Ok(Ok(run)) => {
+            if !run.status.success() {
+                return format!("git clone failed: {}", run.failure());
             }
             format!("Cloned {} into {}", url, dest)
         }
-        Ok(Err(e)) => format!("Failed to run git clone: {}", e),
+        Ok(Err(e)) => e,
         Err(_) => "git clone timed out after 120 seconds".into(),
     }
 }
@@ -511,24 +539,18 @@ pub async fn git_status(path: &str) -> String {
         Ok(d) => d,
         Err(e) => return e,
     };
-    match git_command()
-        .args(["-C", &dir, "status", "--short"])
-        .output()
-        .await
-    {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if !out.status.success() {
-                return format!("git status failed: {}", stderr.trim());
+    match run_git(git_command().args(["-C", &dir, "status", "--short"]), "git").await {
+        Ok(run) => {
+            if !run.status.success() {
+                return format!("git status failed: {}", run.failure());
             }
-            if stdout.trim().is_empty() {
+            if run.stdout.trim().is_empty() {
                 format!("Working tree clean at {}", dir)
             } else {
-                format!("=== git status ({}) ===\n{}", dir, stdout)
+                format!("=== git status ({}) ===\n{}", dir, run.stdout)
             }
         }
-        Err(e) => format!("Failed to run git: {}", e),
+        Err(e) => e,
     }
 }
 
@@ -554,20 +576,14 @@ pub async fn git_log(param: &str) -> String {
     let mut args = vec!["-C", &dir, "log", "--oneline", "-20"];
     args.extend(extra);
 
-    match git_command()
-        .args(&args)
-        .output()
-        .await
-    {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if !out.status.success() {
-                return format!("git log failed: {}", stderr.trim());
+    match run_git(git_command().args(&args), "git").await {
+        Ok(run) => {
+            if !run.status.success() {
+                return format!("git log failed: {}", run.failure());
             }
-            format!("=== git log ({}) ===\n{}", dir, stdout)
+            format!("=== git log ({}) ===\n{}", dir, run.stdout)
         }
-        Err(e) => format!("Failed to run git: {}", e),
+        Err(e) => e,
     }
 }
 
@@ -593,19 +609,14 @@ pub async fn git_add(param: &str) -> String {
     let mut args = vec!["-C", &dir, "add", "--"];
     args.extend(file_args.iter());
 
-    match git_command()
-        .args(&args)
-        .output()
-        .await
-    {
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if !out.status.success() {
-                return format!("git add failed: {}", stderr.trim());
+    match run_git(git_command().args(&args), "git").await {
+        Ok(run) => {
+            if !run.status.success() {
+                return format!("git add failed: {}", run.failure());
             }
             format!("Staged files in {}: {}", dir, files)
         }
-        Err(e) => format!("Failed to run git: {}", e),
+        Err(e) => e,
     }
 }
 
@@ -625,20 +636,14 @@ pub async fn git_commit(param: &str) -> String {
     };
     let message = parts[1].trim();
 
-    match git_command()
-        .args(["-C", &dir, "commit", "-m", message])
-        .output()
-        .await
-    {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if !out.status.success() {
-                return format!("git commit failed: {}", stderr.trim());
+    match run_git(git_command().args(["-C", &dir, "commit", "-m", message]), "git").await {
+        Ok(run) => {
+            if !run.status.success() {
+                return format!("git commit failed: {}", run.failure());
             }
-            format!("Committed in {}:\n{}", dir, stdout.trim())
+            format!("Committed in {}:\n{}", dir, run.stdout.trim())
         }
-        Err(e) => format!("Failed to run git: {}", e),
+        Err(e) => e,
     }
 }
 
@@ -652,25 +657,14 @@ pub async fn git_push(db: &WardsonDbClient, param: &str) -> String {
 
     let auth = git_auth_config(db).await;
 
-    match git_command_with(&auth)
-        .args(["-C", &dir, "push"])
-        .output()
-        .await
-    {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if !out.status.success() {
-                return format!("git push failed: {}", stderr.trim());
+    match run_git(git_command_with(&auth).args(["-C", &dir, "push"]), "git").await {
+        Ok(run) => {
+            if !run.status.success() {
+                return format!("git push failed: {}", run.failure());
             }
-            let output = if stdout.trim().is_empty() {
-                stderr.trim().to_string()
-            } else {
-                stdout.trim().to_string()
-            };
-            format!("Pushed from {}:\n{}", dir, output)
+            format!("Pushed from {}:\n{}", dir, run.report())
         }
-        Err(e) => format!("Failed to run git: {}", e),
+        Err(e) => e,
     }
 }
 
@@ -684,20 +678,14 @@ pub async fn git_pull(db: &WardsonDbClient, param: &str) -> String {
 
     let auth = git_auth_config(db).await;
 
-    match git_command_with(&auth)
-        .args(["-C", &dir, "pull"])
-        .output()
-        .await
-    {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if !out.status.success() {
-                return format!("git pull failed: {}", stderr.trim());
+    match run_git(git_command_with(&auth).args(["-C", &dir, "pull"]), "git").await {
+        Ok(run) => {
+            if !run.status.success() {
+                return format!("git pull failed: {}", run.failure());
             }
-            format!("Pulled in {}:\n{}", dir, stdout.trim())
+            format!("Pulled in {}:\n{}", dir, run.stdout.trim())
         }
-        Err(e) => format!("Failed to run git: {}", e),
+        Err(e) => e,
     }
 }
 
@@ -737,26 +725,19 @@ pub async fn git_fetch(db: &WardsonDbClient, path: &str, remote: &str, branch: O
 
     let auth = git_auth_config(db).await;
 
-    match git_command_with(&auth)
-        .args(["-C", &dir])
-        .args(&fetch)
-        .output()
-        .await
-    {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if !out.status.success() {
-                return format!("git fetch failed: {}", stderr.trim());
+    match run_git(git_command_with(&auth).args(["-C", &dir]).args(&fetch), "git").await {
+        Ok(run) => {
+            if !run.status.success() {
+                return format!("git fetch failed: {}", run.failure());
             }
-            let report = format!("{}\n{}", stderr.trim(), stdout.trim()).trim().to_string();
+            let report = format!("{}\n{}", run.stderr.trim(), run.stdout.trim()).trim().to_string();
             if report.is_empty() {
                 format!("Fetched {remote} in {dir}: nothing new, the remote-tracking refs were current")
             } else {
                 format!("Fetched {remote} in {dir}:\n{report}")
             }
         }
-        Err(e) => format!("Failed to run git: {}", e),
+        Err(e) => e,
     }
 }
 
@@ -782,24 +763,18 @@ pub async fn git_diff(param: &str) -> String {
         args.push(f);
     }
 
-    match git_command()
-        .args(&args)
-        .output()
-        .await
-    {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if !out.status.success() {
-                return format!("git diff failed: {}", stderr.trim());
+    match run_git(git_command().args(&args), "git").await {
+        Ok(run) => {
+            if !run.status.success() {
+                return format!("git diff failed: {}", run.failure());
             }
-            if stdout.trim().is_empty() {
+            if run.stdout.trim().is_empty() {
                 format!("No changes in {}", dir)
             } else {
-                format!("=== git diff ({}) ===\n{}", dir, stdout)
+                format!("=== git diff ({}) ===\n{}", dir, run.stdout)
             }
         }
-        Err(e) => format!("Failed to run git: {}", e),
+        Err(e) => e,
     }
 }
 
@@ -843,19 +818,14 @@ pub async fn git_branch(param: &str) -> String {
         };
 
         if is_delete_force {
-            return match git_command()
-                .args(["-C", &dir, "branch", "-D", name])
-                .output()
-                .await
-            {
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    if !out.status.success() {
-                        return format!("git branch failed: {}", stderr.trim());
+            return match run_git(git_command().args(["-C", &dir, "branch", "-D", name]), "git").await {
+                Ok(run) => {
+                    if !run.status.success() {
+                        return format!("git branch failed: {}", run.failure());
                     }
                     format!("Force-deleted branch '{}' in {} (unmerged commits discarded)", name, dir)
                 }
-                Err(e) => format!("Failed to run git: {}", e),
+                Err(e) => e,
             };
         }
 
@@ -872,19 +842,20 @@ pub async fn git_branch(param: &str) -> String {
 
         // merge-base --is-ancestor exits 0 if branch tip is reachable from base,
         // 1 if not. Anything else is an unexpected git error.
-        let ancestor = git_command()
-            .args([
+        let ancestor = run_git(
+            git_command().args([
                 "-C",
                 &dir,
                 "merge-base",
                 "--is-ancestor",
                 &format!("refs/heads/{}", name),
                 &base_ref,
-            ])
-            .output()
-            .await;
+            ]),
+            "git merge-base",
+        )
+        .await;
         match ancestor {
-            Ok(out) => match out.status.code() {
+            Ok(run) => match run.status.code() {
                 Some(0) => {} // merged — fall through to delete
                 Some(1) => {
                     return format!(
@@ -895,14 +866,13 @@ pub async fn git_branch(param: &str) -> String {
                     );
                 }
                 _ => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
                     return format!(
                         "Cannot verify merge status of '{}' against '{}': {}",
-                        name, base_ref, stderr.trim()
+                        name, base_ref, run.failure()
                     );
                 }
             },
-            Err(e) => return format!("Failed to run git merge-base: {}", e),
+            Err(e) => return e,
         }
 
         // Our `merge-base --is-ancestor` check above is the authoritative
@@ -916,19 +886,14 @@ pub async fn git_branch(param: &str) -> String {
         // this is not a force-delete semantically (the merged-into-base
         // guarantee still holds), it just bypasses a redundant narrower
         // check. Closes Embra_Debug #56.
-        return match git_command()
-            .args(["-C", &dir, "branch", "-D", name])
-            .output()
-            .await
-        {
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                if !out.status.success() {
-                    return format!("git branch failed: {}", stderr.trim());
+        return match run_git(git_command().args(["-C", &dir, "branch", "-D", name]), "git").await {
+            Ok(run) => {
+                if !run.status.success() {
+                    return format!("git branch failed: {}", run.failure());
                 }
                 format!("Deleted branch '{}' in {} (verified merged into '{}')", name, dir, base_ref)
             }
-            Err(e) => format!("Failed to run git: {}", e),
+            Err(e) => e,
         };
     }
 
@@ -938,19 +903,14 @@ pub async fn git_branch(param: &str) -> String {
             Ok(n) => n,
             Err(e) => return e,
         };
-        return match git_command()
-            .args(["-C", &dir, "branch", name])
-            .output()
-            .await
-        {
-            Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                if !out.status.success() {
-                    return format!("git branch failed: {}", stderr.trim());
+        return match run_git(git_command().args(["-C", &dir, "branch", name]), "git").await {
+            Ok(run) => {
+                if !run.status.success() {
+                    return format!("git branch failed: {}", run.failure());
                 }
                 format!("Created branch '{}' in {}", name, dir)
             }
-            Err(e) => format!("Failed to run git: {}", e),
+            Err(e) => e,
         };
     }
 
@@ -959,20 +919,14 @@ pub async fn git_branch(param: &str) -> String {
 }
 
 async fn git_branch_list(dir: &str) -> String {
-    match git_command()
-        .args(["-C", dir, "branch", "-a"])
-        .output()
-        .await
-    {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if !out.status.success() {
-                return format!("git branch failed: {}", stderr.trim());
+    match run_git(git_command().args(["-C", dir, "branch", "-a"]), "git").await {
+        Ok(run) => {
+            if !run.status.success() {
+                return format!("git branch failed: {}", run.failure());
             }
-            format!("=== Branches ({}) ===\n{}", dir, stdout)
+            format!("=== Branches ({}) ===\n{}", dir, run.stdout)
         }
-        Err(e) => format!("Failed to run git: {}", e),
+        Err(e) => e,
     }
 }
 
@@ -992,25 +946,14 @@ pub async fn git_checkout(param: &str) -> String {
         Err(e) => return e,
     };
 
-    match git_command()
-        .args(["-C", &dir, "checkout", branch])
-        .output()
-        .await
-    {
-        Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            if !out.status.success() {
-                return format!("git checkout failed: {}", stderr.trim());
+    match run_git(git_command().args(["-C", &dir, "checkout", branch]), "git").await {
+        Ok(run) => {
+            if !run.status.success() {
+                return format!("git checkout failed: {}", run.failure());
             }
-            let output = if stdout.trim().is_empty() {
-                stderr.trim().to_string()
-            } else {
-                stdout.trim().to_string()
-            };
-            format!("Checked out '{}' in {}:\n{}", branch, dir, output)
+            format!("Checked out '{}' in {}:\n{}", branch, dir, run.report())
         }
-        Err(e) => format!("Failed to run git: {}", e),
+        Err(e) => e,
     }
 }
 
@@ -1043,33 +986,22 @@ pub async fn git_merge(param: &str) -> String {
     }
     args.push(branch.to_string());
 
-    match git_command()
-        .args(&args)
-        .output()
-        .await
-    {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if output.status.success() {
-                let body = if stdout.trim().is_empty() {
-                    stderr.trim().to_string()
-                } else {
-                    stdout.trim().to_string()
-                };
+    match run_git(git_command().args(&args), "git merge").await {
+        Ok(run) => {
+            if run.status.success() {
                 let ff_tag = if no_ff { " (no-ff)" } else { "" };
                 format!(
                     "Merged '{}' into current branch of {}{}:\n{}",
-                    branch, dir, ff_tag, body
+                    branch, dir, ff_tag, run.report()
                 )
             } else {
                 format!(
                     "git merge failed in {} (likely conflicts — resolve via file_* tools, then git_add + git_commit, or run `git merge --abort` manually):\n--- stdout ---\n{}\n--- stderr ---\n{}",
-                    dir, stdout, stderr
+                    dir, run.stdout, run.stderr
                 )
             }
         }
-        Err(e) => format!("Failed to run git merge: {}", e),
+        Err(e) => e,
     }
 }
 
@@ -1094,30 +1026,19 @@ pub async fn git_rm(param: &str) -> String {
         }
     }
 
-    match git_command()
-        .args(["-C", &dir, "rm", "--"])
-        .args(&file_args)
-        .output()
-        .await
-    {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if output.status.success() {
+    match run_git(git_command().args(["-C", &dir, "rm", "--"]).args(&file_args), "git rm").await {
+        Ok(run) => {
+            if run.status.success() {
                 format!(
                     "Removed and staged in {}:\n{}",
                     dir,
-                    if stdout.is_empty() {
-                        stderr.to_string()
-                    } else {
-                        stdout.to_string()
-                    }
+                    if run.stdout.is_empty() { &run.stderr } else { &run.stdout }
                 )
             } else {
-                format!("git rm failed in {}:\n{}", dir, stderr)
+                format!("git rm failed in {}:\n{}", dir, run.stderr)
             }
         }
-        Err(e) => format!("Failed to run git rm: {}", e),
+        Err(e) => e,
     }
 }
 
@@ -1141,21 +1062,15 @@ pub async fn git_mv(param: &str) -> String {
         (Err(e), _) | (_, Err(e)) => return e,
     };
 
-    match git_command()
-        .args(["-C", &dir, "mv", "--", src, dst])
-        .output()
-        .await
-    {
-        Ok(output) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            if output.status.success() {
+    match run_git(git_command().args(["-C", &dir, "mv", "--", src, dst]), "git mv").await {
+        Ok(run) => {
+            if run.status.success() {
                 format!("git mv: {} → {} in {}", src, dst, dir)
             } else {
-                format!("git mv failed in {}:\n{}{}", dir, stdout, stderr)
+                format!("git mv failed in {}:\n{}{}", dir, run.stdout, run.stderr)
             }
         }
-        Err(e) => format!("Failed to run git mv: {}", e),
+        Err(e) => e,
     }
 }
 
@@ -1377,8 +1292,21 @@ fn default_git_branch_action() -> GitBranchAction {
 }
 
 impl GitBranchArgs {
-    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = match (&self.action, &self.name) {
+    /// The string form `git_branch` parses, or the refusal. That parser
+    /// splits on whitespace, so a field with a space would be read as
+    /// another form: `name = "delete x"` under action=create would have
+    /// deleted `x` (the verification of 2026-10-24). No field may carry any.
+    fn param(&self) -> Result<String, String> {
+        for (field, value) in [
+            ("path", Some(self.path.as_str())),
+            ("name", self.name.as_deref()),
+            ("base", self.base.as_deref()),
+        ] {
+            if value.is_some_and(|v| v.chars().any(char::is_whitespace)) {
+                return Err(format!("git_branch: {field} cannot contain whitespace."));
+            }
+        }
+        Ok(match (&self.action, &self.name) {
             (GitBranchAction::List, _) => self.path.clone(),
             (GitBranchAction::Create, Some(n)) => format!("{} {}", self.path, n),
             (GitBranchAction::Delete, Some(n)) => {
@@ -1390,13 +1318,16 @@ impl GitBranchArgs {
                 }
             }
             (GitBranchAction::Create, None) | (GitBranchAction::Delete, None) => {
-                return Ok(format!(
-                    "git_branch action={:?} requires a name.",
-                    self.action
-                ));
+                return Err(format!("git_branch action={:?} requires a name.", self.action));
             }
-        };
-        Ok(git_branch(&param).await)
+        })
+    }
+
+    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(match self.param() {
+            Ok(param) => git_branch(&param).await,
+            Err(refusal) => refusal,
+        })
     }
 }
 
@@ -1539,31 +1470,32 @@ mod native_args_tests {
         assert_eq!(delete_force.force, Some(true));
     }
 
-    #[tokio::test]
-    async fn git_branch_force_maps_to_delete_force_token() {
-        // The param serialization between GitBranchArgs::run and the legacy
-        // string handler is an internal protocol; force=true routes through
-        // the delete-force keyword, force=false/unset through plain delete.
-        // We verify the behavior end-to-end by invoking run against a bogus
-        // workspace path and inspecting the rejection message — the resolver
-        // rejects *before* the git subprocess, but the token choice determines
-        // which code path emits the rejection/usage text. Simpler: reconstruct
-        // the expected param manually.
-        let args = GitBranchArgs {
+    /// The typed arguments become the string form `git_branch` parses:
+    /// force=true the `delete-force` keyword, force unset plain `delete` with
+    /// its base. A field with whitespace is refused before the string is
+    /// built: the parser splits on it, so `name = "delete x"` under
+    /// action=create read as a delete of `x` (the verification of 2026-10-24).
+    #[test]
+    fn git_branch_args_build_the_string_form_and_refuse_whitespace() {
+        let args = |action, name: Option<&str>, base: Option<&str>, force| GitBranchArgs {
             path: "/w/x".into(),
-            action: GitBranchAction::Delete,
-            name: Some("spike".into()),
-            base: None,
-            force: Some(true),
+            action,
+            name: name.map(str::to_string),
+            base: base.map(str::to_string),
+            force,
         };
-        // Re-build the same match the real run() does, asserting the keyword.
-        let param = match (&args.action, &args.name) {
-            (GitBranchAction::Delete, Some(n)) if args.force.unwrap_or(false) => {
-                format!("{} delete-force {}", args.path, n)
-            }
-            _ => "unexpected".into(),
-        };
-        assert_eq!(param, "/w/x delete-force spike");
+        assert_eq!(args(GitBranchAction::Delete, Some("spike"), None, Some(true)).param().unwrap(), "/w/x delete-force spike");
+        assert_eq!(args(GitBranchAction::Delete, Some("spike"), None, None).param().unwrap(), "/w/x delete spike main");
+        assert_eq!(args(GitBranchAction::Delete, Some("spike"), Some("develop"), Some(false)).param().unwrap(), "/w/x delete spike develop");
+        assert_eq!(args(GitBranchAction::Create, Some("feature"), None, None).param().unwrap(), "/w/x feature");
+        assert_eq!(args(GitBranchAction::List, None, None, None).param().unwrap(), "/w/x");
+        assert_eq!(args(GitBranchAction::Create, None, None, None).param().unwrap_err(), "git_branch action=Create requires a name.");
+        let refused = args(GitBranchAction::Create, Some("delete x"), None, None).param().unwrap_err();
+        assert!(refused.contains("name") && refused.contains("whitespace"), "{refused}");
+        assert!(args(GitBranchAction::Delete, Some("spike"), Some("ma in"), None).param().is_err());
+        let mut spaced = args(GitBranchAction::List, None, None, None);
+        spaced.path = "/w/my repo".into();
+        assert!(spaced.param().is_err());
     }
 
     #[test]

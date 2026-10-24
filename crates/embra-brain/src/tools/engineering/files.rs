@@ -332,7 +332,6 @@ pub(crate) async fn write_at(path: &Path, content: &str) -> String {
 
 /// Append content to a file. Workspace restricted.
 /// Param format: `<path> | <content>`
-/// Supports `\n` for newlines and `\t` for tabs in content.
 /// Creates the file (and parent directories) if it doesn't exist.
 ///
 /// Not atomic, unlike `file_write` and `file_patch`: an append that fails

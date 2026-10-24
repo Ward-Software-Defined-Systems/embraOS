@@ -40,6 +40,11 @@ pub fn is_not_found(e: &anyhow::Error) -> bool {
     e.downcast_ref::<WardsonDbError>().is_some_and(WardsonDbError::is_not_found)
 }
 
+/// True for a 409 from the server: a create that found its target there.
+pub fn is_conflict(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<WardsonDbError>().is_some_and(WardsonDbError::is_conflict)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

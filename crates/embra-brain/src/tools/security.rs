@@ -13,7 +13,7 @@ pub async fn security_check() -> String {
     let mut output = String::from("=== Security Check ===\n");
 
     // Process count
-    match tokio::process::Command::new("sh")
+    match super::subprocess("sh")
         .arg("-c")
         .arg("ls /proc/*/status 2>/dev/null | wc -l")
         .output()
@@ -830,6 +830,7 @@ pub async fn ssh_session_start(param: &str) -> String {
                         let _ = ssh_command()
                             .arg("-O").arg("exit")
                             .arg("-o").arg(format!("ControlPath={}", control_path))
+                            .arg("--")
                             .arg(&user_host)
                             .output().await;
                         let _ = std::fs::remove_file(&control_path);
@@ -848,6 +849,7 @@ pub async fn ssh_session_start(param: &str) -> String {
                     let _ = ssh_command()
                         .arg("-O").arg("exit")
                         .arg("-o").arg(format!("ControlPath={}", control_path))
+                        .arg("--")
                         .arg(&user_host)
                         .output().await;
                     let _ = std::fs::remove_file(&control_path);
@@ -948,6 +950,7 @@ pub async fn ssh_session_end() -> String {
                 ssh_command()
                     .arg("-O").arg("exit")
                     .arg("-o").arg(format!("ControlPath={}", session.control_path))
+                    .arg("--")
                     .arg(&session.user_host)
                     .output(),
             )

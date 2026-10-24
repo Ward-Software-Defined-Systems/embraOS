@@ -206,14 +206,6 @@ fn next_run_from_now(interval_secs: u64) -> String {
     next.to_rfc3339()
 }
 
-/// The runs collection, for a brain upgraded in place: the boot creates
-/// it with its index, this covers the first fire before the next boot.
-async fn ensure_runs_collection(db: &WardsonDbClient) {
-    if !db.collection_exists(CRON_RUNS).await.unwrap_or(true) {
-        let _ = db.create_collection(CRON_RUNS).await;
-    }
-}
-
 /// One run as it is recorded. `is_error` is a dispatch error (an unknown
 /// tool, bad arguments, a timeout); a tool that reports a problem in its
 /// own text is a run that worked, by house style, and reads as one here.
@@ -604,7 +596,10 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<CronFired
         // The run is recorded whatever happens to its report: the channel
         // may drop the report, the record stays.
         if let Some(id) = doc_id(doc) {
-            ensure_runs_collection(db).await;
+            // The runs collection, for a brain upgraded in place: the boot
+            // creates it with its index, this covers the first fire before
+            // the next boot.
+            super::ensure_collection(db, CRON_RUNS).await;
             let run = cron_run_doc(id, &plan.display, started_at, elapsed_ms, is_error, &result_text);
             if let Err(e) = db.write(CRON_RUNS, &run).await {
                 tracing::warn!(target: "cron", command = %plan.display, "cron run not recorded: {e}");

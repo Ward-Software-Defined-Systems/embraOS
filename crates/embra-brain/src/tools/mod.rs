@@ -59,9 +59,18 @@ use crate::tools::registry::DispatchContext;
 
 // ── Memory & Knowledge Tools ──
 
+/// Best effort, before a write to a collection a boot normally creates: the
+/// collection is created when the probe says it is absent or cannot say (a
+/// failing probe reads as absent, so the create is tried; a 409 means it was
+/// there). A failure is logged, and the caller reports its own write.
 async fn ensure_collection(db: &WardsonDbClient, name: &str) {
-    if !db.collection_exists(name).await.unwrap_or(true) {
-        let _ = db.create_collection(name).await;
+    if db.collection_exists(name).await.unwrap_or(false) {
+        return;
+    }
+    if let Err(e) = db.create_collection(name).await
+        && !crate::db::error::is_conflict(&e)
+    {
+        tracing::warn!(target: "tools", collection = name, "could not create the collection: {e}");
     }
 }
 
