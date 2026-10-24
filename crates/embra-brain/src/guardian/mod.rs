@@ -320,6 +320,9 @@ pub async fn handle_guardian_slash(args: &str, db: &Arc<WardsonDbClient>) -> Str
                         header.push_str(&format!("//   rationale: {}\n", r.rationale));
                     }
                 }
+                // The digest `/guardian approve` binds the approval to
+                // (`source_matches`), so the operator can see what was reviewed.
+                header.push_str(&format!("// source sha256: {}\n", d.source_sha256));
                 format!("{header}// guardian-tool: {}\n{}", d.name, d.source)
             }
             None => format!("guardian: no such tool '{}'", rest.trim()),
@@ -749,11 +752,13 @@ fn provider_state_key(cfg: &SystemConfig) -> String {
 /// Run the replicant check against the sealed soul for a validated
 /// module — the shared Gate 2 used by BOTH the brain's `propose` and the
 /// operator's `define` (the soul gates both authoring paths). Returns:
-/// - `Ok(None)` — no soul is sealed yet (nothing to evaluate against; the
-///   caller decides whether that means proceed (operator setup) or refuse
-///   (brain must not self-author ungated)).
-/// - `Err(msg)` — the check is configured but could not run/complete;
-///   callers fail closed (no compile/proposal).
+/// - `Ok(None)` — no soul is sealed yet and no seal hash is stored (nothing
+///   to evaluate against; the caller decides whether that means proceed
+///   (operator setup) or refuse (brain must not self-author ungated)).
+/// - `Err(msg)` — the check is configured but could not run/complete, or the
+///   soul document is missing beside a stored hash (the state trustd halts
+///   on: tamper or data loss, never a first boot); callers fail closed
+///   (no compile/proposal).
 /// - `Ok(Some((verdict, model)))` — a completed judgment + the judging
 ///   model id (for the audit record).
 async fn run_replicant_check(
@@ -761,9 +766,35 @@ async fn run_replicant_check(
     cfg: &SystemConfig,
     module: &ValidatedModule,
 ) -> Result<Option<(replicant::ReplicantVerdict, String)>, String> {
+    run_replicant_check_at(db, cfg, module, Path::new(crate::learning::SOUL_HASH_PATH)).await
+}
+
+/// `run_replicant_check` against a given hash file (a test's directory).
+async fn run_replicant_check_at(
+    db: &WardsonDbClient,
+    cfg: &SystemConfig,
+    module: &ValidatedModule,
+    hash_path: &Path,
+) -> Result<Option<(replicant::ReplicantVerdict, String)>, String> {
     let soul = match crate::learning::load_soul(db).await {
         Ok(Some(s)) => s,
-        Ok(None) => return Ok(None),
+        // No document is "nothing to evaluate against" only on a machine that
+        // was never sealed. A hash file beside a missing document is the state
+        // trustd halts a boot on; here it refuses every authoring path (#11).
+        Ok(None) => {
+            return match crate::learning::soul_hash_is_stored(hash_path) {
+                Ok(false) => Ok(None),
+                Ok(true) => Err(format!(
+                    "the soul document is missing but a sealed hash is stored at {} — restore \
+                     DATA, or remove the hash to start over",
+                    hash_path.display()
+                )),
+                Err(e) => Err(format!(
+                    "the stored soul hash at {} could not be checked — {e}",
+                    hash_path.display()
+                )),
+            };
+        }
         // A database error is not "no soul": every caller fails closed.
         Err(e) => return Err(format!("soul read failed — {e}")),
     };
@@ -2316,22 +2347,77 @@ mod replicant_gate_tests {
         .expect("minimal config deserializes")
     }
 
+    fn hash_file(tag: &str, contents: Option<&str>) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("embra-replicant-gate-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("soul.sha256");
+        if let Some(c) = contents {
+            std::fs::write(&file, c).unwrap();
+        }
+        file
+    }
+
+    fn envelope(v: serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "data": v, "meta": {}}))
+    }
+
+    async fn mount(server: &MockServer, verb: &str, route: &str, response: ResponseTemplate) {
+        Mock::given(method(verb)).and(path(route)).respond_with(response).mount(server).await;
+    }
+
     #[tokio::test]
     async fn a_soul_read_error_fails_the_gate_closed() {
         let module = embra_guardian::validate(embra_guardian::shipped::HTTP_REQUEST.source, &reserved_names())
             .expect("the shipped source validates");
+        let absent = hash_file("absent", None);
         // The database fails: not "no soul", an error every caller refuses on.
         let server = MockServer::start().await;
-        Mock::given(method("GET")).and(path("/soul.invariant")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
-        Mock::given(method("GET")).and(path("/soul.invariant/docs/soul")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+        mount(&server, "GET", "/soul.invariant", ResponseTemplate::new(500)).await;
+        mount(&server, "GET", "/soul.invariant/docs/soul", ResponseTemplate::new(500)).await;
         let db = WardsonDbClient::from_url(&server.uri());
-        let err = run_replicant_check(&db, &config(), &module).await.unwrap_err();
+        let err = run_replicant_check_at(&db, &config(), &module, &absent).await.unwrap_err();
         assert!(err.starts_with("soul read failed"), "{err}");
+        // The collection answers and the document read fails (#55 item 3):
+        // an error, whether the query fallback fails too or answers empty.
+        for query in [ResponseTemplate::new(500), envelope(serde_json::json!([]))] {
+            let server = MockServer::start().await;
+            mount(&server, "GET", "/soul.invariant", ResponseTemplate::new(200)).await;
+            mount(&server, "GET", "/soul.invariant/docs/soul", ResponseTemplate::new(500)).await;
+            mount(&server, "POST", "/soul.invariant/query", query).await;
+            let db = WardsonDbClient::from_url(&server.uri());
+            let err = run_replicant_check_at(&db, &config(), &module, &absent).await.unwrap_err();
+            assert!(err.starts_with("soul read failed"), "{err}");
+        }
         // No collection at all is "no soul": nothing to check against.
         let server = MockServer::start().await;
-        Mock::given(method("GET")).and(path("/soul.invariant")).respond_with(ResponseTemplate::new(404)).mount(&server).await;
+        mount(&server, "GET", "/soul.invariant", ResponseTemplate::new(404)).await;
         let db = WardsonDbClient::from_url(&server.uri());
-        assert!(matches!(run_replicant_check(&db, &config(), &module).await, Ok(None)));
+        assert!(matches!(run_replicant_check_at(&db, &config(), &module, &absent).await, Ok(None)));
+    }
+
+    /// #11, the verification of 2026-10-24: a soul collection that exists and
+    /// holds no document is "no soul" only on a machine that was never
+    /// sealed. Beside a stored hash it is the state trustd halts on (tamper
+    /// or data loss), and every caller refuses — `define` and `rebuild`
+    /// included, which proceed on a true `Ok(None)`.
+    #[tokio::test]
+    async fn a_missing_soul_beside_a_stored_hash_fails_the_gate_closed() {
+        let module = embra_guardian::validate(embra_guardian::shipped::HTTP_REQUEST.source, &reserved_names())
+            .expect("the shipped source validates");
+        let server = MockServer::start().await;
+        mount(&server, "GET", "/soul.invariant", ResponseTemplate::new(200)).await;
+        mount(&server, "GET", "/soul.invariant/docs/soul", ResponseTemplate::new(404)).await;
+        mount(&server, "POST", "/soul.invariant/query", envelope(serde_json::json!([]))).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let stored = hash_file("stored", Some("abc123\n"));
+        let err = run_replicant_check_at(&db, &config(), &module, &stored).await.unwrap_err();
+        assert!(err.contains("sealed hash is stored"), "{err}");
+        let empty = hash_file("empty", Some("  \n"));
+        let err = run_replicant_check_at(&db, &config(), &module, &empty).await.unwrap_err();
+        assert!(err.contains("sealed hash is stored"), "an empty file is still a stored hash: {err}");
+        let absent = hash_file("absent2", None);
+        assert!(matches!(run_replicant_check_at(&db, &config(), &module, &absent).await, Ok(None)));
     }
 
     #[test]

@@ -53,6 +53,19 @@ pub async fn is_soul_sealed(db: &WardsonDbClient) -> Result<bool> {
     db.collection_exists("soul.invariant").await
 }
 
+/// Whether a seal hash is stored at `hash_path`: `Ok(true)` for a file of any
+/// content, `Ok(false)` only when nothing is there, and the error when that
+/// cannot be told (a permission or I/O failure). Presence, not readability,
+/// is the question a missing soul document raises: a hash file beside a
+/// missing document is the state trustd halts on, whatever the file holds.
+pub(crate) fn soul_hash_is_stored(hash_path: &Path) -> std::io::Result<bool> {
+    match std::fs::metadata(hash_path) {
+        Ok(_) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// What the seal looks like now (#15): no soul; a soul whose hash matches
 /// the stored one; or a soul present with a different stored hash or none.
 /// trustd verifies at boot and halts on a mismatch, so the third state is
@@ -106,9 +119,13 @@ async fn load_soul_doc(db: &WardsonDbClient) -> Result<Option<serde_json::Value>
     if !db.collection_exists("soul.invariant").await? {
         return Ok(None);
     }
-    // Try direct GET by well-known ID
-    if let Ok(doc) = db.read("soul.invariant", "soul").await {
-        return Ok(Some(doc));
+    // Try direct GET by well-known ID. Only a document that is not there
+    // falls through to the query (pre-migration data under another id); a
+    // failing server is an error, never an absence.
+    match db.read("soul.invariant", "soul").await {
+        Ok(doc) => return Ok(Some(doc)),
+        Err(e) if crate::db::error::is_not_found(&e) => {}
+        Err(e) => return Err(e),
     }
     // Fallback: query (pre-migration data)
     let results = db
