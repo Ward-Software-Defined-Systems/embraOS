@@ -412,11 +412,25 @@ fn is_header_name(name: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
 }
 
+/// A value typed with surrounding double quotes, as a shell would take it
+/// (`Authorization "Bearer <token>"`), without them: a header a secret
+/// carries never begins and ends with a quote mark, and stored with them the
+/// header failed at the server with nothing said (the verification of
+/// 2026-10-24). One matching pair only; anything else is the value as typed.
+fn unquoted(value: &str) -> &str {
+    value
+        .strip_prefix('"')
+        .and_then(|v| v.strip_suffix('"'))
+        .filter(|inner| !inner.is_empty())
+        .unwrap_or(value)
+}
+
 /// `secret` | `secret <host>` | `secret <host> remove` |
 /// `secret <host> <header> remove` | `secret <host> <header> <value…>`.
-/// The value is the rest of the line, spaces included. The host is
-/// normalized like a git host (scheme and path off, lowercase, a port
-/// kept); the header name is lowercased and must be a token.
+/// The value is the rest of the line, spaces included, less one pair of
+/// surrounding double quotes (`unquoted`). The host is normalized like a
+/// git host (scheme and path off, lowercase, a port kept); the header name
+/// is lowercased and must be a token.
 fn parse_secret_args(rest: &str) -> Result<SecretOp, String> {
     let rest = rest.trim();
     if rest.is_empty() {
@@ -434,7 +448,7 @@ fn parse_secret_args(rest: &str) -> Result<SecretOp, String> {
         return Ok(SecretOp::RemoveHost(host));
     }
     let (header_raw, value) = match after_host.split_once(char::is_whitespace) {
-        Some((h, v)) => (h, v.trim()),
+        Some((h, v)) => (h, unquoted(v.trim())),
         None => (after_host, ""),
     };
     let header = header_raw.to_ascii_lowercase();
@@ -1959,6 +1973,22 @@ mod secret_and_egress_tests {
             assert!(out.contains("is not a tool name"), "{bad}: {out}");
         }
         assert!(server.received_requests().await.unwrap_or_default().is_empty());
+    }
+
+    /// The docs taught `Authorization "Bearer <token>"`, and the parser kept
+    /// the quote marks in the stored header. One matching pair comes off;
+    /// a quote inside, an unmatched one and a nested pair stay as typed.
+    #[test]
+    fn a_quoted_secret_value_is_stored_without_its_quotes() {
+        let set = |rest: &str| match parse_secret_args(rest).unwrap() {
+            SecretOp::Set { value, .. } => value,
+            other => panic!("expected a Set, got {other:?}"),
+        };
+        assert_eq!(set("graph.microsoft.com Authorization \"Bearer abc def\""), "Bearer abc def");
+        assert_eq!(set("api.example.com X-API-Key \"k\""), "k");
+        assert_eq!(set("api.example.com X-API-Key k\"q\"k"), "k\"q\"k", "quotes inside stay");
+        assert_eq!(set("api.example.com X-API-Key \"open"), "\"open", "an unmatched quote is the value as typed");
+        assert_eq!(set("api.example.com X-API-Key \"\"nested\"\""), "\"nested\"", "one pair only");
     }
 
     #[test]
