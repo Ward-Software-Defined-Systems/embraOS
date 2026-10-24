@@ -3,7 +3,7 @@
 > **Target:** QEMU-bootable x86_64 disk image running natively on Intel Mac via HVF —
 > Apple's Hypervisor.framework accelerates the x86_64 guest at near-native speed.
 >
-> **Host:** macOS on Intel (any Mac with an `x86_64` CPU + macOS 10.10+).
+> **Host:** macOS on Intel (a Mac with an `x86_64` CPU and a macOS that Homebrew supports).
 >
 > ✅ **Status — re-verified end-to-end on Intel Mac (2026-07-19).** Verified by
 > William on Intel MacBook Pro 16" against Buildroot `2026.02.1` under the
@@ -17,6 +17,11 @@
 > feature upstream (project-wide, not Intel-Mac-specific). Re-run the
 > [End-to-End Validation](#end-to-end-validation) checklist after any
 > canonical-build bump and re-stamp this date.
+>
+> The toolchain bump to Rust 1.98.1, Step 3.6 (the embedding model) and the
+> hardened Buildroot hooks (`set -euo pipefail`) landed after that run and are
+> **TBD on macOS** until the next Mac build; the x86_64 Linux build validates
+> them on every rebuild.
 >
 > **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a
 > named volume over `buildroot-src`: bind-mount Buildroot trees exhaust the
@@ -36,8 +41,9 @@
 ## Quick Start
 
 Builds the x86_64 embraOS image that runs natively on Intel Mac via HVF. Steps
-0.5–3.5 (frontend + Rust cross-compile + initramfs + in-OS Rust toolchain stage)
-run on macOS; Step 4 (Buildroot) runs in a `linux/amd64` Docker container.
+0.5–3.6 (frontend + Rust cross-compile + initramfs + the in-OS Rust toolchain and
+embedding-model stages) run on macOS; Step 4 (Buildroot) runs in a `linux/amd64`
+Docker container.
 
 > **Default UI is the browser console.** `run-qemu.sh` boots the **embra-web**
 > console by default, served over HTTPS at
@@ -236,7 +242,8 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > embra-guardian-v1. Needs `xz` + `sha256sum` on PATH — `brew install xz
 > coreutils` + the gnubin PATH from step 1 satisfies both. First build needs
 > network for this. The toolchain is the largest item in the image: about
-> 320 MiB of a root filesystem of about 475 MiB, as compressed in the SquashFS.
+> 320 MiB of a root filesystem of about 475 MiB, as compressed in the SquashFS
+> (measured on the x86_64 Linux build).
 > Override the pin with `RUST_TOOLCHAIN_VERSION=...`. An image with a different
 > pin leaves existing Guardian tools unloaded until the operator runs
 > `/guardian rebuild --all`.

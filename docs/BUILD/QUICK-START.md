@@ -1,6 +1,6 @@
 # embraOS Quick Start
 
-Build a QEMU-bootable embraOS disk image from source and boot it. The project landing page is [../README.md](../../README.md).
+Build a QEMU-bootable embraOS disk image from source and boot it. The project landing page is [../../README.md](../../README.md).
 
 > **Default UI.** The browser-based **embra-web** console is the default UI, served
 > over HTTPS at **https://localhost:3345/embraOS** — open it from the URL embraOS

@@ -18,6 +18,10 @@
 > Validation](#end-to-end-validation) checklist after any canonical-build bump and
 > re-stamp this date.
 >
+> The toolchain bump to Rust 1.98.1, Step 3.6 (the embedding model) and the hardened
+> Buildroot hooks (`set -euo pipefail`) landed after that run and are **TBD on macOS**
+> until the next Mac build; the x86_64 Linux build validates them on every rebuild.
+>
 > **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a named
 > volume over `buildroot-src`: building the Buildroot tree on the bind mount
 > exhausts the Docker runtime's macOS-side file provider (`Too many open files` —
@@ -37,7 +41,8 @@
 
 Builds a QEMU-bootable ARM64 embraOS image that runs natively on Apple Silicon via HVF.
 Steps 0.5–3 (frontend + Rust cross-compile + initramfs) run on macOS; Step 3.5 (in-OS
-Rust toolchain) and Step 4 (Buildroot) run in a `linux/arm64` Docker container.
+Rust toolchain), Step 3.6 (the embedding model) and Step 4 (Buildroot) run in a
+`linux/arm64` Docker container.
 
 > **Default UI is the browser console.** `run-qemu-aarch64.sh` boots the
 > **embra-web** console by default, served over HTTPS at
@@ -264,8 +269,8 @@ ls /usr/local/Cellar/musl-cross/*/libexec/bin/aarch64-linux-musl-gcc
 ### The build pipeline, step by step
 
 `build-image-aarch64.sh` orchestrates the whole pipeline. On macOS it runs Steps 0.5–3,
-logs that Step 3.5 is deferred, and exits at the Step 4 guard printing the Docker
-command. The Docker `--buildroot-only` pass then runs Step 3.5 and Step 4.
+logs that Steps 3.5 and 3.6 are deferred, and exits at the Step 4 guard printing the
+Docker command. The Docker `--buildroot-only` pass then runs Steps 3.5, 3.6 and 4.
 
 - **Step 0.5 — embra-web frontend (Trunk → WASM).** Builds `crates/embra-web-ui` with
   Trunk so `embra-web` can embed `dist/` via `rust-embed`. wasm32 output is
@@ -422,8 +427,8 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 |---|---|---|
 | Binary | `qemu-system-x86_64` | `qemu-system-aarch64` |
 | Machine | (default, i440FX/q35) | `-machine virt` |
-| Acceleration on macOS | HVF (guest is x86 → TCG fallback) | HVF (native — near-native speed) |
-| CPU | `-cpu max` (TCG) | `-cpu host` (HVF) |
+| Acceleration on macOS | `-accel hvf` (`run-qemu.sh` passes it on every Mac; an x86_64 guest runs under HVF on an Intel Mac only) | `-accel hvf` (native — near-native speed) |
+| CPU | QEMU's default (`run-qemu.sh` passes no `-cpu`) | `-cpu host` under HVF, `-cpu max` otherwise |
 | Kernel image | `bzImage` | `Image` |
 | Serial console | `console=ttyS0` | `console=ttyAMA0` |
 | Default UI | embra-web console; `EMBRA_TUI=1` → serial TUI | identical |
@@ -605,8 +610,9 @@ ARM64 Linux host: `apt-get install -y xz-utils curl coreutils`.
 rm -rf vendor/rust-toolchain
 ```
 
-The expected host-tarball hash is `244ef245…f21e`. If it persists, check network /
-proxy interception of `static.rust-lang.org`.
+The expected hash is the one in the `.tar.xz.sha256` file the script downloads beside
+the tarball from `static.rust-lang.org`, and the script verifies against it. If it
+persists, check network / proxy interception of `static.rust-lang.org`.
 
 #### `ERROR: buildroot-src has local changes; refusing to switch to 2026.02.1`
 
@@ -921,14 +927,14 @@ ARM64's `-machine virt` uses the PL011 UART (`/dev/ttyAMA0`), not 8250
 
 You will see `--device /dev/ttyS0` if you grep the source (`embrad`'s
 `supervisor.rs` passes it to embra-console). **It is vestigial and harmless** —
-embra-console's `terminal::run(_device)` ignores that argument and renders the TUI
+embra-console's `run_tui(_device)` ignores that argument and renders the TUI
 to its inherited `stdout`, which embrad wires to the real console (`ttyAMA0` on
 aarch64, `ttyS0` on x86_64). The serial TUI (`EMBRA_TUI=1`) therefore attaches
 correctly on Apple Silicon with **no code change** — verified on aarch64.
 
 ### End-to-End Validation
 
-This is the sequence used to verify the 2026-05-18 re-sync (see the status banner).
+This is the sequence used to verify the 2026-07-19 run (see the status banner).
 Re-run it as the regression checklist after any canonical-build bump:
 
 1. **Boot — web console (default).** `./scripts/run-qemu-aarch64.sh`. Banner shows
