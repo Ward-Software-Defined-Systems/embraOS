@@ -53,6 +53,48 @@ pub async fn is_soul_sealed(db: &WardsonDbClient) -> Result<bool> {
     db.collection_exists("soul.invariant").await
 }
 
+/// What the seal looks like now (#15): no soul; a soul whose hash matches
+/// the stored one; or a soul present with a different stored hash or none.
+/// trustd verifies at boot and halts on a mismatch, so the third state is
+/// never a boot that was let through — it is a soul or a hash file changed
+/// since. The status surfaces print it, which is what the issue asked the
+/// display to be able to reveal; the mode still follows the document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SealState {
+    Unsealed,
+    Sealed,
+    SealedUnverified,
+}
+
+impl SealState {
+    /// The word the status surfaces print.
+    pub fn status_word(self) -> &'static str {
+        match self {
+            SealState::Unsealed => "unsealed",
+            SealState::Sealed => "sealed",
+            SealState::SealedUnverified => "sealed, unverified",
+        }
+    }
+}
+
+/// The seal re-verified against `SOUL_HASH_PATH`.
+pub async fn seal_state(db: &WardsonDbClient) -> SealState {
+    seal_state_at(db, Path::new(SOUL_HASH_PATH)).await
+}
+
+/// `seal_state` against a given hash file (a test's directory). A soul
+/// that cannot be read reads as unsealed, as `is_soul_sealed` did.
+pub(crate) async fn seal_state_at(db: &WardsonDbClient, hash_path: &Path) -> SealState {
+    let Some(soul) = load_soul(db).await.ok().flatten() else {
+        return SealState::Unsealed;
+    };
+    let stored = std::fs::read_to_string(hash_path).ok().map(|s| s.trim().to_string());
+    match (compute_soul_hash(&soul), stored) {
+        (Ok(computed), Some(stored)) if computed == stored => SealState::Sealed,
+        _ => SealState::SealedUnverified,
+    }
+}
+
 pub async fn load_soul(db: &WardsonDbClient) -> Result<Option<serde_json::Value>> {
     Ok(load_soul_doc(db)
         .await?
@@ -164,5 +206,64 @@ mod hash_file_tests {
         assert!(err.to_string().starts_with("Failed to write soul hash to STATE"), "{err}");
         assert_eq!(names(&dir), vec!["state".to_string()], "nothing else was created");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod seal_state_tests {
+    use super::{SealState, compute_soul_hash, seal_state_at};
+    use crate::db::WardsonDbClient;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn envelope(v: serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": v, "meta": {}}))
+    }
+
+    async fn server_with_soul(soul: &serde_json::Value) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/soul.invariant")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/soul.invariant/docs/soul"))
+            .respond_with(envelope(json!({"_id": "soul", "soul": soul})))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn hash_file(tag: &str, contents: Option<&str>) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("embra-seal-state-{}-{tag}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("soul.sha256");
+        if let Some(c) = contents {
+            std::fs::write(&file, c).unwrap();
+        }
+        file
+    }
+
+    /// #15: the word follows the hash as stored now — a match is sealed; a
+    /// different or missing hash is sealed and unverified; no soul is
+    /// unsealed. trustd halts a mismatch at boot, so the middle state is a
+    /// soul or a file changed since, which the status surfaces now show.
+    #[tokio::test]
+    async fn the_seal_is_re_verified_against_the_stored_hash() {
+        let soul = json!({"name": "Embra", "values": ["candor"]});
+        let hash = compute_soul_hash(&soul).unwrap();
+        let server = server_with_soul(&soul).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        assert_eq!(seal_state_at(&db, &hash_file("match", Some(&hash))).await, SealState::Sealed);
+        assert_eq!(seal_state_at(&db, &hash_file("other", Some("0000"))).await, SealState::SealedUnverified);
+        assert_eq!(seal_state_at(&db, &hash_file("none", None)).await, SealState::SealedUnverified);
+
+        let empty = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/soul.invariant")).respond_with(ResponseTemplate::new(404)).mount(&empty).await;
+        let db = WardsonDbClient::from_url(&empty.uri());
+        assert_eq!(seal_state_at(&db, &hash_file("unsealed", Some(&hash))).await, SealState::Unsealed);
+
+        assert_eq!(SealState::Sealed.status_word(), "sealed");
+        assert_eq!(SealState::SealedUnverified.status_word(), "sealed, unverified");
+        assert_eq!(SealState::Unsealed.status_word(), "unsealed");
     }
 }

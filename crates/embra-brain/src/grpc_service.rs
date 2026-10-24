@@ -1077,9 +1077,12 @@ impl BrainService for BrainGrpcService {
         } else {
             OperatingMode::Learning
         };
+        // #15: the mode follows the document, as before; the word re-verifies
+        // the seal against the stored hash.
+        let soul_status = learning::seal_state(&self.db).await.status_word().to_string();
         Ok(Response::new(GetModeResponse {
             mode: mode as i32,
-            soul_status: if is_sealed { "sealed" } else { "unsealed" }.to_string(),
+            soul_status,
         }))
     }
 

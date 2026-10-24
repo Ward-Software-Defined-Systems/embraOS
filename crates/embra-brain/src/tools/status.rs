@@ -142,15 +142,16 @@ fn count_exceeds_window(count: Option<u64>, window: usize) -> bool {
 pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
     // The independent reads at once (#47): the order of the window
     // warnings below is the only thing that may change.
-    let (healthy, collections, sealed, stats) = tokio::join!(
+    let (healthy, collections, seal, stats) = tokio::join!(
         db.health(),
         db.list_collections(),
-        db.collection_exists("soul.invariant"),
+        crate::learning::seal_state(db),
         db.stats(),
     );
     let healthy = healthy.unwrap_or(false);
     let collections = collections.unwrap_or_default();
-    let soul_status = if sealed.unwrap_or(false) { "sealed" } else { "unsealed" };
+    // #15: the seal re-verified now, not the presence of a document.
+    let soul_status = seal.status_word();
 
     let stats = stats.ok();
     let storage_poisoned = stats
