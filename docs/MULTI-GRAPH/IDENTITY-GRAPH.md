@@ -189,7 +189,6 @@ memory, session, and knowledge node it had before.
 - Schema **v13**: the `identity.graph` collection (collection-create only;
   harmless-empty on legacy instances). Projection data is derived by the
   every-boot reconcile, never by the versioned ladder.
-- Tool count unchanged (95); proto unchanged (the import dialogue reuses
-  `SetupPrompt`/`UserMessage`).
+- Proto unchanged (the import dialogue reuses `SetupPrompt`/`UserMessage`).
 - Graph-mode instances get exactly one prompt-cache reset at seal time
   (by design); legacy instances get none.

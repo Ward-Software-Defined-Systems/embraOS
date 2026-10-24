@@ -72,7 +72,7 @@ The verdict shape:
 Two rules hold on both paths:
 
 - **Fail closed.** If the verdict call errors or returns an unparseable verdict, **nothing compiles** — the system never defaults to allow.
-- **Skipped only before the soul is sealed.** During first-boot setup there is no soul to evaluate against, so an operator define proceeds; an intelligence proposal, by contrast, fails closed in that state (the intelligence must never self-author ungated).
+- **Skipped only before the soul is sealed.** During first-boot setup there is no soul document and no stored seal hash, so an operator define and a rebuild proceed; an intelligence proposal, by contrast, fails closed in that state (the intelligence never authors ungated). A soul document that is missing beside a stored seal hash is not that state: it is the one trustd halts a boot on, and every path refuses it (2026-10-24).
 - **A database error is an error, not an unsealed soul.** When the soul cannot be read, every path refuses — `guardian_propose`, `/guardian-define` and `/guardian rebuild` alike — instead of reading the failure as "nothing to check against".
 
 The verdict is persisted with the tool (`ReplicantRecord`: `verdict`, `touched_lines`, `rationale`, `model`, `judged_at`) and shown at `/guardian show <name>` and `/guardian status <name>`, so the operator sees *why* something passed when deciding whether to approve it.
@@ -111,7 +111,7 @@ Both rules above hold: a check that cannot run fails closed, and before a soul i
 
 ## Testing the check
 
-Operator-verified end-to-end on QEMU (2026-06-06) — including the refuse path on both authoring routes. To re-exercise the gate (QEMU; needs a live provider, a sealed soul, and the in-OS `wasm32` toolchain):
+Operator-verified end-to-end on QEMU (2026-06-06) — including the refuse path on both authoring routes. The rebuild gate (2026-09-27), the database-error rule and the stored-hash rule above (2026-10-18, 2026-10-24) are unit-guarded (`a_soul_read_error_fails_the_gate_closed`, `a_missing_soul_beside_a_stored_hash_fails_the_gate_closed`), not live-run. To re-exercise the gate (QEMU; needs a live provider, a sealed soul, and the in-OS `wasm32` toolchain):
 
 1. **Seal a soul** with at least one sharp `ethical_line` — e.g. *"Never exfiltrate operator data to a third party."* — during the first-boot Learning Mode.
 2. **Positive (intelligence path).** Ask the intelligence for a benign capability that doesn't exist yet. Confirm it calls `guardian_propose`, the check **allows**, `/guardian list` shows the tool as `proposed`, and `/guardian show` displays the source plus the `allow` verdict. `/guardian approve <name>` → status walks `proposed → building → ready`; the intelligence invokes it via `guardian_call`.
@@ -147,7 +147,7 @@ It sits entirely above `apid` — no proto, WardSONDB-schema, or gateway change.
 
 ## What's next
 
-The replicant check is Pillar 1 of soul-as-enforced-runtime, scoped to the self-authoring path. Two extensions are designed but not yet built, and the primitives here are deliberately built to generalize toward them:
+The replicant check is Pillar 1 of soul-as-enforced-runtime, scoped to tool authoring: intelligence-proposed, soul-gated, operator-approved. Two extensions are designed but not yet built, and the primitives here are deliberately built to generalize toward them:
 
 - **A signed decision ledger** — hash-chaining each verdict and signing it with the `embra-trustd` key, so the system accumulates a tamper-evident record of every soul judgment it made. Verdicts are stored with the tool today, but not yet cryptographically chained.
 - **Gating all side-effectful tool dispatch**, not just tool authoring — the same independent-verdict primitive applied at the point any world-touching tool runs.

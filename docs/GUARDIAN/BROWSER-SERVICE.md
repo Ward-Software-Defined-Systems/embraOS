@@ -93,7 +93,7 @@ The first lists the routes; the second answers the rendered page as
 
 ```text
 /guardian egress allow browser.example.lan
-/guardian secret browser.example.lan Authorization "Bearer <BROWSERLESS_TOKEN>"
+/guardian secret browser.example.lan Authorization Bearer <BROWSERLESS_TOKEN>
 ```
 
 The first admits the private host; the second stores the bearer the host

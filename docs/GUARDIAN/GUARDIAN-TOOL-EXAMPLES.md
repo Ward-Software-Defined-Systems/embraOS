@@ -5,7 +5,7 @@ the intelligence. Every fenced `rust` module below is checked against the
 real validator by `crates/embra-guardian/tests/doc_examples_validate.rs`,
 so what's here is exactly what the gate accepts.
 
-> Status: **experimental** (branch `embra-guardian-v1`). The in-OS
+> Status: **experimental**. The in-OS
 > toolchain (`/opt/rust`) must be present — build the image with
 > `BR2_PACKAGE_EMBRA_RUST_TOOLCHAIN=y` (default in the embraOS defconfig).
 
@@ -43,16 +43,26 @@ You paste **only** these items — the scaffold owns everything else
 - `const GUARDIAN_SCHEMA: &str = r#"{ "type":"object", "properties":{…} }"#;`
 - *(optional)* `const GUARDIAN_CAPS: &[&str] = &["http_get"];`
   (v1 capabilities: `"http_get"`, `"http_request"`, `"web_search"` — declare
-  only what the tool uses; the validator rejects an undeclared `host::` reference)
+  only what the tool uses; the validator refuses a capability it does not know, and
+  a `host::` call the module did not declare fails in the build, since the scaffold
+  generates the host functions of the declared capabilities alone)
 - Exactly one `fn run(input: &str) -> String` (not `pub`, not `unsafe`).
 - Any number of **private** helper `fn`s.
 
-Forbidden in the paste (validator-enforced): `unsafe`, `extern`/FFI,
-`std::*` / `core::arch` / `proc_macro`, `use` of anything outside
-`core`/`alloc`/`json`/`host`/`html_text`/`inject`, `include!`/`env!`/`asm!`-style macros,
-`mod`, `pub` free items, `#[no_mangle]`/`#[link]`/runtime attrs, and any
-third-party crate dependency (v1 guests are dependency-free). `vec![]`
-and `format!` are available.
+Forbidden in the paste (validator-enforced, `crates/embra-guardian/src/validator.rs`):
+`unsafe` in every form (a block, `unsafe fn`, `unsafe impl`, and inside any macro
+invocation); `extern crate` and `extern { … }` blocks; `mod`; a `pub` free `fn`; `use`
+of anything outside `core`/`alloc`/`json`/`host`/`html_text`/`inject`; a bare `std`,
+`std::{process, fs, net, os, env, thread, ffi, arch}`, `core::arch` and `proc_macro`
+paths; the macros `include!`, `include_str!`, `include_bytes!`, `env!`, `option_env!`,
+`asm!`, `global_asm!`, `concat_idents!` and `macro_rules!`, bare or path-qualified
+(`core::include_str!`), as a statement or inside another macro or a list attribute; the
+attributes `#[no_mangle]`, `#[export_name]`, `#[link]`, `#[link_section]`,
+`#[panic_handler]`, `#[global_allocator]`, `#![no_std]`, `#![feature]`, the
+edition-2024 `#[unsafe(…)]` wrapper and `#[cfg_attr(…)]`; and any third-party crate
+(v1 guests are dependency-free). Other `std::` paths pass the validator and fail in the
+build, the second gate, since a guest is `#![no_std]`. `vec![]` and `format!` are
+available.
 
 `run` must never panic — a panic becomes a sandbox trap reported as a
 tool error. Parse defensively (`unwrap_or`, return an `{"error":…}`

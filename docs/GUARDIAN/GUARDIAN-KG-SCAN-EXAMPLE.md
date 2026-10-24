@@ -5,7 +5,8 @@ patterns. It is the first Guardian tool authored by the intelligence
 itself: drafted on a production instance via `guardian_propose`,
 `syn`-validated, judged against the sealed soul by the replicant check
 (fail-closed), and compiled only after operator approval — the full gated
-self-authoring path ([REPLICANT-CHECK.md](./REPLICANT-CHECK.md)). The
+path, intelligence-proposed, soul-gated, operator-approved
+([REPLICANT-CHECK.md](./REPLICANT-CHECK.md)). The
 intelligence iterated it v1 → v5 in one day (2026-06-03): v1's
 temporal-gating matcher was a stub; v5 added the Crockford-Base32
 timestamp decode with hyphen handling and corrected the
@@ -516,5 +517,7 @@ fn run(input: &str) -> String {
 
 On an instance where the intelligence has already authored its own
 `kg_scan` (it exists on the machine this example came from),
-`/guardian-define` hits a name conflict — `/guardian delete kg_scan`
-first, or rename the marker + `GUARDIAN_NAME` pair in your paste.
+`/guardian-define` replaces the record of that name with your paste, its
+build and replicant verdict included — `/guardian show kg_scan` first to
+keep a copy of its source, or rename the marker + `GUARDIAN_NAME` pair in
+your paste.

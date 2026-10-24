@@ -36,8 +36,9 @@ the OS's packs are in the image, and a copy in STATE would be ignored at boot
 (it would otherwise pin the pack to the day it was copied, through every
 later image and every restored backup). Files must end in `.knowledge.json` and stay under
 4 MiB. Two files whose packs share a `name` conflate the loader's
-fast-path counts — the first file (alphabetical) wins and the other is
-skipped with a boot-journal warning.
+fast-path counts — the first file in scan order wins (the image's directory
+before STATE, file-name order within each) and the other is skipped with a
+boot-journal warning.
 
 ## The ensure-present contract (read this before editing a live instance)
 

@@ -61,7 +61,7 @@ excluded from the import selector:
 2. **No dangling references** — every edge `src`/`dst` names an existing
    node `id`.
 3. **No duplicate edges** — the `(src, dst, relation)` triple is unique.
-4. **Valid ids** — non-empty, ≤ 512 bytes, no leading `_`, no NUL, and
+4. **Valid ids** — unique within the graph, non-empty, ≤ 512 bytes, no leading `_`, no NUL, and
    **not prefixed `user_`** (that namespace is reserved for the operator
    subgraph embraOS generates locally from the Phase-1 profile).
 5. Parseable JSON with `nodes` and `edges` arrays.
@@ -76,7 +76,7 @@ renders them faithfully. The two committed examples are deliberate contrasts:
 |---|---|---|
 | Derivation | Production Embra (from `Embra_IDENTITY.md` + `Embra_SOUL.md`), naming no operator | Authored control fixture (QNM dynamical-specificity test) |
 | Nodes / edges | 100 / 354 | 100 / 349 |
-| Node types | 13 (trait, value, soul_line, behavior, principle, anti_pattern, …) | 13 entirely different (belief, craft_virtue, drive, failure_mode, horizon, …) |
+| Node types | 13 (trait, value, soul_line, behavior, principle, anti_pattern, …) | 13, eleven of them its own (belief, craft_virtue, drive, failure_mode, horizon, …); `self` and `entity` are shared |
 | Relations | 10 | 54 |
 | Topology | Hub-and-spoke from the self node | Mesh + ring motifs |
 

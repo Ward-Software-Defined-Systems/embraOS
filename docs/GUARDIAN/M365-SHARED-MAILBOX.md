@@ -157,10 +157,10 @@ curl -sS -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/tok
 Then, in the embraOS console:
 
 ```text
-/guardian secret graph.microsoft.com Authorization "Bearer <PASTE_ACCESS_TOKEN>"
+/guardian secret graph.microsoft.com Authorization Bearer <PASTE_ACCESS_TOKEN>
 ```
 
-The value is stored in STATE and shown by no surface. When the token
+The value is the rest of the line, spaces included (a pair of double quotes around it is dropped); it is stored in the configuration document (`config.system`), not in STATE, and shown by no surface. When the token
 expires, Graph answers 401 and the intelligence reports it; store a new
 one with the same command, which replaces the old value.
 

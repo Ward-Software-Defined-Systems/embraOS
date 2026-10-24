@@ -6,7 +6,7 @@ guard) **and** optionally fetch + read the top results (via the
 `http_get` egress guard) — neutralizing prompt-injection in everything
 before the model sees it. Read
 [GUARDIAN-TOOL-EXAMPLES.md](./GUARDIAN-TOOL-EXAMPLES.md) first for the
-contract and the `json` / `host` / `html_text` APIs.
+contract and the `json` / `host` / `html_text` / `inject` APIs.
 
 The second shipped tool, `http_request` (a guarded curl for pages and API
 work), is in [GUARDIAN-HTTP-REQUEST-EXAMPLE.md](./GUARDIAN-HTTP-REQUEST-EXAMPLE.md).
@@ -472,7 +472,7 @@ fn overlap_score(query: &str, title: &str, description: &str) -> f64 {
   routinely); `fetch_url` names the URL that answered when it is not the
   result's, and `fetch_redirect` the target of a redirect past that limit.
 - **No third-party crates** (v1 rule): `#![no_std]` + the vendored
-  `json` and `html_text` helpers only. `html_text::to_text` is a
+  `json`, `html_text` and `inject` helpers only. `html_text::to_text` is a
   **heuristic** HTML→text reducer (drops `<script>/<style>`, strips
   tags, decodes a small entity set), documented conservative — it does
   not make hostile markup safe; the scrubber still runs on its output.
