@@ -62,7 +62,7 @@
 <text x="88" y="419" font-family="DejaVu Sans, sans-serif" font-size="12.5" font-weight="bold" fill="#e6e4df" text-anchor="start">embra-brain</text>
 <text x="728" y="419" font-family="DejaVu Sans Mono, monospace" font-size="10.4" font-weight="normal" fill="#ef4444" text-anchor="end">gRPC :50002</text>
 <text x="72" y="435" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">headless AI runtime: providers (Anthropic, Gemini,</text>
-<text x="72" y="447" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">Ollama, LM Studio) · 117 tools · sessions · Learning Mode</text>
+<text x="72" y="447" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">Ollama, LM Studio) · 118 tools · sessions · Learning Mode</text>
 <text x="72" y="459" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">knowledge graph + in-OS embeddings (tract · bge-small)</text>
 <text x="72" y="471" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">proactive: reminders, cron · media (images in and out)</text>
 <text x="72" y="483" font-family="DejaVu Sans, sans-serif" font-size="9.9" font-weight="normal" fill="#aaa8b3" text-anchor="start">tools write under /embra/workspace only · read everything</text>
@@ -152,7 +152,7 @@
 <rect x="60" y="794" width="1100" height="58" rx="8" fill="#14131a" stroke="#6a6a7a" stroke-width="1.2"/>
 <text x="72" y="813" font-family="DejaVu Sans, sans-serif" font-size="12.5" font-weight="bold" fill="#e6e4df" text-anchor="start">Linux kernel · Buildroot 2026.02.1 · initramfs /init = embra-init</text>
 <text x="72" y="829.0" font-family="DejaVu Sans, sans-serif" font-size="10" font-weight="normal" fill="#aaa8b3" text-anchor="start">virtio blk/net · SquashFS (xz) · ext4 · console=ttyS0 | ttyAMA0 · root=/dev/vda2 ro · embra-init (sync, no tokio): mounts proc, sys, dev → / from vda2, read-only SquashFS</text>
-<text x="72" y="841.6" font-family="DejaVu Sans, sans-serif" font-size="10" font-weight="normal" fill="#aaa8b3" text-anchor="start">→ /embra/state from vda3 → /embra/data from vda4 → pivot_root → exec /sbin/embrad</text>
+<text x="72" y="841.6" font-family="DejaVu Sans, sans-serif" font-size="10" font-weight="normal" fill="#aaa8b3" text-anchor="start">→ /embra/state from vda3 → /embra/data from vda4 → chroot → exec /sbin/embrad</text>
 <rect x="60" y="876" width="1100" height="84" rx="8" fill="#14131a" stroke="#5a5a6a" stroke-width="1.2"/>
 <text x="72" y="895" font-family="DejaVu Sans, sans-serif" font-size="12.5" font-weight="bold" fill="#e6e4df" text-anchor="start">QEMU · the host</text>
 <text x="72" y="911.0" font-family="DejaVu Sans, sans-serif" font-size="10" font-weight="normal" fill="#aaa8b3" text-anchor="start">qemu-system-x86_64 -accel kvm (Linux) · qemu-system-aarch64 -accel hvf (Apple Silicon) · -m 4G on both · -smp N · -kernel + -initrd · -nographic -serial mon:stdio</text>
@@ -163,7 +163,7 @@
 <polyline points="1120,712 1120,685" fill="none" stroke="#8d8a96" stroke-width="1.3" marker-end="url(#head)"/>
 <text x="1108" y="703" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#bdbac4" text-anchor="end">starts ① → ⑥ · restarts any exit</text>
 <polyline points="1120,794 1120,771" fill="none" stroke="#8d8a96" stroke-width="1.3" marker-end="url(#head)"/>
-<text x="1108" y="787" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#bdbac4" text-anchor="end">exec /sbin/embrad after pivot_root</text>
+<text x="1108" y="787" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#bdbac4" text-anchor="end">exec /sbin/embrad after chroot</text>
 <polyline points="1120,876 1120,853" fill="none" stroke="#8d8a96" stroke-width="1.3" marker-end="url(#head)"/>
 <text x="1108" y="869" font-family="DejaVu Sans, sans-serif" font-size="9.6" font-weight="normal" fill="#bdbac4" text-anchor="end">-kernel · -initrd · the virtio disk</text>
 <text x="60" y="980" font-family="DejaVu Sans, sans-serif" font-size="9.4" font-weight="normal" fill="#6a6a7a" text-anchor="start">Every port, path and flag is the one the code binds or the scripts pass · detail: docs/SYSTEM-DESIGN.md</text>

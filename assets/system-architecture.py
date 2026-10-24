@@ -129,7 +129,7 @@ box(200, 308, 520, 56, "embra-apid", [
 # row C
 box(60, 400, 680, 124, "embra-brain", [
     "headless AI runtime: providers (Anthropic, Gemini,",
-    "Ollama, LM Studio) · 117 tools · sessions · Learning Mode",
+    "Ollama, LM Studio) · 118 tools · sessions · Learning Mode",
     "knowledge graph + in-OS embeddings (tract · bge-small)",
     "proactive: reminders, cron · media (images in and out)",
     "tools write under /embra/workspace only · read everything",
@@ -222,7 +222,7 @@ slab(712, 58, "embrad · PID 1 · init and service supervisor", SLAB, [
 ])
 slab(794, 58, "Linux kernel · Buildroot 2026.02.1 · initramfs /init = embra-init", KERNEL, [
     "virtio blk/net · SquashFS (xz) · ext4 · console=ttyS0 | ttyAMA0 · root=/dev/vda2 ro · embra-init (sync, no tokio): mounts proc, sys, dev → / from vda2, read-only SquashFS",
-    "→ /embra/state from vda3 → /embra/data from vda4 → pivot_root → exec /sbin/embrad",
+    "→ /embra/state from vda3 → /embra/data from vda4 → chroot → exec /sbin/embrad",
 ])
 slab(876, 84, "QEMU · the host", QEMU, [
     "qemu-system-x86_64 -accel kvm (Linux) · qemu-system-aarch64 -accel hvf (Apple Silicon) · -m 4G on both · -smp N · -kernel + -initrd · -nographic -serial mon:stdio",
@@ -233,7 +233,7 @@ slab(876, 84, "QEMU · the host", QEMU, [
 arrow([(660, 712), (660, 659)], "VerifySoul at boot", (668, 690), label_dy=0)
 # slab connectors on the right
 arrow([(1120, 712), (1120, 685)], "starts ① → ⑥ · restarts any exit", (1108, 703), anchor="end", label_dy=0)
-arrow([(1120, 794), (1120, 771)], "exec /sbin/embrad after pivot_root", (1108, 787), anchor="end", label_dy=0)
+arrow([(1120, 794), (1120, 771)], "exec /sbin/embrad after chroot", (1108, 787), anchor="end", label_dy=0)
 arrow([(1120, 876), (1120, 853)], "-kernel · -initrd · the virtio disk", (1108, 869), anchor="end", label_dy=0)
 
 # ------------------------------------------------------------------ footer --

@@ -22,7 +22,7 @@
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — the sealed identity graph and the memory collections in one multigraph, with the production instance's measured numbers" width="100%">
 </p>
 
-**Current Status:** Phase 1 — Stable (code review in progress). Sprint 6, the final Phase 1 sprint, closed with `v0.15.0-phase1` (2026-09-18); the code-review pit stop is on branch `code-review`.
+**Current Status:** Phase 1 — Stable (code review in progress). Sprint 6, the final Phase 1 sprint, closed with `v0.15.0-phase1` (2026-09-18); the code-review pit stop runs on branch `code-review`, and its releases are `v0.16.0-phase1` through `v0.20.0-phase1` ([docs/CHANGE-LOG.md](docs/CHANGE-LOG.md)).
 
 Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` management CLI, an image factory targeting bare metal and Kubernetes, and a sovereign-intelligence tier — A/B partitioned rollback, LUKS, mTLS, and fully offline local inference. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
@@ -86,7 +86,7 @@ Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` 
 > this session is worth keeping — it has `remember` and twelve `knowledge_*` tools.
 > `remember` writes the memory into the knowledge graph in the same call and names the
 > nearest existing nodes, so the intelligence links what is related without being asked.
-> Automation is on the near-term roadmap. ***Reading*** is
+> ***Reading*** is
 > automatic on every turn, and it is **semantic, not just lexical**: alongside tag and
 > IDF-weighted content matching over recency-ranked windows, a **sentence-embedding
 > model runs inside the OS** and ranks memories by meaning rather than wording. Measured
@@ -201,12 +201,12 @@ The full embraOS manual lives in [docs/](docs/).
 | Chapter | What it covers |
 |---|---|
 | **[Quick Start](docs/BUILD/QUICK-START.md)** | Build the QEMU image from source (Ubuntu 24.04 / 26.04); first-boot Config Wizard; operational notes |
-| **[Roadmap](docs/ROADMAP.md)** | Phase 0–5 delivery status, the post-Sprint-5 embra-web / embra-guardian v1 increments, and Sprint 6 — the final Phase 1 sprint |
+| **[Roadmap](docs/ROADMAP.md)** | Phase 0–5 delivery status, the post-Sprint-5 embra-web / embra-guardian v1 increments, Sprint 6 — the final Phase 1 sprint — and the code-review pit stop |
 | **[Change Log](docs/CHANGE-LOG.md)** | Merge log, anchored on tagged releases |
 | **[Operation](docs/OPERATIONS/OPERATION.md)** | Run lifecycle, the session model, keyboard shortcuts, current limitations |
 | **[Command Reference](docs/OPERATIONS/COMMAND-REFERENCE.md)** | Every slash command |
 | **[Tool Reference](docs/OPERATIONS/TOOL-REFERENCE.md)** | All 118 built-in tools by category, plus workspace / GitHub / SSH safety notes |
-| **[System Design](docs/SYSTEM-DESIGN.md)** | The 7-layer continuity architecture, the four LLM providers, reasoning controls, prompt caching |
+| **[System Design](docs/SYSTEM-DESIGN.md)** | The 7-layer continuity architecture, the boot chain and disk layout, network exposure and trust boundaries, the four LLM providers, reasoning controls, prompt caching |
 | **[Knowledge Graph](docs/MULTI-GRAPH/KNOWLEDGE-GRAPH.md)** | The cross-session memory graph — promotion at creation, link candidates, auto-derived edges, auto-enrichment, retrieval ranking, in-OS embeddings, the twelve `knowledge_*` tools |
 | **[Identity Graph](docs/MULTI-GRAPH/IDENTITY-GRAPH.md)** | The sealed IDENTITY+SOUL graph — format, the Learning-Mode import, KG projection, prompt rendering, and the re-seal migration ceremony |
 | **[Open Problems](docs/OPEN-PROBLEMS.md)** | Unresolved design questions tracked at the architecture level |
