@@ -434,23 +434,31 @@ static SAMPLER: OnceLock<Sampler> = OnceLock::new();
 /// The database sample every snapshot reads. One task samples: every
 /// `SNAPSHOT_INTERVAL` while someone watches, and right away when a watcher
 /// arrives. GETs only, no query body; the seal is read until seen once.
+/// The task runs under `proactive::supervise` like the proactive loops: a
+/// panic in a sample would otherwise freeze every snapshot until the next
+/// boot, with nothing said (#59).
 pub(crate) fn db_sample(db: &WardsonDbClient) -> watch::Receiver<Option<DbSample>> {
     let sampler = SAMPLER.get_or_init(|| {
         let (tx, rx) = watch::channel(None);
         let wake = Arc::new(Notify::new());
         let db = db.clone();
         let waker = wake.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = waker.notified() => {}
-                    _ = tokio::time::sleep(SNAPSHOT_INTERVAL) => {}
-                }
-                if receiver_count() == 0 {
-                    continue;
-                }
-                if let Some(sample) = take_sample(&db).await {
-                    tx.send_replace(Some(sample));
+        crate::proactive::supervise("activity-sampler", move || {
+            let db = db.clone();
+            let waker = waker.clone();
+            let tx = tx.clone();
+            async move {
+                loop {
+                    tokio::select! {
+                        _ = waker.notified() => {}
+                        _ = tokio::time::sleep(SNAPSHOT_INTERVAL) => {}
+                    }
+                    if receiver_count() == 0 {
+                        continue;
+                    }
+                    if let Some(sample) = take_sample(&db).await {
+                        tx.send_replace(Some(sample));
+                    }
                 }
             }
         });
@@ -460,12 +468,48 @@ pub(crate) fn db_sample(db: &WardsonDbClient) -> watch::Receiver<Option<DbSample
     sampler.rx.clone()
 }
 
+/// Set while the sampler's reads fail, so a failing database is said once
+/// per streak and its recovery once, not every `SNAPSHOT_INTERVAL`.
+static SAMPLE_FAILING: AtomicBool = AtomicBool::new(false);
+
+/// A read the sample could not take: the snapshot keeps the last sample,
+/// and the reason is logged at the start of the streak (#60).
+fn sample_failed(what: &str, reason: &dyn std::fmt::Display) {
+    if !SAMPLE_FAILING.swap(true, Ordering::Relaxed) {
+        tracing::warn!(target: "activity", "database sample skipped: {what} — {reason}");
+    }
+}
+
+fn sample_recovered() {
+    if SAMPLE_FAILING.swap(false, Ordering::Relaxed) {
+        tracing::info!(target: "activity", "database sample taken again");
+    }
+}
+
 async fn take_sample(db: &WardsonDbClient) -> Option<DbSample> {
-    let collections = tokio::time::timeout(SAMPLE_TIMEOUT, db.list_collections_with_counts())
-        .await
-        .ok()?
-        .ok()?;
-    let stats = tokio::time::timeout(SAMPLE_TIMEOUT, db.stats()).await.ok()?.ok()?;
+    let collections = match tokio::time::timeout(SAMPLE_TIMEOUT, db.list_collections_with_counts()).await {
+        Ok(Ok(collections)) => collections,
+        Ok(Err(e)) => {
+            sample_failed("collections", &e);
+            return None;
+        }
+        Err(_) => {
+            sample_failed("collections", &format!("no answer within {SAMPLE_TIMEOUT:?}"));
+            return None;
+        }
+    };
+    let stats = match tokio::time::timeout(SAMPLE_TIMEOUT, db.stats()).await {
+        Ok(Ok(stats)) => stats,
+        Ok(Err(e)) => {
+            sample_failed("stats", &e);
+            return None;
+        }
+        Err(_) => {
+            sample_failed("stats", &format!("no answer within {SAMPLE_TIMEOUT:?}"));
+            return None;
+        }
+    };
+    sample_recovered();
     if !SEALED.load(Ordering::Relaxed)
         && let Ok(Ok(true)) =
             tokio::time::timeout(SAMPLE_TIMEOUT, db.collection_exists("soul.invariant")).await

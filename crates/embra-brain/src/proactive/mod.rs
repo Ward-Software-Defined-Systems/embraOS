@@ -132,8 +132,8 @@ const SUPERVISE_RESTART_PAUSE: Duration = Duration::from_secs(5);
 /// would otherwise die silently and take its subsystem with it until the
 /// next boot (#59). The panic is logged and the loop built again by `make`
 /// after [`SUPERVISE_RESTART_PAUSE`]; a loop that returns is logged the
-/// same way.
-fn supervise<F, Fut>(name: &'static str, make: F)
+/// same way. The activity sampler (`activity::db_sample`) runs under it too.
+pub(crate) fn supervise<F, Fut>(name: &'static str, make: F)
 where
     F: Fn() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
@@ -530,8 +530,19 @@ mod supervise_tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    /// Polls `done` every 10 ms until it holds or `deadline` has passed.
+    async fn wait_until(done: impl Fn() -> bool, deadline: Duration) {
+        let started = tokio::time::Instant::now();
+        while !done() && started.elapsed() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// A loop that panics is started again after the pause; one that runs
-    /// is left alone (#59).
+    /// is left alone (#59). The second start is awaited with a deadline, not
+    /// read after a fixed sleep: under a loaded test run the fixed 400 ms
+    /// once saw the restart still pending (the verification of 2026-10-24).
+    /// The second run never ends, so the count can never pass two.
     #[tokio::test]
     async fn a_proactive_loop_that_panics_is_started_again() {
         let starts = Arc::new(AtomicUsize::new(0));
@@ -545,8 +556,11 @@ mod supervise_tests {
                 std::future::pending::<()>().await
             }
         });
-        tokio::time::sleep(Duration::from_millis(400)).await;
-        assert_eq!(starts.load(Ordering::SeqCst), 2, "started, died, started again, and then left alone");
+        let probe = starts.clone();
+        wait_until(move || probe.load(Ordering::SeqCst) == 2, Duration::from_secs(10)).await;
+        assert_eq!(starts.load(Ordering::SeqCst), 2, "started, died, started again");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(starts.load(Ordering::SeqCst), 2, "and then left alone");
         handle.abort();
     }
 }
