@@ -733,7 +733,9 @@ pub async fn run_config_wizard_grpc(
 
     let name = match response_rx.recv().await {
         Some(input) if !input.is_empty() => input,
-        _ => "Embra".to_string(),
+        Some(_) => "Embra".to_string(),
+        // #61: a closed channel is the client gone, not an empty answer.
+        None => anyhow::bail!("setup channel closed during the name step"),
     };
     info!("Config wizard: name = {}", name);
 
@@ -753,7 +755,8 @@ pub async fn run_config_wizard_grpc(
     })).await;
     let provider_choice = match response_rx.recv().await {
         Some(input) if !input.is_empty() => input,
-        _ => PROVIDER_WIZARD_LABELS[0].to_string(),
+        Some(_) => PROVIDER_WIZARD_LABELS[0].to_string(),
+        None => anyhow::bail!("setup channel closed during the provider step"),
     };
     let provider_kind = provider_from_label(&provider_choice);
     // Capture the chosen Anthropic model for the Anthropic path; persisted
@@ -1953,5 +1956,26 @@ mod load_config_tests {
         let db = WardsonDbClient::from_url(&server.uri());
         let cfg = load_config(&db).await.unwrap();
         assert_eq!(cfg.version, env!("CARGO_PKG_VERSION"));
+    }
+}
+
+#[cfg(test)]
+mod wizard_channel_tests {
+    use super::run_config_wizard_grpc;
+    use crate::db::WardsonDbClient;
+    use tokio::sync::mpsc;
+
+    /// #61: a client that disconnects during setup ends the wizard with an
+    /// error naming the step it was on; it neither defaults its way through
+    /// the steps nor spins on a closed channel. Nothing before the first
+    /// answer reaches the database, so the address is never dialed.
+    #[tokio::test]
+    async fn a_dropped_receiver_ends_the_wizard_at_the_step_it_was_on() {
+        let (tx, _prompts) = mpsc::channel(8);
+        let (answers, mut response_rx) = mpsc::channel::<String>(8);
+        drop(answers);
+        let db = WardsonDbClient::from_url("http://127.0.0.1:9");
+        let err = run_config_wizard_grpc(&tx, &mut response_rx, &db).await.unwrap_err().to_string();
+        assert!(err.contains("setup channel closed during the name step"), "{err}");
     }
 }
