@@ -2,7 +2,7 @@
 
 Unresolved design questions tracked at the architecture level rather than as code comments. Each is something that will need a decision during Phase 1–3 implementation. Implementation bugs go in the Embra_Debug tracker — this list is design-state tracking, not defects.
 
-Extracted from `ARCHITECTURE.md` — `### Architectural Tensions (Known Open Problems)` — on 2026-05-23. Wording verbatim. A dated note under an entry says what has happened since; the entry itself is left as it was written.
+Extracted from `ARCHITECTURE.md` (a local design record, not in the repository) — `### Architectural Tensions (Known Open Problems)` — on 2026-05-23. Wording verbatim. A dated note under an entry says what has happened since; the entry itself is left as it was written.
 
 ---
 
@@ -30,6 +30,8 @@ WardSONDB is a core OS service. If it fails, the brain can't read state and the 
 
 **2026-10-03.** Two of the three mitigations exist. Crash recovery is the storage engine's — fjall or rocksdb, chosen when the image is built (`--storage-engine`) — and `embrad` restarts the database with backoff under a burst budget (`crates/embrad/src/supervisor.rs`). Snapshot restore is `scripts/embraos-backup.sh` (`backup`, `restore`, `list`, `verify` of STATE and DATA), a file-level copy taken from the host with the VM stopped. There is still no replica, and no design for one.
 
+**2026-10-24.** The brain's side of a database that is away: its client has a connect timeout and a read-idle timeout (`788a412`), and a read that fails is reported as a failure — an Error frame at a turn, an attach or a `/switch`, a tool reply that says the read failed — never as empty state (`f2e44b9`, `4edd79b`, `af1c8fd`). The brain stays up and says so. The replica is still undesigned.
+
 ## Bare metal vs K8s isolation parity
 
 In bare metal mode, module containers share the same kernel as embraOS. In K8s mode, modules run in a separate namespace with network policies. Bare metal needs stronger containerd-level isolation (seccomp, AppArmor/SELinux profiles, user namespaces) to match K8s-level isolation. The seccomp/AppArmor profiles are not yet written.
@@ -40,6 +42,8 @@ If module source originates inside the OS (operator-authored via Guardian, or �
 
 **2026-10-03.** Part of the chain exists for dynamic tools, and the source this entry calls future — a proposal of the intelligence — has existed since `guardian_propose`. The record of a tool (`ToolDoc` in `crates/embra-guardian/src/store.rs`, collection `guardian.tools`) keeps its source and the SHA-256 of it, the verdict of the replicant check with the model that judged and the time, the toolchain version it was built with, and the tail of the build log. A tool has no third-party dependency, so its build runs no code but the compiler's. Not kept: a record of the operator's approval (building a proposal is the approval), a hash or a signature of the built artifact, and a log of each step that can be verified afterwards. Modules as images, with signing and an allowlist, are still not designed.
 
+**2026-10-24.** `/guardian approve` builds a proposal only when its stored source still matches the hash recorded with it (`257ae9b`), and `/guardian show` prints that digest (`d23b48a`), so the approval is bound to the source the operator saw.
+
 ## Does the auto-derived edge layer still earn its cost?
 
 Opened 2026-09-08, when retrieval's graph-expansion step was deleted. `same_session`, `temporal` and `tag_overlap` account for **405,429 of production's 408,046 edges (99.36%)**, growing ~1.7x faster than the node layer (edges +44.5% against nodes +26% over 19 days), and 21% of sampled nodes now exceed the 500-edge auto window — up from 10.8% a month earlier.
@@ -48,7 +52,7 @@ That layer's headline justification was per-turn depth-2 expansion during retrie
 
 What remains is `knowledge_traverse`, which the intelligence invokes deliberately rather than on every turn — and the control case is instructive: identity nodes carry no auto edges, and a traversal from one is **100% meaningful**. The graph is useful exactly where the auto layer does not drown it.
 
-Options, none taken: decay `same_session`/`temporal` weights with age and prune below a floor; stop double-writing auto edges; cap per-node auto degree at write time; or accept the growth as the cost of a traversal tool used a few times a session. The decision needs a measurement of what `knowledge_traverse` actually returns in practice, which does not exist yet. Related: the WardSONDB traverse endpoint stays deferred precisely because the step it would accelerate was the one deleted (`embraOS-Phase1-Implementation/Sprint 6/KG-DEFERRED-ITEMS-DECISION.md`).
+Options, none taken: decay `same_session`/`temporal` weights with age and prune below a floor; stop double-writing auto edges; cap per-node auto degree at write time; or accept the growth as the cost of a traversal tool used a few times a session. The decision needs a measurement of what `knowledge_traverse` actually returns in practice, which does not exist yet. Related: the WardSONDB traverse endpoint stays deferred precisely because the step it would accelerate was the one deleted (the measurements are in [KNOWLEDGE-GRAPH.md](MULTI-GRAPH/KNOWLEDGE-GRAPH.md), under retrieval).
 
 **2026-10-03.** The proportion holds: 430,271 of 433,325 edges are automatic (99.3%, the backup of 2026-10-02). `remember` now promotes a memory when it is created, so every memory derives twice — once for its entry and once for its node, which carries the same text, tags and session. That was already the practice (1,264 of 1,294 entries were promoted); it is the rule now. It adds an option to the list above: derive for the node alone. A memory would then add about half of what it adds today. The price is in retrieval, whose session step walks `same_session` edges from the session's entries (`retrieval.rs`, step 2) and would have to be examined again.
 
