@@ -1958,9 +1958,12 @@ where
                     if busy.get_untracked() {
                         // A stop that failed is said (#62): the route answers
                         // 200 with `error` set when the gateway did not take
-                        // it, and a transport failure never reaches the route.
+                        // it, a transport failure never reaches the route, and
+                        // any other status (a gate's 401 or 403, a proxy's
+                        // 502) is a failure too, never read as success.
                         spawn_local(async move {
                             let failed = match gloo_net::http::Request::post("/api/stop").send().await {
+                                Ok(resp) if !resp.ok() => Some(format!("HTTP {}", resp.status())),
                                 Ok(resp) => resp
                                     .json::<serde_json::Value>()
                                     .await
