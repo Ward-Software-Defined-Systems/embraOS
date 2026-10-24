@@ -154,15 +154,11 @@ audit:
       cargo audit --version
     - |
       set -eu
-      # One id per line, each with its crate, the version in the lock and the
-      # fix. The line goes when the bump lands.
+      # An id waiting on William's decision goes here as one line,
+      #   ignore="$ignore --ignore RUSTSEC-YYYY-NNNN"   # <crate> <version in the lock>: <defect>; fix >=<version>
+      # and the line goes when the bump lands. None at the moment: the six
+      # the job opened with went with the bumps of 2026-10-24.
       ignore=""
-      ignore="$ignore --ignore RUSTSEC-2026-0346"   # rustls 0.23.45: Debug impls expose client session secrets; fix >=0.23.46
-      ignore="$ignore --ignore RUSTSEC-2026-0347"   # rustls 0.23.45: buffered data to the outer server after ECH rejection; fix >=0.23.46
-      ignore="$ignore --ignore RUSTSEC-2026-0348"   # rustls 0.23.45: brotli certificate decompression before authentication; fix >=0.23.46
-      ignore="$ignore --ignore RUSTSEC-2026-0349"   # rustls 0.23.45: unauthenticated ServerHello downgrade; fix >=0.23.46
-      ignore="$ignore --ignore RUSTSEC-2026-0382"   # rustls-webpki 0.103.15: distrusted intermediates accepted; fix >=0.103.16
-      ignore="$ignore --ignore RUSTSEC-2026-0381"   # webpki-roots 1.0.6: distrusted emSign intermediates in the bundle; fix >=1.0.10
       # shellcheck disable=SC2086
       cargo audit $ignore
     - cargo audit --file crates/embra-web-ui/Cargo.lock
