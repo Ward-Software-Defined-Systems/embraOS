@@ -23,6 +23,11 @@ pub const FEED_CAPACITY: usize = 256;
 /// resets after a connection that delivered a snapshot.
 pub const BACKOFF_BASE: Duration = Duration::from_secs(1);
 pub const BACKOFF_MAX: Duration = Duration::from_secs(10);
+/// How long a fresh connection may run without one decodable snapshot
+/// before it counts as failed (#62). apid sees a healthy stream while every
+/// frame is dropped here, so only this deadline fires the reconnect. A
+/// live feed delivers its first snapshot within seconds of connecting.
+pub const FIRST_SNAPSHOT_WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Clone)]
 pub struct ActivityFeed {
@@ -106,25 +111,62 @@ impl ActivityFeed {
         // a frame here is small, the rule is uniform.
         let mut client = EmbraApiClient::new(endpoint.connect_lazy())
             .max_decoding_message_size(embra_common::GRPC_MAX_MESSAGE_BYTES);
-        let mut frames = match client.watch_activity(WatchActivityRequest {}).await {
+        let frames = match client.watch_activity(WatchActivityRequest {}).await {
             Ok(r) => r.into_inner(),
             Err(e) => {
                 tracing::debug!(error = %e, "activity feed: watch not open");
                 return false;
             }
         };
+        // The error is only logged, so it travels as text: `tonic::Status` is a
+        // large `Err` for a closure to return (clippy::result_large_err).
+        self.consume(frames.map(|item| item.map(|f| f.payload).map_err(|e| e.to_string())), FIRST_SNAPSHOT_WINDOW).await
+    }
+
+    /// The frame loop of one connection. `true` when it delivered a
+    /// snapshot. A connection that has produced no decodable snapshot by the
+    /// end of `window` returns `false` (#62): without the deadline such a run
+    /// would spin forever on dropped frames, never backing off or
+    /// reconnecting. The deadline is checked while waiting for a frame and
+    /// again after each one, so a firehose of undecodable frames cannot
+    /// outrun it.
+    async fn consume<S>(&self, mut frames: S, window: Duration) -> bool
+    where
+        S: tokio_stream::Stream<Item = Result<Vec<u8>, String>> + Unpin,
+    {
+        let deadline = tokio::time::Instant::now() + window;
         let mut delivered = false;
         let mut undecodable_said = false;
-        while let Some(item) = frames.next().await {
-            let frame = match item {
-                Ok(f) => f,
+        loop {
+            let next = if delivered {
+                frames.next().await
+            } else {
+                match tokio::time::timeout_at(deadline, frames.next()).await {
+                    Ok(next) => next,
+                    Err(_) => {
+                        tracing::warn!("activity feed: no decodable snapshot within {window:?}; reconnecting");
+                        return false;
+                    }
+                }
+            };
+            let Some(item) = next else { break };
+            let payload = match item {
+                Ok(p) => p,
                 Err(e) => {
                     tracing::warn!(error = %e, "activity feed ended");
                     break;
                 }
             };
-            let decoded = match brain::ActivityFrame::decode(frame.payload.as_slice()) {
-                Ok(d) => d,
+            match brain::ActivityFrame::decode(payload.as_slice()) {
+                Ok(decoded) => {
+                    if let Some(msg) = frame_to_msg(decoded) {
+                        if !delivered && matches!(msg, ActivityMsg::Snapshot(_)) {
+                            delivered = true;
+                            tracing::info!("activity feed connected");
+                        }
+                        self.publish(&msg);
+                    }
+                }
                 Err(e) => {
                     // Said once per connection: a run whose every frame fails
                     // to decode would otherwise spin without a word (#62).
@@ -132,15 +174,11 @@ impl ActivityFeed {
                         undecodable_said = true;
                         tracing::warn!(error = %e, "activity feed: a frame did not decode; such frames are dropped");
                     }
-                    continue;
                 }
-            };
-            if let Some(msg) = frame_to_msg(decoded) {
-                if !delivered && matches!(msg, ActivityMsg::Snapshot(_)) {
-                    delivered = true;
-                    tracing::info!("activity feed connected");
-                }
-                self.publish(&msg);
+            }
+            if !delivered && tokio::time::Instant::now() >= deadline {
+                tracing::warn!("activity feed: no decodable snapshot within {window:?}; reconnecting");
+                return false;
             }
         }
         delivered
@@ -202,5 +240,49 @@ mod tests {
         assert_eq!(feed.after_run(false, BACKOFF_BASE), Duration::from_secs(2), "a failed reconnect doubles it");
         assert!(rx.try_recv().is_err(), "no second offline while it stays away");
         assert_eq!(feed.subscribe().0, r#"{"t":"offline"}"#, "a new socket is told at once");
+    }
+}
+
+#[cfg(test)]
+mod consume_tests {
+    use super::ActivityFeed;
+    use embra_common::proto::brain;
+    use prost::Message as _;
+    use std::time::Duration;
+    use tokio_stream::wrappers::ReceiverStream;
+
+    fn snapshot_frame() -> Vec<u8> {
+        brain::ActivityFrame {
+            frame: Some(brain::activity_frame::Frame::Snapshot(brain::ActivitySnapshot::default())),
+        }
+        .encode_to_vec()
+    }
+
+    /// #62: a connection that keeps sending frames none of which decode is
+    /// given up at the window, so the caller backs off and reconnects
+    /// instead of spinning; one that delivers a snapshot is a success.
+    #[tokio::test]
+    async fn a_connection_with_no_decodable_snapshot_in_the_window_is_a_failed_run() {
+        let feed = ActivityFeed::default();
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, String>>(8);
+        let firehose = tokio::spawn(async move {
+            loop {
+                if tx.send(Ok(vec![0xff, 0xfe, 0xfd])).await.is_err() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        });
+        let started = std::time::Instant::now();
+        let delivered = feed.consume(ReceiverStream::new(rx), Duration::from_millis(80)).await;
+        firehose.abort();
+        assert!(!delivered, "a run with no decodable snapshot is a failed run");
+        assert!(started.elapsed() < Duration::from_secs(5), "it ended at the window, not with the stream");
+
+        let feed = ActivityFeed::default();
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Vec<u8>, String>>(8);
+        tx.send(Ok(snapshot_frame())).await.unwrap();
+        drop(tx);
+        assert!(feed.consume(ReceiverStream::new(rx), Duration::from_millis(80)).await);
     }
 }
