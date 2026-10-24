@@ -61,12 +61,7 @@ impl TrustService for TrustServiceImpl {
         let req = request.into_inner();
         let pki = self.pki.read().await;
 
-        let (is_server, is_client) = match req.role() {
-            CertRole::Server => (true, false),
-            CertRole::Client => (false, true),
-            CertRole::Peer => (true, true),
-            _ => (true, true), // Default to peer
-        };
+        let (is_server, is_client) = usages_for(req.role());
 
         let (cert_pem, key_pem) = pki.generate_service_cert(
             &req.common_name,
@@ -168,6 +163,18 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The extended key usages a certificate role asks for, as
+/// `(is_server, is_client)`: `Server` is server-auth alone, `Client` is
+/// client-auth alone, `Peer` and an unspecified role are both. The leaf's
+/// EKU follows this pair (`pki.rs::generate_service_cert`).
+fn usages_for(role: CertRole) -> (bool, bool) {
+    match role {
+        CertRole::Server => (true, false),
+        CertRole::Client => (false, true),
+        CertRole::Peer | CertRole::Unspecified => (true, true),
+    }
+}
+
 #[cfg(test)]
 mod expected_hash_tests {
     use super::apply_expected_hash;
@@ -184,5 +191,23 @@ mod expected_hash_tests {
         assert_eq!((differs.computed_hash.as_str(), differs.stored_hash.as_str()), ("aa", "aa"));
         let failed = apply_expected_hash("", false, "aa".into(), "bb".into(), "Hash mismatch".into());
         assert!(!failed.valid && failed.error == "Hash mismatch");
+    }
+}
+
+#[cfg(test)]
+mod role_tests {
+    use super::{CertRole, usages_for};
+
+    /// The role on the wire maps to the usages the leaf carries (#52 item
+    /// 4): a server role is server-auth alone, a client role client-auth
+    /// alone, a peer or an unspecified role both — the default the proto's
+    /// zero value takes.
+    #[test]
+    fn a_role_maps_to_its_usages() {
+        assert_eq!(usages_for(CertRole::Server), (true, false));
+        assert_eq!(usages_for(CertRole::Client), (false, true));
+        assert_eq!(usages_for(CertRole::Peer), (true, true));
+        assert_eq!(usages_for(CertRole::Unspecified), (true, true));
+        assert_eq!(usages_for(CertRole::try_from(0).unwrap()), (true, true), "the wire's zero value");
     }
 }

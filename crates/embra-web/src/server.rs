@@ -176,12 +176,15 @@ mod tests {
     }
 
     /// A client that connects and never starts its handshake holds nothing
-    /// but its own task: the next client's handshake completes and that
-    /// connection is accepted while the first is still silent (#22). With
-    /// the handshake inline in the accept loop, the second client waited
-    /// behind the first for good.
+    /// but its own task, and one that speaks something other than TLS is
+    /// dropped by its task: the next client's handshake completes and that
+    /// connection is accepted while the first is still silent (#22, #54).
+    /// With the handshake inline in the accept loop, the second client
+    /// waited behind the first for good.
     #[tokio::test]
     async fn a_stalled_handshake_does_not_hold_up_the_next_connection() {
+        use tokio::io::AsyncWriteExt;
+
         let (leaf, ca, key) = crate::tls::mint_for_tests();
         let server_config = crate::tls::build_server_config(leaf.as_bytes(), key.as_bytes()).unwrap();
         let tcp = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -190,6 +193,9 @@ mod tests {
 
         // Connected at the TCP level, never a ClientHello.
         let stalled = TcpStream::connect(addr).await.unwrap();
+        // Not TLS at all: the handshake fails and the task logs and drops it.
+        let mut garbage = TcpStream::connect(addr).await.unwrap();
+        garbage.write_all(b"GET / HTTP/1.0\r\n\r\n").await.unwrap();
         let accepted = tokio::spawn(async move { listener.accept().await });
 
         let speaking = TcpStream::connect(addr).await.unwrap();
