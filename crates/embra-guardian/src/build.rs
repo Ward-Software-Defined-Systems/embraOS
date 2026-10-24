@@ -58,6 +58,31 @@ fn tail(s: &str) -> String {
     format!("…[{} earlier bytes truncated]\n{}", i, &s[i..])
 }
 
+/// The cargo that builds a guest: the pinned toolchain's binary, with the
+/// environment cleared. A guest's compile-time read of the environment
+/// (`env!`, which the validator refuses, and whatever a future rule misses)
+/// then finds none of the brain's secrets — the verification of 2026-10-24
+/// compiled `core::env!("GITHUB_TOKEN")` under the inherited environment
+/// (#12). The child gets `PATH` (the toolchain first), `CARGO_HOME` and
+/// `CARGO_TARGET_DIR`, and nothing else; cargo and rustc need no `HOME`
+/// once `CARGO_HOME` is set.
+fn cargo_command(env: &BuildEnv, manifest: &Path) -> tokio::process::Command {
+    let path_env = {
+        let cur = std::env::var("PATH").unwrap_or_default();
+        format!("{}:{}", env.toolchain_bin.display(), cur)
+    };
+    let mut cmd = tokio::process::Command::new(env.toolchain_bin.join("cargo"));
+    cmd.args(build_args(manifest))
+        .env_clear()
+        .env("PATH", path_env)
+        .env("CARGO_HOME", &env.cargo_home)
+        .env("CARGO_TARGET_DIR", &env.target_dir)
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    cmd
+}
+
 /// Compile the scaffolded project. `Err(BuildFailed(tail))` carries the
 /// cargo output tail so the intelligence can self-correct.
 pub async fn build(
@@ -65,23 +90,7 @@ pub async fn build(
     env: &BuildEnv,
     timeout: Duration,
 ) -> Result<BuildArtifact, GuardianError> {
-    use tokio::process::Command;
-
-    let path_env = {
-        let cur = std::env::var("PATH").unwrap_or_default();
-        format!("{}:{}", env.toolchain_bin.display(), cur)
-    };
-
-    let child = Command::new(env.toolchain_bin.join("cargo"))
-        .args(build_args(&paths.manifest))
-        .env("CARGO_HOME", &env.cargo_home)
-        .env("CARGO_TARGET_DIR", &env.target_dir)
-        .env("PATH", path_env)
-        .env_remove("RUSTUP_TOOLCHAIN")
-        .env_remove("RUSTFLAGS")
-        .kill_on_drop(true)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+    let child = cargo_command(env, &paths.manifest)
         .spawn()
         .map_err(|e| GuardianError::BuildFailed(format!("spawn cargo: {e}")))?;
 
@@ -141,6 +150,36 @@ mod tests {
             artifact_path(&env, &paths),
             Path::new("/embra/workspace/.guardian/target/wasm32-unknown-unknown/release/web_search.wasm")
         );
+    }
+
+    /// The build's environment is the three variables cargo needs and
+    /// nothing the brain holds (#12): a stand-in `cargo` that prints its
+    /// environment sees `PATH`, `CARGO_HOME` and `CARGO_TARGET_DIR` and no
+    /// `HOME`, which every shell hands a process.
+    #[tokio::test]
+    async fn the_build_runs_cargo_in_a_cleared_environment() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("embra-guardian-env-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("cargo");
+        std::fs::write(&fake, "#!/bin/sh\nenv\n").unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let env = BuildEnv {
+            toolchain_bin: dir.clone(),
+            cargo_home: dir.join("home"),
+            target_dir: dir.join("target"),
+        };
+        let out = cargo_command(&env, Path::new("/x/Cargo.toml")).output().await.unwrap();
+        let printed = String::from_utf8_lossy(&out.stdout);
+        let names: Vec<&str> = printed.lines().filter_map(|l| l.split_once('=').map(|(k, _)| k)).collect();
+        assert!(names.contains(&"PATH") && names.contains(&"CARGO_HOME") && names.contains(&"CARGO_TARGET_DIR"), "{printed}");
+        // The shell adds `PWD` and the like of its own; what must be absent
+        // is what the brain's process carries.
+        for inherited in ["HOME", "USER", "LOGNAME", "RUSTUP_TOOLCHAIN", "RUSTFLAGS"] {
+            assert!(!names.contains(&inherited), "the inherited {inherited} reached the build: {printed}");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
