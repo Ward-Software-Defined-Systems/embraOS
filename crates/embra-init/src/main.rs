@@ -24,7 +24,7 @@ fn main() {
         eprintln!("[embra-init]   3. Mount STATE from /dev/vda3 → /mnt/root/embra/state");
         eprintln!("[embra-init]   4. Mount DATA from /dev/vda4 → /mnt/root/embra/data");
         eprintln!("[embra-init]   5. Mount ephemeral tmpfs → /mnt/root/embra/ephemeral");
-        eprintln!("[embra-init]   6. pivot_root /mnt/root");
+        eprintln!("[embra-init]   6. Switch root to /mnt/root (move the mount, chroot; pivot_root fails from an initramfs)");
         eprintln!("[embra-init]   7. exec /sbin/embrad");
         std::process::exit(1);
     }
