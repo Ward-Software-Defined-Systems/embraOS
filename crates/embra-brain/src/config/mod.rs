@@ -1903,6 +1903,31 @@ mod save_config_tests {
         save_config(&db, &minimal_cfg()).await.unwrap();
         server.verify().await;
     }
+
+    /// F-7: the document written carries the running build whatever the
+    /// struct says (`minimal_cfg` says `"test"`), so no caller persists a
+    /// stale string.
+    #[tokio::test]
+    async fn a_save_stamps_the_running_build_into_version() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/config.system")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/config.system/docs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "data": {"_id": "config"}, "meta": {}})))
+            .mount(&server)
+            .await;
+        save_config(&WardsonDbClient::from_url(&server.uri()), &minimal_cfg()).await.unwrap();
+        let written = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|r| !r.body.is_empty())
+            .expect("one document was written");
+        let body: serde_json::Value = serde_json::from_slice(&written.body).unwrap();
+        assert_eq!(body["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(body["_id"], "config");
+    }
 }
 
 #[cfg(test)]

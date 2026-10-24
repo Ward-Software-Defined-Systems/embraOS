@@ -160,6 +160,10 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
     // Retention policies — every boot as well (see ensure_ttl_policies).
     ensure_ttl_policies(db).await;
 
+    // The stored configuration's version — every boot (see
+    // ensure_config_version); the one field, patched only when it differs.
+    ensure_config_version(db).await;
+
     // Identity-projection reconcile — also every boot, unversioned (the
     // sealed doc is the source of truth forever; insert-missing-only, so a
     // healthy boot costs two reads + a count). No-op on legacy flat souls.
@@ -493,6 +497,112 @@ async fn ensure_ttl_policies(db: &WardsonDbClient) {
                 "Retention on {} could not be set (the stored policy stays): {}",
                 collection, e
             ),
+        }
+    }
+}
+
+/// The stored configuration's `version` is the build the OS runs under
+/// (F-7). A long-lived instance carried its creation-time string across
+/// image rebuilds — `0.5.0-phase1` on a `0.19.0-phase1` binary — because
+/// nothing at boot wrote the document: `load_config` refreshes the value in
+/// memory and `save_config` stamps it on every write, so the document only
+/// caught up when an operator next changed a setting. This step brings the
+/// document itself current on the first boot of a new build, so a reader
+/// of the document never sees a version that disagrees with the binary.
+///
+/// Every boot, unversioned, for the reason the retention policies are: the
+/// running build is not a fact a one-shot step can record. Idempotent — a
+/// current document is read and left alone, and the patch is the one field.
+/// No document (the first boot, before the wizard) is nothing to refresh;
+/// a failure is logged and never stops the boot, since the configuration in
+/// memory is right regardless.
+async fn ensure_config_version(db: &WardsonDbClient) {
+    let running = env!("CARGO_PKG_VERSION");
+    let doc = match db.read("config.system", "config").await {
+        Ok(doc) => doc,
+        Err(e) => {
+            if matches!(
+                e.downcast_ref::<crate::db::WardsonDbError>(),
+                Some(crate::db::WardsonDbError::DocumentNotFound { .. })
+            ) {
+                tracing::debug!("No stored configuration yet; nothing to refresh");
+            } else {
+                warn!("Config version not checked: {}", e);
+            }
+            return;
+        }
+    };
+    let stored = doc.get("version").and_then(|v| v.as_str()).unwrap_or("");
+    if stored == running {
+        return;
+    }
+    match db
+        .patch_document("config.system", "config", &serde_json::json!({"version": running}))
+        .await
+    {
+        Ok(()) => info!("Config version refreshed: {} → {}", stored, running),
+        Err(e) => warn!("Config version not refreshed (the document keeps {}): {}", stored, e),
+    }
+}
+
+#[cfg(test)]
+mod config_version_tests {
+    use super::ensure_config_version;
+    use crate::db::WardsonDbClient;
+    use serde_json::json;
+    use wiremock::matchers::{body_json, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn stored(version: &str) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true, "meta": {},
+            "data": {"_id": "config", "name": "Embra", "version": version}
+        }))
+    }
+
+    fn done() -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": {}, "meta": {}}))
+    }
+
+    /// F-7: a document carrying another build's string is patched to the
+    /// running build — the one field, exactly once.
+    #[tokio::test]
+    async fn a_stale_version_is_patched_to_the_running_build() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/config.system/docs/config"))
+            .respond_with(stored("0.5.0-phase1"))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/config.system/docs/config"))
+            .and(body_json(json!({"version": env!("CARGO_PKG_VERSION")})))
+            .respond_with(done())
+            .expect(1)
+            .mount(&server)
+            .await;
+        ensure_config_version(&WardsonDbClient::from_url(&server.uri())).await;
+        server.verify().await;
+    }
+
+    /// A current document is left alone, and so is a first boot with none.
+    #[tokio::test]
+    async fn a_current_or_absent_document_is_not_written() {
+        for answer in [stored(env!("CARGO_PKG_VERSION")), ResponseTemplate::new(404)] {
+            let server = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/config.system/docs/config"))
+                .respond_with(answer)
+                .mount(&server)
+                .await;
+            Mock::given(method("PATCH"))
+                .and(path("/config.system/docs/config"))
+                .respond_with(done())
+                .expect(0)
+                .mount(&server)
+                .await;
+            ensure_config_version(&WardsonDbClient::from_url(&server.uri())).await;
+            server.verify().await;
         }
     }
 }
