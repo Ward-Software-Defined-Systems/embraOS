@@ -432,6 +432,12 @@ fn ssh_session_lock() -> &'static tokio::sync::Mutex<Option<SshSession>> {
 /// connection). The user reaches ssh as `-l user` and the host alone, never
 /// as one `user@host` argument.
 fn parse_ssh_target(target: &str) -> Result<(String, String, u16), String> {
+    if target.chars().any(char::is_whitespace) {
+        return Err(
+            "Denied: ssh target contains whitespace; give it as user@host or host[:port] with no spaces"
+                .to_string(),
+        );
+    }
     let (user_part, host_port) = if let Some(at_pos) = target.find('@') {
         (target[..at_pos].to_string(), &target[at_pos + 1..])
     } else {
@@ -456,7 +462,45 @@ fn parse_ssh_target(target: &str) -> Result<(String, String, u16), String> {
 
 #[cfg(test)]
 mod private_address_tests {
-    use super::{is_private_address, port_scan, ssh_remote_admin, ssh_session_start};
+    use super::{
+        is_private_address, parse_ssh_target, port_scan, ssh_remote_admin, ssh_remote_admin_argv,
+        ssh_session_start,
+    };
+
+    #[test]
+    fn a_target_with_whitespace_is_refused() {
+        // The bypassing shape from the Part 3 log: a space splits off a
+        // second token. The parser refuses any whitespace outright.
+        for t in [
+            "root@192.168.1.10 -oProxyCommand=id",
+            "192.168.1.10\t-oProxyCommand=id",
+            "192.168.1.10\n-oProxyCommand=id",
+            " 192.168.1.10",
+        ] {
+            let e = parse_ssh_target(t).unwrap_err();
+            assert!(e.contains("whitespace"), "{t}: {e}");
+        }
+        assert_eq!(
+            parse_ssh_target("root@192.168.1.10").unwrap(),
+            ("root".to_string(), "192.168.1.10".to_string(), 22)
+        );
+    }
+
+    #[test]
+    fn ssh_remote_admin_puts_a_double_dash_before_the_destination() {
+        // An option-shaped remote command sits after `--`, where ssh reads
+        // it as the command and never permutes it ahead of the destination.
+        let argv = ssh_remote_admin_argv("root", "192.168.1.10", 22, "-oProxyCommand=id true");
+        let dd = argv.iter().position(|a| a == "--").expect("-- present");
+        assert_eq!(
+            &argv[dd + 1..],
+            &[
+                "192.168.1.10".to_string(),
+                "-oProxyCommand=id true".to_string()
+            ]
+        );
+        assert!(argv[..dd].iter().any(|a| a == "-l"), "options precede --");
+    }
 
     #[test]
     fn the_private_ranges_and_loopback_pass() {
@@ -604,6 +648,36 @@ mod parse_ssh_target_tests {
     }
 }
 
+/// The per-call arguments for the one-shot ssh, after `ssh_command`'s
+/// `-F /dev/null`. `--` ends option parsing before the destination, so a
+/// host or a remote command that begins with `-` is a positional and is
+/// never permuted ahead of the destination to be read as a local option.
+/// The destination and the command are the only positionals, in that order.
+/// Guard `ssh_remote_admin_puts_a_double_dash_before_the_destination`.
+fn ssh_remote_admin_argv(user: &str, host: &str, port: u16, command: &str) -> Vec<String> {
+    vec![
+        "-p".into(),
+        port.to_string(),
+        "-i".into(),
+        SSH_KEY_PATH.into(),
+        "-o".into(),
+        format!("UserKnownHostsFile={SSH_KNOWN_HOSTS}"),
+        "-o".into(),
+        "StrictHostKeyChecking=accept-new".into(),
+        "-o".into(),
+        "ConnectTimeout=10".into(),
+        "-o".into(),
+        "BatchMode=yes".into(),
+        "-o".into(),
+        "PasswordAuthentication=no".into(),
+        "-l".into(),
+        user.into(),
+        "--".into(),
+        host.into(),
+        command.into(),
+    ]
+}
+
 /// Execute a single command on a remote host via SSH (EXPERIMENTAL).
 /// Param format: `<user@host> <command>` or `<host> <command>`
 pub async fn ssh_remote_admin(param: &str) -> String {
@@ -638,16 +712,7 @@ pub async fn ssh_remote_admin(param: &str) -> String {
     };
 
     let result = ssh_command()
-        .arg("-p").arg(port.to_string())
-        .arg("-i").arg(SSH_KEY_PATH)
-        .arg("-o").arg(format!("UserKnownHostsFile={}", SSH_KNOWN_HOSTS))
-        .arg("-o").arg("StrictHostKeyChecking=accept-new")
-        .arg("-o").arg("ConnectTimeout=10")
-        .arg("-o").arg("BatchMode=yes")
-        .arg("-o").arg("PasswordAuthentication=no")
-        .arg("-l").arg(&user)
-        .arg(&host)
-        .arg(command)
+        .args(ssh_remote_admin_argv(&user, &host, port, command))
         .output()
         .await;
 
@@ -726,6 +791,7 @@ pub async fn ssh_session_start(param: &str) -> String {
             .arg("-o").arg("ServerAliveInterval=15")
             .arg("-o").arg("ServerAliveCountMax=3")
             .arg("-l").arg(&user)
+            .arg("--")
             .arg(&host)
             .output(),
     )
@@ -740,6 +806,7 @@ pub async fn ssh_session_start(param: &str) -> String {
                 Duration::from_secs(10),
                 ssh_command()
                     .arg("-o").arg(format!("ControlPath={}", control_path))
+                    .arg("--")
                     .arg(&user_host)
                     .arg("echo embra_probe_ok")
                     .output(),
@@ -831,6 +898,7 @@ pub async fn ssh_session_exec(param: &str) -> String {
     let result = ssh_command()
         .arg("-o").arg(format!("ControlPath={}", session.control_path))
         .arg("-o").arg("ConnectTimeout=10")
+        .arg("--")
         .arg(&session.user_host)
         .arg(param)
         .output()
