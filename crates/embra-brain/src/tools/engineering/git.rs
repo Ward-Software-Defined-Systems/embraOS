@@ -11,7 +11,7 @@ use std::path::Path;
 use tracing::{info, warn};
 
 use crate::db::WardsonDbClient;
-use crate::tools::jail::{jailed_write_path, resolve_workspace_path, WORKSPACE_ROOT};
+use crate::tools::jail::{self, jailed_write_path, resolve_in, WORKSPACE_ROOT};
 use crate::tools::registry::DispatchContext;
 use crate::tools::security::{SSH_KEY_PATH, SSH_KNOWN_HOSTS};
 use crate::tools::subprocess;
@@ -57,6 +57,7 @@ pub(crate) fn git_command() -> tokio::process::Command {
 /// One git run, both streams decoded. The tools classify the status and
 /// pick the stream themselves; what they share is the spawn, the decode and
 /// the one sentence for a git that could not start.
+#[derive(Debug)]
 struct GitRun {
     status: std::process::ExitStatus,
     stdout: String,
@@ -89,6 +90,41 @@ async fn run_git(cmd: &mut tokio::process::Command, what: &str) -> Result<GitRun
         }),
         Err(e) => Err(format!("Failed to run {what}: {e}")),
     }
+}
+
+/// The budget of a git that talks to a remote (`clone`, `fetch`, `pull`,
+/// `push`): a hung transport ends here, not at the dispatcher's ten-minute
+/// backstop, which would hold the dispatcher for the whole of it.
+const GIT_NETWORK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// [`run_git`] under a budget: past it the child is killed with the future
+/// (`kill_on_drop`) and the tool answers `<verb> timed out after N seconds`.
+async fn run_git_within(
+    limit: std::time::Duration,
+    cmd: &mut tokio::process::Command,
+    what: &str,
+    verb: &str,
+) -> Result<GitRun, String> {
+    match tokio::time::timeout(limit, run_git(cmd, what)).await {
+        Ok(run) => run,
+        Err(_) => Err(format!("{verb} timed out after {} seconds", limit.as_secs())),
+    }
+}
+
+/// The directory a git tool runs in: the lexical jail, then the canonical
+/// check of what exists (`jail::real`), the writers' rule. A workspace link
+/// to a repository outside it is refused before git runs: the hooks are
+/// pinned, but a `.git/config` outside the workspace is not the operator's
+/// to run git against (the verification of 2026-10-24).
+async fn git_dir(path: &str) -> Result<String, String> {
+    git_dir_in(WORKSPACE_ROOT, path).await
+}
+
+/// [`git_dir`] against any root, for a test under a temporary directory.
+async fn git_dir_in(root: &str, path: &str) -> Result<String, String> {
+    let lexical = resolve_in(root, path)?;
+    let real = jail::real(Path::new(root), Path::new(&lexical)).await?;
+    Ok(real.path.display().to_string())
 }
 
 /// [`git_command`] with configuration pairs for one call, the token
@@ -226,7 +262,8 @@ fn positional<'a>(token: &'a str, what: &str) -> Result<&'a str, String> {
 }
 
 /// A URL `git_clone` accepts: `https://`, `http://`, `ssh://`, `git://`, or
-/// the scp form `[user@]host:path`. Refused before git runs: a token that
+/// the scp form `[user@]host:path` (the path absolute or relative to the
+/// account's home, as git reads it). Refused before git runs: a token that
 /// begins with `-` (an option), a remote-helper transport (`ext::` runs a
 /// command; any `name::`), `file://` and a local path (the rest of the
 /// filesystem into the workspace), and a user, host or port in the URL's
@@ -255,11 +292,12 @@ pub(crate) fn validate_clone_url(url: &str) -> Result<(), String> {
         let authority = url[scheme.len()..].split('/').next().unwrap_or("");
         return option_shaped_authority(url, authority, true);
     }
-    // The scp form: a colon before the first slash, after a host.
+    // The scp form: a colon before the first slash, after a host. The path
+    // after it may be absolute (`host:/srv/repo.git`): git hands it to ssh
+    // on the remote, where it names nothing of this filesystem.
     if let Some(colon) = url.find(':')
         && colon > 0
         && !url[..colon].contains('/')
-        && !url[colon + 1..].starts_with('/')
     {
         return option_shaped_authority(url, &url[..colon], false);
     }
@@ -518,24 +556,27 @@ pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
     // config files or argv).
     let auth = git_auth_config(db).await;
 
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        run_git(git_command_with(&auth).args(["clone", "--", url, &dest]), "git clone"),
-    ).await {
-        Ok(Ok(run)) => {
+    match run_git_within(
+        GIT_NETWORK_TIMEOUT,
+        git_command_with(&auth).args(["clone", "--", url, &dest]),
+        "git clone",
+        "git clone",
+    )
+    .await
+    {
+        Ok(run) => {
             if !run.status.success() {
                 return format!("git clone failed: {}", run.failure());
             }
             format!("Cloned {} into {}", url, dest)
         }
-        Ok(Err(e)) => e,
-        Err(_) => "git clone timed out after 120 seconds".into(),
+        Err(e) => e,
     }
 }
 
 /// Run `git status` on a path.
 pub async fn git_status(path: &str) -> String {
-    let dir = match resolve_workspace_path(path) {
+    let dir = match git_dir(path).await {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -555,7 +596,7 @@ pub async fn git_status(path: &str) -> String {
 }
 
 /// Run `git log` with optional params. First whitespace token is the path
-/// (resolved through `resolve_workspace_path`); remaining tokens pass through
+/// (resolved through `git_dir`); remaining tokens pass through
 /// as git-log flags (e.g. `-n 20 --oneline`).
 pub async fn git_log(param: &str) -> String {
     let parts: Vec<&str> = param.split_whitespace().collect();
@@ -568,7 +609,7 @@ pub async fn git_log(param: &str) -> String {
         Ok(a) => a,
         Err(e) => return e,
     };
-    let dir = match resolve_workspace_path(path_token) {
+    let dir = match git_dir(path_token).await {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -594,18 +635,17 @@ pub async fn git_add(param: &str) -> String {
     if parts.len() < 2 {
         return "Usage: git_add <path> <files>\nExample: git_add /embra/workspace/repos/myrepo file.txt".into();
     }
-    let dir = match resolve_workspace_path(parts[0]) {
-        Ok(d) => d,
-        Err(e) => return e,
-    };
     let files = parts[1];
-
     let file_args: Vec<&str> = files.split_whitespace().collect();
     for f in &file_args {
         if let Err(e) = positional(f, "file") {
             return e;
         }
     }
+    let dir = match git_dir(parts[0]).await {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
     let mut args = vec!["-C", &dir, "add", "--"];
     args.extend(file_args.iter());
 
@@ -630,7 +670,7 @@ pub async fn git_commit(param: &str) -> String {
     if parts.len() < 2 {
         return "Usage: git_commit <path> | <message>\nA blank line after the first line separates the subject from the body.".into();
     }
-    let dir = match resolve_workspace_path(parts[0].trim()) {
+    let dir = match git_dir(parts[0].trim()).await {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -650,14 +690,14 @@ pub async fn git_commit(param: &str) -> String {
 /// Run `git push`. Write operation — workspace restricted.
 /// Param format: `<path>`
 pub async fn git_push(db: &WardsonDbClient, param: &str) -> String {
-    let dir = match resolve_workspace_path(param.trim()) {
+    let dir = match git_dir(param.trim()).await {
         Ok(d) => d,
         Err(e) => return e,
     };
 
     let auth = git_auth_config(db).await;
 
-    match run_git(git_command_with(&auth).args(["-C", &dir, "push"]), "git").await {
+    match run_git_within(GIT_NETWORK_TIMEOUT, git_command_with(&auth).args(["-C", &dir, "push"]), "git", "git push").await {
         Ok(run) => {
             if !run.status.success() {
                 return format!("git push failed: {}", run.failure());
@@ -671,14 +711,14 @@ pub async fn git_push(db: &WardsonDbClient, param: &str) -> String {
 /// Run `git pull`. Write operation — workspace restricted.
 /// Param format: `<path>`
 pub async fn git_pull(db: &WardsonDbClient, param: &str) -> String {
-    let dir = match resolve_workspace_path(param.trim()) {
+    let dir = match git_dir(param.trim()).await {
         Ok(d) => d,
         Err(e) => return e,
     };
 
     let auth = git_auth_config(db).await;
 
-    match run_git(git_command_with(&auth).args(["-C", &dir, "pull"]), "git").await {
+    match run_git_within(GIT_NETWORK_TIMEOUT, git_command_with(&auth).args(["-C", &dir, "pull"]), "git", "git pull").await {
         Ok(run) => {
             if !run.status.success() {
                 return format!("git pull failed: {}", run.failure());
@@ -714,18 +754,18 @@ fn git_fetch_args<'a>(remote: &'a str, branch: Option<&'a str>, prune: bool, tag
 /// on stderr, so the report carries both streams; nothing to report means
 /// the remote-tracking refs were already current.
 pub async fn git_fetch(db: &WardsonDbClient, path: &str, remote: &str, branch: Option<&str>, prune: bool, tags: bool) -> String {
-    let dir = match resolve_workspace_path(path.trim()) {
-        Ok(d) => d,
-        Err(e) => return e,
-    };
     let fetch = match git_fetch_args(remote, branch, prune, tags) {
         Ok(a) => a,
+        Err(e) => return e,
+    };
+    let dir = match git_dir(path.trim()).await {
+        Ok(d) => d,
         Err(e) => return e,
     };
 
     let auth = git_auth_config(db).await;
 
-    match run_git(git_command_with(&auth).args(["-C", &dir]).args(&fetch), "git").await {
+    match run_git_within(GIT_NETWORK_TIMEOUT, git_command_with(&auth).args(["-C", &dir]).args(&fetch), "git", "git fetch").await {
         Ok(run) => {
             if !run.status.success() {
                 return format!("git fetch failed: {}", run.failure());
@@ -752,7 +792,7 @@ pub async fn git_diff(param: &str) -> String {
     } else {
         (parts[0], Some(parts[1]))
     };
-    let dir = match resolve_workspace_path(path_token) {
+    let dir = match git_dir(path_token).await {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -802,15 +842,29 @@ pub async fn git_branch(param: &str) -> String {
     if parts.is_empty() {
         return git_branch_list(WORKSPACE_ROOT).await;
     }
-    let dir = match resolve_workspace_path(parts[0]) {
+    // Delete forms: `<path> delete <name> [<base>]` (safe) or
+    // `<path> delete-force <name>` (force, skips merge check). Every
+    // positional is refused before the directory is resolved, so a bad
+    // argument never reaches the filesystem.
+    let is_delete = parts.len() >= 3 && parts[1].eq_ignore_ascii_case("delete");
+    let is_delete_force = parts.len() >= 3 && parts[1].eq_ignore_ascii_case("delete-force");
+    if is_delete || is_delete_force {
+        if let Err(e) = positional(parts[2], "branch") {
+            return e;
+        }
+        if let Err(e) = positional(parts.get(3).copied().unwrap_or("main"), "base") {
+            return e;
+        }
+    } else if parts.len() >= 2
+        && let Err(e) = positional(parts[1], "branch")
+    {
+        return e;
+    }
+    let dir = match git_dir(parts[0]).await {
         Ok(d) => d,
         Err(e) => return e,
     };
 
-    // Delete forms: `<path> delete <name> [<base>]` (safe) or
-    // `<path> delete-force <name>` (force, skips merge check).
-    let is_delete = parts.len() >= 3 && parts[1].eq_ignore_ascii_case("delete");
-    let is_delete_force = parts.len() >= 3 && parts[1].eq_ignore_ascii_case("delete-force");
     if is_delete || is_delete_force {
         let name = match positional(parts[2], "branch") {
             Ok(n) => n,
@@ -937,12 +991,12 @@ pub async fn git_checkout(param: &str) -> String {
     if parts.len() < 2 {
         return "Usage: git_checkout <path> <branch>".into();
     }
-    let dir = match resolve_workspace_path(parts[0]) {
-        Ok(d) => d,
-        Err(e) => return e,
-    };
     let branch = match positional(parts[1], "branch") {
         Ok(b) => b,
+        Err(e) => return e,
+    };
+    let dir = match git_dir(parts[0]).await {
+        Ok(d) => d,
         Err(e) => return e,
     };
 
@@ -970,12 +1024,12 @@ pub async fn git_merge(param: &str) -> String {
     if parts.len() < 2 {
         return "Usage: git_merge <repo_path> <branch> [--no-ff]".into();
     }
-    let dir = match resolve_workspace_path(parts[0]) {
-        Ok(d) => d,
-        Err(e) => return e,
-    };
     let branch = match positional(parts[1], "branch") {
         Ok(b) => b,
+        Err(e) => return e,
+    };
+    let dir = match git_dir(parts[0]).await {
+        Ok(d) => d,
         Err(e) => return e,
     };
     let no_ff = parts.iter().skip(2).any(|p| *p == "--no-ff");
@@ -1013,11 +1067,6 @@ pub async fn git_rm(param: &str) -> String {
         return "Usage: git_rm <repo_path> <files>\nExample: git_rm /embra/workspace/repos/myrepo old_file.txt".into();
     }
 
-    let dir = match resolve_workspace_path(parts[0]) {
-        Ok(d) => d,
-        Err(e) => return e,
-    };
-
     let files = parts[1];
     let file_args: Vec<&str> = files.split_whitespace().collect();
     for f in &file_args {
@@ -1025,6 +1074,10 @@ pub async fn git_rm(param: &str) -> String {
             return e;
         }
     }
+    let dir = match git_dir(parts[0]).await {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
 
     match run_git(git_command().args(["-C", &dir, "rm", "--"]).args(&file_args), "git rm").await {
         Ok(run) => {
@@ -1052,14 +1105,13 @@ pub async fn git_mv(param: &str) -> String {
         return "Usage: git_mv <repo_path> <source> <destination>\nExample: git_mv /embra/workspace/repos/myrepo src/Old.rs src/old.rs".into();
     }
 
-    let dir = match resolve_workspace_path(parts[0]) {
-        Ok(d) => d,
-        Err(e) => return e,
-    };
-
     let (src, dst) = match (positional(parts[1], "source"), positional(parts[2], "destination")) {
         (Ok(s), Ok(d)) => (s, d),
         (Err(e), _) | (_, Err(e)) => return e,
+    };
+    let dir = match git_dir(parts[0]).await {
+        Ok(d) => d,
+        Err(e) => return e,
     };
 
     match run_git(git_command().args(["-C", &dir, "mv", "--", src, dst]), "git mv").await {
@@ -1470,6 +1522,43 @@ mod native_args_tests {
         assert_eq!(delete_force.force, Some(true));
     }
 
+    /// A git tool runs in a directory under the workspace by its real path:
+    /// a workspace link to a repository outside it is refused before git
+    /// runs, as every writer refuses it (the verification of 2026-10-24).
+    #[tokio::test]
+    async fn a_git_tool_refuses_a_workspace_link_to_an_outside_repository() {
+        let base = std::env::temp_dir().join(format!("embra-git-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("workspace");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(root.join("repo")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        let root_s = root.to_str().unwrap();
+        let inside = git_dir_in(root_s, "repo").await.unwrap();
+        assert!(inside.ends_with("/workspace/repo"), "{inside}");
+        let err = git_dir_in(root_s, "link").await.unwrap_err();
+        assert!(err.contains("outside"), "{err}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// A git that talks to a remote runs under `GIT_NETWORK_TIMEOUT`: past
+    /// it the child is killed with the future and the tool says so, instead
+    /// of holding the dispatcher for the ten-minute backstop.
+    #[tokio::test]
+    async fn a_git_past_its_network_budget_is_ended_and_named() {
+        let err = run_git_within(
+            std::time::Duration::from_millis(50),
+            crate::tools::subprocess("sleep").arg("5"),
+            "git",
+            "git probe",
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, "git probe timed out after 0 seconds");
+        assert_eq!(GIT_NETWORK_TIMEOUT.as_secs(), 120);
+    }
+
     /// The typed arguments become the string form `git_branch` parses:
     /// force=true the `delete-force` keyword, force unset plain `delete` with
     /// its base. A field with whitespace is refused before the string is
@@ -1775,6 +1864,8 @@ mod argument_tests {
             "ssh://[::1]:22/r",
             "git@github.com:o/r.git",
             "host:path/r",
+            "git@host:/srv/repo.git",
+            "host:/abs/r",
         ] {
             assert!(validate_clone_url(ok).is_ok(), "{ok}");
         }

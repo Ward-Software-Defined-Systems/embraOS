@@ -3626,7 +3626,7 @@ async fn handle_slash_command(
                 let _ = std::fs::set_permissions(ssh_dir, std::fs::Permissions::from_mode(0o700));
             }
 
-            match tokio::process::Command::new("ssh-keygen")
+            match crate::tools::subprocess("ssh-keygen")
                 .args(["-t", "ed25519", "-f", key_path, "-N", "", "-C", "embra@embraos"])
                 .output()
                 .await

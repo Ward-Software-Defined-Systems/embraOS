@@ -357,6 +357,45 @@ mod tests {
 }
 
 #[cfg(test)]
+mod derivation_tests {
+    //! The caller of `edge_exists`: a check that fails writes no edge (#57).
+    use super::derive_edges;
+    use crate::db::WardsonDbClient;
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // Deserialized, not a struct literal: see `learning::phases` tests.
+    fn config() -> crate::config::SystemConfig {
+        serde_json::from_value(serde_json::json!({
+            "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase1",
+            "created_at": "", "version": "test", "api_provider": "anthropic"
+        }))
+        .expect("minimal config deserializes")
+    }
+
+    /// A candidate is found on every arm, the existence check fails, and no
+    /// edge is written: the failure is said, never a duplicate written.
+    #[tokio::test]
+    async fn a_failed_existence_check_writes_no_edge() {
+        let server = MockServer::start().await;
+        let now = chrono::Utc::now().to_rfc3339();
+        let candidate = serde_json::json!({"ok": true, "data": [{"_id": "c1", "created_at": now, "tags": ["t"], "session": "s1"}], "meta": {}});
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/memory\.(entries|semantic|procedural)/query$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(candidate))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST")).and(path("/memory.edges/query")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let inserted = derive_edges(&db, "n1", "memory.semantic", "s1", &["t".to_string()], &now, &config()).await.unwrap();
+        assert_eq!(inserted, 0);
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert!(requests.iter().any(|r| r.url.path() == "/memory.edges/query"), "the existence check ran");
+        assert!(!requests.iter().any(|r| r.url.path().starts_with("/memory.edges/docs")), "nothing was written");
+    }
+}
+
+#[cfg(test)]
 mod edge_exists_tests {
     use super::edge_exists;
     use crate::db::WardsonDbClient;

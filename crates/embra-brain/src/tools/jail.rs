@@ -172,15 +172,27 @@ pub(crate) fn fence_git_dir(path: &Path) -> Result<(), String> {
 /// elsewhere, inside a repository, is an ordinary directory.
 pub(crate) const SSH_DIR: &str = ".ssh";
 
-/// The writers' fence: any `.git` component ([`fence_git_dir`]) and
-/// `<root>/.ssh`. `root` is the jail root `path` is under: the configured
-/// root for a path as resolved, the canonical root (`Real::root`) for a
-/// real path.
+/// The git configuration directory under `$HOME`, which is the workspace:
+/// `attributes` and `ignore` there are read by every git the OS runs. The
+/// global config file itself is under STATE (`GIT_CONFIG_GLOBAL`), out of
+/// reach; this closes the directory beside it the same way as `.ssh`.
+pub(crate) const GIT_CONFIG_DIR: &str = ".config/git";
+
+/// The writers' fence: any `.git` component ([`fence_git_dir`]),
+/// `<root>/.ssh` and `<root>/.config/git`. `root` is the jail root `path`
+/// is under: the configured root for a path as resolved, the canonical root
+/// (`Real::root`) for a real path.
 pub(crate) fn fence_owned_dirs(root: &Path, path: &Path) -> Result<(), String> {
     fence_git_dir(path)?;
     if path.starts_with(root.join(SSH_DIR)) {
         return Err(format!(
             "Denied: path '{}' is inside the workspace SSH directory, which /ssh-keygen and ssh own; nothing is written there",
+            path.display()
+        ));
+    }
+    if path.starts_with(root.join(GIT_CONFIG_DIR)) {
+        return Err(format!(
+            "Denied: path '{}' is inside the workspace git configuration directory (~/.config/git), which every git the OS runs reads; nothing is written there",
             path.display()
         ));
     }
@@ -395,6 +407,21 @@ mod tests {
         }
         let err = fence_owned_dirs(root, Path::new("/r/repo/.git/config")).unwrap_err();
         assert!(err.contains(".git directory"), "{err}");
+    }
+
+    /// `$HOME` is the workspace, so `~/.config/git` would be read by every
+    /// git the OS runs (`attributes`, `ignore`); it is fenced like `.ssh`.
+    /// `.config` itself and a `.config/git` inside a repository are not.
+    #[test]
+    fn the_fence_refuses_the_workspace_git_config_directory() {
+        let root = Path::new("/r");
+        for refused in ["/r/.config/git", "/r/.config/git/attributes", "/r/.config/git/ignore"] {
+            let err = fence_owned_dirs(root, Path::new(refused)).unwrap_err();
+            assert!(err.contains("git configuration directory"), "{refused}: {err}");
+        }
+        for ok in ["/r/.config", "/r/.config/other/x", "/r/repo/.config/git/attributes", "/r/.configx/git"] {
+            assert!(fence_owned_dirs(root, Path::new(ok)).is_ok(), "{ok}");
+        }
     }
 
     struct TempDir(PathBuf);

@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use anyhow::Result;
 use sha2::{Digest, Sha256};
@@ -49,8 +50,43 @@ pub(crate) async fn write_soul_hash(hash_path: &Path, hash: &str) -> Result<()> 
         .map_err(|e| anyhow::anyhow!("Failed to write soul hash to STATE: {}", e))
 }
 
+const SEAL_UNKNOWN: u8 = 0;
+const SEAL_ABSENT: u8 = 1;
+const SEAL_PRESENT: u8 = 2;
+
+/// The seal as last read, for [`is_soul_sealed`].
+static LAST_KNOWN_SEAL: AtomicU8 = AtomicU8::new(SEAL_UNKNOWN);
+
+/// Whether a soul is sealed: the `soul.invariant` collection exists. The
+/// answer is remembered, and a read that fails answers the last known one
+/// with a warning — never "unsealed", which every caller would act on as
+/// Learning Mode (the verification of 2026-10-24: twelve callers read the
+/// error as `false`). Before the first successful read the error is
+/// returned. A seal or a ceremony changes the collection, and the next
+/// successful read follows it.
 pub async fn is_soul_sealed(db: &WardsonDbClient) -> Result<bool> {
-    db.collection_exists("soul.invariant").await
+    is_soul_sealed_with(db, &LAST_KNOWN_SEAL).await
+}
+
+/// [`is_soul_sealed`] with the memory as a parameter, for a test.
+pub(crate) async fn is_soul_sealed_with(db: &WardsonDbClient, last_known: &AtomicU8) -> Result<bool> {
+    match db.collection_exists("soul.invariant").await {
+        Ok(sealed) => {
+            last_known.store(if sealed { SEAL_PRESENT } else { SEAL_ABSENT }, Ordering::Relaxed);
+            Ok(sealed)
+        }
+        Err(e) => match last_known.load(Ordering::Relaxed) {
+            SEAL_UNKNOWN => Err(e),
+            known => {
+                let sealed = known == SEAL_PRESENT;
+                tracing::warn!(
+                    "soul seal read failed; answering the last known state ({}): {e}",
+                    if sealed { "sealed" } else { "unsealed" }
+                );
+                Ok(sealed)
+            }
+        },
+    }
 }
 
 /// Whether a seal hash is stored at `hash_path`: `Ok(true)` for a file of any
@@ -96,7 +132,8 @@ pub async fn seal_state(db: &WardsonDbClient) -> SealState {
 }
 
 /// `seal_state` against a given hash file (a test's directory). A soul
-/// that cannot be read reads as unsealed, as `is_soul_sealed` did.
+/// that cannot be read reads as unsealed here, in the status word;
+/// `is_soul_sealed`, which the mode follows, answers its last known state.
 pub(crate) async fn seal_state_at(db: &WardsonDbClient, hash_path: &Path) -> SealState {
     let Some(soul) = load_soul(db).await.ok().flatten() else {
         return SealState::Unsealed;
@@ -229,6 +266,37 @@ mod hash_file_tests {
         assert!(err.to_string().starts_with("Failed to write soul hash to STATE"), "{err}");
         assert_eq!(names(&dir), vec!["state".to_string()], "nothing else was created");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod seal_memory_tests {
+    use super::*;
+    use crate::db::WardsonDbClient;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn server(status: u16) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/soul.invariant")).respond_with(ResponseTemplate::new(status)).mount(&server).await;
+        server
+    }
+
+    /// A seal read that fails answers the last known state, sealed or
+    /// unsealed, and is an error only before anything is known: a transient
+    /// database error never flips the callers to Learning Mode.
+    #[tokio::test]
+    async fn a_failed_seal_read_answers_the_last_known_state_and_never_unsealed() {
+        let known = AtomicU8::new(SEAL_UNKNOWN);
+        let failing = server(500).await;
+        let db_failing = WardsonDbClient::from_url(&failing.uri());
+        assert!(is_soul_sealed_with(&db_failing, &known).await.is_err(), "nothing known yet: the error is returned");
+        let sealed = server(200).await;
+        assert!(is_soul_sealed_with(&WardsonDbClient::from_url(&sealed.uri()), &known).await.unwrap());
+        assert!(is_soul_sealed_with(&db_failing, &known).await.unwrap(), "the last known state is sealed");
+        let unsealed = server(404).await;
+        assert!(!is_soul_sealed_with(&WardsonDbClient::from_url(&unsealed.uri()), &known).await.unwrap());
+        assert!(!is_soul_sealed_with(&db_failing, &known).await.unwrap(), "the last known state is unsealed");
     }
 }
 

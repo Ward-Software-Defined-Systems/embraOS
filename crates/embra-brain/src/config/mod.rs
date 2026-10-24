@@ -1978,4 +1978,19 @@ mod wizard_channel_tests {
         let err = run_config_wizard_grpc(&tx, &mut response_rx, &db).await.unwrap_err().to_string();
         assert!(err.contains("setup channel closed during the name step"), "{err}");
     }
+
+    /// The same past the name and the provider steps: a client gone at the
+    /// API-key step ends the wizard naming that step (the verification of
+    /// 2026-10-24 found the guard above exercised the name step alone).
+    #[tokio::test]
+    async fn a_dropped_receiver_ends_the_wizard_at_the_api_key_step() {
+        let (tx, _prompts) = mpsc::channel(8);
+        let (answers, mut response_rx) = mpsc::channel::<String>(8);
+        answers.send("Embra".to_string()).await.unwrap();
+        answers.send(super::PROVIDER_WIZARD_LABELS[0].to_string()).await.unwrap();
+        drop(answers);
+        let db = WardsonDbClient::from_url("http://127.0.0.1:9");
+        let err = run_config_wizard_grpc(&tx, &mut response_rx, &db).await.unwrap_err().to_string();
+        assert!(err.contains("setup channel closed during the API key step"), "{err}");
+    }
 }
