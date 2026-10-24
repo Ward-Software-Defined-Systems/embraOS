@@ -85,6 +85,13 @@ pub struct ToolDoc {
     pub source_sha256: String,
     #[serde(default)]
     pub build_log_tail: String,
+    /// The sha256 of the `.wasm` the last successful build produced, the
+    /// bytes the overlay loaded then. Boot reconcile loads an artifact only
+    /// when its bytes hash to this; a record from before the field was kept,
+    /// or one whose artifact differs, is not loaded (#12). Serde-additive —
+    /// does NOT bump `TOOL_DOC_FORMAT`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_sha256: Option<String>,
     /// Replicant-check verdict. Absent on a document from before the check
     /// existed and on a tool defined before the soul was sealed.
     /// Additive + optional so those load unchanged — does NOT bump
@@ -121,6 +128,7 @@ impl ToolDoc {
             toolchain_version: toolchain_version.to_string(),
             source_sha256: sha256_hex(source),
             build_log_tail: String::new(),
+            artifact_sha256: None,
             replicant: None,
             shipped: None,
             created_at: now_rfc3339.to_string(),
@@ -149,8 +157,13 @@ impl ToolDoc {
 }
 
 pub fn sha256_hex(s: &str) -> String {
+    sha256_hex_bytes(s.as_bytes())
+}
+
+/// The hex sha256 of bytes: a built `.wasm` (`ToolDoc::artifact_sha256`).
+pub fn sha256_hex_bytes(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
-    h.update(s.as_bytes());
+    h.update(bytes);
     hex::encode(h.finalize())
 }
 
@@ -177,7 +190,7 @@ mod tests {
 
     #[test]
     fn doc_round_trips_through_value_with_id() {
-        let d = ToolDoc::building(
+        let mut d = ToolDoc::building(
             "web_search",
             "desc",
             json!({"type":"object","properties":{}}),
@@ -186,14 +199,19 @@ mod tests {
             "1.94.1",
             "2026-05-17T00:00:00Z",
         );
+        // A building record names no artifact and serializes none.
+        assert!(d.to_value().get("artifact_sha256").is_none());
+        d.artifact_sha256 = Some(sha256_hex_bytes(b"\0asm"));
         let v = d.to_value();
         assert_eq!(v["_id"], "web_search");
         assert_eq!(v["status"], "building");
         assert_eq!(v["format_version"], TOOL_DOC_FORMAT);
+        assert_eq!(v["artifact_sha256"], sha256_hex_bytes(b"\0asm"));
         let back = ToolDoc::from_value(&v).unwrap();
         assert_eq!(back.name, "web_search");
         assert_eq!(back.caps, vec!["http_get"]);
         assert_eq!(back.status, ToolStatus::Building);
+        assert_eq!(back.artifact_sha256, d.artifact_sha256);
         assert!(back.source_matches(&d.source));
         assert!(!back.source_matches("tampered"));
     }
@@ -249,7 +267,9 @@ mod tests {
         let d = ToolDoc::from_value(&v).unwrap();
         assert_eq!(d.format_version, TOOL_DOC_FORMAT);
         assert!(d.caps.is_empty());
-        // Pre-replicant docs load with no verdict.
+        // Pre-replicant docs load with no verdict, and a record from before
+        // the artifact hash was kept names no artifact.
         assert!(d.replicant.is_none());
+        assert!(d.artifact_sha256.is_none());
     }
 }

@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use embra_guardian::build::{self, BuildEnv};
 use embra_guardian::shipped::ShippedTool;
-use embra_guardian::store::{ReplicantRecord, ShippedRecord, ToolDoc, ToolStatus};
+use embra_guardian::store::{ReplicantRecord, ShippedRecord, ToolDoc, ToolStatus, sha256_hex_bytes};
 use embra_guardian::ValidatedModule;
 use embra_tools_core::DispatchError;
 use serde_json::Value;
@@ -23,7 +23,12 @@ mod replicant;
 mod save;
 
 /// Guardian's writable sub-tree of the workspace (DATA, persists reboots).
+/// The write jail fences it for every tool (`jail::GUARDIAN_DIR`).
 const GUARDIAN_BASE: &str = "/embra/workspace/.guardian";
+/// The ephemeral tmpfs embra-init mounts (`noexec`): a build's `CARGO_HOME`
+/// lives there for the build's duration, nowhere a tool can write. On a host
+/// without it (development) the system temp directory stands in.
+const EPHEMERAL_DIR: &str = "/embra/ephemeral";
 /// Prebaked toolchain location (Buildroot package, task #5).
 const TOOLCHAIN_BIN: &str = "/opt/rust/bin";
 const COLLECTION: &str = "guardian.tools";
@@ -42,11 +47,36 @@ fn base() -> &'static Path {
     Path::new(GUARDIAN_BASE)
 }
 
-fn build_env() -> BuildEnv {
+fn ephemeral_root() -> PathBuf {
+    let dir = Path::new(EPHEMERAL_DIR);
+    if dir.is_dir() { dir.to_path_buf() } else { std::env::temp_dir() }
+}
+
+/// The build environment of one tool (#12): the pinned toolchain; a
+/// `CARGO_HOME` of its own on the ephemeral tmpfs, which `build::build`
+/// creates and removes and runs cargo in, so cargo's configuration
+/// discovery meets no directory a tool can write; and the shared target
+/// directory on DATA, where the artifact must survive a reboot — fenced
+/// from the tools by the write jail and verified by `artifact_check` at
+/// boot.
+fn build_env(name: &str) -> BuildEnv {
     BuildEnv {
         toolchain_bin: PathBuf::from(TOOLCHAIN_BIN),
-        cargo_home: base().join("cargo-home"),
+        cargo_home: build::fresh_cargo_home(&ephemeral_root(), name),
         target_dir: base().join("target"),
+    }
+}
+
+/// Whether the bytes on DATA are the artifact the record names (#12): the
+/// target directory is under the workspace, so what loads at boot is what
+/// a build produced, by hash, and never a file put there by other means. A
+/// record from before the hash was kept is not loaded either;
+/// `/guardian rebuild` records one.
+fn artifact_check(doc: &ToolDoc, wasm: &[u8]) -> Result<(), String> {
+    match &doc.artifact_sha256 {
+        None => Err("was built before artifacts were recorded, so its bytes cannot be checked".to_string()),
+        Some(expected) if *expected == sha256_hex_bytes(wasm) => Ok(()),
+        Some(_) => Err("is not the one the record names (sha256 differs)".to_string()),
     }
 }
 
@@ -130,7 +160,8 @@ impl Availability {
                 remedy(name)
             )),
             Availability::ArtifactNotLoaded => Some(format!(
-                "not loaded: the build artifact is missing or did not load. Operator: {}.",
+                "not loaded: the build artifact is missing, is not the one on record or did not \
+                 load. Operator: {}.",
                 remedy(name)
             )),
             Availability::Proposed => Some(format!(
@@ -206,9 +237,12 @@ pub async fn reconcile_on_boot(db: &WardsonDbClient) -> anyhow::Result<()> {
     let tv = toolchain_version();
     let rt = embra_guardian::overlay::init(tv.clone())
         .map_err(|e| anyhow::anyhow!("guardian overlay init: {e}"))?;
-    for sub in ["", "cargo-home", "target", "tools"] {
+    for sub in ["", "target", "tools"] {
         let _ = std::fs::create_dir_all(base().join(sub));
     }
+    // The cargo home moved to the ephemeral tmpfs (`build_env`); the one an
+    // earlier build left on DATA is removed, configuration and all.
+    let _ = std::fs::remove_dir_all(base().join("cargo-home"));
 
     let docs = all_docs(db).await;
     let total = docs.len();
@@ -247,15 +281,22 @@ pub async fn reconcile_on_boot(db: &WardsonDbClient) -> anyhow::Result<()> {
             continue;
         }
         match std::fs::read(artifact_path(&doc.name)) {
-            Ok(wasm) => match rt.compile_insert(
-                &doc.name,
-                &doc.description,
-                doc.input_schema.clone(),
-                doc.caps.clone(),
-                &wasm,
-            ) {
-                Ok(()) => loaded += 1,
-                Err(e) => warn!("guardian: compiling '{}' failed: {e}", doc.name),
+            Ok(wasm) => match artifact_check(&doc, &wasm) {
+                Ok(()) => match rt.compile_insert(
+                    &doc.name,
+                    &doc.description,
+                    doc.input_schema.clone(),
+                    doc.caps.clone(),
+                    &wasm,
+                ) {
+                    Ok(()) => loaded += 1,
+                    Err(e) => warn!("guardian: compiling '{}' failed: {e}", doc.name),
+                },
+                Err(why) => warn!(
+                    "guardian: artifact for '{}' {why} — not loaded; {}",
+                    doc.name,
+                    remedy(&doc.name)
+                ),
             },
             Err(_) => warn!(
                 "guardian: artifact for '{}' missing — not loaded; {}",
@@ -1642,7 +1683,7 @@ fn list_row(d: &ToolDoc, avail: &Availability) -> String {
             d.status
         ),
         Availability::ArtifactNotLoaded => {
-            format!("{:?}, NOT LOADED: artifact missing", d.status)
+            format!("{:?}, NOT LOADED: artifact missing or not the one on record", d.status)
         }
     };
     let origin = match &d.shipped {
@@ -1683,7 +1724,7 @@ async fn list_human(db: &WardsonDbClient) -> String {
 
 async fn build_and_register(db: Arc<WardsonDbClient>, module: ValidatedModule) {
     let tv = toolchain_version();
-    let env = build_env();
+    let env = build_env(&module.name);
     let paths = match embra_guardian::scaffold(base(), &module) {
         Ok(p) => p,
         Err(e) => return mark_failed(&db, &module, &tv, &format!("scaffold: {e}")).await,
@@ -1698,7 +1739,10 @@ async fn build_and_register(db: Arc<WardsonDbClient>, module: ValidatedModule) {
                 &art.wasm,
             ) {
                 Ok(()) => {
-                    mark(&db, &module, &tv, ToolStatus::Ready, &art.log_tail).await;
+                    // The hash of the bytes just loaded: what boot reconcile
+                    // demands of the file on DATA (`artifact_check`).
+                    let artifact = Some(sha256_hex_bytes(&art.wasm));
+                    mark(&db, &module, &tv, ToolStatus::Ready, &art.log_tail, artifact).await;
                     info!("guardian: '{}' ready", module.name);
                 }
                 Err(e) => {
@@ -1711,12 +1755,15 @@ async fn build_and_register(db: Arc<WardsonDbClient>, module: ValidatedModule) {
     }
 }
 
+/// Persist a build's outcome: `artifact_sha256` is the hash of the loaded
+/// artifact on success and `None` on a failure, which trusts no artifact.
 async fn mark(
     db: &WardsonDbClient,
     m: &ValidatedModule,
     tv: &str,
     status: ToolStatus,
     log_tail: &str,
+    artifact_sha256: Option<String>,
 ) {
     let now = chrono::Utc::now().to_rfc3339();
     // Load-merge so fields not derivable from the module — the replicant
@@ -1736,6 +1783,7 @@ async fn mark(
     d.status = status;
     d.toolchain_version = tv.to_string();
     d.build_log_tail = log_tail.chars().take(8 * 1024).collect();
+    d.artifact_sha256 = artifact_sha256;
     d.updated_at = now;
     if let Err(e) = upsert(db, &d).await {
         error!("guardian: failed to persist status for '{}': {e}", m.name);
@@ -1744,7 +1792,7 @@ async fn mark(
 
 async fn mark_failed(db: &WardsonDbClient, m: &ValidatedModule, tv: &str, why: &str) {
     warn!("guardian: build failed for '{}': {}", m.name, why);
-    mark(db, m, tv, ToolStatus::Failed, why).await;
+    mark(db, m, tv, ToolStatus::Failed, why, None).await;
 }
 
 // ── meta-tool backends (called from tools/guardian.rs) ──
@@ -2155,6 +2203,33 @@ mod tests {
         );
         d.status = status;
         d
+    }
+
+    /// What loads at boot is the artifact the record names (#12): the bytes
+    /// the last build produced pass, other bytes do not, and a record from
+    /// before the hash was kept does not load until a rebuild records one.
+    #[test]
+    fn a_ready_tool_loads_only_with_the_artifact_its_record_names() {
+        let mut d = doc(ToolStatus::Ready, "1.98.1");
+        let wasm = b"\0asm\x01\0\0\0";
+        let why = artifact_check(&d, wasm).unwrap_err();
+        assert!(why.contains("before artifacts were recorded"), "{why}");
+        d.artifact_sha256 = Some(sha256_hex_bytes(wasm));
+        assert_eq!(artifact_check(&d, wasm), Ok(()));
+        let why = artifact_check(&d, b"\0asm\x01\0\0\0planted").unwrap_err();
+        assert!(why.contains("not the one the record names"), "{why}");
+    }
+
+    /// A build's cargo home is its own and outside the workspace, so cargo's
+    /// configuration discovery meets no file a tool can write; the target
+    /// directory stays on DATA, where the artifact must survive a reboot.
+    #[test]
+    fn the_cargo_home_is_per_build_and_outside_the_workspace() {
+        let env = build_env("web_search");
+        assert!(!env.cargo_home.starts_with(GUARDIAN_BASE), "{}", env.cargo_home.display());
+        assert!(env.cargo_home.ends_with("guardian-cargo-home-web_search"), "{}", env.cargo_home.display());
+        assert_ne!(build_env("other").cargo_home, env.cargo_home);
+        assert_eq!(env.target_dir, Path::new(GUARDIAN_BASE).join("target"));
     }
 
     #[test]

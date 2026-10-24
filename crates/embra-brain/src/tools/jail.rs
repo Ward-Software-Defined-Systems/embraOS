@@ -178,10 +178,19 @@ pub(crate) const SSH_DIR: &str = ".ssh";
 /// reach; this closes the directory beside it the same way as `.ssh`.
 pub(crate) const GIT_CONFIG_DIR: &str = ".config/git";
 
+/// The Guardian's build tree under the workspace: the scaffolded projects
+/// and the shared target directory holding the built `.wasm` artifacts boot
+/// reconcile loads. A writer never creates, changes or removes anything
+/// under it: an artifact put there would load as a built tool (its hash is
+/// checked at boot besides, `guardian::artifact_check`), and a cargo
+/// configuration planted there would reach the next build. The Guardian
+/// writes it itself (`embra_guardian::scaffold`, `build`).
+pub(crate) const GUARDIAN_DIR: &str = ".guardian";
+
 /// The writers' fence: any `.git` component ([`fence_git_dir`]),
-/// `<root>/.ssh` and `<root>/.config/git`. `root` is the jail root `path`
-/// is under: the configured root for a path as resolved, the canonical root
-/// (`Real::root`) for a real path.
+/// `<root>/.ssh`, `<root>/.config/git` and `<root>/.guardian`. `root` is
+/// the jail root `path` is under: the configured root for a path as
+/// resolved, the canonical root (`Real::root`) for a real path.
 pub(crate) fn fence_owned_dirs(root: &Path, path: &Path) -> Result<(), String> {
     fence_git_dir(path)?;
     if path.starts_with(root.join(SSH_DIR)) {
@@ -193,6 +202,12 @@ pub(crate) fn fence_owned_dirs(root: &Path, path: &Path) -> Result<(), String> {
     if path.starts_with(root.join(GIT_CONFIG_DIR)) {
         return Err(format!(
             "Denied: path '{}' is inside the workspace git configuration directory (~/.config/git), which every git the OS runs reads; nothing is written there",
+            path.display()
+        ));
+    }
+    if path.starts_with(root.join(GUARDIAN_DIR)) {
+        return Err(format!(
+            "Denied: path '{}' is inside the Guardian build tree (.guardian), which the Guardian owns; nothing is written there",
             path.display()
         ));
     }
@@ -420,6 +435,25 @@ mod tests {
             assert!(err.contains("git configuration directory"), "{refused}: {err}");
         }
         for ok in ["/r/.config", "/r/.config/other/x", "/r/repo/.config/git/attributes", "/r/.configx/git"] {
+            assert!(fence_owned_dirs(root, Path::new(ok)).is_ok(), "{ok}");
+        }
+    }
+
+    /// The Guardian build tree holds the artifacts boot reconcile loads and
+    /// the projects it builds; it is fenced like `.ssh`, itself and
+    /// everything under it, and a `.guardian` inside a repository is not.
+    #[test]
+    fn the_fence_refuses_the_workspace_guardian_build_tree() {
+        let root = Path::new("/r");
+        for refused in [
+            "/r/.guardian",
+            "/r/.guardian/target/wasm32-unknown-unknown/release/web_search.wasm",
+            "/r/.guardian/tools/x/.cargo/config.toml",
+        ] {
+            let err = fence_owned_dirs(root, Path::new(refused)).unwrap_err();
+            assert!(err.starts_with("Denied:") && err.contains("Guardian build tree"), "{refused}: {err}");
+        }
+        for ok in ["/r/.guardianx/x", "/r/repo/.guardian/x", "/r/guardian/x"] {
             assert!(fence_owned_dirs(root, Path::new(ok)).is_ok(), "{ok}");
         }
     }

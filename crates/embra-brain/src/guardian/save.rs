@@ -34,8 +34,10 @@ use crate::tools::jail;
 const _: () = assert!(HTTP_SAVE_MAX_BYTES as u64 <= FILE_DOWNLOAD_MAX);
 const _: () = assert!(HTTP_SAVE_MAX_BYTES == MEDIA_UPLOAD_MAX);
 
-/// The Guardian build tree under the workspace, refused as a save target.
-const GUARDIAN_DIR_NAME: &str = ".guardian";
+/// The Guardian build tree under the workspace (`jail::GUARDIAN_DIR`): the
+/// fence refuses it for every writer, and this module names it in its own
+/// words on the lexical path and checks the real path besides.
+const GUARDIAN_DIR_NAME: &str = jail::GUARDIAN_DIR;
 
 fn exists(resolved: &str) -> String {
     format!("'{resolved}' exists; choose another name (nothing is overwritten)")

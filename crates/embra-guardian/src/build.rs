@@ -13,14 +13,35 @@ use crate::scaffold::ScaffoldPaths;
 pub const DEFAULT_BUILD_TIMEOUT: Duration = Duration::from_secs(90);
 const LOG_TAIL_CAP: usize = 8 * 1024;
 
-/// Locations of the prebaked toolchain + the shared, writable cargo dirs
-/// on DATA (`/embra/workspace/.guardian/{cargo-home,target}`).
+/// Locations of the prebaked toolchain, the build's own `CARGO_HOME` and
+/// the shared target directory on DATA (`/embra/workspace/.guardian/target`).
 #[derive(Debug, Clone)]
 pub struct BuildEnv {
     /// `/opt/rust/bin` (contains `cargo`, `rustc`, `rust-lld`).
     pub toolchain_bin: PathBuf,
+    /// A directory for this build alone, named by [`fresh_cargo_home`]:
+    /// [`build`] creates it empty and removes it after, and cargo runs in
+    /// it. Cargo reads its configuration from the working directory upward
+    /// and from `CARGO_HOME`, so with this directory outside the workspace
+    /// no `.cargo/config.toml` a tool could write is read (#12).
     pub cargo_home: PathBuf,
     pub target_dir: PathBuf,
+}
+
+/// The name every per-build `CARGO_HOME` starts with; [`build`] removes a
+/// directory only when it is one.
+const CARGO_HOME_PREFIX: &str = "guardian-cargo-home-";
+
+/// The `CARGO_HOME` of one tool's build under `root` (the brain passes the
+/// ephemeral tmpfs).
+pub fn fresh_cargo_home(root: &Path, name: &str) -> PathBuf {
+    root.join(format!("{CARGO_HOME_PREFIX}{name}"))
+}
+
+fn is_per_build_home(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.starts_with(CARGO_HOME_PREFIX))
 }
 
 pub struct BuildArtifact {
@@ -65,7 +86,10 @@ fn tail(s: &str) -> String {
 /// compiled `core::env!("GITHUB_TOKEN")` under the inherited environment
 /// (#12). The child gets `PATH` (the toolchain first), `CARGO_HOME` and
 /// `CARGO_TARGET_DIR`, and nothing else; cargo and rustc need no `HOME`
-/// once `CARGO_HOME` is set.
+/// once `CARGO_HOME` is set. It runs in `CARGO_HOME`, so cargo's
+/// configuration discovery (the working directory and its ancestors, then
+/// `CARGO_HOME`) meets no directory a tool can write; the brain's own
+/// working directory, inherited before, is not part of the contract.
 fn cargo_command(env: &BuildEnv, manifest: &Path) -> tokio::process::Command {
     let path_env = {
         let cur = std::env::var("PATH").unwrap_or_default();
@@ -77,6 +101,7 @@ fn cargo_command(env: &BuildEnv, manifest: &Path) -> tokio::process::Command {
         .env("PATH", path_env)
         .env("CARGO_HOME", &env.cargo_home)
         .env("CARGO_TARGET_DIR", &env.target_dir)
+        .current_dir(&env.cargo_home)
         .kill_on_drop(true)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -84,8 +109,31 @@ fn cargo_command(env: &BuildEnv, manifest: &Path) -> tokio::process::Command {
 }
 
 /// Compile the scaffolded project. `Err(BuildFailed(tail))` carries the
-/// cargo output tail so the intelligence can self-correct.
+/// cargo output tail so the intelligence can self-correct. `CARGO_HOME` is
+/// created empty for this build and removed after it, whatever the
+/// outcome: nothing an earlier build wrote is read, and nothing cargo
+/// writes stays (#12).
 pub async fn build(
+    paths: &ScaffoldPaths,
+    env: &BuildEnv,
+    timeout: Duration,
+) -> Result<BuildArtifact, GuardianError> {
+    if !is_per_build_home(&env.cargo_home) {
+        return Err(GuardianError::BuildFailed(format!(
+            "cargo home {} is not a per-build directory ({CARGO_HOME_PREFIX}*)",
+            env.cargo_home.display()
+        )));
+    }
+    let _ = std::fs::remove_dir_all(&env.cargo_home);
+    std::fs::create_dir_all(&env.cargo_home).map_err(|e| {
+        GuardianError::BuildFailed(format!("cargo home {}: {e}", env.cargo_home.display()))
+    })?;
+    let result = run_cargo(paths, env, timeout).await;
+    let _ = std::fs::remove_dir_all(&env.cargo_home);
+    result
+}
+
+async fn run_cargo(
     paths: &ScaffoldPaths,
     env: &BuildEnv,
     timeout: Duration,
@@ -155,7 +203,8 @@ mod tests {
     /// The build's environment is the three variables cargo needs and
     /// nothing the brain holds (#12): a stand-in `cargo` that prints its
     /// environment sees `PATH`, `CARGO_HOME` and `CARGO_TARGET_DIR` and no
-    /// `HOME`, which every shell hands a process.
+    /// `HOME`, which every shell hands a process. It runs in `CARGO_HOME`,
+    /// which the shell reports as `PWD`.
     #[tokio::test]
     async fn the_build_runs_cargo_in_a_cleared_environment() {
         use std::os::unix::fs::PermissionsExt;
@@ -165,9 +214,11 @@ mod tests {
         let fake = dir.join("cargo");
         std::fs::write(&fake, "#!/bin/sh\nenv\n").unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let home = fresh_cargo_home(&dir, "probe");
+        std::fs::create_dir_all(&home).unwrap();
         let env = BuildEnv {
             toolchain_bin: dir.clone(),
-            cargo_home: dir.join("home"),
+            cargo_home: home.clone(),
             target_dir: dir.join("target"),
         };
         let out = cargo_command(&env, Path::new("/x/Cargo.toml")).output().await.unwrap();
@@ -179,7 +230,31 @@ mod tests {
         for inherited in ["HOME", "USER", "LOGNAME", "RUSTUP_TOOLCHAIN", "RUSTFLAGS"] {
             assert!(!names.contains(&inherited), "the inherited {inherited} reached the build: {printed}");
         }
+        let pwd = format!("PWD={}", std::fs::canonicalize(&home).unwrap().display());
+        assert!(printed.lines().any(|l| l == pwd), "cargo did not run in CARGO_HOME: {printed}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `build` removes its `CARGO_HOME` after the build, so it refuses a
+    /// directory that is not a per-build one before anything runs.
+    #[tokio::test]
+    async fn a_cargo_home_that_is_not_per_build_is_refused_before_cargo_runs() {
+        let dir = std::env::temp_dir().join(format!("embra-guardian-home-{}", std::process::id()));
+        let env = BuildEnv {
+            toolchain_bin: "/nonexistent/bin".into(),
+            cargo_home: dir.join("home"),
+            target_dir: dir.join("target"),
+        };
+        let paths = ScaffoldPaths {
+            project: dir.join("tools/x"),
+            manifest: dir.join("tools/x/Cargo.toml"),
+            lib_rs: dir.join("tools/x/src/lib.rs"),
+            artifact_name: "x.wasm".into(),
+        };
+        let err = build(&paths, &env, Duration::from_secs(1)).await.err().expect("refused");
+        assert!(err.to_string().contains("not a per-build directory"), "{err}");
+        assert!(is_per_build_home(&fresh_cargo_home(&dir, "x")));
+        assert!(!is_per_build_home(&dir.join("cargo-home")));
     }
 
     #[test]
