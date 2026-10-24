@@ -353,7 +353,8 @@ runs them in a `wasmtime` sandbox. Step 3.5 stages that toolchain.
   it runs *inside* the aarch64 guest; `aarch64-unknown-linux-musl` is a Tier-2
   *with-host-tools* target so a prebuilt `rustc`/`cargo` exists) + arch-agnostic
   `rust-std-1.98.1-wasm32-unknown-unknown`. Both are SHA-256-verified against the
-  `.sha256` sidecars from `static.rust-lang.org`.
+  pins in `scripts/rust-toolchain.sha256` (the `xz_hash` values of the signed channel
+  manifest), never against a checksum fetched beside the download.
 - **Where it goes:** staged into `vendor/rust-toolchain`, installed read-only at
   `/opt/rust` in the rootfs by the `embra-rust-toolchain` Buildroot package. `rustc`
   resolves its sysroot relative to its own binary, so the staged tree is
@@ -610,9 +611,11 @@ ARM64 Linux host: `apt-get install -y xz-utils curl coreutils`.
 rm -rf vendor/rust-toolchain
 ```
 
-The expected hash is the one in the `.tar.xz.sha256` file the script downloads beside
-the tarball from `static.rust-lang.org`, and the script verifies against it. If it
-persists, check network / proxy interception of `static.rust-lang.org`.
+The expected hash is the pin in `scripts/rust-toolchain.sha256`, and the script verifies
+the download against it. If it persists, check network / proxy interception of
+`static.rust-lang.org`. A `no pinned sha256 for …` error means `RUST_TOOLCHAIN_VERSION`
+moved without its pins: take the `xz_hash` values from
+`https://static.rust-lang.org/dist/channel-rust-<version>.toml` and add the three lines.
 
 #### `ERROR: buildroot-src has local changes; refusing to switch to 2026.02.1`
 

@@ -69,8 +69,10 @@ pub struct PtyBridge {
 
 /// Minimum spacing between two console repaints. Requests inside the
 /// window are DEFERRED (the flag stays set), never dropped: a flapping
-/// tab reconnects every 2 s, and a client looping on `/ws/terminal`
-/// must not turn into a full-screen repaint for every client per tick.
+/// tab reconnects after a second at first (`embra-term.js` doubles the
+/// wait while the socket keeps closing), and a client looping on
+/// `/ws/terminal` must not turn into a full-screen repaint for every
+/// client per tick.
 const REPAINT_COOLDOWN: Duration = Duration::from_millis(250);
 
 /// Restart pacing — embrad's numbers for the services it supervises.
