@@ -21,6 +21,12 @@ pub struct SystemConfig {
     pub timezone: String,
     pub deployment_mode: String,
     pub created_at: String,
+    /// The embraOS build the config is running under
+    /// (`CARGO_PKG_VERSION`, e.g. `0.19.0-phase1`). Refreshed to the running
+    /// build on load and on save (F-7), so the stored doc never lags the
+    /// binary. Not the build that first created the DATA: `created_at`
+    /// carries the origin, and `system_status`/`GetSoulStatus` report the
+    /// same live `env!` string.
     pub version: String,
     #[serde(default)]
     pub github_token: Option<String>,
@@ -536,6 +542,9 @@ pub async fn save_config(db: &WardsonDbClient, config: &SystemConfig) -> Result<
     let mut doc = serde_json::to_value(config)?;
     if let Some(obj) = doc.as_object_mut() {
         obj.insert("_id".into(), serde_json::json!("config"));
+        // F-7: stamp the writing build, so the persisted doc self-heals an
+        // older `version` string on the next save (see load_config).
+        obj.insert("version".into(), serde_json::json!(env!("CARGO_PKG_VERSION")));
     }
     match db.write("config.system", &doc).await {
         Ok(_) => Ok(()),
@@ -592,6 +601,12 @@ pub async fn load_config(db: &WardsonDbClient) -> Result<SystemConfig> {
     };
     // Always resolve timezone abbreviations (PDT → America/Los_Angeles) so chrono-tz can parse
     config.timezone = crate::tools::resolve_timezone(&config.timezone);
+    // F-7: `version` is the build the config runs under, not the build that
+    // first created the DATA. A long-lived instance kept its creation-time
+    // string (e.g. 0.5.0-phase1) across image rebuilds while the binary moved
+    // on; refresh it so a reader of the stored doc never sees a version that
+    // disagrees with the running binary.
+    config.version = env!("CARGO_PKG_VERSION").into();
     Ok(config)
 }
 
@@ -1887,5 +1902,31 @@ mod save_config_tests {
         let db = WardsonDbClient::from_url(&server.uri());
         save_config(&db, &minimal_cfg()).await.unwrap();
         server.verify().await;
+    }
+}
+
+#[cfg(test)]
+mod load_config_tests {
+    use super::{load_config, tests_support::minimal_cfg};
+    use crate::db::WardsonDbClient;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// F-7: a stored config whose `version` predates the running build is
+    /// refreshed to `CARGO_PKG_VERSION` on load, so no reader sees a version
+    /// that disagrees with the binary it configures.
+    #[tokio::test]
+    async fn load_refreshes_a_stale_version_to_the_running_build() {
+        let mut doc = serde_json::to_value(minimal_cfg()).unwrap();
+        doc["version"] = serde_json::json!("0.5.0-phase1");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/config.system/docs/config"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "data": doc, "meta": {}})))
+            .mount(&server)
+            .await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let cfg = load_config(&db).await.unwrap();
+        assert_eq!(cfg.version, env!("CARGO_PKG_VERSION"));
     }
 }
