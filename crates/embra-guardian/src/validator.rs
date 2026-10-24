@@ -332,9 +332,13 @@ impl Deny {
     }
 }
 
+// `macro_rules` is refused as a whole: a declared macro's body is tokens
+// `syn` never parses into items, so `extern`, `mod`, `pub` or an ABI
+// attribute inside it would reach the compiler unseen. No shipped or
+// documented module declares one.
 const DENIED_MACROS: &[&str] = &[
     "include", "include_str", "include_bytes", "env", "option_env",
-    "asm", "global_asm", "concat_idents",
+    "asm", "global_asm", "concat_idents", "macro_rules",
 ];
 const USE_ROOTS_OK: &[&str] =
     &["core", "alloc", "crate", "self", "super", "json", "host", "html_text", "inject"];
@@ -419,10 +423,14 @@ impl<'ast> Visit<'ast> for Deny {
                     a.span(),
                 ));
             }
+            // `cfg_attr` wraps another attribute in tokens this walker
+            // would never see as an attribute (`#[cfg_attr(all(), no_mangle)]`),
+            // so the wrapper is refused with the names it could carry.
             if matches!(
                 n.as_str(),
                 "no_mangle" | "export_name" | "link" | "link_section"
                     | "panic_handler" | "global_allocator" | "no_std" | "feature"
+                    | "cfg_attr"
             ) {
                 self.flag(err_at(
                     "attribute",
@@ -432,6 +440,13 @@ impl<'ast> Visit<'ast> for Deny {
             }
         }
         syn::visit::visit_attribute(self, a);
+    }
+    /// The tokens of a list attribute (`#[name(…)]`), which `syn` leaves
+    /// unparsed: scanned like a macro's, so a denied macro or path inside
+    /// one is refused as it is anywhere else.
+    fn visit_meta_list(&mut self, m: &'ast syn::MetaList) {
+        self.scan_tokens(m.tokens.clone());
+        syn::visit::visit_meta_list(self, m);
     }
 }
 
@@ -459,12 +474,13 @@ fn flatten(tokens: proc_macro2::TokenStream, out: &mut Vec<proc_macro2::TokenTre
 }
 
 impl Deny {
-    /// The tokens of a macro invocation, which `syn` leaves unparsed: an
-    /// `unsafe` block, a denied path and a denied macro name inside
-    /// `vec![…]`, `format!(…)` or any other invocation are refused as their
-    /// parsed forms are (#12). The scan is over tokens, so nothing a macro
-    /// accepts escapes it; what passes here is what a plain statement would
-    /// pass.
+    /// The tokens of a macro invocation or a list attribute, which `syn`
+    /// leaves unparsed. The scan checks three things, each as the parsed
+    /// form is checked: the ident `unsafe`; a path `denied_path` refuses;
+    /// and a denied macro name followed by `!`, bare or as the last segment
+    /// of a path (`core::include_str!`), the segment `visit_macro` reads
+    /// (#12). It does not recognise items, so a declared macro's body is
+    /// kept out by refusing `macro_rules!` itself.
     fn scan_tokens(&mut self, tokens: proc_macro2::TokenStream) {
         use proc_macro2::TokenTree;
         let mut flat = Vec::new();
@@ -480,11 +496,6 @@ impl Deny {
             if name == "unsafe" {
                 self.flag(err_at("unsafe", "`unsafe` inside a macro invocation is not allowed", id.span()));
             }
-            if DENIED_MACROS.contains(&name.as_str())
-                && matches!(flat.get(i + 1), Some(TokenTree::Punct(p)) if p.as_char() == '!')
-            {
-                self.flag(err_at("macro", format!("`{name}!` is not allowed"), id.span()));
-            }
             // A path: `ident (:: ident)*`.
             let mut segs = vec![name];
             let mut j = i;
@@ -496,6 +507,15 @@ impl Deny {
                     }
                     _ => break,
                 }
+            }
+            // A denied macro is named by the last segment, followed by `!`:
+            // `include_str!` and `core::include_str!` alike. Checked after
+            // the path is collected, so a qualified name is not stepped over.
+            if let Some(last) = segs.last()
+                && DENIED_MACROS.contains(&last.as_str())
+                && matches!(flat.get(j + 1), Some(TokenTree::Punct(p)) if p.as_char() == '!')
+            {
+                self.flag(err_at("macro", format!("`{last}!` is not allowed"), id.span()));
             }
             if denied_path(&segs) {
                 self.flag(err_at(
@@ -649,6 +669,22 @@ fn run(input: &str) -> String {
             // The edition-2024 spelling of an ABI attribute.
             ("attribute", "#[unsafe(no_mangle)] fn run(input: &str) -> String { String::new() }"),
             ("attribute", "#[unsafe(export_name = \"galloc\")] fn run(input: &str) -> String { String::new() }"),
+            // A path-qualified denied macro inside another invocation: the
+            // token scan used to step past the name with the path
+            // (the verification of 2026-10-24). `core` re-exports them all.
+            ("macro", "fn run(input: &str) -> String { format!(\"{}\", core::include_str!(\"/embra/state/api_key_anthropic\")) }"),
+            ("macro", "fn run(input: &str) -> String { format!(\"{}\", core::env!(\"GITHUB_TOKEN\")) }"),
+            ("macro", "fn run(input: &str) -> String { format!(\"{:?}\", core::option_env!(\"HOME\")) }"),
+            ("macro", "fn run(input: &str) -> String { let _ = vec![::core::include_bytes!(\"/x\")]; String::new() }"),
+            // `cfg_attr` carries an attribute the walker never sees as one.
+            ("attribute", "#[cfg_attr(all(), no_mangle)] fn run(input: &str) -> String { String::new() }"),
+            ("attribute", "#[cfg_attr(all(), unsafe(no_mangle))] fn run(input: &str) -> String { String::new() }"),
+            ("attribute", "#[cfg_attr(all(), export_name = include_str!(\"/x\"))] fn run(input: &str) -> String { String::new() }"),
+            // A denied macro inside any other list attribute's tokens.
+            ("macro", "#[doc(alias = include_str!(\"/x\"))] fn run(input: &str) -> String { String::new() }"),
+            // A declared macro's body is never parsed into items; the
+            // declaration itself is refused.
+            ("macro", "macro_rules! smuggle { () => { extern \"C\" { fn syscall(); } } }\nfn run(input: &str) -> String { smuggle!(); String::new() }"),
         ];
         for (rule, body) in cases {
             let src = format!(
@@ -670,6 +706,21 @@ fn run(input: &str) -> String {
                    const GUARDIAN_SCHEMA: &str=r#\"{\"type\":\"object\"}\"#;\n\
                    fn run(input: &str) -> String { let v = vec![1, 2]; let s = alloc::format!(\"{} {}\", v.len(), core::cmp::max(1, 2)); format!(\"{s} {input}\") }";
         let m = validate(src, &[]).expect("ordinary macro arguments pass");
+        assert_eq!(m.name, "demo");
+    }
+
+    /// Ordinary attributes keep passing: the scan of a list attribute's
+    /// tokens refuses what a statement would refuse and nothing else.
+    #[test]
+    fn an_ordinary_attribute_still_passes() {
+        let src = "// guardian-tool: demo\nconst GUARDIAN_NAME: &str=\"demo\";\
+                   const GUARDIAN_DESC: &str=\"d\";\
+                   const GUARDIAN_SCHEMA: &str=r#\"{\"type\":\"object\"}\"#;\n\
+                   #[inline] fn helper(n: usize) -> usize { n }\n\
+                   #[allow(dead_code, clippy::needless_return)] fn unused() -> usize { return 1; }\n\
+                   #[cfg(target_arch = \"wasm32\")] fn arch() -> &'static str { \"wasm32\" }\n\
+                   #[doc = \"documented\"] fn run(input: &str) -> String { format!(\"{} {}\", helper(input.len()), unused()) }";
+        let m = validate(src, &[]).expect("ordinary attributes pass");
         assert_eq!(m.name, "demo");
     }
 
