@@ -7,20 +7,21 @@ use anyhow::{Result, Context};
 use sha2::{Sha256, Digest};
 use tracing::debug;
 
-/// What `verify` reports when WardSONDB holds no soul document.
+/// What `verify` reports when WardSONDB holds no soul document and no seal
+/// hash is stored.
 ///
 /// embrad reads this TEXT to tell a first boot from a failed verification
-/// (`embrad/src/supervisor.rs`, `is_first_run`): it looks for "no soul" and
-/// for "not found". Reword it there as well, or the first boot halts. No
-/// other report of this module may carry either phrase, or a failed
-/// verification would read as a first boot.
+/// (`embrad/src/supervisor.rs`, `is_first_run`): it compares the report with
+/// this sentence exactly (`NO_SOUL_REPORT` there). Reword it there as well,
+/// or the first boot halts. Every other report of this module is some other
+/// sentence, so no failed verification can read as a first boot.
 const NO_SOUL_ERROR: &str = "Soul document not found — no soul exists (first run or data loss)";
 
-/// The report for a soul document that is gone while a sealed hash is
-/// stored: tamper or data loss, never a first run. It carries none of the
-/// words embrad reads as a first run (`is_first_run`: "no soul", "not
-/// found"), so embrad halts on it. Guard
-/// `a_missing_soul_with_a_stored_hash_halts_and_without_one_is_a_first_run`.
+/// The report for a soul document that is gone while a seal hash file is
+/// present, whatever it holds: tamper or data loss, never a first run. It is
+/// not the first-run sentence, so embrad halts on it. Guards
+/// `a_missing_soul_with_a_stored_hash_halts_and_without_one_is_a_first_run`,
+/// `a_missing_soul_with_an_empty_or_unreadable_hash_file_halts`.
 const SEALED_HASH_WITHOUT_SOUL_ERROR: &str = "Soul document missing but a sealed hash is stored";
 
 /// The report for a soul document that carries no `soul` field: the seal
@@ -62,16 +63,23 @@ impl SoulVerifier {
         let soul_json = match self.read_soul_from_db().await? {
             Some(doc) => doc,
             None => {
-                // A missing document is a first run only when nothing was
-                // ever sealed. With a stored hash it is tamper or data
-                // loss, and embrad halts on this report.
-                if self.read_stored_hash().is_ok() {
-                    anyhow::bail!(
+                // A missing document is a first run only when no hash file
+                // is there at all. Presence is the question, not content: an
+                // empty or unreadable hash file beside a missing document is
+                // tamper or data loss as much as a full one (#9), and a file
+                // whose presence cannot be told halts too. Every one of these
+                // reports is some sentence other than NO_SOUL_ERROR.
+                match self.stored_hash_is_present() {
+                    Ok(false) => anyhow::bail!(NO_SOUL_ERROR),
+                    Ok(true) => anyhow::bail!(
                         "{SEALED_HASH_WITHOUT_SOUL_ERROR} at {} — restore DATA, or remove the hash to start over",
                         self.hash_path.display()
-                    );
+                    ),
+                    Err(e) => anyhow::bail!(
+                        "Soul document missing and the seal hash at {} could not be checked ({e}) — fix STATE, or remove the hash to start over",
+                        self.hash_path.display()
+                    ),
                 }
-                anyhow::bail!(NO_SOUL_ERROR);
             }
         };
 
@@ -133,9 +141,21 @@ impl SoulVerifier {
         Ok(format!("{:x}", hasher.finalize()))
     }
 
+    /// Whether a seal hash file is present: `Ok(true)` for a file of any
+    /// content, `Ok(false)` only when nothing is there, and the error when
+    /// that cannot be told. The 404 path asks this and never reads the file.
+    fn stored_hash_is_present(&self) -> std::io::Result<bool> {
+        match std::fs::metadata(&self.hash_path) {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
     fn read_stored_hash(&self) -> Result<String> {
         if !self.hash_path.exists() {
-            // A soul document exists (the 404 path never comes here), so a
+            // A soul document exists (the 404 path checks presence with
+            // `stored_hash_is_present` and never reads the file), so a
             // missing hash is a lost or tampered STATE, and embrad halts on
             // this report (#14: the recovery is named).
             anyhow::bail!(
@@ -243,6 +263,45 @@ mod tests {
         let (valid, _, _, err) = SoulVerifier::new(server.uri(), dir.join("absent.sha256")).verify().await;
         assert!(!valid);
         assert_eq!(err, NO_SOUL_ERROR, "no hash: a first run");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The verification of 2026-10-24: `read_stored_hash` errs on an empty
+    /// or unreadable file, so keying the 404 branch on it read "present but
+    /// empty" as "never sealed" and started Learning Mode. The branch keys
+    /// on presence now; what the file holds does not matter.
+    #[tokio::test]
+    async fn a_missing_soul_with_an_empty_or_unreadable_hash_file_halts() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/soul.invariant/docs/soul"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let dir = std::env::temp_dir().join(format!("embra-trustd-h5-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let empty = dir.join("empty.sha256");
+        std::fs::write(&empty, "  \n").unwrap();
+        let (valid, _, _, err) = SoulVerifier::new(server.uri(), empty.clone()).verify().await;
+        assert!(!valid);
+        assert!(err.starts_with(SEALED_HASH_WITHOUT_SOUL_ERROR), "an empty hash file is still a stored hash: {err}");
+        assert_ne!(err, NO_SOUL_ERROR);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let unreadable = dir.join("unreadable.sha256");
+            std::fs::write(&unreadable, "abc123\n").unwrap();
+            std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let (valid, _, _, err) = SoulVerifier::new(server.uri(), unreadable.clone()).verify().await;
+            assert!(!valid);
+            assert!(err.starts_with(SEALED_HASH_WITHOUT_SOUL_ERROR), "an unreadable hash file is present: {err}");
+            let _ = std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o600));
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
