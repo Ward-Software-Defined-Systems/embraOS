@@ -9,8 +9,16 @@ fn main() {
     #[cfg(target_os = "linux")]
     {
         if let Err(e) = boot() {
+            // The reason goes to the serial line, then the machine halts:
+            // an initramfs that cannot mount its root has nothing to wait
+            // for, and a halt is what the operator sees in QEMU, where a
+            // sleep forever looked like a hang (#29).
             eprintln!("[embra-init] FATAL: {}", e);
-            eprintln!("[embra-init] Dropping to emergency halt");
+            eprintln!("[embra-init] Halting: the boot cannot continue");
+            std::thread::sleep(std::time::Duration::from_secs(2));
+            let _ = nix::sys::reboot::reboot(nix::sys::reboot::RebootMode::RB_HALT_SYSTEM);
+            // reboot(2) returned: stay here rather than exit, which would
+            // panic the kernel ("Attempted to kill init!").
             loop { std::thread::sleep(std::time::Duration::from_secs(3600)); }
         }
     }
@@ -74,13 +82,20 @@ fn boot() -> Result<(), Box<dyn std::error::Error>> {
     let state_path = format!("{}/embra/state", NEWROOT);
     std::fs::create_dir_all(&state_path)?;
 
-    eprintln!("[embra-init] Mounting STATE partition from /dev/vda3");
+    // STATE and DATA hold files, never programs: `nosuid,nodev,noexec`
+    // (#6, #29). The Guardian's build writes under DATA and executes
+    // nothing there (rustc and rust-lld run from the rootfs), wasmtime
+    // runs a tool from memory, and git runs no hook (the hooks path is
+    // pinned to an empty directory under STATE).
+    let data_flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC;
+
+    eprintln!("[embra-init] Mounting STATE partition from /dev/vda3 (nosuid,nodev,noexec)");
     wait_for_device("/dev/vda3", 5)?;
     mount(
         Some("/dev/vda3"),
         state_path.as_str(),
         Some("ext4"),
-        MsFlags::empty(),
+        data_flags,
         None::<&str>,
     )?;
 
@@ -88,13 +103,13 @@ fn boot() -> Result<(), Box<dyn std::error::Error>> {
     let data_path = format!("{}/embra/data", NEWROOT);
     std::fs::create_dir_all(&data_path)?;
 
-    eprintln!("[embra-init] Mounting DATA partition from /dev/vda4");
+    eprintln!("[embra-init] Mounting DATA partition from /dev/vda4 (nosuid,nodev,noexec)");
     wait_for_device("/dev/vda4", 5)?;
     mount(
         Some("/dev/vda4"),
         data_path.as_str(),
         Some("ext4"),
-        MsFlags::empty(),
+        data_flags,
         None::<&str>,
     )?;
 
@@ -109,7 +124,7 @@ fn boot() -> Result<(), Box<dyn std::error::Error>> {
         Some("tmpfs"),
         eph_path.as_str(),
         Some("tmpfs"),
-        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+        MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC,
         Some("size=512M"),
     )?;
 

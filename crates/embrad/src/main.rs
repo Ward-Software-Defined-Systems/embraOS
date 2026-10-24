@@ -4,9 +4,10 @@
 //! 1. Install the panic hook (PID 1 only)
 //! 2. Mount pseudo-filesystems
 //! 3. Verify partition mounts
-//! 4. Start services in dependency order
-//! 5. Verify soul (HALT on failure)
-//! 6. Enter reconciliation loop
+//! 4. Set the environment every service inherits (one thread, no runtime yet)
+//! 5. Start services in dependency order
+//! 6. Verify soul (HALT on failure)
+//! 7. Enter reconciliation loop
 //!
 //! PID 1 never exits. A fatal boot error and a panic both end in
 //! `supervisor::halt_system`, with the reason written to
@@ -34,6 +35,16 @@ fn main() -> Result<()> {
         install_panic_hook();
     }
 
+    // The mounts and the environment come before the runtime: one thread
+    // runs here, which is what makes the `set_var` calls in
+    // `supervisor::prepare_environment` sound (#29). A failure is a halt
+    // with its reason, as below.
+    match prepare(pid) {
+        Ok(()) => {}
+        Err(e) if pid == 1 => halt_system(&fatal_reason(&e)),
+        Err(e) => return Err(e),
+    }
+
     // The runtime is built by hand, so a failure is a halt with its reason
     // and not an unwinding panic inside `#[tokio::main]`.
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
@@ -42,7 +53,7 @@ fn main() -> Result<()> {
         Err(e) => return Err(e.into()),
     };
 
-    match runtime.block_on(run(pid)) {
+    match runtime.block_on(run()) {
         Ok(()) => {}
         Err(e) if pid == 1 => halt_system(&fatal_reason(&e)),
         Err(e) => return Err(e),
@@ -56,9 +67,9 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// The boot and the reconciliation loop. An `Err` is fatal: PID 1 halts
-/// with it as the reason, development mode returns it.
-async fn run(pid: u32) -> Result<()> {
+/// Steps 2 to 4 of the boot, synchronous and before the runtime: the
+/// pseudo-filesystems (PID 1 only), the partition mounts, the environment.
+fn prepare(pid: u32) -> Result<()> {
     info!("embrad starting as PID {}", pid);
 
     if pid != 1 {
@@ -67,7 +78,7 @@ async fn run(pid: u32) -> Result<()> {
         // This allows testing the supervisor without being actual PID 1.
     }
 
-    // Step 1: Mount pseudo-filesystems
+    // Step 2: Mount pseudo-filesystems
     if pid == 1 {
         info!("Mounting pseudo-filesystems");
         mount::mount_pseudofs().map_err(|e| {
@@ -76,14 +87,23 @@ async fn run(pid: u32) -> Result<()> {
         })?;
     }
 
-    // Step 2: Verify partition mounts
+    // Step 3: Verify partition mounts
     info!("Verifying partition mounts");
     mount::verify_partitions().map_err(|e| {
         error!("Partition verification failed: {}", e);
         e
     })?;
 
-    // Step 3: Start services in dependency order
+    // Step 4: The environment every service inherits (TZ, the operator CA
+    // trust). The ephemeral tmpfs the CA bundle is written to exists now.
+    supervisor::prepare_environment();
+    Ok(())
+}
+
+/// The services and the reconciliation loop. An `Err` is fatal: PID 1
+/// halts with it as the reason, development mode returns it.
+async fn run() -> Result<()> {
+    // Step 5: Start services in dependency order
     info!("Starting services");
     let mut supervisor = supervisor::Supervisor::new();
 

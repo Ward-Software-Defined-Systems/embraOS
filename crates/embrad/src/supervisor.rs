@@ -175,6 +175,9 @@ pub struct Supervisor {
     /// `register_services`, handed to embra-web in its environment and
     /// printed in the boot banner, the one place it is shown.
     web_token: Option<String>,
+    /// The stdio of the boot, kept before the log redirect for the serial
+    /// console's restarts (`keep_boot_stdio`, #29).
+    boot_stdio: Option<(std::fs::File, std::fs::File)>,
     /// In start order.
     services: Vec<ServiceState>,
 }
@@ -183,6 +186,7 @@ impl Supervisor {
     pub fn new() -> Self {
         Self {
             web_token: None,
+            boot_stdio: None,
             services: Vec::new(),
         }
     }
@@ -190,18 +194,6 @@ impl Supervisor {
     /// Register all embraOS services in dependency order: `start_all`
     /// starts them in the order they are registered here.
     pub fn register_services(&mut self) {
-        // Set TZ for all child processes (read from STATE, written by config wizard)
-        let tz = std::fs::read_to_string("/embra/state/timezone")
-            .unwrap_or_default()
-            .trim().to_string();
-        if !tz.is_empty() {
-            // SAFETY: called once at startup before services are spawned
-            unsafe { std::env::set_var("TZ", &tz); }
-            tracing::info!("System timezone set: TZ={}", tz);
-        }
-        // Merge operator CA certs (STATE drop-in) with the stock bundle and
-        // export GIT_SSL_CAINFO/SSL_CERT_FILE for all child processes.
-        crate::ca_bundle::setup_operator_ca_trust();
         // Which engine: fixed in THIS binary when the image is built
         // (scripts/build-image.sh --storage-engine, see crates/embrad/build.rs),
         // rocksdb for a dev build that bypasses the script. WardSONDB itself
@@ -450,8 +442,11 @@ impl Supervisor {
 
             // After spawning the operator UI, redirect embrad's output to
             // a log file: serial console needs ttyS0 clean for the TUI;
-            // web mode wants ttyS0 quiet (operator is on the browser).
+            // web mode wants ttyS0 quiet (operator is on the browser). The
+            // stdio of the boot is kept first, for the serial console's
+            // restarts (#29).
             if (name == "embra-console" || name == "embra-web") && std::process::id() == 1 {
+                self.boot_stdio = keep_boot_stdio();
                 if name == "embra-web" {
                     // embra-web is healthy now (TCP :3345 open ⇒ cert
                     // acquired + HTTPS serving). Print a clear readiness
@@ -492,6 +487,10 @@ impl Supervisor {
     }
 
     async fn start_service(&mut self, index: usize) -> Result<()> {
+        let boot_stdio = self
+            .boot_stdio
+            .as_ref()
+            .and_then(|(i, o)| Some((i.try_clone().ok()?, o.try_clone().ok()?)));
         let svc = &mut self.services[index];
         svc.status = ServiceStatus::Starting;
 
@@ -500,13 +499,25 @@ impl Supervisor {
         for (key, val) in &svc.def.env {
             cmd.env(key, val);
         }
-        // embra-console gets stdin/stdout for the TUI (serial console)
-        // stderr goes to log file to prevent embrad log bleed-through
-        // A log file that cannot be opened (or cloned for the second
-        // stream) sends that stream nowhere; nothing here can panic PID 1.
+        // embra-console gets stdin/stdout for the TUI (serial console):
+        // the stdio of the boot, kept before the log redirect, once that
+        // has happened — a console started again later would otherwise
+        // inherit the log file and draw its screen into it (#29) — and
+        // embrad's own before it. stderr goes to a log file to prevent
+        // embrad log bleed-through. A log file that cannot be opened (or
+        // cloned for the second stream) sends that stream nowhere; nothing
+        // here can panic PID 1.
         if svc.def.name == "embra-console" {
-            cmd.stdin(Stdio::inherit());
-            cmd.stdout(Stdio::inherit());
+            match boot_stdio {
+                Some((stdin, stdout)) => {
+                    cmd.stdin(Stdio::from(stdin));
+                    cmd.stdout(Stdio::from(stdout));
+                }
+                None => {
+                    cmd.stdin(Stdio::inherit());
+                    cmd.stdout(Stdio::inherit());
+                }
+            }
             let log_path = "/embra/ephemeral/embra-console.log";
             cmd.stderr(match std::fs::File::create(log_path) {
                 Ok(f) => Stdio::from(f),
@@ -639,7 +650,7 @@ impl Supervisor {
                                 let mut buf = vec![0u8; 4096];
                                 if let Ok(n) = stream.read(&mut buf).await {
                                     let response = String::from_utf8_lossy(&buf[..n]);
-                                    if response.contains("200") {
+                                    if is_http_200(&response) {
                                         return Ok(());
                                     }
                                 }
@@ -711,24 +722,26 @@ impl Supervisor {
         }
     }
 
-    /// Stop all services in reverse dependency order.
+    /// Stop all services in reverse dependency order: SIGTERM, a grace
+    /// period, SIGKILL (`stop_one`).
     pub async fn stop_all(&mut self) {
         info!("Stopping all services");
         for i in (0..self.services.len()).rev() {
             let name = self.services[i].def.name.clone();
             info!("Stopping {}", name);
             if let Some(ref mut child) = self.services[i].child {
-                // Send SIGTERM first
-                let _ = child.kill().await;
-                // Wait up to 5 seconds for graceful shutdown
-                let _ = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    child.wait()
-                ).await;
+                stop_one(child, &name, STOP_GRACE).await;
             }
             self.services[i].status = ServiceStatus::Stopped;
             self.services[i].child = None;
         }
+    }
+
+    /// The pids of the supervised children that are running: what the
+    /// orphan reaper (`reconcile::reap_orphans`) leaves for tokio's `Child`
+    /// to collect.
+    pub fn child_pids(&self) -> Vec<u32> {
+        self.services.iter().filter_map(|s| s.child.as_ref().and_then(|c| c.id())).collect()
     }
 
     /// Check if a service is still running. Returns true if alive.
@@ -821,6 +834,84 @@ impl Supervisor {
     pub fn service_status(&self, index: usize) -> &ServiceStatus {
         &self.services[index].status
     }
+}
+
+/// How long a service has to exit on SIGTERM before it is killed.
+const STOP_GRACE: Duration = Duration::from_secs(5);
+
+/// Stops one child: SIGTERM, `grace` to exit on it, SIGKILL after. A
+/// service that handles SIGTERM closes its files first — WardSONDB its
+/// database — instead of being cut off, which `Child::kill` alone did
+/// (#29). The exit status, when one was collected.
+pub(crate) async fn stop_one(child: &mut tokio::process::Child, name: &str, grace: Duration) -> Option<std::process::ExitStatus> {
+    if let Some(pid) = child.id()
+        && let Err(e) = nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid as i32), nix::sys::signal::Signal::SIGTERM)
+    {
+        warn!("{name}: SIGTERM not sent: {e}");
+    }
+    match tokio::time::timeout(grace, child.wait()).await {
+        Ok(Ok(status)) => Some(status),
+        Ok(Err(e)) => {
+            warn!("{name}: wait failed: {e}");
+            None
+        }
+        Err(_) => {
+            warn!("{name} did not exit on SIGTERM within {grace:?}; killing it");
+            let _ = child.kill().await;
+            child.try_wait().ok().flatten()
+        }
+    }
+}
+
+/// Whether an HTTP response begins with a 200 status line. The substring
+/// `200` anywhere in a response (a `Content-Length: 200`, a body) is not a
+/// health (#29).
+pub(crate) fn is_http_200(response: &str) -> bool {
+    let line = response.lines().next().unwrap_or("");
+    let mut parts = line.split_whitespace();
+    matches!(parts.next(), Some(version) if version.starts_with("HTTP/")) && parts.next() == Some("200")
+}
+
+/// The stdio PID 1 has at boot, duplicated so the log redirect that follows
+/// leaves these handles on the kernel console: the serial console's
+/// restarts use them (#29). `None` when a duplicate could not be made; the
+/// console then inherits as before.
+fn keep_boot_stdio() -> Option<(std::fs::File, std::fs::File)> {
+    use std::os::unix::io::FromRawFd;
+    // SAFETY: dup(2) of the process's own fds 0 and 1 gives descriptors this
+    // process owns alone, each wrapped once; a failed dup is -1 and is not
+    // wrapped.
+    let stdin = unsafe { libc::dup(0) };
+    if stdin < 0 {
+        return None;
+    }
+    let stdout = unsafe { libc::dup(1) };
+    if stdout < 0 {
+        unsafe { libc::close(stdin) };
+        return None;
+    }
+    Some(unsafe { (std::fs::File::from_raw_fd(stdin), std::fs::File::from_raw_fd(stdout)) })
+}
+
+/// The environment every service inherits, set before the tokio runtime is
+/// built: `TZ` from STATE (the config wizard writes it) and the operator CA
+/// trust (`ca_bundle`). One thread runs at this point, which is what makes
+/// the `set_var` calls sound (#29); nothing after the runtime exists touches
+/// the environment.
+pub fn prepare_environment() {
+    let tz = std::fs::read_to_string("/embra/state/timezone")
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if !tz.is_empty() {
+        // SAFETY: one thread runs — `main` calls this before it builds the
+        // runtime — so no other thread reads the environment meanwhile.
+        unsafe { std::env::set_var("TZ", &tz) };
+        info!("System timezone set: TZ={}", tz);
+    }
+    // Merge operator CA certs (STATE drop-in) with the stock bundle and
+    // export GIT_SSL_CAINFO/SSL_CERT_FILE for all child processes.
+    crate::ca_bundle::setup_operator_ca_trust();
 }
 
 /// Where a halt leaves its reason, on STATE: a soul verification failure, a
@@ -1088,5 +1179,119 @@ mod restart_budget_tests {
         assert_eq!(secs, vec![1, 2, 4, 8, 16, 30, 30]);
         // Absurd counts never overflow past the cap.
         assert_eq!(backoff_for(&p, 40), Duration::from_secs(30));
+    }
+}
+
+#[cfg(test)]
+mod stop_and_health_tests {
+    use super::*;
+    use std::os::unix::process::ExitStatusExt;
+
+    /// A health is a 200 status line, not the digits `200` anywhere (#29).
+    #[test]
+    fn a_health_is_a_200_status_line_and_nothing_else() {
+        assert!(is_http_200("HTTP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok"));
+        assert!(is_http_200("HTTP/1.1 200 \r\n\r\n"));
+        assert!(!is_http_200("HTTP/1.1 404 Not Found\r\nContent-Length: 200\r\n\r\n"));
+        assert!(!is_http_200("HTTP/1.1 500 Internal Server Error\r\n\r\n{\"code\":200}"));
+        assert!(!is_http_200("200 OK"));
+        assert!(!is_http_200(""));
+    }
+
+    /// A stop is SIGTERM first; a service that exits on it is left its own
+    /// status, one that ignores it is killed after the grace (#29).
+    #[tokio::test]
+    async fn a_stop_is_sigterm_first_and_sigkill_after_the_grace() {
+        let mut polite = Command::new("sleep").arg("30").kill_on_drop(true).spawn().unwrap();
+        let status = stop_one(&mut polite, "polite", Duration::from_secs(5)).await.unwrap();
+        assert_eq!(status.signal(), Some(15), "ended by SIGTERM: {status:?}");
+        // The shell itself stays the process (a `wait`, not an exec of the
+        // last command), so the ignored SIGTERM is its own to ignore.
+        let mut stubborn = Command::new("sh")
+            .args(["-c", "trap '' TERM; sleep 30 & wait"])
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        // The shell has to reach its `trap` line before the signal lands.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let status = stop_one(&mut stubborn, "stubborn", Duration::from_millis(300)).await.unwrap();
+        assert_eq!(status.signal(), Some(9), "killed after the grace: {status:?}");
+    }
+
+    /// The serial console is started on the stdio kept from the boot: a
+    /// console started after the log redirect draws on it, not on what
+    /// embrad's stdout has become (#29). The stand-in console exits at
+    /// once, which `start_service` reports as an error; what it wrote is
+    /// the point.
+    #[tokio::test]
+    async fn a_restarted_console_draws_on_the_kept_boot_stdio() {
+        let dir = std::env::temp_dir().join(format!("embrad-console-stdio-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let screen = dir.join("screen");
+        let out = std::fs::File::create(&screen).unwrap();
+        let input = std::fs::File::open("/dev/null").unwrap();
+        let mut sup = Supervisor::new();
+        sup.boot_stdio = Some((input, out));
+        sup.services.push(ServiceState {
+            def: ServiceDef {
+                name: "embra-console".into(),
+                binary: "/bin/sh".into(),
+                args: vec!["-c".into(), "echo drawn".into()],
+                env: vec![],
+                health_check: HealthCheck::ProcessAlive,
+                restart_policy: RestartPolicy::default(),
+            },
+            child: None,
+            pid: None,
+            started_at: None,
+            restart_count: 0,
+            status: ServiceStatus::Stopped,
+        });
+        let _ = sup.start_service(0).await;
+        assert_eq!(std::fs::read_to_string(&screen).unwrap(), "drawn\n");
+        assert!(keep_boot_stdio().is_some(), "the boot's stdio can be kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod shutdown_during_restart_tests {
+    use super::*;
+
+    /// A shutdown signal during a restart's backoff ends the loop at once
+    /// (#63): the service here is failed with a 30 s backoff ahead of it,
+    /// and the loop returns well within that when the signal fires.
+    #[tokio::test]
+    async fn a_shutdown_signal_is_answered_during_a_restart_backoff() {
+        let mut sup = Supervisor::new();
+        sup.services.push(ServiceState {
+            def: ServiceDef {
+                name: "probe".into(),
+                binary: String::new(),
+                args: vec![],
+                env: vec![],
+                health_check: HealthCheck::ProcessAlive,
+                restart_policy: RestartPolicy {
+                    backoff_base: Duration::from_secs(30),
+                    backoff_max: Duration::from_secs(30),
+                    ..RestartPolicy::default()
+                },
+            },
+            child: None,
+            pid: None,
+            started_at: None,
+            restart_count: 0,
+            status: ServiceStatus::Failed("exited".into()),
+        });
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            let _ = tx.send(());
+        });
+        let started = Instant::now();
+        crate::reconcile::run_until(&mut sup, async move { rx.await.ok(); "the test" }, None).await;
+        assert!(started.elapsed() < Duration::from_secs(5), "the backoff held the signal: {:?}", started.elapsed());
+        assert_eq!(sup.services[0].restart_count, 1, "the restart had begun");
     }
 }

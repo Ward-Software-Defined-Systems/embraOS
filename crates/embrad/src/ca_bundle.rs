@@ -171,7 +171,9 @@ pub fn setup_operator_ca_trust() {
         return;
     }
 
-    // SAFETY: called once at startup before services are spawned
+    // SAFETY: one thread runs — `supervisor::prepare_environment` calls this
+    // from `main` before the tokio runtime is built — so no other thread
+    // reads the environment meanwhile.
     unsafe {
         std::env::set_var("GIT_SSL_CAINFO", CA_MERGED_BUNDLE);
         std::env::set_var("SSL_CERT_FILE", CA_MERGED_BUNDLE);

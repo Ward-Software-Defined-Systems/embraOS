@@ -209,11 +209,14 @@ pub fn verify_partitions() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         use nix::mount::MsFlags;
-        mount_if_needed("tmpfs", "/embra/ephemeral", "tmpfs", MsFlags::MS_NOSUID | MsFlags::MS_NODEV)?;
+        mount_if_needed("tmpfs", "/embra/ephemeral", "tmpfs", MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC)?;
     }
 
     // Create workspace directory on DATA partition (persistent, writable)
-    // Bind mount so /embra/workspace is writable despite read-only SquashFS rootfs
+    // Bind mount so /embra/workspace is writable despite read-only SquashFS
+    // rootfs. The bind carries DATA's `nosuid,nodev,noexec` (embra-init
+    // mounts DATA so), set again here by a remount so the workspace states
+    // them itself: nothing the tools write there is ever executed (#6, #29).
     let workspace_data = "/embra/data/workspace";
     let workspace_mount = "/embra/workspace";
     std::fs::create_dir_all(workspace_data).ok();
@@ -221,14 +224,11 @@ pub fn verify_partitions() -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         use nix::mount::{mount, MsFlags};
-        match mount(
-            Some(workspace_data),
-            workspace_mount,
-            None::<&str>,
-            MsFlags::MS_BIND,
-            None::<&str>,
-        ) {
-            Ok(_) => info!("Workspace bind mount: {} → {}", workspace_data, workspace_mount),
+        let hardened = MsFlags::MS_BIND | MsFlags::MS_REMOUNT | MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC;
+        match mount(Some(workspace_data), workspace_mount, None::<&str>, MsFlags::MS_BIND, None::<&str>)
+            .and_then(|_| mount(None::<&str>, workspace_mount, None::<&str>, hardened, None::<&str>))
+        {
+            Ok(_) => info!("Workspace bind mount: {} → {} (nosuid,nodev,noexec)", workspace_data, workspace_mount),
             Err(e) => tracing::warn!("Failed to bind mount workspace: {} (tools may fail on write)", e),
         }
     }
