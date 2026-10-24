@@ -33,7 +33,7 @@ use crate::chat_bridge::{ClientMsg, ServerMsg, brain_to_server_msg};
 use crate::state::AppState;
 
 pub async fn ws_chat(ws: WebSocketUpgrade, State(st): State<AppState>) -> Response {
-    ws.on_upgrade(move |socket| handle_chat_socket(socket, st))
+    crate::ws::bounded(ws).on_upgrade(move |socket| handle_chat_socket(socket, st))
 }
 
 async fn handle_chat_socket(socket: WebSocket, st: AppState) {
@@ -84,33 +84,15 @@ async fn handle_chat_socket(socket: WebSocket, st: AppState) {
         loop {
             match resp_stream.message().await {
                 Ok(Some(apid_resp)) => {
-                    let brain_resp =
-                        match brain::ConversationResponse::decode(apid_resp.payload.as_slice()) {
-                            Ok(r) => r,
-                            Err(e) => {
-                                let _ = sender
-                                    .send(Message::Text(
-                                        json_err(&format!("decode brain response: {e}")).into(),
-                                    ))
-                                    .await;
-                                continue;
-                            }
-                        };
-                    let Some(srv_msg) = brain_to_server_msg(brain_resp) else {
-                        continue;
-                    };
-                    let json = match serde_json::to_string(&srv_msg) {
-                        Ok(j) => j,
-                        Err(e) => {
-                            let _ = sender
-                                .send(Message::Text(
-                                    json_err(&format!("encode server msg: {e}")).into(),
-                                ))
-                                .await;
+                    let frame = match translate_apid_payload(&apid_resp.payload) {
+                        Ok(Some(frame)) => frame,
+                        Ok(None) => continue,
+                        Err(error_frame) => {
+                            let _ = sender.send(Message::Text(error_frame.into())).await;
                             continue;
                         }
                     };
-                    if sender.send(Message::Text(json.into())).await.is_err() {
+                    if sender.send(Message::Text(frame.into())).await.is_err() {
                         break;
                     }
                 }
@@ -157,6 +139,21 @@ async fn handle_chat_socket(socket: WebSocket, st: AppState) {
     }
 }
 
+/// One apid frame as the browser's text frame: the opaque payload decoded
+/// as the brain's response, translated (`brain_to_server_msg`) and
+/// serialized. `Ok(None)` is a response with no variant, nothing to send;
+/// `Err` is the error frame to send in its place.
+fn translate_apid_payload(payload: &[u8]) -> Result<Option<String>, String> {
+    let brain_resp = brain::ConversationResponse::decode(payload)
+        .map_err(|e| json_err(&format!("decode brain response: {e}")))?;
+    let Some(srv_msg) = brain_to_server_msg(brain_resp) else {
+        return Ok(None);
+    };
+    serde_json::to_string(&srv_msg)
+        .map(Some)
+        .map_err(|e| json_err(&format!("encode server msg: {e}")))
+}
+
 /// Serialize a `ServerMsg::Error` so we can ship a structured failure
 /// to the browser before closing. Falls back to a hand-built JSON
 /// string on the (extremely unlikely) chance the serializer itself
@@ -166,4 +163,41 @@ fn json_err(message: &str) -> String {
         message: message.to_string(),
     })
     .unwrap_or_else(|_| r#"{"t":"error","message":"json_err fallback"}"#.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    /// A failure of this bridge reaches the browser as the error frame the
+    /// UI shows, with the message as given (#54).
+    #[test]
+    fn a_bridge_error_is_the_error_frame() {
+        let v: Value = serde_json::from_str(&json_err("converse open failed: x")).unwrap();
+        assert_eq!(v, json!({"t": "error", "message": "converse open failed: x"}));
+    }
+
+    /// What apid hands over goes to the browser as the frame the brain
+    /// meant; bytes that are not a brain response become the error frame,
+    /// never a dropped connection; a response with no variant sends
+    /// nothing (#54).
+    #[test]
+    fn an_apid_payload_becomes_the_frame_the_brain_meant_or_an_error_frame() {
+        let token = brain::ConversationResponse {
+            response_type: Some(brain::conversation_response::ResponseType::Token(brain::StreamToken {
+                text: "hel".into(),
+            })),
+        };
+        let frame = translate_apid_payload(&token.encode_to_vec()).unwrap().expect("a frame");
+        assert_eq!(serde_json::from_str::<Value>(&frame).unwrap(), json!({"t": "token", "text": "hel"}));
+
+        let empty = brain::ConversationResponse { response_type: None };
+        assert_eq!(translate_apid_payload(&empty.encode_to_vec()).unwrap(), None);
+
+        let error_frame = translate_apid_payload(&[0xff, 0xff, 0xff, 0xff, 0xff]).unwrap_err();
+        let v: Value = serde_json::from_str(&error_frame).unwrap();
+        assert_eq!(v["t"], "error");
+        assert!(v["message"].as_str().unwrap().starts_with("decode brain response: "), "{v}");
+    }
 }

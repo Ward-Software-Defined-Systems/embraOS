@@ -11,7 +11,7 @@ use futures_util::{SinkExt, StreamExt};
 use crate::state::AppState;
 
 pub async fn ws_activity(ws: WebSocketUpgrade, State(st): State<AppState>) -> Response {
-    ws.on_upgrade(move |socket| handle_activity_socket(socket, st))
+    crate::ws::bounded(ws).on_upgrade(move |socket| handle_activity_socket(socket, st))
 }
 
 async fn handle_activity_socket(socket: WebSocket, st: AppState) {

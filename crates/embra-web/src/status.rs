@@ -47,9 +47,18 @@ async fn http_get(addr: &str, path: &str) -> Option<String> {
         Some(String::from_utf8_lossy(&buf).into_owned())
     };
     match tokio::time::timeout(PROBE_TIMEOUT, fut).await {
-        Ok(Some(resp)) if resp.contains(" 200") || resp.contains("200 OK") => Some(resp),
+        Ok(Some(resp)) if is_http_200(&resp) => Some(resp),
         _ => None,
     }
+}
+
+/// Whether a response's status line says 200: the second field of its
+/// first line, never a `200` somewhere in the body (#29; embrad's probe
+/// reads the line the same way).
+fn is_http_200(response: &str) -> bool {
+    let line = response.lines().next().unwrap_or("");
+    let mut parts = line.split_whitespace();
+    matches!(parts.next(), Some(version) if version.starts_with("HTTP/")) && parts.next() == Some("200")
 }
 
 fn svc(name: &str, up: bool, detail: &str) -> Value {
@@ -191,6 +200,17 @@ mod tests {
 
     fn http_200(body: &str) -> String {
         format!("HTTP/1.0 200 OK\r\ncontent-type: application/json\r\n\r\n{body}")
+    }
+
+    #[test]
+    fn only_the_status_line_says_whether_a_probe_passed() {
+        assert!(is_http_200("HTTP/1.0 200 OK\r\n\r\n"));
+        assert!(is_http_200("HTTP/1.1 200\r\n\r\n"));
+        assert!(!is_http_200("HTTP/1.0 503 Service Unavailable\r\n\r\n{\"ok\":false,\"count\":200}"));
+        assert!(!is_http_200("HTTP/1.0 404 Not Found\r\n\r\n200 OK"));
+        assert!(!is_http_200("HTTP/1.0 2000 Odd\r\n\r\n"));
+        assert!(!is_http_200("200 OK"), "a line without the protocol is not a status line");
+        assert!(!is_http_200(""));
     }
 
     #[test]

@@ -17,6 +17,12 @@ use rust_embed::RustEmbed;
 #[folder = "../embra-web-ui/dist"]
 struct Assets;
 
+/// The console is never framed by another page: a click on the real console
+/// inside an attacker's page is a click on the console (#30). The CSP
+/// directive is the current rule; `X-Frame-Options` is the one older
+/// browsers read. Every embedded asset carries both.
+pub(crate) const FRAME_ANCESTORS_NONE: &str = "frame-ancestors 'none'";
+
 fn content_type(path: &str) -> &'static str {
     match path.rsplit('.').next() {
         Some("html") => "text/html; charset=utf-8",
@@ -47,6 +53,8 @@ fn serve(path: &str) -> Option<Response> {
                 // LAN, so the bandwidth cost is negligible compared to
                 // the time spent debugging stale-cache mysteries.
                 (header::CACHE_CONTROL, "no-store"),
+                (header::CONTENT_SECURITY_POLICY, FRAME_ANCESTORS_NONE),
+                (header::X_FRAME_OPTIONS, "DENY"),
             ],
             Body::from(file.data),
         )
@@ -91,7 +99,66 @@ pub async fn static_handler(uri: Uri) -> Response {
 
 #[cfg(test)]
 mod tests {
-    use super::{Route, route};
+    use super::*;
+
+    async fn get(path: &'static str) -> (StatusCode, header::HeaderMap, Vec<u8>) {
+        let resp = static_handler(Uri::from_static(path)).await;
+        let status = resp.status();
+        let headers = resp.headers().clone();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap().to_vec();
+        (status, headers, body)
+    }
+
+    /// The handler over the embedded `dist/`: the app page at `/embraOS` and
+    /// under it, with the headers that keep it fresh and out of a frame; a
+    /// path that climbs out of the folder, encoded or not, finds nothing;
+    /// an unknown path is 404, never the app (#30, #54).
+    #[tokio::test]
+    async fn the_app_page_is_fresh_and_unframed_and_a_path_out_of_the_folder_finds_nothing() {
+        let (status, headers, body) = get("/embraOS").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(headers[header::CONTENT_TYPE], "text/html; charset=utf-8");
+        assert_eq!(headers[header::CACHE_CONTROL], "no-store");
+        assert_eq!(headers[header::CONTENT_SECURITY_POLICY], "frame-ancestors 'none'");
+        assert_eq!(headers[header::X_FRAME_OPTIONS], "DENY");
+        assert!(std::str::from_utf8(&body).unwrap().contains("<html"), "the app page");
+        let (status, _, under) = get("/embraOS/sessions").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(under, body, "every path under the app is the one page");
+
+        for climb in [
+            "/../../etc/passwd",
+            "/%2e%2e/%2e%2e/etc/passwd",
+            "/assets/../../Cargo.toml",
+            "/embra-web-ui_bg.wasm/../../Cargo.toml",
+        ] {
+            let (status, _, body) = get(climb).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{climb}");
+            assert_eq!(body, b"not found", "{climb}");
+        }
+        let (status, _, _) = get("/nonexistent/route").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "an unknown path is not the app");
+        let (status, _, _) = get("/").await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "nor is the root");
+    }
+
+    #[test]
+    fn the_content_type_follows_the_extension_and_the_rest_is_a_download() {
+        for (path, ct) in [
+            ("index.html", "text/html; charset=utf-8"),
+            ("embra-web-ui.js", "text/javascript; charset=utf-8"),
+            ("embra-web-ui_bg.wasm", "application/wasm"),
+            ("assets/app.css", "text/css; charset=utf-8"),
+            ("manifest.json", "application/json"),
+            ("assets/logo.svg", "image/svg+xml"),
+            ("assets/icon.png", "image/png"),
+            ("favicon.ico", "image/x-icon"),
+            ("README", "application/octet-stream"),
+            ("archive.tar.gz", "application/octet-stream"),
+        ] {
+            assert_eq!(content_type(path), ct, "{path}");
+        }
+    }
 
     #[test]
     fn the_app_is_served_under_embraos_and_the_assets_at_their_root_paths() {

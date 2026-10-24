@@ -94,7 +94,7 @@ fn parse_chain_and_key(
     Ok((certs, key))
 }
 
-fn build_server_config(cert_pem: &[u8], key_pem: &[u8]) -> anyhow::Result<ServerConfig> {
+pub(crate) fn build_server_config(cert_pem: &[u8], key_pem: &[u8]) -> anyhow::Result<ServerConfig> {
     let (certs, key) = parse_chain_and_key(cert_pem, key_pem)?;
 
     // Explicit provider (aws-lc-rs is the resolved rustls default in this
@@ -110,25 +110,30 @@ fn build_server_config(cert_pem: &[u8], key_pem: &[u8]) -> anyhow::Result<Server
     Ok(config)
 }
 
+/// A CA and a server certificate it signed, minted the way trustd mints
+/// them: `KeyPair::generate()`, `cert.pem()`, `key.serialize_pem()`; the
+/// leaf names `localhost`. Returns (leaf cert PEM, CA cert PEM, leaf key
+/// PEM). Shared with the listener's test in `server.rs`.
+#[cfg(test)]
+pub(crate) fn mint_for_tests() -> (String, String, String) {
+    use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
+
+    let ca_key = KeyPair::generate().unwrap();
+    let mut ca_params = CertificateParams::default();
+    ca_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    ca_params.distinguished_name.push(DnType::CommonName, "embraOS test CA");
+    let ca = ca_params.self_signed(&ca_key).unwrap();
+
+    let leaf_key = KeyPair::generate().unwrap();
+    let leaf_params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+    let leaf = leaf_params.signed_by(&leaf_key, &ca, &ca_key).unwrap();
+    (leaf.pem(), ca.pem(), leaf_key.serialize_pem())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rcgen::{CertificateParams, IsCa, KeyPair};
-
-    /// A CA and a server certificate it signed, minted the way trustd mints
-    /// them: `KeyPair::generate()`, `cert.pem()`, `key.serialize_pem()`.
-    /// Returns (leaf cert PEM, CA cert PEM, leaf key PEM).
-    fn mint() -> (String, String, String) {
-        let ca_key = KeyPair::generate().unwrap();
-        let mut ca_params = CertificateParams::default();
-        ca_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        let ca = ca_params.self_signed(&ca_key).unwrap();
-
-        let leaf_key = KeyPair::generate().unwrap();
-        let leaf_params = CertificateParams::new(vec!["localhost".to_string()]).unwrap();
-        let leaf = leaf_params.signed_by(&leaf_key, &ca, &ca_key).unwrap();
-        (leaf.pem(), ca.pem(), leaf_key.serialize_pem())
-    }
+    use super::mint_for_tests as mint;
 
     #[test]
     fn what_trustd_mints_becomes_a_server_config() {

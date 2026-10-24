@@ -35,3 +35,23 @@ pub struct AppState {
     /// carries it, in the query once and in a cookie after.
     pub token: Arc<str>,
 }
+
+impl AppState {
+    /// A state with no console, no feed subscriptions and an apid nothing
+    /// listens on (`127.0.0.1:1`), for a handler test. The PTY bridge's
+    /// input queue comes with it, so a test can read what reached the PTY.
+    #[cfg(test)]
+    pub(crate) fn stub() -> (Self, tokio::sync::mpsc::Receiver<Vec<u8>>) {
+        let (bridge, input_rx) = PtyBridge::stub();
+        let state = AppState {
+            bridge,
+            arbiter: Arbiter::new(),
+            cpu_snap: Arc::new(Mutex::new(None)),
+            apid_addr: "http://127.0.0.1:1".to_string(),
+            activity: ActivityFeed::new(),
+            tools: ToolFeed::new(),
+            token: Arc::from("0123456789abcdef0123456789abcdef"),
+        };
+        (state, input_rx)
+    }
+}

@@ -32,6 +32,16 @@ use crate::state::AppState;
 /// life on the web PTY, so every new terminal is told so.
 pub(crate) const ATTACH_PREAMBLE: &[u8] = b"\x1b[?2004h";
 
+/// The most one WebSocket message or frame may carry on `:3345`: a paste
+/// into the terminal or a chat message fits with room, and a client cannot
+/// ask the server to assemble more (#21).
+pub(crate) const WS_MAX_MESSAGE_BYTES: usize = 1 << 20;
+
+/// The upgrade with the size limits every socket of the console takes.
+pub(crate) fn bounded(ws: WebSocketUpgrade) -> WebSocketUpgrade {
+    ws.max_message_size(WS_MAX_MESSAGE_BYTES).max_frame_size(WS_MAX_MESSAGE_BYTES)
+}
+
 #[derive(Deserialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
 enum ClientControl {
@@ -75,7 +85,44 @@ pub async fn ws_terminal(
     ws: WebSocketUpgrade,
     State(st): State<AppState>,
 ) -> Response {
-    ws.on_upgrade(move |socket| handle_socket(socket, st))
+    bounded(ws).on_upgrade(move |socket| handle_socket(socket, st))
+}
+
+/// A frame from the browser, as the gate reads it.
+enum TerminalFrame {
+    Binary(Vec<u8>),
+    Control(ClientControl),
+}
+
+/// What a frame does (`terminal_action`).
+#[derive(Debug, PartialEq, Eq)]
+enum TerminalAction {
+    Write(Vec<u8>),
+    Resize { cols: u16, rows: u16, xpixel: u16, ypixel: u16 },
+    Takeover,
+    Nothing,
+}
+
+/// The writer's gate, pure: raw bytes, typed input, a key and a resize
+/// reach the PTY from the writer alone, an observer's are dropped, and a
+/// takeover is honoured from anyone (`Arbiter::takeover` decides what it
+/// means). The handler asks `Arbiter::is_writer` and performs the action;
+/// the table is what the test pins (#54).
+fn terminal_action(frame: TerminalFrame, writer: bool) -> TerminalAction {
+    match frame {
+        TerminalFrame::Binary(bytes) if writer => TerminalAction::Write(bytes),
+        TerminalFrame::Binary(_) => TerminalAction::Nothing,
+        TerminalFrame::Control(ClientControl::Takeover) => TerminalAction::Takeover,
+        TerminalFrame::Control(ClientControl::Resize { cols, rows, xpixel, ypixel }) if writer => {
+            TerminalAction::Resize { cols, rows, xpixel, ypixel }
+        }
+        TerminalFrame::Control(ClientControl::Input { data }) if writer => TerminalAction::Write(data.into_bytes()),
+        TerminalFrame::Control(ClientControl::Key { code }) if writer => match key_to_bytes(&code) {
+            Some(seq) => TerminalAction::Write(seq.to_vec()),
+            None => TerminalAction::Nothing,
+        },
+        TerminalFrame::Control(_) => TerminalAction::Nothing,
+    }
 }
 
 async fn handle_socket(socket: WebSocket, st: AppState) {
@@ -137,39 +184,20 @@ async fn handle_socket(socket: WebSocket, st: AppState) {
     let bridge = st.bridge.clone();
     let mut from_client = tokio::spawn(async move {
         while let Some(Ok(msg)) = receiver.next().await {
-            match msg {
-                Message::Binary(b) => {
-                    if arbiter.is_writer(id) {
-                        bridge.write_input(b.to_vec());
-                    }
-                }
-                Message::Text(t) => {
-                    let Ok(ctrl) = serde_json::from_str::<ClientControl>(&t) else {
-                        continue;
-                    };
-                    match ctrl {
-                        ClientControl::Takeover => arbiter.takeover(id),
-                        ClientControl::Resize { cols, rows, xpixel, ypixel } => {
-                            if arbiter.is_writer(id) {
-                                bridge.resize(cols, rows, xpixel, ypixel);
-                            }
-                        }
-                        ClientControl::Input { data } => {
-                            if arbiter.is_writer(id) {
-                                bridge.write_input(data.into_bytes());
-                            }
-                        }
-                        ClientControl::Key { code } => {
-                            if arbiter.is_writer(id)
-                                && let Some(seq) = key_to_bytes(&code)
-                            {
-                                bridge.write_input(seq.to_vec());
-                            }
-                        }
-                    }
-                }
+            let frame = match msg {
+                Message::Binary(b) => TerminalFrame::Binary(b.to_vec()),
+                Message::Text(t) => match serde_json::from_str::<ClientControl>(&t) {
+                    Ok(ctrl) => TerminalFrame::Control(ctrl),
+                    Err(_) => continue,
+                },
                 Message::Close(_) => break,
-                _ => {}
+                _ => continue,
+            };
+            match terminal_action(frame, arbiter.is_writer(id)) {
+                TerminalAction::Write(bytes) => bridge.write_input(bytes).await,
+                TerminalAction::Resize { cols, rows, xpixel, ypixel } => bridge.resize(cols, rows, xpixel, ypixel).await,
+                TerminalAction::Takeover => arbiter.takeover(id),
+                TerminalAction::Nothing => {}
             }
         }
     });
@@ -179,4 +207,49 @@ async fn handle_socket(socket: WebSocket, st: AppState) {
         _ = &mut from_client => to_client.abort(),
     }
     st.arbiter.disconnect(id);
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+    use crate::arbiter::Arbiter;
+
+    /// Two clients, a writer and an observer: the observer's bytes, typed
+    /// input, keys and resizes do nothing, the writer's reach the PTY, a
+    /// takeover is honoured from the observer and flips the gate (#54).
+    #[test]
+    fn only_the_writer_reaches_the_pty_and_a_takeover_flips_the_gate() {
+        let arb = Arbiter::new();
+        let (a, _a_rx) = arb.connect();
+        let (b, _b_rx) = arb.connect();
+        arb.takeover(a);
+        assert!(arb.is_writer(a) && !arb.is_writer(b));
+        let frames = || {
+            vec![
+                TerminalFrame::Binary(b"x".to_vec()),
+                TerminalFrame::Control(ClientControl::Input { data: "y".into() }),
+                TerminalFrame::Control(ClientControl::Key { code: "Enter".into() }),
+                TerminalFrame::Control(ClientControl::Resize { cols: 100, rows: 30, xpixel: 0, ypixel: 0 }),
+            ]
+        };
+        for frame in frames() {
+            assert_eq!(terminal_action(frame, arb.is_writer(b)), TerminalAction::Nothing);
+        }
+        let acted: Vec<TerminalAction> = frames().into_iter().map(|f| terminal_action(f, arb.is_writer(a))).collect();
+        assert_eq!(
+            acted,
+            vec![
+                TerminalAction::Write(b"x".to_vec()),
+                TerminalAction::Write(b"y".to_vec()),
+                TerminalAction::Write(b"\r".to_vec()),
+                TerminalAction::Resize { cols: 100, rows: 30, xpixel: 0, ypixel: 0 },
+            ]
+        );
+        assert_eq!(terminal_action(TerminalFrame::Control(ClientControl::Takeover), arb.is_writer(b)), TerminalAction::Takeover);
+        arb.takeover(b);
+        assert!(arb.is_writer(b) && !arb.is_writer(a));
+        assert_eq!(terminal_action(TerminalFrame::Binary(b"x".to_vec()), arb.is_writer(b)), TerminalAction::Write(b"x".to_vec()));
+        assert_eq!(terminal_action(TerminalFrame::Binary(b"x".to_vec()), arb.is_writer(a)), TerminalAction::Nothing);
+        assert_eq!(terminal_action(TerminalFrame::Control(ClientControl::Key { code: "NoSuchKey".into() }), true), TerminalAction::Nothing);
+    }
 }

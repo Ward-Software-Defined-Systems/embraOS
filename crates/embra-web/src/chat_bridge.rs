@@ -387,3 +387,126 @@ mod media_bridge_tests {
         assert_eq!(system_msg_kind(5), "reconnection");
     }
 }
+
+#[cfg(test)]
+mod frame_tests {
+    use super::*;
+    use brain::conversation_response::ResponseType;
+    use serde_json::{Value, json};
+
+    fn frame(rt: ResponseType) -> Value {
+        let msg = brain_to_server_msg(brain::ConversationResponse { response_type: Some(rt) }).expect("a frame");
+        serde_json::to_value(&msg).unwrap()
+    }
+
+    /// The three string tables are read off the proto enums themselves, so
+    /// a renumbered enum fails here and not in the browser (#54).
+    #[test]
+    fn the_enum_tables_follow_the_proto() {
+        use brain::{OperatingMode, SetupFieldType, SystemMessageType};
+        for (kind, name) in [
+            (SystemMessageType::Info, "info"),
+            (SystemMessageType::Warning, "warning"),
+            (SystemMessageType::Error, "error"),
+            (SystemMessageType::Notification, "notification"),
+            (SystemMessageType::Reconnection, "reconnection"),
+            (SystemMessageType::TranscriptReset, "reset"),
+            (SystemMessageType::Unspecified, "unspecified"),
+        ] {
+            assert_eq!(system_msg_kind(kind as i32), name, "{kind:?}");
+        }
+        assert_eq!(system_msg_kind(99), "unspecified");
+        for (mode, name) in [
+            (OperatingMode::Setup, "setup"),
+            (OperatingMode::Learning, "learning"),
+            (OperatingMode::Operational, "operational"),
+            (OperatingMode::Unspecified, "unspecified"),
+        ] {
+            assert_eq!(operating_mode(mode as i32), name, "{mode:?}");
+        }
+        for (field, name) in [
+            (SetupFieldType::Text, "text"),
+            (SetupFieldType::Selector, "selector"),
+            (SetupFieldType::Confirm, "confirm"),
+            (SetupFieldType::Unspecified, "text"),
+        ] {
+            assert_eq!(setup_field_type(field as i32), name, "{field:?}");
+        }
+    }
+
+    /// Each frame of the brain's becomes the JSON the browser switches on:
+    /// the tag, the field names and the booleans are pinned, and a response
+    /// with no variant is no frame (#54).
+    #[test]
+    fn each_brain_frame_becomes_its_json_frame() {
+        assert_eq!(
+            frame(ResponseType::Token(brain::StreamToken { text: "hel".into() })),
+            json!({"t": "token", "text": "hel"})
+        );
+        assert_eq!(
+            frame(ResponseType::Done(brain::StreamDone { full_response: "hello".into() })),
+            json!({"t": "done", "text": "hello"})
+        );
+        assert_eq!(
+            frame(ResponseType::System(brain::SystemMessage {
+                content: "saved".into(),
+                msg_type: brain::SystemMessageType::Warning as i32,
+            })),
+            json!({"t": "system", "content": "saved", "kind": "warning"})
+        );
+        assert_eq!(
+            frame(ResponseType::Tool(brain::ToolExecution {
+                tool_use_id: "toolu_1".into(),
+                tool_name: "git_status".into(),
+                input_json: "{}".into(),
+                result: "refused".into(),
+                is_error: true,
+                ..Default::default()
+            })),
+            json!({
+                "t": "tool",
+                "tool_use_id": "toolu_1",
+                "name": "git_status",
+                "input_json": "{}",
+                "result": "refused",
+                "is_error": true
+            })
+        );
+        assert_eq!(
+            frame(ResponseType::Thinking(brain::ThinkingState {
+                is_thinking: true,
+                name: "Embra".into(),
+                current_tool: "recall".into(),
+            })),
+            json!({"t": "thinking", "is_thinking": true, "name": "Embra", "current_tool": "recall"})
+        );
+        assert_eq!(
+            frame(ResponseType::ModeChange(brain::ModeTransition {
+                from_mode: brain::OperatingMode::Learning as i32,
+                to_mode: brain::OperatingMode::Operational as i32,
+                message: "sealed".into(),
+            })),
+            json!({"t": "mode", "from": "learning", "to": "operational", "message": "sealed"})
+        );
+        assert_eq!(
+            frame(ResponseType::Setup(brain::SetupPrompt {
+                field_type: brain::SetupFieldType::Selector as i32,
+                prompt: "Provider?".into(),
+                options: vec!["anthropic".into(), "gemini".into()],
+                default_value: "anthropic".into(),
+            })),
+            json!({
+                "t": "setup",
+                "field_type": "selector",
+                "prompt": "Provider?",
+                "options": ["anthropic", "gemini"],
+                "default_value": "anthropic"
+            })
+        );
+        assert_eq!(
+            frame(ResponseType::ReasoningDelta(brain::ReasoningDelta { text: "hm".into() })),
+            json!({"t": "reasoning", "text": "hm"})
+        );
+        assert!(brain_to_server_msg(brain::ConversationResponse { response_type: None }).is_none());
+    }
+}

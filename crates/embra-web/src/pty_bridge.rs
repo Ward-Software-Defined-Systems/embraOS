@@ -49,12 +49,19 @@ use bytes::Bytes;
 use portable_pty::{CommandBuilder, ExitStatus, PtySize, native_pty_system};
 use tokio::sync::{broadcast, mpsc};
 
+/// How many input frames may wait for the pump before a sender waits: a
+/// browser that types faster than the console reads is held at its socket
+/// (TCP backpressure), never buffered without bound (#21).
+pub(crate) const INPUT_QUEUE: usize = 256;
+/// The same for resize frames; the pump coalesces them, so few ever wait.
+pub(crate) const RESIZE_QUEUE: usize = 16;
+
 /// Handle shared across the axum app (Clone, Send + Sync).
 #[derive(Clone)]
 pub struct PtyBridge {
     output_tx: broadcast::Sender<Bytes>,
-    input_tx: mpsc::UnboundedSender<Vec<u8>>,
-    resize_tx: mpsc::UnboundedSender<(u16, u16, u16, u16)>,
+    input_tx: mpsc::Sender<Vec<u8>>,
+    resize_tx: mpsc::Sender<(u16, u16, u16, u16)>,
     /// Set by [`PtyBridge::repaint`], consumed (coalesced) by the pump
     /// thread — see the module doc.
     repaint: Arc<AtomicBool>,
@@ -112,8 +119,8 @@ impl PtyBridge {
         // deliberate non-goal: a chronically slow client would loop
         // lag → repaint → lag; a VT snapshot replay is the real answer.)
         let (output_tx, _) = broadcast::channel::<Bytes>(2048);
-        let (input_tx, input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (resize_tx, resize_rx) = mpsc::unbounded_channel::<(u16, u16, u16, u16)>();
+        let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(INPUT_QUEUE);
+        let (resize_tx, resize_rx) = mpsc::channel::<(u16, u16, u16, u16)>(RESIZE_QUEUE);
         let repaint = Arc::new(AtomicBool::new(false));
 
         let bridge = PtyBridge {
@@ -133,6 +140,18 @@ impl PtyBridge {
         bridge
     }
 
+    /// A bridge with its channels and no pump, for a test of what feeds
+    /// them or of a handler that needs an `AppState`. The input queue's
+    /// receiver comes with it; a resize goes nowhere.
+    #[cfg(test)]
+    pub(crate) fn stub() -> (Self, mpsc::Receiver<Vec<u8>>) {
+        let (output_tx, _) = broadcast::channel::<Bytes>(16);
+        let (input_tx, input_rx) = mpsc::channel::<Vec<u8>>(INPUT_QUEUE);
+        let (resize_tx, _) = mpsc::channel::<(u16, u16, u16, u16)>(RESIZE_QUEUE);
+        let bridge = PtyBridge { output_tx, input_tx, resize_tx, repaint: Arc::new(AtomicBool::new(false)) };
+        (bridge, input_rx)
+    }
+
     /// Subscribe to the PTY output stream (one receiver per WS client).
     pub fn subscribe(&self) -> broadcast::Receiver<Bytes> {
         self.output_tx.subscribe()
@@ -140,15 +159,15 @@ impl PtyBridge {
 
     /// Write input bytes to the PTY. The arbiter only calls this for the
     /// current writer client; non-writer frames never reach here.
-    pub fn write_input(&self, data: Vec<u8>) {
-        let _ = self.input_tx.send(data);
+    pub async fn write_input(&self, data: Vec<u8>) {
+        let _ = self.input_tx.send(data).await;
     }
 
     /// Request a PTY winsize change (cols, rows).
     /// `xpixel`/`ypixel` = screen pixel size (0 = unknown); lands in the
     /// PTY winsize so the console can derive its cell size for sixel.
-    pub fn resize(&self, cols: u16, rows: u16, xpixel: u16, ypixel: u16) {
-        let _ = self.resize_tx.send((cols, rows, xpixel, ypixel));
+    pub async fn resize(&self, cols: u16, rows: u16, xpixel: u16, ypixel: u16) {
+        let _ = self.resize_tx.send((cols, rows, xpixel, ypixel)).await;
     }
 
     /// Ask the console for a full-screen repaint (the fresh-attach
@@ -164,8 +183,8 @@ fn session_manager(
     console_bin: String,
     apid_addr: String,
     output_tx: broadcast::Sender<Bytes>,
-    mut input_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-    mut resize_rx: mpsc::UnboundedReceiver<(u16, u16, u16, u16)>,
+    mut input_rx: mpsc::Receiver<Vec<u8>>,
+    mut resize_rx: mpsc::Receiver<(u16, u16, u16, u16)>,
     repaint: Arc<AtomicBool>,
 ) {
     // Last requested size, so a restart reopens at the operator's size.
@@ -237,8 +256,8 @@ fn console_command(console_bin: &str, apid_addr: &str) -> CommandBuilder {
 fn run_one_session(
     cmd: CommandBuilder,
     output_tx: &broadcast::Sender<Bytes>,
-    input_rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
-    resize_rx: &mut mpsc::UnboundedReceiver<(u16, u16, u16, u16)>,
+    input_rx: &mut mpsc::Receiver<Vec<u8>>,
+    resize_rx: &mut mpsc::Receiver<(u16, u16, u16, u16)>,
     last_size: &mut PtySize,
     repaint: &AtomicBool,
 ) -> anyhow::Result<ExitStatus> {
@@ -458,8 +477,8 @@ mod tests {
         cmd.env(CHILD_ENV, "1");
 
         let (output_tx, mut output_rx) = broadcast::channel::<Bytes>(2048);
-        let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (resize_tx, mut resize_rx) = mpsc::unbounded_channel::<(u16, u16, u16, u16)>();
+        let (input_tx, mut input_rx) = mpsc::channel::<Vec<u8>>(INPUT_QUEUE);
+        let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16, u16, u16)>(RESIZE_QUEUE);
         let repaint = Arc::new(AtomicBool::new(false));
 
         let session = {
@@ -477,7 +496,7 @@ mod tests {
         expect(&mut output_rx, &mut seen, "ready 80x24 0x0");
 
         // A real size change: the kernel signals the child itself.
-        resize_tx.send((100, 30, 900, 540)).unwrap();
+        resize_tx.try_send((100, 30, 900, 540)).unwrap();
         expect(&mut output_rx, &mut seen, "winch 1 100x30 900x540");
 
         // Same size, so no kernel signal — the bridge sends SIGWINCH.
@@ -485,7 +504,7 @@ mod tests {
         expect(&mut output_rx, &mut seen, "winch 2 100x30 900x540");
         assert!(!repaint.load(Ordering::SeqCst), "the pump consumes the repaint request");
 
-        input_tx.send(b"quit\n".to_vec()).unwrap();
+        input_tx.try_send(b"quit\n".to_vec()).unwrap();
         expect(&mut output_rx, &mut seen, "bye");
 
         let start = Instant::now();
@@ -518,8 +537,8 @@ mod tests {
         cmd.env(CHILD_ENV, "1");
 
         let (output_tx, mut output_rx) = broadcast::channel::<Bytes>(2048);
-        let (input_tx, mut input_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (_resize_tx, mut resize_rx) = mpsc::unbounded_channel::<(u16, u16, u16, u16)>();
+        let (input_tx, mut input_rx) = mpsc::channel::<Vec<u8>>(INPUT_QUEUE);
+        let (_resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16, u16, u16)>(RESIZE_QUEUE);
         let repaint = AtomicBool::new(false);
 
         let session = std::thread::spawn({
@@ -533,7 +552,7 @@ mod tests {
 
         let mut seen = String::new();
         expect(&mut output_rx, &mut seen, "ready 80x24 0x0");
-        input_tx.send(b"fail\n".to_vec()).unwrap();
+        input_tx.try_send(b"fail\n".to_vec()).unwrap();
         // Its last words are delivered, although it is gone a moment later.
         expect(&mut output_rx, &mut seen, "cannot go on");
 
@@ -567,5 +586,23 @@ mod tests {
         assert_eq!(early_exits(u32::MAX, short), u32::MAX);
         // A crash loop pacing itself at the cap must not clear its own count.
         const { assert!(STABLE_AFTER.as_secs() > RESTART_MAX.as_secs()) };
+    }
+}
+
+#[cfg(test)]
+mod queue_tests {
+    use super::*;
+
+    /// The input queue is bounded (#21): a sender past `INPUT_QUEUE` frames
+    /// waits for the pump instead of growing the process, which is what
+    /// holds a fast browser at its socket.
+    #[tokio::test]
+    async fn the_input_queue_is_bounded_and_a_sender_past_it_waits() {
+        let (bridge, _rx) = PtyBridge::stub();
+        for _ in 0..INPUT_QUEUE {
+            bridge.write_input(vec![b'x']).await;
+        }
+        let past = tokio::time::timeout(std::time::Duration::from_millis(100), bridge.write_input(vec![b'y'])).await;
+        assert!(past.is_err(), "the frame past the queue waited");
     }
 }

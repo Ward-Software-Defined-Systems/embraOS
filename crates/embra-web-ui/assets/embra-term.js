@@ -12,6 +12,11 @@
   let roleCb = null;
   let lastRole = "observer", lastOwner = "none";
   let reconnectTimer = null;
+  // Reconnect pacing (#30): 1 s after a loss, doubling to 10 s while the
+  // socket keeps closing at once; a socket that stayed open for
+  // RECONNECT_STABLE_MS was working, so the next wait is 1 s again.
+  const RECONNECT_BASE_MS = 1000, RECONNECT_MAX_MS = 10000, RECONNECT_STABLE_MS = 5000;
+  let reconnectDelay = RECONNECT_BASE_MS, openedAt = 0;
 
   function wsUrl() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
@@ -49,7 +54,7 @@
   function connect() {
     ws = new WebSocket(wsUrl());
     ws.binaryType = "arraybuffer";
-    ws.onopen = () => { try { fit.fit(); } catch (e) {} sendResize(); };
+    ws.onopen = () => { openedAt = Date.now(); try { fit.fit(); } catch (e) {} sendResize(); };
     ws.onmessage = (e) => {
       if (e.data instanceof ArrayBuffer) {
         term.write(new Uint8Array(e.data));
@@ -71,10 +76,14 @@
       }
     };
     ws.onclose = () => {
-      term.write("\r\n\x1b[2m[embra-web] connection lost — reconnecting…\x1b[0m\r\n");
+      if (openedAt && Date.now() - openedAt >= RECONNECT_STABLE_MS) reconnectDelay = RECONNECT_BASE_MS;
+      openedAt = 0;
+      const secs = Math.round(reconnectDelay / 1000);
+      term.write(`\r\n\x1b[2m[embra-web] connection lost — reconnecting in ${secs} s…\x1b[0m\r\n`);
       if (!reconnectTimer) reconnectTimer = setTimeout(() => {
         reconnectTimer = null; connect();
-      }, 2000);
+      }, reconnectDelay);
+      reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
     };
   }
 

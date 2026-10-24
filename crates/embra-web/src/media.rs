@@ -18,10 +18,10 @@
 //! disposition with the sanitized name. Ids are validated here BEFORE the
 //! RPC so a malformed path never reaches the brain.
 //!
-//! Trust model: unchanged from the rest of `/api/*` — TLS only, no auth
-//! (the `/ws/chat` channel already drives tools and writes files). What
-//! this route adds is a disk-fill / decode vector, bounded by the body
-//! limit here and the brain's size/dimension caps.
+//! Trust model: the rest of `/api/*`'s — TLS, and the boot's token on every
+//! request (`access.rs`; a write passes the Origin rule as well). What this
+//! route adds is a disk-fill / decode vector, bounded by the body limit
+//! here and the brain's size/dimension caps.
 
 use axum::Json;
 use axum::body::Bytes;
@@ -347,5 +347,44 @@ mod tests {
         // window stops the build.
         const { assert!(MEDIA_BODY_LIMIT > MEDIA_UPLOAD_MAX) };
         const { assert!(MEDIA_BODY_LIMIT < embra_common::GRPC_MAX_MESSAGE_BYTES) };
+    }
+}
+
+#[cfg(test)]
+mod door_tests {
+    use super::*;
+
+    async fn body_json(resp: Response) -> Value {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// The door's own checks answer before any RPC — an empty or oversize
+    /// upload, a malformed id — and a brain that cannot be reached is a 503
+    /// with the reason, never a hang or a panic (#54).
+    #[tokio::test]
+    async fn the_media_door_checks_before_the_rpc_and_says_when_the_brain_is_away() {
+        let (st, _input) = AppState::stub();
+
+        let resp = api_media_put(State(st.clone()), HeaderMap::new(), Bytes::new()).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(resp).await["error"], "empty upload");
+
+        let oversize = Bytes::from(vec![0u8; MEDIA_UPLOAD_MAX + 1]);
+        let resp = api_media_put(State(st.clone()), HeaderMap::new(), oversize).await;
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let err = body_json(resp).await["error"].as_str().unwrap().to_string();
+        assert!(err.contains(&MEDIA_UPLOAD_MAX.to_string()), "{err}");
+
+        let resp = api_media_get(State(st.clone()), Path("../x".to_string())).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(body_json(resp).await["error"], "invalid media id '../x'");
+
+        // Well-formed requests with no apid behind the door.
+        let resp = api_media_get(State(st.clone()), Path("att-20260820T153012Z-1a2b3c4d".to_string())).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(body_json(resp).await["error"].as_str().is_some_and(|e| !e.is_empty()));
+        let resp = api_media_put(State(st), HeaderMap::new(), Bytes::from_static(b"\x89PNG\r\n")).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

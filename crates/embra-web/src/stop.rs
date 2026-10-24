@@ -43,3 +43,20 @@ async fn send_stop(apid_addr: &str) -> Result<bool, String> {
         .map_err(|e| format!("decode brain response: {e}"))?;
     Ok(brain_resp.was_in_turn)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stop is answered either way: with no apid behind the door it says
+    /// so in `error` and `was_in_turn` is false, so the client shows a
+    /// failed stop and never a success (#54).
+    #[tokio::test]
+    async fn a_stop_with_no_apid_behind_the_door_is_answered_as_a_failure() {
+        let (st, _input) = AppState::stub();
+        let Json(answer) = api_stop(State(st)).await;
+        assert_eq!(answer["was_in_turn"], false);
+        let err = answer["error"].as_str().expect("an error");
+        assert!(err.starts_with("StopTurn RPC failed: "), "{err}");
+    }
+}
