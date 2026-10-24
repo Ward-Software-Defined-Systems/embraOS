@@ -67,7 +67,7 @@ Every slash command available in an embraOS session, grouped as in the web conso
 
 | Command | Description |
 |---|---|
-| `/git-setup <name> \| <email>` | Set git user.name and user.email |
+| `/git-setup <name> \| <email>` | Set git user.name and user.email in the global file under STATE, live for the next git; no arguments shows them. A failed write is reported as such, never as "updated" |
 | `/github-token <token>` | Set GitHub token for API access (persists across reboots) |
 | `/git-token <host> <token>` | Set a token for a self-hosted git server (GitLab/Gitea over HTTPS; injected as an `oauth2` rewrite for `git_clone`/`git_push`/`git_pull`). No args lists configured hosts; `/git-token <host> remove` deletes. github.com stays on `/github-token` |
 | `/ssh-keygen` | Generate ed25519 SSH key pair and display public key |
