@@ -398,11 +398,16 @@ pub(crate) async fn write_link(
             src_coll, src_id, tgt_coll, tgt_id
         ));
     }
-    if db.read(src_coll, src_id).await.is_err() {
-        return Err(format!("Error: Source {}:{} not found", src_coll, src_id));
-    }
-    if db.read(tgt_coll, tgt_id).await.is_err() {
-        return Err(format!("Error: Target {}:{} not found", tgt_coll, tgt_id));
+    // Both ends exist. Only a 404 is "not found"; a refused id or a failing
+    // server is said as what it is (#4, #60).
+    for (role, coll, id) in [("Source", src_coll, src_id), ("Target", tgt_coll, tgt_id)] {
+        if let Err(e) = db.read(coll, id).await {
+            return Err(if crate::db::error::is_not_found(&e) {
+                format!("Error: {role} {coll}:{id} not found")
+            } else {
+                format!("Error: could not read the {} {coll}:{id}: {e}", role.to_ascii_lowercase())
+            });
+        }
     }
 
     // Duplicate check
@@ -796,7 +801,10 @@ pub async fn knowledge_update(params: &str, db: &WardsonDbClient, config: &Syste
 
     let existing = match db.read(coll, id).await {
         Ok(doc) => doc,
-        Err(_) => return format!("knowledge_update rejected (node {}:{} not found)", coll, id),
+        Err(e) if crate::db::error::is_not_found(&e) => {
+            return format!("knowledge_update rejected (node {}:{} not found)", coll, id);
+        }
+        Err(e) => return format!("knowledge_update rejected (could not read node {}:{}: {})", coll, id, e),
     };
 
     let changed_fields: Vec<String> = obj.keys().cloned().collect();

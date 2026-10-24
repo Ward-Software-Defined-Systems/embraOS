@@ -42,16 +42,25 @@ async fn recall(db: &WardsonDbClient, query: &str, unpromoted_only: bool) -> Str
     // server default (limit:100, UUIDv7 key order = oldest first), freezing
     // recall over the oldest ~100 docs per collection forever. Newest-first
     // also means the display cap below shows the most recent matches.
-    let entries = db.fetch_recent("memory.entries", MEMORY_FETCH_WINDOW).await.unwrap_or_default();
+    // A read that fails is reported as itself, never as "no memories" (#60).
+    let entries = match db.fetch_recent("memory.entries", MEMORY_FETCH_WINDOW).await {
+        Ok(docs) => docs,
+        Err(e) => return format!("Failed to load memories from the database: {e}"),
+    };
     // Unpromoted-worklist mode only concerns memory.entries — semantic and
     // procedural docs are promoted by definition.
     let (semantic, procedural) = if unpromoted_only {
         (Vec::new(), Vec::new())
     } else {
-        (
-            db.fetch_recent("memory.semantic", MEMORY_FETCH_WINDOW).await.unwrap_or_default(),
-            db.fetch_recent("memory.procedural", MEMORY_FETCH_WINDOW).await.unwrap_or_default(),
-        )
+        let semantic = match db.fetch_recent("memory.semantic", MEMORY_FETCH_WINDOW).await {
+            Ok(docs) => docs,
+            Err(e) => return format!("Failed to load semantic memories from the database: {e}"),
+        };
+        let procedural = match db.fetch_recent("memory.procedural", MEMORY_FETCH_WINDOW).await {
+            Ok(docs) => docs,
+            Err(e) => return format!("Failed to load procedural memories from the database: {e}"),
+        };
+        (semantic, procedural)
     };
 
     if entries.is_empty() && semantic.is_empty() && procedural.is_empty() {
@@ -179,6 +188,26 @@ fn recall_lines(
     }
 
     output_lines
+}
+
+#[cfg(test)]
+mod read_failure_tests {
+    //! A failed database read is reported as itself, never as "no memories".
+    use super::recall;
+    use crate::db::WardsonDbClient;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn a_failed_memory_read_is_reported_and_not_an_empty_recall() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/memory.entries")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+        Mock::given(method("POST")).and(path("/memory.entries/query")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let out = recall(&db, "anything", false).await;
+        assert!(out.starts_with("Failed to load memories from the database"), "{out}");
+        assert!(!out.contains("No memory entries found"), "{out}");
+    }
 }
 
 #[cfg(test)]

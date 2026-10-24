@@ -570,7 +570,10 @@ async fn draft(db: &WardsonDbClient, param: &str, session: &str) -> String {
         if title.is_empty() {
             return "draft rejected (delete requires a title)".into();
         }
-        let existing = db.fetch_collection("drafts").await.unwrap_or_default();
+        let existing = match db.fetch_collection("drafts").await {
+            Ok(docs) => docs,
+            Err(e) => return format!("draft failed (could not read the drafts: {e})"),
+        };
         let match_id = existing.iter().find_map(|doc| {
             let doc_title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("");
             if doc_title.eq_ignore_ascii_case(title) {
@@ -603,8 +606,13 @@ async fn draft(db: &WardsonDbClient, param: &str, session: &str) -> String {
         ("Untitled Draft", param)
     };
 
-    // DESIGN-001: Check for existing draft with same title and upsert
-    let existing = db.fetch_collection("drafts").await.unwrap_or_default();
+    // DESIGN-001: Check for existing draft with same title and upsert. A
+    // read that fails is reported: read as "none", it would create a second
+    // draft under the same title (#60).
+    let existing = match db.fetch_collection("drafts").await {
+        Ok(docs) => docs,
+        Err(e) => return format!("draft failed (could not check for an existing draft '{title}': {e})"),
+    };
     let existing_id = existing.iter().find_map(|doc| {
         let doc_title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("");
         if doc_title.eq_ignore_ascii_case(title) {
@@ -990,6 +998,15 @@ mod id_gate_tests {
     use crate::db::WardsonDbClient;
     use wiremock::MockServer;
 
+    // Deserialized, not a struct literal: see `learning::phases` tests.
+    fn config() -> crate::config::SystemConfig {
+        serde_json::from_value(serde_json::json!({
+            "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase1",
+            "created_at": "", "version": "test", "api_provider": "anthropic"
+        }))
+        .expect("minimal config deserializes")
+    }
+
     #[tokio::test]
     async fn a_traversal_id_is_refused_by_every_entry_tool_before_the_database() {
         let server = MockServer::start().await;
@@ -999,13 +1016,47 @@ mod id_gate_tests {
             get(&db, &format!("memory.entries {id}")).await,
             forget(&db, id).await,
             crate::tools::engineering::task_delete(&db, id).await,
+            crate::tools::engineering::plan::task_done(&db, id).await,
+            crate::tools::engineering::plan::plan_delete(&db, id, false).await,
             crate::knowledge::tools::knowledge_unlink_node(&format!("memory.semantic:{id}"), &db).await,
+            crate::knowledge::tools::knowledge_update(&format!("memory.semantic:{id} | {{\"content\": \"x\"}}"), &db, &config()).await,
+            crate::knowledge::tools::knowledge_link(&format!("memory.semantic:{id} | related_to | memory.semantic:other | 0.5"), &db).await,
         ];
         for out in &outs {
             assert!(out.contains("is not a valid name"), "{out}");
             assert!(!out.contains("not found"), "a refused id is not 'not found': {out}");
         }
         assert!(server.received_requests().await.unwrap_or_default().is_empty(), "nothing was sent");
+    }
+}
+
+#[cfg(test)]
+mod draft_read_failure_tests {
+    //! A drafts read that fails is reported, and no draft is written over it.
+    use super::draft;
+    use crate::db::WardsonDbClient;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn a_failed_drafts_read_is_reported_and_writes_no_duplicate() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/drafts")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+        Mock::given(method("POST")).and(path("/drafts/query")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+        Mock::given(method("GET")).and(path("/drafts/docs")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let out = draft(&db, "Notes | first line", "s1").await;
+        assert!(out.starts_with("draft failed (could not check for an existing draft"), "{out}");
+        let writes = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/drafts/docs")
+            .count();
+        assert_eq!(writes, 0, "nothing was written");
+        let out = draft(&db, "delete Notes", "s1").await;
+        assert!(out.starts_with("draft failed (could not read the drafts"), "{out}");
     }
 }
 

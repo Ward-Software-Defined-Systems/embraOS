@@ -1028,11 +1028,17 @@ impl BrainService for BrainGrpcService {
     async fn get_soul_document(&self, _req: Request<GetSoulDocumentRequest>) -> Result<Response<GetSoulDocumentResponse>, Status> {
         match learning::load_soul(&self.db).await {
             Ok(Some(soul)) => {
-                let hash = learning::compute_soul_hash(&soul).unwrap_or_default();
+                // A hash that cannot be computed is an error, never an empty
+                // digest shown as a seal (#13); `sealed` is the seal as verified
+                // now against the STATE hash, not the presence of a document (#15).
+                let hash = learning::compute_soul_hash(&soul)
+                    .map_err(|e| Status::internal(format!("Failed to hash the soul: {e}")))?;
+                let sealed = learning::seal_of(&soul, std::path::Path::new(learning::SOUL_HASH_PATH))
+                    == learning::SealState::Sealed;
                 Ok(Response::new(GetSoulDocumentResponse {
                     soul_json: serde_json::to_string_pretty(&soul).unwrap_or_default(),
                     sha256: hash,
-                    sealed: true,
+                    sealed,
                 }))
             }
             Ok(None) => Ok(Response::new(GetSoulDocumentResponse {
@@ -2862,27 +2868,40 @@ async fn handle_request(
 
             // Load and send session history so console displays prior
             // conversation. Capture `history.len()` here so the
-            // "restored" message below and the resume-briefing gate
-            // further down don't need a second load_history round-trip.
+            // "restored" message and the resume-briefing gate further
+            // down don't need a second load_history round-trip. A history
+            // that cannot be read is said as such (#59), never reported as
+            // "0 messages restored".
             let history_len: usize = {
                 let mgr = session_mgr.read().await;
                 match mgr.load_history(&session_name).await {
                     Ok(history) => {
                         replay_history(tx, &session_name, &history).await;
+                        let _ = tx.send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::System(
+                                SystemMessage {
+                                    content: format!("Session '{}' attached ({} messages restored)", session_name, history.len()),
+                                    msg_type: SystemMessageType::Reconnection as i32,
+                                }
+                            )),
+                        })).await;
                         history.len()
                     }
-                    Err(_) => 0,
+                    Err(e) => {
+                        drop(mgr);
+                        send_system(
+                            tx,
+                            format!(
+                                "Session '{}' attached, but its history could not be loaded: {}. Nothing was replayed; the next turn reads it again.",
+                                session_name, e
+                            ),
+                            SystemMessageType::Error,
+                        )
+                        .await;
+                        0
+                    }
                 }
             };
-
-            let _ = tx.send(Ok(ConversationResponse {
-                response_type: Some(conversation_response::ResponseType::System(
-                    SystemMessage {
-                        content: format!("Session '{}' attached ({} messages restored)", session_name, history_len),
-                        msg_type: SystemMessageType::Reconnection as i32,
-                    }
-                )),
-            })).await;
 
             // Send ModeTransition so console knows the correct mode, timezone, and name
             let is_sealed = learning::is_soul_sealed(db).await.unwrap_or(false);
@@ -3368,21 +3387,30 @@ async fn handle_slash_command(
                         .await;
                         return None;
                     }
-                    let _ = mgr.reattach(args).await;
-                    mgr.active_session = Some(args.to_string());
-                    // Load and send session history; capture len for the
-                    // resume-briefing gate below.
-                    let history_len: usize = match mgr.load_history(args).await {
+                    // One load: `reattach` marks the session active and
+                    // returns its history (the second `load_history` that
+                    // followed read the same document again). A reattach
+                    // that fails is said and leaves the active session as it
+                    // was (#59): never "Switched" over a history that could
+                    // not be read.
+                    let previous = mgr.active_session.clone();
+                    let history_len: usize = match mgr.reattach(args).await {
                         Ok(history) => {
                             drop(mgr);
                             replay_history(tx, args, &history).await;
                             send_msg(tx, format!("Switched to session '{}' ({} messages)", args, history.len())).await;
                             history.len()
                         }
-                        Err(_) => {
+                        Err(e) => {
+                            mgr.active_session = previous;
                             drop(mgr);
-                            send_msg(tx, format!("Switched to session '{}'", args)).await;
-                            0
+                            send_system(
+                                tx,
+                                format!("Could not switch to session '{}': {}. The active session is unchanged.", args, e),
+                                SystemMessageType::Error,
+                            )
+                            .await;
+                            return None;
                         }
                     };
                     send_session_update(tx, args).await;

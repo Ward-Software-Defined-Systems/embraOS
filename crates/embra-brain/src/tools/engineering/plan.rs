@@ -159,7 +159,8 @@ pub async fn task_done(db: &WardsonDbClient, task_id: &str) -> String {
                 Err(e) => format!("Failed to update task: {}", e),
             }
         }
-        Err(e) => format!("Task not found: {}", e),
+        Err(e) if crate::db::error::is_not_found(&e) => format!("Task not found: {}", task_id.trim()),
+        Err(e) => format!("Failed to read task {}: {}", task_id.trim(), e),
     }
 }
 
@@ -201,7 +202,8 @@ pub async fn plan_delete(db: &WardsonDbClient, plan_id: &str, cascade_tasks: boo
             .and_then(|v| v.as_str())
             .unwrap_or("(no title)")
             .to_string(),
-        Err(e) => return format!("Plan not found: {}", e),
+        Err(e) if crate::db::error::is_not_found(&e) => return format!("Plan not found: {}", id),
+        Err(e) => return format!("Failed to read plan {}: {}", id, e),
     };
 
     let cascade_msg = if cascade_tasks {

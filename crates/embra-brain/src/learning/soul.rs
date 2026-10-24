@@ -101,8 +101,14 @@ pub(crate) async fn seal_state_at(db: &WardsonDbClient, hash_path: &Path) -> Sea
     let Some(soul) = load_soul(db).await.ok().flatten() else {
         return SealState::Unsealed;
     };
+    seal_of(&soul, hash_path)
+}
+
+/// The seal of a soul already loaded, against the hash file: `Sealed` when
+/// the hash computed now is the stored one, `SealedUnverified` otherwise.
+pub(crate) fn seal_of(soul: &serde_json::Value, hash_path: &Path) -> SealState {
     let stored = std::fs::read_to_string(hash_path).ok().map(|s| s.trim().to_string());
-    match (compute_soul_hash(&soul), stored) {
+    match (compute_soul_hash(soul), stored) {
         (Ok(computed), Some(stored)) if computed == stored => SealState::Sealed,
         _ => SealState::SealedUnverified,
     }

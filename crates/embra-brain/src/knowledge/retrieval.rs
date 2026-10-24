@@ -284,7 +284,10 @@ pub async fn retrieve_relevant_knowledge(
             .map(|entry_id| async move {
                 db.query("memory.edges", &session_edge_query_body(&entry_id))
                     .await
-                    .unwrap_or_default()
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("retrieval session-edge read for {} failed: {}", entry_id, e);
+                        Vec::new()
+                    })
             })
             .buffered(STEP2_WALK_CONCURRENCY)
             .collect()
