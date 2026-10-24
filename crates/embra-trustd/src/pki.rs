@@ -264,6 +264,75 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// What trustd mints verifies the way a client verifies it (#31; #52
+    /// item 5): a server certificate chains to the first-boot `ca.crt` and
+    /// carries the names asked for and the server usage; a client
+    /// certificate carries the client usage and not the server one; a name
+    /// that was not asked for does not verify; a certificate of another CA
+    /// does not chain; the CA loaded on a reboot signs the same chain.
+    #[test]
+    fn a_minted_certificate_chains_to_the_ca_and_carries_its_names_and_usage() {
+        use rustls::client::danger::ServerCertVerifier;
+        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+        use std::sync::Arc;
+
+        let dir = temp_pki("verify");
+        let mut pki = PKIManager::new(dir.clone());
+        pki.init().expect("a fresh CA");
+        let ca = CertificateDer::from_pem_slice(&pki.ca_cert_pem().unwrap()).unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(ca).unwrap();
+        let roots = Arc::new(roots);
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let servers = rustls::client::WebPkiServerVerifier::builder_with_provider(roots.clone(), provider.clone())
+            .build()
+            .unwrap();
+        let clients = rustls::server::WebPkiClientVerifier::builder_with_provider(roots, provider)
+            .build()
+            .unwrap();
+        let now = UnixTime::now();
+        let leaf = |pem: &[u8]| CertificateDer::from_pem_slice(pem).unwrap();
+        let name = |n: &str| ServerName::try_from(n.to_string()).unwrap();
+
+        let (server_pem, _) = pki
+            .generate_service_cert("embra-web", &["localhost".into(), "embraos".into()], &["127.0.0.1".into()], true, false)
+            .unwrap();
+        let server = leaf(&server_pem);
+        for asked in ["localhost", "embraos", "127.0.0.1"] {
+            let _ = servers
+                .verify_server_cert(&server, &[], &name(asked), &[], now)
+                .unwrap_or_else(|e| panic!("{asked}: {e}"));
+        }
+        assert!(servers.verify_server_cert(&server, &[], &name("other.host"), &[], now).is_err(), "a name not asked for");
+        assert!(clients.verify_client_cert(&server, &[], now).is_err(), "a server certificate is not a client certificate");
+
+        let (client_pem, _) = pki.generate_service_cert("embra-console", &[], &[], false, true).unwrap();
+        let client = leaf(&client_pem);
+        let _ = clients.verify_client_cert(&client, &[], now).expect("the client usage");
+        assert!(
+            servers.verify_server_cert(&client, &[], &name("localhost"), &[], now).is_err(),
+            "a client certificate is not a server certificate"
+        );
+
+        // Another CA's certificate with the same name does not chain.
+        let other_dir = temp_pki("other-ca");
+        let mut other = PKIManager::new(other_dir.clone());
+        other.init().unwrap();
+        let (foreign_pem, _) = other.generate_service_cert("embra-web", &["localhost".into()], &[], true, false).unwrap();
+        assert!(servers.verify_server_cert(&leaf(&foreign_pem), &[], &name("localhost"), &[], now).is_err(), "another CA");
+
+        // The CA loaded on a reboot signs certificates the same roots verify.
+        let mut reloaded = PKIManager::new(dir.clone());
+        reloaded.init().expect("the CA loads");
+        let (again_pem, _) = reloaded.generate_service_cert("embra-apid", &["embra-apid".into()], &[], true, true).unwrap();
+        let again = leaf(&again_pem);
+        let _ = servers.verify_server_cert(&again, &[], &name("embra-apid"), &[], now).expect("the reloaded CA chains");
+        let _ = clients.verify_client_cert(&again, &[], now).expect("both usages");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&other_dir);
+    }
+
     /// `write_atomic` leaves the target untouched when it cannot write: a
     /// temporary file that cannot be created is no write at all.
     #[test]

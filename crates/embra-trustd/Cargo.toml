@@ -19,3 +19,6 @@ time = "0.3"
 
 [dev-dependencies]
 wiremock = "0.6"
+# pki.rs verifies what it mints the way a client does (#31, #52): the chain
+# to the CA, the names, the usages. Already in the tree through reqwest.
+rustls = { workspace = true }

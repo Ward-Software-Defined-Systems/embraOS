@@ -1598,6 +1598,7 @@ dependencies = [
  "embra-common",
  "rcgen",
  "reqwest",
+ "rustls",
  "serde_json",
  "sha2",
  "time",
