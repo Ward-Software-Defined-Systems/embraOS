@@ -133,7 +133,7 @@ mod native_args_tests {
             .collect();
         for expected in [
             "git_clone", "git_status", "git_log", "git_add", "git_commit",
-            "git_push", "git_pull", "git_diff", "git_branch", "git_checkout",
+            "git_push", "git_pull", "git_fetch", "git_diff", "git_branch", "git_checkout",
             "git_merge", "git_rm", "git_mv",
             "plan", "plan_delete", "tasks", "task_add", "task_done", "task_delete",
             "gh_issues", "gh_issue_view", "gh_prs", "gh_pr_view",

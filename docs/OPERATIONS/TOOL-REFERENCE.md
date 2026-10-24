@@ -1,6 +1,6 @@
 # Tool Reference
 
-Phase 1 includes 117 internal tools the intelligence invokes during conversation. All 117 work identically across all four LLM providers (Anthropic, Gemini, Ollama, LM Studio) via per-provider tool-schema translators that share a common JSON Schema cleanup pipeline (`provider/schema_util.rs`: `$ref` inlining, and enums collapsed to a plain `type` + `enum`, the shape both Gemini and Ollama keep). They are organized below by category.
+Phase 1 includes 118 internal tools the intelligence invokes during conversation. All 118 work identically across all four LLM providers (Anthropic, Gemini, Ollama, LM Studio) via per-provider tool-schema translators that share a common JSON Schema cleanup pipeline (`provider/schema_util.rs`: `$ref` inlining, and enums collapsed to a plain `type` + `enum`, the shape both Gemini and Ollama keep). They are organized below by category.
 
 Every dispatch runs under three registry-wide limits (`crates/embra-brain/src/tools/registry.rs`): text results are cut at 2 MiB (`MAX_TOOL_RESULT_SIZE` — `file_read` and the session readers page under it), a result carries at most 4 images (`MAX_TOOL_RESULT_IMAGES`; extras are dropped and the text gains `[N image(s) dropped: at most 4 images per tool result]`), and no tool runs longer than 10 minutes (`MAX_TOOL_DURATION`, a backstop — tools with their own inner timeouts keep the tighter one).
 
@@ -107,6 +107,7 @@ For the data model, edge taxonomy, density rationale, promotion path, auto-enric
 | **git_commit** | Commit staged changes with a message, passed to git exactly as given — a blank line after the first line separates the subject from the body (workspace restricted) |
 | **git_push** | Push commits to remote (workspace restricted) |
 | **git_pull** | Pull from remote (workspace restricted) |
+| **git_fetch** | Fetch from a remote without merging — the remote-tracking branches, and tags with `tags=true`; the working tree and the current branch are untouched. `prune=true` drops branches the remote deleted; `remote` defaults to `origin`, `branch` narrows to one (workspace restricted) |
 | **git_branch** | List, create, or delete branches in a workspace repo. `action=list` returns current branches; `action=create` requires `name`; `action=delete` requires `name` and refuses branches with commits not merged into `base` (default `main`, override via `base`; falls back to `origin/<base>` if no local copy). `force=true` on delete bypasses the merge check (maps to `git branch -D`) — for throwaway/spike branches. `path` may be absolute (`/embra/workspace/repo`) or relative (`repo`). Create and delete are workspace restricted |
 | **git_merge** | Merge `branch` into the current branch of a workspace repo. `path` may be absolute or relative. `no_ff=true` forces a merge commit even when fast-forward is possible. On conflict, returns git's output so the caller can resolve via `file_*` tools and finalize with `git_add` + `git_commit` (workspace restricted) |
 | **git_checkout** | Switch branches (workspace restricted) |

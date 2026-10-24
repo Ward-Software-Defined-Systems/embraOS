@@ -19,7 +19,7 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 
 - [OPERATIONS/OPERATION.md](OPERATIONS/OPERATION.md) — What running it feels like, the session model, keyboard shortcuts, current limitations.
 - [OPERATIONS/COMMAND-REFERENCE.md](OPERATIONS/COMMAND-REFERENCE.md) — Every slash command.
-- [OPERATIONS/TOOL-REFERENCE.md](OPERATIONS/TOOL-REFERENCE.md) — All 117 built-in tools by category, plus workspace/GitHub/SSH safety notes.
+- [OPERATIONS/TOOL-REFERENCE.md](OPERATIONS/TOOL-REFERENCE.md) — All 118 built-in tools by category, plus workspace/GitHub/SSH safety notes.
 
 ## Local models — `LOCAL-MODELS/`
 

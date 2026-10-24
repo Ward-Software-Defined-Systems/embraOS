@@ -701,6 +701,65 @@ pub async fn git_pull(db: &WardsonDbClient, param: &str) -> String {
     }
 }
 
+/// The argv of `git fetch` after `-C <dir>`: the flags, then `--`, then the
+/// remote and the optional branch, each refused when it begins with `-`
+/// (`positional`). A fetch moves the remote-tracking refs (and tags) only;
+/// the working tree and the current branch are untouched, which is what
+/// makes it safe before a merge, a push or a status, and from a cron.
+fn git_fetch_args<'a>(remote: &'a str, branch: Option<&'a str>, prune: bool, tags: bool) -> Result<Vec<&'a str>, String> {
+    let mut args = vec!["fetch"];
+    if prune {
+        args.push("--prune");
+    }
+    if tags {
+        args.push("--tags");
+    }
+    args.push("--");
+    args.push(positional(remote, "remote")?);
+    if let Some(b) = branch {
+        args.push(positional(b, "branch")?);
+    }
+    Ok(args)
+}
+
+/// Run `git fetch` in a workspace repository. git reports the ref updates
+/// on stderr, so the report carries both streams; nothing to report means
+/// the remote-tracking refs were already current.
+pub async fn git_fetch(db: &WardsonDbClient, path: &str, remote: &str, branch: Option<&str>, prune: bool, tags: bool) -> String {
+    let dir = match resolve_workspace_path(path.trim()) {
+        Ok(d) => d,
+        Err(e) => return e,
+    };
+    let fetch = match git_fetch_args(remote, branch, prune, tags) {
+        Ok(a) => a,
+        Err(e) => return e,
+    };
+
+    let auth = git_auth_config(db).await;
+
+    match git_command_with(&auth)
+        .args(["-C", &dir])
+        .args(&fetch)
+        .output()
+        .await
+    {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if !out.status.success() {
+                return format!("git fetch failed: {}", stderr.trim());
+            }
+            let report = format!("{}\n{}", stderr.trim(), stdout.trim()).trim().to_string();
+            if report.is_empty() {
+                format!("Fetched {remote} in {dir}: nothing new, the remote-tracking refs were current")
+            } else {
+                format!("Fetched {remote} in {dir}:\n{report}")
+            }
+        }
+        Err(e) => format!("Failed to run git: {}", e),
+    }
+}
+
 /// Run `git diff`. Workspace restricted.
 /// Param format: `<path> [file]`
 pub async fn git_diff(param: &str) -> String {
@@ -1232,6 +1291,35 @@ impl GitPullArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
+    name = "git_fetch",
+    is_side_effectful = true,
+    description = "Fetch from a remote into a workspace repository without merging: updates the remote-tracking branches (and tags with tags=true) and leaves the working tree and the current branch untouched. Use it before git_log or git_diff against origin/<branch> to review incoming work, before git_push to learn whether the remote moved, or with prune=true to drop remote-tracking branches the remote has deleted. remote defaults to origin; branch narrows the fetch to one branch. path may be absolute (`/embra/workspace/repo`) or relative (`repo`)."
+)]
+pub struct GitFetchArgs {
+    pub path: String,
+    /// Remote to fetch from. Defaults to `origin`.
+    #[serde(default)]
+    pub remote: Option<String>,
+    /// One branch to fetch; every branch of the remote when omitted.
+    #[serde(default)]
+    pub branch: Option<String>,
+    /// Remove remote-tracking branches the remote no longer has (`--prune`).
+    #[serde(default)]
+    pub prune: bool,
+    /// Fetch tags as well (`--tags`).
+    #[serde(default)]
+    pub tags: bool,
+}
+
+impl GitFetchArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        let remote = self.remote.as_deref().unwrap_or("origin");
+        Ok(git_fetch(ctx.db, &self.path, remote, self.branch.as_deref(), self.prune, self.tags).await)
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[embra_tool(
     name = "git_diff",
     description = "Show uncommitted changes in a workspace repository. Optional file narrows the diff to a single path. path may be absolute (`/embra/workspace/repo`) or relative (`repo`)."
 )]
@@ -1687,6 +1775,19 @@ mod git_command_tests {
 #[cfg(test)]
 mod argument_tests {
     use super::*;
+
+    /// `git_fetch` places its flags, then `--`, then the remote and the
+    /// branch, and refuses an option-shaped remote or branch before git runs.
+    #[test]
+    fn git_fetch_puts_the_flags_before_a_double_dash_and_refuses_an_option_shaped_remote_or_branch() {
+        assert_eq!(git_fetch_args("origin", None, false, false).unwrap(), vec!["fetch", "--", "origin"]);
+        assert_eq!(
+            git_fetch_args("github", Some("main"), true, true).unwrap(),
+            vec!["fetch", "--prune", "--tags", "--", "github", "main"]
+        );
+        assert!(git_fetch_args("--upload-pack=id", None, false, false).unwrap_err().contains("begins with '-'"));
+        assert!(git_fetch_args("origin", Some("-x"), false, false).unwrap_err().contains("begins with '-'"));
+    }
 
     /// `git_log` passes a count, the listed flags and revisions or paths,
     /// and refuses any other flag: `--output` would write a file wherever
