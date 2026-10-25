@@ -47,8 +47,8 @@ Model:
   /effort                                Show the active provider's effort level and what is sent
   /effort <low|medium|high|xhigh|max>    Set effort for the active provider (Anthropic default max; Gemini high; local presets verbatim, model-validated)
   /effort reset                          Clear the active provider's stored level
-  /gateway                               Show the provider gateway (WSDS Local AI Gateway) and whether requests go through it
-  /gateway <url>|on|off|reset            Route every provider request through the gateway's unified listener (http://host:4000); off keeps the URL
+  /local-ai-gateway                      Show WSDS Local AI Gateway's URL and whether requests go through it
+  /local-ai-gateway <url>|on|off|reset   Route every provider request through its unified listener (http://host:4000); off keeps the URL
   /embeddings                            Show the semantic-similarity layer: model, index, nodes embedded
   /embeddings <on|off>                   Enable/disable semantic similarity in retrieval (default on)
   /embeddings backfill [--force]         Embed nodes that need it (local, ~55ms/node)

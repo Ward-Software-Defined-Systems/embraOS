@@ -170,9 +170,9 @@ pub struct SystemConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_reasoning: Option<bool>,
     /// The provider gateway: WSDS Local AI Gateway's unified listener, set
-    /// with `/gateway`. While `enabled`, every provider request is built on
-    /// `"{url}/<prefix>"` (`provider::gateway::base_for`); `/gateway off`
-    /// keeps the URL for `/gateway on`. Serde-additive `Option` — no schema
+    /// with `/local-ai-gateway`. While `enabled`, every provider request is built on
+    /// `"{url}/<prefix>"` (`provider::gateway::base_for`); `/local-ai-gateway off`
+    /// keeps the URL for `/local-ai-gateway on`. Serde-additive `Option` — no schema
     /// bump; one more field on every `SystemConfig` literal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_gateway: Option<ProviderGateway>,

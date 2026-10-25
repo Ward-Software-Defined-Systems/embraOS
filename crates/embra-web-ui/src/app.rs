@@ -36,7 +36,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
     ("Model", &[
         ("/provider", "switch"), ("/provider --setup", "guided setup"),
         ("/model", "model"), ("/effort", "effort"),
-        ("/gateway", "provider gateway"),
+        ("/local-ai-gateway", "provider gateway"),
         ("/embeddings", "embeddings"), ("/embeddings backfill", "embed backfill"),
     ]),
     ("Media", &[
@@ -180,7 +180,7 @@ const SPECS: &[Spec] = &[
         fields: &[sel("Model",
             &["(show, or pick from the server)", "opus-5.5", "opus-5", "opus-4.8", "fable-5.1", "fable-5",
               "gemini-3.1-pro", "gemini-4-argon"], false)] },
-    Spec { cmd: "/gateway", title: "Provider gateway",
+    Spec { cmd: "/local-ai-gateway", title: "Provider gateway",
         note: "Route every provider request through WSDS Local AI Gateway's unified listener. Blank = show. A URL stores it and turns it on; 'on', 'off' (keeps the URL), 'reset'.",
         join: " ", guided: false,
         fields: &[t("URL / on / off / reset", "http://host:4000 (blank = show)", false)] },

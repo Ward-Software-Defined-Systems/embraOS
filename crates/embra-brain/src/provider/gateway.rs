@@ -1,5 +1,5 @@
 //! The provider gateway: WSDS Local AI Gateway's unified listener, in front
-//! of every provider while the operator keeps it on (`/gateway`).
+//! of every provider while the operator keeps it on (`/local-ai-gateway`).
 //!
 //! The gateway forwards each provider's own wire format byte for byte, with
 //! the key the client sends, and an explicit path prefix forces the backend:
@@ -130,7 +130,7 @@ pub(crate) fn normalize_url(input: &str) -> Result<String, String> {
     Ok(format!("{scheme}://{authority}{}", tail.trim_end_matches('/')))
 }
 
-/// What `/gateway` was asked to do.
+/// What `/local-ai-gateway` was asked to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GatewayAction {
     Show,
@@ -141,7 +141,7 @@ pub(crate) enum GatewayAction {
     Reset,
 }
 
-/// `/gateway`'s argument: nothing shows; `on`, `off` and `reset` (in any
+/// `/local-ai-gateway`'s argument: nothing shows; `on`, `off` and `reset` (in any
 /// case) are themselves; anything else is a URL, normalized or refused with
 /// the reason.
 pub(crate) fn parse_action(args: &str) -> Result<GatewayAction, String> {
@@ -155,7 +155,7 @@ pub(crate) fn parse_action(args: &str) -> Result<GatewayAction, String> {
         "reset" | "clear" => Ok(GatewayAction::Reset),
         _ => normalize_url(arg).map(GatewayAction::Set).map_err(|reason| {
             format!(
-                "/gateway: {reason}. Give the gateway's unified listener as http://host:{UNIFIED_PORT} \
+                "/local-ai-gateway: {reason}. Give the gateway's unified listener as http://host:{UNIFIED_PORT} \
                  (a bare host gets http:// and :{UNIFIED_PORT}), or on, off, reset."
             )
         }),
@@ -173,7 +173,7 @@ fn plain_http_note(url: &str) -> &'static str {
     }
 }
 
-/// Apply `/gateway`'s action to the configuration and say what it did.
+/// Apply `/local-ai-gateway`'s action to the configuration and say what it did.
 /// `Show` changes nothing and answers with [`status_line`]. An `Err` names
 /// what could not be done and leaves the configuration as it was.
 pub(crate) fn apply(cfg: &mut SystemConfig, action: &GatewayAction) -> Result<String, String> {
@@ -202,7 +202,7 @@ pub(crate) fn apply(cfg: &mut SystemConfig, action: &GatewayAction) -> Result<St
                 ))
             }
             None => Err(
-                "No provider gateway is stored. /gateway <url> stores one and turns it on."
+                "No provider gateway is stored. /local-ai-gateway <url> stores one and turns it on."
                     .to_string(),
             ),
         },
@@ -212,7 +212,7 @@ pub(crate) fn apply(cfg: &mut SystemConfig, action: &GatewayAction) -> Result<St
                 Ok(format!(
                     "Provider gateway off; {} is kept. Requests go to each provider's own host \
                      from your next message (Ollama and LM Studio to their stored endpoint). \
-                     /gateway on routes them through it again.",
+                     /local-ai-gateway on routes them through it again.",
                     g.url
                 ))
             }
@@ -229,22 +229,22 @@ pub(crate) fn apply(cfg: &mut SystemConfig, action: &GatewayAction) -> Result<St
     }
 }
 
-/// The answer to a bare `/gateway`.
+/// The answer to a bare `/local-ai-gateway`.
 pub(crate) fn status_line(cfg: &SystemConfig) -> String {
     match cfg.provider_gateway.as_ref() {
         Some(g) if g.enabled => format!(
             "Provider gateway: on — {}. Every provider request goes through it: {PREFIX_LIST}. \
              For Ollama and LM Studio the gateway's own upstream answers; the stored endpoint is \
-             used again when it is off. /gateway off keeps the URL; /gateway reset forgets it.{}",
+             used again when it is off. /local-ai-gateway off keeps the URL; /local-ai-gateway reset forgets it.{}",
             g.url,
             plain_http_note(&g.url)
         ),
         Some(g) => format!(
             "Provider gateway: off — {} kept. Requests go to each provider's own host (Ollama and \
-             LM Studio to their stored endpoint). /gateway on routes them through it again.",
+             LM Studio to their stored endpoint). /local-ai-gateway on routes them through it again.",
             g.url
         ),
-        None => "Provider gateway: not configured. /gateway <url> stores WSDS Local AI Gateway's \
+        None => "Provider gateway: not configured. /local-ai-gateway <url> stores WSDS Local AI Gateway's \
                  unified listener (http://host:4000) and turns it on; every provider request then \
                  goes through it."
             .to_string(),
@@ -310,10 +310,10 @@ mod tests {
     #[test]
     fn on_without_a_url_is_refused_and_a_bad_url_saves_nothing() {
         let mut c = cfg();
-        assert!(apply(&mut c, &GatewayAction::On).unwrap_err().contains("/gateway <url>"));
+        assert!(apply(&mut c, &GatewayAction::On).unwrap_err().contains("/local-ai-gateway <url>"));
         assert!(apply(&mut c, &GatewayAction::Off).is_err());
         let err = parse_action("localhost").unwrap_err();
-        assert!(err.starts_with("/gateway: ") && err.contains("beside the OS"), "{err}");
+        assert!(err.starts_with("/local-ai-gateway: ") && err.contains("beside the OS"), "{err}");
         assert_eq!(c.provider_gateway, None);
         assert_eq!(parse_action("").unwrap(), GatewayAction::Show);
         assert_eq!(apply(&mut c, &GatewayAction::Show).unwrap(), status_line(&c));
