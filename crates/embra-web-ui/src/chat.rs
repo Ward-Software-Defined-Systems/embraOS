@@ -488,6 +488,7 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/provider --setup", "guided key, model or endpoint setup (needs provider)"),
         ("/model", "show / switch the model"),
         ("/effort", "show / set the active provider's effort"),
+        ("/gateway", "provider gateway: show / <url> / on / off / reset"),
         ("/embeddings", "semantic similarity: status / on / off"),
         ("/embeddings backfill", "embed nodes that need it"),
     ]),
