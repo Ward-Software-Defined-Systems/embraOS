@@ -1,6 +1,6 @@
 //! The GitLab API tools (`gl_*`) against a self-hosted instance: the
-//! client with the operator's CA drop-ins, the host chooser, the shared
-//! `gl_get`/`gl_send` plumbing and the tools.
+//! client, the host chooser, the shared `gl_get`/`gl_send` plumbing and
+//! the tools.
 
 use embra_tool_macro::embra_tool;
 use embra_tools_core::{DispatchError, USER_AGENT};
@@ -8,25 +8,15 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use super::git::{normalize_git_host, resolve_git_tokens};
-use super::load_operator_ca_certs;
 use crate::db::WardsonDbClient;
 use crate::tools::registry::DispatchContext;
 
-/// Build the reqwest client for GitLab API calls: stock webpki roots plus
-/// the operator CA drop-ins, so a self-hosted instance behind a private CA
-/// (e.g. mkcert) verifies. Falls back to a stock client on builder failure.
-///
-/// Only this client adds them. The other reqwest clients in this file keep
-/// the compiled-in roots, deliberately.
+/// The reqwest client for GitLab API calls: `crate::net::client()`, which
+/// carries the stock webpki roots and the operator's CA drop-ins like every
+/// client of the brain, so a self-hosted instance behind a private CA
+/// (e.g. mkcert) verifies.
 fn gitlab_client() -> reqwest::Client {
-    let mut builder = crate::net::bounded();
-    for cert in load_operator_ca_certs() {
-        builder = builder.add_root_certificate(cert);
-    }
-    builder.build().unwrap_or_else(|e| {
-        tracing::warn!("GitLab client builder failed ({}); using the stock client", e);
-        crate::net::client()
-    })
+    crate::net::client()
 }
 
 /// Percent-encode a GitLab project path (`namespace/project`) for use as a

@@ -41,3 +41,9 @@ tokenizers = { version = "0.23", default-features = false, features = ["fancy-re
 
 [dev-dependencies]
 wiremock = "0.6"
+# net.rs proves that a client built there trusts an operator CA drop-in: a
+# CA and a leaf minted with rcgen, served by tokio-rustls. All three are in
+# the tree already (trustd, embra-web, reqwest): edges in the lock, no package.
+rcgen = { workspace = true }
+rustls = { workspace = true }
+tokio-rustls = { version = "0.26", default-features = false }

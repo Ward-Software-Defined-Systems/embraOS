@@ -9,9 +9,34 @@
 //! one rule; every provider builds its URLs on the base it is given, and the
 //! health probe takes the same base through
 //! `grpc_service::provider_probe_target`.
+//!
+//! The routing is specific to this gateway, so a URL is stored only once
+//! the listener behind it has identified itself ([`identify`]): every
+//! response of a WSDS Local AI Gateway proxy listener carries
+//! [`GATEWAY_HEADER`] with the gateway's version, and `/local-ai-gateway
+//! <url>` and `on` read it from `GET {url}/v1/models` before a change is
+//! saved.
 
 use crate::config::{ProviderGateway, SystemConfig};
 use crate::provider::ProviderKind;
+
+/// Every response of a WSDS Local AI Gateway proxy listener carries this
+/// header with the gateway's version (its `listener::GATEWAY_HEADER`).
+pub(crate) const GATEWAY_HEADER: &str = "x-local-ai-gateway";
+
+/// The whole of the identification request: connect, TLS and the answer.
+const IDENTIFY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// What a refused certificate means here, and what fixes it.
+const CA_HINT: &str = " The listener's certificate is not trusted: put the gateway's CA certificate \
+     (local-ai-gateway tls ca-cert) in /embra/state/ca-certificates/ with seed-state.sh --ca-dir \
+     and boot again.";
+
+/// What an answer that is not HTTP to a plain `http://` request means: a
+/// TLS listener answers a plaintext request with an alert, which hyper
+/// reports as an invalid HTTP version.
+const TLS_HINT: &str = " The listener did not speak plain HTTP: a gateway listener with tls on is \
+     reached as https://host:port.";
 
 /// The unified listener's default port, given to a bare host and to an
 /// `http://` URL without one, as the presets' `normalize_endpoint` gives
@@ -67,8 +92,8 @@ pub(crate) fn host_label(base: &str) -> String {
 /// composes as `"{url}/{prefix}"` too. Refused, with the reason: a scheme
 /// other than http or https, a query or a fragment, credentials in the URL,
 /// and a loopback or unspecified host, because the gateway runs beside the
-/// OS and never inside it. No network call is made here; the health probe
-/// that follows a change reports whether the gateway answers.
+/// OS and never inside it. No network call is made here; [`identify`] is
+/// the call that follows, and the health probe after the change.
 pub(crate) fn normalize_url(input: &str) -> Result<String, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -162,6 +187,65 @@ pub(crate) fn parse_action(args: &str) -> Result<GatewayAction, String> {
     }
 }
 
+/// The URL `/local-ai-gateway` asks to identify itself before the action is
+/// applied: the new URL of `Set`, the stored one of `On`. None for `Show`,
+/// `Off` and `Reset`, which reach no listener, and none for `On` without a
+/// stored gateway, which [`apply`] refuses.
+pub(crate) fn url_to_identify(cfg: &SystemConfig, action: &GatewayAction) -> Option<String> {
+    match action {
+        GatewayAction::Set(url) => Some(url.clone()),
+        GatewayAction::On => cfg.provider_gateway.as_ref().map(|g| g.url.clone()),
+        GatewayAction::Show | GatewayAction::Off | GatewayAction::Reset => None,
+    }
+}
+
+/// Asks the listener at `url` to identify itself: `GET {url}/v1/models`
+/// with no provider header (the gateway's own merged model list, which it
+/// does not record), and the answer's [`GATEWAY_HEADER`], which every
+/// response of a WSDS Local AI Gateway proxy listener carries, whatever
+/// the status. The version in it is returned. A listener that does not
+/// answer, or answers without the header (another gateway, a plain model
+/// server, a gateway from before the header), is refused with the reason;
+/// a certificate the brain does not trust names the drop-in directory.
+/// The caller saves nothing on an `Err`.
+pub(crate) async fn identify(url: &str) -> Result<String, String> {
+    let target = format!("{}/v1/models", url.trim_end_matches('/'));
+    let client = crate::net::builder()
+        .timeout(IDENTIFY_TIMEOUT)
+        .build()
+        .map_err(|e| format!("/local-ai-gateway: http client: {e}"))?;
+    let resp = client.get(&target).send().await.map_err(|e| {
+        let cause = crate::net::error_chain(&e);
+        let lower = cause.to_ascii_lowercase();
+        let hint = if lower.contains("certificate") {
+            CA_HINT
+        } else if url.starts_with("http://") && lower.contains("invalid http version") {
+            TLS_HINT
+        } else {
+            ""
+        };
+        format!(
+            "/local-ai-gateway: nothing answered at {target}: {cause}.{hint} The configuration \
+             is unchanged."
+        )
+    })?;
+    let version = resp
+        .headers()
+        .get(GATEWAY_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string);
+    version.ok_or_else(|| {
+        format!(
+            "/local-ai-gateway: {url} answered (HTTP {}) without the {GATEWAY_HEADER} header: it \
+             is not WSDS Local AI Gateway's unified listener, or a build from before the header. \
+             The configuration is unchanged.",
+            resp.status().as_u16()
+        )
+    })
+}
+
 const PREFIX_LIST: &str =
     "Anthropic at /anthropic, Gemini at /gemini, Ollama at /ollama, LM Studio at /lmstudio";
 
@@ -173,10 +257,22 @@ fn plain_http_note(url: &str) -> &'static str {
     }
 }
 
+/// What the listener said it was, for the answer to `Set` and `On`.
+fn identified(version: Option<&str>) -> String {
+    version
+        .map(|v| format!(" (WSDS Local AI Gateway {v})"))
+        .unwrap_or_default()
+}
+
 /// Apply `/local-ai-gateway`'s action to the configuration and say what it did.
-/// `Show` changes nothing and answers with [`status_line`]. An `Err` names
-/// what could not be done and leaves the configuration as it was.
-pub(crate) fn apply(cfg: &mut SystemConfig, action: &GatewayAction) -> Result<String, String> {
+/// `version` is what [`identify`] learned for `Set` and `On`, named in the
+/// answer. `Show` changes nothing and answers with [`status_line`]. An `Err`
+/// names what could not be done and leaves the configuration as it was.
+pub(crate) fn apply(
+    cfg: &mut SystemConfig,
+    action: &GatewayAction,
+    version: Option<&str>,
+) -> Result<String, String> {
     match action {
         GatewayAction::Show => Ok(status_line(cfg)),
         GatewayAction::Set(url) => {
@@ -185,9 +281,10 @@ pub(crate) fn apply(cfg: &mut SystemConfig, action: &GatewayAction) -> Result<St
                 enabled: true,
             });
             Ok(format!(
-                "Provider gateway set and on: {url}. Every provider request goes through it from \
-                 your next message: {PREFIX_LIST}. The health probe runs through it now; /status \
-                 shows the result.{}",
+                "Provider gateway set and on: {url}{}. Every provider request goes through it \
+                 from your next message: {PREFIX_LIST}. The health probe runs through it now; \
+                 /status shows the result.{}",
+                identified(version),
                 plain_http_note(url)
             ))
         }
@@ -195,9 +292,10 @@ pub(crate) fn apply(cfg: &mut SystemConfig, action: &GatewayAction) -> Result<St
             Some(g) => {
                 g.enabled = true;
                 Ok(format!(
-                    "Provider gateway on: {}. Every provider request goes through it from your \
+                    "Provider gateway on: {}{}. Every provider request goes through it from your \
                      next message; the health probe runs through it now.{}",
                     g.url,
+                    identified(version),
                     plain_http_note(&g.url)
                 ))
             }
@@ -283,6 +381,8 @@ pub(crate) fn provider_line_suffix(cfg: &SystemConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn cfg() -> SystemConfig {
         crate::config::tests_support::minimal_cfg()
@@ -291,35 +391,138 @@ mod tests {
     #[test]
     fn a_url_is_normalized_saved_and_turned_on() {
         let mut c = cfg();
-        let msg = apply(&mut c, &parse_action(" axiom-app.ops.wsds ").unwrap()).unwrap();
+        let msg = apply(&mut c, &parse_action(" axiom-app.ops.wsds ").unwrap(), Some("0.1.0")).unwrap();
         assert_eq!(c.provider_gateway, Some(gw("http://axiom-app.ops.wsds:4000", true)));
         assert!(msg.contains("/anthropic") && msg.contains("/lmstudio"), "{msg}");
+        assert!(msg.contains("http://axiom-app.ops.wsds:4000 (WSDS Local AI Gateway 0.1.0)"), "{msg}");
         assert!(msg.contains("Plain HTTP"), "{msg}");
-        let msg = apply(&mut c, &parse_action("https://gw.example").unwrap()).unwrap();
+        let msg = apply(&mut c, &parse_action("https://gw.example").unwrap(), None).unwrap();
         assert_eq!(c.provider_gateway, Some(gw("https://gw.example", true)));
-        assert!(!msg.contains("Plain HTTP"), "{msg}");
+        assert!(!msg.contains("Plain HTTP") && !msg.contains("WSDS Local AI Gateway"), "{msg}");
     }
 
     #[test]
     fn off_keeps_the_url_and_on_brings_it_back() {
         let mut c = cfg();
-        apply(&mut c, &GatewayAction::Set("http://gw:4000".into())).unwrap();
-        let msg = apply(&mut c, &parse_action("OFF").unwrap()).unwrap();
+        apply(&mut c, &GatewayAction::Set("http://gw:4000".into()), None).unwrap();
+        let msg = apply(&mut c, &parse_action("OFF").unwrap(), None).unwrap();
         assert_eq!(c.provider_gateway, Some(gw("http://gw:4000", false)));
         assert!(msg.contains("kept"), "{msg}");
         assert!(status_line(&c).starts_with("Provider gateway: off"));
         assert_eq!(provider_line_suffix(&c), " Gateway: off (http://gw:4000 kept).");
-        apply(&mut c, &parse_action("on").unwrap()).unwrap();
+        let msg = apply(&mut c, &parse_action("on").unwrap(), Some("0.2.0")).unwrap();
         assert_eq!(c.provider_gateway, Some(gw("http://gw:4000", true)));
+        assert!(msg.contains("http://gw:4000 (WSDS Local AI Gateway 0.2.0)"), "{msg}");
         assert!(status_line(&c).starts_with("Provider gateway: on"));
         assert_eq!(provider_line_suffix(&c), " Gateway: on (http://gw:4000).");
+    }
+
+    #[test]
+    fn set_and_on_name_the_url_to_identify_and_the_rest_none() {
+        let mut c = cfg();
+        assert_eq!(
+            url_to_identify(&c, &GatewayAction::Set("http://gw:4000".into())),
+            Some("http://gw:4000".to_string())
+        );
+        assert_eq!(url_to_identify(&c, &GatewayAction::On), None, "nothing stored: apply refuses");
+        c.provider_gateway = Some(gw("http://gw:4000", false));
+        assert_eq!(url_to_identify(&c, &GatewayAction::On), Some("http://gw:4000".to_string()));
+        for action in [GatewayAction::Show, GatewayAction::Off, GatewayAction::Reset] {
+            assert_eq!(url_to_identify(&c, &action), None, "{action:?}");
+        }
+    }
+
+    /// The gateway's answer: the header on any status, read from the merged
+    /// model list, asked with no provider header so the gateway generates
+    /// the list itself. A base with a path composes the same way.
+    #[tokio::test]
+    async fn a_listener_with_the_header_gives_its_version_whatever_the_status() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header(GATEWAY_HEADER, " 0.1.0 ")
+                    .set_body_json(serde_json::json!({"object": "list", "data": []})),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/ai/v1/models"))
+            .respond_with(ResponseTemplate::new(502).insert_header(GATEWAY_HEADER, "0.2.0"))
+            .mount(&server)
+            .await;
+
+        assert_eq!(identify(&server.uri()).await.unwrap(), "0.1.0");
+        assert_eq!(identify(&format!("{}/ai/", server.uri())).await.unwrap(), "0.2.0");
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(requests.len(), 2);
+        for req in &requests {
+            for header in ["anthropic-version", "x-goog-api-key", "openai-organization", "authorization", "x-api-key"] {
+                assert!(!req.headers.contains_key(header), "{header} was sent");
+            }
+        }
+    }
+
+    /// What is refused, with the reason: an answer without the header (the
+    /// status named), an empty header, and no answer at all. Nothing is
+    /// saved on either; the handler returns before `apply`.
+    #[tokio::test]
+    async fn a_listener_without_the_header_or_without_an_answer_is_refused() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{\"models\":[]}"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/empty/v1/models"))
+            .respond_with(ResponseTemplate::new(200).insert_header(GATEWAY_HEADER, ""))
+            .mount(&server)
+            .await;
+
+        let err = identify(&server.uri()).await.unwrap_err();
+        assert!(err.starts_with("/local-ai-gateway: "), "{err}");
+        assert!(err.contains("(HTTP 200) without the x-local-ai-gateway header"), "{err}");
+        assert!(err.contains("The configuration is unchanged."), "{err}");
+        let err = identify(&format!("{}/empty", server.uri())).await.unwrap_err();
+        assert!(err.contains("without the x-local-ai-gateway header"), "{err}");
+
+        // A port nothing listens on: bound, read, released.
+        let closed = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            l.local_addr().unwrap()
+        };
+        let err = identify(&format!("http://{closed}")).await.unwrap_err();
+        assert!(err.contains(&format!("nothing answered at http://{closed}/v1/models: ")), "{err}");
+        assert!(err.ends_with("The configuration is unchanged."), "{err}");
+        assert!(!err.contains("ca-certificates") && !err.contains("https://"), "no hint on a refused connection: {err}");
+    }
+
+    /// A TLS listener given as `http://` answers the plaintext request with
+    /// an alert record; the refusal says to use `https://`. (Live on
+    /// 2026-10-25: the gateway's `tls = "on"` listener on 4000 reads
+    /// `client error (SendRequest): invalid HTTP version parsed`.)
+    #[tokio::test]
+    async fn a_tls_listener_given_as_http_is_refused_with_the_https_hint() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut tcp, _) = listener.accept().await.unwrap();
+            // TLS alert, fatal, protocol_version: what rustls sends to a
+            // ClientHello it cannot read.
+            tokio::io::AsyncWriteExt::write_all(&mut tcp, &[0x15, 0x03, 0x01, 0x00, 0x02, 0x02, 0x46]).await.ok();
+        });
+        let err = identify(&format!("http://{addr}")).await.unwrap_err();
+        assert!(err.contains("nothing answered at"), "{err}");
+        assert!(err.contains("reached as https://host:port"), "{err}");
     }
 
     #[test]
     fn the_status_rows_say_on_or_off_with_the_url_and_nothing_when_unset() {
         let mut c = cfg();
         assert!(status_rows(&c).is_empty());
-        apply(&mut c, &GatewayAction::Set("http://gw:4000".into())).unwrap();
+        apply(&mut c, &GatewayAction::Set("http://gw:4000".into()), None).unwrap();
         assert_eq!(
             status_rows(&c),
             vec![
@@ -330,7 +533,7 @@ mod tests {
                 ),
             ]
         );
-        apply(&mut c, &GatewayAction::Off).unwrap();
+        apply(&mut c, &GatewayAction::Off, None).unwrap();
         assert_eq!(
             status_rows(&c),
             vec![
@@ -343,24 +546,24 @@ mod tests {
     #[test]
     fn reset_forgets_the_gateway() {
         let mut c = cfg();
-        apply(&mut c, &GatewayAction::Set("http://gw:4000".into())).unwrap();
-        apply(&mut c, &parse_action("reset").unwrap()).unwrap();
+        apply(&mut c, &GatewayAction::Set("http://gw:4000".into()), None).unwrap();
+        apply(&mut c, &parse_action("reset").unwrap(), None).unwrap();
         assert_eq!(c.provider_gateway, None);
         assert!(status_line(&c).starts_with("Provider gateway: not configured"));
         assert_eq!(provider_line_suffix(&c), "");
-        assert!(apply(&mut c, &GatewayAction::Reset).is_err());
+        assert!(apply(&mut c, &GatewayAction::Reset, None).is_err());
     }
 
     #[test]
     fn on_without_a_url_is_refused_and_a_bad_url_saves_nothing() {
         let mut c = cfg();
-        assert!(apply(&mut c, &GatewayAction::On).unwrap_err().contains("/local-ai-gateway <url>"));
-        assert!(apply(&mut c, &GatewayAction::Off).is_err());
+        assert!(apply(&mut c, &GatewayAction::On, None).unwrap_err().contains("/local-ai-gateway <url>"));
+        assert!(apply(&mut c, &GatewayAction::Off, None).is_err());
         let err = parse_action("localhost").unwrap_err();
         assert!(err.starts_with("/local-ai-gateway: ") && err.contains("beside the OS"), "{err}");
         assert_eq!(c.provider_gateway, None);
         assert_eq!(parse_action("").unwrap(), GatewayAction::Show);
-        assert_eq!(apply(&mut c, &GatewayAction::Show).unwrap(), status_line(&c));
+        assert_eq!(apply(&mut c, &GatewayAction::Show, None).unwrap(), status_line(&c));
     }
 
     fn gw(url: &str, enabled: bool) -> ProviderGateway {

@@ -1,8 +1,8 @@
 //! The engineering tools, by domain: `git` (the local git tools and the
 //! auth helpers), `github` (`gh_*`), `gitlab` (`gl_*`), `plan` (plans and
-//! tasks) and `files` (the file and directory tools). This module keeps
-//! the operator CA drop-ins, shared by the GitLab client and the Guardian
-//! broker, and re-exports what the rest of the crate reaches for.
+//! tasks) and `files` (the file and directory tools), and re-exports what
+//! the rest of the crate reaches for. The operator's CA drop-ins, which the
+//! GitLab client and the Guardian broker trust, are `crate::net`'s.
 
 pub mod files;
 pub mod git;
@@ -18,60 +18,6 @@ pub(crate) use files::ensure_parent_dirs;
 pub(crate) use git::{normalize_git_host, resolve_git_tokens, resolve_github_token};
 #[cfg(test)]
 pub(crate) use plan::task_delete;
-
-// ---------------------------------------------------------------------------
-// GitLab API tools (gl_*) — self-hosted GitLab/instance support.
-//
-// Mirrors the gh_* set against GitLab's /api/v4. Auth = the per-host PAT
-// from `SystemConfig.git_tokens` (`/git-token <host> <token>`), sent as
-// `PRIVATE-TOKEN`. Unlike the git tools (which ride the git binary and the
-// embrad-merged CA bundle via GIT_SSL_CAINFO), these are reqwest clients
-// with compiled-in webpki roots — so the client builder below explicitly
-// adds the operator CA drop-ins from /embra/state/ca-certificates/ as
-// additional trust anchors. Same dir + EMBRA_CA_DIR override semantics as
-// embrad's ca_bundle.rs; certs that fail to parse are skipped (the TLS
-// handshake surfaces any real trust problem honestly).
-// ---------------------------------------------------------------------------
-
-/// Operator CA drop-in dir (kept in sync with crates/embrad/src/ca_bundle.rs).
-const OPERATOR_CA_DIR: &str = "/embra/state/ca-certificates";
-
-const OPERATOR_CA_DIR_ENV: &str = "EMBRA_CA_DIR";
-
-/// Load operator CA certs from the STATE drop-in dir. Unparseable files are
-/// skipped with a warn — never fail the call over a bad drop-in; a genuinely
-/// missing trust anchor shows up as a TLS error on the request itself.
-pub(crate) fn load_operator_ca_certs() -> Vec<reqwest::Certificate> {
-    let dir = std::env::var(OPERATOR_CA_DIR_ENV)
-        .ok()
-        .filter(|d| !d.is_empty())
-        .unwrap_or_else(|| OPERATOR_CA_DIR.to_string());
-    let entries = match std::fs::read_dir(&dir) {
-        Ok(e) => e,
-        Err(_) => return Vec::new(),
-    };
-    let mut certs = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let is_cert_ext = matches!(
-            path.extension().and_then(|e| e.to_str()),
-            Some("pem") | Some("crt")
-        );
-        if !path.is_file() || !is_cert_ext {
-            continue;
-        }
-        let Ok(bytes) = std::fs::read(&path) else { continue };
-        match reqwest::Certificate::from_pem_bundle(&bytes) {
-            Ok(parsed) => certs.extend(parsed),
-            Err(e) => tracing::warn!(
-                "Operator CA file skipped for GitLab client: {}: {}",
-                path.display(),
-                e
-            ),
-        }
-    }
-    certs
-}
 
 #[cfg(test)]
 mod native_args_tests {
@@ -154,25 +100,6 @@ mod native_args_tests {
     }
 }
 
-#[cfg(test)]
-mod git_token_tests {
-    use super::*;
-
-    #[test]
-    fn load_operator_ca_certs_skips_garbage_and_missing_dir() {
-        let dir = std::env::temp_dir().join(format!("brain-ca-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("garbage.pem"), "not a certificate").unwrap();
-        std::fs::write(dir.join("ignored.txt"), "also not").unwrap();
-        // EMBRA_CA_DIR override scopes the scan to the temp dir. Env mutation
-        // is process-global; this is the only test touching this var.
-        unsafe { std::env::set_var(OPERATOR_CA_DIR_ENV, &dir) };
-        let certs = load_operator_ca_certs();
-        unsafe { std::env::remove_var(OPERATOR_CA_DIR_ENV) };
-        std::fs::remove_dir_all(&dir).ok();
-        assert!(certs.is_empty(), "garbage PEMs must be skipped, not error");
-    }
-}
 
 #[cfg(test)]
 mod user_agent_tests {

@@ -1908,11 +1908,11 @@ pub async fn guardian_call(
                 None
             };
             if wants_http || wants_request {
-                // The transport takes the operator's CA drop-ins (an internal
-                // host on the allowlist behind an internal CA); the policy
-                // takes the allowlist, and a tool with http_request the
-                // secrets.
-                let roots = crate::tools::engineering::load_operator_ca_certs();
+                // The transport takes the operator's CA drop-ins, the ones
+                // every client of the brain carries (an internal host on the
+                // allowlist behind an internal CA); the policy takes the
+                // allowlist, and a tool with http_request the secrets.
+                let roots = crate::net::operator_roots().to_vec();
                 match embra_guardian::caps::ReqwestTransport::with_roots(roots) {
                     Ok(tr) => {
                         caps.http = Some(Arc::new(tr));
