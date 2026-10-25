@@ -4,12 +4,61 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use futures::StreamExt;
 
+use crate::db::WardsonDbClient;
+
 // SSH paths on the writable DATA partition (rootfs is read-only SquashFS)
 pub(crate) const SSH_KEY_PATH: &str = "/embra/workspace/.ssh/id_ed25519";
 pub(crate) const SSH_KNOWN_HOSTS: &str = "/embra/workspace/.ssh/known_hosts";
 
-/// Run a basic security/system check by reading container info.
-pub async fn security_check() -> String {
+/// The storage mounts and the flags the boot gives each one: the rootfs a
+/// read-only SquashFS; STATE and DATA `nosuid,nodev,noexec` (embra-init);
+/// the workspace bind remounted with the same flags and the ephemeral
+/// tmpfs `nosuid,nodev,noexec` (embrad's `mount.rs`). `security_check`
+/// reads `/proc/mounts` and prints each mount's options against this
+/// table: the storage integrity flags its description promises.
+const STORAGE_MOUNTS: [(&str, &[&str]); 5] = [
+    ("/", &["ro"]),
+    ("/embra/state", &["nosuid", "nodev", "noexec"]),
+    ("/embra/data", &["nosuid", "nodev", "noexec"]),
+    ("/embra/workspace", &["nosuid", "nodev", "noexec"]),
+    ("/embra/ephemeral", &["nosuid", "nodev", "noexec"]),
+];
+
+/// The `Storage:` block of `security_check` from the text of
+/// `/proc/mounts`: one line per mount of `STORAGE_MOUNTS` with its
+/// filesystem type, its options as the kernel reports them and a verdict,
+/// `ok` or `MISSING` with the expected flags the options lack. A mount
+/// point listed more than once is read from its last line, the one in
+/// effect; a mount point not listed is `not mounted`.
+fn storage_report(mounts: &str) -> String {
+    let mut out = String::from("Storage:\n");
+    for (point, expected) in STORAGE_MOUNTS {
+        let Some(line) = mounts.lines().rfind(|l| l.split_whitespace().nth(1) == Some(point)) else {
+            out.push_str(&format!("  {point:<17} not mounted\n"));
+            continue;
+        };
+        let mut fields = line.split_whitespace().skip(2);
+        let fstype = fields.next().unwrap_or("?");
+        let options = fields.next().unwrap_or("");
+        let missing: Vec<&str> = expected
+            .iter()
+            .copied()
+            .filter(|flag| !options.split(',').any(|o| o == *flag))
+            .collect();
+        let verdict = if missing.is_empty() {
+            "ok".to_string()
+        } else {
+            format!("MISSING {}", missing.join(","))
+        };
+        out.push_str(&format!("  {point:<17} {fstype:<9} {options}  [{verdict}]\n"));
+    }
+    out
+}
+
+/// The system overview the tool's description promises: processes, load,
+/// the listening ports, the seal's state and the storage mounts' flags,
+/// and whether a container is detected.
+pub async fn security_check(db: &WardsonDbClient) -> String {
     let mut output = String::from("=== Security Check ===\n");
 
     // Process count
@@ -66,6 +115,19 @@ pub async fn security_check() -> String {
             }
         }
         Err(_) => output.push_str("Listening ports: /proc/net/tcp unavailable\n"),
+    }
+
+    // The seal as the other status surfaces print it (`system_status`,
+    // `GetMode`): re-verified now against the stored hash.
+    output.push_str(&format!(
+        "Soul: {}\n",
+        crate::learning::seal_state(db).await.status_word()
+    ));
+
+    // The storage mounts and their flags, from the kernel's own table.
+    match tokio::fs::read_to_string("/proc/mounts").await {
+        Ok(mounts) => output.push_str(&storage_report(&mounts)),
+        Err(_) => output.push_str("Storage: /proc/mounts unavailable\n"),
     }
 
     // Container detection
@@ -458,6 +520,100 @@ fn parse_ssh_target(target: &str) -> Result<(String, String, u16), String> {
         }
     }
     Ok((user_part, host, port))
+}
+
+#[cfg(test)]
+mod storage_report_tests {
+    use super::storage_report;
+
+    /// `/proc/mounts` as the OS shows it once embra-init and embrad have
+    /// mounted: the rootfs read-only, the four writable mounts with the
+    /// three flags, the workspace a bind of DATA.
+    const BOOTED: &str = "\
+/dev/vda2 / squashfs ro,relatime,errors=continue 0 0
+proc /proc proc rw,nosuid,nodev,noexec,relatime 0 0
+sysfs /sys sysfs rw,nosuid,nodev,noexec,relatime 0 0
+devtmpfs /dev devtmpfs rw,nosuid,relatime,size=1986104k,nr_inodes=496526,mode=755 0 0
+/dev/vda3 /embra/state ext4 rw,nosuid,nodev,noexec,relatime 0 0
+/dev/vda4 /embra/data ext4 rw,nosuid,nodev,noexec,relatime 0 0
+tmpfs /embra/ephemeral tmpfs rw,nosuid,nodev,noexec,relatime,size=524288k 0 0
+/dev/vda4 /embra/workspace ext4 rw,nosuid,nodev,noexec,relatime 0 0
+";
+
+    fn words(report: &str, point: &str) -> Vec<String> {
+        report
+            .lines()
+            .find(|l| l.split_whitespace().next() == Some(point))
+            .unwrap_or_else(|| panic!("no line for {point} in {report}"))
+            .split_whitespace()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn every_boot_mount_reads_ok_and_a_flag_that_is_lacking_is_named() {
+        let report = storage_report(BOOTED);
+        assert_eq!(report.lines().next(), Some("Storage:"));
+        assert_eq!(report.lines().count(), 6, "{report}");
+        for line in report.lines().skip(1) {
+            assert!(line.ends_with("  [ok]"), "{line}");
+        }
+        assert_eq!(words(&report, "/"), ["/", "squashfs", "ro,relatime,errors=continue", "[ok]"]);
+        assert_eq!(
+            words(&report, "/embra/ephemeral"),
+            ["/embra/ephemeral", "tmpfs", "rw,nosuid,nodev,noexec,relatime,size=524288k", "[ok]"]
+        );
+
+        let relaxed = BOOTED
+            .replace("/embra/data ext4 rw,nosuid,nodev,noexec,relatime", "/embra/data ext4 rw,nosuid,nodev,relatime")
+            .replace("/ squashfs ro,", "/ squashfs rw,");
+        let report = storage_report(&relaxed);
+        assert_eq!(words(&report, "/"), ["/", "squashfs", "rw,relatime,errors=continue", "[MISSING", "ro]"]);
+        assert_eq!(
+            words(&report, "/embra/data"),
+            ["/embra/data", "ext4", "rw,nosuid,nodev,relatime", "[MISSING", "noexec]"]
+        );
+        assert_eq!(
+            words(&report, "/embra/state"),
+            ["/embra/state", "ext4", "rw,nosuid,nodev,noexec,relatime", "[ok]"]
+        );
+    }
+
+    #[test]
+    fn an_absent_mount_is_said_and_an_over_mount_is_read_from_its_last_line() {
+        let without_workspace: String = BOOTED
+            .lines()
+            .filter(|l| !l.contains("/embra/workspace"))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        assert_eq!(
+            words(&storage_report(&without_workspace), "/embra/workspace"),
+            ["/embra/workspace", "not", "mounted"]
+        );
+
+        // A plain bind over the hardened one is what is in effect ...
+        let relaxed_last = format!("{BOOTED}/dev/vda4 /embra/workspace ext4 rw,relatime 0 0\n");
+        assert_eq!(
+            words(&storage_report(&relaxed_last), "/embra/workspace"),
+            ["/embra/workspace", "ext4", "rw,relatime", "[MISSING", "nosuid,nodev,noexec]"]
+        );
+        // ... and the remount's line after it is, again.
+        let hardened_last =
+            format!("{relaxed_last}/dev/vda4 /embra/workspace ext4 rw,nosuid,nodev,noexec,relatime 0 0\n");
+        assert_eq!(
+            words(&storage_report(&hardened_last), "/embra/workspace"),
+            ["/embra/workspace", "ext4", "rw,nosuid,nodev,noexec,relatime", "[ok]"]
+        );
+
+        // A mount point is matched whole, and an empty table names every mount.
+        assert_eq!(
+            words(&storage_report("/dev/vda4 /embra/data2 ext4 rw,nosuid,nodev,noexec 0 0\n"), "/embra/data"),
+            ["/embra/data", "not", "mounted"]
+        );
+        let empty = storage_report("");
+        assert_eq!(empty.lines().count(), 6, "{empty}");
+        assert!(empty.lines().skip(1).all(|l| l.ends_with(" not mounted")), "{empty}");
+    }
 }
 
 #[cfg(test)]
@@ -1042,8 +1198,8 @@ use crate::tools::registry::DispatchContext;
 pub struct SecurityCheckArgs {}
 
 impl SecurityCheckArgs {
-    pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        Ok(security_check().await)
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(security_check(ctx.db).await)
     }
 }
 
