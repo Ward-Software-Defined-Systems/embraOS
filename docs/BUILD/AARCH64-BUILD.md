@@ -18,9 +18,12 @@
 > Validation](#end-to-end-validation) checklist after any canonical-build bump and
 > re-stamp this date.
 >
-> The toolchain bump to Rust 1.98.1, Step 3.6 (the embedding model) and the hardened
-> Buildroot hooks (`set -euo pipefail`) landed after that run and are **TBD on macOS**
-> until the next Mac build; the x86_64 Linux build validates them on every rebuild.
+> **2026-10-25 — the build passes with everything that landed since.** The toolchain
+> bump to Rust 1.98.1, Step 3.6 (the embedding model) and the hardened Buildroot hooks
+> (`set -euo pipefail`) landed after the 2026-07-19 run; the operator's Apple Silicon
+> build of 2026-10-25 passed with all three. The x86_64 Linux build validates them on
+> every rebuild. The End-to-End Validation checklist's date above stands until the
+> checklist is re-run in full.
 >
 > **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a named
 > volume over `buildroot-src`: building the Buildroot tree on the bind mount
