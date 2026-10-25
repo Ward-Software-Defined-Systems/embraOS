@@ -505,7 +505,7 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/git-setup", "show git identity"),
         ("/github-token", "set / show GitHub token"),
         ("/git-token", "set token for a self-hosted git server"),
-        ("/ssh-keygen", "generate SSH key"),
+        ("/ssh-keygen", "SSH key: generate or show / remove / rotate"),
         ("/ssh-copy-id", "copy SSH key to host (needs target)"),
     ]),
     ("Guardian", &[

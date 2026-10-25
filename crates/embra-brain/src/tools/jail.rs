@@ -164,8 +164,9 @@ pub(crate) fn fence_git_dir(path: &Path) -> Result<(), String> {
 }
 
 /// The directory ssh owns, directly under the workspace root (`$HOME` is
-/// the workspace): `/ssh-keygen` writes the key pair there and ssh its
-/// known hosts, and a client configuration there would be read by every
+/// the workspace): `/ssh-keygen` writes the key pair there (and its
+/// `remove` and `rotate` delete it) and ssh its known hosts, and a client
+/// configuration there would be read by every
 /// ssh the OS runs, git's included; a configuration can name a command for
 /// ssh to run. A writer never creates, changes or removes anything under
 /// it. The private key is read-jailed besides ([`read_denied`]). A `.ssh`

@@ -1,5 +1,6 @@
 use std::sync::OnceLock;
 use std::time::Duration;
+use std::path::{Path, PathBuf};
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 use futures::StreamExt;
@@ -478,6 +479,152 @@ pub(crate) fn ssh_key_comment(name: &str) -> String {
     let slug = slug.trim_end_matches('-');
     let who = if slug.is_empty() { "embra" } else { slug };
     format!("{who}@embraos")
+}
+
+/// What `/ssh-keygen` was asked to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SshKeygenAction {
+    /// Generate the pair, or show the public key when one exists.
+    ShowOrGenerate,
+    /// Delete the pair after showing its public key and fingerprint.
+    Remove,
+    /// Remove, then generate a new pair.
+    Rotate,
+}
+
+/// `/ssh-keygen`'s usage: the answer to an argument that is neither of its
+/// two words.
+pub(crate) const SSH_KEYGEN_USAGE: &str = "Usage: /ssh-keygen [remove|rotate]\n  \
+    (nothing)  generate the ed25519 key pair, or show the public key when one exists\n  \
+    remove     delete the key pair after showing its public key and fingerprint\n  \
+    rotate     remove the pair, then generate a new one";
+
+/// `/ssh-keygen`'s argument: nothing generates or shows; `remove` and
+/// `rotate`, in any case, are themselves; anything else is the usage.
+pub(crate) fn ssh_keygen_action(args: &str) -> Result<SshKeygenAction, String> {
+    match args.trim().to_ascii_lowercase().as_str() {
+        "" => Ok(SshKeygenAction::ShowOrGenerate),
+        "remove" => Ok(SshKeygenAction::Remove),
+        "rotate" => Ok(SshKeygenAction::Rotate),
+        _ => Err(SSH_KEYGEN_USAGE.to_string()),
+    }
+}
+
+/// The fingerprint of a public key line (`ssh-ed25519 <base64 blob>
+/// [comment]`) as `ssh-keygen -lf` prints it: `SHA256:` and the digest of
+/// the blob, base64 without padding. `None` when the line carries no blob
+/// that decodes.
+pub(crate) fn ssh_pub_key_fingerprint(pub_line: &str) -> Option<String> {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let blob = pub_line.split_whitespace().nth(1)?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(blob).ok()?;
+    let digest = sha2::Sha256::digest(&bytes);
+    Some(format!(
+        "SHA256:{}",
+        base64::engine::general_purpose::STANDARD_NO_PAD.encode(digest)
+    ))
+}
+
+/// Removes the key pair at `key_path`: the private key and its `.pub`.
+/// `Ok(Some(line))` when there was a pair, with the public key line for the
+/// operator to find in the hosts' `authorized_keys` (empty when the `.pub`
+/// was already gone or unreadable); `Ok(None)` when neither file exists;
+/// `Err` when a file that exists could not be removed. The handler is the
+/// one writer under the workspace `.ssh` directory, which the write jail
+/// fences for every tool (`jail::fence_owned_dirs`).
+pub(crate) fn remove_ssh_key_pair(key_path: &Path) -> Result<Option<String>, String> {
+    let pub_path = PathBuf::from(format!("{}.pub", key_path.display()));
+    if !key_path.exists() && !pub_path.exists() {
+        return Ok(None);
+    }
+    let pub_line = std::fs::read_to_string(&pub_path)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    for path in [key_path, pub_path.as_path()] {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("could not remove {}: {e}", path.display())),
+        }
+    }
+    Ok(Some(pub_line))
+}
+
+/// Ends the open SSH session when there is one, so no connection outlives a
+/// key `/ssh-keygen remove` or `rotate` deletes: a ControlMaster that
+/// authenticated with the key keeps serving without it. The message of
+/// [`ssh_session_end`] when a session was open.
+pub(crate) async fn close_ssh_session_if_open() -> Option<String> {
+    let open = ssh_session_lock().lock().await.is_some();
+    if open {
+        Some(ssh_session_end().await)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod ssh_keygen_tests {
+    use super::*;
+
+    #[test]
+    fn the_argument_is_nothing_remove_or_rotate() {
+        assert_eq!(ssh_keygen_action("").unwrap(), SshKeygenAction::ShowOrGenerate);
+        assert_eq!(ssh_keygen_action("   ").unwrap(), SshKeygenAction::ShowOrGenerate);
+        assert_eq!(ssh_keygen_action("remove").unwrap(), SshKeygenAction::Remove);
+        assert_eq!(ssh_keygen_action(" ROTATE ").unwrap(), SshKeygenAction::Rotate);
+        let err = ssh_keygen_action("revoke").unwrap_err();
+        assert!(err.starts_with("Usage: /ssh-keygen [remove|rotate]"), "{err}");
+        assert!(err.contains("rotate     remove the pair"), "{err}");
+    }
+
+    /// `ssh-keygen -lf` on this key printed
+    /// `256 SHA256:BmTa18YlPJLOiGisKsRc+NSXkMOuA42qNZef+qdopn0 fixture@test (ED25519)`.
+    #[test]
+    fn the_fingerprint_is_the_one_ssh_keygen_prints() {
+        const BLOB: &str = "AAAAC3NzaC1lZDI1NTE5AAAAIJfyshnM/h6A/wSUJTXbZvbs1qwSehyRqvVWlec5p7qI";
+        const PRINT: &str = "SHA256:BmTa18YlPJLOiGisKsRc+NSXkMOuA42qNZef+qdopn0";
+        assert_eq!(
+            ssh_pub_key_fingerprint(&format!("ssh-ed25519 {BLOB} fixture@test")).unwrap(),
+            PRINT
+        );
+        assert_eq!(ssh_pub_key_fingerprint(&format!("ssh-ed25519 {BLOB}")).unwrap(), PRINT);
+        assert!(ssh_pub_key_fingerprint("ssh-ed25519").is_none());
+        assert!(ssh_pub_key_fingerprint("ssh-ed25519 not*base64 c").is_none());
+        assert!(ssh_pub_key_fingerprint("").is_none());
+    }
+
+    #[test]
+    fn removing_the_pair_returns_the_public_line_and_a_missing_pair_is_none() {
+        let dir = std::env::temp_dir().join(format!("brain-ssh-remove-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("id_ed25519");
+        let pub_path = dir.join("id_ed25519.pub");
+        assert_eq!(remove_ssh_key_pair(&key).unwrap(), None, "nothing to remove");
+
+        std::fs::write(&key, "private").unwrap();
+        std::fs::write(&pub_path, "ssh-ed25519 AAAA fixture@test\n").unwrap();
+        assert_eq!(
+            remove_ssh_key_pair(&key).unwrap(),
+            Some("ssh-ed25519 AAAA fixture@test".to_string())
+        );
+        assert!(!key.exists() && !pub_path.exists(), "both files gone");
+
+        std::fs::write(&key, "private").unwrap();
+        assert_eq!(remove_ssh_key_pair(&key).unwrap(), Some(String::new()), "no .pub to show");
+        assert!(!key.exists());
+
+        std::fs::write(&pub_path, "ssh-ed25519 BBBB fixture@test").unwrap();
+        assert_eq!(
+            remove_ssh_key_pair(&key).unwrap(),
+            Some("ssh-ed25519 BBBB fixture@test".to_string()),
+            "a stray .pub is removed too"
+        );
+        assert!(!pub_path.exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }
 
 #[cfg(test)]

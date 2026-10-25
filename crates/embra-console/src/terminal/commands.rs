@@ -69,7 +69,8 @@ Git & SSH:
   /git-setup <name> | <email>    Set git user config
   /github-token <token>          Set GitHub token
   /git-token <host> <token>      Set a token for a self-hosted git server (remove: /git-token <host> remove)
-  /ssh-keygen                    Generate SSH key pair
+  /ssh-keygen                    Generate the SSH key pair (comment: the instance's name at embraos), or show the public key
+  /ssh-keygen remove|rotate      Delete the key pair after showing it, or replace it with a new one
   /ssh-copy-id <user@host>       Copy SSH key to host
 
 Guardian:

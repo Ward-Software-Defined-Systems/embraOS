@@ -3103,7 +3103,7 @@ async fn handle_slash_command(
 
     match command {
         "/help" => {
-            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key, then pick the model (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the model; on Ollama / LM Studio, pick one from the models the server lists\n  /model <name>                      Switch the model (next message): opus-5.5|opus-5|opus-4.8|fable-5.1|fable-5 on Anthropic, gemini-3.1-pro|gemini-4-argon on Gemini, a listed model on Ollama / LM Studio\n  /effort                            Show the active provider's effort level and what is sent\n  /effort <low|medium|high|xhigh|max>  Set effort for the active provider (Anthropic default max; Gemini high; local presets: sent verbatim, model-validated); /effort reset clears\n  /local-ai-gateway                  Show WSDS Local AI Gateway's URL and whether requests go through it\n  /local-ai-gateway <url>|on|off|reset  Route every provider request through its unified listener (http(s)://host:4000, which must answer with its x-local-ai-gateway header); off keeps the URL, reset forgets it\n  /embeddings                        Show the local semantic-similarity layer: model, index, how many nodes are embedded\n  /embeddings <on|off>               Enable or disable semantic similarity in retrieval (default on)\n  /embeddings backfill [--force]     Embed nodes that need it (local CPU, ~55ms/node); --force re-embeds all\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image or a text file (uploaded id, uploads/ path or any workspace path) to your next message\n  /attach list | clear               Show or drop the staged attachments\n  /download <path>                   Hand a workspace file to your browser as a download (regular files up to 12 MiB)\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-3-pro-image (default) | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate SSH key pair\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian rebuild <name>|--all     Rebuild tools an OS update left unloaded, or failed builds (validated + replicant-checked again)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /guardian secret <host> <header> <value>  Store a credential the host adds to every http_request to that host (never in a tool's input); `secret` lists, `<host> remove` forgets\n  /guardian egress allow|deny <host>   The allowlist of private hosts the tools may reach (loopback is refused always); `egress` lists\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
+            send_msg(tx, "Available commands:\n  /sessions, /switch <name>, /new <name>, /close\n  /sessions delete <name>            Guided delete: summary + reason + memories, then soft delete (7-day grace)\n  /sessions restore <name>           Undo a soft delete during its grace period\n  /stop                              Stop a stuck in-flight turn (console: Esc; mobile: the \u{25a0} button)\n  /status, /soul, /identity, /mode\n  /provider                          Show active provider, model, session\n  /provider <anthropic|gemini|ollama|lm_studio>  Switch provider for future turns\n  /provider --setup <anthropic|gemini>  Add/replace an API key, then pick the model (multi-turn)\n  /provider --setup <ollama|lm_studio>  Reconfigure endpoint, bearer, and model (multi-turn)\n  /model                             Show the model; on Ollama / LM Studio, pick one from the models the server lists\n  /model <name>                      Switch the model (next message): opus-5.5|opus-5|opus-4.8|fable-5.1|fable-5 on Anthropic, gemini-3.1-pro|gemini-4-argon on Gemini, a listed model on Ollama / LM Studio\n  /effort                            Show the active provider's effort level and what is sent\n  /effort <low|medium|high|xhigh|max>  Set effort for the active provider (Anthropic default max; Gemini high; local presets: sent verbatim, model-validated); /effort reset clears\n  /local-ai-gateway                  Show WSDS Local AI Gateway's URL and whether requests go through it\n  /local-ai-gateway <url>|on|off|reset  Route every provider request through its unified listener (http(s)://host:4000, which must answer with its x-local-ai-gateway header); off keeps the URL, reset forgets it\n  /embeddings                        Show the local semantic-similarity layer: model, index, how many nodes are embedded\n  /embeddings <on|off>               Enable or disable semantic similarity in retrieval (default on)\n  /embeddings backfill [--force]     Embed nodes that need it (local CPU, ~55ms/node); --force re-embeds all\n  /iter-cap                          Show the per-turn tool iteration cap\n  /iter-cap <N>                      Set the cap (1..=1000, default 100)\n  /iter-cap reset                    Restore the default cap\n  /show-reasoning                    Show whether reasoning streams to the panel\n  /show-reasoning <on|off>           Toggle live reasoning in the expression panel (default on)\n  /attach <id|path>                  Attach an image or a text file (uploaded id, uploads/ path or any workspace path) to your next message\n  /attach list | clear               Show or drop the staged attachments\n  /download <path>                   Hand a workspace file to your browser as a download (regular files up to 12 MiB)\n  /image-provider                    Show the image-generation backend, model, and key status\n  /image-provider gemini             Use Gemini image models for image_generate\n  /image-provider model <id>         gemini-3-pro-image (default) | gemini-3.1-flash-image | gemini-3.1-flash-lite-image | gemini-2.5-flash-image\n  /image-provider key <token>        Set a dedicated image-generation key (STATE, 0600); `key remove` deletes it\n  /github-token <token>              Set GitHub token\n  /git-token <host> <token>          Set a token for a self-hosted git server (remove: /git-token <host> remove)\n  /ssh-keygen                        Generate the SSH key pair (its comment: the instance's name at embraos), or show the public key\n  /ssh-keygen remove|rotate          Delete the key pair after showing its public key and fingerprint, or replace it with a new one\n  /ssh-copy-id <user@host>           Copy SSH key to host\n  /git-setup <name> | <email>        Set git user config\n  /guardian-define                   Paste a Rust module to define a dynamic tool\n  /guardian list|status <name>|show <name>|delete <name>  Manage dynamic tools\n  /guardian approve <name>|reject <name>  Approve/reject a brain-proposed tool (replicant-checked)\n  /guardian rebuild <name>|--all     Rebuild tools an OS update left unloaded, or failed builds (validated + replicant-checked again)\n  /guardian key brave <token>        Set the Brave Search API key (enables web_search tools)\n  /guardian secret <host> <header> <value>  Store a credential the host adds to every http_request to that host (never in a tool's input); `secret` lists, `<host> remove` forgets\n  /guardian egress allow|deny <host>   The allowlist of private hosts the tools may reach (loopback is refused always); `egress` lists\n  /feedback-loop                     (EXPERIMENTAL) trigger Phase 3 feedback-loop protocol\n  /help".to_string()).await;
         }
         "/feedback-loop" => {
             send_msg(tx, "\u{26A0} EXPERIMENTAL: Phase 3 Continuity Engine preview (manual trigger)\nInitiating feedback loop per feedback-loop-spec-v2.md.\nThe Brain will now begin Step 1.1 (Gather \u{2192} Introspect).\nThis is a multi-turn protocol \u{2014} expect 5+ tool invocations.".to_string()).await;
@@ -3607,67 +3607,91 @@ async fn handle_slash_command(
             }
         }
         "/ssh-keygen" => {
-            let key_path = "/embra/workspace/.ssh/id_ed25519";
-            let pub_path = format!("{}.pub", key_path);
-
-            if std::path::Path::new(key_path).exists() {
-                match std::fs::read_to_string(&pub_path) {
-                    Ok(pubkey) => {
-                        send_msg(tx, format!(
-                            "SSH key already exists. Public key:\n\n{}\n\nAdd this to ~/.ssh/authorized_keys on your target hosts.",
-                            pubkey.trim()
-                        )).await;
-                    }
-                    Err(_) => {
-                        send_msg(tx, "SSH private key exists but public key is missing.".to_string()).await;
-                    }
-                }
-                return None;
-            }
-
-            // Ensure .ssh directory exists with correct permissions
-            let ssh_dir = "/embra/workspace/.ssh";
-            let _ = std::fs::create_dir_all(ssh_dir);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(ssh_dir, std::fs::Permissions::from_mode(0o700));
-            }
-
-            // The key's comment names this instance: the intelligence's
-            // name at `embraos`, so two instances' keys read apart in an
-            // authorized_keys file. A configuration that cannot be read
-            // gives the default; a label does not hold up the key.
-            let comment = match config::load_config(db).await {
-                Ok(cfg) => crate::tools::security::ssh_key_comment(&cfg.name),
-                Err(_) => crate::tools::security::ssh_key_comment(""),
+            use crate::tools::security::{
+                close_ssh_session_if_open, remove_ssh_key_pair, ssh_keygen_action,
+                ssh_pub_key_fingerprint, SshKeygenAction, SSH_KEY_PATH,
             };
-            match crate::tools::subprocess("ssh-keygen")
-                .args(["-t", "ed25519", "-f", key_path, "-N", "", "-C", &comment])
-                .output()
-                .await
-            {
-                Ok(out) if out.status.success() => {
+            let action = match ssh_keygen_action(args) {
+                Ok(action) => action,
+                Err(usage) => {
+                    send_msg(tx, usage).await;
+                    return None;
+                }
+            };
+            let key_path = std::path::Path::new(SSH_KEY_PATH);
+            let pub_path = format!("{SSH_KEY_PATH}.pub");
+            let mut parts: Vec<String> = Vec::new();
+            if action == SshKeygenAction::ShowOrGenerate {
+                if key_path.exists() {
                     match std::fs::read_to_string(&pub_path) {
                         Ok(pubkey) => {
                             send_msg(tx, format!(
-                                "SSH key generated. Public key:\n\n{}\n\nAdd this to ~/.ssh/authorized_keys on your target hosts.",
+                                "SSH key already exists. Public key:\n\n{}\n\nAdd this to ~/.ssh/authorized_keys on your target hosts. /ssh-keygen rotate replaces it; /ssh-keygen remove deletes it.",
                                 pubkey.trim()
                             )).await;
                         }
-                        Err(e) => {
-                            send_msg(tx, format!("Key generated but could not read public key: {}", e)).await;
+                        Err(_) => {
+                            send_msg(tx, "SSH private key exists but public key is missing. /ssh-keygen rotate replaces the pair.".to_string()).await;
                         }
                     }
+                    return None;
                 }
-                Ok(out) => {
-                    let stderr = String::from_utf8_lossy(&out.stderr);
-                    send_msg(tx, format!("ssh-keygen failed: {}", stderr.trim())).await;
+            } else {
+                // The session first: a ControlMaster that authenticated
+                // with the key would keep serving without the file.
+                let closed = close_ssh_session_if_open().await;
+                match remove_ssh_key_pair(key_path) {
+                    Ok(Some(old)) => {
+                        let fingerprint = ssh_pub_key_fingerprint(&old)
+                            .unwrap_or_else(|| "fingerprint unavailable".to_string());
+                        parts.push(format!("SSH key removed ({fingerprint})."));
+                        if old.is_empty() {
+                            parts.push(
+                                "Its public key file was already gone, so there is no line to show."
+                                    .to_string(),
+                            );
+                        } else {
+                            parts.push(format!(
+                                "Its public key was:\n\n{old}\n\nRemove that line from ~/.ssh/authorized_keys on every host that trusted it; the OS cannot do that for you."
+                            ));
+                        }
+                        if let Some(note) = closed {
+                            parts.push(note);
+                        }
+                    }
+                    Ok(None) => {
+                        if action == SshKeygenAction::Remove {
+                            send_msg(tx, "No SSH key to remove.".to_string()).await;
+                            return None;
+                        }
+                        parts.push("No SSH key to remove.".to_string());
+                    }
+                    Err(e) => {
+                        let word = if action == SshKeygenAction::Remove { "remove" } else { "rotate" };
+                        send_msg(tx, format!("/ssh-keygen {word}: {e}")).await;
+                        return None;
+                    }
                 }
-                Err(e) => {
-                    send_msg(tx, format!("Failed to run ssh-keygen: {}", e)).await;
+                if action == SshKeygenAction::Remove {
+                    parts.push("The ssh tools have no key until /ssh-keygen generates one.".to_string());
+                    send_msg(tx, parts.join("\n\n")).await;
+                    return None;
                 }
             }
+            match generate_ssh_key(db).await {
+                Ok(pubkey) => {
+                    let (head, tail) = if action == SshKeygenAction::Rotate {
+                        ("New SSH key generated. Public key:", ", replacing the old line")
+                    } else {
+                        ("SSH key generated. Public key:", "")
+                    };
+                    parts.push(format!(
+                        "{head}\n\n{pubkey}\n\nAdd this to ~/.ssh/authorized_keys on your target hosts{tail}."
+                    ));
+                }
+                Err(e) => parts.push(e),
+            }
+            send_msg(tx, parts.join("\n\n")).await;
         }
         "/ssh-copy-id" => {
             if args.is_empty() {
@@ -4604,6 +4628,44 @@ pub(crate) fn provider_probe_target(
             })
         }
     }
+}
+
+/// `/ssh-keygen`'s generation: the ed25519 pair at `SSH_KEY_PATH`, its
+/// directory created `0700`, the comment the instance's name
+/// (`security::ssh_key_comment`; the default when the configuration cannot
+/// be read, so a label never holds up the key). Returns the public key
+/// line.
+async fn generate_ssh_key(db: &Arc<WardsonDbClient>) -> Result<String, String> {
+    use crate::tools::security::{ssh_key_comment, SSH_KEY_PATH};
+    let pub_path = format!("{SSH_KEY_PATH}.pub");
+    let ssh_dir = std::path::Path::new(SSH_KEY_PATH)
+        .parent()
+        .ok_or_else(|| "the key path has no directory".to_string())?;
+    std::fs::create_dir_all(ssh_dir)
+        .map_err(|e| format!("could not create {}: {e}", ssh_dir.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(ssh_dir, std::fs::Permissions::from_mode(0o700));
+    }
+    let comment = match config::load_config(db).await {
+        Ok(cfg) => ssh_key_comment(&cfg.name),
+        Err(_) => ssh_key_comment(""),
+    };
+    let out = crate::tools::subprocess("ssh-keygen")
+        .args(["-t", "ed25519", "-f", SSH_KEY_PATH, "-N", "", "-C", &comment])
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run ssh-keygen: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "ssh-keygen failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    std::fs::read_to_string(&pub_path)
+        .map(|s| s.trim().to_string())
+        .map_err(|e| format!("Key generated but could not read public key: {e}"))
 }
 
 /// `/local-ai-gateway`: show the provider gateway, store a URL and turn it on, turn
