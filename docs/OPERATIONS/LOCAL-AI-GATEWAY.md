@@ -67,7 +67,7 @@ Run on the operator's rebuilt image against the gateway at `axiom-app.ops.wsds:4
 | HTTPS trust: on an image without the CA seeded, `/local-ai-gateway https://axiom-app.ops.wsds:4000` is refused naming `/embra/state/ca-certificates/`; with it seeded, the boot journal counts the drop-ins and the command succeeds | TBD |
 | An Anthropic turn through the gateway: a `POST /v1/messages` row with tokens, timing and spend; tool calls and `/stop` mid-stream as direct | passed 2026-10-25 |
 | Gemini 3.1 Pro: the `cachedContents` POST as `cloud_passthrough`, the `streamGenerateContent` row, no stale-cache retry in the `gemini::cache` log; Gemini 4 Argon: the probe through the gateway | passed 2026-10-25 |
-| Ollama: `/model` lists the gateway upstream's models; a turn is a `/ollama/v1/chat/completions` row; `/status` shows the context window from `/api/ps`. LM Studio with `/lmstudio` | Ollama passed 2026-10-25; LM Studio TBD (another instance) |
+| Ollama: `/model` lists the gateway upstream's models; a turn is a `/ollama/v1/chat/completions` row; `/status` shows the context window from `/api/ps`. LM Studio with `/lmstudio` | passed 2026-10-25 (Ollama, and LM Studio on a second instance) |
 | DLP: a message carrying a fake `AKIA…` key pattern ends with `HTTP 403: … request blocked by gateway DLP policy (rule …)`; the Security tab shows the finding's path | passed 2026-10-25 |
 | `/provider --setup anthropic` with the gateway on: the key check's `GET /v1/models` is a row | passed 2026-10-25 |
 | `/local-ai-gateway off`: no new rows, `/status` names `api.anthropic.com`; `/local-ai-gateway on` again; `/local-ai-gateway reset` reads not configured | passed 2026-10-25 |
