@@ -26,6 +26,24 @@
 
 Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` management CLI, an image factory targeting bare metal and Kubernetes, and a sovereign-intelligence tier — A/B partitioned rollback, LUKS, mTLS, and fully offline local inference. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
+> **Pair it with WSDS Local AI Gateway — under evaluation.** embraOS can route every
+> provider request through [WSDS Local AI Gateway](https://github.com/Ward-Software-Defined-Systems/Local-AI-Gateway),
+> a monitoring, inspection and data-loss-prevention reverse proxy for LLM traffic:
+> `/local-ai-gateway https://<host>:4000` sends Anthropic, Gemini, Ollama and LM Studio
+> requests through its unified listener, each in the provider's own format and with the
+> operator's own key, and `/local-ai-gateway off` restores the direct path. A URL is stored
+> only once the listener has identified itself with the gateway's `x-local-ai-gateway`
+> header, and the gateway's own certificate authority is trusted through the operator's
+> CA drop-ins (`seed-state.sh --ca-dir`), so the key travels to the gateway over HTTPS.
+> The gateway records every request with its bodies, tokens, timing and routing for
+> inspection, prices cloud traffic at list rates, and blocks a request that carries a
+> secret before it leaves the network — embraOS reports such a block as the turn's error,
+> naming the rule. The operator is evaluating the gateway as the companion of embraOS and
+> for vendoring into this workspace the way WardSONDB was; until then it is a separate
+> install beside the OS, its unified listener and HTTPS on the gateway's `unified-router`
+> branch.
+> **[Routing the providers through the gateway →](docs/OPERATIONS/LOCAL-AI-GATEWAY.md)**
+
 > **Local inference — model selection matters.** All 118 tools dispatch identically on
 > every backend, but a locally-served model has to handle a large tool schema without
 > truncating or hallucinating calls, and plenty of otherwise-capable ones cannot. For
