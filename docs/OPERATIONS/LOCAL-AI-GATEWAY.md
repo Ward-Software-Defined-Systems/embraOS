@@ -2,7 +2,7 @@
 
 [WSDS Local AI Gateway](https://github.com/Ward-Software-Defined-Systems/Local-AI-Gateway) is a monitoring, inspection and data-loss-prevention reverse proxy for LLM traffic: a separate WSDS project that runs beside embraOS, never inside it. Its unified listener takes the standard Anthropic, Gemini and OpenAI-compatible paths and forwards each request, byte for byte and with the key the client sent, to the provider the path names. embraOS routes every provider request through it with one command, `/local-ai-gateway`, and back with another.
 
-**Status.** Under evaluation (2026-10-25). The operator is evaluating the gateway as the companion of embraOS and for vendoring into this workspace, the way WardSONDB was vendored at `crates/wardsondb`. The unified listener and the cloud backends live on the gateway's `unified-router` branch; its `main` has the per-backend listeners for LM Studio and Ollama only. The live checks of this page are listed at the end; a row marked TBD has not been run.
+**Status.** Under evaluation (2026-10-25). The operator is evaluating the gateway as the companion of embraOS and for vendoring into this workspace, the way WardSONDB was vendored at `crates/wardsondb`. The unified listener and the cloud backends live on the gateway's `unified-router` branch; its `main` has the per-backend listeners for LM Studio and Ollama only. Since the gateway's `d24dc9a` and `658fe29` (2026-10-25) every proxy-listener response carries `x-local-ai-gateway: <version>`, and a listener can serve HTTPS from the gateway's own certificate authority; embraOS requires the header before it stores a URL, and trusts the CA through the operator's drop-ins. The live checks of this page are listed at the end; a row marked TBD has not been run.
 
 ## What the gateway does with a request
 
@@ -11,12 +11,14 @@
 - **Recorded.** Every request is a row in the gateway's Requests tab: both bodies (redacted), the headers, the chunk timeline, tokens, time to first token, how it was routed, copy as curl. Cloud traffic is priced at list rates on the Cloud tab. Bodies are kept 7 days by default, in the gateway's SQLite database on the gateway host; the system prompt and the knowledge-graph context of every turn are in them.
 - **Scanned.** Request bodies are scanned for secrets and personal data before they leave. On a cloud provider a secret **blocks** the request: the gateway answers 403 with the header `x-gateway-blocked: dlp` and a body in the provider's own error shape whose message is `request blocked by gateway DLP policy (rule <id>)`. embraOS shows that body as the turn's error (`HTTP 403: …`); the Security tab shows the finding with its JSON path into the request, such as `$.messages[3].content`. Headers are not scanned, so the probe and the key check, GETs without a body, are never blocked.
 - **Streams pass through.** A 2xx body is forwarded chunk by chunk, never buffered; a client that hangs up drops the upstream stream, so `/stop` ends a generation through the gateway as it does direct. The gateway never follows a provider's redirect and sends none of its own on the proxy listeners.
+- **Identified.** Every response from a proxy listener carries `x-local-ai-gateway: <version>` (the gateway's crate version, `0.1.0` today), set after the gateway's handler, so it is on a proxied stream's head, on the merged model list and on every refusal; a header of that name from an upstream is replaced. `/local-ai-gateway <url>` and `on` read it from `GET <url>/v1/models`, the gateway-generated merged list, which the gateway does not record, and refuse a listener without it.
 
 ## Setting it up
 
 On the gateway host, in `config.toml` (`local-ai-gateway config init` writes one with every default):
 
-- `[unified] listen` must name a non-loopback address, such as `"0.0.0.0:4000"`; the default `127.0.0.1:4000` is unreachable from the OS. The proxy listeners carry no authentication and speak plain HTTP; bind them to a network you trust.
+- `[unified] listen` must name a non-loopback address, such as `"0.0.0.0:4000"`; the default `127.0.0.1:4000` is unreachable from the OS. The proxy listeners carry no authentication; bind them to a network you trust, and give the unified listener HTTPS (next bullet) so the provider key does not cross it in clear.
+- `[unified] tls = "on"` serves HTTPS on the same port, with a certificate from the gateway's own certificate authority: `tls/ca.pem` in its data directory, minted at the first start; the server certificate, reissued at every start, carries `localhost`, the loopback addresses, the host name, the listeners' addresses and the names in `[tls] sans`. The name embraOS uses in the URL must be one of them (`[tls] sans` adds it; a restart item). Export the CA on the gateway host, `local-ai-gateway tls ca-cert > Local-AI-Gateway_ca.pem` (or download it from the Settings tab; `tls show` prints the fingerprint to compare), and seed it into the OS's CA drop-ins with the VM stopped: `./scripts/seed-state.sh --ca-dir <directory holding the .pem>` ([BUILD/QUICK-START.md](../BUILD/QUICK-START.md#self-hosted-git-servers-private-ca)). Every HTTP client of the brain trusts the drop-ins in `/embra/state/ca-certificates/` beside the stock roots, read once at the first client a boot builds, so a seeded certificate takes effect at the next boot; the boot journal counts them (`operator CA drop-ins: N certificate(s)`). The URL is then `https://<host>:4000`: `https://` keeps its implicit 443, so the port is given.
 - Each backend embraOS uses is `enabled`, and its `upstream` is the server that should answer: `[backends.anthropic]` and `[backends.gemini]` default to the providers' hosts; `[backends.ollama]` and `[backends.lmstudio]` default to `http://127.0.0.1:11434` and `http://127.0.0.1:1234` **on the gateway host**, not to the endpoint stored in embraOS.
 - `[dlp.cloud] request_action` is `block` by default. The Security tab's test box shows what a text would trigger.
 
@@ -27,8 +29,8 @@ From an embraOS instance in QEMU, the host machine is `10.0.2.2`, and a name suc
 | Command | Effect |
 |---|---|
 | `/local-ai-gateway` | Show the gateway: whether one is stored, its URL, and whether requests go through it |
-| `/local-ai-gateway <url>` | Store the unified listener and turn it on. A bare host gets `http://` and `:4000`; `https://` keeps its implicit 443; a trailing `/` is dropped; a path is kept. A loopback host, a query or credentials in the URL are refused with the reason, and nothing is saved |
-| `/local-ai-gateway on`, `/local-ai-gateway off` | Turn the stored gateway on or off; the URL is kept |
+| `/local-ai-gateway <url>` | Store the unified listener and turn it on, once it has identified itself. The URL is normalized first: a bare host gets `http://` and `:4000`; `https://` keeps its implicit 443; a trailing `/` is dropped; a path is kept; a loopback host, a query or credentials in the URL are refused with the reason. Then `GET <url>/v1/models` must answer with the gateway's `x-local-ai-gateway` header: a listener that does not answer, or answers without it (another gateway, a plain model server, a gateway from before the header), is refused with the reason, and nothing is saved. A certificate the brain does not trust is refused naming the drop-in directory; a TLS listener given as `http://` is refused naming `https://`. The Info names the gateway's version |
+| `/local-ai-gateway on`, `/local-ai-gateway off` | Turn the stored gateway on, after the same identification, or off; the URL is kept |
 | `/local-ai-gateway reset` | Forget the gateway |
 
 A change is saved to `SystemConfig.provider_gateway` (serde-additive; an instance from before the field reads as not configured) and takes effect on the next message: the provider is rebuilt from the configuration at every turn start. The health probe runs through the new route at once; `/status` and the web console's provider pill show its result, and the probe's `endpoint` names the host reached: `api.anthropic.com` direct, `axiom-app.ops.wsds:4000` through the gateway. `/provider` adds `Gateway: on (<url>)` or `Gateway: off (<url> kept)` to its status line. The web console shows a `local-ai-gateway` pill while a gateway is stored: green while every provider request goes through it, grey while it is off, gone after `reset`; its tooltip carries the URL. `/status` carries a `provider_gateway` block with the URL and the switch. The first-boot wizard has no gateway step; set it after the first boot.
@@ -48,7 +50,7 @@ Direct, whatever `/local-ai-gateway` says: the first-boot wizard's key check (no
 
 ## Caveats
 
-- **The provider key reaches the gateway host in clear.** The proxy listeners speak plain HTTP. The brain says so when `/local-ai-gateway` stores an `http://` URL. An `https://` gateway behind a reverse proxy with a publicly trusted certificate passes the URL rule; the brain's provider clients trust their compiled-in public roots only, so a private CA does not work for them. TBD, untested.
+- **The provider key reaches the gateway host in clear over `http://`.** The brain says so when `/local-ai-gateway` stores an `http://` URL. Over `https://` the key is covered on the way: the gateway's own CA among the operator's drop-ins (above), or a publicly trusted certificate on a reverse proxy in front of the gateway, which needs no drop-in. A listener whose certificate the brain does not trust is refused at `/local-ai-gateway <url>`, before anything is saved.
 - **Bodies are stored on the gateway host.** Redacted of what the DLP rules match, kept 7 days, in an unencrypted database. Treat the gateway's data directory as you treat embraOS's DATA.
 - **A block is a failed turn.** The turn ends with the 403 and the rule's name; nothing was sent to the provider. A memory or a tool description that matches a rule blocks every turn until the finding is allowlisted on the gateway (`[[dlp.allowlist]]`) or the text changes. A block is never mistaken for a stale Gemini cache: the stale-cache retry fires only on a body that names a cached content. A blocked `cachedContents` creation makes the turn go uncached, and the stream request then names the rule.
 - **A toggle is a new probe target.** The probe announces a standing failure once more after a toggle, says nothing on a healthy flip, and reads Ollama's context window again at its next run.
@@ -56,11 +58,13 @@ Direct, whatever `/local-ai-gateway` says: the first-boot wizard's key check (no
 
 ## Live checks
 
-Run on the operator's rebuilt image against the gateway at `axiom-app.ops.wsds:4000`, with its Requests tab open. A row reads `passed <date>` once it has been run; TBD until then.
+Run on the operator's rebuilt image against the gateway at `axiom-app.ops.wsds:4000` (`[unified] tls = "on"`, its CA seeded into the drop-ins), with its Requests tab open. A row reads `passed <date>` once it has been run; TBD until then.
 
 | Check | Result |
 |---|---|
-| `/local-ai-gateway http://axiom-app.ops.wsds:4000`: the Info names the prefixes; `/provider` shows `Gateway: on`; `/status` names the gateway host; the probe's `GET /v1/models/<model>` is a row routed by prefix | TBD |
+| `/local-ai-gateway https://axiom-app.ops.wsds:4000`: the Info names the gateway's version and the prefixes; `/provider` shows `Gateway: on`; `/status` names the gateway host; the probe's `GET /v1/models/<model>` is a row routed by prefix | TBD |
+| The handshake: `/local-ai-gateway http://axiom-app.ops.wsds:4000` (plaintext to the TLS listener) is refused naming `https://`; the URL of a server that is not the gateway (an Ollama endpoint) is refused naming the missing header; nothing is saved either time (`/local-ai-gateway` still reads not configured) | TBD |
+| HTTPS trust: on an image without the CA seeded, `/local-ai-gateway https://axiom-app.ops.wsds:4000` is refused naming `/embra/state/ca-certificates/`; with it seeded, the boot journal counts the drop-ins and the command succeeds | TBD |
 | An Anthropic turn through the gateway: a `POST /v1/messages` row with tokens, timing and spend; tool calls and `/stop` mid-stream as direct | TBD |
 | Gemini 3.1 Pro: the `cachedContents` POST as `cloud_passthrough`, the `streamGenerateContent` row, no stale-cache retry in the `gemini::cache` log; Gemini 4 Argon: the probe through the gateway | TBD |
 | Ollama: `/model` lists the gateway upstream's models; a turn is a `/ollama/v1/chat/completions` row; `/status` shows the context window from `/api/ps`. LM Studio with `/lmstudio` | TBD |
@@ -69,5 +73,7 @@ Run on the operator's rebuilt image against the gateway at `axiom-app.ops.wsds:4
 | `/local-ai-gateway off`: no new rows, `/status` names `api.anthropic.com`; `/local-ai-gateway on` again; `/local-ai-gateway reset` reads not configured | TBD |
 | The `local-ai-gateway` pill: green after `/local-ai-gateway <url>`, grey after `off`, gone after `reset`; the mobile health chip stays green with the gateway off; `/status` shows `provider_gateway` | TBD |
 | `image_generate` through `/gemini/v1beta/interactions` | TBD |
+
+Checked from the build host on 2026-10-25, through the brain's own `identify` with the exported CA as `EMBRA_CA_DIR`: `https://axiom-app.ops.wsds:4000` identified itself as WSDS Local AI Gateway 0.1.0; without the CA the refusal read `invalid peer certificate: UnknownIssuer` and named the drop-in directory; `http://axiom-app.ops.wsds:4000` read `invalid HTTP version parsed` and named `https://`. With curl and the same CA, `GET /v1/models` and a 404 both carried `x-local-ai-gateway: 0.1.0`.
 
 *Last updated: 2026-10-25.*

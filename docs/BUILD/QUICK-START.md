@@ -190,6 +190,8 @@ To let the git tools reach a self-hosted GitLab/Gitea whose HTTPS certificate ch
 ./scripts/seed-state-mac.sh --ca-dir /path/to/dir-with-rootCA.pem
 ```
 
+The same drop-ins are trusted by every HTTP client of the brain beside the compiled-in roots — the GitLab tools, the Guardian transport of `http_request`, and the providers while `/local-ai-gateway` routes them through an HTTPS gateway with its own certificate authority ([OPERATIONS/LOCAL-AI-GATEWAY.md](../OPERATIONS/LOCAL-AI-GATEWAY.md)) — read once at the first client a boot builds, so a seeded certificate takes effect at the next boot.
+
 With no image argument, `seed-state.sh` resolves the same one `run-qemu.sh` boots
 (`$EMBRAOS_IMAGE`, then `buildroot-src/output/images/`, then `output/images/`), so you
 cannot seed one image and boot another. Pass a path — positional or `--image <path>` — to

@@ -20,7 +20,10 @@
 # --ca-dir copies *.pem / *.crt root CA certificates into STATE's
 # ca-certificates/ directory; embrad merges them with the stock CA bundle
 # at boot and exports GIT_SSL_CAINFO/SSL_CERT_FILE so the git tools trust
-# self-hosted git servers (e.g. GitLab behind an mkcert CA).
+# self-hosted git servers (e.g. GitLab behind an mkcert CA). The brain's
+# HTTP clients read the same directory themselves, once per boot: the
+# GitLab tools, the Guardian transport, the providers through an HTTPS
+# provider gateway (/local-ai-gateway).
 #
 # Image resolution (same precedence as run-qemu.sh and embraos-backup.sh, so
 # you always seed the image QEMU will actually boot):
