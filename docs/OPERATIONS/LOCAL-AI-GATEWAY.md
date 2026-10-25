@@ -68,7 +68,7 @@ Run on the operator's rebuilt image against the gateway at `axiom-app.ops.wsds:4
 | An Anthropic turn through the gateway: a `POST /v1/messages` row with tokens, timing and spend; tool calls and `/stop` mid-stream as direct | passed 2026-10-25 |
 | Gemini 3.1 Pro: the `cachedContents` POST as `cloud_passthrough`, the `streamGenerateContent` row, no stale-cache retry in the `gemini::cache` log; Gemini 4 Argon: the probe through the gateway | TBD |
 | Ollama: `/model` lists the gateway upstream's models; a turn is a `/ollama/v1/chat/completions` row; `/status` shows the context window from `/api/ps`. LM Studio with `/lmstudio` | TBD |
-| DLP: a message carrying a fake `AKIA…` key pattern ends with `HTTP 403: … request blocked by gateway DLP policy (rule …)`; the Security tab shows the finding's path | TBD |
+| DLP: a message carrying a fake `AKIA…` key pattern ends with `HTTP 403: … request blocked by gateway DLP policy (rule …)`; the Security tab shows the finding's path | passed 2026-10-25 |
 | `/provider --setup anthropic` with the gateway on: the key check's `GET /v1/models` is a row | TBD |
 | `/local-ai-gateway off`: no new rows, `/status` names `api.anthropic.com`; `/local-ai-gateway on` again; `/local-ai-gateway reset` reads not configured | passed 2026-10-25 |
 | The `local-ai-gateway` pill: green after `/local-ai-gateway <url>`, grey after `off`, gone after `reset`; the mobile health chip stays green with the gateway off; `/status` shows `provider_gateway` | passed 2026-10-25 |
