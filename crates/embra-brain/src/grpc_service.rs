@@ -3634,8 +3634,16 @@ async fn handle_slash_command(
                 let _ = std::fs::set_permissions(ssh_dir, std::fs::Permissions::from_mode(0o700));
             }
 
+            // The key's comment names this instance: the intelligence's
+            // name at `embraos`, so two instances' keys read apart in an
+            // authorized_keys file. A configuration that cannot be read
+            // gives the default; a label does not hold up the key.
+            let comment = match config::load_config(db).await {
+                Ok(cfg) => crate::tools::security::ssh_key_comment(&cfg.name),
+                Err(_) => crate::tools::security::ssh_key_comment(""),
+            };
             match crate::tools::subprocess("ssh-keygen")
-                .args(["-t", "ed25519", "-f", key_path, "-N", "", "-C", "embra@embraos"])
+                .args(["-t", "ed25519", "-f", key_path, "-N", "", "-C", &comment])
                 .output()
                 .await
             {

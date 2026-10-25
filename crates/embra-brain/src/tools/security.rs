@@ -459,6 +459,43 @@ fn ssh_command() -> tokio::process::Command {
     cmd
 }
 
+/// The comment `/ssh-keygen` writes into the key, which is what the
+/// operator reads beside it in an `authorized_keys` file: the
+/// intelligence's name (`SystemConfig.name`) as a slug — lowercased, ASCII
+/// letters, digits and hyphens, a run of anything else one hyphen — at
+/// `embraos`, so two instances' keys read apart. No name reads `embra`.
+/// The comment is a label with no part in authentication, and a key
+/// generated earlier keeps the comment it was made with.
+pub(crate) fn ssh_key_comment(name: &str) -> String {
+    let mut slug = String::new();
+    for c in name.to_lowercase().chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c);
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    let slug = slug.trim_end_matches('-');
+    let who = if slug.is_empty() { "embra" } else { slug };
+    format!("{who}@embraos")
+}
+
+#[cfg(test)]
+mod ssh_key_comment_tests {
+    use super::ssh_key_comment;
+
+    #[test]
+    fn the_key_comment_is_the_instances_name_as_a_slug() {
+        assert_eq!(ssh_key_comment("Meridian"), "meridian@embraos");
+        assert_eq!(ssh_key_comment("Pathfinder Prime"), "pathfinder-prime@embraos");
+        assert_eq!(ssh_key_comment("  Ode_7!  "), "ode-7@embraos");
+        assert_eq!(ssh_key_comment("Émile"), "mile@embraos", "ASCII only, by design");
+        for empty in ["", "   ", "!!!", "_-_"] {
+            assert_eq!(ssh_key_comment(empty), "embra@embraos", "{empty:?}");
+        }
+    }
+}
+
 struct SshSession {
     user_host: String,      // "user@host"
     control_path: String,   // "/tmp/embra-ssh-{uuid}"
