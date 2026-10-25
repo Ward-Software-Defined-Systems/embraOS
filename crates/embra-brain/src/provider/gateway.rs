@@ -251,6 +251,25 @@ pub(crate) fn status_line(cfg: &SystemConfig) -> String {
     }
 }
 
+/// The system-status rows the web console's `local-ai-gateway` pill is
+/// rendered from (`GetSystemStatus.services`, proxied by apid's `/status`):
+/// `local-ai-gateway` is `on` or `off` and `.detail` says what that means,
+/// with the URL; nothing while no gateway is stored.
+pub(crate) fn status_rows(cfg: &SystemConfig) -> Vec<(String, String)> {
+    let Some(g) = cfg.provider_gateway.as_ref() else {
+        return Vec::new();
+    };
+    let (state, detail) = if g.enabled {
+        ("on", format!("every provider request goes through {}", g.url))
+    } else {
+        ("off", format!("off; {} kept", g.url))
+    };
+    vec![
+        ("local-ai-gateway".to_string(), state.to_string()),
+        ("local-ai-gateway.detail".to_string(), detail),
+    ]
+}
+
 /// What `/provider` adds to its status line: the gateway, when one is
 /// stored.
 pub(crate) fn provider_line_suffix(cfg: &SystemConfig) -> String {
@@ -294,6 +313,31 @@ mod tests {
         assert_eq!(c.provider_gateway, Some(gw("http://gw:4000", true)));
         assert!(status_line(&c).starts_with("Provider gateway: on"));
         assert_eq!(provider_line_suffix(&c), " Gateway: on (http://gw:4000).");
+    }
+
+    #[test]
+    fn the_status_rows_say_on_or_off_with_the_url_and_nothing_when_unset() {
+        let mut c = cfg();
+        assert!(status_rows(&c).is_empty());
+        apply(&mut c, &GatewayAction::Set("http://gw:4000".into())).unwrap();
+        assert_eq!(
+            status_rows(&c),
+            vec![
+                ("local-ai-gateway".to_string(), "on".to_string()),
+                (
+                    "local-ai-gateway.detail".to_string(),
+                    "every provider request goes through http://gw:4000".to_string()
+                ),
+            ]
+        );
+        apply(&mut c, &GatewayAction::Off).unwrap();
+        assert_eq!(
+            status_rows(&c),
+            vec![
+                ("local-ai-gateway".to_string(), "off".to_string()),
+                ("local-ai-gateway.detail".to_string(), "off; http://gw:4000 kept".to_string()),
+            ]
+        );
     }
 
     #[test]

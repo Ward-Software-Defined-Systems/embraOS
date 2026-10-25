@@ -67,6 +67,8 @@ body { background:
 .pill.up .dot { background: var(--good); box-shadow: 0 0 7px var(--good); }
 .pill.down .dot { background: var(--bad); box-shadow: 0 0 7px var(--bad); }
 .pill.down { color: var(--bad); border-color: #3a201a; }
+/* A service switched off on purpose (the provider gateway): dim, not red. */
+.pill.off .dot { background: var(--txt-dim); }
 
 /* System-resource meters (CPU / MEM): label, mini fill bar, percent. */
 .pill.meter { gap: 8px; }
@@ -833,6 +835,7 @@ body.is-observer .term-wrap {
 .sheet-row .row-state { font-size: 12px; font-weight: 600; }
 .sheet-row .row-state.up { color: var(--good); }
 .sheet-row .row-state.down { color: var(--bad); }
+.sheet-row .row-state.off { color: var(--txt-dim); }
 
 /* Sessions sheet — new-session row at top with text input + button. */
 .sheet-newrow {

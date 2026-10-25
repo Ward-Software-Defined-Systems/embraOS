@@ -725,10 +725,16 @@ pub fn App() -> impl IntoView {
                 // of the 52 px top bar 2026-09-17 — they need the room, and
                 // the guided-setup control needed none). Rendered from the
                 // same 5-s /api/status poll; a `provider` pill appears once
-                // the brain has probed the active LLM endpoint.
+                // the brain has probed the active LLM endpoint, and a
+                // `local-ai-gateway` pill while a provider gateway is stored
+                // (`off` is a choice, shown grey, never red).
                 <div class="pills status-strip">
                     {move || status.get().services.into_iter().map(|s| {
-                        let cls = if s.state == "up" { "pill up" } else { "pill down" };
+                        let cls = match s.state.as_str() {
+                            "up" => "pill up",
+                            "off" => "pill off",
+                            _ => "pill down",
+                        };
                         view! {
                             <span class=cls title=s.detail.clone()>
                                 <span class="dot"></span>{s.name}

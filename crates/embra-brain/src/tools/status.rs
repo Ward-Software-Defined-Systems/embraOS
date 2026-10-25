@@ -125,6 +125,10 @@ pub struct SystemStatus {
     /// See [`ProviderStatus`]; omitted before the first probe.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<ProviderStatus>,
+    /// The provider gateway as configured (`/local-ai-gateway`): its URL
+    /// and whether requests go through it; omitted while none is stored.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_gateway: Option<crate::config::ProviderGateway>,
     pub embedding: EmbeddingHealth,
 }
 
@@ -142,11 +146,12 @@ fn count_exceeds_window(count: Option<u64>, window: usize) -> bool {
 pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
     // The independent reads at once (#47): the order of the window
     // warnings below is the only thing that may change.
-    let (healthy, collections, seal, stats) = tokio::join!(
+    let (healthy, collections, seal, stats, cfg) = tokio::join!(
         db.health(),
         db.list_collections(),
         crate::learning::seal_state(db),
         db.stats(),
+        crate::config::load_config(db),
     );
     let healthy = healthy.unwrap_or(false);
     let collections = collections.unwrap_or_default();
@@ -207,6 +212,7 @@ pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
             memory_collections,
         },
         provider: crate::provider::health::latest().map(ProviderStatus::from),
+        provider_gateway: cfg.ok().and_then(|c| c.provider_gateway),
         embedding: EmbeddingHealth {
             failures_write: failures.write,
             failures_query: failures.query,
@@ -701,10 +707,12 @@ mod native_args_tests {
                 }],
             },
             provider: None,
+            provider_gateway: None,
             embedding: EmbeddingHealth { failures_write: 0, failures_query: 0, last_failure: None },
         };
         let v = serde_json::to_value(&s).unwrap();
         assert!(v.get("provider").is_none(), "no probe yet → no provider block");
+        assert!(v.get("provider_gateway").is_none(), "no gateway stored → no block");
         assert_eq!(v["embedding"]["failures_write"], 0);
         assert_eq!(v["embedding"]["failures_query"], 0);
         assert!(v["embedding"].get("last_failure").is_none(), "no failure → no last_failure");

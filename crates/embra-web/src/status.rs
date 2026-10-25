@@ -62,7 +62,13 @@ fn is_http_200(response: &str) -> bool {
 }
 
 fn svc(name: &str, up: bool, detail: &str) -> Value {
-    json!({ "name": name, "state": if up { "up" } else { "down" }, "detail": detail })
+    svc_state(name, if up { "up" } else { "down" }, detail)
+}
+
+/// A pill with a named state: `up`, `down`, or `off` for a service the
+/// operator switched off on purpose (grey, never red).
+fn svc_state(name: &str, state: &str, detail: &str) -> Value {
+    json!({ "name": name, "state": state, "detail": detail })
 }
 
 /// The active LLM provider as apid's `/status` reports it: a `provider`
@@ -81,6 +87,26 @@ fn parse_provider_pill(resp: &str) -> Option<Value> {
         .and_then(Value::as_str)
         .unwrap_or("LLM provider");
     Some(svc("provider", state == "up", detail))
+}
+
+/// The provider gateway as the brain's `/status` reports it from the
+/// configuration: a `local-ai-gateway` pill, `up` while every provider
+/// request goes through it and `off` while it is stored and off; `None`
+/// when none is stored or the answer is not a 200.
+fn parse_gateway_pill(resp: &str) -> Option<Value> {
+    let body = resp.split("\r\n\r\n").nth(1)?;
+    let v: Value = serde_json::from_str(body.trim()).ok()?;
+    let services = v.get("data")?.get("services")?;
+    let state = match services.get("local-ai-gateway")?.as_str()? {
+        "on" => "up",
+        "off" => "off",
+        _ => return None,
+    };
+    let detail = services
+        .get("local-ai-gateway.detail")
+        .and_then(Value::as_str)
+        .unwrap_or("WSDS Local AI Gateway");
+    Some(svc_state("local-ai-gateway", state, detail))
 }
 
 /// Pull `data.embraos_version` out of apid's `/version` HTTP response.
@@ -116,6 +142,9 @@ pub async fn api_status(State(state): State<AppState>) -> Json<Value> {
     ];
     if let Some(provider) = brain_status_resp.as_deref().and_then(parse_provider_pill) {
         services.push(provider);
+    }
+    if let Some(gateway) = brain_status_resp.as_deref().and_then(parse_gateway_pill) {
+        services.push(gateway);
     }
 
     let version = version_resp
@@ -218,6 +247,29 @@ mod tests {
         let resp = http_200(r#"{"ok":true,"data":{"embraos_version":"0.14.0-phase1","service":"embra-apid"}}"#);
         assert_eq!(parse_version(&resp).as_deref(), Some("0.14.0-phase1"));
         assert_eq!(parse_version("HTTP/1.0 200 OK\r\n\r\nnot json"), None);
+    }
+
+    #[test]
+    fn the_gateway_pill_is_up_while_on_off_while_stored_and_absent_otherwise() {
+        let on = http_200(
+            r#"{"ok":true,"data":{"services":{"local-ai-gateway":"on","local-ai-gateway.detail":"every provider request goes through http://axiom-app.ops.wsds:4000"}}}"#,
+        );
+        let pill = parse_gateway_pill(&on).expect("pill");
+        assert_eq!(pill["name"], "local-ai-gateway");
+        assert_eq!(pill["state"], "up");
+        assert!(pill["detail"].as_str().unwrap().contains("axiom-app"));
+
+        let off = http_200(
+            r#"{"ok":true,"data":{"services":{"local-ai-gateway":"off","local-ai-gateway.detail":"off; http://axiom-app.ops.wsds:4000 kept"}}}"#,
+        );
+        assert_eq!(parse_gateway_pill(&off).unwrap()["state"], "off");
+
+        // No gateway stored, an unknown state, or a 503 body → no pill.
+        assert!(parse_gateway_pill(&http_200(r#"{"ok":true,"data":{"services":{"llm-provider":"up"}}}"#)).is_none());
+        assert!(parse_gateway_pill(&http_200(r#"{"ok":true,"data":{"services":{"local-ai-gateway":"maybe"}}}"#)).is_none());
+        let unavailable = "HTTP/1.0 503 Service Unavailable\r\ncontent-type: application/json\r\n\r\n\
+                           {\"ok\":false,\"error\":\"brain unreachable\"}";
+        assert!(parse_gateway_pill(unavailable).is_none());
     }
 
     #[test]

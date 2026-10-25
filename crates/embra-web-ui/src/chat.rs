@@ -596,7 +596,9 @@ fn services_health(s: &StatusData) -> &'static str {
     if s.services.is_empty() {
         return "warn"; // pre-first-poll
     }
-    let down = s.services.iter().filter(|svc| svc.state != "up").count();
+    // `off` is a service the operator switched off on purpose (the provider
+    // gateway); it counts against nothing.
+    let down = s.services.iter().filter(|svc| svc.state == "down").count();
     match down {
         0 => "up",
         n if n < s.services.len() => "warn",
@@ -957,10 +959,10 @@ pub fn ChatApp() -> impl IntoView {
                                     view! {
                                         <>
                                             {svcs.into_iter().map(|s| {
-                                                let state_class = if s.state == "up" {
-                                                    "row-state up"
-                                                } else {
-                                                    "row-state down"
+                                                let state_class = match s.state.as_str() {
+                                                    "up" => "row-state up",
+                                                    "off" => "row-state off",
+                                                    _ => "row-state down",
                                                 };
                                                 view! {
                                                     <div class="sheet-row svc"

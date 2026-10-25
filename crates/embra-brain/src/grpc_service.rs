@@ -1008,21 +1008,25 @@ impl BrainService for BrainGrpcService {
     }
 
     async fn get_system_status(&self, _req: Request<GetSystemStatusRequest>) -> Result<Response<GetSystemStatusResponse>, Status> {
+        // The service rows apid's REST /status proxies and the web console
+        // renders as pills (no proto change): the active LLM provider's
+        // last endpoint probe as two entries, and the provider gateway as
+        // configured (`on` or `off` with its URL, nothing while none is
+        // stored). A configuration that cannot be read adds no row.
+        let mut services = std::collections::HashMap::new();
+        if let Some(p) = crate::provider::health::latest() {
+            services.insert("llm-provider".to_string(), p.state().to_string());
+            services.insert("llm-provider.detail".to_string(), p.summary_line());
+        }
+        if let Ok(cfg) = config::load_config(&self.db).await {
+            services.extend(crate::provider::gateway::status_rows(&cfg));
+        }
         Ok(Response::new(GetSystemStatusResponse {
             version: env!("CARGO_PKG_VERSION").to_string(),
             uptime_seconds: self.start_time.elapsed().as_secs(),
             soul: None,
             wardsondb_status: if self.db.health().await.unwrap_or(false) { "healthy" } else { "unhealthy" }.to_string(),
-            // The active LLM provider's last endpoint probe, as two map
-            // entries (no proto change): apid's REST /status proxies this
-            // and the web console renders the `provider` pill from it.
-            services: match crate::provider::health::latest() {
-                Some(p) => std::collections::HashMap::from([
-                    ("llm-provider".to_string(), p.state().to_string()),
-                    ("llm-provider.detail".to_string(), p.summary_line()),
-                ]),
-                None => std::collections::HashMap::new(),
-            },
+            services,
         }))
     }
 

@@ -31,7 +31,7 @@ From an embraOS instance in QEMU, the host machine is `10.0.2.2`, and a name suc
 | `/local-ai-gateway on`, `/local-ai-gateway off` | Turn the stored gateway on or off; the URL is kept |
 | `/local-ai-gateway reset` | Forget the gateway |
 
-A change is saved to `SystemConfig.provider_gateway` (serde-additive; an instance from before the field reads as not configured) and takes effect on the next message: the provider is rebuilt from the configuration at every turn start. The health probe runs through the new route at once; `/status` and the web console's provider pill show its result, and the probe's `endpoint` names the host reached: `api.anthropic.com` direct, `axiom-app.ops.wsds:4000` through the gateway. `/provider` adds `Gateway: on (<url>)` or `Gateway: off (<url> kept)` to its status line. The first-boot wizard has no gateway step; set it after the first boot.
+A change is saved to `SystemConfig.provider_gateway` (serde-additive; an instance from before the field reads as not configured) and takes effect on the next message: the provider is rebuilt from the configuration at every turn start. The health probe runs through the new route at once; `/status` and the web console's provider pill show its result, and the probe's `endpoint` names the host reached: `api.anthropic.com` direct, `axiom-app.ops.wsds:4000` through the gateway. `/provider` adds `Gateway: on (<url>)` or `Gateway: off (<url> kept)` to its status line. The web console shows a `local-ai-gateway` pill while a gateway is stored: green while every provider request goes through it, grey while it is off, gone after `reset`; its tooltip carries the URL. `/status` carries a `provider_gateway` block with the URL and the switch. The first-boot wizard has no gateway step; set it after the first boot.
 
 ## What goes through, and what stays direct
 
@@ -67,6 +67,7 @@ Run on the operator's rebuilt image against the gateway at `axiom-app.ops.wsds:4
 | DLP: a message carrying a fake `AKIA…` key pattern ends with `HTTP 403: … request blocked by gateway DLP policy (rule …)`; the Security tab shows the finding's path | TBD |
 | `/provider --setup anthropic` with the gateway on: the key check's `GET /v1/models` is a row | TBD |
 | `/local-ai-gateway off`: no new rows, `/status` names `api.anthropic.com`; `/local-ai-gateway on` again; `/local-ai-gateway reset` reads not configured | TBD |
+| The `local-ai-gateway` pill: green after `/local-ai-gateway <url>`, grey after `off`, gone after `reset`; the mobile health chip stays green with the gateway off; `/status` shows `provider_gateway` | TBD |
 | `image_generate` through `/gemini/v1beta/interactions` | TBD |
 
 *Last updated: 2026-10-25.*
