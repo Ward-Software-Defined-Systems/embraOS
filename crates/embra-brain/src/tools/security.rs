@@ -55,9 +55,9 @@ fn storage_report(mounts: &str) -> String {
     out
 }
 
-/// The system overview the tool's description promises: processes, load,
-/// the listening ports, the seal's state and the storage mounts' flags,
-/// and whether a container is detected.
+/// The system overview the tool's description promises, and nothing it
+/// does not: processes, load, the listening ports, the seal's state and
+/// the storage mounts' flags.
 pub async fn security_check(db: &WardsonDbClient) -> String {
     let mut output = String::from("=== Security Check ===\n");
 
@@ -129,13 +129,6 @@ pub async fn security_check(db: &WardsonDbClient) -> String {
         Ok(mounts) => output.push_str(&storage_report(&mounts)),
         Err(_) => output.push_str("Storage: /proc/mounts unavailable\n"),
     }
-
-    // Container detection
-    let in_container = tokio::fs::metadata("/.dockerenv").await.is_ok();
-    output.push_str(&format!(
-        "Container: {}\n",
-        if in_container { "yes (Docker)" } else { "not detected" }
-    ));
 
     output
 }
