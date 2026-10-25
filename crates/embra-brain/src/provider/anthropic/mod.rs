@@ -63,10 +63,14 @@ const MAX_TOKENS: u32 = 128_000;
 /// supported model (Opus 5.5, Opus 5, Opus 4.8, Fable 5.1, Fable 5 — and
 /// the legacy 4.7).
 const DEFAULT_EFFORT: &str = "max";
-const API_URL: &str = "https://api.anthropic.com/v1/messages";
+/// The provider's own host. Every URL is built on the base the provider was
+/// given: this one direct, the provider gateway's `{url}/anthropic` through
+/// `provider::gateway::base_for` ([`AnthropicProvider::with_base_url`]).
+pub(crate) const DIRECT_BASE: &str = "https://api.anthropic.com";
+const MESSAGES_PATH: &str = "/v1/messages";
+pub(crate) const MODELS_PATH: &str = "/v1/models";
 pub(crate) const API_VERSION: &str = "2023-06-01";
 const BETA: &str = "prompt-caching-2024-07-31";
-pub(crate) const MODELS_URL: &str = "https://api.anthropic.com/v1/models";
 const VALIDATE_TIMEOUT: Duration = Duration::from_secs(10);
 /// TCP + TLS establishment bound for the streaming client.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -99,6 +103,9 @@ pub struct AnthropicProvider {
     /// [`DEFAULT_EFFORT`]; overridden per-instance via [`Self::with_effort`]
     /// from the `/effort`-persisted config value.
     effort: String,
+    /// The base every URL is built on: [`DIRECT_BASE`], or the provider
+    /// gateway's prefixed base ([`Self::with_base_url`]).
+    base_url: String,
     http: Client,
 }
 
@@ -131,6 +138,7 @@ impl AnthropicProvider {
             model,
             display_name,
             effort: DEFAULT_EFFORT.to_string(),
+            base_url: DIRECT_BASE.to_string(),
             http,
         }
     }
@@ -142,6 +150,22 @@ impl AnthropicProvider {
     pub fn with_effort(mut self, effort: String) -> Self {
         self.effort = effort;
         self
+    }
+
+    /// Build every URL on `base` instead of [`DIRECT_BASE`]: the provider
+    /// gateway's `{url}/anthropic`, from `provider::gateway::base_for`. A
+    /// trailing `/` is dropped so the paths join cleanly.
+    pub fn with_base_url(mut self, base: String) -> Self {
+        self.base_url = base.trim_end_matches('/').to_string();
+        self
+    }
+
+    fn messages_url(&self) -> String {
+        format!("{}{MESSAGES_PATH}", self.base_url)
+    }
+
+    fn models_url(&self) -> String {
+        format!("{}{MODELS_PATH}", self.base_url)
     }
 
     /// Build the `/v1/messages` request body. Pure (no I/O) so the exact
@@ -229,6 +253,11 @@ impl LlmProvider for AnthropicProvider {
         ProviderKind::Anthropic
     }
 
+    #[cfg(test)]
+    fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     // One attempt, no retry: an overloaded API reads as `Unknown`, a
     // network failure as `NetworkError`, and neither as an invalid key.
     async fn validate_key(&self, key: &str) -> ValidationResult {
@@ -243,7 +272,7 @@ impl LlmProvider for AnthropicProvider {
             Err(_) => return ValidationResult::Unknown,
         };
         let resp = client
-            .get(MODELS_URL)
+            .get(self.models_url())
             .header("x-api-key", key)
             .header("anthropic-version", API_VERSION)
             .send()
@@ -284,11 +313,12 @@ impl LlmProvider for AnthropicProvider {
         // immediately while any backoff runs.
         let http = self.http.clone();
         let api_key = self.api_key.clone();
+        let url = self.messages_url();
 
         let (tx, rx) = mpsc::channel::<wire::AnthropicStreamEvent>(128);
         let tx_clone = tx.clone();
         tokio::spawn(async move {
-            match send_with_retry(&http, API_URL, &api_key, &body, RETRY_DELAYS_SECS).await {
+            match send_with_retry(&http, &url, &api_key, &body, RETRY_DELAYS_SECS).await {
                 Ok(response) => {
                     if let Err(e) =
                         streaming::process_sse_stream(response, tx_clone.clone()).await
@@ -577,6 +607,34 @@ mod tests {
         );
         assert_eq!(p.model, "claude-opus-4-7");
         assert_eq!(p.display_name(), "opus-4.7");
+    }
+
+    #[test]
+    fn the_messages_and_models_urls_follow_the_base() {
+        let direct = AnthropicProvider::new(String::new());
+        assert_eq!(direct.messages_url(), "https://api.anthropic.com/v1/messages");
+        assert_eq!(direct.models_url(), "https://api.anthropic.com/v1/models");
+        let routed =
+            AnthropicProvider::new(String::new()).with_base_url("http://gw:4000/anthropic/".into());
+        assert_eq!(routed.messages_url(), "http://gw:4000/anthropic/v1/messages");
+        assert_eq!(routed.models_url(), "http://gw:4000/anthropic/v1/models");
+        assert_eq!(routed.base_url(), "http://gw:4000/anthropic");
+    }
+
+    #[tokio::test]
+    async fn validate_key_asks_the_models_path_on_the_base_it_was_built_with() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/anthropic/v1/models"))
+            .and(header("x-api-key", "sk-test"))
+            .and(header("anthropic-version", API_VERSION))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let p = AnthropicProvider::new(String::new())
+            .with_base_url(format!("{}/anthropic", server.uri()));
+        assert_eq!(p.validate_key("sk-test").await, ValidationResult::Valid);
     }
 
     #[test]

@@ -169,6 +169,13 @@ pub struct SystemConfig {
     /// runtime via `/show-reasoning`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_reasoning: Option<bool>,
+    /// The provider gateway: WSDS Local AI Gateway's unified listener, set
+    /// with `/gateway`. While `enabled`, every provider request is built on
+    /// `"{url}/<prefix>"` (`provider::gateway::base_for`); `/gateway off`
+    /// keeps the URL for `/gateway on`. Serde-additive `Option` — no schema
+    /// bump; one more field on every `SystemConfig` literal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_gateway: Option<ProviderGateway>,
     /// OpenAI-compat preset configuration (Sprint 5 schema v11).
     /// Holds endpoint URL and selected model id per preset; bearer
     /// tokens are NOT here (STATE-only per Locked Decision #8).
@@ -216,6 +223,7 @@ impl SystemConfig {
             gemini_api_key: None,
             max_tool_iterations: None,
             show_reasoning: None,
+            provider_gateway: None,
             openai_compat: OpenAiCompatConfig::default(),
         }
     }
@@ -226,6 +234,17 @@ impl SystemConfig {
     pub fn show_reasoning(&self) -> bool {
         self.show_reasoning.unwrap_or(true)
     }
+}
+
+/// The provider gateway stored in [`SystemConfig::provider_gateway`]: the
+/// URL of WSDS Local AI Gateway's unified listener and whether requests go
+/// through it. `enabled` defaults to off, so a document that carries only
+/// the URL reads as stored and off.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderGateway {
+    pub url: String,
+    #[serde(default)]
+    pub enabled: bool,
 }
 
 /// Per-preset OpenAI-compat config. Endpoint and model name only;
@@ -621,8 +640,9 @@ enum ApiKeyCheck {
 pub(crate) async fn check_api_key(
     provider: ProviderKind,
     key: &str,
+    gateway: Option<&ProviderGateway>,
 ) -> Result<(), String> {
-    match validate_api_key_for(provider, key).await {
+    match validate_api_key_for(provider, key, gateway).await {
         ApiKeyCheck::Valid => Ok(()),
         ApiKeyCheck::Invalid(msg) => Err(msg),
     }
@@ -631,8 +651,14 @@ pub(crate) async fn check_api_key(
 /// Probe the chosen provider's model-listing endpoint with the given
 /// key. Single source of truth — the providers' own `validate_key`
 /// impls (constructed with an empty key for the probe) carry the
-/// HTTP shape and status mapping.
-async fn validate_api_key_for(provider: ProviderKind, key: &str) -> ApiKeyCheck {
+/// HTTP shape and status mapping. The probe goes where the next turn
+/// would (`provider::gateway::base_for`): through the provider gateway
+/// when `gateway` is stored and on, to the provider's own host otherwise.
+async fn validate_api_key_for(
+    provider: ProviderKind,
+    key: &str,
+    gateway: Option<&ProviderGateway>,
+) -> ApiKeyCheck {
     if key.is_empty() {
         return ApiKeyCheck::Invalid("API key is empty.".into());
     }
@@ -644,9 +670,25 @@ async fn validate_api_key_for(provider: ProviderKind, key: &str) -> ApiKeyCheck 
                     "Anthropic API key must start with 'sk-'.".into(),
                 );
             }
-            AnthropicProvider::new(String::new()).validate_key(key).await
+            AnthropicProvider::new(String::new())
+                .with_base_url(crate::provider::gateway::base_for(
+                    gateway,
+                    ProviderKind::Anthropic,
+                    crate::provider::anthropic::DIRECT_BASE,
+                ))
+                .validate_key(key)
+                .await
         }
-        ProviderKind::Gemini => GeminiProvider::new(String::new()).validate_key(key).await,
+        ProviderKind::Gemini => {
+            GeminiProvider::new(String::new())
+                .with_base_url(crate::provider::gateway::base_for(
+                    gateway,
+                    ProviderKind::Gemini,
+                    crate::provider::gemini::DIRECT_BASE,
+                ))
+                .validate_key(key)
+                .await
+        }
         // OpenAI-compat presets validate via endpoint+bearer probe in the
         // wizard's Stage 4 flow, not via this api-key path. This arm is
         // unreachable from the current 2-way wizard but kept for
@@ -900,7 +942,9 @@ pub async fn run_config_wizard_grpc(
                     }
                 )),
             })).await;
-            match validate_api_key_for(provider_kind, &candidate).await {
+            // The first boot has no provider gateway yet: the check goes
+            // to the provider's own host.
+            match validate_api_key_for(provider_kind, &candidate, None).await {
                 ApiKeyCheck::Valid => break candidate,
                 ApiKeyCheck::Invalid(msg) => {
                     let _ = tx.send(Ok(ConversationResponse {
@@ -1039,6 +1083,7 @@ pub async fn run_config_wizard_grpc(
         gemini_api_key,
         max_tool_iterations: None,
         show_reasoning: None,
+        provider_gateway: None,
         openai_compat,
     };
     save_config(db, &config).await?;
@@ -1300,6 +1345,7 @@ pub(crate) mod tests_support {
             gemini_api_key: None,
             max_tool_iterations: None,
             show_reasoning: None,
+            provider_gateway: None,
             openai_compat: crate::config::OpenAiCompatConfig::default(),
         }
     }
@@ -1372,12 +1418,81 @@ mod max_tool_iterations_serde_tests {
     }
 
     #[test]
+    fn provider_gateway_is_serde_additive_and_absent_when_none() {
+        // Absent on the wire when None, so a stored document keeps its
+        // bytes; a round trip keeps the URL and the switch; a document that
+        // carries only the URL reads as stored and off.
+        let json = serde_json::to_value(minimal_cfg()).unwrap();
+        assert!(json.get("provider_gateway").is_none());
+        let mut cfg = minimal_cfg();
+        cfg.provider_gateway = Some(super::ProviderGateway {
+            url: "http://gw:4000".into(),
+            enabled: true,
+        });
+        let json = serde_json::to_value(&cfg).unwrap();
+        let back: SystemConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(back.provider_gateway, cfg.provider_gateway);
+        let mut json = serde_json::to_value(minimal_cfg()).unwrap();
+        json["provider_gateway"] = serde_json::json!({"url": "http://gw:4000"});
+        let back: SystemConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            back.provider_gateway,
+            Some(super::ProviderGateway {
+                url: "http://gw:4000".into(),
+                enabled: false,
+            })
+        );
+    }
+
+    #[test]
     fn explicit_value_round_trips() {
         let mut cfg = minimal_cfg();
         cfg.max_tool_iterations = Some(42);
         let json = serde_json::to_value(&cfg).unwrap();
         let back: SystemConfig = serde_json::from_value(json).unwrap();
         assert_eq!(back.max_tool_iterations, Some(42));
+    }
+}
+
+#[cfg(test)]
+mod gateway_key_check_tests {
+    //! The key check after boot goes where the next turn would.
+    use super::*;
+    use wiremock::matchers::{header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn check_api_key_asks_the_base_the_gateway_rule_gives() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/anthropic/v1/models"))
+            .and(header("x-api-key", "sk-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gemini/v1beta/models"))
+            .and(header("x-goog-api-key", "g-test"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let gateway = ProviderGateway {
+            url: server.uri(),
+            enabled: true,
+        };
+        assert!(check_api_key(ProviderKind::Anthropic, "sk-test", Some(&gateway)).await.is_ok());
+        assert!(check_api_key(ProviderKind::Gemini, "g-test", Some(&gateway)).await.is_ok());
+        // Off, the same check goes to the provider's own host: a key the
+        // mock never saw is not reported valid by it.
+        let off = ProviderGateway {
+            url: server.uri(),
+            enabled: false,
+        };
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+        assert!(check_api_key(ProviderKind::Anthropic, "", Some(&off)).await.is_err());
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
     }
 }
 

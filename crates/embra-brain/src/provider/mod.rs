@@ -12,6 +12,7 @@
 //! - `gemini` (Stages 3–6) — new.
 
 pub mod anthropic;
+pub mod gateway;
 pub mod gemini;
 pub mod health;
 pub mod image;
@@ -189,6 +190,12 @@ pub trait LlmProvider: Send + Sync {
     /// `display_name()` cannot tell Ollama from LM Studio.
     #[cfg(test)]
     fn kind(&self) -> ProviderKind;
+
+    /// The base every URL of this provider is built on. Test-only: the
+    /// tests of the provider factory read it to tell a direct provider from
+    /// one routed through the provider gateway.
+    #[cfg(test)]
+    fn base_url(&self) -> &str;
 
     /// Probe the provider's model-listing endpoint with the given key.
     /// Called by the config wizard; never on the hot path.

@@ -48,7 +48,8 @@ const DEFAULT_MAX_TOOL_ITERATIONS: usize = 100;
 /// completed briefing persists its turns and thereby bumps `last_active`,
 /// so the gate is self-limiting. `/switch` briefs unconditionally (explicit
 /// user action). Module const, not SystemConfig — SystemConfig has no
-/// Default and 10 construction literals.
+/// Default, and every construction literal is a maintenance site for a
+/// new field (`grep anthropic_effort:` finds them).
 const RESUME_BRIEFING_MIN_IDLE_SECS: i64 = 30 * 60;
 
 /// Minimum spacing between briefing STARTS per session. Covers the
@@ -4505,12 +4506,14 @@ fn build_openai_compat_provider(
     let bearer = std::env::var(bearer_env_var(preset))
         .ok()
         .filter(|s| !s.is_empty());
+    // The stored endpoint is the direct base; while the provider gateway is
+    // on, the gateway's `{url}/ollama` or `{url}/lmstudio` stands in for it
+    // and the gateway's own upstream answers.
+    let base = crate::provider::gateway::base_for(config.provider_gateway.as_ref(), kind, endpoint);
     let provider = match preset {
-        OpenAiCompatPreset::Ollama => {
-            OpenAICompatProvider::ollama(endpoint.to_string(), bearer, model.to_string())
-        }
+        OpenAiCompatPreset::Ollama => OpenAICompatProvider::ollama(base, bearer, model.to_string()),
         OpenAiCompatPreset::LmStudio => {
-            OpenAICompatProvider::lm_studio(endpoint.to_string(), bearer, model.to_string())
+            OpenAICompatProvider::lm_studio(base, bearer, model.to_string())
         }
     };
     // `/effort` override for this preset, sent verbatim when set; `None`
@@ -4522,9 +4525,10 @@ fn build_openai_compat_provider(
 
 /// What the endpoint-health probe should check, resolved from persisted
 /// config with the SAME resolvers a turn uses (env model overrides, the
-/// per-provider key with the boot-key fallback, the preset's bearer), so
-/// the probe never disagrees with the next request. `None` = nothing to
-/// probe yet (no key / no preset endpoint — a pre-wizard boot).
+/// per-provider key with the boot-key fallback, the preset's bearer, the
+/// base the provider gateway rule gives), so the probe never disagrees
+/// with the next request. `None` = nothing to probe yet (no key / no
+/// preset endpoint — a pre-wizard boot).
 pub(crate) fn provider_probe_target(
     cfg: &config::SystemConfig,
     boot_key: &str,
@@ -4549,7 +4553,14 @@ pub(crate) fn provider_probe_target(
                 kind,
                 model,
                 key,
-                endpoint: String::new(),
+                endpoint: crate::provider::gateway::base_for(
+                    cfg.provider_gateway.as_ref(),
+                    kind,
+                    match kind {
+                        ProviderKind::Anthropic => crate::provider::anthropic::DIRECT_BASE,
+                        _ => crate::provider::gemini::DIRECT_BASE,
+                    },
+                ),
             })
         }
         ProviderKind::Ollama | ProviderKind::LmStudio => {
@@ -4566,7 +4577,11 @@ pub(crate) fn provider_probe_target(
                 kind,
                 model: model.to_string(),
                 key: bearer,
-                endpoint: endpoint.to_string(),
+                endpoint: crate::provider::gateway::base_for(
+                    cfg.provider_gateway.as_ref(),
+                    kind,
+                    endpoint,
+                ),
             })
         }
     }
@@ -4595,7 +4610,13 @@ pub(crate) fn build_provider_from_config(
     match kind {
         ProviderKind::Gemini => {
             let model_id = resolve_gemini_model_id(cfg);
+            // The base first: `with_cache` builds the cache manager on it.
             let p = GeminiProvider::with_model(active_key, model_id)
+                .with_base_url(crate::provider::gateway::base_for(
+                    cfg.provider_gateway.as_ref(),
+                    ProviderKind::Gemini,
+                    crate::provider::gemini::DIRECT_BASE,
+                ))
                 .with_effort(resolve_provider_effort(ProviderKind::Gemini, cfg));
             let p = match gemini_cache_db {
                 Some(db) => p.with_cache(db),
@@ -4607,6 +4628,11 @@ pub(crate) fn build_provider_from_config(
             let (model_id, display) = resolve_anthropic_model(cfg);
             Ok(Arc::new(
                 AnthropicProvider::with_model(active_key, model_id, display)
+                    .with_base_url(crate::provider::gateway::base_for(
+                        cfg.provider_gateway.as_ref(),
+                        ProviderKind::Anthropic,
+                        crate::provider::anthropic::DIRECT_BASE,
+                    ))
                     .with_effort(resolve_anthropic_effort(cfg)),
             ))
         }
@@ -5249,20 +5275,8 @@ async fn handle_pending_key_setup(
         return;
     }
 
-    // Validate via the same probe path the wizard uses.
-    if let Err(msg) = config::check_api_key(target, &candidate).await {
-        send_msg(
-            format!(
-                "{} Try again on the next message, or use a non-/provider command to abort.",
-                msg
-            ),
-            SystemMessageType::Error,
-        )
-        .await;
-        return;
-    }
-
-    // Persist into config.
+    // The config first: the key is persisted into it, and the check goes
+    // where the next turn would (through the provider gateway when on).
     let mut cfg = match config::load_config(db).await {
         Ok(c) => c,
         Err(_) => {
@@ -5276,6 +5290,21 @@ async fn handle_pending_key_setup(
             return;
         }
     };
+
+    // Validate via the same probe path the wizard uses.
+    if let Err(msg) =
+        config::check_api_key(target, &candidate, cfg.provider_gateway.as_ref()).await
+    {
+        send_msg(
+            format!(
+                "{} Try again on the next message, or use a non-/provider command to abort.",
+                msg
+            ),
+            SystemMessageType::Error,
+        )
+        .await;
+        return;
+    }
     match target {
         ProviderKind::Anthropic => cfg.anthropic_api_key = Some(candidate.clone()),
         ProviderKind::Gemini => cfg.gemini_api_key = Some(candidate.clone()),
@@ -5982,10 +6011,18 @@ async fn handle_local_model_command(
     };
     let (endpoint, current) = local_endpoint_and_model(&cfg, preset);
     let bearer = std::env::var(bearer_env_var(preset)).ok().filter(|s| !s.is_empty());
+    // The list comes from where the next turn goes: the stored endpoint, or
+    // the provider gateway's prefixed base while it is on. The stored
+    // endpoint itself is what the selector keeps.
+    let probe_base = crate::provider::gateway::base_for(
+        cfg.provider_gateway.as_ref(),
+        preset.as_kind(),
+        &endpoint,
+    );
 
     let models = match crate::provider::openai_compat::OpenAICompatProvider::probe_models(
         preset,
-        &endpoint,
+        &probe_base,
         bearer.as_deref(),
     )
     .await
@@ -5993,7 +6030,7 @@ async fn handle_local_model_command(
         Ok(models) if !models.is_empty() => models,
         Ok(_) => {
             send(
-                format!("No models found at {endpoint}. Pull or load a model on the server, then run /model again."),
+                format!("No models found at {probe_base}. Pull or load a model on the server, then run /model again."),
                 SystemMessageType::Error,
             )
             .await;
@@ -6002,7 +6039,7 @@ async fn handle_local_model_command(
         Err(e) => {
             send(
                 format!(
-                    "Could not list the models at {endpoint}: {e}. /provider --setup {} reconfigures the endpoint.",
+                    "Could not list the models at {probe_base}: {e}. /provider --setup {} reconfigures the endpoint.",
                     preset.as_kind().as_str()
                 ),
                 SystemMessageType::Error,
@@ -7144,41 +7181,22 @@ async fn run_learning_loop(
     // persisted config (or its anthropic default for first-run).
     let provider_kind = ProviderKind::from_str(&config.api_provider)
         .unwrap_or(ProviderKind::Anthropic);
-    let active_key = config
-        .key_for(provider_kind)
-        .map(str::to_string)
-        .unwrap_or_else(|| api_key.to_string());
-    let provider: Arc<dyn LlmProvider> = match provider_kind {
-        ProviderKind::Gemini => {
-            let model_id = resolve_gemini_model_id(&config);
-            info!(
-                target: "gemini::diag",
-                model = %model_id,
-                explicit_cache = crate::provider::gemini::explicit_cache_supported(&model_id),
-                "gemini learning turn starting"
-            );
-            Arc::new(
-                GeminiProvider::with_model(active_key, model_id)
-                    .with_effort(resolve_provider_effort(ProviderKind::Gemini, &config))
-                    .with_cache(db.clone()),
-            )
-        }
-        ProviderKind::Anthropic => {
-            let (model_id, display) = resolve_anthropic_model(&config);
-            Arc::new(
-                AnthropicProvider::with_model(active_key, model_id, display)
-                    .with_effort(resolve_anthropic_effort(&config)),
-            )
-        }
-        ProviderKind::Ollama | ProviderKind::LmStudio => {
-            match build_openai_compat_provider(provider_kind, &config) {
-                Ok(p) => p,
-                Err(msg) => {
-                    return Err(anyhow::anyhow!(msg));
-                }
-            }
-        }
-    };
+    if provider_kind == ProviderKind::Gemini {
+        let model_id = resolve_gemini_model_id(&config);
+        info!(
+            target: "gemini::diag",
+            model = %model_id,
+            explicit_cache = crate::provider::gemini::explicit_cache_supported(&model_id),
+            "gemini learning turn starting"
+        );
+    }
+    // The one builder the turn loop and the replicant check use: the key
+    // fallback, the model and effort resolvers, the context cache and the
+    // provider gateway all come with it. An unconfigured preset is the
+    // error it names.
+    let provider: Arc<dyn LlmProvider> =
+        build_provider_from_config(&config, api_key, Some(db.clone()))
+            .map_err(|msg| anyhow::anyhow!(msg))?;
     let empty_manifest: ToolManifest = provider.build_tool_manifest(&[]);
 
     // Resume support: load any previously persisted documents
@@ -8859,6 +8877,7 @@ mod native_loop_tests {
             gemini_api_key: None,
             max_tool_iterations: None,
             show_reasoning: None,
+            provider_gateway: None,
             openai_compat: config::OpenAiCompatConfig::default(),
         }
     }
@@ -9057,6 +9076,77 @@ mod native_loop_tests {
         // replicant check → fail closed, no proposal).
         cfg.api_provider = "ollama".to_string();
         assert!(build_provider_from_config(&cfg, "", None).is_err());
+    }
+
+    /// With the provider gateway stored and on, every kind is built on the
+    /// gateway's prefixed base; off, each on its own host and the presets
+    /// on their stored endpoint.
+    #[test]
+    fn build_provider_from_config_routes_every_kind_through_the_gateway_when_on() {
+        let mut cfg = empty_config();
+        cfg.provider_gateway = Some(config::ProviderGateway {
+            url: "http://gw:4000".into(),
+            enabled: true,
+        });
+        cfg.openai_compat.ollama_endpoint = "http://mac:11434".into();
+        cfg.openai_compat.ollama_model = "qwen3.8:27b".into();
+        cfg.openai_compat.lm_studio_endpoint = "http://mac:1234".into();
+        cfg.openai_compat.lm_studio_model = "qwen/qwen3.8-27b".into();
+        for (kind, base) in [
+            ("anthropic", "http://gw:4000/anthropic"),
+            ("gemini", "http://gw:4000/gemini"),
+            ("ollama", "http://gw:4000/ollama"),
+            ("lm_studio", "http://gw:4000/lmstudio"),
+        ] {
+            cfg.api_provider = kind.to_string();
+            let p = build_provider_from_config(&cfg, "k", None).unwrap();
+            assert_eq!(p.base_url(), base, "{kind}");
+        }
+        cfg.provider_gateway.as_mut().unwrap().enabled = false;
+        for (kind, base) in [
+            ("anthropic", "https://api.anthropic.com"),
+            ("gemini", "https://generativelanguage.googleapis.com"),
+            ("ollama", "http://mac:11434"),
+            ("lm_studio", "http://mac:1234"),
+        ] {
+            cfg.api_provider = kind.to_string();
+            let p = build_provider_from_config(&cfg, "k", None).unwrap();
+            assert_eq!(p.base_url(), base, "{kind} off");
+        }
+    }
+
+    /// The probe's target carries the same base the turn is built on.
+    #[test]
+    fn provider_probe_target_carries_the_routed_base_for_every_kind() {
+        let mut cfg = empty_config();
+        cfg.anthropic_api_key = Some("sk-a".into());
+        cfg.gemini_api_key = Some("g".into());
+        cfg.openai_compat.ollama_endpoint = "http://mac:11434".into();
+        cfg.openai_compat.ollama_model = "qwen3.8:27b".into();
+        cfg.openai_compat.lm_studio_endpoint = "http://mac:1234".into();
+        cfg.openai_compat.lm_studio_model = "m".into();
+        for (kind, direct) in [
+            ("anthropic", "https://api.anthropic.com"),
+            ("gemini", "https://generativelanguage.googleapis.com"),
+            ("ollama", "http://mac:11434"),
+            ("lm_studio", "http://mac:1234"),
+        ] {
+            cfg.api_provider = kind.to_string();
+            assert_eq!(provider_probe_target(&cfg, "").unwrap().endpoint, direct, "{kind}");
+        }
+        cfg.provider_gateway = Some(config::ProviderGateway {
+            url: "http://gw:4000".into(),
+            enabled: true,
+        });
+        for (kind, routed) in [
+            ("anthropic", "http://gw:4000/anthropic"),
+            ("gemini", "http://gw:4000/gemini"),
+            ("ollama", "http://gw:4000/ollama"),
+            ("lm_studio", "http://gw:4000/lmstudio"),
+        ] {
+            cfg.api_provider = kind.to_string();
+            assert_eq!(provider_probe_target(&cfg, "").unwrap().endpoint, routed, "{kind} on");
+        }
     }
 
     #[test]
@@ -9942,6 +10032,7 @@ mod reasoning_delta_privacy_tests {
             gemini_api_key: None,
             max_tool_iterations: None,
             show_reasoning: None,
+            provider_gateway: None,
             openai_compat: config::OpenAiCompatConfig::default(),
         };
         assert!(cfg.show_reasoning(), "None should default to on");
@@ -10005,6 +10096,7 @@ mod soul_sealed_mode_change_tests {
             gemini_api_key: None,
             max_tool_iterations: None,
             show_reasoning: None,
+            provider_gateway: None,
             openai_compat: OpenAiCompatConfig::default(),
         }
     }

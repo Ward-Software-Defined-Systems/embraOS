@@ -47,7 +47,12 @@ pub const DEFAULT_MODEL: &str = "gemini-3.1-pro-preview";
 pub const DEFAULT_DISPLAY_NAME: &str = "gemini-3.1-pro";
 /// Gemini 4 Argon: selectable, not the default. Its id is its alias.
 pub const ARGON_MODEL: &str = "gemini-4-argon";
-pub(crate) const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
+/// The provider's own host. Every URL is built on the base the provider was
+/// given (this one direct, the provider gateway's `{url}/gemini` through
+/// `provider::gateway::base_for`, [`GeminiProvider::with_base_url`]) and
+/// [`V1BETA`].
+pub(crate) const DIRECT_BASE: &str = "https://generativelanguage.googleapis.com";
+pub(crate) const V1BETA: &str = "/v1beta";
 const VALIDATE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// 64,000 output tokens: under the 65,536 that a synchronous request of
@@ -120,6 +125,9 @@ pub struct GeminiProvider {
     http: Client,
     model_id: String,
     display_name: String,
+    /// The base every URL is built on: [`DIRECT_BASE`], or the provider
+    /// gateway's prefixed base ([`Self::with_base_url`]).
+    base_url: String,
     /// `thinkingLevel` sent on every request (see [`thinking_level_for`]).
     thinking_level: String,
     /// Optional context-cache lifecycle manager. `None` when the
@@ -145,9 +153,19 @@ impl GeminiProvider {
             http: crate::net::client(),
             model_id,
             display_name,
+            base_url: DIRECT_BASE.to_string(),
             thinking_level: THINKING_LEVEL.to_string(),
             cache: None,
         }
+    }
+
+    /// Build every URL on `base` instead of [`DIRECT_BASE`]: the provider
+    /// gateway's `{url}/gemini`, from `provider::gateway::base_for`. Call it
+    /// before [`Self::with_cache`], which builds the cache manager on the
+    /// base in hand. A trailing `/` is dropped so the paths join cleanly.
+    pub fn with_base_url(mut self, base: String) -> Self {
+        self.base_url = base.trim_end_matches('/').to_string();
+        self
     }
 
     /// Operator effort posture from `/effort` (canonical embraOS ladder);
@@ -174,6 +192,7 @@ impl GeminiProvider {
                 self.api_key.clone(),
                 db,
                 self.model_id.clone(),
+                self.base_url.clone(),
             ))
         });
         self
@@ -181,13 +200,13 @@ impl GeminiProvider {
 
     fn stream_url(&self) -> String {
         format!(
-            "{}/models/{}:streamGenerateContent?alt=sse",
-            API_BASE, self.model_id
+            "{}{V1BETA}/models/{}:streamGenerateContent?alt=sse",
+            self.base_url, self.model_id
         )
     }
 
-    fn models_url() -> String {
-        format!("{}/models", API_BASE)
+    fn models_url(&self) -> String {
+        format!("{}{V1BETA}/models", self.base_url)
     }
 }
 
@@ -202,6 +221,11 @@ impl LlmProvider for GeminiProvider {
         ProviderKind::Gemini
     }
 
+    #[cfg(test)]
+    fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     async fn validate_key(&self, key: &str) -> ValidationResult {
         if key.is_empty() {
             return ValidationResult::InvalidKey;
@@ -211,7 +235,7 @@ impl LlmProvider for GeminiProvider {
             Err(_) => return ValidationResult::Unknown,
         };
         let resp = client
-            .get(Self::models_url())
+            .get(self.models_url())
             .header("x-goog-api-key", key)
             .send()
             .await;
@@ -603,6 +627,45 @@ mod tests {
         ] {
             assert!(!explicit_cache_supported(id), "{id} takes no explicit cache");
         }
+    }
+
+    #[test]
+    fn the_stream_and_models_urls_follow_the_base() {
+        let direct = GeminiProvider::new("k".into());
+        assert_eq!(
+            direct.stream_url(),
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse"
+        );
+        assert_eq!(
+            direct.models_url(),
+            "https://generativelanguage.googleapis.com/v1beta/models"
+        );
+        let routed = GeminiProvider::new("k".into()).with_base_url("http://gw:4000/gemini/".into());
+        assert_eq!(
+            routed.stream_url(),
+            "http://gw:4000/gemini/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse"
+        );
+        assert_eq!(routed.models_url(), "http://gw:4000/gemini/v1beta/models");
+        assert_eq!(routed.base_url(), "http://gw:4000/gemini");
+    }
+
+    #[test]
+    fn the_cache_manager_takes_the_providers_base() {
+        let db = Arc::new(WardsonDbClient::from_url("http://127.0.0.1:1"));
+        let p = GeminiProvider::new("k".into())
+            .with_base_url("http://gw:4000/gemini".into())
+            .with_cache(db);
+        assert_eq!(p.cache.as_ref().unwrap().base_url(), "http://gw:4000/gemini");
+    }
+
+    #[test]
+    fn is_cache_stale_error_rejects_a_gateway_dlp_block() {
+        // The provider gateway refuses a request its DLP matched with the
+        // provider's own 403 shape and a fixed message that never names a
+        // cached content, so the stale-cache retry never fires on it and
+        // the turn reports the rule instead.
+        let body = r#"{"error":{"code":403,"message":"request blocked by gateway DLP policy (rule aws-access-key)","status":"PERMISSION_DENIED"}}"#;
+        assert!(!is_cache_stale_error(403, body));
     }
 
     #[test]

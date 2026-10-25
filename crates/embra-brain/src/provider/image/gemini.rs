@@ -17,8 +17,6 @@ use serde_json::{json, Value as JsonValue};
 
 use super::{GeneratedImage, ImageGenError, ImageGenRequest, ImageGenResponse, ImageProvider, ImageProviderKind};
 
-pub const DEFAULT_ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta/interactions";
-
 pub struct GeminiImageProvider {
     api_key: String,
     model: String,
@@ -27,10 +25,8 @@ pub struct GeminiImageProvider {
 }
 
 impl GeminiImageProvider {
-    pub fn new(api_key: String, model: String) -> Self {
-        Self::with_endpoint(api_key, model, DEFAULT_ENDPOINT.to_string())
-    }
-
+    /// `endpoint` is `image::interactions_url`'s answer: the provider's own
+    /// host, or the provider gateway's base while it is on.
     pub fn with_endpoint(api_key: String, model: String, endpoint: String) -> Self {
         let http = crate::net::builder()
             .connect_timeout(std::time::Duration::from_secs(10))

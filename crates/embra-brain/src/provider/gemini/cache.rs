@@ -40,7 +40,6 @@ use crate::provider::{ProviderError, SystemPromptBundle, ToolManifest};
 
 const COLLECTION: &str = "provider.gemini_cache";
 const HANDLE_ID: &str = "current";
-const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_TTL_SECS: u32 = 3600;
 
 /// Live handle to a Gemini cached-content resource.
@@ -70,6 +69,9 @@ pub struct GeminiCacheManager {
     api_key: String,
     db: Arc<WardsonDbClient>,
     model_id: String,
+    /// The provider's base (`gemini::DIRECT_BASE`, or the provider gateway's
+    /// `{url}/gemini`); the cache URLs are built on it and `gemini::V1BETA`.
+    base_url: String,
 }
 
 /// Compute the cache fingerprint over a system prompt, a tools manifest
@@ -94,13 +96,30 @@ pub fn compute_fingerprint(
 }
 
 impl GeminiCacheManager {
-    pub fn new(api_key: String, db: Arc<WardsonDbClient>, model_id: String) -> Self {
+    pub fn new(
+        api_key: String,
+        db: Arc<WardsonDbClient>,
+        model_id: String,
+        base_url: String,
+    ) -> Self {
         Self {
             http: crate::net::client(),
             api_key,
             db,
             model_id,
+            base_url: base_url.trim_end_matches('/').to_string(),
         }
+    }
+
+    /// The base the cache URLs are built on. Test-only: the provider's
+    /// builder test reads it to prove the manager took the provider's base.
+    #[cfg(test)]
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    fn cached_contents_url(&self) -> String {
+        format!("{}{}/cachedContents", self.base_url, super::V1BETA)
     }
 
     /// Reuse an existing valid handle, invalidate stale/wrong-session
@@ -196,7 +215,7 @@ impl GeminiCacheManager {
     /// Delete a cache handle remote-side. Tolerant of 404 (already
     /// gone).
     pub async fn delete(&self, cache_name: &str) -> Result<(), ProviderError> {
-        let url = format!("{}/{}", API_BASE, cache_name);
+        let url = format!("{}{}/{}", self.base_url, super::V1BETA, cache_name);
         match self
             .http
             .delete(&url)
@@ -245,7 +264,7 @@ impl GeminiCacheManager {
         fingerprint: &str,
         now: DateTime<Utc>,
     ) -> Result<Option<CacheHandle>, ProviderError> {
-        let url = format!("{}/cachedContents", API_BASE);
+        let url = self.cached_contents_url();
         let body = serde_json::json!({
             "model": format!("models/{}", self.model_id),
             "systemInstruction": {

@@ -252,7 +252,44 @@ pub fn resolve_image_provider(cfg: &SystemConfig) -> Result<Box<dyn ImageProvide
         )
     })?;
     match choice.kind {
-        ImageProviderKind::Gemini => Ok(Box::new(gemini::GeminiImageProvider::new(key, choice.model))),
+        ImageProviderKind::Gemini => Ok(Box::new(gemini::GeminiImageProvider::with_endpoint(
+            key,
+            choice.model,
+            interactions_url(cfg),
+        ))),
+    }
+}
+
+/// The Gemini image endpoint on the base the provider gateway rule gives:
+/// the provider's own host direct, the gateway's `{url}/gemini` while it
+/// is on.
+pub(crate) fn interactions_url(cfg: &SystemConfig) -> String {
+    let base = crate::provider::gateway::base_for(
+        cfg.provider_gateway.as_ref(),
+        crate::provider::ProviderKind::Gemini,
+        crate::provider::gemini::DIRECT_BASE,
+    );
+    format!("{base}{}/interactions", crate::provider::gemini::V1BETA)
+}
+
+#[cfg(test)]
+mod gateway_tests {
+    const DIRECT: &str = "https://generativelanguage.googleapis.com/v1beta/interactions";
+
+    #[test]
+    fn the_image_endpoint_follows_the_gateway_when_on() {
+        let mut cfg = crate::config::tests_support::minimal_cfg();
+        assert_eq!(super::interactions_url(&cfg), DIRECT);
+        cfg.provider_gateway = Some(crate::config::ProviderGateway {
+            url: "http://gw:4000".into(),
+            enabled: true,
+        });
+        assert_eq!(
+            super::interactions_url(&cfg),
+            "http://gw:4000/gemini/v1beta/interactions"
+        );
+        cfg.provider_gateway.as_mut().unwrap().enabled = false;
+        assert_eq!(super::interactions_url(&cfg), DIRECT);
     }
 }
 

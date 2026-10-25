@@ -28,8 +28,9 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use super::anthropic::{API_VERSION as ANTHROPIC_API_VERSION, MODELS_URL as ANTHROPIC_MODELS_URL};
-use super::gemini::API_BASE as GEMINI_API_BASE;
+use super::anthropic::{API_VERSION as ANTHROPIC_API_VERSION, MODELS_PATH as ANTHROPIC_MODELS_PATH};
+use super::gateway::host_label;
+use super::gemini::V1BETA as GEMINI_V1BETA;
 use super::openai_compat::{OpenAICompatProvider, OpenAiCompatPreset};
 use super::{ProviderError, ProviderKind};
 use crate::proactive::{Notification, Priority};
@@ -53,7 +54,10 @@ pub struct ProbeTarget {
     pub model: String,
     /// Anthropic/Gemini API key, or the OpenAI-compat bearer (may be empty).
     pub key: String,
-    /// OpenAI-compat base URL; unused for the cloud providers.
+    /// The base every request of the provider is built on, as the turn
+    /// path resolves it (`provider::gateway::base_for`): the provider's own
+    /// host or the preset's stored endpoint direct, the provider gateway's
+    /// prefixed base while it is on.
     pub endpoint: String,
 }
 
@@ -63,7 +67,8 @@ pub struct ProbeTarget {
 pub struct ProviderProbe {
     pub kind: String,
     pub model: String,
-    /// Host for the cloud providers, base URL for the local presets.
+    /// The host reached for the cloud providers (the gateway's while the
+    /// provider gateway is on), the base URL for the local presets.
     pub endpoint: String,
     /// False when no request was made (no provider configured yet).
     pub configured: bool,
@@ -256,12 +261,12 @@ pub async fn probe(target: Option<&ProbeTarget>) -> ProviderProbe {
     };
     match t.kind {
         ProviderKind::Anthropic => {
-            let url = format!("{ANTHROPIC_MODELS_URL}/{}", t.model);
-            probe_model_url(t, &url, "api.anthropic.com").await
+            let url = format!("{}{ANTHROPIC_MODELS_PATH}/{}", t.endpoint, t.model);
+            probe_model_url(t, &url, &host_label(&t.endpoint)).await
         }
         ProviderKind::Gemini => {
-            let url = format!("{GEMINI_API_BASE}/models/{}", t.model);
-            probe_model_url(t, &url, "generativelanguage.googleapis.com").await
+            let url = format!("{}{GEMINI_V1BETA}/models/{}", t.endpoint, t.model);
+            probe_model_url(t, &url, &host_label(&t.endpoint)).await
         }
         ProviderKind::Ollama | ProviderKind::LmStudio => probe_openai_compat(t).await,
     }
@@ -750,6 +755,68 @@ mod tests {
         classify_model_status(&mut p, 529);
         assert_eq!(p.error.as_deref(), Some("HTTP 529"));
         assert!(p.model_present.is_none() && p.key_state.is_none());
+    }
+
+    /// Through the provider gateway the target's base is the gateway's
+    /// prefixed one: the probe's GET lands on the prefixed models path and
+    /// the endpoint label names the gateway's host and port.
+    #[tokio::test]
+    async fn a_cloud_probe_through_the_gateway_hits_the_prefixed_models_path_and_names_the_gateway_host()
+    {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/anthropic/v1/models/claude-opus-5"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/gemini/v1beta/models/gemini-4-argon"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let gateway_host = server.uri().trim_start_matches("http://").to_string();
+        let anthropic = target(
+            ProviderKind::Anthropic,
+            "claude-opus-5",
+            &format!("{}/anthropic", server.uri()),
+        );
+        let p = probe(Some(&anthropic)).await;
+        assert!(p.reachable && p.model_present == Some(true), "{p:?}");
+        assert_eq!(p.endpoint, gateway_host);
+        let gemini = target(
+            ProviderKind::Gemini,
+            "gemini-4-argon",
+            &format!("{}/gemini", server.uri()),
+        );
+        let p = probe(Some(&gemini)).await;
+        assert!(p.reachable && p.model_present == Some(true), "{p:?}");
+        assert_eq!(p.endpoint, gateway_host);
+    }
+
+    /// A gateway toggle changes the host reached, so the probe that follows
+    /// is a first sighting of a new target: a standing failure is announced
+    /// once more, a healthy flip says nothing.
+    #[test]
+    fn a_gateway_toggle_is_a_new_probe_target() {
+        let direct = ProviderProbe::base(
+            &target(ProviderKind::Anthropic, "claude-opus-5", "https://api.anthropic.com"),
+            host_label("https://api.anthropic.com"),
+        );
+        let routed = ProviderProbe::base(
+            &target(ProviderKind::Anthropic, "claude-opus-5", "http://gw:4000/anthropic"),
+            host_label("http://gw:4000/anthropic"),
+        );
+        assert_eq!(direct.endpoint, "api.anthropic.com");
+        assert_eq!(routed.endpoint, "gw:4000");
+        assert!(same_target(&direct, &direct.clone()));
+        assert!(!same_target(&direct, &routed));
+        let mut healthy_routed = routed.clone();
+        healthy_routed.reachable = true;
+        healthy_routed.model_present = Some(true);
+        healthy_routed.key_state = Some("valid".into());
+        assert!(transition_events(Some(&direct), &healthy_routed).is_empty());
     }
 
     #[tokio::test]

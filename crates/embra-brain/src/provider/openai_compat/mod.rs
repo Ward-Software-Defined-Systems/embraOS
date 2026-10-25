@@ -354,6 +354,11 @@ impl LlmProvider for OpenAICompatProvider {
         self.preset.as_kind()
     }
 
+    #[cfg(test)]
+    fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     /// Validate a candidate bearer (or no auth) against the endpoint
     /// by probing /v1/models. Mirrors the existing trait contract;
     /// the wizard uses [`Self::probe_models`] directly to also obtain
