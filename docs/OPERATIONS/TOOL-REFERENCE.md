@@ -158,7 +158,7 @@ For the data model, edge taxonomy, density rationale, promotion path, auto-enric
 
 | Tool | Description |
 |---|---|
-| **security_check** | System overview — process count, load average, listening ports and whether a container is detected |
+| **security_check** | System overview — process count, load average, listening ports, the seal's state (`sealed`, `sealed, unverified`, `unsealed`), the five storage mounts (the rootfs, STATE, DATA, the workspace, the ephemeral tmpfs) with their options from `/proc/mounts` and `ok` or `MISSING <flags>` against what the boot sets (the rootfs `ro`; the four others `nosuid,nodev,noexec`), and whether a container is detected |
 | **port_scan** | TCP connect scan with banner grabbing — supports specific ports (`80,443`), ranges (`8000-8100`), and presets (`web`, `db`, `low` for 1–1024, `all`; without `ports`, a set of 17 common ports). At most 50 connects in flight, under a 120 s budget: a scan that runs out of it reports what it found and how many of its ports it checked. Restricted to RFC 1918 private and loopback addresses only |
 | **ssh_remote_admin** | Execute a single command on a remote host via SSH — host forms: `host`, `user@host`, `host:port`, `user@host:port` (EXPERIMENTAL) |
 | **ssh_session_start** | Open a persistent SSH session via ControlMaster — connection validated with probe command. Same host forms as `ssh_remote_admin` (`host:port` / `user@host:port` supported). One session at a time (EXPERIMENTAL) |
