@@ -74,7 +74,7 @@ Every slash command available in an embraOS session, grouped as in the web conso
 | `/git-setup <name> \| <email>` | Set git user.name and user.email in the global file under STATE, live for the next git; no arguments shows them. A failed write is reported as such, never as "updated" |
 | `/github-token <token>` | Set GitHub token for API access (persists across reboots) |
 | `/git-token <host> <token>` | Set a token for a self-hosted git server (GitLab/Gitea over HTTPS; injected as an `oauth2` rewrite for `git_clone`/`git_push`/`git_pull`/`git_fetch`). No args lists configured hosts; `/git-token <host> remove` deletes. github.com stays on `/github-token` |
-| `/ssh-keygen` | Generate ed25519 SSH key pair and display public key |
+| `/ssh-keygen` | Generate an ed25519 SSH key pair under the workspace's `.ssh/` and show the public key. The key's comment is the intelligence's name as a lowercase slug at `embraos` (`meridian@embraos`; `embra@embraos` when no name is set), so two instances' keys read apart in an `authorized_keys` file. An existing key is shown, not regenerated, and keeps the comment it was made with |
 | `/ssh-copy-id <user@host>` | Copy SSH public key to remote host (RFC 1918 only) |
 
 ## Guardian
