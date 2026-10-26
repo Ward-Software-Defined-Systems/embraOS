@@ -22,7 +22,9 @@ tokio-stream = "0.1"
 futures-util = "0.3"
 bytes = "1"
 portable-pty = "0.9"
-rust-embed = { version = "8", features = ["compression"] }
+# No `compression`: it pulled zstd and libflate into the tree to deflate `dist/`
+# (1.4 MB) for a 0.3 MB smaller binary; the UI is embedded raw (2026-10-26).
+rust-embed = "8"
 libc = "0.2"
 
 [dev-dependencies]
