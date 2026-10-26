@@ -291,7 +291,10 @@ mod tests {
         let clients = rustls::server::WebPkiClientVerifier::builder_with_provider(roots, provider)
             .build()
             .unwrap();
-        let now = UnixTime::now();
+        // The clock is read at each verification: a certificate minted after a
+        // captured instant is not yet valid at that instant (its not_before is
+        // the minting second), and the suite under load crosses the second.
+        let now = UnixTime::now;
         let leaf = |pem: &[u8]| CertificateDer::from_pem_slice(pem).unwrap();
         let name = |n: &str| ServerName::try_from(n.to_string()).unwrap();
 
@@ -301,17 +304,17 @@ mod tests {
         let server = leaf(&server_pem);
         for asked in ["localhost", "embraos", "127.0.0.1"] {
             let _ = servers
-                .verify_server_cert(&server, &[], &name(asked), &[], now)
+                .verify_server_cert(&server, &[], &name(asked), &[], now())
                 .unwrap_or_else(|e| panic!("{asked}: {e}"));
         }
-        assert!(servers.verify_server_cert(&server, &[], &name("other.host"), &[], now).is_err(), "a name not asked for");
-        assert!(clients.verify_client_cert(&server, &[], now).is_err(), "a server certificate is not a client certificate");
+        assert!(servers.verify_server_cert(&server, &[], &name("other.host"), &[], now()).is_err(), "a name not asked for");
+        assert!(clients.verify_client_cert(&server, &[], now()).is_err(), "a server certificate is not a client certificate");
 
         let (client_pem, _) = pki.generate_service_cert("embra-console", &[], &[], false, true).unwrap();
         let client = leaf(&client_pem);
-        let _ = clients.verify_client_cert(&client, &[], now).expect("the client usage");
+        let _ = clients.verify_client_cert(&client, &[], now()).expect("the client usage");
         assert!(
-            servers.verify_server_cert(&client, &[], &name("localhost"), &[], now).is_err(),
+            servers.verify_server_cert(&client, &[], &name("localhost"), &[], now()).is_err(),
             "a client certificate is not a server certificate"
         );
 
@@ -320,15 +323,15 @@ mod tests {
         let mut other = PKIManager::new(other_dir.clone());
         other.init().unwrap();
         let (foreign_pem, _) = other.generate_service_cert("embra-web", &["localhost".into()], &[], true, false).unwrap();
-        assert!(servers.verify_server_cert(&leaf(&foreign_pem), &[], &name("localhost"), &[], now).is_err(), "another CA");
+        assert!(servers.verify_server_cert(&leaf(&foreign_pem), &[], &name("localhost"), &[], now()).is_err(), "another CA");
 
         // The CA loaded on a reboot signs certificates the same roots verify.
         let mut reloaded = PKIManager::new(dir.clone());
         reloaded.init().expect("the CA loads");
         let (again_pem, _) = reloaded.generate_service_cert("embra-apid", &["embra-apid".into()], &[], true, true).unwrap();
         let again = leaf(&again_pem);
-        let _ = servers.verify_server_cert(&again, &[], &name("embra-apid"), &[], now).expect("the reloaded CA chains");
-        let _ = clients.verify_client_cert(&again, &[], now).expect("both usages");
+        let _ = servers.verify_server_cert(&again, &[], &name("embra-apid"), &[], now()).expect("the reloaded CA chains");
+        let _ = clients.verify_client_cert(&again, &[], now()).expect("both usages");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&other_dir);
     }
