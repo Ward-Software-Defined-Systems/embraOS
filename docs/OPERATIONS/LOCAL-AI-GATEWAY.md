@@ -72,7 +72,7 @@ Run on the operator's rebuilt image against the gateway at `axiom-app.ops.wsds:4
 | `/provider --setup anthropic` with the gateway on: the key check's `GET /v1/models` is a row | passed 2026-10-25 |
 | `/local-ai-gateway off`: no new rows, `/status` names `api.anthropic.com`; `/local-ai-gateway on` again; `/local-ai-gateway reset` reads not configured | passed 2026-10-25 |
 | The `local-ai-gateway` pill: green after `/local-ai-gateway <url>`, grey after `off`, gone after `reset`; the mobile health chip stays green with the gateway off; `/status` shows `provider_gateway` | passed 2026-10-25 |
-| `image_generate` through `/gemini/v1beta/interactions`: a `gemini_interactions` row with its bodies, tokens and price, counted on the Cloud tab | TBD on a gateway at `471d93f` or later; passed 2026-10-25 on the build before it, where the request was a `cloud_passthrough` row in Requests and absent from the Cloud tab |
+| `image_generate` through `/gemini/v1beta/interactions`: a `gemini_interactions` row with its bodies, tokens and price, counted on the Cloud tab | passed 2026-10-25 on a gateway at `471d93f` (on the build before it, the request was a `cloud_passthrough` row in Requests and absent from the Cloud tab) |
 
 Checked from the build host on 2026-10-25, through the brain's own `identify` with the exported CA as `EMBRA_CA_DIR`: `https://axiom-app.ops.wsds:4000` identified itself as WSDS Local AI Gateway 0.1.0; without the CA the refusal read `invalid peer certificate: UnknownIssuer` and named the drop-in directory; `http://axiom-app.ops.wsds:4000` read `invalid HTTP version parsed` and named `https://`. With curl and the same CA, `GET /v1/models` and a 404 both carried `x-local-ai-gateway: 0.1.0`.
 
