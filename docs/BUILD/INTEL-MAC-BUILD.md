@@ -174,7 +174,7 @@ EMBRA_TUI=1 ./scripts/run-qemu.sh      # serial TUI on this terminal: functional
 EMBRA_DB_VERBOSE=1 ./scripts/run-qemu.sh   # opt-in per-request WardSONDB log lines
 ```
 
-Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, LLM
+Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, the provider gateway or direct, LLM
 provider + credentials, timezone), then Learning Mode forms and seals the soul.
 Once the soul is sealed, run `/embeddings backfill` once: the seed knowledge packs
 load before the wizard writes a configuration, so their nodes have no vectors until
@@ -307,7 +307,7 @@ banner at the top of this file.
    `Acceleration: HVF (macOS)`, `UI mode: web console (default)`, and
    `3345→3345 (HTTPS web)`. No kernel panic on `ttyS0`.
 2. **Config Wizard + Learning Mode** in the browser at the URL embraOS printed at
-   boot (`https://localhost:3345/embraOS?token=…`; accept the embraOS-CA cert) — name, LLM
+   boot (`https://localhost:3345/embraOS?token=…`; accept the embraOS-CA cert) — name, the provider gateway or direct, LLM
    provider + credentials, timezone; full soul-formation conversation; soul
    sealed.
 3. **REST gateway:** from the host, `curl http://localhost:8443/health` →

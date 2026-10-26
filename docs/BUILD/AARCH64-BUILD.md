@@ -132,7 +132,7 @@ EMBRA_TUI=1 ./scripts/run-qemu-aarch64.sh      # serial TUI on this terminal: fu
 EMBRA_DB_VERBOSE=1 ./scripts/run-qemu-aarch64.sh   # opt-in per-request WardSONDB log lines
 ```
 
-Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, LLM provider
+Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, the provider gateway or direct, LLM provider
 + credentials, timezone), then Learning Mode forms and seals the soul.
 Once the soul is sealed, run `/embeddings backfill` once: the seed knowledge packs
 load before the wizard writes a configuration, so their nodes have no vectors until
@@ -948,7 +948,7 @@ Re-run it as the regression checklist after any canonical-build bump:
    `qemu-system-aarch64 -machine virt -accel hvf -cpu host`, kernel `Image`,
    `console=ttyAMA0` — no kernel panic on the PL011 console.
 2. **Config Wizard + Learning Mode** in the browser at the URL embraOS printed at
-   boot (`https://localhost:3345/embraOS?token=…`; accept the embraOS-CA cert) — name, LLM provider
+   boot (`https://localhost:3345/embraOS?token=…`; accept the embraOS-CA cert) — name, the provider gateway or direct, LLM provider
    + credentials, timezone; full soul-formation conversation; soul sealed.
 3. **REST gateway:** from the host, `curl http://localhost:8443/health` → healthy; `curl http://localhost:8443/status` → `ok:true` with the `services` map.
 4. **Conversation session** — tool dispatch, memory writes to WardSONDB, session

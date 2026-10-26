@@ -40,11 +40,10 @@ Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` 
 > secret before it leaves the network — embraOS reports such a block as the turn's error,
 > naming the rule. The operator is evaluating the gateway as the companion of embraOS and
 > for vendoring into this workspace the way WardSONDB was; until then it is a separate
-> install beside the OS. For now, if Ollama or LM Studio is reachable only through the
-> gateway, set the preset up with the gateway's prefixed URL as its endpoint,
-> `https://<host>:4000/ollama` or `/lmstudio`: `/provider --setup` probes the endpoint it
-> is given directly, and that is the one route that answers. With the gateway off, such a
-> preset has no direct path.
+> install beside the OS. The first-boot wizard asks whether the providers are reached
+> directly or through the gateway, and `/provider --setup` lists the Ollama or LM Studio
+> models through it while it is on, so a server reachable only through the gateway needs
+> no direct endpoint; with the gateway off, such a preset says so.
 > **[Routing the providers through the gateway →](docs/OPERATIONS/LOCAL-AI-GATEWAY.md)**
 
 > **Local inference — model selection matters.** All 118 tools dispatch identically on
