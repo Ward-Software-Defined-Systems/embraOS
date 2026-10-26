@@ -3990,14 +3990,23 @@ async fn handle_provider_command(
             // - Anthropic/Gemini: per-provider API-key field via
             //   `cfg.key_for` (Sprint 4 D2), falling back to the legacy
             //   `api_key` when the active provider matches.
-            // - Ollama/LmStudio: endpoint + model presence in
-            //   `cfg.openai_compat` via `for_preset` (Sprint 5).
-            //   Bearer is intentionally NOT required — no-auth Ollama
-            //   is a valid configuration.
-            let configured = match target {
-                ProviderKind::Anthropic | ProviderKind::Gemini => {
-                    cfg.key_for(target).is_some()
-                }
+            // - Ollama/LmStudio: a model, and a base to reach it on
+            //   (`for_preset_routed`: the stored endpoint, or the provider
+            //   gateway's prefix while the gateway is on; a preset set up
+            //   through the gateway may have no direct endpoint). Bearer is
+            //   intentionally NOT required — no-auth Ollama is a valid
+            //   configuration.
+            let refusal: Option<String> = match target {
+                ProviderKind::Anthropic | ProviderKind::Gemini => cfg
+                    .key_for(target)
+                    .is_none()
+                    .then(|| {
+                        format!(
+                            "No API key recorded for {}. Run /provider --setup {} to add one.",
+                            target.as_str(),
+                            target.as_str()
+                        )
+                    }),
                 ProviderKind::Ollama | ProviderKind::LmStudio => {
                     let preset = match target {
                         ProviderKind::Ollama => {
@@ -4008,23 +4017,13 @@ async fn handle_provider_command(
                         }
                         _ => unreachable!(),
                     };
-                    cfg.openai_compat.for_preset(preset).is_some()
+                    cfg.openai_compat
+                        .for_preset_routed(preset, cfg.provider_gateway.as_ref())
+                        .err()
+                        .map(|e| e.to_string())
                 }
             };
-            if !configured {
-                let body = match target {
-                    ProviderKind::Anthropic | ProviderKind::Gemini => format!(
-                        "No API key recorded for {}. Run /provider --setup {} to add one.",
-                        target.as_str(),
-                        target.as_str()
-                    ),
-                    ProviderKind::Ollama | ProviderKind::LmStudio => format!(
-                        "{} is not configured (endpoint + model missing). \
-                         Run /provider --setup {} to set them.",
-                        target.as_str(),
-                        target.as_str()
-                    ),
-                };
+            if let Some(body) = refusal {
                 send_msg(body, SystemMessageType::Error).await;
                 return;
             }
@@ -4361,16 +4360,15 @@ async fn perform_provider_swap(
                     }
                     _ => unreachable!(),
                 };
-                if cfg.openai_compat.for_preset(preset).is_none() {
+                if let Err(reason) = cfg
+                    .openai_compat
+                    .for_preset_routed(preset, cfg.provider_gateway.as_ref())
+                {
                     let _ = tx
                         .send(Ok(ConversationResponse {
                             response_type: Some(conversation_response::ResponseType::System(
                                 SystemMessage {
-                                    content: format!(
-                                        "Cannot switch — {} is not configured. \
-                                         Re-run setup wizard to configure endpoint + model.",
-                                        preset.label()
-                                    ),
+                                    content: format!("Cannot switch — {reason}"),
                                     msg_type: SystemMessageType::Error as i32,
                                 },
                             )),
@@ -4539,20 +4537,17 @@ fn build_openai_compat_provider(
         ProviderKind::LmStudio => OpenAiCompatPreset::LmStudio,
         _ => unreachable!("build_openai_compat_provider called with non-OpenAI-compat kind"),
     };
-    let (endpoint, model) = config.openai_compat.for_preset(preset).ok_or_else(|| {
-        format!(
-            "Cannot start a turn — {} is not configured. \
-             Re-run setup wizard to configure endpoint + model.",
-            preset.label()
-        )
-    })?;
+    // The base is the stored endpoint, or the provider gateway's `{url}/ollama`
+    // or `{url}/lmstudio` while the gateway is on, when the gateway's own
+    // upstream answers; a preset set up through the gateway with no direct
+    // endpoint is refused while the gateway is off (`for_preset_routed`).
+    let (base, model) = config
+        .openai_compat
+        .for_preset_routed(preset, config.provider_gateway.as_ref())
+        .map_err(|reason| format!("Cannot start a turn — {reason}"))?;
     let bearer = std::env::var(bearer_env_var(preset))
         .ok()
         .filter(|s| !s.is_empty());
-    // The stored endpoint is the direct base; while the provider gateway is
-    // on, the gateway's `{url}/ollama` or `{url}/lmstudio` stands in for it
-    // and the gateway's own upstream answers.
-    let base = crate::provider::gateway::base_for(config.provider_gateway.as_ref(), kind, endpoint);
     let provider = match preset {
         OpenAiCompatPreset::Ollama => OpenAICompatProvider::ollama(base, bearer, model.to_string()),
         OpenAiCompatPreset::LmStudio => {
@@ -4611,7 +4606,13 @@ pub(crate) fn provider_probe_target(
                 ProviderKind::Ollama => OpenAiCompatPreset::Ollama,
                 _ => OpenAiCompatPreset::LmStudio,
             };
-            let (endpoint, model) = cfg.openai_compat.for_preset(preset)?;
+            // The routed base: the stored endpoint, or the gateway's prefix
+            // while it is on; a preset without a direct endpoint reads as
+            // unconfigured while the gateway is off.
+            let (endpoint, model) = cfg
+                .openai_compat
+                .for_preset_routed(preset, cfg.provider_gateway.as_ref())
+                .ok()?;
             let bearer = std::env::var(bearer_env_var(preset))
                 .ok()
                 .filter(|s| !s.is_empty())
@@ -4620,11 +4621,7 @@ pub(crate) fn provider_probe_target(
                 kind,
                 model: model.to_string(),
                 key: bearer,
-                endpoint: crate::provider::gateway::base_for(
-                    cfg.provider_gateway.as_ref(),
-                    kind,
-                    endpoint,
-                ),
+                endpoint,
             })
         }
     }
@@ -4718,8 +4715,8 @@ async fn handle_gateway_command(
     let version = match gateway::url_to_identify(&cfg, &action) {
         Some(url) => match gateway::identify(&url).await {
             Ok(version) => Some(version),
-            Err(msg) => {
-                send_msg(msg, SystemMessageType::Error).await;
+            Err(reason) => {
+                send_msg(gateway::refusal(&reason), SystemMessageType::Error).await;
                 return;
             }
         },
@@ -4913,17 +4910,13 @@ async fn enter_openai_compat_setup(
     };
 
     let cfg = config::load_config(db).await.ok();
-    let (current_endpoint, current_model) = match (cfg.as_ref(), preset) {
-        (Some(c), OpenAiCompatPreset::Ollama) => (
-            non_empty(&c.openai_compat.ollama_endpoint),
-            non_empty(&c.openai_compat.ollama_model),
-        ),
-        (Some(c), OpenAiCompatPreset::LmStudio) => (
-            non_empty(&c.openai_compat.lm_studio_endpoint),
-            non_empty(&c.openai_compat.lm_studio_model),
-        ),
-        _ => (None, None),
-    };
+    let (current_endpoint, current_model) = cfg
+        .as_ref()
+        .map(|c| {
+            let (endpoint, model) = c.openai_compat.fields(preset);
+            (non_empty(endpoint), non_empty(model))
+        })
+        .unwrap_or((None, None));
     let current_bearer = std::env::var(bearer_env_var(preset))
         .ok()
         .filter(|s| !s.is_empty());
@@ -6164,16 +6157,27 @@ async fn handle_local_model_command(
                 .await;
         }
     };
-    let (endpoint, current) = local_endpoint_and_model(&cfg, preset);
+    let (endpoint, current) = {
+        let (endpoint, model) = cfg.openai_compat.fields(preset);
+        (endpoint.to_string(), non_empty(model))
+    };
     let bearer = std::env::var(bearer_env_var(preset)).ok().filter(|s| !s.is_empty());
     // The list comes from where the next turn goes: the stored endpoint, or
     // the provider gateway's prefixed base while it is on. The stored
-    // endpoint itself is what the selector keeps.
-    let probe_base = crate::provider::gateway::base_for(
-        cfg.provider_gateway.as_ref(),
-        preset.as_kind(),
-        &endpoint,
-    );
+    // endpoint itself, blank for a preset set up through the gateway, is
+    // what the selector keeps; with no base there is nothing to list.
+    let Some(probe_base) = local_route(&cfg, preset) else {
+        send(
+            config::PresetNotReady::NoDirectEndpoint {
+                preset,
+                gateway_stored: cfg.provider_gateway.is_some(),
+            }
+            .to_string(),
+            SystemMessageType::Error,
+        )
+        .await;
+        return;
+    };
 
     let models = match crate::provider::openai_compat::OpenAICompatProvider::probe_models(
         preset,
@@ -6232,21 +6236,21 @@ async fn handle_local_model_command(
     send_brain_status(tx, &cfg, session_mgr, &model).await;
 }
 
-/// The configured endpoint (the preset's default when none is) and model
-/// of an OpenAI-compatible preset.
-fn local_endpoint_and_model(
+/// Where a preset's requests go now: the stored endpoint, or the provider
+/// gateway's prefixed base while the gateway is on; `None` for a preset set
+/// up through the gateway with no direct endpoint while the gateway is off
+/// or gone. Never the preset's default: inside the OS `localhost` is the
+/// machine itself.
+fn local_route(
     cfg: &config::SystemConfig,
     preset: crate::provider::openai_compat::OpenAiCompatPreset,
-) -> (String, Option<String>) {
-    use crate::provider::openai_compat::OpenAiCompatPreset;
-    let (endpoint, model) = match preset {
-        OpenAiCompatPreset::Ollama => (&cfg.openai_compat.ollama_endpoint, &cfg.openai_compat.ollama_model),
-        OpenAiCompatPreset::LmStudio => (&cfg.openai_compat.lm_studio_endpoint, &cfg.openai_compat.lm_studio_model),
-    };
-    (
-        non_empty(endpoint).unwrap_or_else(|| preset.default_base_url().to_string()),
-        non_empty(model),
-    )
+) -> Option<String> {
+    let (endpoint, _) = cfg.openai_compat.fields(preset);
+    non_empty(&crate::provider::gateway::base_for(
+        cfg.provider_gateway.as_ref(),
+        preset.as_kind(),
+        endpoint,
+    ))
 }
 
 /// Point the preset at `model`. Each model keeps its own `/effort` level;
@@ -6970,11 +6974,7 @@ async fn handle_effort_command(
         ProviderKind::LmStudio => Some(OpenAiCompatPreset::LmStudio),
         _ => None,
     };
-    let local_model: Option<String> = preset.and_then(|p| {
-        cfg.openai_compat
-            .for_preset(p)
-            .map(|(_, model)| model.to_string())
-    });
+    let local_model: Option<String> = preset.and_then(|p| non_empty(cfg.openai_compat.fields(p).1));
     let trimmed = args.trim();
 
     // No args → show the ACTIVE provider's posture, its default, and the
@@ -9268,6 +9268,23 @@ mod native_loop_tests {
             let p = build_provider_from_config(&cfg, "k", None).unwrap();
             assert_eq!(p.base_url(), base, "{kind} off");
         }
+        // A preset set up through the gateway, no direct endpoint: built on
+        // the gateway's prefix while it is on, refused while it is off with
+        // the two ways out, and refused with the URL way when it is gone.
+        cfg.api_provider = "ollama".to_string();
+        cfg.openai_compat.ollama_endpoint = String::new();
+        let err = build_provider_from_config(&cfg, "k", None).err().expect("refused");
+        assert!(err.starts_with("Cannot start a turn — Ollama has no direct endpoint"), "{err}");
+        assert!(err.contains("/local-ai-gateway on") && err.contains("/provider --setup ollama"), "{err}");
+        cfg.provider_gateway.as_mut().unwrap().enabled = true;
+        let p = build_provider_from_config(&cfg, "k", None).unwrap();
+        assert_eq!(p.base_url(), "http://gw:4000/ollama");
+        cfg.provider_gateway = None;
+        let err = build_provider_from_config(&cfg, "k", None).err().expect("refused");
+        assert!(err.contains("no longer stored") && err.contains("/local-ai-gateway <url>"), "{err}");
+        cfg.openai_compat.ollama_model = String::new();
+        let err = build_provider_from_config(&cfg, "k", None).err().expect("refused");
+        assert!(err.contains("Ollama is not configured. /provider --setup ollama"), "{err}");
     }
 
     /// The probe's target carries the same base the turn is built on.
@@ -9302,6 +9319,13 @@ mod native_loop_tests {
             cfg.api_provider = kind.to_string();
             assert_eq!(provider_probe_target(&cfg, "").unwrap().endpoint, routed, "{kind} on");
         }
+        // A preset without a direct endpoint: probed through the gateway
+        // while it is on, no target (unconfigured) while it is off.
+        cfg.api_provider = "ollama".to_string();
+        cfg.openai_compat.ollama_endpoint = String::new();
+        assert_eq!(provider_probe_target(&cfg, "").unwrap().endpoint, "http://gw:4000/ollama");
+        cfg.provider_gateway.as_mut().unwrap().enabled = false;
+        assert!(provider_probe_target(&cfg, "").is_none(), "no direct endpoint, gateway off");
     }
 
     #[test]

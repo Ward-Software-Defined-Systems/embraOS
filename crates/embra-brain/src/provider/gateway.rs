@@ -205,15 +205,16 @@ pub(crate) fn url_to_identify(cfg: &SystemConfig, action: &GatewayAction) -> Opt
 /// response of a WSDS Local AI Gateway proxy listener carries, whatever
 /// the status. The version in it is returned. A listener that does not
 /// answer, or answers without the header (another gateway, a plain model
-/// server, a gateway from before the header), is refused with the reason;
-/// a certificate the brain does not trust names the drop-in directory.
-/// The caller saves nothing on an `Err`.
+/// server, a gateway from before the header), is refused with the bare
+/// reason — a sentence the command wraps with [`refusal`] and the wizard
+/// shows as it is; a certificate the brain does not trust names the
+/// drop-in directory. The caller saves nothing on an `Err`.
 pub(crate) async fn identify(url: &str) -> Result<String, String> {
     let target = format!("{}/v1/models", url.trim_end_matches('/'));
     let client = crate::net::builder()
         .timeout(IDENTIFY_TIMEOUT)
         .build()
-        .map_err(|e| format!("/local-ai-gateway: http client: {e}"))?;
+        .map_err(|e| format!("http client: {e}"))?;
     let resp = client.get(&target).send().await.map_err(|e| {
         let cause = crate::net::error_chain(&e);
         let lower = cause.to_ascii_lowercase();
@@ -224,10 +225,7 @@ pub(crate) async fn identify(url: &str) -> Result<String, String> {
         } else {
             ""
         };
-        format!(
-            "/local-ai-gateway: nothing answered at {target}: {cause}.{hint} The configuration \
-             is unchanged."
-        )
+        format!("nothing answered at {target}: {cause}.{hint}")
     })?;
     let version = resp
         .headers()
@@ -238,13 +236,40 @@ pub(crate) async fn identify(url: &str) -> Result<String, String> {
         .map(str::to_string);
     version.ok_or_else(|| {
         format!(
-            "/local-ai-gateway: {url} answered (HTTP {}) without the {GATEWAY_HEADER} header: it \
-             is not WSDS Local AI Gateway's unified listener, or a build from before the header. \
-             The configuration is unchanged.",
+            "{url} answered (HTTP {}) without the {GATEWAY_HEADER} header: it is not WSDS Local AI \
+             Gateway's unified listener, or a build from before the header.",
             resp.status().as_u16()
         )
     })
 }
+
+/// `/local-ai-gateway`'s answer to a refused identification: the bare
+/// reason of [`identify`] as the command's own error.
+pub(crate) fn refusal(reason: &str) -> String {
+    format!("/local-ai-gateway: {reason} The configuration is unchanged.")
+}
+
+/// The presets set up through the gateway with no direct endpoint, named
+/// in the answers that turn the gateway off or forget it, and in the status
+/// line: each answers only while the gateway is on. `way_back` is the
+/// command that brings the gateway back, when there is one.
+fn stranded_note(cfg: &SystemConfig, way_back: &str) -> String {
+    cfg.openai_compat
+        .gateway_only_presets()
+        .into_iter()
+        .map(|preset| {
+            format!(
+                " {} has no direct endpoint: it answers only while the gateway is on; \
+                 /provider --setup {} stores one{way_back}.",
+                preset.label(),
+                preset.as_kind().as_str()
+            )
+        })
+        .collect()
+}
+
+const WAY_BACK_ON: &str = ", or /local-ai-gateway on brings the gateway back";
+const WAY_BACK_URL: &str = ", or /local-ai-gateway <url> stores a gateway again";
 
 const PREFIX_LIST: &str =
     "Anthropic at /anthropic, Gemini at /gemini, Ollama at /ollama, LM Studio at /lmstudio";
@@ -307,21 +332,22 @@ pub(crate) fn apply(
         GatewayAction::Off => match cfg.provider_gateway.as_mut() {
             Some(g) => {
                 g.enabled = false;
+                let url = g.url.clone();
                 Ok(format!(
-                    "Provider gateway off; {} is kept. Requests go to each provider's own host \
+                    "Provider gateway off; {url} is kept. Requests go to each provider's own host \
                      from your next message (Ollama and LM Studio to their stored endpoint). \
-                     /local-ai-gateway on routes them through it again.",
-                    g.url
+                     /local-ai-gateway on routes them through it again.{}",
+                    stranded_note(cfg, WAY_BACK_ON)
                 ))
             }
             None => Err("No provider gateway is configured.".to_string()),
         },
         GatewayAction::Reset => match cfg.provider_gateway.take() {
-            Some(_) => Ok(
+            Some(_) => Ok(format!(
                 "Provider gateway forgotten. Requests go to each provider's own host from your \
-                 next message."
-                    .to_string(),
-            ),
+                 next message.{}",
+                stranded_note(cfg, WAY_BACK_URL)
+            )),
             None => Err("No provider gateway is configured.".to_string()),
         },
     }
@@ -333,14 +359,16 @@ pub(crate) fn status_line(cfg: &SystemConfig) -> String {
         Some(g) if g.enabled => format!(
             "Provider gateway: on — {}. Every provider request goes through it: {PREFIX_LIST}. \
              For Ollama and LM Studio the gateway's own upstream answers; the stored endpoint is \
-             used again when it is off. /local-ai-gateway off keeps the URL; /local-ai-gateway reset forgets it.{}",
+             used again when it is off. /local-ai-gateway off keeps the URL; /local-ai-gateway reset forgets it.{}{}",
             g.url,
-            plain_http_note(&g.url)
+            plain_http_note(&g.url),
+            stranded_note(cfg, "")
         ),
         Some(g) => format!(
             "Provider gateway: off — {} kept. Requests go to each provider's own host (Ollama and \
-             LM Studio to their stored endpoint). /local-ai-gateway on routes them through it again.",
-            g.url
+             LM Studio to their stored endpoint). /local-ai-gateway on routes them through it again.{}",
+            g.url,
+            stranded_note(cfg, WAY_BACK_ON)
         ),
         None => "Provider gateway: not configured. /local-ai-gateway <url> stores WSDS Local AI Gateway's \
                  unified listener (http://host:4000) and turns it on; every provider request then \
@@ -482,9 +510,12 @@ mod tests {
             .await;
 
         let err = identify(&server.uri()).await.unwrap_err();
-        assert!(err.starts_with("/local-ai-gateway: "), "{err}");
+        assert!(err.starts_with(&server.uri()), "the bare reason, no command prefix: {err}");
         assert!(err.contains("(HTTP 200) without the x-local-ai-gateway header"), "{err}");
-        assert!(err.contains("The configuration is unchanged."), "{err}");
+        assert!(!err.contains("/local-ai-gateway") && !err.contains("unchanged"), "{err}");
+        let wrapped = refusal(&err);
+        assert!(wrapped.starts_with("/local-ai-gateway: ") && wrapped.contains(&err), "{wrapped}");
+        assert!(wrapped.ends_with("The configuration is unchanged."), "{wrapped}");
         let err = identify(&format!("{}/empty", server.uri())).await.unwrap_err();
         assert!(err.contains("without the x-local-ai-gateway header"), "{err}");
 
@@ -494,9 +525,35 @@ mod tests {
             l.local_addr().unwrap()
         };
         let err = identify(&format!("http://{closed}")).await.unwrap_err();
-        assert!(err.contains(&format!("nothing answered at http://{closed}/v1/models: ")), "{err}");
-        assert!(err.ends_with("The configuration is unchanged."), "{err}");
+        assert!(err.starts_with(&format!("nothing answered at http://{closed}/v1/models: ")), "{err}");
+        assert!(err.ends_with('.'), "{err}");
         assert!(!err.contains("ca-certificates") && !err.contains("https://"), "no hint on a refused connection: {err}");
+    }
+
+    /// A preset set up through the gateway with no direct endpoint is named
+    /// by the answers that turn the gateway off or forget it, and by the
+    /// status line, with the way back; one with both fields stored is not.
+    #[test]
+    fn off_reset_and_the_status_line_name_a_preset_without_a_direct_endpoint() {
+        let mut c = cfg();
+        c.openai_compat.ollama_model = "qwen3.8:27b".into();
+        c.openai_compat.lm_studio_endpoint = "http://mac:1234".into();
+        c.openai_compat.lm_studio_model = "m".into();
+        apply(&mut c, &GatewayAction::Set("http://gw:4000".into()), Some("0.1.0")).unwrap();
+        let on = status_line(&c);
+        assert!(on.contains("Ollama has no direct endpoint: it answers only while the gateway is on; /provider --setup ollama stores one."), "{on}");
+        assert!(!on.contains("LM Studio has no direct endpoint"), "{on}");
+        let off = apply(&mut c, &GatewayAction::Off, None).unwrap();
+        for text in [&off, &status_line(&c)] {
+            assert!(text.contains("Ollama has no direct endpoint"), "{text}");
+            assert!(text.contains("/provider --setup ollama stores one, or /local-ai-gateway on brings the gateway back."), "{text}");
+        }
+        let reset = apply(&mut c, &GatewayAction::Reset, None).unwrap();
+        assert!(reset.contains("Ollama has no direct endpoint"), "{reset}");
+        assert!(reset.contains(", or /local-ai-gateway <url> stores a gateway again."), "{reset}");
+        c.openai_compat.ollama_endpoint = "http://mac:11434".into();
+        apply(&mut c, &GatewayAction::Set("http://gw:4000".into()), None).unwrap();
+        assert!(!apply(&mut c, &GatewayAction::Off, None).unwrap().contains("no direct endpoint"));
     }
 
     /// A TLS listener given as `http://` answers the plaintext request with

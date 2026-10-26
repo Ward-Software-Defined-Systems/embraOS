@@ -286,22 +286,56 @@ pub struct OpenAiCompatConfig {
 }
 
 impl OpenAiCompatConfig {
-    /// Endpoint and model for the given preset. Returns `None` when
-    /// either field is empty (unconfigured).
-    pub fn for_preset(
+    /// The stored endpoint and model of a preset as they are; either may be
+    /// empty. [`Self::for_preset_routed`] is the rule for whether the preset
+    /// can answer.
+    pub fn fields(
         &self,
         preset: crate::provider::openai_compat::OpenAiCompatPreset,
-    ) -> Option<(&str, &str)> {
+    ) -> (&str, &str) {
         use crate::provider::openai_compat::OpenAiCompatPreset;
-        let (endpoint, model) = match preset {
+        match preset {
             OpenAiCompatPreset::Ollama => (&self.ollama_endpoint, &self.ollama_model),
             OpenAiCompatPreset::LmStudio => (&self.lm_studio_endpoint, &self.lm_studio_model),
-        };
-        if endpoint.is_empty() || model.is_empty() {
-            None
-        } else {
-            Some((endpoint.as_str(), model.as_str()))
         }
+    }
+
+    /// Whether a preset can answer, and on what base. The model must be
+    /// stored. The base is the provider gateway's prefixed URL while the
+    /// gateway is on, else the stored endpoint, which is blank for a preset
+    /// set up through the gateway with no direct path (`none` at the
+    /// endpoint step): such a preset is refused while the gateway is off or
+    /// gone, and the error names the ways out.
+    pub fn for_preset_routed(
+        &self,
+        preset: crate::provider::openai_compat::OpenAiCompatPreset,
+        gateway: Option<&ProviderGateway>,
+    ) -> Result<(String, &str), PresetNotReady> {
+        let (endpoint, model) = self.fields(preset);
+        if model.is_empty() {
+            return Err(PresetNotReady::NoModel(preset));
+        }
+        let base = crate::provider::gateway::base_for(gateway, preset.as_kind(), endpoint);
+        if base.trim().is_empty() {
+            return Err(PresetNotReady::NoDirectEndpoint {
+                preset,
+                gateway_stored: gateway.is_some(),
+            });
+        }
+        Ok((base, model))
+    }
+
+    /// The presets set up through the gateway with no direct endpoint: a
+    /// model stored, the endpoint blank.
+    pub fn gateway_only_presets(&self) -> Vec<crate::provider::openai_compat::OpenAiCompatPreset> {
+        use crate::provider::openai_compat::OpenAiCompatPreset;
+        [OpenAiCompatPreset::Ollama, OpenAiCompatPreset::LmStudio]
+            .into_iter()
+            .filter(|p| {
+                let (endpoint, model) = self.fields(*p);
+                endpoint.is_empty() && !model.is_empty()
+            })
+            .collect()
     }
 
     /// The operator's stored effort override for the preset's active
@@ -382,6 +416,52 @@ impl OpenAiCompatConfig {
         }
     }
 }
+
+/// Why a preset cannot answer now (`OpenAiCompatConfig::for_preset_routed`).
+/// The `Display` names the way out: `/provider --setup <kind>` for a
+/// missing model or a direct endpoint, `/local-ai-gateway on` or `<url>`
+/// for a preset that answers through the gateway alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PresetNotReady {
+    /// No model is stored.
+    NoModel(crate::provider::openai_compat::OpenAiCompatPreset),
+    /// A model is stored but no direct endpoint, and the gateway is off
+    /// (`gateway_stored`) or no longer stored.
+    NoDirectEndpoint {
+        preset: crate::provider::openai_compat::OpenAiCompatPreset,
+        gateway_stored: bool,
+    },
+}
+
+impl std::fmt::Display for PresetNotReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PresetNotReady::NoModel(preset) => write!(
+                f,
+                "{} is not configured. /provider --setup {} sets its endpoint and model.",
+                preset.label(),
+                preset.as_kind().as_str()
+            ),
+            PresetNotReady::NoDirectEndpoint { preset, gateway_stored: true } => write!(
+                f,
+                "{} has no direct endpoint: it was set up through the provider gateway, which is \
+                 off. /local-ai-gateway on routes it through the gateway again; /provider --setup {} \
+                 stores a direct endpoint.",
+                preset.label(),
+                preset.as_kind().as_str()
+            ),
+            PresetNotReady::NoDirectEndpoint { preset, gateway_stored: false } => write!(
+                f,
+                "{} has no direct endpoint: it was set up through a provider gateway that is no \
+                 longer stored. /local-ai-gateway <url> stores one again; /provider --setup {} \
+                 stores a direct endpoint.",
+                preset.label(),
+                preset.as_kind().as_str()
+            ),
+        }
+    }
+}
+
 
 /// Write a credential file to the STATE partition with mode `0600`
 /// (read/write for owner only). Used for API keys and bearer tokens
@@ -2107,5 +2187,61 @@ mod wizard_channel_tests {
         let db = WardsonDbClient::from_url("http://127.0.0.1:9");
         let err = run_config_wizard_grpc(&tx, &mut response_rx, &db).await.unwrap_err().to_string();
         assert!(err.contains("setup channel closed during the API key step"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod openai_compat_route_tests {
+    use super::{OpenAiCompatConfig, PresetNotReady, ProviderGateway};
+    use crate::provider::openai_compat::OpenAiCompatPreset::{LmStudio, Ollama};
+
+    fn gw(enabled: bool) -> ProviderGateway {
+        ProviderGateway { url: "http://gw:4000".into(), enabled }
+    }
+
+    /// A model stored and no direct endpoint: routed through the gateway
+    /// while it is on, refused with the way back while it is off, refused
+    /// with the URL way when none is stored.
+    #[test]
+    fn a_model_alone_is_routed_while_the_gateway_is_on_and_refused_off() {
+        let oc = OpenAiCompatConfig { ollama_model: "m".into(), ..Default::default() };
+        assert_eq!(oc.for_preset_routed(Ollama, Some(&gw(true))), Ok(("http://gw:4000/ollama".to_string(), "m")));
+        let off = oc.for_preset_routed(Ollama, Some(&gw(false))).unwrap_err();
+        assert_eq!(off, PresetNotReady::NoDirectEndpoint { preset: Ollama, gateway_stored: true });
+        assert_eq!(
+            off.to_string(),
+            "Ollama has no direct endpoint: it was set up through the provider gateway, which is off. \
+             /local-ai-gateway on routes it through the gateway again; /provider --setup ollama stores a direct endpoint."
+        );
+        let gone = oc.for_preset_routed(Ollama, None).unwrap_err();
+        assert_eq!(gone, PresetNotReady::NoDirectEndpoint { preset: Ollama, gateway_stored: false });
+        assert!(gone.to_string().contains("no longer stored. /local-ai-gateway <url> stores one again;"), "{gone}");
+        assert_eq!(oc.gateway_only_presets(), vec![Ollama]);
+        assert_eq!(OpenAiCompatConfig::default().gateway_only_presets(), vec![]);
+    }
+
+    #[test]
+    fn both_fields_give_the_endpoint_off_and_the_prefix_on() {
+        let oc = OpenAiCompatConfig {
+            lm_studio_endpoint: "http://mac:1234".into(),
+            lm_studio_model: "qwen/qwen3.8-27b".into(),
+            ..Default::default()
+        };
+        assert_eq!(oc.for_preset_routed(LmStudio, None), Ok(("http://mac:1234".to_string(), "qwen/qwen3.8-27b")));
+        assert_eq!(oc.for_preset_routed(LmStudio, Some(&gw(false))), Ok(("http://mac:1234".to_string(), "qwen/qwen3.8-27b")));
+        assert_eq!(oc.for_preset_routed(LmStudio, Some(&gw(true))), Ok(("http://gw:4000/lmstudio".to_string(), "qwen/qwen3.8-27b")));
+        assert_eq!(oc.fields(LmStudio), ("http://mac:1234", "qwen/qwen3.8-27b"));
+        assert!(oc.gateway_only_presets().is_empty());
+    }
+
+    #[test]
+    fn no_model_is_never_routed() {
+        let oc = OpenAiCompatConfig { ollama_endpoint: "http://mac:11434".into(), ..Default::default() };
+        for gateway in [None, Some(gw(true)), Some(gw(false))] {
+            let err = oc.for_preset_routed(Ollama, gateway.as_ref()).unwrap_err();
+            assert_eq!(err, PresetNotReady::NoModel(Ollama));
+            assert_eq!(err.to_string(), "Ollama is not configured. /provider --setup ollama sets its endpoint and model.");
+        }
+        assert!(oc.gateway_only_presets().is_empty(), "no model, so not a gateway-only preset");
     }
 }
