@@ -512,9 +512,10 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
                 app.selector = Some(Selector::new(options));
             }
 
-            if !default_value.is_empty() {
-                app.setup_default = Some(default_value);
-            }
+            // Each prompt's own default, an empty one clearing the last:
+            // a stale default would be sent for an empty answer to the
+            // next text prompt.
+            app.setup_default = (!default_value.is_empty()).then_some(default_value);
 
             // Update setup step
             if let AppMode::Setup(ref mut setup) = app.mode {
@@ -613,8 +614,9 @@ async fn handle_key_event(
         // has to stand ABOVE this one, or it never runs.
         (KeyCode::Enter, _) => {
             if let Some(selector) = app.selector.take() {
-                // Send selector choice
+                // Send selector choice; the prompt's default goes with it.
                 let choice = selector.current().to_string();
+                app.setup_default = None;
                 app.clear_live_reasoning();
                 let _ = in_tx.send(ConversationRequest {
                     request_type: Some(conversation_request::RequestType::UserMessage(
@@ -1105,6 +1107,36 @@ mod screen_tests {
     #[test]
     fn the_screen_comes_up_on_a_serial_line_nobody_is_attached_to() {
         the_screen_comes_up("serial");
+    }
+}
+
+#[cfg(test)]
+mod setup_default_tests {
+    use super::*;
+
+    fn prompt(field_type: &str, default_value: &str) -> ConsoleEvent {
+        ConsoleEvent::SetupPrompt {
+            field_type: field_type.to_string(),
+            prompt: "Which AI provider would you like to use?".to_string(),
+            options: if field_type == "selector" { vec!["a".to_string(), "b".to_string()] } else { vec![] },
+            default_value: default_value.to_string(),
+        }
+    }
+
+    /// Every setup prompt sets its own default, and an empty one clears
+    /// the last: Enter on an empty text line never sends a stale default
+    /// (the provider label as an API key, say).
+    #[test]
+    fn a_setup_prompt_sets_its_own_default_and_an_empty_one_clears_it() {
+        let mut app = AppState::new();
+        handle_console_event(prompt("text", "Embra"), &mut app);
+        assert_eq!(app.setup_default.as_deref(), Some("Embra"));
+        handle_console_event(prompt("selector", ""), &mut app);
+        assert_eq!(app.setup_default, None, "a selector with no default clears the name's");
+        handle_console_event(prompt("text", "none"), &mut app);
+        assert_eq!(app.setup_default.as_deref(), Some("none"));
+        handle_console_event(prompt("text", ""), &mut app);
+        assert_eq!(app.setup_default, None);
     }
 }
 

@@ -861,6 +861,13 @@ pub async fn run_config_wizard_grpc(
     };
     info!("Config wizard: name = {}", name);
 
+    // Step 1b: the provider gateway, before the provider: the key check
+    // and a preset's model list of this boot go through it when chosen.
+    let gateway = crate::setup::wizard::run_gateway_subflow(tx, response_rx).await?;
+    if let Some((g, version)) = &gateway {
+        info!("Config wizard: gateway = {} ({})", g.url, version);
+    }
+
     // Step 2: Provider selection (Sprint 4 → Sprint 5 4-way, then the
     // Anthropic line-up, five models since 2026-09-27) —
     // Selector UI. The default is the first label (see
@@ -903,6 +910,7 @@ pub async fn run_config_wizard_grpc(
         ProviderKind::Ollama => Some(
             crate::setup::wizard::run_openai_compat_subflow(
                 crate::provider::openai_compat::OpenAiCompatPreset::Ollama,
+                gateway.as_ref().map(|(g, _)| g),
                 tx,
                 response_rx,
             )
@@ -911,6 +919,7 @@ pub async fn run_config_wizard_grpc(
         ProviderKind::LmStudio => Some(
             crate::setup::wizard::run_openai_compat_subflow(
                 crate::provider::openai_compat::OpenAiCompatPreset::LmStudio,
+                gateway.as_ref().map(|(g, _)| g),
                 tx,
                 response_rx,
             )
@@ -1015,16 +1024,16 @@ pub async fn run_config_wizard_grpc(
                 response_type: Some(conversation_response::ResponseType::System(
                     SystemMessage {
                         content: format!(
-                            "Validating API key with {}…",
-                            provider_choice
+                            "Validating API key with {}{}…",
+                            provider_choice,
+                            if gateway.is_some() { " through the gateway" } else { "" }
                         ),
                         msg_type: SystemMessageType::Info as i32,
                     }
                 )),
             })).await;
-            // The first boot has no provider gateway yet: the check goes
-            // to the provider's own host.
-            match validate_api_key_for(provider_kind, &candidate, None).await {
+            // Through the gateway when one was chosen: where the next turn goes.
+            match validate_api_key_for(provider_kind, &candidate, gateway.as_ref().map(|(g, _)| g)).await {
                 ApiKeyCheck::Valid => break candidate,
                 ApiKeyCheck::Invalid(msg) => {
                     let _ = tx.send(Ok(ConversationResponse {
@@ -1082,8 +1091,9 @@ pub async fn run_config_wizard_grpc(
 
     // Step 5: Confirmation
     let summary = format!(
-        "Configuration summary:\n  Name: {}\n  Provider: {}\n  API Key: {}\n  Timezone: {}\n\nConfirm?",
+        "Configuration summary:\n  Name: {}\n  Gateway: {}\n  Provider: {}\n  API Key: {}\n  Timezone: {}\n\nConfirm?",
         name,
+        gateway.as_ref().map(|(g, _)| g.url.as_str()).unwrap_or("none"),
         provider_choice,
         key_summary(&api_key),
         timezone,
@@ -1163,7 +1173,7 @@ pub async fn run_config_wizard_grpc(
         gemini_api_key,
         max_tool_iterations: None,
         show_reasoning: None,
-        provider_gateway: None,
+        provider_gateway: gateway.map(|(g, _)| g),
         openai_compat,
     };
     save_config(db, &config).await?;
@@ -2158,6 +2168,9 @@ mod load_config_tests {
 mod wizard_channel_tests {
     use super::run_config_wizard_grpc;
     use crate::db::WardsonDbClient;
+    use embra_common::proto::brain::{
+        conversation_response, ConversationResponse, SetupFieldType, SetupPrompt,
+    };
     use tokio::sync::mpsc;
 
     /// #61: a client that disconnects during setup ends the wizard with an
@@ -2166,27 +2179,148 @@ mod wizard_channel_tests {
     /// answer reaches the database, so the address is never dialed.
     #[tokio::test]
     async fn a_dropped_receiver_ends_the_wizard_at_the_step_it_was_on() {
-        let (tx, _prompts) = mpsc::channel(8);
-        let (answers, mut response_rx) = mpsc::channel::<String>(8);
+        let (tx, _prompts) = mpsc::channel(64);
+        let (answers, mut response_rx) = mpsc::channel::<String>(64);
         drop(answers);
         let db = WardsonDbClient::from_url("http://127.0.0.1:9");
         let err = run_config_wizard_grpc(&tx, &mut response_rx, &db).await.unwrap_err().to_string();
         assert!(err.contains("setup channel closed during the name step"), "{err}");
     }
 
-    /// The same past the name and the provider steps: a client gone at the
-    /// API-key step ends the wizard naming that step (the verification of
-    /// 2026-10-24 found the guard above exercised the name step alone).
+    /// The same past the name, the gateway and the provider steps: a client
+    /// gone at the API-key step ends the wizard naming that step (the
+    /// verification of 2026-10-24 found the guard above exercised the name
+    /// step alone).
     #[tokio::test]
     async fn a_dropped_receiver_ends_the_wizard_at_the_api_key_step() {
-        let (tx, _prompts) = mpsc::channel(8);
-        let (answers, mut response_rx) = mpsc::channel::<String>(8);
+        let (tx, _prompts) = mpsc::channel(64);
+        let (answers, mut response_rx) = mpsc::channel::<String>(64);
         answers.send("Embra".to_string()).await.unwrap();
+        answers.send(crate::setup::wizard::GATEWAY_DIRECT.to_string()).await.unwrap();
         answers.send(super::PROVIDER_WIZARD_LABELS[0].to_string()).await.unwrap();
         drop(answers);
         let db = WardsonDbClient::from_url("http://127.0.0.1:9");
         let err = run_config_wizard_grpc(&tx, &mut response_rx, &db).await.unwrap_err().to_string();
         assert!(err.contains("setup channel closed during the API key step"), "{err}");
+    }
+
+    /// The gateway step and its endpoint step name themselves the same way.
+    #[tokio::test]
+    async fn a_dropped_receiver_ends_the_wizard_at_the_gateway_steps() {
+        let (tx, _prompts) = mpsc::channel(64);
+        let (answers, mut response_rx) = mpsc::channel::<String>(64);
+        answers.send("Embra".to_string()).await.unwrap();
+        drop(answers);
+        let db = WardsonDbClient::from_url("http://127.0.0.1:9");
+        let err = run_config_wizard_grpc(&tx, &mut response_rx, &db).await.unwrap_err().to_string();
+        assert!(err.contains("setup channel closed during the gateway step"), "{err}");
+
+        let (tx, _prompts) = mpsc::channel(64);
+        let (answers, mut response_rx) = mpsc::channel::<String>(64);
+        answers.send("Embra".to_string()).await.unwrap();
+        answers.send(crate::setup::wizard::GATEWAY_THROUGH.to_string()).await.unwrap();
+        drop(answers);
+        let err = run_config_wizard_grpc(&tx, &mut response_rx, &db).await.unwrap_err().to_string();
+        assert!(err.contains("setup channel closed during the gateway endpoint step"), "{err}");
+    }
+
+    fn setup_prompts(frames: &[ConversationResponse]) -> Vec<&SetupPrompt> {
+        frames
+            .iter()
+            .filter_map(|f| match &f.response_type {
+                Some(conversation_response::ResponseType::Setup(p)) => Some(p),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn system_texts(frames: &[ConversationResponse]) -> Vec<String> {
+        frames
+            .iter()
+            .filter_map(|f| match &f.response_type {
+                Some(conversation_response::ResponseType::System(m)) => Some(m.content.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A refused gateway URL is asked again with `direct` as the default,
+    /// and `direct` goes on to the provider step with no gateway.
+    #[tokio::test]
+    async fn a_refused_gateway_url_is_asked_again_and_direct_falls_back() {
+        let (tx, mut prompts) = mpsc::channel(64);
+        let (answers, mut response_rx) = mpsc::channel::<String>(64);
+        answers.send("Embra".to_string()).await.unwrap();
+        answers.send(crate::setup::wizard::GATEWAY_THROUGH.to_string()).await.unwrap();
+        answers.send("localhost".to_string()).await.unwrap();
+        answers.send("direct".to_string()).await.unwrap();
+        drop(answers);
+        let db = WardsonDbClient::from_url("http://127.0.0.1:9");
+        let err = run_config_wizard_grpc(&tx, &mut response_rx, &db).await.unwrap_err().to_string();
+        assert!(err.contains("setup channel closed during the provider step"), "{err}");
+        drop(tx);
+        let mut frames = Vec::new();
+        while let Some(Ok(f)) = prompts.recv().await {
+            frames.push(f);
+        }
+        let texts = system_texts(&frames);
+        assert!(texts.iter().any(|t| t.starts_with("Not a gateway URL:") && t.contains("beside the OS")), "{texts:?}");
+        let ps = setup_prompts(&frames);
+        let re_ask = ps.iter().find(|p| p.prompt.starts_with("Re-enter the gateway endpoint")).expect("the re-ask");
+        assert_eq!(re_ask.default_value, "direct");
+        assert_eq!(ps.last().unwrap().prompt, "Which AI provider would you like to use?");
+    }
+
+    /// An identified gateway carries the key check (`/anthropic/v1/models`
+    /// at the gateway) and shows in the summary. The client drops at the
+    /// confirmation step, which keeps the save and the STATE writes out of
+    /// the test. `ANTHROPIC_API_KEY` must be unset, as the key-step guard
+    /// above assumes.
+    #[tokio::test]
+    async fn an_identified_gateway_carries_the_key_check_and_the_summary() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        // On the host's own address: the gateway step refuses a loopback URL.
+        let (server, uri) = crate::setup::wizard::test_support::reachable_mock_server().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).insert_header(crate::provider::gateway::GATEWAY_HEADER, "0.1.0"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/anthropic/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"data": []})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let (tx, mut prompts) = mpsc::channel(64);
+        let (answers, mut response_rx) = mpsc::channel::<String>(64);
+        for answer in [
+            "Embra",
+            crate::setup::wizard::GATEWAY_THROUGH,
+            uri.as_str(),
+            super::PROVIDER_WIZARD_LABELS[0],
+            "sk-test-key",
+            "UTC",
+        ] {
+            answers.send(answer.to_string()).await.unwrap();
+        }
+        drop(answers);
+        let db = WardsonDbClient::from_url("http://127.0.0.1:9");
+        let err = run_config_wizard_grpc(&tx, &mut response_rx, &db).await.unwrap_err().to_string();
+        assert!(err.contains("setup channel closed during the confirmation step"), "{err}");
+        drop(tx);
+        let mut frames = Vec::new();
+        while let Some(Ok(f)) = prompts.recv().await {
+            frames.push(f);
+        }
+        let texts = system_texts(&frames);
+        assert!(texts.iter().any(|t| t.starts_with(&format!("WSDS Local AI Gateway 0.1.0 at {uri}."))), "{texts:?}");
+        assert!(texts.iter().any(|t| t.ends_with("through the gateway…")), "{texts:?}");
+        let confirm = setup_prompts(&frames).into_iter().last().expect("the confirmation");
+        assert_eq!(confirm.field_type, SetupFieldType::Confirm as i32);
+        assert!(confirm.prompt.contains(&format!("\n  Gateway: {uri}\n")), "{}", confirm.prompt);
+        assert!(server.received_requests().await.unwrap().iter().any(|r| r.url.path() == "/anthropic/v1/models"));
     }
 }
 

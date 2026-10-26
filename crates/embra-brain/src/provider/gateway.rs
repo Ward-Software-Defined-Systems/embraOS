@@ -249,6 +249,16 @@ pub(crate) fn refusal(reason: &str) -> String {
     format!("/local-ai-gateway: {reason} The configuration is unchanged.")
 }
 
+/// What an identified listener is, for the wizard's Info: the version, the
+/// URL, the prefixes, the plain-HTTP note.
+pub(crate) fn identified_line(url: &str, version: &str) -> String {
+    format!(
+        "WSDS Local AI Gateway {version} at {url}. Every provider request goes through it: \
+         {PREFIX_LIST}.{}",
+        plain_http_note(url)
+    )
+}
+
 /// The presets set up through the gateway with no direct endpoint, named
 /// in the answers that turn the gateway off or forget it, and in the status
 /// line: each answers only while the gateway is on. `way_back` is the
