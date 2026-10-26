@@ -234,6 +234,10 @@ pub struct OpenAiCompatSetupState {
     /// starts at the model step with the endpoint and bearer as they are,
     /// and the pick only switches the model (`local_model_selection`).
     pub model_only: bool,
+    /// The provider gateway while it is on, captured at entry: the models
+    /// are listed through its prefix, and the endpoint typed is the direct
+    /// path for when the gateway is off, `none` allowed.
+    pub gateway: Option<config::ProviderGateway>,
 }
 
 #[derive(Debug, Clone)]
@@ -4921,34 +4925,71 @@ async fn enter_openai_compat_setup(
         .ok()
         .filter(|s| !s.is_empty());
 
-    let default_endpoint = current_endpoint
-        .clone()
-        .unwrap_or_else(|| preset.default_base_url().to_string());
-    let prompt_text = format!(
-        "Enter the {} endpoint URL (current: {}):",
-        preset.label(),
-        current_endpoint.as_deref().unwrap_or("<unconfigured>"),
-    );
-
-    *pending.lock().await = Some(OpenAiCompatSetupState {
+    // The gateway while it is on: the models are listed through it, and
+    // the endpoint typed is the direct path for when it is off.
+    let gateway = cfg
+        .as_ref()
+        .and_then(|c| c.provider_gateway.clone())
+        .filter(|g| g.enabled);
+    let state = OpenAiCompatSetupState {
         preset,
         current_endpoint,
         current_bearer,
         current_model,
         step: OpenAiCompatSetupStep::AwaitingEndpoint,
         model_only: false,
-    });
+        gateway,
+    };
+    let prompt = endpoint_prompt(&state, false);
+    *pending.lock().await = Some(state);
 
     let _ = tx
         .send(Ok(ConversationResponse {
-            response_type: Some(conversation_response::ResponseType::Setup(SetupPrompt {
-                field_type: SetupFieldType::Text as i32,
-                prompt: prompt_text,
-                options: vec![],
-                default_value: default_endpoint,
-            })),
+            response_type: Some(conversation_response::ResponseType::Setup(prompt)),
         }))
         .await;
+}
+
+/// The endpoint step's prompt. With the provider gateway on, the endpoint
+/// typed is the direct path for when the gateway is off, and `none` is
+/// allowed, since the gateway's own upstream answers while it is on; the
+/// default is the current endpoint, else `none`. Without a gateway on, the
+/// typed endpoint is where the preset is reached, and the default is the
+/// current endpoint, else the preset's.
+fn endpoint_prompt(state: &OpenAiCompatSetupState, re_enter: bool) -> SetupPrompt {
+    let label = state.preset.label();
+    let current = state.current_endpoint.as_deref();
+    let (prompt, default_value) = if state.gateway.is_some() {
+        (
+            if re_enter {
+                format!("Re-enter the {label} endpoint URL (none is allowed):")
+            } else {
+                format!(
+                    "Enter the {label} endpoint URL for when the gateway is off (current: {}; none is allowed):",
+                    current.unwrap_or("none")
+                )
+            },
+            current.unwrap_or("none").to_string(),
+        )
+    } else {
+        (
+            if re_enter {
+                format!("Re-enter the {label} endpoint URL:")
+            } else {
+                format!(
+                    "Enter the {label} endpoint URL (current: {}):",
+                    current.unwrap_or("<unconfigured>")
+                )
+            },
+            current.unwrap_or(state.preset.default_base_url()).to_string(),
+        )
+    };
+    SetupPrompt {
+        field_type: SetupFieldType::Text as i32,
+        prompt,
+        options: vec![],
+        default_value,
+    }
 }
 
 fn non_empty(s: &str) -> Option<String> {
@@ -4976,7 +5017,29 @@ async fn handle_pending_openai_compat_step(
 
     match next_step {
         OpenAiCompatSetupStep::AwaitingEndpoint => {
-            let endpoint_input = if trimmed.is_empty() {
+            // `none`, or nothing with nothing current, is a blank direct
+            // endpoint while the gateway is on; without the gateway on, a
+            // direct endpoint is the one way to reach the preset.
+            let none = trimmed.eq_ignore_ascii_case("none");
+            let endpoint_input = if state.gateway.is_some()
+                && (none || (trimmed.is_empty() && state.current_endpoint.is_none()))
+            {
+                String::new()
+            } else if none {
+                let _ = tx
+                    .send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::System(
+                            SystemMessage {
+                                content: "none needs the gateway: a direct endpoint is required \
+                                          while /local-ai-gateway is off."
+                                    .to_string(),
+                                msg_type: SystemMessageType::Error as i32,
+                            },
+                        )),
+                    }))
+                    .await;
+                return reset_to_endpoint_step(state, tx).await;
+            } else if trimmed.is_empty() {
                 state
                     .current_endpoint
                     .clone()
@@ -5144,10 +5207,22 @@ async fn advance_to_probe(
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
     _pending: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
 ) -> SetupStepOutcome {
+    // The list comes from where the next turn goes: the typed endpoint, or
+    // the gateway's prefix while the gateway is on.
+    let probe_base = crate::provider::gateway::base_for(
+        state.gateway.as_ref(),
+        state.preset.as_kind(),
+        &endpoint,
+    );
+    let routed = state.gateway.is_some();
     let _ = tx
         .send(Ok(ConversationResponse {
             response_type: Some(conversation_response::ResponseType::System(SystemMessage {
-                content: format!("Probing {endpoint} for available models…"),
+                content: if routed {
+                    format!("Probing {probe_base} for the models the gateway's upstream lists…")
+                } else {
+                    format!("Probing {probe_base} for available models…")
+                },
                 msg_type: SystemMessageType::Info as i32,
             })),
         }))
@@ -5155,7 +5230,7 @@ async fn advance_to_probe(
 
     let probe = crate::provider::openai_compat::OpenAICompatProvider::probe_models(
         state.preset,
-        &endpoint,
+        &probe_base,
         bearer.as_deref(),
     )
     .await;
@@ -5166,7 +5241,7 @@ async fn advance_to_probe(
                     response_type: Some(conversation_response::ResponseType::System(
                         SystemMessage {
                             content: format!(
-                                "No models found at {endpoint}. Pull or load a model on the server, then try again."
+                                "No models found at {probe_base}. Pull or load a model on the server, then try again."
                             ),
                             msg_type: SystemMessageType::Error as i32,
                         },
@@ -5181,7 +5256,16 @@ async fn advance_to_probe(
                 .send(Ok(ConversationResponse {
                     response_type: Some(conversation_response::ResponseType::System(
                         SystemMessage {
-                            content: format!("Probe failed: {e}. Re-entering endpoint step."),
+                            content: if routed {
+                                format!(
+                                    "Probe through the gateway at {probe_base} failed: {e}. Its \
+                                     [backends.{}] upstream must answer, or /local-ai-gateway off sets \
+                                     the preset up directly. Re-entering endpoint step.",
+                                    crate::provider::gateway::prefix(state.preset.as_kind())
+                                )
+                            } else {
+                                format!("Probe failed: {e}. Re-entering endpoint step.")
+                            },
                             msg_type: SystemMessageType::Error as i32,
                         },
                     )),
@@ -5226,18 +5310,10 @@ async fn reset_to_endpoint_step(
     state: &mut OpenAiCompatSetupState,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
 ) -> SetupStepOutcome {
-    let default_endpoint = state
-        .current_endpoint
-        .clone()
-        .unwrap_or_else(|| state.preset.default_base_url().to_string());
+    let prompt = endpoint_prompt(state, true);
     let _ = tx
         .send(Ok(ConversationResponse {
-            response_type: Some(conversation_response::ResponseType::Setup(SetupPrompt {
-                field_type: SetupFieldType::Text as i32,
-                prompt: format!("Re-enter the {} endpoint URL:", state.preset.label()),
-                options: vec![],
-                default_value: default_endpoint,
-            })),
+            response_type: Some(conversation_response::ResponseType::Setup(prompt)),
         }))
         .await;
     state.step = OpenAiCompatSetupStep::AwaitingEndpoint;
@@ -5368,9 +5444,14 @@ async fn complete_openai_compat_setup(
         .send(Ok(ConversationResponse {
             response_type: Some(conversation_response::ResponseType::System(SystemMessage {
                 content: format!(
-                    "{} reconfigured: endpoint={endpoint}, bearer={bearer_change_label}, model={model}. \
+                    "{} reconfigured: endpoint={}, bearer={bearer_change_label}, model={model}. \
                      Switch to it with /provider {} when ready.",
                     state.preset.label(),
+                    if endpoint.is_empty() {
+                        "none (through the gateway only)"
+                    } else {
+                        endpoint.as_str()
+                    },
                     state.preset.as_kind().as_str(),
                 ),
                 msg_type: SystemMessageType::Info as i32,
@@ -6209,7 +6290,9 @@ async fn handle_local_model_command(
     };
 
     if wanted.is_empty() {
-        let (prompt, state) = local_model_selection(preset, endpoint, bearer, current, models);
+        let gateway = cfg.provider_gateway.clone().filter(|g| g.enabled);
+        let (prompt, state) =
+            local_model_selection(preset, endpoint, bearer, current, models, gateway);
         *pending.lock().await = Some(state);
         let _ = tx
             .send(Ok(ConversationResponse {
@@ -6324,6 +6407,7 @@ fn local_model_selection(
     bearer: Option<String>,
     current: Option<String>,
     mut models: Vec<String>,
+    gateway: Option<config::ProviderGateway>,
 ) -> (SetupPrompt, OpenAiCompatSetupState) {
     if let Some(at) = current.as_ref().and_then(|c| models.iter().position(|m| m == c)) {
         let listed = models.remove(at);
@@ -6338,11 +6422,12 @@ fn local_model_selection(
     };
     let state = OpenAiCompatSetupState {
         preset,
-        current_endpoint: Some(endpoint.clone()),
+        current_endpoint: non_empty(&endpoint),
         current_bearer: bearer.clone(),
         current_model: current,
         step: OpenAiCompatSetupStep::AwaitingModelSelection { endpoint, bearer, models },
         model_only: true,
+        gateway,
     };
     (prompt, state)
 }
@@ -9437,6 +9522,7 @@ mod setup_reconfigure_tests {
             current_model: model.map(String::from),
             step,
             model_only: false,
+            gateway: None,
         }
     }
 
@@ -9917,6 +10003,7 @@ mod setup_reconfigure_tests {
             Some("tok".to_string()),
             Some("qwen3.8-27b".to_string()),
             names(&["gemma4-31b", "qwen3.8-27b"]),
+            None,
         );
         assert_eq!(prompt.field_type, SetupFieldType::Selector as i32);
         assert_eq!(prompt.prompt, "Select an LM Studio model:");
@@ -9933,7 +10020,7 @@ mod setup_reconfigure_tests {
         assert_eq!(models.len(), 2);
         // A current model the server no longer lists: the first is chosen.
         let (prompt, _) =
-            local_model_selection(OpenAiCompatPreset::Ollama, "e".into(), None, Some("gone".into()), names(&["a", "b"]));
+            local_model_selection(OpenAiCompatPreset::Ollama, "e".into(), None, Some("gone".into()), names(&["a", "b"]), None);
         assert_eq!(prompt.default_value, "a");
     }
 
@@ -9943,7 +10030,7 @@ mod setup_reconfigure_tests {
     #[tokio::test]
     async fn a_model_only_pick_outside_the_list_ends_the_flow() {
         let (_, mut state) =
-            local_model_selection(OpenAiCompatPreset::Ollama, "http://ollama:11434".into(), None, None, names(&["a", "b"]));
+            local_model_selection(OpenAiCompatPreset::Ollama, "http://ollama:11434".into(), None, None, names(&["a", "b"]), None);
         let (events, outcome) = run_step(&mut state, "c").await;
         assert!(matches!(outcome, SetupStepOutcome::Error));
         assert!(last_setup_prompt(&events).is_none(), "no endpoint prompt");
@@ -9987,6 +10074,7 @@ mod setup_reconfigure_tests {
             None,
             Some("a".into()),
             names(&["a", "b"]),
+            None,
         );
         let (tx, mut rx) = mpsc::channel::<Result<ConversationResponse, Status>>(64);
         let pending = Arc::new(Mutex::new(None));
@@ -10018,6 +10106,197 @@ mod setup_reconfigure_tests {
         assert_eq!(saved[0]["openai_compat"]["ollama_model"], "b");
         assert_eq!(saved[0]["openai_compat"]["ollama_endpoint"], "http://ollama:11434");
         assert!(pending.lock().await.is_none());
+    }
+
+    fn gw(uri: &str) -> config::ProviderGateway {
+        config::ProviderGateway { url: uri.to_string(), enabled: true }
+    }
+
+    fn system_texts(events: &[ConversationResponse]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match &e.response_type {
+                Some(conversation_response::ResponseType::System(m)) => Some(m.content.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// With the gateway on, the models are listed through its prefix, not
+    /// at the typed endpoint, and the Info says so.
+    #[tokio::test]
+    async fn with_the_gateway_on_the_setup_probe_goes_through_its_prefix() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/ollama/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "object": "list", "data": [{"id": "qwen3.8:27b"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let mut state = make_state(
+            OpenAiCompatPreset::Ollama,
+            Some("http://mac:11434"),
+            None,
+            None,
+            OpenAiCompatSetupStep::AwaitingBearerChoice { endpoint: "http://mac:11434".to_string() },
+        );
+        state.gateway = Some(gw(&server.uri()));
+        let (events, outcome) = run_step(&mut state, BEARER_SKIP).await;
+        assert!(matches!(outcome, SetupStepOutcome::Advance));
+        assert!(matches!(state.step, OpenAiCompatSetupStep::AwaitingModelSelection { ref endpoint, .. } if endpoint == "http://mac:11434"));
+        let prompt = last_setup_prompt(&events).expect("the model selector");
+        assert_eq!(prompt.prompt, "Select a model:");
+        let texts = system_texts(&events);
+        assert!(texts.iter().any(|t| t == &format!("Probing {}/ollama for the models the gateway's upstream lists…", server.uri())), "{texts:?}");
+        assert!(server.received_requests().await.unwrap().iter().all(|r| r.url.path() == "/ollama/v1/models"));
+    }
+
+    /// `none` is a blank direct endpoint while the gateway is on, and is
+    /// refused with the reason while it is off, the endpoint asked again.
+    #[tokio::test]
+    async fn none_is_a_blank_endpoint_while_the_gateway_is_on_and_refused_off() {
+        let mut on = make_state(OpenAiCompatPreset::Ollama, None, None, None, OpenAiCompatSetupStep::AwaitingEndpoint);
+        on.gateway = Some(gw("http://gw:4000"));
+        let (_, outcome) = run_step(&mut on, "NONE").await;
+        assert!(matches!(outcome, SetupStepOutcome::Advance));
+        assert!(matches!(on.step, OpenAiCompatSetupStep::AwaitingBearerChoice { ref endpoint } if endpoint.is_empty()));
+        let mut on = make_state(OpenAiCompatPreset::Ollama, None, None, None, OpenAiCompatSetupStep::AwaitingEndpoint);
+        on.gateway = Some(gw("http://gw:4000"));
+        run_step(&mut on, "").await;
+        assert!(matches!(on.step, OpenAiCompatSetupStep::AwaitingBearerChoice { ref endpoint } if endpoint.is_empty()), "nothing with nothing current is none too");
+
+        let mut off = make_state(OpenAiCompatPreset::Ollama, None, None, None, OpenAiCompatSetupStep::AwaitingEndpoint);
+        let (events, outcome) = run_step(&mut off, "none").await;
+        assert!(matches!(outcome, SetupStepOutcome::Advance));
+        assert!(matches!(off.step, OpenAiCompatSetupStep::AwaitingEndpoint));
+        assert!(system_texts(&events).iter().any(|t| t.starts_with("none needs the gateway:")), "{:?}", system_texts(&events));
+        let prompt = last_setup_prompt(&events).expect("the endpoint asked again");
+        assert_eq!(prompt.prompt, "Re-enter the Ollama endpoint URL:");
+        assert_eq!(prompt.default_value, "http://localhost:11434");
+    }
+
+    /// A probe that fails through the gateway names the gateway's upstream
+    /// setting and the way to set the preset up directly, and the endpoint
+    /// is asked again with `none` allowed.
+    #[tokio::test]
+    async fn a_failed_probe_through_the_gateway_names_the_upstream_and_asks_the_endpoint_again() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/ollama/v1/models"))
+            .respond_with(ResponseTemplate::new(502).set_body_string("upstream down"))
+            .mount(&server)
+            .await;
+        let mut state = make_state(
+            OpenAiCompatPreset::Ollama,
+            None,
+            None,
+            None,
+            OpenAiCompatSetupStep::AwaitingBearerChoice { endpoint: String::new() },
+        );
+        state.gateway = Some(gw(&server.uri()));
+        let (events, _) = run_step(&mut state, BEARER_SKIP).await;
+        assert!(matches!(state.step, OpenAiCompatSetupStep::AwaitingEndpoint));
+        let texts = system_texts(&events);
+        let failed = texts.iter().find(|t| t.starts_with("Probe through the gateway at")).unwrap_or_else(|| panic!("{texts:?}"));
+        assert!(failed.contains("[backends.ollama] upstream must answer") && failed.contains("/local-ai-gateway off"), "{failed}");
+        let prompt = last_setup_prompt(&events).expect("the endpoint asked again");
+        assert_eq!(prompt.prompt, "Re-enter the Ollama endpoint URL (none is allowed):");
+        assert_eq!(prompt.default_value, "none");
+    }
+
+    /// A pick after `none` saves a blank endpoint, and the acknowledgement
+    /// says the preset answers through the gateway only. LM Studio here, so
+    /// the bearer step's env-var clearing touches no other test's variable.
+    #[tokio::test]
+    async fn a_blank_endpoint_is_saved_and_the_ack_says_through_the_gateway_only() {
+        let db_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/config.system/docs/config"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "meta": {}, "data": {
+                "name": "Embra", "api_key": "k", "timezone": "UTC", "deployment_mode": "phase1",
+                "created_at": "", "version": "test", "api_provider": "anthropic",
+                "provider_gateway": {"url": "http://gw:4000", "enabled": true},
+            }})))
+            .mount(&db_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/config.system"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "meta": {}, "data": {}})))
+            .mount(&db_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/config.system/docs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "meta": {}, "data": {"_id": "config"}})))
+            .mount(&db_server)
+            .await;
+        let mut state = make_state(
+            OpenAiCompatPreset::LmStudio,
+            None,
+            None,
+            None,
+            OpenAiCompatSetupStep::AwaitingModelSelection { endpoint: String::new(), bearer: None, models: names(&["m"]) },
+        );
+        state.gateway = Some(gw("http://gw:4000"));
+        let (tx, mut rx) = mpsc::channel::<Result<ConversationResponse, Status>>(64);
+        let pending = Arc::new(Mutex::new(None));
+        let db = Arc::new(WardsonDbClient::from_url(&db_server.uri()));
+        let outcome = handle_pending_openai_compat_step(&mut state, "m", &tx, &db, &pending).await;
+        drop(tx);
+        assert!(matches!(outcome, SetupStepOutcome::Complete));
+        let mut said = Vec::new();
+        while let Some(Ok(r)) = rx.recv().await {
+            if let Some(conversation_response::ResponseType::System(m)) = r.response_type {
+                said.push(m.content);
+            }
+        }
+        let ack = said.iter().find(|s| s.starts_with("LM Studio reconfigured:")).unwrap_or_else(|| panic!("{said:?}"));
+        assert!(ack.contains("endpoint=none (through the gateway only), bearer=none, model=m."), "{ack}");
+        let saved: Vec<serde_json::Value> = db_server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path() == "/config.system/docs")
+            .map(|r| serde_json::from_slice(&r.body).expect("a config document"))
+            .collect();
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0]["openai_compat"]["lm_studio_endpoint"], "");
+        assert_eq!(saved[0]["openai_compat"]["lm_studio_model"], "m");
+    }
+
+    /// The endpoint prompt offers `none` while the gateway is on and the
+    /// preset's default otherwise.
+    #[test]
+    fn the_endpoint_prompt_offers_none_while_the_gateway_is_on() {
+        let mut state = make_state(OpenAiCompatPreset::Ollama, None, None, None, OpenAiCompatSetupStep::AwaitingEndpoint);
+        let p = endpoint_prompt(&state, false);
+        assert_eq!(p.prompt, "Enter the Ollama endpoint URL (current: <unconfigured>):");
+        assert_eq!(p.default_value, "http://localhost:11434");
+        state.gateway = Some(gw("http://gw:4000"));
+        let p = endpoint_prompt(&state, false);
+        assert_eq!(p.prompt, "Enter the Ollama endpoint URL for when the gateway is off (current: none; none is allowed):");
+        assert_eq!(p.default_value, "none");
+        state.current_endpoint = Some("http://mac:11434".into());
+        let p = endpoint_prompt(&state, true);
+        assert_eq!(p.prompt, "Re-enter the Ollama endpoint URL (none is allowed):");
+        assert_eq!(p.default_value, "http://mac:11434");
+    }
+
+    /// `/model` lists from the routed base and never from the preset's
+    /// default: a preset without a direct endpoint has nothing to list
+    /// while the gateway is off.
+    #[test]
+    fn a_preset_without_a_direct_path_is_not_listed_while_the_gateway_is_off() {
+        let mut cfg = crate::config::tests_support::minimal_cfg();
+        cfg.openai_compat.ollama_model = "m".into();
+        assert_eq!(local_route(&cfg, OpenAiCompatPreset::Ollama), None);
+        cfg.provider_gateway = Some(gw("http://gw:4000"));
+        assert_eq!(local_route(&cfg, OpenAiCompatPreset::Ollama), Some("http://gw:4000/ollama".to_string()));
+        cfg.provider_gateway.as_mut().unwrap().enabled = false;
+        cfg.openai_compat.ollama_endpoint = "http://mac:11434".into();
+        assert_eq!(local_route(&cfg, OpenAiCompatPreset::Ollama), Some("http://mac:11434".to_string()));
     }
 }
 
