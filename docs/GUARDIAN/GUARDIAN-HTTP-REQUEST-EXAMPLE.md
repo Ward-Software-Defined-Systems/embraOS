@@ -30,7 +30,7 @@ lives on the host:
    may not set `Authorization`, `Proxy-Authorization` or `Cookie` itself, and
    a token never enters a tool's input, the turn trace or the session history.
 3. **The user agent** — every hop carries `User-Agent: embraOS/<version>`,
-   the workspace version (`embraOS/0.20.0-phase1` today), so it moves with
+   the workspace version (`embraOS/0.21.0-phase1` today), so it moves with
    a release; a `User-Agent` in the request's `headers` is sent instead.
 4. **Redirects** followed for GET and HEAD only, at most three, every hop
    checked; the other methods get the 3xx back with its target under
