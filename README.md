@@ -40,8 +40,7 @@ Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` 
 > secret before it leaves the network — embraOS reports such a block as the turn's error,
 > naming the rule. The operator is evaluating the gateway as the companion of embraOS and
 > for vendoring into this workspace the way WardSONDB was; until then it is a separate
-> install beside the OS, its unified listener and HTTPS on the gateway's `unified-router`
-> branch.
+> install beside the OS.
 > **[Routing the providers through the gateway →](docs/OPERATIONS/LOCAL-AI-GATEWAY.md)**
 
 > **Local inference — model selection matters.** All 118 tools dispatch identically on
