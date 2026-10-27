@@ -1034,6 +1034,18 @@ fn console_url(token: &str) -> String {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    /// The tests that spawn children, and the orphan-reaper guard, run one
+    /// at a time. The harness runs tests on parallel threads of one process,
+    /// and `reconcile::reap_orphans` with an empty supervised list reaps
+    /// every exited child of that process: a child of another test taken
+    /// that way leaves its `wait` with no child to collect (`stop_one` then
+    /// answers `None`), and a zombie of another test counts in the reaper
+    /// guard's sweep. Seen as CI job 1794 under the runner's load.
+    pub(crate) static CHILDREN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+}
+
+#[cfg(test)]
 mod web_token_tests {
     use super::{boot_token, console_url, hex_of};
 
@@ -1186,6 +1198,7 @@ mod restart_budget_tests {
 mod stop_and_health_tests {
     use super::*;
     use std::os::unix::process::ExitStatusExt;
+    use tokio::io::AsyncBufReadExt;
 
     /// A health is a 200 status line, not the digits `200` anywhere (#29).
     #[test]
@@ -1202,18 +1215,22 @@ mod stop_and_health_tests {
     /// status, one that ignores it is killed after the grace (#29).
     #[tokio::test]
     async fn a_stop_is_sigterm_first_and_sigkill_after_the_grace() {
+        let _children = test_support::CHILDREN.lock().await;
         let mut polite = Command::new("sleep").arg("30").kill_on_drop(true).spawn().unwrap();
         let status = stop_one(&mut polite, "polite", Duration::from_secs(5)).await.unwrap();
         assert_eq!(status.signal(), Some(15), "ended by SIGTERM: {status:?}");
         // The shell itself stays the process (a `wait`, not an exec of the
-        // last command), so the ignored SIGTERM is its own to ignore.
+        // last command), so the ignored SIGTERM is its own to ignore. It
+        // says when its `trap` line is behind it, so the signal lands after
+        // that however loaded the host is.
         let mut stubborn = Command::new("sh")
-            .args(["-c", "trap '' TERM; sleep 30 & wait"])
+            .args(["-c", "trap '' TERM; echo ready; sleep 30 & wait"])
+            .stdout(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .unwrap();
-        // The shell has to reach its `trap` line before the signal lands.
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        let mut ready = tokio::io::BufReader::new(stubborn.stdout.take().unwrap()).lines();
+        assert_eq!(ready.next_line().await.unwrap().as_deref(), Some("ready"));
         let status = stop_one(&mut stubborn, "stubborn", Duration::from_millis(300)).await.unwrap();
         assert_eq!(status.signal(), Some(9), "killed after the grace: {status:?}");
     }
@@ -1225,6 +1242,7 @@ mod stop_and_health_tests {
     /// the point.
     #[tokio::test]
     async fn a_restarted_console_draws_on_the_kept_boot_stdio() {
+        let _children = test_support::CHILDREN.lock().await;
         let dir = std::env::temp_dir().join(format!("embrad-console-stdio-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();

@@ -145,6 +145,9 @@ mod tests {
     /// reap. A pid on the supervised list is never waited on.
     #[test]
     fn an_orphaned_grandchild_is_reaped_and_a_supervised_pid_is_left() {
+        // One child-spawning test at a time: the sweeps below take every
+        // exited child of this process (`supervisor::test_support`).
+        let _children = crate::supervisor::test_support::CHILDREN.blocking_lock();
         nix::sys::prctl::set_child_subreaper(true).unwrap();
         // The child forks a grandchild and exits at once; the grandchild
         // outlives it, reparents to this process and exits a little later.
