@@ -18,7 +18,7 @@ use super::{EmbeddingError, EmbeddingProvider, EMBEDDING_DIM, MAX_TOKENS, QUERY_
 /// Concurrent inference slots. Inference is CPU-bound and single-threaded per
 /// call; more slots than this just starve the async runtime on a QEMU vCPU.
 /// Mirrors the media wave's 2-slot decode gate.
-const INFERENCE_SLOTS: usize = 2;
+pub(crate) const INFERENCE_SLOTS: usize = 2;
 
 /// `SimplePlan::run` takes `self: &Arc<Self>`, and `into_runnable()` hands
 /// back the `Arc` — so the plan is stored Arc'd rather than owned.

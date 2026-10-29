@@ -12,8 +12,9 @@ use crate::config::SystemConfig;
 use crate::db::WardsonDbClient;
 
 use super::cache::EMBEDDED_COLLECTIONS;
+use super::local::INFERENCE_SLOTS;
 use super::write::embed_text;
-use super::{cache, encode_vector};
+use super::{cache, encode_vector, EmbeddingProvider};
 
 /// Documents embedded per progress report.
 const PROGRESS_EVERY: usize = 100;
@@ -91,6 +92,20 @@ where
     let provider = super::provider(cfg)
         .await
         .ok_or_else(|| "no embedding model available — see /embeddings status".to_string())?;
+    run_with(db, provider.as_ref(), force, progress).await
+}
+
+/// `run` on the provider given, so a test can hand it one of its own.
+pub(crate) async fn run_with<F, Fut>(
+    db: &WardsonDbClient,
+    provider: &dyn EmbeddingProvider,
+    force: bool,
+    progress: F,
+) -> Result<BackfillReport, String>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
     let model = provider.model_id().to_string();
     let mut report = BackfillReport::default();
 
@@ -102,48 +117,64 @@ where
             .await
             .map_err(|e| format!("reading {coll} failed: {e}"))?;
 
-        for doc in &docs {
-            let Some(id) = doc.get("_id").and_then(|v| v.as_str()) else { continue };
-            if !force && is_current(doc, &model) {
-                report.already_current += 1;
-                continue;
-            }
-            let text = embed_text(doc, coll);
-            if text.trim().is_empty() {
-                report.skipped_empty += 1;
-                continue;
-            }
-            match provider.embed_query_or_document(&text).await {
-                Ok(vector) => {
-                    let patch = serde_json::json!({
-                        "embedding": encode_vector(&vector),
-                        "embedding_model": model,
-                        "embedding_updated_at": chrono::Utc::now().to_rfc3339(),
-                    });
-                    if let Err(e) = db.patch_document(coll, id, &patch).await {
-                        tracing::warn!(target: "kg::embedding", "backfill store {coll}:{id}: {e}");
+        let pending: Vec<(&str, String)> = docs
+            .iter()
+            .filter_map(|doc| {
+                let id = doc.get("_id").and_then(|v| v.as_str())?;
+                if !force && is_current(doc, &model) {
+                    report.already_current += 1;
+                    return None;
+                }
+                let text = embed_text(doc, coll);
+                if text.trim().is_empty() {
+                    report.skipped_empty += 1;
+                    return None;
+                }
+                Some((id, text))
+            })
+            .collect();
+
+        // The provider runs `INFERENCE_SLOTS` forward passes at once; one
+        // document awaited at a time left the second slot idle for the
+        // whole run (#44). Each chunk embeds in parallel, in order, then
+        // its vectors are stored one by one as before.
+        for chunk in pending.chunks(INFERENCE_SLOTS) {
+            let outcomes =
+                futures::future::join_all(chunk.iter().map(|(_, text)| provider.embed_query_or_document(text))).await;
+            for ((id, _), outcome) in chunk.iter().zip(outcomes) {
+                let id: &str = id;
+                match outcome {
+                    Ok(vector) => {
+                        let patch = serde_json::json!({
+                            "embedding": encode_vector(&vector),
+                            "embedding_model": model,
+                            "embedding_updated_at": chrono::Utc::now().to_rfc3339(),
+                        });
+                        if let Err(e) = db.patch_document(coll, id, &patch).await {
+                            tracing::warn!(target: "kg::embedding", "backfill store {coll}:{id}: {e}");
+                            cache::record_failure(cache::FailureKind::Write, &format!("{coll}:{id}"), &e.to_string())
+                                .await;
+                            report.failed += 1;
+                        } else {
+                            cache::upsert(coll, id, vector, &model, false).await;
+                            report.embedded += 1;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(target: "kg::embedding", "backfill embed {coll}:{id}: {e}");
                         cache::record_failure(cache::FailureKind::Write, &format!("{coll}:{id}"), &e.to_string())
                             .await;
                         report.failed += 1;
-                    } else {
-                        cache::upsert(coll, id, vector, &model, false).await;
-                        report.embedded += 1;
                     }
                 }
-                Err(e) => {
-                    tracing::warn!(target: "kg::embedding", "backfill embed {coll}:{id}: {e}");
-                    cache::record_failure(cache::FailureKind::Write, &format!("{coll}:{id}"), &e.to_string())
-                        .await;
-                    report.failed += 1;
+                let done = report.embedded + report.failed;
+                if done > 0 && done % PROGRESS_EVERY == 0 {
+                    progress(format!(
+                        "  … {} embedded, {} failed (in {coll})",
+                        report.embedded, report.failed
+                    ))
+                    .await;
                 }
-            }
-            let done = report.embedded + report.failed;
-            if done > 0 && done % PROGRESS_EVERY == 0 {
-                progress(format!(
-                    "  … {} embedded, {} failed (in {coll})",
-                    report.embedded, report.failed
-                ))
-                .await;
             }
         }
     }
@@ -154,6 +185,81 @@ where
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A provider that counts how many forward passes are in flight at once
+    /// and keeps the highest count seen.
+    struct Counting {
+        in_flight: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl EmbeddingProvider for Counting {
+        async fn embed_query(&self, text: &str) -> Result<Vec<f32>, super::super::EmbeddingError> {
+            self.embed_query_or_document(text).await
+        }
+
+        async fn embed_documents(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, super::super::EmbeddingError> {
+            use std::sync::atomic::Ordering;
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+            Ok(texts.iter().map(|_| vec![0.5, 0.5]).collect())
+        }
+
+        fn model_id(&self) -> &str {
+            "counting"
+        }
+
+        fn dimensions(&self) -> usize {
+            2
+        }
+    }
+
+    /// #44: the backfill embeds `INFERENCE_SLOTS` documents at once and
+    /// stores every one of them; the order of the patches follows the
+    /// documents.
+    #[tokio::test]
+    async fn the_backfill_fills_both_inference_slots_and_stores_each_vector() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let docs: Vec<serde_json::Value> =
+            (1..=4).map(|i| json!({"_id": format!("n{i}"), "content": format!("node {i}")})).collect();
+        Mock::given(method("POST"))
+            .and(path("/memory.semantic/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": docs, "meta": {}})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/memory.procedural/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": [], "meta": {}})))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": {}, "meta": {}})))
+            .mount(&server)
+            .await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let provider = Counting { in_flight: Default::default(), peak: Default::default() };
+
+        let report = run_with(&db, &provider, false, |_| async {}).await.expect("the backfill ran");
+        assert_eq!((report.embedded, report.failed, report.skipped_empty), (4, 0, 0));
+        assert_eq!(provider.peak.load(std::sync::atomic::Ordering::SeqCst), INFERENCE_SLOTS);
+        let patched: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "PATCH")
+            .map(|r| r.url.path().to_string())
+            .collect();
+        assert_eq!(
+            patched,
+            ["/memory.semantic/docs/n1", "/memory.semantic/docs/n2", "/memory.semantic/docs/n3", "/memory.semantic/docs/n4"]
+        );
+    }
 
     #[test]
     fn survey_projection_covers_every_field_is_current_reads() {
