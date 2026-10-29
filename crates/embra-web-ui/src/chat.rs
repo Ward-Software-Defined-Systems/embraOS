@@ -27,6 +27,7 @@ use gloo_net::websocket::futures::WebSocket;
 use gloo_timers::future::TimeoutFuture;
 use leptos::ev::{KeyboardEvent, MouseEvent};
 use leptos::prelude::*;
+use std::sync::Arc;
 
 use crate::json_view::{json_pre, pretty_json_capped, truncate};
 use serde::{Deserialize, Serialize};
@@ -376,6 +377,12 @@ fn revoke_previews(items: &[PendingAttachment]) {
     }
 }
 
+/// The timeline: every bubble behind a shared handle, so a push clones
+/// pointers and not the kilobytes of a tool card (#40). An `Arc` rather
+/// than an `Rc`: `<For>` and the signals want `Send`, and on wasm32
+/// without threads the atomic count costs nothing.
+type Timeline = RwSignal<Vec<Arc<Bubble>>>;
+
 #[derive(Debug, Clone)]
 enum Bubble {
     /// Operator turn: text plus the images (thumbnails) and text files
@@ -610,7 +617,7 @@ fn services_health(s: &StatusData) -> &'static str {
 
 #[component]
 pub fn ChatApp() -> impl IntoView {
-    let messages = RwSignal::new(Vec::<Bubble>::new());
+    let messages: Timeline = RwSignal::new(Vec::new());
     // Live-streaming assistant text — flushed to a Bubble::Assistant
     // on Done. Cleared on each new turn.
     let streaming = RwSignal::new(String::new());
@@ -699,14 +706,14 @@ pub fn ChatApp() -> impl IntoView {
         // the user turn back on the Converse stream, so the timeline
         // would otherwise skip what the operator typed.
         if let ClientMsg::Msg { text, .. } = &msg {
-            messages.update(|m| m.push(Bubble::User { text: text.clone(), images: sent_images.clone(), files: sent_files.clone() }));
+            messages.update(|m| m.push(Arc::new(Bubble::User { text: text.clone(), images: sent_images.clone(), files: sent_files.clone() })));
         } else if let ClientMsg::Slash { command, args } = &msg {
             let display = if args.is_empty() {
                 command.clone()
             } else {
                 format!("{command} {args}")
             };
-            messages.update(|m| m.push(Bubble::User { text: display, images: Vec::new(), files: Vec::new() }));
+            messages.update(|m| m.push(Arc::new(Bubble::User { text: display, images: Vec::new(), files: Vec::new() })));
         }
         if let Some(tx) = outbound.get_untracked() {
             let _ = tx.unbounded_send(msg);
@@ -726,7 +733,7 @@ pub fn ChatApp() -> impl IntoView {
         } else {
             format!("{command} {args}")
         };
-        messages.update(|m| m.push(Bubble::User { text: display, images: Vec::new(), files: Vec::new() }));
+        messages.update(|m| m.push(Arc::new(Bubble::User { text: display, images: Vec::new(), files: Vec::new() })));
         if let Some(tx) = outbound.get_untracked() {
             let _ = tx.unbounded_send(ClientMsg::Slash { command, args });
         }
@@ -741,7 +748,7 @@ pub fn ChatApp() -> impl IntoView {
         if text.is_empty() {
             return;
         }
-        messages.update(|m| m.push(Bubble::User { text: text.clone(), images: Vec::new(), files: Vec::new() }));
+        messages.update(|m| m.push(Arc::new(Bubble::User { text: text.clone(), images: Vec::new(), files: Vec::new() })));
         if let Some(tx) = outbound.get_untracked() {
             let _ = tx.unbounded_send(ClientMsg::Msg { text, attachment_ids: Vec::new(), file_paths: Vec::new() });
         }
@@ -1013,7 +1020,7 @@ pub fn ChatApp() -> impl IntoView {
 )]
 async fn run_ws_forever(
     outbound: RwSignal<Option<mpsc::UnboundedSender<ClientMsg>>>,
-    messages: RwSignal<Vec<Bubble>>,
+    messages: Timeline,
     streaming: RwSignal<String>,
     connected: RwSignal<bool>,
     thinking: RwSignal<bool>,
@@ -1076,7 +1083,7 @@ enum ExitReason {
 )]
 async fn run_ws_once(
     mut rx: mpsc::UnboundedReceiver<ClientMsg>,
-    messages: RwSignal<Vec<Bubble>>,
+    messages: Timeline,
     streaming: RwSignal<String>,
     connected: RwSignal<bool>,
     thinking: RwSignal<bool>,
@@ -1171,7 +1178,7 @@ async fn run_ws_once(
 )]
 fn handle_server_msg(
     srv: ServerMsg,
-    messages: RwSignal<Vec<Bubble>>,
+    messages: Timeline,
     streaming: RwSignal<String>,
     thinking: RwSignal<bool>,
     thinking_tool: RwSignal<String>,
@@ -1250,7 +1257,7 @@ fn handle_server_msg(
             // bubble. Push the untrimmed text to preserve intentional
             // formatting; gate only on whether anything is visible.
             if !final_text.trim().is_empty() {
-                messages.update(|m| m.push(Bubble::Assistant(final_text)));
+                messages.update(|m| m.push(Arc::new(Bubble::Assistant(final_text))));
             }
             streaming.set(String::new());
             thinking.set(false);
@@ -1296,7 +1303,7 @@ fn handle_server_msg(
             } else {
                 Bubble::System { content, kind }
             };
-            messages.update(|m| m.push(bubble));
+            messages.update(|m| m.push(Arc::new(bubble)));
         }
         ServerMsg::Tool {
             name,
@@ -1306,12 +1313,12 @@ fn handle_server_msg(
             ..
         } => {
             messages.update(|m| {
-                m.push(Bubble::Tool {
+                m.push(Arc::new(Bubble::Tool {
                     name,
                     is_error,
                     input_json,
                     result,
-                });
+                }));
             });
         }
         ServerMsg::Thinking {
@@ -1334,10 +1341,10 @@ fn handle_server_msg(
             reasoning.set(String::new());
             current_setup.set(None);
             messages.update(|m| {
-                m.push(Bubble::System {
+                m.push(Arc::new(Bubble::System {
                     content,
                     kind: "info".into(),
-                });
+                }));
             });
         }
         ServerMsg::Setup {
@@ -1352,7 +1359,7 @@ fn handle_server_msg(
                 options,
                 default_value,
             }));
-            messages.update(|m| m.push(Bubble::Setup { prompt }));
+            messages.update(|m| m.push(Arc::new(Bubble::Setup { prompt })));
         }
         // Into its own signal, for the side sheet. Never a `Bubble` in
         // `messages`, and never sent back over the socket.
@@ -1368,7 +1375,7 @@ fn handle_server_msg(
                 return;
             }
             messages.update(|m| {
-                m.push(Bubble::Media(MediaCard { id, url, name, width, height, byte_size, origin, caption }));
+                m.push(Arc::new(Bubble::Media(MediaCard { id, url, name, width, height, byte_size, origin, caption })));
             });
         }
         ServerMsg::File { path, name, byte_size, media_type, origin, caption, replay, url, .. } => {
@@ -1382,15 +1389,15 @@ fn handle_server_msg(
                 start_download(&url, &name);
             }
             messages.update(|m| {
-                m.push(Bubble::File(FileCard { path, name, byte_size, media_type, origin, caption, url }));
+                m.push(Arc::new(Bubble::File(FileCard { path, name, byte_size, media_type, origin, caption, url })));
             });
         }
         ServerMsg::Error { message } => {
             messages.update(|m| {
-                m.push(Bubble::System {
+                m.push(Arc::new(Bubble::System {
                     content: format!("bridge error: {message}"),
                     kind: "error".into(),
-                });
+                }));
             });
         }
     }
@@ -1485,7 +1492,7 @@ fn ChatTopBar(
 
 #[component]
 fn ChatScroll(
-    messages: RwSignal<Vec<Bubble>>,
+    messages: Timeline,
     streaming: RwSignal<String>,
 ) -> impl IntoView {
     let scroll_ref = NodeRef::<leptos::html::Div>::new();
@@ -1512,12 +1519,12 @@ fn ChatScroll(
             .get()
             .into_iter()
             .enumerate()
-            .collect::<Vec<(usize, Bubble)>>()
+            .collect::<Vec<(usize, Arc<Bubble>)>>()
     };
 
     view! {
         <div node_ref=scroll_ref class="chat-scroll">
-            <For each=bubbles key={|t: &(usize, Bubble)| t.0} let:item>
+            <For each=bubbles key={|t: &(usize, Arc<Bubble>)| t.0} let:item>
                 <BubbleView idx={item.0} bubble={item.1} />
             </For>
             // The streaming bubble is always in the DOM: its text is one
@@ -1533,10 +1540,12 @@ fn ChatScroll(
 }
 
 #[component]
-fn BubbleView(idx: usize, bubble: Bubble) -> impl IntoView {
+fn BubbleView(idx: usize, bubble: Arc<Bubble>) -> impl IntoView {
     let _ = idx;
     let lightbox = use_context::<RwSignal<Option<MediaCard>>>();
-    match bubble {
+    // The timeline keeps its handle, so this is the one clone of the
+    // bubble's strings, made when its view is created and never again.
+    match Arc::unwrap_or_clone(bubble) {
         Bubble::User { text, images, files } => {
             if images.is_empty() && files.is_empty() {
                 view! { <div class="bubble user">{text}</div> }.into_any()
@@ -1799,7 +1808,7 @@ fn ChatInput<F>(
     session_name: RwSignal<String>,
     /// The timeline, for the one message the composer adds itself: a stop
     /// that failed.
-    messages: RwSignal<Vec<Bubble>>,
+    messages: Timeline,
     busy: Signal<bool>,
     on_send: F,
 ) -> impl IntoView
@@ -1975,7 +1984,7 @@ where
                             };
                             if let Some(reason) = failed {
                                 messages.update(|m| {
-                                    m.push(Bubble::System { content: format!("stop failed: {reason}"), kind: "error".into() });
+                                    m.push(Arc::new(Bubble::System { content: format!("stop failed: {reason}"), kind: "error".into() }));
                                 });
                             }
                         });
