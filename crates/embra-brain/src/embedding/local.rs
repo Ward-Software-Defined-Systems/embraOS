@@ -459,7 +459,7 @@ mod measure {
                 let query_tokens = crate::knowledge::text::content_tokens(&text);
                 let ctx_tokens = crate::knowledge::retrieval::context_tokens(&context, &query_tokens);
                 let df_tokens: HashSet<String> = query_tokens.union(&ctx_tokens).cloned().collect();
-                let df = crate::knowledge::idf::DocFreq::build(&df_tokens, token_sets.iter().cloned());
+                let df = crate::knowledge::idf::DocFreq::build(&df_tokens, token_sets.iter());
                 let terms = crate::knowledge::retrieval::expansion_terms(&ctx_tokens, &df, &tag_vocab);
                 let top_raw = raw.first().map(|h| h.1);
                 let expanded = if crate::knowledge::retrieval::should_expand(top_raw, !terms.is_empty()) {

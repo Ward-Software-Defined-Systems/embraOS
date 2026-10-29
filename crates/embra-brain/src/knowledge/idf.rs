@@ -43,9 +43,9 @@ impl DocFreq {
     /// One pass over the corpus. `docs` yields each document's token set — the
     /// caller owns tokenization so this module never duplicates the rules in
     /// `text.rs`.
-    pub(crate) fn build<I>(query_tokens: &HashSet<String>, docs: I) -> Self
+    pub(crate) fn build<'a, I>(query_tokens: &HashSet<String>, docs: I) -> Self
     where
-        I: IntoIterator<Item = HashSet<String>>,
+        I: IntoIterator<Item = &'a HashSet<String>>,
     {
         let mut df: HashMap<String, usize> =
             query_tokens.iter().map(|t| (t.clone(), 0usize)).collect();
@@ -125,7 +125,7 @@ mod tests {
     #[test]
     fn idf_is_smoothed_floored_at_one_and_rarer_scores_higher() {
         let q = toks("the review absent");
-        let df = DocFreq::build(&q, corpus());
+        let df = DocFreq::build(&q, &corpus());
         assert_eq!(df.n_docs, 100);
         // ln(101/61)+1
         let the = df.idf("the");
@@ -144,7 +144,7 @@ mod tests {
     fn idf_floor_is_exactly_one_when_every_doc_contains_the_token() {
         let q = toks("ubiquitous");
         let docs: Vec<HashSet<String>> = (0..100).map(|_| toks("ubiquitous")).collect();
-        let df = DocFreq::build(&q, docs);
+        let df = DocFreq::build(&q, &docs);
         // ln((100+1)/(100+1)) + 1 = 1.0 exactly.
         assert!((df.idf("ubiquitous") - 1.0).abs() < 1e-9);
     }
@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn stopword_gate_uses_the_df_ratio() {
         let q = toks("the review");
-        let df = DocFreq::build(&q, corpus());
+        let df = DocFreq::build(&q, &corpus());
         assert!(df.is_stopword("the"), "60/100 is over the 0.15 ratio");
         assert!(!df.is_stopword("review"), "3/100 is under the ratio");
     }
@@ -165,7 +165,7 @@ mod tests {
         let docs: Vec<HashSet<String>> = (0..MIN_CORPUS_FOR_STOPWORDS - 1)
             .map(|_| toks("the"))
             .collect();
-        let df = DocFreq::build(&q, docs);
+        let df = DocFreq::build(&q, &docs);
         assert!(df.n_docs < MIN_CORPUS_FOR_STOPWORDS);
         assert!(!df.is_stopword("the"));
     }
@@ -175,7 +175,7 @@ mod tests {
         // 12 query tokens, none observed → every IDF is identical, so the
         // denominator must be exactly 8 of them, not 12.
         let q: HashSet<String> = (0..12).map(|i| format!("tok{i}")).collect();
-        let df = DocFreq::build(&q, Vec::<HashSet<String>>::new());
+        let df = DocFreq::build(&q, &Vec::<HashSet<String>>::new());
         let one = df.idf("tok0");
         assert!((df.denominator(&q) - one * IDF_DENOM_CAP as f64).abs() < 1e-9);
     }
@@ -183,7 +183,7 @@ mod tests {
     #[test]
     fn denominator_prefers_the_highest_weighted_tokens() {
         let q = toks("the review absent");
-        let df = DocFreq::build(&q, corpus());
+        let df = DocFreq::build(&q, &corpus());
         // Under the cap, so all three sum — and the sum must exceed a
         // three-way sum of the cheapest term.
         let expected = df.idf("the") + df.idf("review") + df.idf("absent");
@@ -193,7 +193,7 @@ mod tests {
     #[test]
     fn denominator_is_never_zero_for_an_empty_query() {
         let empty: HashSet<String> = HashSet::new();
-        let df = DocFreq::build(&empty, corpus());
+        let df = DocFreq::build(&empty, &corpus());
         assert!(df.denominator(&empty) > 0.0, "callers divide by this");
     }
 }

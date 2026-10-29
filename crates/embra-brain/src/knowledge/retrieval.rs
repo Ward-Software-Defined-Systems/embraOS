@@ -230,18 +230,19 @@ pub async fn retrieve_relevant_knowledge(
     let tag_vocab = tag_vocabulary(
         prefetched.iter().flat_map(|(_, docs)| docs.iter()).chain(all_entries.iter()),
     );
+    // Every prefetched document is tokenized ONCE here (#35): the sets feed
+    // the document frequency and then step 3's content match, which
+    // tokenized the same documents a second time before. The order of each
+    // list is the order of its documents.
+    let prefetched_tokens: Vec<Vec<HashSet<String>>> = prefetched
+        .iter()
+        .map(|(coll, docs)| docs.iter().map(|d| content_tokens(&doc_match_text(d, coll))).collect())
+        .collect();
+    let entry_tokens: Vec<HashSet<String>> =
+        all_entries.iter().map(|d| content_tokens(&doc_match_text(d, "memory.entries"))).collect();
     let doc_freq = DocFreq::build(
         &df_tokens,
-        prefetched
-            .iter()
-            .flat_map(|(coll, docs)| {
-                docs.iter().map(move |d| content_tokens(&doc_match_text(d, coll)))
-            })
-            .chain(
-                all_entries
-                    .iter()
-                    .map(|d| content_tokens(&doc_match_text(d, "memory.entries"))),
-            ),
+        prefetched_tokens.iter().flatten().chain(entry_tokens.iter()),
     );
 
     // Step 1: Direct tag query on semantic + procedural — in memory over the
@@ -264,9 +265,9 @@ pub async fn retrieve_relevant_knowledge(
     // unsearchable anywhere: a promoted fact whose tags don't match was
     // invisible to direct retrieval). In-memory, so effectively free.
     if !query_tokens.is_empty() {
-        for (coll, docs) in &prefetched {
+        for ((coll, docs), tokens) in prefetched.iter().zip(&prefetched_tokens) {
             for (doc, strength) in step3_content_hits(
-                docs, coll, &query_tokens, &doc_freq, STEP3_PER_COLLECTION_CAP,
+                docs, tokens, &query_tokens, &doc_freq, STEP3_PER_COLLECTION_CAP,
             ) {
                 insert_collected(&mut collected, doc, coll, "direct_query", strength);
             }
@@ -323,7 +324,7 @@ pub async fn retrieve_relevant_knowledge(
     // messages), over the window fetched above.
     if !query_tokens.is_empty() {
         for (doc, strength) in step3_content_hits(
-            &all_entries, "memory.entries", &query_tokens, &doc_freq, STEP3_PER_COLLECTION_CAP,
+            &all_entries, &entry_tokens, &query_tokens, &doc_freq, STEP3_PER_COLLECTION_CAP,
         ) {
             // The promoted target's content derives from the matched entry,
             // so the match strength rides the redirect.
@@ -628,19 +629,17 @@ fn doc_match_text(doc: &serde_json::Value, collection: &str) -> String {
 /// of input order. Returns each doc with its match strength.
 fn step3_content_hits<'a>(
     docs: &'a [serde_json::Value],
-    collection: &str,
+    tokens: &[HashSet<String>],
     query_tokens: &HashSet<String>,
     doc_freq: &DocFreq,
     cap: usize,
 ) -> Vec<(&'a serde_json::Value, f64)> {
+    debug_assert_eq!(docs.len(), tokens.len(), "one token set per document, in order");
     let mut hits: Vec<(usize, &str, &str, &'a serde_json::Value, f64)> = docs
         .iter()
-        .filter_map(|doc| {
-            let (matched, strength) = content_match(
-                &content_tokens(&doc_match_text(doc, collection)),
-                query_tokens,
-                doc_freq,
-            )?;
+        .zip(tokens)
+        .filter_map(|(doc, doc_tokens)| {
+            let (matched, strength) = content_match(doc_tokens, query_tokens, doc_freq)?;
             Some((
                 matched,
                 doc.get("created_at").and_then(|v| v.as_str()).unwrap_or(""),
@@ -1429,7 +1428,13 @@ mod content_match_tests {
     }
 
     fn df_for(query: &HashSet<String>, common: &[&str]) -> DocFreq {
-        DocFreq::build(query, corpus_where(common))
+        DocFreq::build(query, &corpus_where(common))
+    }
+
+    /// The token set of each document, in order: what the retrieval
+    /// computes once per turn and hands to the content match.
+    fn tokens_of(docs: &[serde_json::Value], collection: &str) -> Vec<HashSet<String>> {
+        docs.iter().map(|d| content_tokens(&doc_match_text(d, collection))).collect()
     }
 
     #[test]
@@ -1518,7 +1523,7 @@ mod content_match_tests {
             mk("weak-new", "cert refresh other", "2026-06-03T00:00:00Z"),
             mk("miss", "unrelated content entirely", "2026-06-04T00:00:00Z"),
         ];
-        let hits = step3_content_hits(&docs, "memory.semantic", &query, &df, 2);
+        let hits = step3_content_hits(&docs, &tokens_of(&docs, "memory.semantic"), &query, &df, 2);
         let ids: Vec<&str> = hits.iter().map(|(d, _)| d["_id"].as_str().unwrap()).collect();
         // match-count desc first (strong=3), then recency desc among the
         // 2-token matches (weak-new beats weak-old), capped at 2.
@@ -1537,10 +1542,10 @@ mod content_match_tests {
             "created_at": "2026-06-01T00:00:00Z",
         });
         let docs = vec![doc];
-        let hits = step3_content_hits(&docs, "memory.procedural", &query, &df, 10);
+        let hits = step3_content_hits(&docs, &tokens_of(&docs, "memory.procedural"), &query, &df, 10);
         assert_eq!(hits.len(), 1, "title text must be matchable for procedural nodes");
         // Same doc under memory.semantic matches nothing — no `content` field.
-        let hits = step3_content_hits(&docs, "memory.semantic", &query, &df, 10);
+        let hits = step3_content_hits(&docs, &tokens_of(&docs, "memory.semantic"), &query, &df, 10);
         assert!(hits.is_empty());
     }
 
@@ -1605,7 +1610,7 @@ mod expansion_tests {
             d.insert("great".into());
             d.insert("look".into());
         }
-        let df = DocFreq::build(&context, docs);
+        let df = DocFreq::build(&context, &docs);
         let vocab = set(&["cron", "guardian"]);
         assert_eq!(expansion_terms(&context, &df, &vocab), ["cron"]);
     }
@@ -1624,7 +1629,7 @@ mod expansion_tests {
     fn expansion_terms_are_graph_known_non_stopwords_in_idf_order_capped_at_eight() {
         let context = set(&["the", "guardian", "cron", "zebra"]);
         let vocab = context.clone();
-        let df = DocFreq::build(&context, corpus());
+        let df = DocFreq::build(&context, &corpus());
         assert_eq!(expansion_terms(&context, &df, &vocab), ["cron", "guardian"], "rarest first; no stopword, no unseen term");
 
         // Ten seen terms of equal IDF: eight survive, in alphabetical order.
@@ -1635,7 +1640,7 @@ mod expansion_tests {
             if i < 10 { d.insert(ten[i].clone()); }
             d
         }).collect();
-        let df = DocFreq::build(&context, docs);
+        let df = DocFreq::build(&context, &docs);
         let terms = expansion_terms(&context, &df, &context);
         assert_eq!(terms.len(), EXPANSION_TERMS_MAX);
         assert_eq!(terms, ["t0", "t1", "t2", "t3", "t4", "t5", "t6", "t7"]);
@@ -1653,7 +1658,7 @@ mod expansion_tests {
         let query = content_tokens("what now");
         let context = context_tokens(&[], &query);
         assert!(context.is_empty());
-        let df = DocFreq::build(&query, corpus());
+        let df = DocFreq::build(&query, &corpus());
         assert!(expansion_terms(&context, &df, &HashSet::new()).is_empty());
         assert!(!should_expand(Some(0.3), false), "nothing to append, nothing to try");
         assert_eq!(embedding_query_text("what now", &[]), "what now");
