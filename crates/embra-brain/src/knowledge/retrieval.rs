@@ -157,6 +157,11 @@ pub struct RetrievalStats {
     pub top_cosine_raw: Option<f32>,
     /// Best cosine of the expanded query's search, when it ran.
     pub top_cosine_expanded: Option<f32>,
+    /// The candidate reads that failed this turn, by name (`memory.semantic`,
+    /// `memory.procedural`, `memory.entries`, `session entries`, `session
+    /// edges`). An empty candidate set beside a name here is an outage, not
+    /// an empty graph, and every reader says so (#57).
+    pub failed_reads: Vec<&'static str>,
 }
 
 /// `context` is the recent user turns, newest first, that a weak query may
@@ -173,6 +178,10 @@ pub async fn retrieve_relevant_knowledge(
     let mut collected: HashMap<(String, String), Collected> = HashMap::new();
     let query_tokens = content_tokens(query_text);
     let context_tokens = context_tokens(context, &query_tokens);
+    // A read that fails is logged where it fails and named in the stats:
+    // the turn goes on with what was read, and the readers tell an outage
+    // from an empty graph (#57).
+    let mut failed_reads: Vec<&'static str> = Vec::new();
 
     // Prefetch the promoted-node collections once; every later lookup joins
     // in memory (2026-07-04 — replaces hundreds of sequential point reads).
@@ -186,6 +195,7 @@ pub async fn retrieve_relevant_knowledge(
             .await
             .unwrap_or_else(|e| {
                 tracing::warn!("retrieval prefetch of {} failed: {}", coll, e);
+                failed_reads.push(coll);
                 Vec::new()
             });
         prefetched.push((coll, docs));
@@ -206,6 +216,7 @@ pub async fn retrieve_relevant_knowledge(
         .await
         .unwrap_or_else(|e| {
             tracing::warn!("retrieval prefetch of memory.entries failed: {}", e);
+            failed_reads.push("memory.entries");
             Vec::new()
         })
     };
@@ -273,6 +284,7 @@ pub async fn retrieve_relevant_knowledge(
     let session_entries = db.query("memory.entries", &session_entries_query_body(session_name)).await;
     if let Err(e) = &session_entries {
         tracing::warn!("retrieval session-entry read failed: {}", e);
+        failed_reads.push("session entries");
     }
     if let Ok(entries) = session_entries {
         let walk_ids: Vec<String> = entries
@@ -280,19 +292,22 @@ pub async fn retrieve_relevant_knowledge(
             .filter_map(|d| d.get("_id").and_then(|v| v.as_str()).map(|s| s.to_string()))
             .take(STEP2_ENTRY_WALK)
             .collect();
-        let edge_windows: Vec<Vec<serde_json::Value>> = stream::iter(walk_ids)
+        let edge_windows: Vec<Option<Vec<serde_json::Value>>> = stream::iter(walk_ids)
             .map(|entry_id| async move {
                 db.query("memory.edges", &session_edge_query_body(&entry_id))
                     .await
-                    .unwrap_or_else(|e| {
+                    .map_err(|e| {
                         tracing::warn!("retrieval session-edge read for {} failed: {}", entry_id, e);
-                        Vec::new()
                     })
+                    .ok()
             })
             .buffered(STEP2_WALK_CONCURRENCY)
             .collect()
             .await;
-        for edge in edge_windows.into_iter().flatten() {
+        if edge_windows.iter().any(Option::is_none) {
+            failed_reads.push("session edges");
+        }
+        for edge in edge_windows.into_iter().flatten().flatten() {
             let Some(target_coll) = edge.get("target_collection").and_then(|v| v.as_str()) else { continue; };
             let Some(target_id) = edge.get("target_id").and_then(|v| v.as_str()) else { continue; };
             if target_coll == "memory.entries" { continue; }
@@ -431,6 +446,7 @@ pub async fn retrieve_relevant_knowledge(
 
     // Funnel stats — pre-threshold, pre-truncation (the observability seam).
     let mut stats = funnel_stats(&collected);
+    stats.failed_reads = failed_reads;
     stats.embedding = embedding_candidates;
     stats.query_expanded = !expansion_terms_used.is_empty();
     stats.expansion_terms = expansion_terms_used;
@@ -1334,6 +1350,59 @@ mod scoring_tests {
         // The historical `graph_expansion` field is now the unknown-source
         // bucket; nothing in retrieval produces that label any more.
         assert_eq!(stats.graph_expansion, 1);
+    }
+}
+
+#[cfg(test)]
+mod failed_read_tests {
+    //! #57: a candidate read that fails is named in the stats; the turn
+    //! goes on with what was read.
+    use super::retrieve_relevant_knowledge;
+    use crate::db::WardsonDbClient;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn data(v: serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"ok": true, "meta": {}, "data": v}))
+    }
+
+    #[tokio::test]
+    async fn a_failed_candidate_read_is_named_in_the_stats() {
+        let server = MockServer::start().await;
+        for coll in ["memory.semantic", "memory.procedural"] {
+            Mock::given(method("POST"))
+                .and(path(format!("/{coll}/query")))
+                .respond_with(data(json!([])))
+                .mount(&server)
+                .await;
+        }
+        Mock::given(method("POST"))
+            .and(path("/memory.entries/query"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let mut cfg = crate::config::tests_support::minimal_cfg();
+        cfg.embedding_enabled = Some(false);
+
+        let (results, stats) = retrieve_relevant_knowledge(&db, "ops", &[], "cert rotation", &[], 5, &cfg)
+            .await
+            .expect("the turn goes on with what was read");
+        assert!(results.is_empty());
+        assert_eq!(stats.failed_reads, ["memory.entries", "session entries"]);
+
+        // Every read answering: nothing is named.
+        Mock::given(method("POST"))
+            .and(path("/memory.entries/query"))
+            .respond_with(data(json!([])))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let (_, stats) = retrieve_relevant_knowledge(&db, "ops", &[], "cert rotation", &[], 5, &cfg)
+            .await
+            .expect("read");
+        assert!(stats.failed_reads.is_empty(), "{:?}", stats.failed_reads);
     }
 }
 

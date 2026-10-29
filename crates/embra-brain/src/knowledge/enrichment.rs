@@ -173,20 +173,24 @@ pub async fn build_turn_context(
         expansion_terms = %stats.expansion_terms.join(" "),
         top_cosine_raw = %cosine_field(stats.top_cosine_raw),
         top_cosine_expanded = %cosine_field(stats.top_cosine_expanded),
+        failed_reads = %stats.failed_reads.join(","),
         result_count = qualifying.len(),
         top_score = qualifying.first().map(|r| r.score).unwrap_or(0.0),
         injected = %injected.join(","),
         "auto-enrichment"
     );
 
-    if qualifying.is_empty() {
+    // Nothing to inject and nothing that failed: the message as typed. A
+    // read that failed is said even with nothing retrieved (#57), so the
+    // model does not take an outage for an empty graph.
+    if qualifying.is_empty() && stats.failed_reads.is_empty() {
         return user_message.to_string();
     }
 
     // A superseded node is still injected, with its successor named: the
     // ranking is unchanged and the mark tells the model which claim stands.
     let superseders = super::supersession::superseders(db).await;
-    retrieved_context_block(&qualifying, &superseders, user_message)
+    retrieved_context_block(&qualifying, &superseders, user_message, &stats.failed_reads)
 }
 
 /// The `<retrieved_context>` block and the operator's message after it.
@@ -198,11 +202,18 @@ fn retrieved_context_block(
     qualifying: &[&RankedNode],
     superseders: &HashMap<NodeKey, NodeKey>,
     user_message: &str,
+    failed_reads: &[&str],
 ) -> String {
     let mut ctx = String::from("<retrieved_context source=\"auto-enrichment\">\n");
     ctx.push_str(
         "Relevant prior knowledge for this turn (retrieved automatically, not user-provided):\n\n",
     );
+    if !failed_reads.is_empty() {
+        ctx.push_str(&format!(
+            "Reads of the knowledge graph that failed this turn: {}. The graph may hold more than what follows; say that a read failed rather than that nothing is known.\n\n",
+            failed_reads.join(", ")
+        ));
+    }
     for (i, r) in qualifying.iter().enumerate() {
         ctx.push_str(&format!(
             "{}. [{}:{}] {} (score: {:.2}){}\n",
@@ -384,6 +395,22 @@ mod injection_gate_tests {
     /// A superseded node keeps its place in the block and names its
     /// successor; a live one reads as before. Every line names its node as
     /// `collection:id`.
+    /// #57: a read that failed is said in the block, with nothing
+    /// retrieved too, so the model never takes an outage for an empty graph.
+    #[test]
+    fn a_failed_read_is_said_in_the_block_even_with_nothing_retrieved() {
+        let superseders = HashMap::new();
+        let block = retrieved_context_block(&[], &superseders, "what do we know?", &["memory.entries", "session edges"]);
+        assert!(
+            block.contains("Reads of the knowledge graph that failed this turn: memory.entries, session edges."),
+            "{block}"
+        );
+        assert!(block.contains("say that a read failed rather than that nothing is known"), "{block}");
+        assert!(block.ends_with("</retrieved_context>\n\nwhat do we know?"), "{block}");
+        let clean = retrieved_context_block(&[], &superseders, "what do we know?", &[]);
+        assert!(!clean.contains("failed"), "{clean}");
+    }
+
     #[test]
     fn a_superseded_node_is_injected_with_its_successor_named() {
         let mut old = ranked(0.62, MIN_RELEVANCE);
@@ -397,7 +424,7 @@ mod injection_gate_tests {
             ("memory.semantic".to_string(), "old".to_string()),
             ("memory.semantic".to_string(), "live".to_string()),
         );
-        let block = retrieved_context_block(&[&old, &live], &superseders, "where is the clone?");
+        let block = retrieved_context_block(&[&old, &live], &superseders, "where is the clone?", &[]);
         assert!(
             block.contains("1. [memory.semantic:old] the clone lives in repos/ (score: 0.62) — superseded by memory.semantic:live\n"),
             "{block}"

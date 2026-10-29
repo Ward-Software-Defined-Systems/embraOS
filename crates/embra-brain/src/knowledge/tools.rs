@@ -10,7 +10,7 @@ use crate::db::WardsonDbClient;
 use super::neighbors::{candidates_block, link_candidates};
 use super::promotion::{node_of_entry, promote_to_procedural, promote_to_semantic};
 use super::node_store::NodeStore;
-use super::retrieval::retrieve_relevant_knowledge;
+use super::retrieval::{retrieve_relevant_knowledge, RetrievalStats};
 use super::traversal::{spawn_access_touches, traverse_multi};
 use super::types::{content_preview, EdgeType, NodeType, SemanticCategory, SUPERSESSION_KEY};
 
@@ -145,6 +145,28 @@ async fn answer_for_an_existing_node(
             }
         }
     })
+}
+
+#[cfg(test)]
+mod candidates_line_tests {
+    use super::candidates_line;
+    use super::RetrievalStats;
+
+    /// #57: the line names the reads that failed, so an empty candidate
+    /// set is told from an empty graph; without one it reads as before.
+    #[test]
+    fn candidates_line_names_the_reads_that_failed() {
+        let stats = RetrievalStats { candidates_total: 3, direct_query: 2, session_based: 1, ..Default::default() };
+        assert_eq!(
+            candidates_line(&stats),
+            "Candidates considered: 3 (direct 2, session 1, similarity 0 — pre-ranking)\n"
+        );
+        let degraded = RetrievalStats { failed_reads: vec!["memory.entries", "session edges"], ..Default::default() };
+        assert_eq!(
+            candidates_line(&degraded),
+            "Candidates considered: 0 (direct 0, session 0, similarity 0 — pre-ranking) — reads that failed: memory.entries, session edges; the graph may hold more than this\n"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -957,6 +979,23 @@ pub async fn knowledge_traverse(
     out
 }
 
+/// What retrieval considered before ranking, so "few results" is told from
+/// "few candidates", and a read that failed from an empty graph (#57).
+pub(crate) fn candidates_line(stats: &RetrievalStats) -> String {
+    let mut line = format!(
+        "Candidates considered: {} (direct {}, session {}, similarity {} — pre-ranking)",
+        stats.candidates_total, stats.direct_query, stats.session_based, stats.embedding
+    );
+    if !stats.failed_reads.is_empty() {
+        line.push_str(&format!(
+            " — reads that failed: {}; the graph may hold more than this",
+            stats.failed_reads.join(", ")
+        ));
+    }
+    line.push('\n');
+    line
+}
+
 /// `knowledge_query <query_text> [| <max_results> [| <categories_csv>]]`
 pub async fn knowledge_query(
     params: &str,
@@ -1031,11 +1070,8 @@ pub async fn knowledge_query(
 
     // The header counts the RETURNED set; this line reports what retrieval
     // actually considered before ranking, so "few results" can be told apart
-    // from "few candidates".
-    let candidates_line = format!(
-        "Candidates considered: {} (direct {}, session {}, similarity {} — pre-ranking)\n",
-        stats.candidates_total, stats.direct_query, stats.session_based, stats.embedding
-    );
+    // from "few candidates", and a read that failed from an empty graph.
+    let candidates_line = candidates_line(&stats);
 
     if results.is_empty() {
         return format!(
