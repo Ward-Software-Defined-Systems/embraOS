@@ -225,6 +225,96 @@ fn truncate(s: &str, n: usize) -> String {
 mod tests {
     use super::*;
 
+    /// A provider that answers `stream_turn` with the events scripted:
+    /// the glue between a provider's stream and the verdict (#55).
+    struct FakeProvider {
+        events: Vec<StreamEvent>,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmProvider for FakeProvider {
+        fn display_name(&self) -> &str {
+            "fake"
+        }
+
+        fn kind(&self) -> crate::provider::ProviderKind {
+            crate::provider::ProviderKind::Anthropic
+        }
+
+        fn base_url(&self) -> &str {
+            "http://fake.invalid"
+        }
+
+        async fn validate_key(&self, _key: &str) -> crate::provider::ValidationResult {
+            crate::provider::ValidationResult::Valid
+        }
+
+        async fn stream_turn(
+            &self,
+            _messages: &[ApiMessage],
+            _system: &SystemPromptBundle,
+            _tools: &ToolManifest,
+            _options: LlmRequestOptions,
+        ) -> Result<BoxStream<'static, StreamEvent>, crate::provider::ProviderError> {
+            Ok(futures::stream::iter(self.events.clone()).boxed())
+        }
+
+        fn build_tool_manifest(
+            &self,
+            _descriptors: &[&'static crate::tools::registry::ToolDescriptor],
+        ) -> ToolManifest {
+            ToolManifest { wire_json: serde_json::json!([]) }
+        }
+    }
+
+    fn module() -> ValidatedModule {
+        ValidatedModule {
+            name: "temp_delta".into(),
+            description: "Delta between two temperatures.".into(),
+            input_schema: serde_json::json!({"type": "object"}),
+            caps: Vec::new(),
+            source: "fn run(input: &str) -> String { String::new() }".into(),
+        }
+    }
+
+    fn complete(text: &str) -> StreamEvent {
+        StreamEvent::Complete(crate::provider::ir::AssistantTurn {
+            content: if text.is_empty() { Vec::new() } else { vec![Block::Text(text.to_string())] },
+            outcome: crate::provider::ir::TurnOutcome::EndTurn,
+            stop_details: None,
+        })
+    }
+
+    /// #55: the soul gate fails closed on everything but a verdict. A
+    /// stream error, a reply with no text, and a stream that ends with no
+    /// `Complete` are each an error; a refuse verdict delivered in deltas
+    /// is read as the refusal it is.
+    #[tokio::test]
+    async fn the_replicant_check_fails_closed_on_a_stream_error_or_an_empty_reply() {
+        let soul = serde_json::json!({"name": "Embra"});
+        let judge = |events: Vec<StreamEvent>| {
+            let soul = &soul;
+            async move { evaluate_against_soul(&FakeProvider { events }, soul, &module()).await }
+        };
+
+        let err = judge(vec![StreamEvent::Error("connection reset".into())]).await.expect_err("a stream error");
+        assert!(err.contains("stream error"), "{err}");
+
+        let verdict = judge(vec![
+            StreamEvent::TextDelta(r#"{"verdict":"refuse","touched_lines":["never deceive"],"rationale":"exfiltrates"}"#.into()),
+            complete(""),
+        ])
+        .await
+        .expect("a verdict");
+        assert!(verdict.is_refuse());
+
+        let err = judge(vec![complete("")]).await.expect_err("nothing to read a verdict from");
+        assert!(!err.is_empty());
+
+        let err = judge(Vec::new()).await.expect_err("a stream that ends with no Complete");
+        assert_eq!(err, "empty replicant response");
+    }
+
     #[test]
     fn parses_clean_allow() {
         let v = parse_verdict(r#"{"verdict":"allow","touched_lines":[],"rationale":"ok"}"#).unwrap();
