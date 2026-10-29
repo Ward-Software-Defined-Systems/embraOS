@@ -1520,14 +1520,14 @@ fn ChatScroll(
             <For each=bubbles key={|t: &(usize, Bubble)| t.0} let:item>
                 <BubbleView idx={item.0} bubble={item.1} />
             </For>
-            {move || {
-                let s = streaming.get();
-                if s.is_empty() {
-                    view! { <span></span> }.into_any()
-                } else {
-                    view! { <div class="bubble assistant streaming">{s}<span class="cursor"></span></div> }.into_any()
-                }
-            }}
+            // The streaming bubble is always in the DOM: its text is one
+            // reactive text node and its visibility one reactive class, so a
+            // token patches the node instead of tearing the bubble down and
+            // building it again (#40).
+            <div class="bubble assistant streaming" class:idle=move || streaming.with(|s| s.is_empty())>
+                {move || streaming.get()}
+                <span class="cursor"></span>
+            </div>
         </div>
     }
 }

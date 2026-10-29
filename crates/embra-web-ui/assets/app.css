@@ -389,6 +389,8 @@ body.is-observer .term-wrap {
   border: 1px solid var(--line);
   border-bottom-left-radius: 4px;
 }
+/* No text yet (between turns): the bubble stays in the DOM, out of view. */
+.bubble.assistant.streaming.idle { display: none; }
 .bubble.assistant.streaming .cursor {
   display: inline-block;
   width: 7px; height: 1.1em;
