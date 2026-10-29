@@ -383,6 +383,9 @@ fn revoke_previews(items: &[PendingAttachment]) {
 /// without threads the atomic count costs nothing.
 type Timeline = RwSignal<Vec<Arc<Bubble>>>;
 
+/// What the timeline shows for an answer to a secret prompt (#20).
+const SECRET_ECHO: &str = "••••••••";
+
 #[derive(Debug, Clone)]
 enum Bubble {
     /// Operator turn: text plus the images (thumbnails) and text files
@@ -417,7 +420,8 @@ enum Bubble {
 /// prompts live in the timeline as `Bubble::Setup`.
 #[derive(Clone, Debug)]
 struct SetupData {
-    /// "text" / "selector" / "confirm" — mapped from `SetupFieldType`.
+    /// "text" / "secret" / "selector" / "confirm" — mapped from
+    /// `SetupFieldType`; a secret is text the overlay never shows (#20).
     field_type: String,
     prompt: String,
     /// Populated for `field_type == "selector"`.
@@ -713,6 +717,8 @@ pub fn ChatApp() -> impl IntoView {
             } else {
                 format!("{command} {args}")
             };
+            // A token or a key on the command line is echoed masked (#20).
+            let display = embra_tools_core::mask_secret_argument(&display);
             messages.update(|m| m.push(Arc::new(Bubble::User { text: display, images: Vec::new(), files: Vec::new() })));
         }
         if let Some(tx) = outbound.get_untracked() {
@@ -733,6 +739,7 @@ pub fn ChatApp() -> impl IntoView {
         } else {
             format!("{command} {args}")
         };
+        let display = embra_tools_core::mask_secret_argument(&display);
         messages.update(|m| m.push(Arc::new(Bubble::User { text: display, images: Vec::new(), files: Vec::new() })));
         if let Some(tx) = outbound.get_untracked() {
             let _ = tx.unbounded_send(ClientMsg::Slash { command, args });
@@ -744,11 +751,13 @@ pub fn ChatApp() -> impl IntoView {
     // typing the answer into the input bar. Used by the SetupOverlay
     // submit path. Echoes locally so the timeline shows what was
     // answered next to the wizard prompt bubble.
-    let send_text = move |text: String| {
+    let send_text = move |text: String, secret: bool| {
         if text.is_empty() {
             return;
         }
-        messages.update(|m| m.push(Arc::new(Bubble::User { text: text.clone(), images: Vec::new(), files: Vec::new() })));
+        // A secret's echo is the mask: the value never enters the timeline.
+        let shown = if secret { SECRET_ECHO.to_string() } else { text.clone() };
+        messages.update(|m| m.push(Arc::new(Bubble::User { text: shown, images: Vec::new(), files: Vec::new() })));
         if let Some(tx) = outbound.get_untracked() {
             let _ = tx.unbounded_send(ClientMsg::Msg { text, attachment_ids: Vec::new(), file_paths: Vec::new() });
         }
@@ -1716,13 +1725,16 @@ fn SetupOverlay<F>(
     on_submit: F,
 ) -> impl IntoView
 where
-    F: Fn(String) + 'static + Copy + Send + Sync,
+    F: Fn(String, bool) + 'static + Copy + Send + Sync,
 {
     view! {
         {move || current_setup.get().map(|setup| {
             // Destructure into owned locals so each branch can move
             // freely without re-cloning the parent struct.
             let SetupData { field_type, prompt, options, default_value } = setup;
+            // A secret (an API key, a bearer) is typed into a password
+            // field and echoed as a mask (#20).
+            let secret = field_type == "secret";
 
             let body: leptos::tachys::view::any_view::AnyView = match field_type.as_str() {
                 "selector" => {
@@ -1733,7 +1745,7 @@ where
                                 view! {
                                     <button class="setup-opt"
                                         on:click=move |_| {
-                                            on_submit(opt_value.clone());
+                                            on_submit(opt_value.clone(), false);
                                             current_setup.set(None);
                                         }>{opt}</button>
                                 }
@@ -1746,12 +1758,12 @@ where
                         <div class="setup-options">
                             <button class="setup-opt yes"
                                 on:click=move |_| {
-                                    on_submit("yes".to_string());
+                                    on_submit("yes".to_string(), false);
                                     current_setup.set(None);
                                 }>"Yes"</button>
                             <button class="setup-opt no"
                                 on:click=move |_| {
-                                    on_submit("no".to_string());
+                                    on_submit("no".to_string(), false);
                                     current_setup.set(None);
                                 }>"No"</button>
                         </div>
@@ -1764,13 +1776,15 @@ where
                         if val.is_empty() {
                             return;
                         }
-                        on_submit(val);
+                        on_submit(val, secret);
                         current_setup.set(None);
                     };
+                    let input_type = if secret { "password" } else { "text" };
                     view! {
                         <div class="setup-text-row">
                             <input class="setup-input"
-                                type="text"
+                                type=input_type
+                                autocomplete="off"
                                 prop:value=move || answer.get()
                                 on:input=move |e| answer.set(event_target_value(&e))
                                 on:keydown=move |e: KeyboardEvent| {

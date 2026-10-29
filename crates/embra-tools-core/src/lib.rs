@@ -8,6 +8,9 @@
 
 pub use serde_json::Value as JsonValue;
 
+pub mod mask;
+pub use mask::{MASK_CHAR, mask_secret_argument, mask_secret_argument_keeping_length};
+
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::future::Future;

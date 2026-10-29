@@ -47,6 +47,8 @@ futures-util = "0.3"
 gloo-net = { version = "0.6", features = ["http", "websocket"] }
 gloo-timers = { version = "0.3", features = ["futures"] }
 console_error_panic_hook = "0.1"
+# Shared with the console: the secret-argument mask and the JSON tokenizer.
+embra-tools-core = { path = "../embra-tools-core" }
 
 [profile.release]
 opt-level = "z"

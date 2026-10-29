@@ -310,10 +310,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "embra-tools-core"
+version = "0.22.0-phase1"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "embra-web-ui"
 version = "0.5.0-phase1"
 dependencies = [
  "console_error_panic_hook",
+ "embra-tools-core",
  "futures",
  "futures-util",
  "gloo-net",
