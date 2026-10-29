@@ -17,7 +17,7 @@ pub async fn plan_list(db: &WardsonDbClient) -> String {
     };
 
     if plans.is_empty() {
-        return "No plans found. Create one with: plan <title> | <description>".into();
+        return "No plans found. Create one with plan (a title, and a description).".into();
     }
 
     let mut output = format!("=== Plans ({}) ===\n", plans.len());

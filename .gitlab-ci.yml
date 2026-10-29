@@ -135,7 +135,7 @@ guards:
 
 # RustSec advisories over both lockfiles (the workspace's and embra-web-ui's,
 # which has its own). A vulnerability fails the job; an unmaintained crate is a
-# warning (`paste` here, `proc-macro-error2` in the frontend lock). An advisory
+# warning (`paste`, in both locks: the tokenizers tree here, the Leptos tree there). An advisory
 # whose fix moves a package inside the vendored database's dependency tree
 # (`cargo tree -p wardsondb`) is William's decision under the lock rules; until
 # it is taken, the advisory is named below with its fix, one id per line, and
