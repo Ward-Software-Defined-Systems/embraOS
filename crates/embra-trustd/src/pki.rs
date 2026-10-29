@@ -7,15 +7,34 @@ use anyhow::{Result, Context};
 use rcgen::{
     CertificateParams, DistinguishedName, DnType, DnValue,
     KeyPair, KeyUsagePurpose, ExtendedKeyUsagePurpose, IsCa,
-    BasicConstraints, SanType, Certificate,
+    BasicConstraints, SanType, Certificate, CidrSubnet, GeneralSubtree, NameConstraints,
 };
 use std::path::{Path, PathBuf};
 use tracing::{info, debug};
+
+/// The identities the OS mints certificates for (#10): the common name,
+/// the DNS names and the addresses embra-web asks for its listener on
+/// `:3345` (`crates/embra-web/src/tls.rs`, `acquire_server_config`), the
+/// one caller of `GenerateCertificate`. The RPC refuses any other name
+/// before minting (`main.rs::permitted`), and a Root CA generated on a
+/// fresh install carries the DNS names and the addresses as its name
+/// constraints (`ca_params`), so a browser that trusts the CA trusts a
+/// leaf for these names and for no other, whoever holds the key.
+pub const SERVICE_COMMON_NAMES: &[&str] = &["embra-web"];
+pub const SERVICE_DNS_NAMES: &[&str] = &["localhost", "embraos", "buildroot"];
+pub const SERVICE_IPS: &[&str] = &["127.0.0.1", "10.0.2.15"];
 
 /// The Root CA's parameters, one definition for a fresh install
 /// (`generate_ca`) and for every reboot (`load_ca`, which re-signs the
 /// issuer from the stored key): the issuer identity cannot drift between
 /// the two (#41). The validity window is the generator's.
+///
+/// The name constraints (#10) permit the service set alone. They reach a
+/// CA generated here; a CA already on an instance keeps its on-disk
+/// certificate as it was generated (`load_ca` distributes that file), so
+/// an instance from before this change stays unconstrained until its
+/// operator starts the PKI over (`/embra/state/pki/` removed, the new CA
+/// trusted in the browser).
 fn ca_params() -> CertificateParams {
     let mut params = CertificateParams::default();
     let mut dn = DistinguishedName::new();
@@ -24,6 +43,18 @@ fn ca_params() -> CertificateParams {
     params.distinguished_name = dn;
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    params.name_constraints = Some(NameConstraints {
+        permitted_subtrees: SERVICE_DNS_NAMES
+            .iter()
+            .map(|name| GeneralSubtree::DnsName(name.to_string()))
+            .chain(SERVICE_IPS.iter().map(|ip| {
+                let addr: std::net::IpAddr = ip.parse().expect("a service address is a literal");
+                let prefix = if addr.is_ipv4() { 32 } else { 128 };
+                GeneralSubtree::IpAddress(CidrSubnet::from_addr_prefix(addr, prefix))
+            }))
+            .collect(),
+        excluded_subtrees: vec![],
+    });
     params
 }
 
@@ -149,7 +180,10 @@ impl PKIManager {
         Ok(())
     }
 
-    /// Generate a service certificate signed by the CA.
+    /// Generate a service certificate signed by the CA, with the names
+    /// asked for. The names are kept to the service set by the RPC's gate
+    /// (`main.rs::permitted`) and, under a fresh CA, by its name
+    /// constraints; this function signs what it is given.
     pub fn generate_service_cert(
         &self,
         common_name: &str,
@@ -328,12 +362,65 @@ mod tests {
         // The CA loaded on a reboot signs certificates the same roots verify.
         let mut reloaded = PKIManager::new(dir.clone());
         reloaded.init().expect("the CA loads");
-        let (again_pem, _) = reloaded.generate_service_cert("embra-apid", &["embra-apid".into()], &[], true, true).unwrap();
+        let (again_pem, _) = reloaded.generate_service_cert("embra-web", &["embraos".into()], &[], true, true).unwrap();
         let again = leaf(&again_pem);
-        let _ = servers.verify_server_cert(&again, &[], &name("embra-apid"), &[], now()).expect("the reloaded CA chains");
+        let _ = servers.verify_server_cert(&again, &[], &name("embraos"), &[], now()).expect("the reloaded CA chains");
         let _ = clients.verify_client_cert(&again, &[], now()).expect("both usages");
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&other_dir);
+    }
+
+    /// A Root CA generated on a fresh install carries the service set as
+    /// its name constraints (#10): a leaf its own key signs for a name or an
+    /// address outside the set — minted here straight through
+    /// `generate_service_cert`, past the RPC's gate — does not verify under
+    /// the root, and one for a service name does. The CA already on an
+    /// instance keeps its on-disk certificate; the constraint reaches a
+    /// fresh `/embra/state/pki/`.
+    #[test]
+    fn a_fresh_ca_constrains_what_its_key_can_sign() {
+        use rustls::client::danger::ServerCertVerifier;
+        use rustls::pki_types::pem::PemObject;
+        use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+        use std::sync::Arc;
+
+        let dir = temp_pki("constrained");
+        let mut pki = PKIManager::new(dir.clone());
+        pki.init().expect("a fresh CA");
+        let ca = CertificateDer::from_pem_slice(&pki.ca_cert_pem().unwrap()).unwrap();
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(ca).unwrap();
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let servers = rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider)
+            .build()
+            .unwrap();
+        let now = UnixTime::now;
+        let leaf = |pem: &[u8]| CertificateDer::from_pem_slice(pem).unwrap();
+        let name = |n: &str| ServerName::try_from(n.to_string()).unwrap();
+
+        let (outside_pem, _) = pki
+            .generate_service_cert("embra-web", &["evil.example".into()], &["192.168.1.9".into()], true, false)
+            .expect("the key signs anything; the constraint is the root's");
+        let outside = leaf(&outside_pem);
+        assert!(
+            servers.verify_server_cert(&outside, &[], &name("evil.example"), &[], now()).is_err(),
+            "a DNS name outside the service set verifies under no fresh root"
+        );
+        assert!(
+            servers.verify_server_cert(&outside, &[], &name("192.168.1.9"), &[], now()).is_err(),
+            "an address outside the service set verifies under no fresh root"
+        );
+
+        let (inside_pem, _) = pki
+            .generate_service_cert("embra-web", &["localhost".into()], &["127.0.0.1".into()], true, false)
+            .unwrap();
+        let inside = leaf(&inside_pem);
+        for asked in ["localhost", "127.0.0.1"] {
+            let _ = servers
+                .verify_server_cert(&inside, &[], &name(asked), &[], now())
+                .unwrap_or_else(|e| panic!("{asked}: {e}"));
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `write_atomic` leaves the target untouched when it cannot write: a

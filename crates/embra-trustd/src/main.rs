@@ -59,6 +59,7 @@ impl TrustService for TrustServiceImpl {
         request: Request<GenerateCertRequest>,
     ) -> Result<Response<GenerateCertResponse>, Status> {
         let req = request.into_inner();
+        permitted(&req).map_err(Status::invalid_argument)?;
         let pki = self.pki.read().await;
 
         let (is_server, is_client) = usages_for(req.role());
@@ -209,5 +210,81 @@ mod role_tests {
         assert_eq!(usages_for(CertRole::Peer), (true, true));
         assert_eq!(usages_for(CertRole::Unspecified), (true, true));
         assert_eq!(usages_for(CertRole::try_from(0).unwrap()), (true, true), "the wire's zero value");
+    }
+}
+/// The gate of `GenerateCertificate` (#10): a certificate is minted for the
+/// OS's own service identities (`pki::SERVICE_COMMON_NAMES`,
+/// `SERVICE_DNS_NAMES`, `SERVICE_IPS`) and for nothing a request names
+/// outside them. The port is unauthenticated by the Phase-1 posture, so
+/// the request's list is never the list of what the CA signs; the first
+/// name outside the set is named in the refusal.
+fn permitted(req: &GenerateCertRequest) -> Result<(), String> {
+    let cn = req.common_name.as_str();
+    if !pki::SERVICE_COMMON_NAMES.contains(&cn) && !pki::SERVICE_DNS_NAMES.contains(&cn) {
+        return Err(format!("common name {cn:?} is not a service identity of this OS"));
+    }
+    if let Some(dns) = req.san_dns.iter().find(|d| !pki::SERVICE_DNS_NAMES.contains(&d.as_str())) {
+        return Err(format!("DNS name {dns:?} is not a service identity of this OS"));
+    }
+    if let Some(ip) = req.san_ip.iter().find(|i| !pki::SERVICE_IPS.contains(&i.as_str())) {
+        return Err(format!("address {ip:?} is not a service identity of this OS"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod minting_gate_tests {
+    use super::*;
+
+    fn request(cn: &str, dns: &[&str], ips: &[&str]) -> GenerateCertRequest {
+        GenerateCertRequest {
+            common_name: cn.to_string(),
+            san_dns: dns.iter().map(|s| s.to_string()).collect(),
+            san_ip: ips.iter().map(|s| s.to_string()).collect(),
+            role: CertRole::Server as i32,
+        }
+    }
+
+    /// The request embra-web sends passes; a common name, a DNS name or an
+    /// address outside the service set is refused, naming it, before the
+    /// CA signs anything — on the pure gate and through the RPC (#10).
+    #[tokio::test]
+    async fn a_name_outside_the_service_set_is_refused_before_minting() {
+        let web = request("embra-web", &["localhost", "buildroot", "embraos"], &["127.0.0.1", "10.0.2.15"]);
+        assert_eq!(permitted(&web), Ok(()));
+        assert_eq!(permitted(&request("localhost", &[], &[])), Ok(()), "a service name as the CN");
+        let cases = [
+            (request("evil.example", &["localhost"], &[]), "common name \"evil.example\""),
+            (request("embra-web", &["localhost", "evil.example"], &[]), "DNS name \"evil.example\""),
+            (request("embra-web", &[], &["192.168.1.9"]), "address \"192.168.1.9\""),
+            (request("embra-web", &["sub.localhost"], &[]), "DNS name \"sub.localhost\""),
+        ];
+        for (req, named) in cases {
+            let err = permitted(&req).expect_err(named);
+            assert!(err.starts_with(named), "{err}");
+        }
+
+        let dir = std::env::temp_dir().join(format!("embra-trustd-gate-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut pki = PKIManager::new(dir.clone());
+        pki.init().expect("a fresh CA");
+        let service = TrustServiceImpl {
+            verifier: Arc::new(SoulVerifier::new("http://127.0.0.1:1".to_string(), dir.join("soul.sha256"))),
+            pki: Arc::new(RwLock::new(pki)),
+            start_time: std::time::Instant::now(),
+        };
+        let minted = service
+            .generate_certificate(Request::new(web))
+            .await
+            .expect("the web console's request is minted")
+            .into_inner();
+        assert!(String::from_utf8_lossy(&minted.cert_pem).contains("BEGIN CERTIFICATE"));
+        let refused = service
+            .generate_certificate(Request::new(request("embra-web", &["evil.example"], &[])))
+            .await
+            .expect_err("a name outside the set");
+        assert_eq!(refused.code(), tonic::Code::InvalidArgument);
+        assert!(refused.message().contains("\"evil.example\""), "{}", refused.message());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
