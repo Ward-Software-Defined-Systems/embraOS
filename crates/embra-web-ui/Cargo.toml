@@ -5,8 +5,13 @@ edition = "2024"
 license-file = "../../LICENSE"
 description = "embraOS web console frontend (Leptos CSR + xterm.js)"
 
+# Its own workspace root: the crate is excluded from the embraOS workspace
+# and built by Trunk on its own; without this table cargo walks past the
+# excluding root to the next one above it (a nested checkout) and refuses.
+[workspace]
+
 [dependencies]
-leptos = { version = "0.7", features = ["csr"] }
+leptos = { version = "0.8", features = ["csr"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"

@@ -1830,11 +1830,9 @@ where
     // Paste with files (screenshots, a file from a file manager) attaches
     // instead of inserting text; plain-text pastes fall through to the
     // textarea.
-    let on_paste = move |e: web_sys::Event| {
-        // leptos types `paste` as a plain Event; narrow to the clipboard
-        // event to reach the pasted files.
-        let Some(ce) = e.dyn_ref::<web_sys::ClipboardEvent>() else { return };
-        if let Some(dt) = ce.clipboard_data()
+    let on_paste = move |e: web_sys::ClipboardEvent| {
+        // leptos 0.8 types `paste` as the clipboard event itself.
+        if let Some(dt) = e.clipboard_data()
             && let Some(files) = dt.files()
             && files.length() > 0
         {
