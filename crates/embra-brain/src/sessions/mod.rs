@@ -24,8 +24,8 @@ pub const CURRENT_SESSION_FORMAT: u32 = 2;
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     #[error(
-        "session '{0}' is legacy (format_version < {}); it is readable but cannot be appended to. Create a new session to continue.",
-        CURRENT_SESSION_FORMAT
+        "session '{0}' is legacy (format_version < {current}); it is readable but cannot be appended to. Create a new session to continue.",
+        current = CURRENT_SESSION_FORMAT
     )]
     LegacyReadOnly(String),
     #[error("session IO: {0}")]

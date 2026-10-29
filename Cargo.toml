@@ -80,7 +80,7 @@ chrono-tz = "0.10"
 
 # Error handling
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 
 # Tool registry (native tool-use migration)
 schemars = "0.8"
