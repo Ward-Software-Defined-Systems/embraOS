@@ -37,32 +37,16 @@ const DIR_LIST_MAX: u32 = 1000;
 /// `/embra/workspace/` so the call shape matches the rest of the file_*
 /// family post #53. Closes Embra_Debug #57.
 ///
-/// Param format: `<path>[|<offset>[|<limit>]]`
-/// - `path`: absolute path (anywhere) or workspace-relative
-/// - `offset`: byte offset to start reading (default 0)
-/// - `limit`: max bytes to read (default and ceiling: FILE_READ_MAX)
-///
-/// When the read doesn't reach EOF, a trailer tells the model how to continue
-/// with the next slice.
-pub async fn file_read(params: &str) -> String {
-    if params.is_empty() {
-        return "Usage: file_read <path>[|<offset>[|<limit>]]\n\
-                Example: file_read /embra/workspace/repos/myrepo/README.md\n\
-                Example: file_read test/probe.txt  (resolves under /embra/workspace)\n\
-                Example: file_read /path/to/big.log|2097152|1048576".into();
-    }
-
-    let mut parts = params.splitn(3, '|').map(str::trim);
-    let raw_path = parts.next().unwrap_or("");
-    let offset: u64 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let limit: usize = parts
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(FILE_READ_MAX)
-        .min(FILE_READ_MAX);
-
+/// `raw_path` is absolute (anywhere) or workspace-relative; `offset` is the
+/// byte the read starts at and `limit` the most bytes it reads, at most
+/// `FILE_READ_MAX` whatever the caller passes (`read_window` derives both
+/// from the tool's optional fields). When the read doesn't reach EOF, a
+/// trailer tells the model how to continue with the next slice.
+pub async fn file_read(raw_path: &str, offset: u64, limit: usize) -> String {
+    let raw_path = raw_path.trim();
+    let limit = limit.min(FILE_READ_MAX);
     if raw_path.is_empty() {
-        return "Usage: file_read <path>[|<offset>[|<limit>]]".into();
+        return "file_read rejected (path is empty)".into();
     }
 
     // The read jail: a relative path resolves under /embra/workspace, an
@@ -274,27 +258,10 @@ pub(crate) async fn ensure_parent_dirs(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Write content to a file (overwrite). Workspace restricted.
-/// Param format: `<path> | <content>`
-/// The content is written exactly as given; nothing is expanded.
-/// Creates parent directories if they don't exist.
-pub async fn file_write(param: &str) -> String {
-    if param.is_empty() {
-        return "Usage: file_write <path> | <content>\n\
-                Example: file_write /embra/workspace/repos/myrepo/notes.txt | line 1"
-            .into();
-    }
-
-    let parts: Vec<&str> = param.splitn(2, " | ").collect();
-    if parts.len() < 2 {
-        return "Usage: file_write <path> | <content>".into();
-    }
-
-    file_write_in(WORKSPACE_ROOT, parts[0].trim(), parts[1]).await
-}
-
-/// [`file_write`] under a root: the lexical jail, the canonical check of
-/// what exists, then [`write_at`] on the real path. Production passes
+/// The `file_write` tool (overwrite; workspace restricted) under a root:
+/// the lexical jail, the canonical check of what exists, then [`write_at`]
+/// on the real path. The content is written exactly as given; nothing is
+/// expanded. Parent directories are created. Production passes
 /// `WORKSPACE_ROOT`; the jail tests pass a temporary directory.
 pub(crate) async fn file_write_in(root: &str, raw_path: &str, content: &str) -> String {
     let path = match jailed_write_path(root, raw_path).await {
@@ -330,29 +297,12 @@ pub(crate) async fn write_at(path: &Path, content: &str) -> String {
     }
 }
 
-/// Append content to a file. Workspace restricted.
-/// Param format: `<path> | <content>`
-/// Creates the file (and parent directories) if it doesn't exist.
+/// The `file_append` tool (workspace restricted) under a root: the lexical
+/// jail, the canonical check of what exists, then [`append_at`] on the real
+/// path. Creates the file (and parent directories) if it doesn't exist.
 ///
 /// Not atomic, unlike `file_write` and `file_patch`: an append that fails
 /// midway leaves what it had written.
-pub async fn file_append(param: &str) -> String {
-    if param.is_empty() {
-        return "Usage: file_append <path> | <content>\n\
-                Example: file_append /embra/workspace/repos/myrepo/log.txt | New entry"
-            .into();
-    }
-
-    let parts: Vec<&str> = param.splitn(2, " | ").collect();
-    if parts.len() < 2 {
-        return "Usage: file_append <path> | <content>".into();
-    }
-
-    file_append_in(WORKSPACE_ROOT, parts[0].trim(), parts[1]).await
-}
-
-/// [`file_append`] under a root: the lexical jail, the canonical check of
-/// what exists, then [`append_at`] on the real path.
 pub(crate) async fn file_append_in(root: &str, raw_path: &str, content: &str) -> String {
     let path = match jailed_write_path(root, raw_path).await {
         Ok(p) => p,
@@ -392,18 +342,9 @@ pub(crate) async fn append_at(path: &Path, content: &str) -> String {
     }
 }
 
-/// Create a directory (and parents). Workspace restricted.
-/// Param format: `<path>`
-pub async fn mkdir(param: &str) -> String {
-    if param.is_empty() {
-        return "Usage: mkdir <path>\nExample: mkdir /embra/workspace/repos/myrepo/src/utils".into();
-    }
-
-    mkdir_in(WORKSPACE_ROOT, param.trim()).await
-}
-
-/// [`mkdir`] under a root: the lexical jail, the canonical check of what
-/// exists, then the directories under the real ancestor.
+/// The `mkdir` tool (a directory and its parents; workspace restricted)
+/// under a root: the lexical jail, the canonical check of what exists, then
+/// the directories under the real ancestor.
 pub(crate) async fn mkdir_in(root: &str, raw_path: &str) -> String {
     let path = match jailed_write_path(root, raw_path).await {
         Ok(p) => p,
@@ -420,33 +361,13 @@ pub(crate) async fn mkdir_in(root: &str, raw_path: &str) -> String {
     }
 }
 
-/// Create a symbolic link. Workspace restricted (both target and link path must
-/// be under `/embra/workspace/`). Dangling targets are allowed — operators can
-/// create a forward-reference symlink and populate the target afterwards.
-/// Param format: `<target> | <link_path>`
-pub async fn file_symlink(param: &str) -> String {
-    let parts: Vec<&str> = param.splitn(2, '|').collect();
-    if parts.len() < 2 {
-        return "file_symlink rejected (missing arguments). Usage: file_symlink <target> | <link_path>\nExample: file_symlink /embra/workspace/repos/foo/src | /embra/workspace/src-link".into();
-    }
-
-    let raw_target = parts[0].trim();
-    let raw_link = parts[1].trim();
-
-    if raw_target.is_empty() {
-        return "file_symlink rejected (target is empty before the '|')".into();
-    }
-    if raw_link.is_empty() {
-        return "file_symlink rejected (link path is empty after the '|')".into();
-    }
-
-    file_symlink_in(WORKSPACE_ROOT, raw_target, raw_link).await
-}
-
-/// [`file_symlink`] under a root. The target keeps the lexical check alone
-/// (a dangling target is allowed, so there may be nothing to resolve); the
-/// link path runs the canonical check, so a link is never created under a
-/// directory that leaves the workspace.
+/// The `file_symlink` tool under a root. Workspace restricted (both the
+/// target and the link path must be under `/embra/workspace/`); dangling
+/// targets are allowed — operators can create a forward-reference symlink
+/// and populate the target afterwards. The target keeps the lexical check
+/// alone (a dangling target is allowed, so there may be nothing to
+/// resolve); the link path runs the canonical check, so a link is never
+/// created under a directory that leaves the workspace.
 pub(crate) async fn file_symlink_in(root: &str, raw_target: &str, raw_link: &str) -> String {
     let target = match super::jail::lexical(root, raw_target) {
         Ok(p) => p,
@@ -470,27 +391,17 @@ pub(crate) async fn file_symlink_in(root: &str, raw_target: &str, raw_link: &str
     }
 }
 
-/// Delete a file or symlink. Workspace restricted. Refuses real directories
-/// (use a shell command for recursive removal). Handles symlinks cleanly:
+/// The `file_delete` tool (a file or a symlink; workspace restricted) under
+/// a root: the lexical jail, then the canonical check of the parent
+/// (`jail::real_parent`), so the entry is unlinked by its name and a link is
+/// never followed. Refuses real directories (`dir_delete` removes those).
+/// Handles symlinks cleanly:
 /// - Dangling symlinks (target missing): unlinked normally; `Path::exists()`
 ///   would have returned false and misled the old implementation into a
 ///   "File not found" error.
 /// - Symlinks to directories: unlinked (only the link goes; the target
 ///   directory is untouched). `Path::is_dir()` follows symlinks and would
 ///   have refused these.
-///
-/// Param format: `<path>`
-pub async fn file_delete(param: &str) -> String {
-    if param.is_empty() {
-        return "Usage: file_delete <path>\nExample: file_delete /embra/workspace/repos/myrepo/old_file.txt".into();
-    }
-
-    file_delete_in(WORKSPACE_ROOT, param.trim()).await
-}
-
-/// [`file_delete`] under a root: the lexical jail, then the canonical check
-/// of the parent (`jail::real_parent`), so the entry is unlinked by its
-/// name and a link is never followed.
 pub(crate) async fn file_delete_in(root: &str, raw_path: &str) -> String {
     let path = match jailed_remove_path(root, raw_path).await {
         Ok(p) => p,
@@ -528,21 +439,11 @@ pub(crate) async fn file_delete_in(root: &str, raw_path: &str) -> String {
     }
 }
 
-/// Move or rename a file or directory. Workspace restricted (both source and destination).
-/// Param format: `<source> | <destination>`
-pub async fn file_move(param: &str) -> String {
-    let parts: Vec<&str> = param.splitn(2, '|').collect();
-    if parts.len() < 2 {
-        return "Usage: file_move <source> | <destination>\nExample: file_move /embra/workspace/repos/myrepo/old.rs | /embra/workspace/repos/myrepo/new.rs".into();
-    }
-
-    file_move_in(WORKSPACE_ROOT, parts[0].trim(), parts[1].trim()).await
-}
-
-/// [`file_move`] under a root. The source runs the canonical check of its
-/// parent (a link is moved as a link, never followed); the destination runs
-/// the canonical check of what exists (no parent is created under a
-/// directory that leaves the workspace).
+/// The `file_move` tool (move or rename a file or a directory; workspace
+/// restricted on both ends) under a root. The source runs the canonical
+/// check of its parent (a link is moved as a link, never followed); the
+/// destination runs the canonical check of what exists (no parent is created
+/// under a directory that leaves the workspace).
 pub(crate) async fn file_move_in(root: &str, raw_src: &str, raw_dst: &str) -> String {
     let src = match jailed_remove_path(root, raw_src).await {
         Ok(p) => p,
@@ -577,36 +478,12 @@ pub(crate) async fn file_move_in(root: &str, raw_src: &str, raw_dst: &str) -> St
     }
 }
 
-/// Remove a directory. Workspace restricted.
-/// Removes empty directories by default; use `--force` suffix to remove non-empty directories.
-/// Param format: `<path>` or `<path> --force`
-pub async fn dir_delete(param: &str) -> String {
-    if param.is_empty() {
-        return "Usage: dir_delete <path> or dir_delete <path> --force\nWithout --force, only empty directories are removed.".into();
-    }
-
-    dir_delete_in(WORKSPACE_ROOT, param).await
-}
-
-/// `--force` is a flag only as the last whitespace-separated token of the
-/// parameter; a directory named `build--force` is a directory.
-fn split_force_flag(param: &str) -> (&str, bool) {
-    let trimmed = param.trim();
-    match trimmed.strip_suffix("--force") {
-        Some(rest) if rest.is_empty() || rest.ends_with(char::is_whitespace) => {
-            (rest.trim(), true)
-        }
-        _ => (trimmed, false),
-    }
-}
-
-/// [`dir_delete`] under a root: the flag split, the lexical jail, the root
-/// refused by name, then the canonical check of the parent
-/// (`jail::real_parent`), so a symlink to a directory is not a directory
-/// here and nothing is followed.
-pub(crate) async fn dir_delete_in(root: &str, param: &str) -> String {
-    let (raw_path, force) = split_force_flag(param);
-
+/// The `dir_delete` tool (workspace restricted; an empty directory, or any
+/// directory with `force`) under a root: the lexical jail, the root refused
+/// by name, then the canonical check of the parent (`jail::real_parent`),
+/// so a symlink to a directory is not a directory here and nothing is
+/// followed.
+pub(crate) async fn dir_delete_in(root: &str, raw_path: &str, force: bool) -> String {
     let lexical = match super::jail::lexical(root, raw_path) {
         Ok(p) => p,
         Err(e) => return e,
@@ -679,19 +556,21 @@ pub struct FileReadArgs {
     pub limit: Option<u64>,
 }
 
+/// The window of a read from the tool's optional fields: the start of the
+/// file and the per-call ceiling when they are absent, and never past the
+/// ceiling (`FILE_READ_MAX`), which binds the text returned.
+fn read_window(offset: Option<u64>, limit: Option<u64>) -> (u64, usize) {
+    let limit = limit
+        .and_then(|l| usize::try_from(l).ok())
+        .unwrap_or(FILE_READ_MAX)
+        .min(FILE_READ_MAX);
+    (offset.unwrap_or(0), limit)
+}
+
 impl FileReadArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let mut param = self.path;
-        if let Some(o) = self.offset {
-            param = format!("{}|{}", param, o);
-            if let Some(l) = self.limit {
-                param = format!("{}|{}", param, l);
-            }
-        } else if let Some(l) = self.limit {
-            // Edge case: limit without offset — retain both in the legacy format.
-            param = format!("{}|0|{}", param, l);
-        }
-        Ok(file_read(&param).await)
+        let (offset, limit) = read_window(self.offset, self.limit);
+        Ok(file_read(&self.path, offset, limit).await)
     }
 }
 
@@ -708,8 +587,7 @@ pub struct FileWriteArgs {
 
 impl FileWriteArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = format!("{} | {}", self.path, self.content);
-        Ok(file_write(&param).await)
+        Ok(file_write_in(WORKSPACE_ROOT, self.path.trim(), &self.content).await)
     }
 }
 
@@ -726,8 +604,7 @@ pub struct FileAppendArgs {
 
 impl FileAppendArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = format!("{} | {}", self.path, self.content);
-        Ok(file_append(&param).await)
+        Ok(file_append_in(WORKSPACE_ROOT, self.path.trim(), &self.content).await)
     }
 }
 
@@ -743,7 +620,7 @@ pub struct FileDeleteArgs {
 
 impl FileDeleteArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        Ok(file_delete(&self.path).await)
+        Ok(file_delete_in(WORKSPACE_ROOT, self.path.trim()).await)
     }
 }
 
@@ -760,8 +637,7 @@ pub struct FileMoveArgs {
 
 impl FileMoveArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = format!("{}|{}", self.source, self.destination);
-        Ok(file_move(&param).await)
+        Ok(file_move_in(WORKSPACE_ROOT, self.source.trim(), self.destination.trim()).await)
     }
 }
 
@@ -800,8 +676,14 @@ pub struct FileSymlinkArgs {
 
 impl FileSymlinkArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = format!("{}|{}", self.target, self.link_path);
-        Ok(file_symlink(&param).await)
+        let (target, link) = (self.target.trim(), self.link_path.trim());
+        if target.is_empty() {
+            return Ok("file_symlink rejected (target is empty)".into());
+        }
+        if link.is_empty() {
+            return Ok("file_symlink rejected (link path is empty)".into());
+        }
+        Ok(file_symlink_in(WORKSPACE_ROOT, target, link).await)
     }
 }
 
@@ -819,12 +701,7 @@ pub struct DirDeleteArgs {
 
 impl DirDeleteArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = if self.force {
-            format!("{} --force", self.path)
-        } else {
-            self.path
-        };
-        Ok(dir_delete(&param).await)
+        Ok(dir_delete_in(WORKSPACE_ROOT, self.path.trim(), self.force).await)
     }
 }
 
@@ -863,7 +740,7 @@ pub struct MkdirArgs {
 
 impl MkdirArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        Ok(mkdir(&self.path).await)
+        Ok(mkdir_in(WORKSPACE_ROOT, self.path.trim()).await)
     }
 }
 
@@ -878,13 +755,13 @@ mod native_args_tests {
         // the uniform `'..'` message (from resolve_workspace_path) instead
         // of silently slipping past the old prefix-only check.
         let rejections = [
-            file_write("../etc/passwd | content").await,
-            file_append("../etc/passwd | content").await,
-            file_delete("../etc/passwd").await,
-            file_move("../src|../dst").await,
-            file_symlink("/embra/workspace/a|../etc/foo").await,
-            mkdir("../etc").await,
-            dir_delete("../etc").await,
+            file_write_in(WORKSPACE_ROOT, "../etc/passwd", "content").await,
+            file_append_in(WORKSPACE_ROOT, "../etc/passwd", "content").await,
+            file_delete_in(WORKSPACE_ROOT, "../etc/passwd").await,
+            file_move_in(WORKSPACE_ROOT, "../src", "../dst").await,
+            file_symlink_in(WORKSPACE_ROOT, "/embra/workspace/a", "../etc/foo").await,
+            mkdir_in(WORKSPACE_ROOT, "../etc").await,
+            dir_delete_in(WORKSPACE_ROOT, "../etc", false).await,
             crate::tools::file_copy::file_copy_impl(
                 serde_json::from_value(serde_json::json!({
                     "source": "x", "destination": "../etc/evil"
@@ -909,7 +786,7 @@ mod native_args_tests {
         // of the file_* family. We exercise this by reading a guaranteed-
         // missing file and asserting the "File not found" message echoes
         // the resolved absolute path, not the raw input.
-        let msg = file_read("nonexistent-zzz-embra-debug-57").await;
+        let msg = file_read("nonexistent-zzz-embra-debug-57", 0, FILE_READ_MAX).await;
         assert!(
             msg.contains("/embra/workspace/nonexistent-zzz-embra-debug-57"),
             "expected resolved workspace path in rejection, got: {}",
@@ -923,7 +800,7 @@ mod native_args_tests {
 
         // Absolute paths still pass through unchanged — the "unrestricted"
         // contract for reads outside /embra/workspace/ is preserved.
-        let abs_msg = file_read("/definitely/not/a/real/path/abs-probe").await;
+        let abs_msg = file_read("/definitely/not/a/real/path/abs-probe", 0, FILE_READ_MAX).await;
         assert!(
             abs_msg.contains("/definitely/not/a/real/path/abs-probe"),
             "absolute path should echo literally, got: {}",
@@ -943,7 +820,7 @@ mod native_args_tests {
         // /embra/workspace" rejection) when /embra/workspace/ is unavailable
         // on the test host. A filesystem error proves the resolver let the
         // path through and the kernel rejected it — the outcome we want.
-        let msg = file_write("Embra_Debug/_relpath_probe.txt | ok").await;
+        let msg = file_write_in(WORKSPACE_ROOT, "Embra_Debug/_relpath_probe.txt", "ok").await;
         assert!(
             !msg.contains("is not under"),
             "old validate_workspace_path rejection leaked back in, got: {}",
@@ -964,6 +841,18 @@ mod native_args_tests {
         .unwrap();
         assert_eq!(b.offset, Some(100));
         assert_eq!(b.limit, Some(500));
+    }
+
+    /// #37: the typed fields replace the `path|offset|limit` string the
+    /// tool once rebuilt and re-split. An absent offset is the start of the
+    /// file, an absent limit the per-call ceiling, and no limit passes it.
+    #[test]
+    fn the_read_window_defaults_to_the_start_and_the_ceiling() {
+        assert_eq!(read_window(None, None), (0, FILE_READ_MAX));
+        assert_eq!(read_window(Some(100), None), (100, FILE_READ_MAX));
+        assert_eq!(read_window(None, Some(500)), (0, 500));
+        assert_eq!(read_window(Some(7), Some(FILE_READ_MAX as u64 + 1)), (7, FILE_READ_MAX));
+        assert_eq!(read_window(Some(0), Some(u64::MAX)), (0, FILE_READ_MAX));
     }
 
     #[test]
@@ -1040,7 +929,7 @@ mod file_io_caps_tests {
         std::fs::write(&target, &data).unwrap();
         let path = target.to_str().unwrap().to_string();
 
-        let out = file_read(&path).await;
+        let out = file_read(&path, 0, FILE_READ_MAX).await;
         assert!(
             out.len() <= crate::tools::registry::MAX_TOOL_RESULT_SIZE,
             "framed result must fit under the dispatcher cap ({} > {})",
@@ -1063,7 +952,7 @@ mod file_io_caps_tests {
         assert_eq!(&body.as_bytes()[..content_end], &data[..FILE_READ_MAX]);
 
         // Follow the trailer verbatim: offset continuation returns the rest.
-        let cont = file_read(&format!("{}|{}", path, FILE_READ_MAX)).await;
+        let cont = file_read(&path, FILE_READ_MAX as u64, FILE_READ_MAX).await;
         assert!(!cont.contains("[... "), "final chunk must end clean, got: {}", &cont[cont.len().saturating_sub(160)..]);
         let cont_body = &cont[cont.find('\n').unwrap() + 1..];
         assert_eq!(cont_body.as_bytes(), &data[FILE_READ_MAX..]);
@@ -1093,11 +982,7 @@ mod file_io_caps_tests {
         let mut offset = 0u64;
         let mut calls = 0;
         loop {
-            let params = match limit {
-                Some(l) => format!("{path}|{offset}|{l}"),
-                None => format!("{path}|{offset}"),
-            };
-            let out = file_read(&params).await;
+            let out = file_read(path, offset, limit.unwrap_or(FILE_READ_MAX)).await;
             calls += 1;
             let (body, next) = body_and_next(&out);
             whole.push_str(body);
@@ -1147,7 +1032,7 @@ mod file_io_caps_tests {
         std::fs::write(&target, &data).unwrap();
         let path = target.to_str().unwrap();
 
-        let first = file_read(path).await;
+        let first = file_read(path, 0, FILE_READ_MAX).await;
         assert!(first.len() <= crate::tools::registry::MAX_TOOL_RESULT_SIZE);
         let (body, next) = body_and_next(&first);
         assert_eq!(next, Some(FILE_READ_MAX as u64 - 1), "the chunk ends before the character");
@@ -1226,7 +1111,7 @@ mod file_io_caps_tests {
         std::fs::write(&target, &data).unwrap();
         let path = target.to_str().unwrap();
 
-        let first = file_read(path).await;
+        let first = file_read(path, 0, FILE_READ_MAX).await;
         assert!(
             first.len() <= crate::tools::registry::MAX_TOOL_RESULT_SIZE,
             "the framed result must fit under the dispatcher cap ({} > {})",
@@ -1282,7 +1167,7 @@ mod file_io_caps_tests {
         // A file that IS UTF-8 says nothing about encodings.
         let clean = dir.0.join("clean.txt");
         std::fs::write(&clean, "caf\u{e9}\n").unwrap();
-        let out = file_read(clean.to_str().unwrap()).await;
+        let out = file_read(clean.to_str().unwrap(), 0, FILE_READ_MAX).await;
         assert!(!out.contains("UTF-8"), "{out}");
     }
 
@@ -1295,7 +1180,7 @@ mod file_io_caps_tests {
         let data = ascii_bytes(FILE_READ_MAX);
         std::fs::write(&target, &data).unwrap();
 
-        let out = file_read(target.to_str().unwrap()).await;
+        let out = file_read(target.to_str().unwrap(), 0, FILE_READ_MAX).await;
         assert!(out.len() <= crate::tools::registry::MAX_TOOL_RESULT_SIZE);
         assert!(!out.contains("[truncated:"));
         assert!(!out.contains("[... "), "complete read must carry no trailer");
@@ -1312,12 +1197,12 @@ mod file_io_caps_tests {
         std::fs::write(&target, ascii_bytes(10_000)).unwrap();
         let path = target.to_str().unwrap();
 
-        let out = file_read(&format!("{}|0|1000", path)).await;
+        let out = file_read(path, 0, 1000).await;
         assert!(out.contains("Continue with offset=1000"), "{out}");
         assert!(out.contains("tip: omit limit"), "{out}");
 
         // A complete small read carries neither trailer nor tip.
-        let full = file_read(path).await;
+        let full = file_read(path, 0, FILE_READ_MAX).await;
         assert!(!full.contains("[... "), "{full}");
         assert!(!full.contains("tip:"), "{full}");
     }
@@ -1328,7 +1213,7 @@ mod file_io_caps_tests {
         for i in 0..(DIR_LIST_MAX + 5) {
             std::fs::write(dir.0.join(format!("f{:05}", i)), b"x").unwrap();
         }
-        let out = file_read(dir.0.to_str().unwrap()).await;
+        let out = file_read(dir.0.to_str().unwrap(), 0, FILE_READ_MAX).await;
         assert!(
             out.contains(&format!("truncated at {} entries", DIR_LIST_MAX)),
             "truncation line must render the const, got tail: {}",
@@ -1347,7 +1232,7 @@ mod file_io_caps_tests {
         std::fs::create_dir(dir.0.join(".git")).unwrap();
         std::fs::write(dir.0.join("RUST_VERSION"), b"1.98.1").unwrap();
         std::fs::write(dir.0.join(".stamp_built"), b"").unwrap();
-        let out = file_read(dir.0.to_str().unwrap()).await;
+        let out = file_read(dir.0.to_str().unwrap(), 0, FILE_READ_MAX).await;
         for line in ["  bin/\n", "  .git/\n", "  RUST_VERSION\n", "  .stamp_built\n"] {
             assert!(out.contains(line), "{line:?} missing from:\n{out}");
         }
@@ -1473,7 +1358,7 @@ mod write_jail_tests {
             file_symlink_in(t.root(), "repo/note.txt", "repo/.git/hooks/post-commit").await,
             file_move_in(t.root(), "repo/note.txt", "repo/.git/hooks/pre-push").await,
             file_delete_in(t.root(), "repo/.git/config").await,
-            dir_delete_in(t.root(), "repo/.git/hooks --force").await,
+            dir_delete_in(t.root(), "repo/.git/hooks", true).await,
         ];
         for out in &refused {
             assert!(out.starts_with("Denied:") && out.contains(".git directory"), "{out}");
@@ -1483,7 +1368,7 @@ mod write_jail_tests {
         assert!(t.join("repo/note.txt").exists());
 
         // The repository as a whole is the writer's to remove.
-        let out = dir_delete_in(t.root(), "repo --force").await;
+        let out = dir_delete_in(t.root(), "repo", true).await;
         assert!(!out.starts_with("Denied:"), "{out}");
         assert!(!t.join("repo").exists());
     }
@@ -1508,7 +1393,7 @@ mod write_jail_tests {
             file_symlink_in(t.root(), "note.txt", ".ssh/authorized_keys").await,
             file_move_in(t.root(), "note.txt", ".ssh/rc").await,
             file_delete_in(t.root(), ".ssh/known_hosts").await,
-            dir_delete_in(t.root(), ".ssh --force").await,
+            dir_delete_in(t.root(), ".ssh", true).await,
         ];
         for out in &refused {
             assert!(out.starts_with("Denied:") && out.contains("SSH directory"), "{out}");
@@ -1599,7 +1484,7 @@ mod write_jail_tests {
         assert_eq!(std::fs::read(&sentinel).unwrap(), b"keep");
 
         // A link to a directory is not a directory for dir_delete ...
-        let out = dir_delete_in(t.root(), "dirlink --force").await;
+        let out = dir_delete_in(t.root(), "dirlink", true).await;
         assert!(out.starts_with("Not a directory"), "{out}");
         assert!(outside.0.is_dir() && sentinel.exists(), "the outside tree stands");
         // ... and file_delete removes the link itself.
@@ -1616,39 +1501,19 @@ mod write_jail_tests {
     }
 
     #[tokio::test]
-    async fn a_directory_named_force_is_not_a_flag() {
-        assert_eq!(split_force_flag("build --force"), ("build", true));
-        assert_eq!(split_force_flag("build\t--force"), ("build", true));
-        assert_eq!(split_force_flag("build--force"), ("build--force", false));
-        assert_eq!(split_force_flag("--force"), ("", true));
-        assert_eq!(split_force_flag("build"), ("build", false));
-
-        let t = TempDir::new("force");
-        std::fs::create_dir(t.join("build--force")).unwrap();
-        std::fs::write(t.join("build--force/keep.txt"), "x").unwrap();
-        let out = dir_delete_in(t.root(), "build--force").await;
-        assert!(out.starts_with("Directory is not empty"), "{out}");
-        assert!(t.join("build--force/keep.txt").exists(), "nothing deleted");
-        let out = dir_delete_in(t.root(), "build--force --force").await;
-        assert!(out.starts_with("Deleted directory and all contents"), "{out}");
-        assert!(!t.join("build--force").exists());
-    }
-
-    #[tokio::test]
     async fn dir_delete_never_takes_the_workspace_root() {
         let t = TempDir::new("root");
         std::fs::write(t.join("keep.txt"), "x").unwrap();
-        let root_abs = format!("{} --force", t.root());
-        for param in ["", " --force", "--force", ". --force", "./", root_abs.as_str()] {
-            let out = dir_delete_in(t.root(), param).await;
+        for (path, force) in [("", true), ("", false), (".", true), ("./", false), (t.root(), true)] {
+            let out = dir_delete_in(t.root(), path, force).await;
             assert!(
                 out.starts_with("Refusing to delete the workspace itself"),
-                "{param:?}: {out}"
+                "{path:?} force={force}: {out}"
             );
         }
         assert!(t.join("keep.txt").exists());
         // A path that leaves is refused by the lexical jail.
-        let out = dir_delete_in(t.root(), "/ --force").await;
+        let out = dir_delete_in(t.root(), "/", true).await;
         assert!(out.starts_with("Denied:"), "{out}");
     }
 }
