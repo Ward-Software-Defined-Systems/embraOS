@@ -9,11 +9,42 @@ use super::git::resolve_github_token;
 use crate::db::WardsonDbClient;
 use crate::tools::registry::DispatchContext;
 
-/// The reqwest client for GitHub API calls: the compiled-in roots and the
-/// brain's redirect policy (`crate::net`: the same origin only, so the
-/// bearer never travels to a third host).
-fn github_client() -> reqwest::Client {
-    crate::net::client()
+/// A request to the GitHub API (#37): the brain's shared client (the
+/// compiled-in roots and the redirect policy of `crate::net`: the same
+/// origin only, so the bearer never travels to a third host; one pool per
+/// process, #36), the user agent and the token. Every `gh_*` request is
+/// built here and nowhere else.
+fn github_request(method: reqwest::Method, token: &str, url: &str) -> reqwest::RequestBuilder {
+    crate::net::shared()
+        .request(method, url)
+        .header("User-Agent", USER_AGENT)
+        .header("Authorization", format!("Bearer {token}"))
+}
+
+/// GET a GitHub API document. A transport failure is `Failed to fetch
+/// <what>: …`, a non-2xx `GitHub API error: <status>`, an undecodable
+/// body `Failed to parse GitHub response: …` — the three shapes the simple
+/// read tools answered with, in one place.
+async fn github_get(token: &str, url: &str, what: &str) -> Result<serde_json::Value, String> {
+    let resp = github_request(reqwest::Method::GET, token, url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to fetch {what}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("GitHub API error: {}", resp.status()));
+    }
+    resp.json().await.map_err(|e| format!("Failed to parse GitHub response: {e}"))
+}
+
+/// The label names and the assignee logins of an issue or a pull request.
+fn labels_and_assignees(item: &serde_json::Value) -> (Vec<&str>, Vec<&str>) {
+    let names = |key: &str, field: &str| -> Vec<&str> {
+        item.get(key)
+            .and_then(|arr| arr.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.get(field).and_then(|n| n.as_str())).collect())
+            .unwrap_or_default()
+    };
+    (names("labels", "name"), names("assignees", "login"))
 }
 
 /// Fetch GitHub issues via API.
@@ -29,49 +60,30 @@ pub async fn gh_issues(db: &WardsonDbClient, param: &str) -> String {
 
     let url = format!("https://api.github.com/repos/{}/issues?state=open&per_page=10", param);
 
-    let client = github_client();
-    match client
-        .get(&url)
-        .header("User-Agent", USER_AGENT)
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            if !resp.status().is_success() {
-                return format!("GitHub API error: {}", resp.status());
-            }
-            let issues: Vec<serde_json::Value> = match resp.json().await {
-                Ok(v) => v,
-                Err(e) => return format!("Failed to parse GitHub response: {}", e),
-            };
-            if issues.is_empty() {
-                return format!("No open issues for {}.", param);
-            }
-            let mut output = format!("=== Open Issues: {} ({}) ===\n", param, issues.len());
-            for issue in &issues {
-                let number = issue.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
-                let title = issue.get("title").and_then(|v| v.as_str()).unwrap_or("?");
-                let labels: Vec<&str> = issue
-                    .get("labels")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|l| l.get("name").and_then(|n| n.as_str()))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let label_str = if labels.is_empty() {
-                    String::new()
-                } else {
-                    format!(" [{}]", labels.join(", "))
-                };
-                output.push_str(&format!("  #{} {}{}\n", number, title, label_str));
-            }
-            output
-        }
-        Err(e) => format!("Failed to fetch issues: {}", e),
+    let issues = match github_get(&token, &url, "issues").await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let issues: Vec<serde_json::Value> = match serde_json::from_value(issues) {
+        Ok(v) => v,
+        Err(e) => return format!("Failed to parse GitHub response: {}", e),
+    };
+    if issues.is_empty() {
+        return format!("No open issues for {}.", param);
     }
+    let mut output = format!("=== Open Issues: {} ({}) ===\n", param, issues.len());
+    for issue in &issues {
+        let number = issue.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
+        let title = issue.get("title").and_then(|v| v.as_str()).unwrap_or("?");
+        let (labels, _) = labels_and_assignees(issue);
+        let label_str = if labels.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", labels.join(", "))
+        };
+        output.push_str(&format!("  #{} {}{}\n", number, title, label_str));
+    }
+    output
 }
 
 /// Fetch the conversation-thread comments on an issue or PR. GitHub stores
@@ -82,22 +94,12 @@ pub async fn gh_issues(db: &WardsonDbClient, param: &str) -> String {
 /// returns an empty Vec on HTTP error so a missing/gated comment thread does
 /// not fail the parent view call — the absence is obvious in the rendered
 /// response.
-async fn fetch_issue_thread_comments(
-    client: &reqwest::Client,
-    token: &str,
-    repo: &str,
-    number: &str,
-) -> Vec<serde_json::Value> {
+async fn fetch_issue_thread_comments(token: &str, repo: &str, number: &str) -> Vec<serde_json::Value> {
     let url = format!(
         "https://api.github.com/repos/{}/issues/{}/comments?per_page=100",
         repo, number
     );
-    let resp = client
-        .get(&url)
-        .header("User-Agent", USER_AGENT)
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .await;
+    let resp = github_request(reqwest::Method::GET, token, &url).send().await;
     // Best-effort enrichment: the issue itself was read; a thread that
     // cannot be fetched or decoded is shown as no comments.
     let raw: Vec<serde_json::Value> = match resp {
@@ -131,22 +133,10 @@ pub async fn gh_issue_view(db: &WardsonDbClient, param: &str) -> String {
     let repo = parts[0];
     let number = parts[1];
 
-    let client = github_client();
-
     let issue_url = format!("https://api.github.com/repos/{}/issues/{}", repo, number);
-    let issue: serde_json::Value = match client
-        .get(&issue_url)
-        .header("User-Agent", USER_AGENT)
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => match resp.json().await {
-            Ok(v) => v,
-            Err(e) => return format!("Failed to parse issue response: {}", e),
-        },
-        Ok(resp) => return format!("GitHub API error: {}", resp.status()),
-        Err(e) => return format!("Failed to fetch issue: {}", e),
+    let issue = match github_get(&token, &issue_url, "issue").await {
+        Ok(v) => v,
+        Err(e) => return e,
     };
 
     // GitHub returns PRs from the /issues/ endpoint too (they carry a
@@ -159,26 +149,8 @@ pub async fn gh_issue_view(db: &WardsonDbClient, param: &str) -> String {
         );
     }
 
-    let comments = fetch_issue_thread_comments(&client, &token, repo, number).await;
-
-    let labels: Vec<&str> = issue
-        .get("labels")
-        .and_then(|arr| arr.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|l| l.get("name").and_then(|n| n.as_str()))
-                .collect()
-        })
-        .unwrap_or_default();
-    let assignees: Vec<&str> = issue
-        .get("assignees")
-        .and_then(|arr| arr.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|u| u.get("login").and_then(|l| l.as_str()))
-                .collect()
-        })
-        .unwrap_or_default();
+    let comments = fetch_issue_thread_comments(&token, repo, number).await;
+    let (labels, assignees) = labels_and_assignees(&issue);
 
     let result = serde_json::json!({
         "number": issue.get("number").and_then(|v| v.as_u64()),
@@ -209,40 +181,29 @@ pub async fn gh_prs(db: &WardsonDbClient, param: &str) -> String {
 
     let url = format!("https://api.github.com/repos/{}/pulls?state=open&per_page=10", param);
 
-    let client = github_client();
-    match client
-        .get(&url)
-        .header("User-Agent", USER_AGENT)
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            if !resp.status().is_success() {
-                return format!("GitHub API error: {}", resp.status());
-            }
-            let prs: Vec<serde_json::Value> = match resp.json().await {
-                Ok(v) => v,
-                Err(e) => return format!("Failed to parse GitHub response: {}", e),
-            };
-            if prs.is_empty() {
-                return format!("No open PRs for {}.", param);
-            }
-            let mut output = format!("=== Open PRs: {} ({}) ===\n", param, prs.len());
-            for pr in &prs {
-                let number = pr.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
-                let title = pr.get("title").and_then(|v| v.as_str()).unwrap_or("?");
-                let user = pr
-                    .get("user")
-                    .and_then(|u| u.get("login"))
-                    .and_then(|l| l.as_str())
-                    .unwrap_or("?");
-                output.push_str(&format!("  #{} {} (by {})\n", number, title, user));
-            }
-            output
-        }
-        Err(e) => format!("Failed to fetch PRs: {}", e),
+    let prs = match github_get(&token, &url, "PRs").await {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let prs: Vec<serde_json::Value> = match serde_json::from_value(prs) {
+        Ok(v) => v,
+        Err(e) => return format!("Failed to parse GitHub response: {}", e),
+    };
+    if prs.is_empty() {
+        return format!("No open PRs for {}.", param);
     }
+    let mut output = format!("=== Open PRs: {} ({}) ===\n", param, prs.len());
+    for pr in &prs {
+        let number = pr.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
+        let title = pr.get("title").and_then(|v| v.as_str()).unwrap_or("?");
+        let user = pr
+            .get("user")
+            .and_then(|u| u.get("login"))
+            .and_then(|l| l.as_str())
+            .unwrap_or("?");
+        output.push_str(&format!("  #{} {} (by {})\n", number, title, user));
+    }
+    output
 }
 
 /// View a single GitHub pull request with its conversation-thread comments.
@@ -260,44 +221,14 @@ pub async fn gh_pr_view(db: &WardsonDbClient, param: &str) -> String {
     let repo = parts[0];
     let number = parts[1];
 
-    let client = github_client();
-
     let pr_url = format!("https://api.github.com/repos/{}/pulls/{}", repo, number);
-    let pr: serde_json::Value = match client
-        .get(&pr_url)
-        .header("User-Agent", USER_AGENT)
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => match resp.json().await {
-            Ok(v) => v,
-            Err(e) => return format!("Failed to parse PR response: {}", e),
-        },
-        Ok(resp) => return format!("GitHub API error: {}", resp.status()),
-        Err(e) => return format!("Failed to fetch PR: {}", e),
+    let pr = match github_get(&token, &pr_url, "PR").await {
+        Ok(v) => v,
+        Err(e) => return e,
     };
 
-    let comments = fetch_issue_thread_comments(&client, &token, repo, number).await;
-
-    let labels: Vec<&str> = pr
-        .get("labels")
-        .and_then(|arr| arr.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|l| l.get("name").and_then(|n| n.as_str()))
-                .collect()
-        })
-        .unwrap_or_default();
-    let assignees: Vec<&str> = pr
-        .get("assignees")
-        .and_then(|arr| arr.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|u| u.get("login").and_then(|l| l.as_str()))
-                .collect()
-        })
-        .unwrap_or_default();
+    let comments = fetch_issue_thread_comments(&token, repo, number).await;
+    let (labels, assignees) = labels_and_assignees(&pr);
 
     let result = serde_json::json!({
         "number": pr.get("number").and_then(|v| v.as_u64()),
@@ -344,11 +275,7 @@ pub async fn gh_issue_create(db: &WardsonDbClient, param: &str) -> String {
         "body": body,
     });
 
-    let client = github_client();
-    match client
-        .post(&url)
-        .header("User-Agent", USER_AGENT)
-        .header("Authorization", format!("Bearer {}", token))
+    match github_request(reqwest::Method::POST, &token, &url)
         .json(&payload)
         .send()
         .await
@@ -386,11 +313,7 @@ async fn post_github_comment(
     );
     let payload = serde_json::json!({ "body": body });
 
-    let client = github_client();
-    match client
-        .post(&url)
-        .header("User-Agent", USER_AGENT)
-        .header("Authorization", format!("Bearer {}", token))
+    match github_request(reqwest::Method::POST, token, &url)
         .json(&payload)
         .send()
         .await
@@ -516,11 +439,7 @@ async fn patch_issue_or_pr_state(
     let url = format!("https://api.github.com/repos/{}/{}/{}", repo, kind, number);
     let payload = serde_json::json!({ "state": new_state });
 
-    let client = github_client();
-    match client
-        .patch(&url)
-        .header("User-Agent", USER_AGENT)
-        .header("Authorization", format!("Bearer {}", token))
+    match github_request(reqwest::Method::PATCH, &token, &url)
         .json(&payload)
         .send()
         .await
@@ -571,11 +490,7 @@ pub async fn gh_pr_create(db: &WardsonDbClient, param: &str) -> String {
         "base": base,
     });
 
-    let client = github_client();
-    match client
-        .post(&url)
-        .header("User-Agent", USER_AGENT)
-        .header("Authorization", format!("Bearer {}", token))
+    match github_request(reqwest::Method::POST, &token, &url)
         .json(&payload)
         .send()
         .await
@@ -630,11 +545,7 @@ pub async fn gh_pr_merge(db: &WardsonDbClient, param: &str) -> String {
     );
     let payload = serde_json::json!({ "merge_method": method });
 
-    let client = github_client();
-    match client
-        .put(&url)
-        .header("User-Agent", USER_AGENT)
-        .header("Authorization", format!("Bearer {}", token))
+    match github_request(reqwest::Method::PUT, &token, &url)
         .json(&payload)
         .send()
         .await
@@ -683,17 +594,13 @@ enum ProjectsFetch {
 /// and falling back to the org endpoint on 404. Projects v2 is NOT supported;
 /// this only talks to the classic REST API.
 async fn fetch_classic_projects(token: &str, owner: &str) -> ProjectsFetch {
-    let client = github_client();
     let endpoints = [
         format!("https://api.github.com/users/{}/projects", owner),
         format!("https://api.github.com/orgs/{}/projects", owner),
     ];
     let mut last_status: Option<reqwest::StatusCode> = None;
     for url in &endpoints {
-        match client
-            .get(url)
-            .header("User-Agent", USER_AGENT)
-            .header("Authorization", format!("Bearer {}", token))
+        match github_request(reqwest::Method::GET, token, url)
             .header("Accept", "application/vnd.github.inertia-preview+json")
             .send()
             .await
@@ -1139,5 +1046,22 @@ mod native_args_tests {
         }))
         .unwrap();
         assert!(matches!(b.method, PrMergeMethod::Squash));
+    }
+}
+
+#[cfg(test)]
+mod request_builder_tests {
+    /// #37: every GitHub request is built by `github_request` — the one
+    /// place a header, the client or the error shape changes.
+    #[test]
+    fn every_github_request_is_built_by_the_one_builder() {
+        let src = include_str!("github.rs");
+        let builder = src.find("fn github_request(").expect("the builder");
+        let body_end = builder + src[builder..].find("\n}\n").expect("its end");
+        let outside = format!("{}{}", &src[..builder], &src[body_end..]);
+        assert!(!outside.contains("\"User-Agent\""), "a user agent set outside the builder");
+        assert!(!outside.contains("\"Authorization\""), "a token set outside the builder");
+        let (bare, fresh) = (["net::", "client()"].concat(), ["Client::", "new()"].concat());
+        assert!(!outside.contains(&bare) && !outside.contains(&fresh), "a client built outside the builder");
     }
 }
