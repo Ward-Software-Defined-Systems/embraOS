@@ -156,11 +156,10 @@ pub async fn get_storage_info(
             let ttl = st.storage.get_ttl(&collection)?;
 
             // Get oldest/newest doc timestamps from first/last UUIDv7 keys
-            // doc_count guard in get_doc_time_range prevents hang on empty partitions
-            let (oldest_doc, newest_doc) = st
-                .storage
-                .get_doc_time_range(&collection)
-                .unwrap_or((None, None));
+            // doc_count guard in get_doc_time_range prevents hang on empty partitions.
+            // A read that fails is the request's failure, not a null window
+            // that reads as an empty collection (#64).
+            let (oldest_doc, newest_doc) = st.storage.get_doc_time_range(&collection)?;
             Ok((info, ttl, oldest_doc, newest_doc))
         })
         .await?;

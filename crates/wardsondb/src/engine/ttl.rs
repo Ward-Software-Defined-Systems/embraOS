@@ -94,7 +94,12 @@ impl Storage {
                         std::ops::ControlFlow::Continue(())
                     }
                     Err(e) => {
-                        item_err = Some(e.into());
+                        // A stored policy that does not parse is the
+                        // server's fault, not the request's: 500, not the
+                        // 400 the serde conversion would give.
+                        item_err = Some(AppError::Internal(format!(
+                            "TTL policy for '{collection}' does not parse: {e}"
+                        )));
                         std::ops::ControlFlow::Break(())
                     }
                 }

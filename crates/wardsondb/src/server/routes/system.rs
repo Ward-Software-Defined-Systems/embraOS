@@ -49,7 +49,9 @@ pub async fn stats(State(state): State<Arc<AppState>>) -> Result<Json<ApiRespons
     let m = &state.metrics;
     let mem = &state.storage.memory_config;
 
-    let ttl_configs = state.storage.get_all_ttl_configs().unwrap_or_default();
+    // A `_meta` scan that fails is a 500, never "0 active policies": a zero
+    // here is read as the truth by whatever watches it (#64).
+    let ttl_configs = state.storage.get_all_ttl_configs()?;
     let last_ttl_run = LAST_TTL_RUN.load(Ordering::Relaxed);
     let accel_stats = state.storage.scan_accelerator.stats();
 
@@ -102,7 +104,9 @@ pub async fn metrics_endpoint(State(state): State<Arc<AppState>>) -> Result<Resp
     let collections = state.storage.list_collections()?;
     let total_docs: u64 = collections.iter().map(|c| c.doc_count).sum();
 
-    let ttl_configs = state.storage.get_all_ttl_configs().unwrap_or_default();
+    // Same rule as `stats`: a gauge of 0 for a scan that failed would be a
+    // false reading on every scrape.
+    let ttl_configs = state.storage.get_all_ttl_configs()?;
 
     let poisoned: u64 = if state.storage.is_poisoned() { 1 } else { 0 };
 

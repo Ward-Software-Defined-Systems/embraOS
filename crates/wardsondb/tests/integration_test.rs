@@ -10913,3 +10913,66 @@ async fn test_missing_collection_404_regardless_of_plan() {
         .unwrap();
     assert_eq!(resp.status(), 404);
 }
+
+/// A server whose `_meta` holds one extra entry, written before the router
+/// is built — the seam for a `_meta` read that fails.
+async fn start_test_server_with_meta_entry(key: &[u8], value: &[u8]) -> (String, TempDir) {
+    let tmp = TempDir::new().unwrap();
+    let storage = Storage::open(tmp.path()).unwrap();
+    let mut batch = storage.write_batch();
+    batch.insert(&storage.meta, key, value).unwrap();
+    storage.commit_batch(batch).unwrap();
+
+    let std_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = std_listener.local_addr().unwrap().port();
+    let config = test_config(&tmp, port);
+    let state = Arc::new(AppState {
+        storage,
+        config,
+        started_at: Instant::now(),
+        metrics: Arc::new(Metrics::new()),
+        api_keys: vec![],
+    });
+    let app = build_router(state);
+    let addr = format!("127.0.0.1:{port}");
+    std_listener.set_nonblocking(true).unwrap();
+    let listener = tokio::net::TcpListener::from_std(std_listener).unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    (format!("http://{addr}"), tmp)
+}
+
+/// #64-3: `/_stats` and `/_metrics` answer 500 when the TTL policies cannot
+/// be read, never "0 active policies".
+#[tokio::test]
+async fn test_stats_and_metrics_fail_when_the_ttl_policies_cannot_be_read() {
+    let (base_url, _tmp) = start_test_server_with_meta_entry(b"ttl:broken", b"not json").await;
+    let client = Client::new();
+
+    let resp = client.get(format!("{base_url}/_stats")).send().await.unwrap();
+    assert_eq!(resp.status(), 500);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["error"]["code"], "INTERNAL_ERROR");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("TTL policy for 'broken' does not parse"),
+        "{body}"
+    );
+
+    let resp = client
+        .get(format!("{base_url}/_metrics"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 500, "a failed scan is not a gauge of zero");
+    let text = resp.text().await.unwrap();
+    assert!(
+        !text.contains("wardsondb_ttl_active_policies 0"),
+        "{text}"
+    );
+}
