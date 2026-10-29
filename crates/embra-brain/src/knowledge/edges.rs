@@ -200,21 +200,41 @@ async fn derive_edges_inner(
         }
     }
 
-    // Duplicate prevention: drop edges that already exist.
-    let mut new_edges: Vec<serde_json::Value> = Vec::new();
-    for edge in edges_to_insert {
-        let src_id = edge.get("source_id").and_then(|v| v.as_str()).unwrap_or("");
-        let tgt_id = edge.get("target_id").and_then(|v| v.as_str()).unwrap_or("");
-        let etype = edge.get("edge_type").and_then(|v| v.as_str()).unwrap_or("");
-        // An existence that could not be determined is not an absence: the
-        // edge is not written (a duplicate would be permanent) and the
-        // failure is said (#57).
-        match edge_exists(db, src_id, tgt_id, etype).await {
-            Ok(false) => new_edges.push(edge),
-            Ok(true) => {}
-            Err(e) => warn!("edge {src_id} -[{etype}]-> {tgt_id} not written: its existence could not be checked: {e}"),
-        }
+    if edges_to_insert.is_empty() {
+        return Ok(0);
     }
+
+    // Duplicate prevention: drop the edges already stored. Two indexed
+    // reads, one per direction, in place of one per planned edge (#35). An
+    // existence that could not be determined is not an absence: nothing is
+    // written (a duplicate would be permanent) and the failure is said
+    // (#57).
+    let others: Vec<&str> = {
+        let mut ids: Vec<&str> = edges_to_insert
+            .iter()
+            .filter_map(|edge| {
+                let source = edge.get("source_id").and_then(|v| v.as_str())?;
+                let target = edge.get("target_id").and_then(|v| v.as_str())?;
+                Some(if source == new_doc_id { target } else { source })
+            })
+            .collect();
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    };
+    let stored = match existing_edges(db, new_doc_id, &others, edges_to_insert.len()).await {
+        Ok(stored) => stored,
+        Err(e) => {
+            warn!(
+                "no edge written for {new_doc_collection}:{new_doc_id}: the stored edges could not be read: {e}"
+            );
+            return Ok(0);
+        }
+    };
+    let new_edges: Vec<serde_json::Value> = edges_to_insert
+        .into_iter()
+        .filter(|edge| !stored.contains(&edge_key(edge)))
+        .collect();
 
     if new_edges.is_empty() {
         return Ok(0);
@@ -279,18 +299,40 @@ fn push_bidirectional(
     }));
 }
 
-/// Whether the edge is already stored. A query that failed is an error,
-/// never `false`: the caller does not write on an unknown (#57).
-async fn edge_exists(db: &WardsonDbClient, source_id: &str, target_id: &str, edge_type: &str) -> Result<bool> {
-    let filter = json!({
-        "filter": {
-            "source_id": source_id,
-            "target_id": target_id,
-            "edge_type": edge_type,
-        },
-        "limit": 1,
-    });
-    Ok(!db.query("memory.edges", &filter).await?.is_empty())
+/// An edge's identity for the duplicate check: `(source_id, target_id,
+/// edge_type)`, the three keys the one-per-edge read matched on.
+fn edge_key(edge: &serde_json::Value) -> (String, String, String) {
+    let field = |key: &str| edge.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string();
+    (field("source_id"), field("target_id"), field("edge_type"))
+}
+
+/// The stored edges between `doc_id` and `others`, in either direction,
+/// as `edge_key`s: one read per direction, `$in` over the ids on the other
+/// end, both served by the `source_id` index (#35). The window is the
+/// planned count plus one per arm: every planned edge may be stored once,
+/// and a window that fills is an error, as a read that fails is — never an
+/// absence, since the caller writes no edge on an unknown (#57).
+async fn existing_edges(
+    db: &WardsonDbClient,
+    doc_id: &str,
+    others: &[&str],
+    planned: usize,
+) -> Result<HashSet<(String, String, String)>> {
+    let limit = planned + 1;
+    let mut stored = HashSet::new();
+    for (arm, filter) in [
+        ("out", json!({ "source_id": doc_id, "target_id": { "$in": others } })),
+        ("in", json!({ "source_id": { "$in": others }, "target_id": doc_id })),
+    ] {
+        let docs = db
+            .query("memory.edges", &json!({ "filter": filter, "limit": limit }))
+            .await?;
+        if docs.len() >= limit {
+            anyhow::bail!("the window of {limit} stored edges filled on the {arm} arm");
+        }
+        stored.extend(docs.iter().map(edge_key));
+    }
+    Ok(stored)
 }
 
 #[cfg(test)]
@@ -393,28 +435,180 @@ mod derivation_tests {
         assert!(requests.iter().any(|r| r.url.path() == "/memory.edges/query"), "the existence check ran");
         assert!(!requests.iter().any(|r| r.url.path().starts_with("/memory.edges/docs")), "nothing was written");
     }
+
+    /// A store that answers the existence reads the way the server does:
+    /// the per-edge filter of the check this replaces, and the two `$in`
+    /// arms of the prefetch, over the same stored edges. Both forms give
+    /// the same answer on every stored set.
+    struct EdgeStore(Vec<(&'static str, &'static str, &'static str)>);
+
+    impl wiremock::Respond for EdgeStore {
+        fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
+            let filter = &body["filter"];
+            let limit = body["limit"].as_u64().unwrap_or(u64::MAX) as usize;
+            let matches = |want: &serde_json::Value, have: &str| -> bool {
+                match want {
+                    serde_json::Value::String(s) => s == have,
+                    v => v["$in"].as_array().is_some_and(|ids| ids.iter().any(|i| i == have)),
+                }
+            };
+            let rows: Vec<serde_json::Value> = self
+                .0
+                .iter()
+                .filter(|(s, t, e)| {
+                    matches(&filter["source_id"], s)
+                        && matches(&filter["target_id"], t)
+                        && (filter["edge_type"].is_null() || filter["edge_type"] == *e)
+                })
+                .take(limit)
+                .map(|(s, t, e)| serde_json::json!({"_id": format!("{s}-{t}-{e}"), "source_id": s, "target_id": t, "edge_type": e}))
+                .collect();
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "data": rows, "meta": {}}))
+        }
+    }
+
+    /// The edges the derivation wrote, as `(source, target, type)`.
+    async fn written(server: &MockServer) -> Vec<(String, String, String)> {
+        let mut out = Vec::new();
+        for r in server.received_requests().await.unwrap_or_default() {
+            if r.method.as_str() != "POST" || !r.url.path().starts_with("/memory.edges/docs") {
+                continue;
+            }
+            let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap_or_default();
+            let docs = body.as_array().cloned().or_else(|| body["documents"].as_array().cloned()).unwrap_or_default();
+            out.extend(docs.iter().map(super::edge_key));
+        }
+        out.sort();
+        out
+    }
+
+    /// #35: the two `$in` reads dedupe exactly what the one-per-edge check
+    /// did, in two round trips instead of one per planned edge. The stored
+    /// set holds an edge on each arm and a direction, a type and a pair
+    /// that are not stored, so every branch of the filter is exercised.
+    #[tokio::test]
+    async fn the_prefetch_dedupes_what_the_per_edge_check_did() {
+        let now = chrono::Utc::now().to_rfc3339();
+        let server = MockServer::start().await;
+        // The candidates live in one collection; the other two hold nothing,
+        // so each planned pair is planned once per type and direction.
+        let candidates = serde_json::json!({"ok": true, "data": [
+            {"_id": "c1", "created_at": now, "tags": ["t"], "session": "s1"},
+            {"_id": "c2", "created_at": now, "tags": ["t"], "session": "s1"},
+        ], "meta": {}});
+        Mock::given(method("POST"))
+            .and(path("/memory.semantic/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(candidates))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/memory\.(entries|procedural)/query$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "data": [], "meta": {}})))
+            .mount(&server)
+            .await;
+        // Stored: both directions of n1↔c1 same_session, one direction of
+        // n1→c2 temporal; c2 tag_overlap and the rest are not stored.
+        let stored = vec![
+            ("n1", "c1", "same_session"),
+            ("c1", "n1", "same_session"),
+            ("n1", "c2", "temporal"),
+        ];
+        Mock::given(method("POST")).and(path("/memory.edges/query")).respond_with(EdgeStore(stored.clone())).mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/memory\.edges/docs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "data": {"inserted": 9}, "meta": {}})))
+            .mount(&server)
+            .await;
+        let db = WardsonDbClient::from_url(&server.uri());
+
+        derive_edges(&db, "n1", "memory.semantic", "s1", &["t".to_string()], &now, &config()).await.unwrap();
+
+        // What the one-per-edge check would have written: every planned
+        // edge whose key is not stored. Planned: both directions of
+        // same_session, temporal and tag_overlap for c1 and c2.
+        let mut expected: Vec<(String, String, String)> = Vec::new();
+        for c in ["c1", "c2"] {
+            for t in ["same_session", "temporal", "tag_overlap"] {
+                for (s, d) in [("n1", c), (c, "n1")] {
+                    if !stored.contains(&(s, d, t)) {
+                        expected.push((s.to_string(), d.to_string(), t.to_string()));
+                    }
+                }
+            }
+        }
+        expected.sort();
+        assert_eq!(written(&server).await, expected);
+        let reads = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.url.path() == "/memory.edges/query")
+            .count();
+        assert_eq!(reads, 2, "one read per direction, not one per planned edge");
+    }
+
+    /// A window that fills is no answer: nothing is written.
+    #[tokio::test]
+    async fn a_filled_prefetch_window_writes_no_edge() {
+        let now = chrono::Utc::now().to_rfc3339();
+        let server = MockServer::start().await;
+        let candidate = serde_json::json!({"ok": true, "data": [{"_id": "c1", "created_at": now, "tags": ["t"], "session": "s1"}], "meta": {}});
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/memory\.(entries|semantic|procedural)/query$"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(candidate))
+            .mount(&server)
+            .await;
+        // Every answer fills the window: `limit` rows, whatever is asked.
+        struct Full;
+        impl wiremock::Respond for Full {
+            fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+                let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
+                let limit = body["limit"].as_u64().unwrap_or(1) as usize;
+                let rows: Vec<serde_json::Value> = (0..limit)
+                    .map(|i| serde_json::json!({"_id": format!("d{i}"), "source_id": "n1", "target_id": "c1", "edge_type": "same_session"}))
+                    .collect();
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "data": rows, "meta": {}}))
+            }
+        }
+        Mock::given(method("POST")).and(path("/memory.edges/query")).respond_with(Full).mount(&server).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let inserted = derive_edges(&db, "n1", "memory.semantic", "s1", &["t".to_string()], &now, &config()).await.unwrap();
+        assert_eq!(inserted, 0);
+        assert!(written(&server).await.is_empty(), "nothing was written");
+    }
 }
 
 #[cfg(test)]
-mod edge_exists_tests {
-    use super::edge_exists;
+mod existing_edges_tests {
+    use super::existing_edges;
     use crate::db::WardsonDbClient;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    async fn ask(answer: ResponseTemplate) -> anyhow::Result<bool> {
+    async fn ask(answer: ResponseTemplate) -> anyhow::Result<std::collections::HashSet<(String, String, String)>> {
         let server = MockServer::start().await;
         Mock::given(method("POST")).and(path("/memory.edges/query")).respond_with(answer).mount(&server).await;
-        edge_exists(&WardsonDbClient::from_url(&server.uri()), "a", "b", "same_session").await
+        existing_edges(&WardsonDbClient::from_url(&server.uri()), "a", &["b"], 4).await
     }
 
-    /// A failed existence check is an error, not "does not exist" (#57).
+    /// A failed existence read is an error, not "nothing stored" (#57).
     #[tokio::test]
     async fn an_unanswered_existence_check_is_an_error_not_an_absence() {
         assert!(ask(ResponseTemplate::new(500)).await.is_err());
         let none = ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "data": [], "meta": {}}));
-        assert!(!ask(none).await.unwrap());
-        let one = ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "data": [{"_id": "e1"}], "meta": {}}));
-        assert!(ask(one).await.unwrap());
+        assert!(ask(none).await.unwrap().is_empty());
+        let one = ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "data": [
+            {"_id": "e1", "source_id": "a", "target_id": "b", "edge_type": "same_session"}
+        ], "meta": {}}));
+        let stored = ask(one).await.unwrap();
+        assert!(stored.contains(&("a".to_string(), "b".to_string(), "same_session".to_string())));
+        // The window is the planned count plus one; an answer that fills it is no answer.
+        let full: Vec<serde_json::Value> = (0..5)
+            .map(|i| serde_json::json!({"_id": format!("e{i}"), "source_id": "a", "target_id": "b", "edge_type": "same_session"}))
+            .collect();
+        let filled = ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "data": full, "meta": {}}));
+        assert!(ask(filled).await.is_err());
     }
 }
