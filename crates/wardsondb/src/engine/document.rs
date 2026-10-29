@@ -19,6 +19,29 @@ const MAX_CUSTOM_ID_LENGTH: usize = 512;
 /// writer off for the length of one commit.
 const BULK_MUTATION_CHUNK: usize = 256;
 
+/// Why `value` cannot name a collection, a document or an index: empty,
+/// `.` or `..`, a path separator, or a control character. The index keys
+/// end in `0x00` + the document id and separate compound fields with
+/// `0x01` (`index::secondary`), so a control byte in an id would be read
+/// as a separator; a `/` or `\` reaches a route's path parameter only
+/// percent-encoded and names nothing a URL could address otherwise (#25).
+/// `None` when the value can.
+pub(crate) fn segment_fault(value: &str) -> Option<&'static str> {
+    if value.is_empty() {
+        return Some("cannot be empty");
+    }
+    if value == "." || value == ".." {
+        return Some("cannot be '.' or '..'");
+    }
+    if value.chars().any(|c| c == '/' || c == '\\') {
+        return Some("cannot contain a path separator");
+    }
+    if value.chars().any(char::is_control) {
+        return Some("cannot contain a control character");
+    }
+    None
+}
+
 /// Validate a custom _id value. Returns the validated string or an error.
 fn validate_custom_id(value: &Value) -> Result<String, AppError> {
     let s = match value {
@@ -43,6 +66,9 @@ fn validate_custom_id(value: &Value) -> Result<String, AppError> {
         return Err(AppError::InvalidDocument(
             "_id contains invalid characters".into(),
         ));
+    }
+    if let Some(why) = segment_fault(s) {
+        return Err(AppError::InvalidDocument(format!("_id {why}")));
     }
     Ok(s.clone())
 }

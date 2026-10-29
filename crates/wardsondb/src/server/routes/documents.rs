@@ -25,6 +25,7 @@ pub async fn create(
     Path(collection): Path<String>,
     JsonBody(body): JsonBody<Value>,
 ) -> Result<impl IntoResponse, AppError> {
+    super::valid_segment("collection name", &collection)?;
     let st = state.clone();
     let doc =
         super::query::with_query_timeout(0, move || st.storage.insert_document(&collection, body))
@@ -46,6 +47,7 @@ pub async fn bulk_create(
     Path(collection): Path<String>,
     JsonBody(body): JsonBody<BulkInsertRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    super::valid_segment("collection name", &collection)?;
     let st = state.clone();
     let (inserted, errors) = super::query::with_query_timeout(0, move || {
         st.storage
@@ -67,6 +69,8 @@ pub async fn get_by_id(
     State(state): State<Arc<AppState>>,
     Path((collection, id)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse>, AppError> {
+    super::valid_segment("collection name", &collection)?;
+    super::valid_segment("document id", &id)?;
     // Point reads are KV work that can stall behind compactions/scans —
     // keep them off the async workers like query/aggregate.
     let timeout_secs = state.config.query_timeout;
@@ -82,6 +86,8 @@ pub async fn replace(
     Path((collection, id)): Path<(String, String)>,
     JsonBody(body): JsonBody<Value>,
 ) -> Result<Json<ApiResponse>, AppError> {
+    super::valid_segment("collection name", &collection)?;
+    super::valid_segment("document id", &id)?;
     let doc = super::query::with_query_timeout(0, move || {
         state.storage.replace_document(&collection, &id, body)
     })
@@ -94,6 +100,8 @@ pub async fn partial_update(
     Path((collection, id)): Path<(String, String)>,
     JsonBody(body): JsonBody<Value>,
 ) -> Result<Json<ApiResponse>, AppError> {
+    super::valid_segment("collection name", &collection)?;
+    super::valid_segment("document id", &id)?;
     let doc = super::query::with_query_timeout(0, move || {
         state
             .storage
@@ -107,6 +115,8 @@ pub async fn delete(
     State(state): State<Arc<AppState>>,
     Path((collection, id)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse>, AppError> {
+    super::valid_segment("collection name", &collection)?;
+    super::valid_segment("document id", &id)?;
     let st = state.clone();
     super::query::with_query_timeout(0, move || st.storage.delete_document(&collection, &id))
         .await?;

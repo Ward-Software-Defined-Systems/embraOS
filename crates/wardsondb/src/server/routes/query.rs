@@ -44,6 +44,7 @@ pub async fn search(
     Path(collection): Path<String>,
     JsonBody(body): JsonBody<QueryRequest>,
 ) -> Result<Json<ApiResponse>, AppError> {
+    super::valid_segment("collection name", &collection)?;
     let start = Instant::now();
     let query = parse_query(body, state.config.max_query_limit, &collection)?;
     let count_only = query.count_only;
@@ -101,6 +102,7 @@ pub async fn aggregate(
     Path(collection): Path<String>,
     JsonBody(body): JsonBody<AggregateRequest>,
 ) -> Result<Json<ApiResponse>, AppError> {
+    super::valid_segment("collection name", &collection)?;
     let start = Instant::now();
     let timeout_secs = state.config.query_timeout;
 
@@ -138,6 +140,7 @@ pub async fn delete_by_query(
     Path(collection): Path<String>,
     JsonBody(body): JsonBody<DeleteByQueryRequest>,
 ) -> Result<Json<ApiResponse>, AppError> {
+    super::valid_segment("collection name", &collection)?;
     let start = Instant::now();
     let filter = parse_filter(&body.filter)?;
     let st = state.clone();
@@ -176,6 +179,7 @@ pub async fn distinct(
     Path(collection): Path<String>,
     JsonBody(body): JsonBody<DistinctRequest>,
 ) -> Result<Json<ApiResponse>, AppError> {
+    super::valid_segment("collection name", &collection)?;
     let start = Instant::now();
 
     let filter = match &body.filter {
@@ -227,6 +231,7 @@ pub async fn update_by_query(
     Path(collection): Path<String>,
     JsonBody(body): JsonBody<UpdateByQueryRequest>,
 ) -> Result<Json<ApiResponse>, AppError> {
+    super::valid_segment("collection name", &collection)?;
     let start = Instant::now();
     let filter = parse_filter(&body.filter)?;
     let st = state.clone();

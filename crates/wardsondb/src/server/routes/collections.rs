@@ -84,6 +84,7 @@ pub async fn get_info(
     State(state): State<Arc<AppState>>,
     Path(collection): Path<String>,
 ) -> Result<Json<ApiResponse>, AppError> {
+    super::valid_segment("collection name", &collection)?;
     let info = state.storage.get_collection_info(&collection)?;
     let data = serde_json::to_value(&info)?;
     Ok(Json(ApiResponse::success(data)))
@@ -93,6 +94,7 @@ pub async fn drop_collection(
     State(state): State<Arc<AppState>>,
     Path(collection): Path<String>,
 ) -> Result<Json<ApiResponse>, AppError> {
+    super::valid_segment("collection name", &collection)?;
     // Drop scans every doc and every index entry to delete them — one of
     // the two O(collection) admin ops (with index backfill). Offload.
     let coll = collection.clone();
@@ -105,6 +107,7 @@ pub async fn get_ttl(
     State(state): State<Arc<AppState>>,
     Path(collection): Path<String>,
 ) -> Result<Json<ApiResponse>, AppError> {
+    super::valid_segment("collection name", &collection)?;
     let ttl = state.storage.get_ttl(&collection)?;
     let data = match ttl {
         Some(config) => serde_json::to_value(&config)?,
@@ -118,6 +121,7 @@ pub async fn set_ttl(
     Path(collection): Path<String>,
     JsonBody(body): JsonBody<SetTtlRequest>,
 ) -> Result<Json<ApiResponse>, AppError> {
+    super::valid_segment("collection name", &collection)?;
     if body.retention_days == 0 {
         return Err(AppError::InvalidDocument(
             "retention_days must be greater than 0".into(),
@@ -137,6 +141,7 @@ pub async fn delete_ttl(
     State(state): State<Arc<AppState>>,
     Path(collection): Path<String>,
 ) -> Result<Json<ApiResponse>, AppError> {
+    super::valid_segment("collection name", &collection)?;
     super::query::with_query_timeout(0, move || state.storage.delete_ttl(&collection)).await?;
     let data = serde_json::json!({"deleted": true});
     Ok(Json(ApiResponse::success(data)))
@@ -146,6 +151,7 @@ pub async fn get_storage_info(
     State(state): State<Arc<AppState>>,
     Path(collection): Path<String>,
 ) -> Result<Json<ApiResponse>, AppError> {
+    super::valid_segment("collection name", &collection)?;
     // Meta gets + first/last-key probes are KV work — keep them off the async
     // workers under the read-path timeout, like the other KV read handlers.
     let timeout_secs = state.config.query_timeout;

@@ -25,6 +25,7 @@ pub async fn list(
     State(state): State<Arc<AppState>>,
     Path(collection): Path<String>,
 ) -> Result<Json<ApiResponse>, AppError> {
+    super::valid_segment("collection name", &collection)?;
     let indexes = state.storage.list_indexes(&collection)?;
     let data = serde_json::to_value(&indexes)?;
     Ok(Json(ApiResponse::success(data)))
@@ -36,6 +37,7 @@ pub async fn create(
     Path(collection): Path<String>,
     JsonBody(body): JsonBody<CreateIndexRequest>,
 ) -> Result<impl IntoResponse, AppError> {
+    super::valid_segment("collection name", &collection)?;
     // Validate index name
     if body.name.is_empty() {
         return Err(AppError::InvalidIndex("Index name cannot be empty".into()));
@@ -93,6 +95,8 @@ pub async fn drop_index(
     State(state): State<Arc<AppState>>,
     Path((collection, name)): Path<(String, String)>,
 ) -> Result<Json<ApiResponse>, AppError> {
+    super::valid_segment("collection name", &collection)?;
+    super::valid_segment("index name", &name)?;
     // Drops scan and delete the whole index partition — offload like create.
     let op_name = name.clone();
     super::query::with_query_timeout(0, move || state.storage.drop_index(&collection, &op_name))

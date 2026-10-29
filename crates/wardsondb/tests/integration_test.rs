@@ -10976,3 +10976,130 @@ async fn test_stats_and_metrics_fail_when_the_ttl_policies_cannot_be_read() {
         "{text}"
     );
 }
+
+/// #25: a path parameter or a custom `_id` that carries a path separator,
+/// a control character or `.`/`..` is refused with 400 before the engine
+/// sees it, and nothing is written. The index keys separate their fields
+/// with 0x01 and end in 0x00 + the id, so the control bytes matter most.
+#[tokio::test]
+async fn test_separators_and_control_characters_are_refused_in_ids_and_names() {
+    let (base_url, _tmp) = start_test_server().await;
+    let client = Client::new();
+
+    client
+        .post(format!("{base_url}/_collections"))
+        .json(&json!({"name": "events"}))
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .post(format!("{base_url}/events/docs"))
+        .json(&json!({"_id": "plain-1", "val": 1}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201, "a plain id still round-trips");
+
+    // Body-supplied ids.
+    for bad in ["a/b", "a\\b", "..", ".", "a\u{01}b", "tab\there"] {
+        let resp = client
+            .post(format!("{base_url}/events/docs"))
+            .json(&json!({"_id": bad, "val": 2}))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 400, "custom _id {bad:?}");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"]["code"], "INVALID_DOCUMENT", "{bad:?}");
+    }
+    let resp = client
+        .post(format!("{base_url}/events/docs/_bulk"))
+        .json(&json!({"documents": [{"_id": "x/y"}, {"_id": "ok-2"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 201);
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["data"]["inserted"], 1);
+    assert!(
+        body["data"]["errors"][0]
+            .as_str()
+            .unwrap()
+            .contains("path separator"),
+        "{body}"
+    );
+
+    // Path parameters, percent-encoded so the client sends them as given
+    // and axum decodes them into the handler's strings.
+    let refused = [
+        ("GET", format!("{base_url}/events/docs/a%2Fb")),
+        ("PUT", format!("{base_url}/events/docs/a%5Cb")),
+        ("DELETE", format!("{base_url}/events/docs/a%01b")),
+        ("GET", format!("{base_url}/a%2Fb")),
+        ("GET", format!("{base_url}/a%2Fb/storage")),
+        ("GET", format!("{base_url}/a%2Fb/ttl")),
+        ("DELETE", format!("{base_url}/events/indexes/x%2Fy")),
+        ("POST", format!("{base_url}/a%2Fb/query")),
+    ];
+    for (method, url) in &refused {
+        let req = match *method {
+            "GET" => client.get(url),
+            "PUT" => client.put(url).json(&json!({"val": 3})),
+            "PATCH" => client.patch(url).json(&json!({"val": 3})),
+            "DELETE" => client.delete(url),
+            _ => client.post(url).json(&json!({"filter": {}})),
+        };
+        let resp = req.send().await.unwrap();
+        assert_eq!(resp.status(), 400, "{method} {url}");
+        let body: Value = resp.json().await.unwrap();
+        assert_eq!(body["error"]["code"], "INVALID_DOCUMENT", "{method} {url}");
+    }
+
+    // A dot segment never leaves a URL-parsing client (reqwest folds
+    // `%2E%2E` into the path), so the server's refusal of one is checked
+    // with the request line written by hand.
+    let addr = base_url.trim_start_matches("http://").to_string();
+    for (line, body) in [
+        ("PATCH /events/docs/.. HTTP/1.1", "{\"val\":3}"),
+        ("GET /events/docs/. HTTP/1.1", ""),
+        ("POST /../docs HTTP/1.1", "{\"val\":3}"),
+    ] {
+        let status = raw_status(&addr, line, body).await;
+        assert_eq!(status, 400, "{line}");
+    }
+
+    // Nothing of the refused ids was written; the plain ones were.
+    let resp = client
+        .get(format!("{base_url}/events"))
+        .send()
+        .await
+        .unwrap();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(body["data"]["doc_count"], 2);
+    let resp = client
+        .get(format!("{base_url}/events/docs/plain-1"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+}
+
+
+/// The status code a request line written by hand gets back.
+async fn raw_status(addr: &str, request_line: &str, body: &str) -> u16 {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let request = format!(
+        "{request_line}\r\nHost: {addr}\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.unwrap();
+    let head = String::from_utf8_lossy(&response);
+    head.split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("no status line in {head:?}"))
+}
