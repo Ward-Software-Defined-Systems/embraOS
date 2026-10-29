@@ -48,17 +48,13 @@ fn labels_and_assignees(item: &serde_json::Value) -> (Vec<&str>, Vec<&str>) {
 }
 
 /// Fetch GitHub issues via API.
-pub async fn gh_issues(db: &WardsonDbClient, param: &str) -> String {
+pub async fn gh_issues(db: &WardsonDbClient, repo: &str) -> String {
     let token = match resolve_github_token(db).await {
         Some(t) => t,
         None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
     };
 
-    if param.is_empty() {
-        return "Usage: gh_issues <owner/repo>\nExample: gh_issues ward-software-defined-systems/wardsondb".into();
-    }
-
-    let url = format!("https://api.github.com/repos/{}/issues?state=open&per_page=10", param);
+    let url = format!("https://api.github.com/repos/{}/issues?state=open&per_page=10", repo);
 
     let issues = match github_get(&token, &url, "issues").await {
         Ok(v) => v,
@@ -69,9 +65,9 @@ pub async fn gh_issues(db: &WardsonDbClient, param: &str) -> String {
         Err(e) => return format!("Failed to parse GitHub response: {}", e),
     };
     if issues.is_empty() {
-        return format!("No open issues for {}.", param);
+        return format!("No open issues for {}.", repo);
     }
-    let mut output = format!("=== Open Issues: {} ({}) ===\n", param, issues.len());
+    let mut output = format!("=== Open Issues: {} ({}) ===\n", repo, issues.len());
     for issue in &issues {
         let number = issue.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
         let title = issue.get("title").and_then(|v| v.as_str()).unwrap_or("?");
@@ -94,7 +90,7 @@ pub async fn gh_issues(db: &WardsonDbClient, param: &str) -> String {
 /// returns an empty Vec on HTTP error so a missing/gated comment thread does
 /// not fail the parent view call — the absence is obvious in the rendered
 /// response.
-async fn fetch_issue_thread_comments(token: &str, repo: &str, number: &str) -> Vec<serde_json::Value> {
+async fn fetch_issue_thread_comments(token: &str, repo: &str, number: u32) -> Vec<serde_json::Value> {
     let url = format!(
         "https://api.github.com/repos/{}/issues/{}/comments?per_page=100",
         repo, number
@@ -119,19 +115,13 @@ async fn fetch_issue_thread_comments(token: &str, repo: &str, number: &str) -> V
 }
 
 /// View a single GitHub issue with its comment thread.
-/// Param format: `<owner/repo> <number>`
-pub async fn gh_issue_view(db: &WardsonDbClient, param: &str) -> String {
+pub async fn gh_issue_view(db: &WardsonDbClient, repo: &str, number: u32) -> String {
     let token = match resolve_github_token(db).await {
         Some(t) => t,
         None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
     };
 
-    let parts: Vec<&str> = param.split_whitespace().collect();
-    if parts.len() < 2 {
-        return "Usage: gh_issue_view <owner/repo> <number>".into();
-    }
-    let repo = parts[0];
-    let number = parts[1];
+    let repo = repo.trim();
 
     let issue_url = format!("https://api.github.com/repos/{}/issues/{}", repo, number);
     let issue = match github_get(&token, &issue_url, "issue").await {
@@ -169,17 +159,13 @@ pub async fn gh_issue_view(db: &WardsonDbClient, param: &str) -> String {
 }
 
 /// Fetch GitHub PRs via API.
-pub async fn gh_prs(db: &WardsonDbClient, param: &str) -> String {
+pub async fn gh_prs(db: &WardsonDbClient, repo: &str) -> String {
     let token = match resolve_github_token(db).await {
         Some(t) => t,
         None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
     };
 
-    if param.is_empty() {
-        return "Usage: gh_prs <owner/repo>\nExample: gh_prs ward-software-defined-systems/wardsondb".into();
-    }
-
-    let url = format!("https://api.github.com/repos/{}/pulls?state=open&per_page=10", param);
+    let url = format!("https://api.github.com/repos/{}/pulls?state=open&per_page=10", repo);
 
     let prs = match github_get(&token, &url, "PRs").await {
         Ok(v) => v,
@@ -190,9 +176,9 @@ pub async fn gh_prs(db: &WardsonDbClient, param: &str) -> String {
         Err(e) => return format!("Failed to parse GitHub response: {}", e),
     };
     if prs.is_empty() {
-        return format!("No open PRs for {}.", param);
+        return format!("No open PRs for {}.", repo);
     }
-    let mut output = format!("=== Open PRs: {} ({}) ===\n", param, prs.len());
+    let mut output = format!("=== Open PRs: {} ({}) ===\n", repo, prs.len());
     for pr in &prs {
         let number = pr.get("number").and_then(|v| v.as_u64()).unwrap_or(0);
         let title = pr.get("title").and_then(|v| v.as_str()).unwrap_or("?");
@@ -207,19 +193,13 @@ pub async fn gh_prs(db: &WardsonDbClient, param: &str) -> String {
 }
 
 /// View a single GitHub pull request with its conversation-thread comments.
-/// Param format: `<owner/repo> <number>`
-pub async fn gh_pr_view(db: &WardsonDbClient, param: &str) -> String {
+pub async fn gh_pr_view(db: &WardsonDbClient, repo: &str, number: u32) -> String {
     let token = match resolve_github_token(db).await {
         Some(t) => t,
         None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
     };
 
-    let parts: Vec<&str> = param.split_whitespace().collect();
-    if parts.len() < 2 {
-        return "Usage: gh_pr_view <owner/repo> <number>".into();
-    }
-    let repo = parts[0];
-    let number = parts[1];
+    let repo = repo.trim();
 
     let pr_url = format!("https://api.github.com/repos/{}/pulls/{}", repo, number);
     let pr = match github_get(&token, &pr_url, "PR").await {
@@ -252,22 +232,16 @@ pub async fn gh_pr_view(db: &WardsonDbClient, param: &str) -> String {
     serde_json::to_string_pretty(&result).unwrap_or_else(|_| "Failed to format PR".into())
 }
 
-/// Create a GitHub issue.
-/// Param format: `<owner/repo> | <title> | <body>`
-pub async fn gh_issue_create(db: &WardsonDbClient, param: &str) -> String {
+/// Create a GitHub issue. A body not given is sent empty, as before.
+pub async fn gh_issue_create(db: &WardsonDbClient, repo: &str, title: &str, body: Option<&str>) -> String {
     let token = match resolve_github_token(db).await {
         Some(t) => t,
         None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
     };
 
-    let parts: Vec<&str> = param.splitn(3, " | ").collect();
-    if parts.len() < 2 {
-        return "Usage: gh_issue_create <owner/repo> | <title> | <body>".into();
-    }
-
-    let repo = parts[0].trim();
-    let title = parts[1].trim();
-    let body = if parts.len() > 2 { parts[2].trim() } else { "" };
+    let repo = repo.trim();
+    let title = title.trim();
+    let body = body.map(str::trim).unwrap_or("");
 
     let url = format!("https://api.github.com/repos/{}/issues", repo);
     let payload = serde_json::json!({
@@ -304,7 +278,7 @@ pub async fn gh_issue_create(db: &WardsonDbClient, param: &str) -> String {
 async fn post_github_comment(
     token: &str,
     repo: &str,
-    number: &str,
+    number: u32,
     body: &str,
 ) -> Result<(u64, String), String> {
     let url = format!(
@@ -340,34 +314,13 @@ async fn post_github_comment(
     }
 }
 
-/// Parse `<owner/repo> <number> | <body>` for comment tools.
-fn parse_comment_param(param: &str) -> Result<(&str, &str, &str), String> {
-    let Some((head, body)) = param.split_once(" | ") else {
-        return Err("missing `|` separator before body".into());
-    };
-    let head = head.trim();
-    let body = body.trim();
-    if body.is_empty() {
-        return Err("body is empty".into());
-    }
-    let head_parts: Vec<&str> = head.split_whitespace().collect();
-    if head_parts.len() < 2 {
-        return Err("need `<owner/repo> <number>` before the `|`".into());
-    }
-    Ok((head_parts[0], head_parts[1], body))
-}
-
 /// Post a comment on a GitHub issue.
-/// Param format: `<owner/repo> <number> | <body>`
-pub async fn gh_issue_comment(db: &WardsonDbClient, param: &str) -> String {
+pub async fn gh_issue_comment(db: &WardsonDbClient, repo: &str, number: u32, body: &str) -> String {
     let token = match resolve_github_token(db).await {
         Some(t) => t,
         None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
     };
-    let (repo, number, body) = match parse_comment_param(param) {
-        Ok(v) => v,
-        Err(e) => return format!("gh_issue_comment rejected ({}). Usage: gh_issue_comment <owner/repo> <number> | <body>", e),
-    };
+    let (repo, body) = (repo.trim(), body.trim());
     match post_github_comment(&token, repo, number, body).await {
         Ok((_id, html_url)) => format!("Comment posted on issue #{} in {}: {}", number, repo, html_url),
         Err(e) => format!("gh_issue_comment failed: {}", e),
@@ -377,16 +330,12 @@ pub async fn gh_issue_comment(db: &WardsonDbClient, param: &str) -> String {
 /// Post a comment on a GitHub pull request. Hits the same underlying endpoint
 /// as `gh_issue_comment` — GitHub treats PR comments (the conversation tab) as
 /// issue comments. Separate tool for semantic clarity in the catalog.
-/// Param format: `<owner/repo> <number> | <body>`
-pub async fn gh_pr_comment(db: &WardsonDbClient, param: &str) -> String {
+pub async fn gh_pr_comment(db: &WardsonDbClient, repo: &str, number: u32, body: &str) -> String {
     let token = match resolve_github_token(db).await {
         Some(t) => t,
         None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
     };
-    let (repo, number, body) = match parse_comment_param(param) {
-        Ok(v) => v,
-        Err(e) => return format!("gh_pr_comment rejected ({}). Usage: gh_pr_comment <owner/repo> <number> | <body>", e),
-    };
+    let (repo, body) = (repo.trim(), body.trim());
     match post_github_comment(&token, repo, number, body).await {
         Ok((_id, html_url)) => format!("Comment posted on PR #{} in {}: {}", number, repo, html_url),
         Err(e) => format!("gh_pr_comment failed: {}", e),
@@ -394,47 +343,43 @@ pub async fn gh_pr_comment(db: &WardsonDbClient, param: &str) -> String {
 }
 
 /// Close a GitHub issue.
-/// Param format: `<owner/repo> <number>`
-pub async fn gh_issue_close(db: &WardsonDbClient, param: &str) -> String {
-    patch_issue_or_pr_state(db, "issues", param, "closed", "gh_issue_close", "Issue", "closed").await
+pub async fn gh_issue_close(db: &WardsonDbClient, repo: &str, number: u32) -> String {
+    let change = StateChange { kind: "issues", new_state: "closed", tool_name: "gh_issue_close", artifact_label: "Issue", verb: "closed" };
+    patch_issue_or_pr_state(db, repo, number, change).await
 }
 
 /// Reopen a previously-closed GitHub issue.
-/// Param format: `<owner/repo> <number>`
-pub async fn gh_issue_reopen(db: &WardsonDbClient, param: &str) -> String {
-    patch_issue_or_pr_state(db, "issues", param, "open", "gh_issue_reopen", "Issue", "reopened").await
+pub async fn gh_issue_reopen(db: &WardsonDbClient, repo: &str, number: u32) -> String {
+    let change = StateChange { kind: "issues", new_state: "open", tool_name: "gh_issue_reopen", artifact_label: "Issue", verb: "reopened" };
+    patch_issue_or_pr_state(db, repo, number, change).await
 }
 
 /// Close a GitHub pull request without merging.
-/// Param format: `<owner/repo> <number>`
-pub async fn gh_pr_close(db: &WardsonDbClient, param: &str) -> String {
-    patch_issue_or_pr_state(db, "pulls", param, "closed", "gh_pr_close", "PR", "closed").await
+pub async fn gh_pr_close(db: &WardsonDbClient, repo: &str, number: u32) -> String {
+    let change = StateChange { kind: "pulls", new_state: "closed", tool_name: "gh_pr_close", artifact_label: "PR", verb: "closed" };
+    patch_issue_or_pr_state(db, repo, number, change).await
+}
+
+/// One issue/PR state PATCH: `kind` is "issues" or "pulls" (URL path
+/// segment), `new_state` is "open" or "closed", and the tool name, the
+/// artifact label and the verb drive the error/success strings.
+struct StateChange {
+    kind: &'static str,
+    new_state: &'static str,
+    tool_name: &'static str,
+    artifact_label: &'static str,
+    verb: &'static str,
 }
 
 /// Shared implementation for issue/PR state PATCH operations.
-/// `kind` is "issues" or "pulls" (URL path segment). `new_state` is "open" or
-/// "closed". Tool name + artifact label + verb drive the error/success strings.
-async fn patch_issue_or_pr_state(
-    db: &WardsonDbClient,
-    kind: &str,
-    param: &str,
-    new_state: &str,
-    tool_name: &str,
-    artifact_label: &str,
-    verb: &str,
-) -> String {
+async fn patch_issue_or_pr_state(db: &WardsonDbClient, repo: &str, number: u32, change: StateChange) -> String {
+    let StateChange { kind, new_state, tool_name, artifact_label, verb } = change;
     let token = match resolve_github_token(db).await {
         Some(t) => t,
         None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
     };
 
-    let parts: Vec<&str> = param.split_whitespace().collect();
-    if parts.len() < 2 {
-        return format!("{} rejected (missing args). Usage: {} <owner/repo> <number>", tool_name, tool_name);
-    }
-
-    let repo = parts[0];
-    let number = parts[1];
+    let repo = repo.trim();
 
     let url = format!("https://api.github.com/repos/{}/{}/{}", repo, kind, number);
     let payload = serde_json::json!({ "state": new_state });
@@ -466,22 +411,16 @@ async fn patch_issue_or_pr_state(
 }
 
 /// Create a GitHub pull request.
-/// Param format: `<owner/repo> | <title> | <head> | <base>`
-pub async fn gh_pr_create(db: &WardsonDbClient, param: &str) -> String {
+pub async fn gh_pr_create(db: &WardsonDbClient, repo: &str, title: &str, head: &str, base: &str) -> String {
     let token = match resolve_github_token(db).await {
         Some(t) => t,
         None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
     };
 
-    let parts: Vec<&str> = param.splitn(4, " | ").collect();
-    if parts.len() < 4 {
-        return "Usage: gh_pr_create <owner/repo> | <title> | <head> | <base>".into();
-    }
-
-    let repo = parts[0].trim();
-    let title = parts[1].trim();
-    let head = parts[2].trim();
-    let base = parts[3].trim();
+    let repo = repo.trim();
+    let title = title.trim();
+    let head = head.trim();
+    let base = base.trim();
 
     let url = format!("https://api.github.com/repos/{}/pulls", repo);
     let payload = serde_json::json!({
@@ -516,25 +455,15 @@ pub async fn gh_pr_create(db: &WardsonDbClient, param: &str) -> String {
 /// Merge a GitHub pull request. Destructive-to-upstream: writes to shared
 /// GitHub state under the operator's token scope — authorization is inherited,
 /// not re-confirmed at call time (same model as gh_pr_create / gh_issue_close).
-/// Param format: `<owner/repo> <number>` (defaults merge_method = "merge") or
-/// `<owner/repo> <number> | <method>` where method is merge / squash / rebase.
-pub async fn gh_pr_merge(db: &WardsonDbClient, param: &str) -> String {
+/// `method` is merge / squash / rebase, checked here as it always was.
+pub async fn gh_pr_merge(db: &WardsonDbClient, repo: &str, number: u32, method: &str) -> String {
     let token = match resolve_github_token(db).await {
         Some(t) => t,
         None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
     };
 
-    // Parse: split on " | " first to separate optional method.
-    let (head, method) = match param.split_once(" | ") {
-        Some((h, m)) => (h.trim(), m.trim()),
-        None => (param.trim(), "merge"),
-    };
-    let parts: Vec<&str> = head.split_whitespace().collect();
-    if parts.len() < 2 {
-        return "gh_pr_merge rejected (missing args). Usage: gh_pr_merge <owner/repo> <number> or gh_pr_merge <owner/repo> <number> | <method> where method is merge|squash|rebase".into();
-    }
-    let repo = parts[0];
-    let number = parts[1];
+    let repo = repo.trim();
+    let method = method.trim();
     if !matches!(method, "merge" | "squash" | "rebase") {
         return format!("gh_pr_merge rejected (invalid method '{}'; use merge, squash, or rebase)", method);
     }
@@ -654,18 +583,13 @@ fn classic_projects_gone_msg(owner: &str) -> String {
 }
 
 /// List GitHub projects for a user or org (classic REST API).
-/// Param format: `<owner>`
-pub async fn gh_project_list(db: &WardsonDbClient, param: &str) -> String {
+pub async fn gh_project_list(db: &WardsonDbClient, owner: &str) -> String {
     let token = match resolve_github_token(db).await {
         Some(t) => t,
         None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
     };
 
-    if param.is_empty() {
-        return "Usage: gh_project_list <owner>".into();
-    }
-
-    let owner = param.trim();
+    let owner = owner.trim();
     match fetch_classic_projects(&token, owner).await {
         ProjectsFetch::Ok(projects) => {
             if projects.is_empty() {
@@ -687,21 +611,14 @@ pub async fn gh_project_list(db: &WardsonDbClient, param: &str) -> String {
 }
 
 /// View a specific GitHub classic project.
-/// Param format: `<owner> <number>`
-pub async fn gh_project_view(db: &WardsonDbClient, param: &str) -> String {
+pub async fn gh_project_view(db: &WardsonDbClient, owner: &str, number: u32) -> String {
     let token = match resolve_github_token(db).await {
         Some(t) => t,
         None => return "GITHUB_TOKEN not set. Use /github-token <token> or set GITHUB_TOKEN env var.".into(),
     };
 
-    let parts: Vec<&str> = param.split_whitespace().collect();
-    if parts.len() < 2 {
-        return "Usage: gh_project_view <owner> <number>".into();
-    }
-
-    let owner = parts[0];
-    let number = parts[1];
-    let target_num: u64 = number.parse().unwrap_or(0);
+    let owner = owner.trim();
+    let target_num = u64::from(number);
 
     match fetch_classic_projects(&token, owner).await {
         ProjectsFetch::Ok(projects) => {
@@ -750,8 +667,7 @@ pub struct GhIssueViewArgs {
 
 impl GhIssueViewArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = format!("{} {}", self.repo, self.number);
-        Ok(gh_issue_view(ctx.db, &param).await)
+        Ok(gh_issue_view(ctx.db, &self.repo, self.number).await)
     }
 }
 
@@ -783,8 +699,7 @@ pub struct GhPrViewArgs {
 
 impl GhPrViewArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = format!("{} {}", self.repo, self.number);
-        Ok(gh_pr_view(ctx.db, &param).await)
+        Ok(gh_pr_view(ctx.db, &self.repo, self.number).await)
     }
 }
 
@@ -803,11 +718,7 @@ pub struct GhIssueCreateArgs {
 
 impl GhIssueCreateArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = match self.body {
-            Some(b) => format!("{} | {} | {}", self.repo, self.title, b),
-            None => format!("{} | {}", self.repo, self.title),
-        };
-        Ok(gh_issue_create(ctx.db, &param).await)
+        Ok(gh_issue_create(ctx.db, &self.repo, &self.title, self.body.as_deref()).await)
     }
 }
 
@@ -824,8 +735,7 @@ pub struct GhIssueCloseArgs {
 
 impl GhIssueCloseArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = format!("{} {}", self.repo, self.number);
-        Ok(gh_issue_close(ctx.db, &param).await)
+        Ok(gh_issue_close(ctx.db, &self.repo, self.number).await)
     }
 }
 
@@ -842,8 +752,7 @@ pub struct GhIssueReopenArgs {
 
 impl GhIssueReopenArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = format!("{} {}", self.repo, self.number);
-        Ok(gh_issue_reopen(ctx.db, &param).await)
+        Ok(gh_issue_reopen(ctx.db, &self.repo, self.number).await)
     }
 }
 
@@ -861,8 +770,7 @@ pub struct GhIssueCommentArgs {
 
 impl GhIssueCommentArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = format!("{} {} | {}", self.repo, self.number, self.body);
-        Ok(gh_issue_comment(ctx.db, &param).await)
+        Ok(gh_issue_comment(ctx.db, &self.repo, self.number, &self.body).await)
     }
 }
 
@@ -881,11 +789,7 @@ pub struct GhPrCreateArgs {
 
 impl GhPrCreateArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = format!(
-            "{} | {} | {} | {}",
-            self.repo, self.title, self.head, self.base
-        );
-        Ok(gh_pr_create(ctx.db, &param).await)
+        Ok(gh_pr_create(ctx.db, &self.repo, &self.title, &self.head, &self.base).await)
     }
 }
 
@@ -902,8 +806,7 @@ pub struct GhPrCloseArgs {
 
 impl GhPrCloseArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = format!("{} {}", self.repo, self.number);
-        Ok(gh_pr_close(ctx.db, &param).await)
+        Ok(gh_pr_close(ctx.db, &self.repo, self.number).await)
     }
 }
 
@@ -921,8 +824,7 @@ pub struct GhPrCommentArgs {
 
 impl GhPrCommentArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = format!("{} {} | {}", self.repo, self.number, self.body);
-        Ok(gh_pr_comment(ctx.db, &param).await)
+        Ok(gh_pr_comment(ctx.db, &self.repo, self.number, &self.body).await)
     }
 }
 
@@ -951,15 +853,20 @@ fn default_pr_merge_method() -> PrMergeMethod {
     PrMergeMethod::Merge
 }
 
-impl GhPrMergeArgs {
-    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let method_str = match self.method {
+impl PrMergeMethod {
+    /// The `merge_method` GitHub takes.
+    fn as_str(&self) -> &'static str {
+        match self {
             PrMergeMethod::Merge => "merge",
             PrMergeMethod::Squash => "squash",
             PrMergeMethod::Rebase => "rebase",
-        };
-        let param = format!("{} {} | {}", self.repo, self.number, method_str);
-        Ok(gh_pr_merge(ctx.db, &param).await)
+        }
+    }
+}
+
+impl GhPrMergeArgs {
+    pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
+        Ok(gh_pr_merge(ctx.db, &self.repo, self.number, self.method.as_str()).await)
     }
 }
 
@@ -990,8 +897,7 @@ pub struct GhProjectViewArgs {
 
 impl GhProjectViewArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = format!("{} {}", self.owner, self.number);
-        Ok(gh_project_view(ctx.db, &param).await)
+        Ok(gh_project_view(ctx.db, &self.owner, self.number).await)
     }
 }
 
