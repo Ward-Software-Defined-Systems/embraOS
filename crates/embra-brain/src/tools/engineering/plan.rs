@@ -7,14 +7,12 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::db::WardsonDbClient;
-use crate::tools::ensure_collection;
 use crate::tools::registry::DispatchContext;
 
 /// Create or update a plan in WardSONDB.
 pub async fn plan(db: &WardsonDbClient, param: &str) -> String {
     if param.is_empty() {
         // List plans
-        ensure_collection(db, "plans").await;
         let plans = match db.fetch_collection("plans").await {
             Ok(p) => p,
             Err(e) => return format!("Failed to load plans from the database: {}", e),
@@ -34,7 +32,6 @@ pub async fn plan(db: &WardsonDbClient, param: &str) -> String {
         return output;
     }
 
-    ensure_collection(db, "plans").await;
 
     // Create/update: "title | description"
     let (title, description) = if let Some(pos) = param.find(" | ") {
@@ -58,7 +55,6 @@ pub async fn plan(db: &WardsonDbClient, param: &str) -> String {
 
 /// List or manage tasks.
 pub async fn tasks(db: &WardsonDbClient, param: &str) -> String {
-    ensure_collection(db, "tasks").await;
 
     if param.is_empty() {
         let all_tasks = match db.fetch_collection("tasks").await {
@@ -117,7 +113,6 @@ pub async fn task_add(db: &WardsonDbClient, param: &str) -> String {
         return "Usage: task_add <title> or task_add <title> | <plan_id>".into();
     }
 
-    ensure_collection(db, "tasks").await;
 
     let (title, plan_id) = if let Some(pos) = param.find(" | ") {
         (&param[..pos], Some(&param[pos + 3..]))

@@ -157,6 +157,10 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
     // (unversioned on purpose — see ensure_hot_path_indexes).
     ensure_hot_path_indexes(db).await;
 
+    // The plan and task collections — every boot (see
+    // ensure_tool_collections); the tools probe for them no more.
+    ensure_tool_collections(db).await;
+
     // Retention policies — every boot as well (see ensure_ttl_policies).
     ensure_ttl_policies(db).await;
 
@@ -435,6 +439,22 @@ fn hot_path_index_specs() -> Vec<(&'static str, serde_json::Value)> {
 /// Re-asserting per boot self-heals across server upgrades; on pre-F2
 /// builds the missing index is harmless (that planner still serves the
 /// lookup from a `source_id`-leading compound).
+/// The collections the plan and task tools write: `plans` and `tasks`.
+pub(crate) const TOOL_COLLECTIONS: [&str; 2] = ["plans", "tasks"];
+
+/// Create the plan and task collections when they are missing, on every
+/// boot and unversioned like the index assertions: the v1 baseline created
+/// them once per instance, and every `plan`, `tasks` and `task_add` call
+/// probed for them again (#37). A collection that cannot be ensured is
+/// logged; the tool's own write then says what is wrong.
+async fn ensure_tool_collections(db: &WardsonDbClient) {
+    for name in TOOL_COLLECTIONS {
+        if let Err(e) = ensure_collection(db, name).await {
+            warn!("collection {name} not ensured at boot: {e}");
+        }
+    }
+}
+
 async fn ensure_hot_path_indexes(db: &WardsonDbClient) {
     for (collection, body) in hot_path_index_specs() {
         let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("?");
@@ -809,6 +829,41 @@ mod reaped_sweep_tests {
             .strip_prefix("sessions.")
             .and_then(|r| r.strip_suffix(".meta"));
         assert_eq!(name, Some("foo.bar"));
+    }
+}
+
+#[cfg(test)]
+mod tool_collection_tests {
+    use super::{ensure_tool_collections, TOOL_COLLECTIONS};
+    use crate::db::WardsonDbClient;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// #37: `plans` and `tasks` exist after every boot, so the tools need
+    /// no probe of their own; one that exists is left alone.
+    #[tokio::test]
+    async fn plans_and_tasks_are_ensured_every_boot() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/plans")).respond_with(ResponseTemplate::new(404)).mount(&server).await;
+        Mock::given(method("GET")).and(path("/tasks")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+        Mock::given(method("POST"))
+            .and(path("/_collections"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"ok": true, "data": {}, "meta": {}})))
+            .mount(&server)
+            .await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        ensure_tool_collections(&db).await;
+        let created: Vec<String> = server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "POST")
+            .filter_map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).ok())
+            .filter_map(|body| body["name"].as_str().map(str::to_string))
+            .collect();
+        assert_eq!(created, ["plans"], "the missing one is created, the present one left alone");
+        assert_eq!(TOOL_COLLECTIONS, ["plans", "tasks"]);
     }
 }
 
