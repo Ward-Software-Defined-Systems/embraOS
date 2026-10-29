@@ -112,7 +112,7 @@ impl OpenAICompatProvider {
             preset,
             base_url,
             bearer_token: bearer,
-            http: crate::net::client(),
+            http: crate::net::shared(),
             model_id: model,
             display_name,
             reasoning_effort_override: None,

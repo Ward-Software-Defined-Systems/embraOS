@@ -103,7 +103,7 @@ impl GeminiCacheManager {
         base_url: String,
     ) -> Self {
         Self {
-            http: crate::net::client(),
+            http: crate::net::shared(),
             api_key,
             db,
             model_id,

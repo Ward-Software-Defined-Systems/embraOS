@@ -150,7 +150,7 @@ impl GeminiProvider {
         let display_name = display_name_for(&model_id);
         Self {
             api_key,
-            http: crate::net::client(),
+            http: crate::net::shared(),
             model_id,
             display_name,
             base_url: DIRECT_BASE.to_string(),

@@ -160,13 +160,37 @@ pub(crate) fn bounded() -> reqwest::ClientBuilder {
 }
 
 /// A client with the redirect policy, the roots and the two bounds (#26).
-/// The Gemini and OpenAI-compat chat clients and the GitHub and GitLab
-/// clients are this.
+/// The GitLab client is this, built per call so a seeded operator CA takes
+/// effect without a restart; the chat and GitHub clients take `shared`.
 pub(crate) fn client() -> reqwest::Client {
     bounded()
         .build()
         .expect("a reqwest client with a redirect policy and the two bounds builds")
 }
+
+/// The brain's long-lived `client()`, built on first use (#36). `reqwest`'s
+/// connection pool lives inside the client: a client built per turn threw
+/// every warm connection away, and the first call of the next turn paid a
+/// new TCP and TLS handshake. The key is a per-request header on every
+/// provider and the bounds are fixed, so one client serves Gemini and its
+/// cache manager, the OpenAI-compatible presets and the GitHub tools. The
+/// Anthropic client keeps its own pair of bounds and its own instance
+/// (`provider::anthropic::shared_client`). The roots are read once per
+/// process either way.
+pub(crate) fn shared() -> reqwest::Client {
+    static SHARED: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    SHARED
+        .get_or_init(|| {
+            #[cfg(test)]
+            SHARED_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            client()
+        })
+        .clone()
+}
+
+/// How many times `shared` built its client: at most once per process.
+#[cfg(test)]
+pub(crate) static SHARED_BUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// What a request error says, its causes joined. reqwest's own line names
 /// the kind and the URL and keeps the cause behind `source()` ("client
@@ -195,6 +219,16 @@ pub(crate) fn error_chain(e: &reqwest::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #36: the shared client is one per process, however many turns and
+    /// tools ask for it.
+    #[test]
+    fn a_shared_client_is_built_once() {
+        for _ in 0..3 {
+            let _ = shared();
+        }
+        assert!(SHARED_BUILDS.load(std::sync::atomic::Ordering::SeqCst) <= 1);
+    }
     use std::sync::Arc;
 
     use rcgen::{
