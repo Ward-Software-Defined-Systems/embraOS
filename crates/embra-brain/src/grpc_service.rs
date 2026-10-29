@@ -448,6 +448,15 @@ impl BrainService for BrainGrpcService {
         tokio::spawn(async move {
             let mut config_tz = config_tz;
             let mut api_key = api_key;
+            let ctx = ServiceCtx {
+                db: db.clone(),
+                session_mgr: session_mgr.clone(),
+                in_turn: in_turn.clone(),
+                pending_provider: pending_provider.clone(),
+                pending_key_setup: pending_key_setup.clone(),
+                pending_openai_compat_setup: pending_openai_compat_setup.clone(),
+                pending_session_delete: pending_session_delete.clone(),
+            };
 
             // Check for first-run: no config in WardSONDB
             let is_first_run = config::load_config(&db).await.is_err();
@@ -573,7 +582,7 @@ impl BrainService for BrainGrpcService {
                         match msg {
                             Some(Ok(req)) => {
                                 if let Err(e) = handle_request(
-                                    req, &tx, &db, &session_mgr, &config_tz, &api_key, &in_turn, &pending_provider, &pending_key_setup, &pending_openai_compat_setup, &pending_session_delete, &stop_rx
+                                    req, &tx, &ctx, &config_tz, &api_key, &stop_rx
                                 ).await {
                                     error!("Error handling request: {}", e);
                                     let _ = tx.send(Ok(ConversationResponse {
@@ -658,7 +667,7 @@ impl BrainService for BrainGrpcService {
                                             )),
                                         };
                                         if let Err(e) = handle_request(
-                                            synthetic, &tx, &db, &session_mgr, &config_tz, &api_key, &in_turn, &pending_provider, &pending_key_setup, &pending_openai_compat_setup, &pending_session_delete, &stop_rx
+                                            synthetic, &tx, &ctx, &config_tz, &api_key, &stop_rx
                                         ).await {
                                             error!("Error handling trigger turn: {}", e);
                                             let _ = tx.send(Ok(ConversationResponse {
@@ -1125,31 +1134,43 @@ impl BrainService for BrainGrpcService {
     }
 }
 
+/// The long-lived handles of one Converse stream, taken from the service
+/// once and passed by reference (#38): the handlers took them one by one,
+/// twelve arguments each, re-listed at every dispatch. The timezone and
+/// the key stay arguments: the stream changes them after the wizard.
+struct ServiceCtx {
+    db: Arc<WardsonDbClient>,
+    session_mgr: Arc<RwLock<SessionManager>>,
+    in_turn: Arc<AtomicBool>,
+    pending_provider: Arc<Mutex<Option<ProviderKind>>>,
+    pending_key_setup: Arc<Mutex<Option<KeySetupStep>>>,
+    pending_openai_compat_setup: Arc<Mutex<Option<OpenAiCompatSetupState>>>,
+    pending_session_delete: Arc<Mutex<Option<PendingSessionDelete>>>,
+}
+
 /// Handle a single incoming conversation request.
 ///
 /// A caller that dispatches a message of its own making (the resume
 /// briefing, the delete flow) sets `active_session` first or attaches a
 /// session: a user message without one is answered with the no-session
 /// notice, and the model is not called.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one argument per shared handle of the Converse stream; bundling them is a \
-              refactor of the stream loop, not a lint fix"
-)]
 async fn handle_request(
     req: ConversationRequest,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
-    db: &Arc<WardsonDbClient>,
-    session_mgr: &Arc<RwLock<SessionManager>>,
+    ctx: &ServiceCtx,
     config_tz: &str,
     api_key: &str,
-    in_turn: &Arc<AtomicBool>,
-    pending_provider: &Arc<Mutex<Option<ProviderKind>>>,
-    pending_key_setup: &Arc<Mutex<Option<KeySetupStep>>>,
-    pending_openai_compat_setup: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
-    pending_session_delete: &Arc<Mutex<Option<PendingSessionDelete>>>,
     stop_rx: &watch::Receiver<u64>,
 ) -> anyhow::Result<()> {
+    let ServiceCtx {
+        db,
+        session_mgr,
+        in_turn,
+        pending_provider,
+        pending_key_setup,
+        pending_openai_compat_setup,
+        pending_session_delete,
+    } = ctx;
     let self_in_turn = in_turn.clone();
     match req.request_type {
         Some(conversation_request::RequestType::UserMessage(msg)) => {
@@ -2746,7 +2767,7 @@ async fn handle_request(
                 }
             }
             if let Some(synthetic_prompt) = handle_slash_command(
-                &cmd.command, &cmd.args, tx, db, session_mgr, config_tz, api_key, in_turn, pending_provider, pending_key_setup, pending_openai_compat_setup, pending_session_delete
+                &cmd.command, &cmd.args, tx, ctx, config_tz, api_key
             ).await {
                 // Slash command requested a synthetic user turn — feed it through the Brain.
                 let synthetic = ConversationRequest {
@@ -2754,9 +2775,7 @@ async fn handle_request(
                         UserMessage { content: synthetic_prompt, timestamp: None, attachment_ids: Vec::new(), file_paths: Vec::new() }
                     )),
                 };
-                Box::pin(handle_request(
-                    synthetic, tx, db, session_mgr, config_tz, api_key, in_turn, pending_provider, pending_key_setup, pending_openai_compat_setup, pending_session_delete, stop_rx
-                )).await?;
+                Box::pin(handle_request(synthetic, tx, ctx, config_tz, api_key, stop_rx)).await?;
             }
             Ok(())
         }
@@ -2982,11 +3001,7 @@ async fn handle_request(
                             }
                         )),
                     };
-                    Box::pin(handle_request(
-                        synthetic, tx, db, session_mgr, config_tz, api_key, in_turn,
-                        pending_provider, pending_key_setup, pending_openai_compat_setup,
-                        pending_session_delete, stop_rx,
-                    )).await?;
+                    Box::pin(handle_request(synthetic, tx, ctx, config_tz, api_key, stop_rx)).await?;
                 } else {
                     info!(
                         target: "sessions",
@@ -3031,24 +3046,15 @@ async fn send_system(
         .await;
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the same handles as handle_request, which calls it"
-)]
 async fn handle_slash_command(
     command: &str,
     args: &str,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
-    db: &Arc<WardsonDbClient>,
-    session_mgr: &Arc<RwLock<SessionManager>>,
+    ctx: &ServiceCtx,
     config_tz: &str,
     _api_key: &str,
-    in_turn: &Arc<AtomicBool>,
-    pending_provider: &Arc<Mutex<Option<ProviderKind>>>,
-    pending_key_setup: &Arc<Mutex<Option<KeySetupStep>>>,
-    pending_openai_compat_setup: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
-    pending_session_delete: &Arc<Mutex<Option<PendingSessionDelete>>>,
 ) -> Option<String> {
+    let ServiceCtx { db, session_mgr, pending_openai_compat_setup, pending_session_delete, .. } = ctx;
     // Helper to send a system message
     let send_msg = |tx: &mpsc::Sender<Result<ConversationResponse, Status>>, content: String| {
         let tx = tx.clone();
@@ -3109,7 +3115,7 @@ async fn handle_slash_command(
             return Some(build_feedback_loop_prompt());
         }
         "/provider" => {
-            handle_provider_command(args, tx, db, session_mgr, in_turn, pending_provider, pending_key_setup, pending_openai_compat_setup).await;
+            handle_provider_command(args, tx, ctx).await;
         }
         "/iter-cap" => {
             handle_iter_cap_command(args, tx, db).await;
@@ -3788,20 +3794,20 @@ async fn handle_slash_command(
 /// spec D2) a deny-then-instruct path when no key is recorded for the
 /// alternate provider. Idle switches apply immediately; in-turn
 /// switches queue via `pending_provider` and drain after the loop.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the three pending-setup slots it arbitrates between are separate handles"
-)]
 async fn handle_provider_command(
     args: &str,
     tx: &mpsc::Sender<Result<ConversationResponse, Status>>,
-    db: &Arc<WardsonDbClient>,
-    session_mgr: &Arc<RwLock<SessionManager>>,
-    in_turn: &Arc<AtomicBool>,
-    pending_provider: &Arc<Mutex<Option<ProviderKind>>>,
-    pending_key_setup: &Arc<Mutex<Option<KeySetupStep>>>,
-    pending_openai_compat_setup: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
+    ctx: &ServiceCtx,
 ) {
+    let ServiceCtx {
+        db,
+        session_mgr,
+        in_turn,
+        pending_provider,
+        pending_key_setup,
+        pending_openai_compat_setup,
+        ..
+    } = ctx;
     let send_msg = |content: String, kind: SystemMessageType| {
         let tx = tx.clone();
         async move {
@@ -11121,22 +11127,18 @@ mod key_setup_model_step_tests {
             let session_mgr = Arc::new(RwLock::new(SessionManager::new(
                 WardsonDbClient::from_url(&db_server.uri()),
             )));
-            let in_turn = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let pending_provider = Arc::new(Mutex::new(None));
             let pending_key_setup = Arc::new(Mutex::new(None));
-            let pending_openai = Arc::new(Mutex::new(None));
+            let ctx = ServiceCtx {
+                db,
+                session_mgr,
+                in_turn: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                pending_provider: Arc::new(Mutex::new(None)),
+                pending_key_setup: pending_key_setup.clone(),
+                pending_openai_compat_setup: Arc::new(Mutex::new(None)),
+                pending_session_delete: Arc::new(Mutex::new(None)),
+            };
             let (tx, mut rx) = mpsc::channel::<Result<ConversationResponse, Status>>(64);
-            handle_provider_command(
-                arg,
-                &tx,
-                &db,
-                &session_mgr,
-                &in_turn,
-                &pending_provider,
-                &pending_key_setup,
-                &pending_openai,
-            )
-            .await;
+            handle_provider_command(arg, &tx, &ctx).await;
             drop(tx);
             let mut prompt = None;
             while let Some(Ok(r)) = rx.recv().await {
