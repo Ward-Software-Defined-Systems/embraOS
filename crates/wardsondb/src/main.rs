@@ -242,7 +242,7 @@ async fn main() {
 
     let app = build_router(state);
 
-    let addr = format!("0.0.0.0:{}", config.port);
+    let addr = format!("{}:{}", config.bind, config.port);
 
     if config.verbose {
         info!(log_file = %config.log_file, "Verbose mode: per-request logs shown in terminal and written to file");
@@ -333,21 +333,7 @@ fn resolve_tls_paths(config: &Config) -> (String, String) {
     info!("Generating self-signed TLS certificate");
     std::fs::create_dir_all(&tls_dir).expect("Failed to create TLS directory");
 
-    let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
-        .expect("Failed to create certificate params");
-    params
-        .subject_alt_names
-        .push(rcgen::SanType::IpAddress(std::net::IpAddr::V4(
-            std::net::Ipv4Addr::new(0, 0, 0, 0),
-        )));
-    params
-        .subject_alt_names
-        .push(rcgen::SanType::IpAddress(std::net::IpAddr::V4(
-            std::net::Ipv4Addr::new(127, 0, 0, 1),
-        )));
-    // Valid for 365 days
-    params.not_after = rcgen::date_time_ymd(2027, 3, 9);
-
+    let params = self_signed_params();
     let key_pair = rcgen::KeyPair::generate().expect("Failed to generate key pair");
     let cert = params
         .self_signed(&key_pair)
@@ -366,6 +352,36 @@ fn resolve_tls_paths(config: &Config) -> (String, String) {
         cert_path.to_string_lossy().to_string(),
         key_path.to_string_lossy().to_string(),
     )
+}
+
+/// The self-signed certificate: `localhost`, `0.0.0.0` and `127.0.0.1` as
+/// its names, valid for 365 days from the day it is generated. The date
+/// was a literal before (2027-03-09), so a certificate generated after it
+/// was born expired.
+fn self_signed_params() -> rcgen::CertificateParams {
+    let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+        .expect("Failed to create certificate params");
+    params
+        .subject_alt_names
+        .push(rcgen::SanType::IpAddress(std::net::IpAddr::V4(
+            std::net::Ipv4Addr::new(0, 0, 0, 0),
+        )));
+    params
+        .subject_alt_names
+        .push(rcgen::SanType::IpAddress(std::net::IpAddr::V4(
+            std::net::Ipv4Addr::new(127, 0, 0, 1),
+        )));
+    let (year, month, day) = a_year_from_today();
+    params.not_after = rcgen::date_time_ymd(year, month, day);
+    params
+}
+
+/// The calendar day 365 days from now, UTC, as rcgen's `date_time_ymd`
+/// takes it.
+fn a_year_from_today() -> (i32, u8, u8) {
+    use chrono::Datelike;
+    let day = (chrono::Utc::now() + chrono::Duration::days(365)).date_naive();
+    (day.year(), day.month() as u8, day.day() as u8)
 }
 
 /// Rebuild scan accelerator from all existing collections using batched iteration.
@@ -566,4 +582,27 @@ fn system_ram_bytes() -> Option<u64> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The self-signed certificate's window ends a year from the day it is
+    /// generated, never on a date written into the source.
+    #[test]
+    fn the_self_signed_certificate_is_valid_for_a_year_from_today() {
+        let before = a_year_from_today();
+        let params = self_signed_params();
+        let after = a_year_from_today();
+        let ends_on = |(y, m, d): (i32, u8, u8)| rcgen::date_time_ymd(y, m, d);
+        // `before` and `after` differ only across a midnight between them.
+        assert!(
+            params.not_after == ends_on(before) || params.not_after == ends_on(after),
+            "not_after {:?} is not a year from today",
+            params.not_after
+        );
+        assert!(params.not_after > rcgen::date_time_ymd(2027, 3, 9) || before.0 < 2026);
+        assert_eq!(params.subject_alt_names.len(), 3);
+    }
 }

@@ -7,6 +7,7 @@ use uuid::Uuid;
 
 use crate::engine::backend::{PartitionId, StorageBackend};
 use crate::error::AppError;
+use crate::query::cancel;
 use crate::query::filter::FilterNode;
 
 use super::storage::Storage;
@@ -425,18 +426,24 @@ impl Storage {
     ) -> Result<(), AppError> {
         self.ensure_collection_exists(collection)?;
         let docs_partition = self.get_docs_partition(collection)?;
-        let mut parse_err: Option<AppError> = None;
-        self.engine.scan_full(
-            &docs_partition,
-            &mut |_, v| match serde_json::from_slice::<Value>(v) {
+        // The error that stopped the scan: a document that does not parse,
+        // or the read's timeout seen at a checkpoint.
+        let mut scan_err: Option<AppError> = None;
+        let mut seen = 0u64;
+        self.engine.scan_full(&docs_partition, &mut |_, v| {
+            if let Err(e) = cancel::checkpoint(&mut seen) {
+                scan_err = Some(e);
+                return ControlFlow::Break(());
+            }
+            match serde_json::from_slice::<Value>(v) {
                 Ok(doc) => visit(doc),
                 Err(e) => {
-                    parse_err = Some(e.into());
+                    scan_err = Some(e.into());
                     ControlFlow::Break(())
                 }
-            },
-        )?;
-        if let Some(e) = parse_err {
+            }
+        })?;
+        if let Some(e) = scan_err {
             return Err(e);
         }
         Ok(())

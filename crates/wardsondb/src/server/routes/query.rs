@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use crate::error::AppError;
 use crate::query::aggregate::{AggregateRequest, execute_aggregate};
+use crate::query::cancel;
 use crate::query::executor::execute_query;
 use crate::query::filter::parse_filter;
 use crate::query::parser::{QueryRequest, parse_query};
@@ -16,8 +17,10 @@ use crate::server::middleware::error_handler::JsonBody;
 use crate::server::response::{ApiResponse, ResponseMeta};
 
 /// Run a blocking closure off the async workers, with an optional timeout
-/// (`timeout_secs == 0` = no timeout). NOTE: a timed-out spawn_blocking task
-/// is NOT cancelled — it keeps running to completion. Reads use the
+/// (`timeout_secs == 0` = no timeout). A timed-out spawn_blocking task
+/// cannot be killed, so a read runs under a `cancel::CancelToken` that the
+/// timeout cancels: the scan loops stop at their next checkpoint instead
+/// of running to the end for a client already answered. Reads use the
 /// configured query timeout; mutations must pass 0 so the client never sees
 /// a failure for work that then completes server-side.
 pub(crate) async fn with_query_timeout<F, R>(timeout_secs: u64, f: F) -> Result<R, AppError>
@@ -32,10 +35,16 @@ where
     }
 
     let timeout = Duration::from_secs(timeout_secs);
-    match tokio::time::timeout(timeout, tokio::task::spawn_blocking(f)).await {
+    let token = cancel::CancelToken::new(timeout_secs);
+    let read_token = token.clone();
+    let task = tokio::task::spawn_blocking(move || cancel::scoped(&read_token, f));
+    match tokio::time::timeout(timeout, task).await {
         Ok(Ok(result)) => result,
         Ok(Err(e)) => Err(AppError::Internal(format!("Task join error: {e}"))),
-        Err(_) => Err(AppError::QueryTimeout(timeout_secs)),
+        Err(_) => {
+            token.cancel();
+            Err(AppError::QueryTimeout(timeout_secs))
+        }
     }
 }
 
@@ -250,4 +259,37 @@ pub async fn update_by_query(
             ..Default::default()
         },
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    /// The read a timeout abandoned stops at its next checkpoint instead of
+    /// running on; the client got the timeout at once.
+    #[tokio::test]
+    async fn a_read_past_its_timeout_is_stopped_at_its_next_checkpoint() {
+        let stopped = Arc::new(AtomicBool::new(false));
+        let seen_by_read = stopped.clone();
+        let started = Instant::now();
+        let result = with_query_timeout(1, move || {
+            let mut seen = 0u64;
+            loop {
+                if let Err(e) = cancel::checkpoint(&mut seen) {
+                    seen_by_read.store(true, Ordering::SeqCst);
+                    return Err::<(), AppError>(e);
+                }
+                std::thread::yield_now();
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(AppError::QueryTimeout(1))), "{result:?}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !stopped.load(Ordering::SeqCst) && Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(stopped.load(Ordering::SeqCst), "the abandoned read stopped");
+    }
 }

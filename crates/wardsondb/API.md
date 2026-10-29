@@ -39,6 +39,7 @@ wardsondb [OPTIONS]
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
 | `--port <PORT>` | `-p` | `8080` | Listen port |
+| `--bind <ADDR>` | | `0.0.0.0` | Address to listen on; `127.0.0.1` keeps the server off the network |
 | `--data-dir <PATH>` | `-d` | `./data` | Data directory (created automatically) |
 | `--storage-engine <ENGINE>` | | *required* | Storage backend: `rocksdb` or `fjall`. Required on every launch (no default). Locked per data directory via a `.engine` marker file. |
 | `--log-level <LEVEL>` | `-l` | `info` | Log level: `trace`, `debug`, `info`, `warn`, `error` |

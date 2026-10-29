@@ -16,6 +16,10 @@ pub struct Config {
     #[arg(short, long, default_value = "8080")]
     pub port: u16,
 
+    /// Address to listen on; `127.0.0.1` keeps the server off the network
+    #[arg(long, default_value = "0.0.0.0")]
+    pub bind: String,
+
     /// Data directory
     #[arg(short, long, default_value = "./data")]
     pub data_dir: String,
@@ -120,4 +124,29 @@ pub struct Config {
     /// Disable the scan accelerator entirely
     #[arg(long, default_value_t = false)]
     pub no_bitmap: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_bind_address_defaults_to_every_interface_and_takes_the_flag() {
+        let cfg = Config::try_parse_from(["wardsondb", "--storage-engine", "fjall"]).unwrap();
+        assert_eq!(cfg.bind, "0.0.0.0");
+        assert_eq!(cfg.port, 8080);
+
+        let cfg = Config::try_parse_from([
+            "wardsondb",
+            "--storage-engine",
+            "fjall",
+            "--bind",
+            "127.0.0.1",
+            "--port",
+            "8090",
+        ])
+        .unwrap();
+        assert_eq!(cfg.bind, "127.0.0.1");
+        assert_eq!(cfg.port, 8090);
+    }
 }

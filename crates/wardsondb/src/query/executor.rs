@@ -9,6 +9,7 @@ use crate::index::secondary::{
     range_scan_bounds, value_to_sortable_bytes,
 };
 
+use super::cancel;
 use super::cursor::{Cursor, CursorValue, compare_doc_to_cursor, encode_cursor};
 use super::filter::resolve_json_path;
 use super::parser::ParsedQuery;
@@ -628,7 +629,12 @@ fn execute_full_scan(
         // only removes the whole-collection buffer.
         let mut docs_scanned = 0u64;
         let mut matches = 0u64;
+        let mut seen = 0u64;
         storage.engine.scan_full(&docs_partition, &mut |_, v| {
+            if let Err(e) = cancel::checkpoint(&mut seen) {
+                parse_err = Some(e);
+                return ControlFlow::Break(());
+            }
             let doc: Value = match serde_json::from_slice(v) {
                 Ok(doc) => doc,
                 Err(e) => {
@@ -664,7 +670,12 @@ fn execute_full_scan(
         // report an exact total only when the scan ran out (UnsortedPage).
         let mut sink = UnsortedPage::new(query.offset as usize, query.limit as usize);
         let mut docs_scanned = 0u64;
+        let mut seen = 0u64;
         storage.engine.scan_full(&docs_partition, &mut |_, v| {
+            if let Err(e) = cancel::checkpoint(&mut seen) {
+                parse_err = Some(e);
+                return ControlFlow::Break(());
+            }
             if filter.is_none() && sink.to_skip > 0 {
                 sink.to_skip -= 1;
                 sink.matches += 1;
@@ -720,7 +731,12 @@ fn execute_full_scan(
     let mut topk = TopK::new(query.offset as usize, query.limit as usize, &query.sort);
     let mut pre_cursor = 0u64;
     let mut docs_scanned = 0u64;
+    let mut seen = 0u64;
     storage.engine.scan_full(&docs_partition, &mut |_, v| {
+        if let Err(e) = cancel::checkpoint(&mut seen) {
+            parse_err = Some(e);
+            return ControlFlow::Break(());
+        }
         let doc: Value = match serde_json::from_slice(v) {
             Ok(doc) => doc,
             Err(e) => {
@@ -785,9 +801,15 @@ fn execute_full_scan_id_seek(
 
     let mut results: Vec<Value> = Vec::new();
     let mut docs_scanned = 0u64;
+    let mut seen = 0u64;
+    let mut scan_err: Option<AppError> = None;
     storage
         .engine
         .scan_range(&docs_partition, &lo, &hi, &mut |_, v| {
+            if let Err(e) = cancel::checkpoint(&mut seen) {
+                scan_err = Some(e);
+                return ControlFlow::Break(());
+            }
             // Parse failures skip-and-continue — this path's long-standing
             // policy (unlike the main full scan's fail), preserved verbatim.
             let Ok(doc) = serde_json::from_slice::<Value>(v) else {
@@ -805,6 +827,9 @@ fn execute_full_scan_id_seek(
             }
             ControlFlow::Continue(())
         })?;
+    if let Some(e) = scan_err {
+        return Err(e);
+    }
 
     let has_more = results.len() > limit;
     results.truncate(limit);
@@ -1195,7 +1220,13 @@ fn execute_index_sorted(
         0
     };
 
+    let mut seen = 0u64;
+    let mut scan_err: Option<AppError> = None;
     let mut visit = |k: &[u8], _v: &[u8]| -> ControlFlow<()> {
+        if let Err(e) = cancel::checkpoint(&mut seen) {
+            scan_err = Some(e);
+            return ControlFlow::Break(());
+        }
         if entry_skip > 0 {
             entry_skip -= 1;
             return ControlFlow::Continue(());
@@ -1226,6 +1257,9 @@ fn execute_index_sorted(
         storage
             .engine
             .scan_range(&partition, &lo, &hi, &mut visit)?;
+    }
+    if let Some(e) = scan_err {
+        return Err(e);
     }
 
     let has_more = results.len() > limit;

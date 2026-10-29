@@ -46,6 +46,7 @@ fn create_siem_event(i: u64) -> Value {
 fn bench_config(tmp: &TempDir, port: u16) -> Config {
     Config {
         port,
+        bind: "127.0.0.1".to_string(),
         data_dir: tmp.path().to_string_lossy().to_string(),
         storage_engine: "rocksdb".to_string(),
         log_level: "error".to_string(),

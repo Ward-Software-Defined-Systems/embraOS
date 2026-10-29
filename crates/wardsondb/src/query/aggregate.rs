@@ -517,8 +517,14 @@ fn try_index_only_aggregate(
     let mut group_counts: Vec<(Vec<u8>, u64)> = Vec::new();
     let mut current_value: Option<Vec<u8>> = None;
     let mut current_count: u64 = 0;
+    let mut seen = 0u64;
+    let mut scan_err: Option<AppError> = None;
 
     storage.engine.scan_full(&partition, &mut |key, _| {
+        if let Err(e) = super::cancel::checkpoint(&mut seen) {
+            scan_err = Some(e);
+            return std::ops::ControlFlow::Break(());
+        }
         // Single-field index key: {value_bytes}\x00{doc_id}. Doc ids are
         // NUL-free (validate_custom_id) but NOT fixed-width — custom _ids can
         // be 1..512 bytes — so the separator is the LAST 0x00, never a fixed
@@ -547,6 +553,9 @@ fn try_index_only_aggregate(
         }
         std::ops::ControlFlow::Continue(())
     })?;
+    if let Some(e) = scan_err {
+        return Err(e);
+    }
     if let Some(cv) = current_value {
         group_counts.push((cv, current_count));
     }

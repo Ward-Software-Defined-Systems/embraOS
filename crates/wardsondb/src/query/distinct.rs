@@ -96,7 +96,13 @@ fn try_index_only_distinct(
     // Streamed: repeated values cost nothing (borrowed-key contains check —
     // only first-seen values are copied), and the scan breaks at `limit`
     // instead of buffering the whole index.
+    let mut seen = 0u64;
+    let mut scan_err: Option<AppError> = None;
     storage.engine.scan_full(&partition, &mut |key, _| {
+        if let Err(e) = super::cancel::checkpoint(&mut seen) {
+            scan_err = Some(e);
+            return ControlFlow::Break(());
+        }
         // Key format: {value_bytes}\x00{doc_id}
         if let Some(sep_pos) = key.iter().rposition(|&b| b == 0x00) {
             let value_part = &key[..sep_pos];
@@ -114,6 +120,9 @@ fn try_index_only_distinct(
         }
         ControlFlow::Continue(())
     })?;
+    if let Some(e) = scan_err {
+        return Err(e);
+    }
 
     let count = values.len();
     Ok(Some(DistinctResult {
