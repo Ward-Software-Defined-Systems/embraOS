@@ -218,6 +218,27 @@ const DB_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5
 /// is an error after it, not a hang for the life of the process.
 const DB_READ_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
+/// The response when it is a success, else the `Api` error with its status
+/// and body: the one status handler of the client (#39).
+async fn ensure_ok(resp: reqwest::Response) -> Result<reqwest::Response> {
+    if resp.status().is_success() {
+        return Ok(resp);
+    }
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    Err(WardsonDbError::Api { status, body }.into())
+}
+
+/// `ensure_ok` for an idempotent call: a status in `accepted` (the 404 of
+/// a delete, the 409 of a create) is `None`, a success `Some`, the rest the
+/// `Api` error.
+async fn ensure_ok_or(resp: reqwest::Response, accepted: &[u16]) -> Result<Option<reqwest::Response>> {
+    if accepted.contains(&resp.status().as_u16()) {
+        return Ok(None);
+    }
+    ensure_ok(resp).await.map(Some)
+}
+
 impl WardsonDbClient {
     /// Create a client from a full URL (Phase 1: embrad passes --wardsondb-url)
     pub fn from_url(url: &str) -> Self {
@@ -284,11 +305,7 @@ impl WardsonDbClient {
             .get(format!("{}/_collections", self.base_url))
             .send()
             .await?;
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(WardsonDbError::Api { status, body }.into());
-        }
+        let resp = ensure_ok(resp).await?;
         let envelope: WardsonEnvelope<Vec<CollectionInfo>> = resp.json().await?;
         Ok(envelope.data)
     }
@@ -303,11 +320,7 @@ impl WardsonDbClient {
             })
             .send()
             .await?;
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(WardsonDbError::Api { status, body }.into());
-        }
+        ensure_ok(resp).await?;
         Ok(())
     }
 
@@ -344,12 +357,8 @@ impl WardsonDbClient {
             .delete(self.url(&[Segment::Collection(name)])?)
             .send()
             .await?;
-        if resp.status().is_success() || resp.status().as_u16() == 404 {
-            return Ok(());
-        }
-        let status = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        Err(WardsonDbError::Api { status, body }.into())
+        ensure_ok_or(resp, &[404]).await?;
+        Ok(())
     }
 
     pub async fn write(
@@ -365,11 +374,7 @@ impl WardsonDbClient {
             .send()
             .await?;
         crate::activity::db_op(collection, crate::activity::DbVerb::Write, started);
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(WardsonDbError::Api { status, body }.into());
-        }
+        let resp = ensure_ok(resp).await?;
         let envelope: WardsonEnvelope<serde_json::Value> = resp.json().await?;
         let id = envelope.data
             .get("_id")
@@ -399,11 +404,7 @@ impl WardsonDbClient {
             }
             .into());
         }
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(WardsonDbError::Api { status, body }.into());
-        }
+        let resp = ensure_ok(resp).await?;
         let envelope: WardsonEnvelope<serde_json::Value> = resp.json().await?;
         Ok(envelope.data)
     }
@@ -433,11 +434,7 @@ impl WardsonDbClient {
             .send()
             .await?;
         crate::activity::db_op(collection, crate::activity::DbVerb::Query, started);
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(WardsonDbError::Api { status, body }.into());
-        }
+        let resp = ensure_ok(resp).await?;
         let envelope: WardsonEnvelope<Vec<serde_json::Value>> = resp.json().await?;
         maybe_warn_slow_query(collection, &envelope.meta, envelope.data.len());
         Ok((envelope.data, envelope.meta))
@@ -530,11 +527,7 @@ impl WardsonDbClient {
             .send()
             .await?;
         crate::activity::db_op(collection, crate::activity::DbVerb::Write, started);
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(WardsonDbError::Api { status, body }.into());
-        }
+        ensure_ok(resp).await?;
         Ok(())
     }
 
@@ -546,11 +539,7 @@ impl WardsonDbClient {
             .send()
             .await?;
         crate::activity::db_op(collection, crate::activity::DbVerb::Delete, started);
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(WardsonDbError::Api { status, body }.into());
-        }
+        ensure_ok(resp).await?;
         Ok(())
     }
 
@@ -612,11 +601,7 @@ impl WardsonDbClient {
             .send()
             .await?;
         crate::activity::db_op(collection, crate::activity::DbVerb::Write, started);
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(WardsonDbError::Api { status, body }.into());
-        }
+        ensure_ok(resp).await?;
         Ok(())
     }
 
@@ -642,11 +627,7 @@ impl WardsonDbClient {
             .send()
             .await?;
         crate::activity::db_op(collection, crate::activity::DbVerb::Delete, started);
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(WardsonDbError::Api { status, body: body_text }.into());
-        }
+        let resp = ensure_ok(resp).await?;
         let envelope: WardsonEnvelope<serde_json::Value> = resp.json().await?;
         Ok(envelope
             .data
@@ -669,11 +650,7 @@ impl WardsonDbClient {
             .json(&body)
             .send()
             .await?;
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body_text = resp.text().await.unwrap_or_default();
-            return Err(WardsonDbError::Api { status, body: body_text }.into());
-        }
+        ensure_ok(resp).await?;
         Ok(())
     }
 
@@ -689,12 +666,8 @@ impl WardsonDbClient {
             .delete(self.url(&[Segment::Collection(collection), Segment::Fixed("ttl")])?)
             .send()
             .await?;
-        if resp.status().is_success() || resp.status().as_u16() == 404 {
-            return Ok(());
-        }
-        let status = resp.status().as_u16();
-        let body = resp.text().await.unwrap_or_default();
-        Err(WardsonDbError::Api { status, body }.into())
+        ensure_ok_or(resp, &[404]).await?;
+        Ok(())
     }
 
     pub async fn query_with_options(
@@ -710,11 +683,7 @@ impl WardsonDbClient {
             .send()
             .await?;
         crate::activity::db_op(collection, crate::activity::DbVerb::Query, started);
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(WardsonDbError::Api { status, body }.into());
-        }
+        let resp = ensure_ok(resp).await?;
         let envelope: WardsonEnvelope<serde_json::Value> = resp.json().await?;
         let returned = envelope.data.as_array().map(|a| a.len()).unwrap_or(1);
         maybe_warn_slow_query(collection, &envelope.meta, returned);
@@ -736,12 +705,8 @@ impl WardsonDbClient {
             .json(body)
             .send()
             .await?;
-        if resp.status().is_success() || resp.status().as_u16() == 409 {
-            return Ok(());
-        }
-        let status = resp.status().as_u16();
-        let body_text = resp.text().await.unwrap_or_default();
-        Err(WardsonDbError::Api { status, body: body_text }.into())
+        ensure_ok_or(resp, &[409]).await?;
+        Ok(())
     }
 
     /// Bulk insert documents (max 10,000 per request). Partial-success semantics:
@@ -760,11 +725,7 @@ impl WardsonDbClient {
             .send()
             .await?;
         crate::activity::db_op(collection, crate::activity::DbVerb::Write, started);
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(WardsonDbError::Api { status, body }.into());
-        }
+        let resp = ensure_ok(resp).await?;
         let envelope: WardsonEnvelope<serde_json::Value> = resp.json().await?;
         // Response shape: { "inserted": <int>, "errors": [...] }
         let inserted = envelope
@@ -789,13 +750,41 @@ impl WardsonDbClient {
             .send()
             .await?;
         crate::activity::db_op(collection, crate::activity::DbVerb::Query, started);
-        if !resp.status().is_success() {
-            let status = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(WardsonDbError::Api { status, body }.into());
-        }
+        let resp = ensure_ok(resp).await?;
         let envelope: WardsonEnvelope<Vec<serde_json::Value>> = resp.json().await?;
         Ok(envelope.data)
+    }
+}
+
+#[cfg(test)]
+mod status_handler_tests {
+    use super::{ensure_ok, ensure_ok_or, WardsonDbError};
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn answer(status: u16, body: &str) -> reqwest::Response {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(status).set_body_string(body))
+            .mount(&server)
+            .await;
+        reqwest::get(server.uri()).await.expect("the mock answers")
+    }
+
+    /// #39: a non-2xx is the `Api` error with its status and body; a
+    /// success passes through; an accepted status of an idempotent call is
+    /// `None`.
+    #[tokio::test]
+    async fn a_non_2xx_is_an_api_error_with_its_status_and_body() {
+        let err = ensure_ok(answer(503, "write pressure").await).await.expect_err("a 503");
+        match err.downcast_ref::<WardsonDbError>() {
+            Some(WardsonDbError::Api { status, body }) => assert_eq!((*status, body.as_str()), (503, "write pressure")),
+            other => panic!("not the Api error: {other:?}"),
+        }
+        assert_eq!(ensure_ok(answer(200, "fine").await).await.expect("passes").status(), 200);
+        assert!(ensure_ok_or(answer(404, "gone").await, &[404]).await.expect("accepted").is_none());
+        assert!(ensure_ok_or(answer(200, "fine").await, &[404]).await.expect("passes").is_some());
+        assert!(ensure_ok_or(answer(500, "down").await, &[404]).await.is_err());
     }
 }
 
