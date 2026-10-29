@@ -35,12 +35,12 @@ The Cargo workspace has twelve members — `embra-init`, `embrad`, `embra-trustd
 
 ### Network exposure
 
-What each port answers to, as the code binds it and as `scripts/run-qemu.sh` forwards it. Every port is a literal in embrad's `register_services` (`crates/embrad/src/supervisor.rs`), and every service binds the literal `0.0.0.0`; neither is configurable.
+What each port answers to, as the code binds it and as `scripts/run-qemu.sh` forwards it. Every port is a literal in embrad's `register_services` (`crates/embrad/src/supervisor.rs`), and every service but the database binds the literal `0.0.0.0` (embrad starts WardSONDB with `--bind 127.0.0.1`: its only clients are the services beside it); neither is configurable.
 
 | Port | Service | Protocol | TLS | Authentication | Binds in the guest | From the host (QEMU) | From the host's network |
 |---|---|---|---|---|---|---|---|
-| 8090 | `wardsondb` | HTTP REST | no | none (embrad passes no `--api-key`) | every interface | no | no |
-| 50001 | `embra-trustd` | gRPC, plaintext h2c | no | none (`GenerateCertificate` answers any caller) | every interface | no | no |
+| 8090 | `wardsondb` | HTTP REST | no | none (embrad passes no `--api-key`) | loopback (`--bind 127.0.0.1`) | no | no |
+| 50001 | `embra-trustd` | gRPC, plaintext h2c | no | none (`GenerateCertificate` answers any caller, for the service identities alone: a common name or a subject alternative name outside `localhost`, `embraos`, `buildroot`, `127.0.0.1` and `10.0.2.15` is refused before anything is minted, and a Root CA generated on a fresh install carries name constraints to that set; an instance from before keeps the CA it generated until `/embra/state/pki/` is removed and the new CA trusted again) | every interface | no | no |
 | 50000 | `embra-apid` | gRPC, plaintext h2c | no | none | every interface | loopback only (`hostfwd=tcp:127.0.0.1:50000`) | no |
 | 8443 | `embra-apid` | HTTP REST | no | none | every interface | loopback only (`hostfwd=tcp:127.0.0.1:8443`) | no |
 | 50002 | `embra-brain` | gRPC, plaintext h2c | no | none | every interface | no | no |

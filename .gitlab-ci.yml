@@ -156,9 +156,10 @@ audit:
       set -eu
       # An id waiting on William's decision goes here as one line,
       #   ignore="$ignore --ignore RUSTSEC-YYYY-NNNN"   # <crate> <version in the lock>: <defect>; fix >=<version>
-      # and the line goes when the bump lands. None at the moment: the six
-      # the job opened with went with the bumps of 2026-10-24.
+      # and the line goes when the bump lands. The six the job opened with
+      # went with the bumps of 2026-10-24.
       ignore=""
+      ignore="$ignore --ignore RUSTSEC-2026-0418"   # libz-sys 1.1.29 (rust-librocksdb-sys, inside the database's tree): the build script leaks environment variables into the build directory; fix >=1.1.31
       # shellcheck disable=SC2086
       cargo audit $ignore
     - cargo audit --file crates/embra-web-ui/Cargo.lock
