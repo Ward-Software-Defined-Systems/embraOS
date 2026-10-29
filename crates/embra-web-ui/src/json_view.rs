@@ -1,9 +1,10 @@
 //! JSON as the browser shows it: pretty-printed under a cap, and tokenized
-//! into the TUI's colours (keys cyan, strings green, numbers and the three
-//! literals amber). Shared by the mobile chat's tool cards and the desktop
+//! by the tokenizer the TUI shares into its colours (keys cyan, strings
+//! green, numbers and the three literals amber). Shared by the mobile chat's tool cards and the desktop
 //! sidebar's tool sheet; the helpers moved here from `chat.rs` when the
 //! sheet arrived.
 
+use embra_tools_core::{JsonTokenKind, tokenize_line};
 use leptos::prelude::*;
 
 pub(crate) fn truncate(s: &str, max: usize) -> String {
@@ -32,96 +33,32 @@ pub(crate) fn pretty_json_capped(s: &str, max: usize) -> String {
     out
 }
 
-/// Match `kw` at `i` in `chars` on word boundaries (so `null` inside
-/// `nullable` doesn't match).
-pub(crate) fn kw_at(chars: &[char], i: usize, kw: &str) -> bool {
-    let k: Vec<char> = kw.chars().collect();
-    if i + k.len() > chars.len() || chars[i..i + k.len()] != k[..] {
-        return false;
+/// The class a token kind renders with: keys `jk` (cyan), strings `js`
+/// (green), numbers `jn` and the three literals `jb` (amber), the
+/// structure and anything else the default. Every kind is named here.
+pub(crate) fn json_class(kind: JsonTokenKind) -> &'static str {
+    match kind {
+        JsonTokenKind::Key => "jk",
+        JsonTokenKind::Str => "js",
+        JsonTokenKind::Number => "jn",
+        JsonTokenKind::Bool | JsonTokenKind::Null => "jb",
+        JsonTokenKind::Punct | JsonTokenKind::Text => "",
     }
-    let before_ok = i == 0 || !chars[i - 1].is_alphanumeric();
-    let after = i + k.len();
-    let after_ok = after >= chars.len() || !chars[after].is_alphanumeric();
-    before_ok && after_ok
 }
 
-/// Tokenize a JSON-ish string into `(text, css-class)` segments, mirroring
-/// the TUI's scheme (`embra-console` `render.rs::parse_json_line`): keys →
-/// `jk` (cyan), string values → `js` (green), numbers + true/false/null →
-/// `jn`/`jb` (amber), everything else → `""` (default). Newlines are kept
-/// verbatim for the surrounding `<pre>`.
+/// Tokenize a JSON-ish string into `(text, css-class)` segments, line by
+/// line through the tokenizer the console shares
+/// (`embra_tools_core::tokenize_line`, #40). Newlines are kept verbatim
+/// for the surrounding `<pre>`.
 pub(crate) fn highlight_json_segments(s: &str) -> Vec<(String, &'static str)> {
-    let chars: Vec<char> = s.chars().collect();
-    let len = chars.len();
     let mut segs: Vec<(String, &'static str)> = Vec::new();
-    let mut cur = String::new();
-    let mut i = 0;
-    while i < len {
-        let ch = chars[i];
-        if ch == '"' {
-            if !cur.is_empty() {
-                segs.push((std::mem::take(&mut cur), ""));
-            }
-            let mut lit = String::from('"');
-            i += 1;
-            while i < len && chars[i] != '"' {
-                if chars[i] == '\\' && i + 1 < len {
-                    lit.push(chars[i]);
-                    i += 1;
-                }
-                lit.push(chars[i]);
-                i += 1;
-            }
-            if i < len {
-                lit.push('"');
-                i += 1;
-            }
-            // A string is a key when the next non-space char is ':'.
-            let mut j = i;
-            while j < len && chars[j] == ' ' {
-                j += 1;
-            }
-            let cls = if j < len && chars[j] == ':' { "jk" } else { "js" };
-            segs.push((lit, cls));
-        } else if (ch.is_ascii_digit() || ch == '-')
-            && (cur.trim().is_empty()
-                || cur.ends_with(": ")
-                || cur.ends_with(',')
-                || cur.ends_with('['))
-        {
-            if !cur.is_empty() {
-                segs.push((std::mem::take(&mut cur), ""));
-            }
-            let mut num = String::from(ch);
-            i += 1;
-            while i < len
-                && (chars[i].is_ascii_digit() || matches!(chars[i], '.' | 'e' | 'E' | '+' | '-'))
-            {
-                num.push(chars[i]);
-                i += 1;
-            }
-            segs.push((num, "jn"));
-        } else if kw_at(&chars, i, "true") || kw_at(&chars, i, "false") || kw_at(&chars, i, "null")
-        {
-            if !cur.is_empty() {
-                segs.push((std::mem::take(&mut cur), ""));
-            }
-            let kw = if kw_at(&chars, i, "false") {
-                "false"
-            } else if kw_at(&chars, i, "true") {
-                "true"
-            } else {
-                "null"
-            };
-            segs.push((kw.to_string(), "jb"));
-            i += kw.len();
-        } else {
-            cur.push(ch);
-            i += 1;
+    for (i, line) in s.split('\n').enumerate() {
+        if i > 0 {
+            segs.push(("\n".to_string(), ""));
         }
-    }
-    if !cur.is_empty() {
-        segs.push((cur, ""));
+        for t in tokenize_line(line) {
+            segs.push((t.text(line).to_string(), json_class(t.kind)));
+        }
     }
     segs
 }
@@ -140,5 +77,37 @@ pub(crate) fn json_pre(content: &str) -> AnyView {
             .into_any()
     } else {
         view! { <span>{content.to_string()}</span> }.into_any()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every token kind of the shared tokenizer has its class here, and a
+    /// multi-line string keeps its newlines between the lines' tokens.
+    #[test]
+    fn the_two_renderers_cover_every_token_kind() {
+        for (kind, class) in [
+            (JsonTokenKind::Key, "jk"),
+            (JsonTokenKind::Str, "js"),
+            (JsonTokenKind::Number, "jn"),
+            (JsonTokenKind::Bool, "jb"),
+            (JsonTokenKind::Null, "jb"),
+            (JsonTokenKind::Punct, ""),
+            (JsonTokenKind::Text, ""),
+        ] {
+            assert_eq!(json_class(kind), class, "{kind:?}");
+        }
+        let segs = highlight_json_segments("{\"a\": [1, true]}\n\"nullable\": null");
+        let classes: Vec<(&str, &str)> = segs.iter().map(|(t, c)| (t.as_str(), *c)).collect();
+        assert_eq!(
+            classes,
+            vec![
+                ("{", ""), ("\"a\"", "jk"), (": [", ""), ("1", "jn"), (", ", ""), ("true", "jb"), ("]}", ""),
+                ("\n", ""),
+                ("\"nullable\"", "jk"), (": ", ""), ("null", "jb"),
+            ]
+        );
     }
 }

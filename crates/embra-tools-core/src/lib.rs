@@ -8,7 +8,9 @@
 
 pub use serde_json::Value as JsonValue;
 
+pub mod json_tokens;
 pub mod mask;
+pub use json_tokens::{JsonToken, JsonTokenKind, tokenize_line};
 pub use mask::{MASK_CHAR, mask_secret_argument, mask_secret_argument_keeping_length};
 
 use serde::{Deserialize, Serialize};

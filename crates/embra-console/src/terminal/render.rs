@@ -1,6 +1,7 @@
 // Render utilities for terminal display
 // Provides rich rendering for JSON, markdown headers, bold, and inline code.
 
+use embra_tools_core::{JsonTokenKind, tokenize_line};
 use ratatui::style::{Color, Modifier, Style};
 
 /// A single styled segment within a line
@@ -121,108 +122,16 @@ pub fn parse_styled_line(line: &str, base_style: Style) -> StyledLine {
     }
 }
 
-/// Parse a JSON block for syntax highlighting.
-/// Returns styled segments per line.
+/// A JSON line as styled segments, through the one tokenizer the web
+/// console shares (`embra_tools_core::tokenize_line`), each kind in the
+/// console's colour: keys cyan, strings green, numbers and the three
+/// literals yellow, the structure and anything else the base white (#40).
 pub fn parse_json_line(line: &str) -> StyledLine {
-    let mut segments = Vec::new();
-    let chars: Vec<char> = line.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-    let mut current = String::new();
-
     let base_style = Style::default().fg(Color::White);
-
-    while i < len {
-        let ch = chars[i];
-
-        // String literals
-        if ch == '"' {
-            // Flush current as punctuation
-            if !current.is_empty() {
-                segments.push(StyledSegment::new(current.clone(), base_style));
-                current.clear();
-            }
-            // Collect the full string including quotes
-            let mut s = String::new();
-            s.push(ch);
-            i += 1;
-            while i < len && chars[i] != '"' {
-                if chars[i] == '\\' && i + 1 < len {
-                    s.push(chars[i]);
-                    i += 1;
-                    s.push(chars[i]);
-                } else {
-                    s.push(chars[i]);
-                }
-                i += 1;
-            }
-            if i < len {
-                s.push(chars[i]); // closing quote
-                i += 1;
-            }
-
-            // Check if this is a key (followed by ':')
-            let mut j = i;
-            while j < len && chars[j] == ' ' {
-                j += 1;
-            }
-            let is_key = j < len && chars[j] == ':';
-
-            let color = if is_key { Color::Cyan } else { Color::Green };
-            segments.push(StyledSegment::new(s, Style::default().fg(color)));
-        }
-        // Numbers
-        else if (ch.is_ascii_digit() || ch == '-') && (current.trim().is_empty() || current.ends_with(": ") || current.ends_with(',')) {
-            if !current.is_empty() {
-                segments.push(StyledSegment::new(current.clone(), base_style));
-                current.clear();
-            }
-            let mut num = String::new();
-            num.push(ch);
-            i += 1;
-            while i < len && (chars[i].is_ascii_digit() || chars[i] == '.' || chars[i] == 'e' || chars[i] == 'E' || chars[i] == '+' || chars[i] == '-') {
-                num.push(chars[i]);
-                i += 1;
-            }
-            segments.push(StyledSegment::new(num, Style::default().fg(Color::Yellow)));
-            continue; // don't increment i again
-        }
-        // Boolean/null keywords — check from chars array, not byte-indexed line slice
-        else if i + 4 <= len && matches!(
-            (chars[i], chars.get(i+1), chars.get(i+2), chars.get(i+3)),
-            ('t', Some('r'), Some('u'), Some('e'))
-            | ('n', Some('u'), Some('l'), Some('l'))
-        ) {
-            if !current.is_empty() {
-                segments.push(StyledSegment::new(current.clone(), base_style));
-                current.clear();
-            }
-            let word: String = chars[i..i + 4].iter().collect();
-            segments.push(StyledSegment::new(word, Style::default().fg(Color::Yellow)));
-            i += 4;
-            continue;
-        }
-        else if i + 5 <= len && (chars[i], chars.get(i+1), chars.get(i+2), chars.get(i+3), chars.get(i+4))
-            == ('f', Some(&'a'), Some(&'l'), Some(&'s'), Some(&'e'))
-        {
-            if !current.is_empty() {
-                segments.push(StyledSegment::new(current.clone(), base_style));
-                current.clear();
-            }
-            let word: String = chars[i..i + 5].iter().collect();
-            segments.push(StyledSegment::new(word, Style::default().fg(Color::Yellow)));
-            i += 5;
-            continue;
-        } else {
-            current.push(ch);
-            i += 1;
-        }
-    }
-
-    if !current.is_empty() {
-        segments.push(StyledSegment::new(current, base_style));
-    }
-
+    let segments: StyledLine = tokenize_line(line)
+        .into_iter()
+        .map(|t| StyledSegment::new(t.text(line), json_style(t.kind, base_style)))
+        .collect();
     if segments.is_empty() {
         vec![StyledSegment::new(String::new(), base_style)]
     } else {
@@ -230,9 +139,60 @@ pub fn parse_json_line(line: &str) -> StyledLine {
     }
 }
 
+/// The console's colour for each token kind; every kind is named here.
+fn json_style(kind: JsonTokenKind, base: Style) -> Style {
+    match kind {
+        JsonTokenKind::Key => Style::default().fg(Color::Cyan),
+        JsonTokenKind::Str => Style::default().fg(Color::Green),
+        JsonTokenKind::Number | JsonTokenKind::Bool | JsonTokenKind::Null => Style::default().fg(Color::Yellow),
+        JsonTokenKind::Punct | JsonTokenKind::Text => base,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every token kind of the shared tokenizer has its colour here, and
+    /// the two rules the console lacked hold: a number after `[`, and a
+    /// keyword at word boundaries only (`null` inside `nullable` is text).
+    #[test]
+    fn the_two_renderers_cover_every_token_kind() {
+        let base = Style::default().fg(Color::White);
+        for (kind, color) in [
+            (JsonTokenKind::Key, Color::Cyan),
+            (JsonTokenKind::Str, Color::Green),
+            (JsonTokenKind::Number, Color::Yellow),
+            (JsonTokenKind::Bool, Color::Yellow),
+            (JsonTokenKind::Null, Color::Yellow),
+            (JsonTokenKind::Punct, Color::White),
+            (JsonTokenKind::Text, Color::White),
+        ] {
+            assert_eq!(json_style(kind, base).fg, Some(color), "{kind:?}");
+        }
+        let line = r#"{"k": [1, null], "s": "v", "x": nullable}"#;
+        let segs: Vec<(String, Option<Color>)> =
+            parse_json_line(line).into_iter().map(|s| (s.text, s.style.fg)).collect();
+        assert_eq!(
+            segs,
+            vec![
+                ("{".to_string(), Some(Color::White)),
+                ("\"k\"".to_string(), Some(Color::Cyan)),
+                (": [".to_string(), Some(Color::White)),
+                ("1".to_string(), Some(Color::Yellow)),
+                (", ".to_string(), Some(Color::White)),
+                ("null".to_string(), Some(Color::Yellow)),
+                ("], ".to_string(), Some(Color::White)),
+                ("\"s\"".to_string(), Some(Color::Cyan)),
+                (": ".to_string(), Some(Color::White)),
+                ("\"v\"".to_string(), Some(Color::Green)),
+                (", ".to_string(), Some(Color::White)),
+                ("\"x\"".to_string(), Some(Color::Cyan)),
+                (": nullable}".to_string(), Some(Color::White)),
+            ]
+        );
+        assert_eq!(parse_json_line("").len(), 1, "an empty line is one empty base segment");
+    }
 
     fn texts(line: &str) -> Vec<(String, bool)> {
         let code = Style::default().fg(Color::Gray);
