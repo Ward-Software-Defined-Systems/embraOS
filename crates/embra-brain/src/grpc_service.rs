@@ -542,17 +542,17 @@ impl BrainService for BrainGrpcService {
                         }
                         // Ensure default session exists and is active
                         {
-                            let mut mgr = session_mgr.write().await;
-                            match mgr.session_exists("main").await {
+                            let store = session_mgr.read().await.store();
+                            match store.session_exists("main").await {
                                 Ok(true) => {}
                                 Ok(false) => {
-                                    if let Err(e) = mgr.create("main").await {
+                                    if let Err(e) = store.create("main").await {
                                         error!("Session 'main' not created: {e}");
                                     }
                                 }
                                 Err(e) => error!("Session 'main' could not be checked: {e}; activating it as it is"),
                             }
-                            mgr.active_session = Some("main".to_string());
+                            session_mgr.write().await.active_session = Some("main".to_string());
                             info!("Session 'main' activated for Operational mode");
                         }
                     }
@@ -923,9 +923,12 @@ impl BrainService for BrainGrpcService {
 
     async fn create_session(&self, request: Request<CreateSessionRequest>) -> Result<Response<CreateSessionResponse>, Status> {
         let name = request.into_inner().name;
-        let mut mgr = self.session_manager.write().await;
-        let session = mgr.create(&name).await
+        let store = self.session_manager.read().await.store();
+        let session = store.create(&name).await
             .map_err(|e| Status::internal(format!("Failed to create session: {}", e)))?;
+        // A created session is the active one, as it was when `create`
+        // set it itself.
+        self.session_manager.write().await.active_session = Some(session.name.clone());
 
         Ok(Response::new(CreateSessionResponse {
             session: Some(SessionInfo {
@@ -958,25 +961,32 @@ impl BrainService for BrainGrpcService {
             )));
         }
 
-        let mut mgr = self.session_manager.write().await;
+        // The round trips run on the store handle, the manager written for
+        // a blink (#59).
+        let (store, current) = {
+            let mgr = self.session_manager.read().await;
+            (mgr.store(), mgr.active_session.clone())
+        };
 
         // A soft-deleted session is refused, as on the other three paths
         // that make a session active (`/switch`, `/new`, attach). Asked
         // before the current session is detached, so a refused switch
         // leaves it in place. `reattach` would refuse as well; from there
         // the reason would arrive as an internal error.
-        let meta = mgr.get_meta(&name).await.ok().flatten();
+        let meta = store.get_meta(&name).await.ok().flatten();
         if let Some(refusal) = meta.as_ref().and_then(|m| crate::sessions::reattach_refusal(&name, m)) {
             return Err(Status::failed_precondition(refusal));
         }
 
         // Detach current session if any
-        if let Some(ref current) = mgr.active_session.clone() {
-            let _ = mgr.detach(current).await;
+        if let Some(ref current) = current {
+            let _ = store.detach(current).await;
+            self.session_manager.write().await.clear_active(current);
         }
 
-        let history = mgr.reattach(&name).await
+        let history = store.reattach(&name).await
             .map_err(|e| Status::internal(format!("{}", e)))?;
+        self.session_manager.write().await.active_session = Some(name.clone());
 
         Ok(Response::new(SwitchSessionResponse {
             session: Some(SessionInfo {
@@ -996,10 +1006,13 @@ impl BrainService for BrainGrpcService {
     }
 
     async fn close_session(&self, _req: Request<CloseSessionRequest>) -> Result<Response<CloseSessionResponse>, Status> {
-        let mut mgr = self.session_manager.write().await;
-        let closed = mgr.active_session.clone().unwrap_or_default();
+        let (store, closed) = {
+            let mgr = self.session_manager.read().await;
+            (mgr.store(), mgr.active_session.clone().unwrap_or_default())
+        };
         if !closed.is_empty() {
-            let _ = mgr.close(&closed).await;
+            let _ = store.close(&closed).await;
+            self.session_manager.write().await.clear_active(&closed);
         }
         Ok(Response::new(CloseSessionResponse {
             closed_session: closed,
@@ -2586,10 +2599,11 @@ async fn handle_request(
                 let verdict = delete_flow_verdict(&last_response_text);
                 let (kind, note) = match verdict {
                     DeleteVerdict::Ready => {
-                        let result = {
-                            let mut mgr = session_mgr.write().await;
-                            mgr.soft_delete(&del.name, msg.content.trim()).await
-                        };
+                        let store = session_mgr.read().await.store();
+                        let result = store.soft_delete(&del.name, msg.content.trim()).await;
+                        if result.is_ok() {
+                            session_mgr.write().await.forget(&del.name);
+                        }
                         match result {
                             Ok(()) => {
                                 // The brain records the deletion, never the
@@ -2747,14 +2761,22 @@ async fn handle_request(
         }
 
         Some(conversation_request::RequestType::SessionAttach(attach)) => {
-            let mut mgr = session_mgr.write().await;
+            // The round trips of an attach run on the store handle with no
+            // lock on the manager held (#59): the manager's lock is
+            // write-preferring, and a writer parked on a round trip held
+            // every reader, the per-turn history load and the activity
+            // feed among them. The manager is written for a blink, below.
+            let (store, active) = {
+                let mgr = session_mgr.read().await;
+                (mgr.store(), mgr.active_session.clone())
+            };
 
             // Determine session: explicit name > most recent active > "main"
             let session_name = if !attach.session_name.is_empty() {
                 attach.session_name.clone()
-            } else if let Some(ref active) = mgr.active_session {
-                active.clone()
-            } else if let Ok(Some(recent)) = mgr.get_most_recent_active().await {
+            } else if let Some(active) = active {
+                active
+            } else if let Ok(Some(recent)) = store.get_most_recent_active().await {
                 recent.name.clone()
             } else {
                 "main".to_string()
@@ -2763,10 +2785,9 @@ async fn handle_request(
             // Ensure session exists. A probe that failed is not an absent
             // session: "new" would skip the deleted-session guard and the
             // cross-provider check and attach the wrong thing (#59).
-            let new_session = match mgr.session_exists(&session_name).await {
+            let new_session = match store.session_exists(&session_name).await {
                 Ok(exists) => !exists,
                 Err(e) => {
-                    drop(mgr);
                     send_system(
                         tx,
                         format!("Could not check session '{}': {}. Nothing was attached; try again.", session_name, e),
@@ -2776,8 +2797,7 @@ async fn handle_request(
                     return Ok(());
                 }
             };
-            if new_session && let Err(e) = mgr.create(&session_name).await {
-                drop(mgr);
+            if new_session && let Err(e) = store.create(&session_name).await {
                 let _ = tx
                     .send(Ok(ConversationResponse {
                         response_type: Some(conversation_response::ResponseType::System(SystemMessage {
@@ -2793,14 +2813,13 @@ async fn handle_request(
             // period (the sheet filters them out, but a stale client or an
             // explicit name can still ask). Restore is the sanctioned path.
             if !new_session {
-                let is_deleted = mgr
+                let is_deleted = store
                     .get_meta(&session_name)
                     .await
                     .ok()
                     .flatten()
                     .is_some_and(|m| m.state == SessionState::Deleted);
                 if is_deleted {
-                    drop(mgr);
                     let _ = tx
                         .send(Ok(ConversationResponse {
                             response_type: Some(conversation_response::ResponseType::System(
@@ -2817,7 +2836,6 @@ async fn handle_request(
                     return Ok(());
                 }
             }
-            drop(mgr);
 
             // Cross-provider session-resume hard-block (locked
             // decision #3). For an existing session whose meta
@@ -2860,8 +2878,7 @@ async fn handle_request(
             // that cannot be read is said as such (#59), never reported as
             // "0 messages restored".
             let history_len: usize = {
-                let mgr = session_mgr.read().await;
-                match mgr.load_history(&session_name).await {
+                match store.load_history(&session_name).await {
                     Ok(history) => {
                         replay_history(tx, &session_name, &history).await;
                         let _ = tx.send(Ok(ConversationResponse {
@@ -2875,7 +2892,6 @@ async fn handle_request(
                         history.len()
                     }
                     Err(e) => {
-                        drop(mgr);
                         send_system(
                             tx,
                             format!(
@@ -2931,7 +2947,7 @@ async fn handle_request(
             // missing/unreadable meta fires — preserves pre-gate behavior
             // on broken-meta paths (history already loaded fine).
             if !new_session && is_sealed && history_len > 0 {
-                let meta = session_mgr.read().await.get_meta(&session_name).await.ok().flatten();
+                let meta = store.get_meta(&session_name).await.ok().flatten();
                 let (idle_ok, idle_secs) = match &meta {
                     Some(m) => resume_briefing_idle_ok(m.last_active, chrono::Utc::now()),
                     None => (true, i64::MAX),
@@ -3250,8 +3266,8 @@ async fn handle_slash_command(
                         send_msg(tx, "Usage: /sessions restore <name>".to_string()).await;
                         return None;
                     }
-                    let mut mgr = session_mgr.write().await;
-                    let meta = mgr.get_meta(rest).await.ok().flatten();
+                    let store = session_mgr.read().await.store();
+                    let meta = store.get_meta(rest).await.ok().flatten();
                     match meta {
                         None => {
                             send_msg(tx, format!(
@@ -3262,7 +3278,7 @@ async fn handle_slash_command(
                         Some(m) if m.state != SessionState::Deleted => {
                             send_msg(tx, format!("Session '{}' isn't deleted.", rest)).await;
                         }
-                        Some(_) => match mgr.restore(rest).await {
+                        Some(_) => match store.restore(rest).await {
                             Ok(()) => {
                                 send_msg(tx, format!(
                                     "Session '{}' restored (Detached) — /switch {} to attach.",
@@ -3287,7 +3303,7 @@ async fn handle_slash_command(
             if args.is_empty() {
                 send_msg(tx, "Usage: /new <session-name>".to_string()).await;
             } else {
-                let mut mgr = session_mgr.write().await;
+                let store = session_mgr.read().await.store();
                 // Duplicate names are refused: create() would append a
                 // SECOND meta doc to the existing collection — shadowed by
                 // the canonical-first read, visible only as a listing
@@ -3296,8 +3312,7 @@ async fn handle_slash_command(
                 // recovery path). create() carries the same guard as
                 // defense-in-depth; this pre-check exists for the tailored
                 // messages.
-                if let Some(existing) = mgr.get_meta(args).await.ok().flatten() {
-                    drop(mgr);
+                if let Some(existing) = store.get_meta(args).await.ok().flatten() {
                     let msg = if existing.state == SessionState::Deleted {
                         format!(
                             "A deleted session '{}' is in its grace period — /sessions restore {} to recover it, or pick another name.",
@@ -3312,11 +3327,10 @@ async fn handle_slash_command(
                     send_msg(tx, msg).await;
                     return None;
                 }
-                match mgr.create(args).await {
+                match store.create(args).await {
                     Ok(s) => {
-                        mgr.active_session = Some(s.name.clone());
+                        session_mgr.write().await.active_session = Some(s.name.clone());
                         let name = s.name.clone();
-                        drop(mgr);
                         // A new session is an empty transcript: the clients
                         // clear what they show before the confirmation.
                         send_transcript_reset(tx, &name).await;
@@ -3333,11 +3347,12 @@ async fn handle_slash_command(
             } else if args == "learning" {
                 send_msg(tx, "Learning session is read-only. Use /soul to view the sealed soul document.".to_string()).await;
             } else {
-                let mut mgr = session_mgr.write().await;
-                let exists = match mgr.session_exists(args).await {
+                // The round trips run on the store handle, the manager
+                // written for a blink once the history is in hand (#59).
+                let store = session_mgr.read().await.store();
+                let exists = match store.session_exists(args).await {
                     Ok(exists) => exists,
                     Err(e) => {
-                        drop(mgr);
                         send_msg(tx, format!("Could not check session '{}': {}. Nothing was switched; try again.", args, e)).await;
                         return None;
                     }
@@ -3346,13 +3361,12 @@ async fn handle_slash_command(
                     // Soft-deleted sessions are unattachable during their
                     // grace period — reattach would silently resurrect a
                     // half-stamped session; restore is the sanctioned path.
-                    let meta = mgr.get_meta(args).await.ok().flatten();
+                    let meta = store.get_meta(args).await.ok().flatten();
                     let is_deleted = meta.as_ref().is_some_and(|m| m.state == SessionState::Deleted);
                     // The start of the absence, read before `reattach`
                     // stamps `last_active` with now.
                     let away_since = meta.map(|m| m.last_active);
                     if is_deleted {
-                        drop(mgr);
                         send_msg(tx, format!(
                             "Session '{}' is deleted (grace period) — /sessions restore {} first.",
                             args, args
@@ -3363,8 +3377,7 @@ async fn handle_slash_command(
                     if let Err((session_provider, active_provider)) =
                         check_session_provider(db, args).await
                     {
-                        let active_session = mgr.active_session.clone();
-                        drop(mgr);
+                        let active_session = session_mgr.read().await.active_session.clone();
                         send_msg(
                             tx,
                             cross_provider_block_message(
@@ -3377,23 +3390,21 @@ async fn handle_slash_command(
                         .await;
                         return None;
                     }
-                    // One load: `reattach` marks the session active and
-                    // returns its history (the second `load_history` that
-                    // followed read the same document again). A reattach
-                    // that fails is said and leaves the active session as it
-                    // was (#59): never "Switched" over a history that could
-                    // not be read.
-                    let previous = mgr.active_session.clone();
-                    let history_len: usize = match mgr.reattach(args).await {
+                    // One load: `reattach` marks the session active in the
+                    // store and returns its history (the second
+                    // `load_history` that followed read the same document
+                    // again); the manager's active session moves once the
+                    // history is in hand. A reattach that fails is said and
+                    // leaves the active session as it was (#59): never
+                    // "Switched" over a history that could not be read.
+                    let history_len: usize = match store.reattach(args).await {
                         Ok(history) => {
-                            drop(mgr);
+                            session_mgr.write().await.active_session = Some(args.to_string());
                             replay_history(tx, args, &history).await;
                             send_msg(tx, format!("Switched to session '{}' ({} messages)", args, history.len())).await;
                             history.len()
                         }
                         Err(e) => {
-                            mgr.active_session = previous;
-                            drop(mgr);
                             send_system(
                                 tx,
                                 format!("Could not switch to session '{}': {}. The active session is unchanged.", args, e),
@@ -3434,10 +3445,13 @@ async fn handle_slash_command(
             }
         }
         "/close" => {
-            let mut mgr = session_mgr.write().await;
-            if let Some(ref name) = mgr.active_session.clone() {
-                let _ = mgr.close(name).await;
-                mgr.active_session = None;
+            let (store, active) = {
+                let mgr = session_mgr.read().await;
+                (mgr.store(), mgr.active_session.clone())
+            };
+            if let Some(name) = active {
+                let _ = store.close(&name).await;
+                session_mgr.write().await.clear_active(&name);
                 send_msg(tx, format!("Closed session '{}'", name)).await;
             } else {
                 send_msg(tx, "No active session".to_string()).await;

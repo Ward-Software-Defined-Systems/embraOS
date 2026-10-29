@@ -172,8 +172,32 @@ pub(crate) fn deleted_at_patch(stamp: Option<&str>) -> serde_json::Value {
     serde_json::json!({ "deleted_at": stamp })
 }
 
-pub struct SessionManager {
+/// The database half of the session manager: every read and write of the
+/// session documents, with the per-session write locks. Cloned out of the
+/// manager with `SessionManager::store`, so a handler does its round trips
+/// with no lock on the manager held (#59): the manager's `RwLock` is
+/// write-preferring, and a writer parked on a database call held every
+/// reader, the per-turn history load and the activity feed among them.
+/// The runtime state (the active session, the pending flags, the staged
+/// attachments, the briefing attempts) stays on the manager behind the
+/// lock, written for a blink.
+#[derive(Clone)]
+pub struct SessionStore {
     db: WardsonDbClient,
+    /// One lock per session for every read-modify-write of its documents
+    /// (#59). The store has no compare-and-set: two streams persisting a
+    /// turn of one session at once would each rewrite the whole history
+    /// document from its own read, and the later write would drop the
+    /// earlier turn. Runtime only; the map is touched for a blink, the
+    /// session's lock is held across the round trips. Shared by every
+    /// handle cloned from one manager.
+    write_locks: std::sync::Arc<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    >,
+}
+
+pub struct SessionManager {
+    store: SessionStore,
     pub active_session: Option<String>,
     /// Set by the SessionAttach handler when a resume briefing should fire
     /// on the next user turn (existing session, prior history, Operational
@@ -201,13 +225,15 @@ pub struct SessionManager {
     /// images by the next operator turn. Runtime only, like the images;
     /// the files stay where they are.
     pending_files: std::collections::HashMap<String, Vec<crate::media::text::TextUpload>>,
-    /// One lock per session for every read-modify-write of its documents
-    /// (#59). The store has no compare-and-set: two streams persisting a
-    /// turn of one session at once would each rewrite the whole history
-    /// document from its own read, and the later write would drop the
-    /// earlier turn. Runtime only; the map is touched for a blink, the
-    /// session's lock is held across the round trips.
-    write_locks: std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+}
+
+/// A caller holding the manager reads and writes the documents through it.
+impl std::ops::Deref for SessionManager {
+    type Target = SessionStore;
+
+    fn deref(&self) -> &SessionStore {
+        &self.store
+    }
 }
 
 /// A trigger turn waiting for its turn: a reminder or a cron job set with
@@ -234,23 +260,37 @@ pub struct ResumeBriefing {
 impl SessionManager {
     pub fn new(db: WardsonDbClient) -> Self {
         Self {
-            db,
+            store: SessionStore {
+                db,
+                write_locks: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            },
             active_session: None,
             pending_resume_briefing: None,
             pending_trigger: None,
             briefing_attempts: std::collections::HashMap::new(),
             pending_media: std::collections::HashMap::new(),
             pending_files: std::collections::HashMap::new(),
-            write_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
-    /// The lock every read-modify-write of `name`'s documents is held
-    /// under: `append_turn` and `rewrite_meta` take it; a test may hold it
-    /// to prove they wait.
-    pub(crate) fn write_lock(&self, name: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self.write_locks.lock().unwrap_or_else(|e| e.into_inner());
-        locks.entry(name.to_string()).or_default().clone()
+    /// A handle on the documents that needs no lock on the manager: the
+    /// handlers take it, drop the manager, and do their round trips on it.
+    pub fn store(&self) -> SessionStore {
+        self.store.clone()
+    }
+
+    /// `name` is no longer the active session, when it was.
+    pub fn clear_active(&mut self, name: &str) {
+        if self.active_session.as_deref() == Some(name) {
+            self.active_session = None;
+        }
+    }
+
+    /// Drop the runtime state of a session that was deleted: it is no
+    /// longer active, and its briefing attempt is forgotten.
+    pub fn forget(&mut self, name: &str) {
+        self.clear_active(name);
+        self.briefing_attempts.remove(name);
     }
 
     /// Stage an image for `session`'s next operator turn. Returns the new
@@ -304,12 +344,25 @@ impl SessionManager {
             .insert(name.to_string(), std::time::Instant::now());
     }
 
+}
+
+impl SessionStore {
+    /// The lock every read-modify-write of `name`'s documents is held
+    /// under: `append_turn` and `rewrite_meta` take it; a test may hold it
+    /// to prove they wait.
+    pub(crate) fn write_lock(&self, name: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.write_locks.lock().unwrap_or_else(|e| e.into_inner());
+        locks.entry(name.to_string()).or_default().clone()
+    }
+
     pub async fn session_exists(&self, name: &str) -> Result<bool> {
         let meta = format!("sessions.{}.meta", name);
         self.db.collection_exists(&meta).await
     }
 
-    pub async fn create(&mut self, name: &str) -> Result<SessionMeta> {
+    /// Create the session's two documents. Runtime state is the caller's:
+    /// a session is made active on the manager.
+    pub async fn create(&self, name: &str) -> Result<SessionMeta> {
         valid_session_name(name).map_err(|e| anyhow::anyhow!(e))?;
         let meta_collection = format!("sessions.{}.meta", name);
         let history_collection = format!("sessions.{}.history", name);
@@ -397,8 +450,6 @@ impl SessionManager {
         self.db
             .write(&history_collection, &serde_json::to_value(&history)?)
             .await?;
-
-        self.active_session = Some(name.to_string());
         Ok(meta)
     }
 
@@ -487,36 +538,34 @@ impl SessionManager {
         Ok(())
     }
 
-    pub async fn detach(&mut self, name: &str) -> Result<()> {
-        self.update_state(name, SessionState::Detached).await?;
-        if self.active_session.as_deref() == Some(name) {
-            self.active_session = None;
-        }
-        Ok(())
+    /// Mark the session detached. The manager's active session is the
+    /// caller's to clear (`SessionManager::clear_active`).
+    pub async fn detach(&self, name: &str) -> Result<()> {
+        self.update_state(name, SessionState::Detached).await
     }
 
-    /// Make an existing session the active one and load its history.
+    /// Mark an existing session active in the store and load its history.
+    /// The manager's `active_session` is the caller's to set, once this
+    /// returned the history (#59: no lock on the manager across the round
+    /// trips, and nothing to undo when the load fails).
     ///
     /// A soft-deleted session is refused here, whatever the caller checked:
     /// made active, it would keep its `deleted_at` stamps and its TTL, and
     /// would be reaped while in use. `/sessions restore` is the way back.
-    pub async fn reattach(&mut self, name: &str) -> Result<Vec<Message>> {
+    pub async fn reattach(&self, name: &str) -> Result<Vec<Message>> {
         if let Some(meta) = self.get_meta(name).await?
             && let Some(refusal) = reattach_refusal(name, &meta)
         {
             anyhow::bail!(refusal);
         }
         self.update_state(name, SessionState::Active).await?;
-        self.active_session = Some(name.to_string());
         self.load_history(name).await
     }
 
-    pub async fn close(&mut self, name: &str) -> Result<()> {
-        self.update_state(name, SessionState::Closed).await?;
-        if self.active_session.as_deref() == Some(name) {
-            self.active_session = None;
-        }
-        Ok(())
+    /// Mark the session closed. The manager's active session is the
+    /// caller's to clear (`SessionManager::clear_active`).
+    pub async fn close(&self, name: &str) -> Result<()> {
+        self.update_state(name, SessionState::Closed).await
     }
 
     /// Soft-delete a session: stamp `deleted_at` (+ the operator's reason
@@ -526,7 +575,9 @@ impl SessionManager {
     /// until the TTL worker reaps the docs; the boot-time
     /// `migrations::sweep_reaped_sessions` drops the emptied collections
     /// afterwards (TTL reaps docs, never collections).
-    pub async fn soft_delete(&mut self, name: &str, reason: &str) -> Result<()> {
+    /// The manager's runtime state of the session is the caller's to drop
+    /// (`SessionManager::forget`).
+    pub async fn soft_delete(&self, name: &str, reason: &str) -> Result<()> {
         let stamp = Utc::now().to_rfc3339();
         let found = self
             .rewrite_meta(name, |m| apply_soft_delete(m, reason, &stamp))
@@ -560,11 +611,6 @@ impl SessionManager {
                     "TTL scheduling failed — session stays hidden but won't auto-reap");
             }
         }
-
-        if self.active_session.as_deref() == Some(name) {
-            self.active_session = None;
-        }
-        self.briefing_attempts.remove(name);
         Ok(())
     }
 
@@ -574,7 +620,7 @@ impl SessionManager {
     /// deliberately left in place: docs without a `deleted_at` stamp never
     /// match the reaper's cutoff, and a future delete of the same name
     /// reuses it.
-    pub async fn restore(&mut self, name: &str) -> Result<()> {
+    pub async fn restore(&self, name: &str) -> Result<()> {
         let found = self.rewrite_meta(name, apply_restore).await?;
         if !found {
             anyhow::bail!(
@@ -926,6 +972,44 @@ mod append_turn_tests {
         drop(held);
         task.await.unwrap().expect("saved once the lock is free");
         assert_eq!(puts(&server).await.len(), 2);
+    }
+
+    /// #59: the handlers do their round trips on `store()`, so a session
+    /// is created, read and written while another task holds the
+    /// manager's write lock, which is held for in-memory state alone.
+    #[tokio::test]
+    async fn a_store_handle_works_while_the_manager_is_write_locked() {
+        let server = session_store().await;
+        Mock::given(method("GET"))
+            .and(path("/sessions.s.meta"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/sessions.s.history"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST")).respond_with(data(json!({"_id": "new"}))).mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/config.system/docs/config"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let mgr = Arc::new(tokio::sync::RwLock::new(SessionManager::new(WardsonDbClient::from_url(
+            &server.uri(),
+        ))));
+        let store = mgr.read().await.store();
+        let writer = mgr.write().await;
+
+        let created = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            store.session_exists("s").await.expect("checked");
+            store.create("s").await.expect("created");
+            store.append_turn("s", &[Message::user("q")], None).await.expect("written")
+        })
+        .await;
+        assert!(created.is_ok(), "the store handle waited for the manager's lock");
+        drop(writer);
     }
 }
 
