@@ -197,19 +197,21 @@ pub(crate) async fn gather(
     now: DateTime<Utc>,
     current: &str,
 ) -> AwayDigest {
-    let entries = db
-        .query("memory.entries", &memories_since_body(&since.to_rfc3339()))
-        .await
-        .unwrap_or_default();
-    let crons = db.fetch_collection("crons").await.unwrap_or_default();
-    let runs = db
-        .query(
-            crate::tools::cron::CRON_RUNS,
-            &super::events::cron_runs_since_body(&since.to_rfc3339()),
-        )
-        .await
-        .unwrap_or_default();
-    let reminders = db.fetch_collection("reminders").await.unwrap_or_default();
+    // Four independent reads of one pooled client, at once (#39): the wait
+    // is the slowest of them, not their sum.
+    let since_text = since.to_rfc3339();
+    let memories_body = memories_since_body(&since_text);
+    let runs_body = super::events::cron_runs_since_body(&since_text);
+    let (entries, crons, runs, reminders) = tokio::join!(
+        db.query("memory.entries", &memories_body),
+        db.fetch_collection("crons"),
+        db.query(crate::tools::cron::CRON_RUNS, &runs_body),
+        db.fetch_collection("reminders"),
+    );
+    let entries = entries.unwrap_or_default();
+    let crons = crons.unwrap_or_default();
+    let runs = runs.unwrap_or_default();
+    let reminders = reminders.unwrap_or_default();
     let (sessions_created, sessions_deleted) = session_changes(metas, since, current);
     let memories_at_limit = crate::db::client::window_saturated(entries.len(), MEMORY_LIMIT);
     if memories_at_limit {

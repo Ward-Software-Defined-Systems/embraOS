@@ -43,24 +43,35 @@ async fn recall(db: &WardsonDbClient, query: &str, unpromoted_only: bool) -> Str
     // recall over the oldest ~100 docs per collection forever. Newest-first
     // also means the display cap below shows the most recent matches.
     // A read that fails is reported as itself, never as "no memories" (#60).
-    let entries = match db.fetch_recent("memory.entries", MEMORY_FETCH_WINDOW).await {
-        Ok(docs) => docs,
-        Err(e) => return format!("Failed to load memories from the database: {e}"),
-    };
+    // The three windows are independent reads of one pooled client, so they
+    // go out at once (#39): the wait is the slowest of three, not their sum.
     // Unpromoted-worklist mode only concerns memory.entries — semantic and
     // procedural docs are promoted by definition.
-    let (semantic, procedural) = if unpromoted_only {
-        (Vec::new(), Vec::new())
+    let (entries, semantic, procedural) = if unpromoted_only {
+        let entries = match db.fetch_recent("memory.entries", MEMORY_FETCH_WINDOW).await {
+            Ok(docs) => docs,
+            Err(e) => return format!("Failed to load memories from the database: {e}"),
+        };
+        (entries, Vec::new(), Vec::new())
     } else {
-        let semantic = match db.fetch_recent("memory.semantic", MEMORY_FETCH_WINDOW).await {
+        let (entries, semantic, procedural) = tokio::join!(
+            db.fetch_recent("memory.entries", MEMORY_FETCH_WINDOW),
+            db.fetch_recent("memory.semantic", MEMORY_FETCH_WINDOW),
+            db.fetch_recent("memory.procedural", MEMORY_FETCH_WINDOW),
+        );
+        let entries = match entries {
+            Ok(docs) => docs,
+            Err(e) => return format!("Failed to load memories from the database: {e}"),
+        };
+        let semantic = match semantic {
             Ok(docs) => docs,
             Err(e) => return format!("Failed to load semantic memories from the database: {e}"),
         };
-        let procedural = match db.fetch_recent("memory.procedural", MEMORY_FETCH_WINDOW).await {
+        let procedural = match procedural {
             Ok(docs) => docs,
             Err(e) => return format!("Failed to load procedural memories from the database: {e}"),
         };
-        (semantic, procedural)
+        (entries, semantic, procedural)
     };
 
     if entries.is_empty() && semantic.is_empty() && procedural.is_empty() {
