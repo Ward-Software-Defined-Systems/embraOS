@@ -500,18 +500,11 @@ pub async fn git_auth_config(db: &WardsonDbClient) -> Vec<(String, String)> {
 }
 
 /// Clone a git repository into /embra/workspace/.
-/// Format: `<url>` or `<url> <subpath>`
-/// `<subpath>` may be a bare dirname (`myrepo`), a relative path under the
+/// `subpath` may be a bare dirname (`myrepo`), a relative path under the
 /// workspace (`repos/myrepo`), or an absolute path that lives under
 /// `/embra/workspace/` (`/embra/workspace/repos/myrepo`). `..` segments are
 /// rejected. A trailing `/` on the subpath appends the URL-derived repo name.
-pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
-    if param.is_empty() {
-        return "Usage: git_clone <url> or git_clone <url> <subpath>".into();
-    }
-
-    let parts: Vec<&str> = param.split_whitespace().collect();
-    let url = parts[0];
+pub async fn git_clone(db: &WardsonDbClient, url: &str, subpath: Option<&str>) -> String {
     if let Err(e) = validate_clone_url(url) {
         return e;
     }
@@ -523,15 +516,10 @@ pub async fn git_clone(db: &WardsonDbClient, param: &str) -> String {
         .trim_end_matches(".git")
         .to_string();
 
-    let subpath_input = if parts.len() > 1 {
-        let raw = parts[1];
-        if raw.ends_with('/') {
-            format!("{}{}", raw, derived_name)
-        } else {
-            raw.to_string()
-        }
-    } else {
-        derived_name
+    let subpath_input = match subpath {
+        Some(raw) if raw.ends_with('/') => format!("{}{}", raw, derived_name),
+        Some(raw) => raw.to_string(),
+        None => derived_name,
     };
 
     // The lexical jail, then the canonical check of what exists: a
@@ -595,21 +583,15 @@ pub async fn git_status(path: &str) -> String {
     }
 }
 
-/// Run `git log` with optional params. First whitespace token is the path
-/// (resolved through `git_dir`); remaining tokens pass through
-/// as git-log flags (e.g. `-n 20 --oneline`).
-pub async fn git_log(param: &str) -> String {
-    let parts: Vec<&str> = param.split_whitespace().collect();
-    let (path_token, extra_args): (&str, Vec<&str>) = if parts.is_empty() {
-        ("", vec![])
-    } else {
-        (parts[0], parts[1..].to_vec())
-    };
-    let extra = match git_log_args(&extra_args) {
+/// Run `git log` in a workspace repository: `path` is resolved through
+/// `git_dir`, `args` are the flags and revisions `git_log_args` admits
+/// (e.g. `-n 20 --oneline`).
+pub async fn git_log(path: &str, args: &[&str]) -> String {
+    let extra = match git_log_args(args) {
         Ok(a) => a,
         Err(e) => return e,
     };
-    let dir = match git_dir(path_token).await {
+    let dir = match git_dir(path).await {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -628,21 +610,16 @@ pub async fn git_log(param: &str) -> String {
     }
 }
 
-/// Run `git add` on files. Write operation — workspace restricted.
-/// Param format: `<path> <files>`
-pub async fn git_add(param: &str) -> String {
-    let parts: Vec<&str> = param.splitn(2, ' ').collect();
-    if parts.len() < 2 {
-        return "Usage: git_add <path> <files>\nExample: git_add /embra/workspace/repos/myrepo file.txt".into();
-    }
-    let files = parts[1];
+/// Run `git add` on files (whitespace-separated). Write operation —
+/// workspace restricted.
+pub async fn git_add(path: &str, files: &str) -> String {
     let file_args: Vec<&str> = files.split_whitespace().collect();
     for f in &file_args {
         if let Err(e) = positional(f, "file") {
             return e;
         }
     }
-    let dir = match git_dir(parts[0]).await {
+    let dir = match git_dir(path).await {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -663,18 +640,12 @@ pub async fn git_add(param: &str) -> String {
 /// Run `git commit -m <message>` in a workspace repository. The message is
 /// passed to git exactly as given: JSON carries real newlines, so a blank
 /// line after the first line separates the subject from the body.
-///
-/// Param format: `<path> | <message>`
-pub async fn git_commit(param: &str) -> String {
-    let parts: Vec<&str> = param.splitn(2, " | ").collect();
-    if parts.len() < 2 {
-        return "Usage: git_commit <path> | <message>\nA blank line after the first line separates the subject from the body.".into();
-    }
-    let dir = match git_dir(parts[0].trim()).await {
+pub async fn git_commit(path: &str, message: &str) -> String {
+    let dir = match git_dir(path.trim()).await {
         Ok(d) => d,
         Err(e) => return e,
     };
-    let message = parts[1].trim();
+    let message = message.trim();
 
     match run_git(git_command().args(["-C", &dir, "commit", "-m", message]), "git").await {
         Ok(run) => {
@@ -688,9 +659,8 @@ pub async fn git_commit(param: &str) -> String {
 }
 
 /// Run `git push`. Write operation — workspace restricted.
-/// Param format: `<path>`
-pub async fn git_push(db: &WardsonDbClient, param: &str) -> String {
-    let dir = match git_dir(param.trim()).await {
+pub async fn git_push(db: &WardsonDbClient, path: &str) -> String {
+    let dir = match git_dir(path.trim()).await {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -709,9 +679,8 @@ pub async fn git_push(db: &WardsonDbClient, param: &str) -> String {
 }
 
 /// Run `git pull`. Write operation — workspace restricted.
-/// Param format: `<path>`
-pub async fn git_pull(db: &WardsonDbClient, param: &str) -> String {
-    let dir = match git_dir(param.trim()).await {
+pub async fn git_pull(db: &WardsonDbClient, path: &str) -> String {
+    let dir = match git_dir(path.trim()).await {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -781,18 +750,9 @@ pub async fn git_fetch(db: &WardsonDbClient, path: &str, remote: &str, branch: O
     }
 }
 
-/// Run `git diff`. Workspace restricted.
-/// Param format: `<path> [file]`
-pub async fn git_diff(param: &str) -> String {
-    let parts: Vec<&str> = param.split_whitespace().collect();
-    let (path_token, file) = if parts.is_empty() {
-        ("", None)
-    } else if parts.len() == 1 {
-        (parts[0], None)
-    } else {
-        (parts[0], Some(parts[1]))
-    };
-    let dir = match git_dir(path_token).await {
+/// Run `git diff`, of one file when `file` is given. Workspace restricted.
+pub async fn git_diff(path: &str, file: Option<&str>) -> String {
+    let dir = match git_dir(path).await {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -818,145 +778,62 @@ pub async fn git_diff(param: &str) -> String {
     }
 }
 
-/// Run `git branch`. Forms:
-/// - `<path>`                       → list branches (read-only, unrestricted path)
-/// - `<path> <name>`                      → create a branch (workspace restricted)
-/// - `<path> delete <name>`               → safe-delete, requires merge into `main`
-/// - `<path> delete <name> <base>`        → safe-delete, requires merge into `<base>`
-/// - `<path> delete-force <name>`         → force-delete, skips the merge check (`git branch -D`)
-/// - `<path> delete-force <name> <base>`  → force-delete (base ignored; retained for shape parity)
+/// Run `git branch`: list (`GitBranchAction::List`), create a branch
+/// (`Create`, workspace restricted), or delete one (`Delete`): the safe
+/// delete requires the branch merged into `base` (`main` by default), the
+/// forced one (`force`) discards unmerged commits.
 ///
-/// The safe `delete` form enforces an explicit merge-base check before invoking
+/// The safe delete enforces an explicit merge-base check before invoking
 /// `git branch -d`. Git's own `-d` is permissive — any tracking ref (including
 /// `origin/<branch>`) makes a branch deletable, so a pushed-but-unmerged branch
 /// would slip through. We pre-check `git merge-base --is-ancestor` against the
 /// base ref (default `main`, falling back to `origin/<base>` if no local copy).
 /// Closes Embra_Debug #49.
 ///
-/// The `delete-force` form is the escape hatch for throwaway/spike branches
+/// The forced delete is the escape hatch for throwaway/spike branches
 /// that the caller explicitly wants to discard unmerged — runs `git branch -D`
 /// and skips both the base lookup and the merge-base check. Closes
 /// Embra_Debug #55.
-pub async fn git_branch(param: &str) -> String {
-    let parts: Vec<&str> = param.split_whitespace().collect();
-    if parts.is_empty() {
+pub async fn git_branch(
+    path: &str,
+    action: GitBranchAction,
+    name: Option<&str>,
+    base: Option<&str>,
+    force: bool,
+) -> String {
+    // Every positional is refused before the directory is resolved, so a
+    // bad argument never reaches the filesystem.
+    let name = match (&action, name) {
+        (GitBranchAction::List, _) => None,
+        (GitBranchAction::Create | GitBranchAction::Delete, None) => {
+            return format!("git_branch action={:?} requires a name.", action);
+        }
+        (GitBranchAction::Create | GitBranchAction::Delete, Some(n)) => match positional(n, "branch") {
+            Ok(n) => Some(n),
+            Err(e) => return e,
+        },
+    };
+    let base = match (&action, base) {
+        (GitBranchAction::Delete, base) => match positional(base.unwrap_or("main"), "base") {
+            Ok(b) => Some(b),
+            Err(e) => return e,
+        },
+        _ => None,
+    };
+    if matches!(action, GitBranchAction::List) && path.trim().is_empty() {
         return git_branch_list(WORKSPACE_ROOT).await;
     }
-    // Delete forms: `<path> delete <name> [<base>]` (safe) or
-    // `<path> delete-force <name>` (force, skips merge check). Every
-    // positional is refused before the directory is resolved, so a bad
-    // argument never reaches the filesystem.
-    let is_delete = parts.len() >= 3 && parts[1].eq_ignore_ascii_case("delete");
-    let is_delete_force = parts.len() >= 3 && parts[1].eq_ignore_ascii_case("delete-force");
-    if is_delete || is_delete_force {
-        if let Err(e) = positional(parts[2], "branch") {
-            return e;
-        }
-        if let Err(e) = positional(parts.get(3).copied().unwrap_or("main"), "base") {
-            return e;
-        }
-    } else if parts.len() >= 2
-        && let Err(e) = positional(parts[1], "branch")
-    {
-        return e;
-    }
-    let dir = match git_dir(parts[0]).await {
+    let dir = match git_dir(path).await {
         Ok(d) => d,
         Err(e) => return e,
     };
 
-    if is_delete || is_delete_force {
-        let name = match positional(parts[2], "branch") {
-            Ok(n) => n,
-            Err(e) => return e,
-        };
+    let Some(name) = name else {
+        // List form.
+        return git_branch_list(&dir).await;
+    };
 
-        if is_delete_force {
-            return match run_git(git_command().args(["-C", &dir, "branch", "-D", name]), "git").await {
-                Ok(run) => {
-                    if !run.status.success() {
-                        return format!("git branch failed: {}", run.failure());
-                    }
-                    format!("Force-deleted branch '{}' in {} (unmerged commits discarded)", name, dir)
-                }
-                Err(e) => e,
-            };
-        }
-
-        let base = match positional(parts.get(3).copied().unwrap_or("main"), "base") {
-            Ok(b) => b,
-            Err(e) => return e,
-        };
-
-        // Resolve a usable base ref: prefer local, fall back to origin/<base>.
-        let base_ref = match resolve_base_ref(&dir, base).await {
-            Ok(r) => r,
-            Err(e) => return e,
-        };
-
-        // merge-base --is-ancestor exits 0 if branch tip is reachable from base,
-        // 1 if not. Anything else is an unexpected git error.
-        let ancestor = run_git(
-            git_command().args([
-                "-C",
-                &dir,
-                "merge-base",
-                "--is-ancestor",
-                &format!("refs/heads/{}", name),
-                &base_ref,
-            ]),
-            "git merge-base",
-        )
-        .await;
-        match ancestor {
-            Ok(run) => match run.status.code() {
-                Some(0) => {} // merged — fall through to delete
-                Some(1) => {
-                    return format!(
-                        "Refusing delete: branch '{}' has commits not reachable from '{}'. \
-                         Merge it first, pass a different base if you're targeting a non-default \
-                         integration branch, or use force=true to discard unmerged commits.",
-                        name, base_ref
-                    );
-                }
-                _ => {
-                    return format!(
-                        "Cannot verify merge status of '{}' against '{}': {}",
-                        name, base_ref, run.failure()
-                    );
-                }
-            },
-            Err(e) => return e,
-        }
-
-        // Our `merge-base --is-ancestor` check above is the authoritative
-        // merge validation against the caller-supplied base — exit 0 means
-        // every commit reachable from the branch is reachable from base_ref,
-        // which is the git definition of "merged into base_ref". git's own
-        // `-d` check is narrower (HEAD or the branch's upstream only) and
-        // cannot consult an arbitrary third ref, so it refuses valid-per-our-
-        // contract deletions when base_ref is neither HEAD nor upstream.
-        // Use `-D` here to finalize what our pre-check already authorized —
-        // this is not a force-delete semantically (the merged-into-base
-        // guarantee still holds), it just bypasses a redundant narrower
-        // check. Closes Embra_Debug #56.
-        return match run_git(git_command().args(["-C", &dir, "branch", "-D", name]), "git").await {
-            Ok(run) => {
-                if !run.status.success() {
-                    return format!("git branch failed: {}", run.failure());
-                }
-                format!("Deleted branch '{}' in {} (verified merged into '{}')", name, dir, base_ref)
-            }
-            Err(e) => e,
-        };
-    }
-
-    // Create form: `<path> <name>`
-    if parts.len() >= 2 {
-        let name = match positional(parts[1], "branch") {
-            Ok(n) => n,
-            Err(e) => return e,
-        };
+    if matches!(action, GitBranchAction::Create) {
         return match run_git(git_command().args(["-C", &dir, "branch", name]), "git").await {
             Ok(run) => {
                 if !run.status.success() {
@@ -968,8 +845,81 @@ pub async fn git_branch(param: &str) -> String {
         };
     }
 
-    // Single arg: list form
-    git_branch_list(&dir).await
+    if force {
+        return match run_git(git_command().args(["-C", &dir, "branch", "-D", name]), "git").await {
+            Ok(run) => {
+                if !run.status.success() {
+                    return format!("git branch failed: {}", run.failure());
+                }
+                format!("Force-deleted branch '{}' in {} (unmerged commits discarded)", name, dir)
+            }
+            Err(e) => e,
+        };
+    }
+
+    let base = base.unwrap_or("main");
+
+    // Resolve a usable base ref: prefer local, fall back to origin/<base>.
+    let base_ref = match resolve_base_ref(&dir, base).await {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+
+    // merge-base --is-ancestor exits 0 if branch tip is reachable from base,
+    // 1 if not. Anything else is an unexpected git error.
+    let ancestor = run_git(
+        git_command().args([
+            "-C",
+            &dir,
+            "merge-base",
+            "--is-ancestor",
+            &format!("refs/heads/{}", name),
+            &base_ref,
+        ]),
+        "git merge-base",
+    )
+    .await;
+    match ancestor {
+        Ok(run) => match run.status.code() {
+            Some(0) => {} // merged — fall through to delete
+            Some(1) => {
+                return format!(
+                    "Refusing delete: branch '{}' has commits not reachable from '{}'. \
+                     Merge it first, pass a different base if you're targeting a non-default \
+                     integration branch, or use force=true to discard unmerged commits.",
+                    name, base_ref
+                );
+            }
+            _ => {
+                return format!(
+                    "Cannot verify merge status of '{}' against '{}': {}",
+                    name, base_ref, run.failure()
+                );
+            }
+        },
+        Err(e) => return e,
+    }
+
+    // Our `merge-base --is-ancestor` check above is the authoritative
+    // merge validation against the caller-supplied base — exit 0 means
+    // every commit reachable from the branch is reachable from base_ref,
+    // which is the git definition of "merged into base_ref". git's own
+    // `-d` check is narrower (HEAD or the branch's upstream only) and
+    // cannot consult an arbitrary third ref, so it refuses valid-per-our-
+    // contract deletions when base_ref is neither HEAD nor upstream.
+    // Use `-D` here to finalize what our pre-check already authorized —
+    // this is not a force-delete semantically (the merged-into-base
+    // guarantee still holds), it just bypasses a redundant narrower
+    // check. Closes Embra_Debug #56.
+    match run_git(git_command().args(["-C", &dir, "branch", "-D", name]), "git").await {
+        Ok(run) => {
+            if !run.status.success() {
+                return format!("git branch failed: {}", run.failure());
+            }
+            format!("Deleted branch '{}' in {} (verified merged into '{}')", name, dir, base_ref)
+        }
+        Err(e) => e,
+    }
 }
 
 async fn git_branch_list(dir: &str) -> String {
@@ -985,17 +935,12 @@ async fn git_branch_list(dir: &str) -> String {
 }
 
 /// Run `git checkout`. Write operation — workspace restricted.
-/// Param format: `<path> <branch>`
-pub async fn git_checkout(param: &str) -> String {
-    let parts: Vec<&str> = param.split_whitespace().collect();
-    if parts.len() < 2 {
-        return "Usage: git_checkout <path> <branch>".into();
-    }
-    let branch = match positional(parts[1], "branch") {
+pub async fn git_checkout(path: &str, branch: &str) -> String {
+    let branch = match positional(branch, "branch") {
         Ok(b) => b,
         Err(e) => return e,
     };
-    let dir = match git_dir(parts[0]).await {
+    let dir = match git_dir(path).await {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -1011,28 +956,23 @@ pub async fn git_checkout(param: &str) -> String {
     }
 }
 
-/// Merge a branch into the current branch of a workspace repository.
-/// Param format: `<path> <branch>` or `<path> <branch> --no-ff`.
+/// Merge a branch into the current branch of a workspace repository, with
+/// a merge commit even where a fast-forward would do when `no_ff`.
 ///
 /// On conflict, returns git's stdout and stderr so the caller can inspect
 /// the conflicted paths and resolve them via the `file_*` tools, then
 /// stage the resolutions with `git_add` and finalize with `git_commit`.
 /// No automatic abort — the caller owns the resolution path. Closes
 /// Embra_Debug #55.
-pub async fn git_merge(param: &str) -> String {
-    let parts: Vec<&str> = param.split_whitespace().collect();
-    if parts.len() < 2 {
-        return "Usage: git_merge <repo_path> <branch> [--no-ff]".into();
-    }
-    let branch = match positional(parts[1], "branch") {
+pub async fn git_merge(path: &str, branch: &str, no_ff: bool) -> String {
+    let branch = match positional(branch, "branch") {
         Ok(b) => b,
         Err(e) => return e,
     };
-    let dir = match git_dir(parts[0]).await {
+    let dir = match git_dir(path).await {
         Ok(d) => d,
         Err(e) => return e,
     };
-    let no_ff = parts.iter().skip(2).any(|p| *p == "--no-ff");
 
     let mut args: Vec<String> = vec!["-C".to_string(), dir.clone(), "merge".to_string()];
     if no_ff {
@@ -1059,22 +999,16 @@ pub async fn git_merge(param: &str) -> String {
     }
 }
 
-/// Stage a file removal with git rm. Workspace restricted.
-/// Param format: `<path> <files>`
-pub async fn git_rm(param: &str) -> String {
-    let parts: Vec<&str> = param.splitn(2, char::is_whitespace).collect();
-    if parts.len() < 2 {
-        return "Usage: git_rm <repo_path> <files>\nExample: git_rm /embra/workspace/repos/myrepo old_file.txt".into();
-    }
-
-    let files = parts[1];
+/// Stage a file removal with git rm (files whitespace-separated).
+/// Workspace restricted.
+pub async fn git_rm(path: &str, files: &str) -> String {
     let file_args: Vec<&str> = files.split_whitespace().collect();
     for f in &file_args {
         if let Err(e) = positional(f, "file") {
             return e;
         }
     }
-    let dir = match git_dir(parts[0]).await {
+    let dir = match git_dir(path).await {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -1098,18 +1032,12 @@ pub async fn git_rm(param: &str) -> String {
 /// Move or rename a tracked file with git mv. Workspace restricted.
 /// Handles case-sensitive renames on case-insensitive filesystems (e.g. File.rs → file.rs)
 /// that plain `file_move` + `git_add` cannot.
-/// Param format: `<repo_path> <source> <destination>`
-pub async fn git_mv(param: &str) -> String {
-    let parts: Vec<&str> = param.splitn(3, char::is_whitespace).collect();
-    if parts.len() < 3 {
-        return "Usage: git_mv <repo_path> <source> <destination>\nExample: git_mv /embra/workspace/repos/myrepo src/Old.rs src/old.rs".into();
-    }
-
-    let (src, dst) = match (positional(parts[1], "source"), positional(parts[2], "destination")) {
+pub async fn git_mv(path: &str, source: &str, destination: &str) -> String {
+    let (src, dst) = match (positional(source, "source"), positional(destination, "destination")) {
         (Ok(s), Ok(d)) => (s, d),
         (Err(e), _) | (_, Err(e)) => return e,
     };
-    let dir = match git_dir(parts[0]).await {
+    let dir = match git_dir(path).await {
         Ok(d) => d,
         Err(e) => return e,
     };
@@ -1142,11 +1070,8 @@ pub struct GitCloneArgs {
 
 impl GitCloneArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = match self.subpath {
-            Some(s) if !s.is_empty() => format!("{} {}", self.url, s),
-            _ => self.url,
-        };
-        Ok(git_clone(ctx.db, &param).await)
+        let subpath = self.subpath.as_deref().filter(|s| !s.is_empty());
+        Ok(git_clone(ctx.db, &self.url, subpath).await)
     }
 }
 
@@ -1178,12 +1103,8 @@ pub struct GitLogArgs {
 
 impl GitLogArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = if self.args.is_empty() {
-            self.path
-        } else {
-            format!("{} {}", self.path, self.args)
-        };
-        Ok(git_log(&param).await)
+        let args: Vec<&str> = self.args.split_whitespace().collect();
+        Ok(git_log(&self.path, &args).await)
     }
 }
 
@@ -1201,8 +1122,7 @@ pub struct GitAddArgs {
 
 impl GitAddArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = format!("{} {}", self.path, self.files);
-        Ok(git_add(&param).await)
+        Ok(git_add(&self.path, &self.files).await)
     }
 }
 
@@ -1219,8 +1139,7 @@ pub struct GitCommitArgs {
 
 impl GitCommitArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = format!("{} | {}", self.path, self.message);
-        Ok(git_commit(&param).await)
+        Ok(git_commit(&self.path, &self.message).await)
     }
 }
 
@@ -1298,11 +1217,8 @@ pub struct GitDiffArgs {
 
 impl GitDiffArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = match self.file {
-            Some(f) if !f.is_empty() => format!("{} {}", self.path, f),
-            _ => self.path,
-        };
-        Ok(git_diff(&param).await)
+        let file = self.file.as_deref().filter(|f| !f.is_empty());
+        Ok(git_diff(&self.path, file).await)
     }
 }
 
@@ -1344,42 +1260,15 @@ fn default_git_branch_action() -> GitBranchAction {
 }
 
 impl GitBranchArgs {
-    /// The string form `git_branch` parses, or the refusal. That parser
-    /// splits on whitespace, so a field with a space would be read as
-    /// another form: `name = "delete x"` under action=create would have
-    /// deleted `x` (the verification of 2026-10-24). No field may carry any.
-    fn param(&self) -> Result<String, String> {
-        for (field, value) in [
-            ("path", Some(self.path.as_str())),
-            ("name", self.name.as_deref()),
-            ("base", self.base.as_deref()),
-        ] {
-            if value.is_some_and(|v| v.chars().any(char::is_whitespace)) {
-                return Err(format!("git_branch: {field} cannot contain whitespace."));
-            }
-        }
-        Ok(match (&self.action, &self.name) {
-            (GitBranchAction::List, _) => self.path.clone(),
-            (GitBranchAction::Create, Some(n)) => format!("{} {}", self.path, n),
-            (GitBranchAction::Delete, Some(n)) => {
-                if self.force.unwrap_or(false) {
-                    format!("{} delete-force {}", self.path, n)
-                } else {
-                    let base = self.base.as_deref().unwrap_or("main");
-                    format!("{} delete {} {}", self.path, n, base)
-                }
-            }
-            (GitBranchAction::Create, None) | (GitBranchAction::Delete, None) => {
-                return Err(format!("git_branch action={:?} requires a name.", self.action));
-            }
-        })
-    }
-
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        Ok(match self.param() {
-            Ok(param) => git_branch(&param).await,
-            Err(refusal) => refusal,
-        })
+        Ok(git_branch(
+            &self.path,
+            self.action,
+            self.name.as_deref(),
+            self.base.as_deref(),
+            self.force.unwrap_or(false),
+        )
+        .await)
     }
 }
 
@@ -1396,8 +1285,7 @@ pub struct GitCheckoutArgs {
 
 impl GitCheckoutArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = format!("{} {}", self.path, self.branch);
-        Ok(git_checkout(&param).await)
+        Ok(git_checkout(&self.path, &self.branch).await)
     }
 }
 
@@ -1419,11 +1307,7 @@ pub struct GitMergeArgs {
 
 impl GitMergeArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let mut param = format!("{} {}", self.path, self.branch);
-        if self.no_ff.unwrap_or(false) {
-            param.push_str(" --no-ff");
-        }
-        Ok(git_merge(&param).await)
+        Ok(git_merge(&self.path, &self.branch, self.no_ff.unwrap_or(false)).await)
     }
 }
 
@@ -1440,8 +1324,7 @@ pub struct GitRmArgs {
 
 impl GitRmArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = format!("{} {}", self.path, self.files);
-        Ok(git_rm(&param).await)
+        Ok(git_rm(&self.path, &self.files).await)
     }
 }
 
@@ -1459,8 +1342,7 @@ pub struct GitMvArgs {
 
 impl GitMvArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = format!("{} {} {}", self.path, self.source, self.destination);
-        Ok(git_mv(&param).await)
+        Ok(git_mv(&self.path, &self.source, &self.destination).await)
     }
 }
 
@@ -1564,29 +1446,6 @@ mod native_args_tests {
     /// its base. A field with whitespace is refused before the string is
     /// built: the parser splits on it, so `name = "delete x"` under
     /// action=create read as a delete of `x` (the verification of 2026-10-24).
-    #[test]
-    fn git_branch_args_build_the_string_form_and_refuse_whitespace() {
-        let args = |action, name: Option<&str>, base: Option<&str>, force| GitBranchArgs {
-            path: "/w/x".into(),
-            action,
-            name: name.map(str::to_string),
-            base: base.map(str::to_string),
-            force,
-        };
-        assert_eq!(args(GitBranchAction::Delete, Some("spike"), None, Some(true)).param().unwrap(), "/w/x delete-force spike");
-        assert_eq!(args(GitBranchAction::Delete, Some("spike"), None, None).param().unwrap(), "/w/x delete spike main");
-        assert_eq!(args(GitBranchAction::Delete, Some("spike"), Some("develop"), Some(false)).param().unwrap(), "/w/x delete spike develop");
-        assert_eq!(args(GitBranchAction::Create, Some("feature"), None, None).param().unwrap(), "/w/x feature");
-        assert_eq!(args(GitBranchAction::List, None, None, None).param().unwrap(), "/w/x");
-        assert_eq!(args(GitBranchAction::Create, None, None, None).param().unwrap_err(), "git_branch action=Create requires a name.");
-        let refused = args(GitBranchAction::Create, Some("delete x"), None, None).param().unwrap_err();
-        assert!(refused.contains("name") && refused.contains("whitespace"), "{refused}");
-        assert!(args(GitBranchAction::Delete, Some("spike"), Some("ma in"), None).param().is_err());
-        let mut spaced = args(GitBranchAction::List, None, None, None);
-        spaced.path = "/w/my repo".into();
-        assert!(spaced.param().is_err());
-    }
-
     #[test]
     fn git_merge_args_no_ff_optional() {
         let a: GitMergeArgs = serde_json::from_value(serde_json::json!({
@@ -1844,10 +1703,10 @@ mod argument_tests {
     async fn a_git_log_output_flag_is_refused_and_writes_nothing() {
         let target = std::env::temp_dir().join(format!("embra-git-log-pwned-{}", std::process::id()));
         let _ = std::fs::remove_file(&target);
-        let out = git_log(&format!("repo --output={}", target.display())).await;
+        let out = git_log("repo", &[&format!("--output={}", target.display())]).await;
         assert!(out.starts_with("Denied:"), "{out}");
         assert!(!target.exists());
-        let out = git_log("repo --output=../escape").await;
+        let out = git_log("repo", &["--output=../escape"]).await;
         assert!(out.starts_with("Denied:"), "{out}");
     }
 
@@ -1907,18 +1766,33 @@ mod argument_tests {
     async fn option_shaped_positionals_are_refused_before_git_runs() {
         let db = WardsonDbClient::from_url("http://127.0.0.1:1");
         let cases = [
-            ("checkout", git_checkout("repo -b").await),
-            ("merge", git_merge("repo --abort").await),
-            ("branch delete", git_branch("repo delete -D").await),
-            ("branch base", git_branch("repo delete main -x").await),
-            ("branch create", git_branch("repo -d").await),
-            ("add", git_add("repo --all").await),
-            ("rm", git_rm("repo -r").await),
-            ("mv", git_mv("repo -k x").await),
-            ("clone", git_clone(&db, "--upload-pack=id").await),
+            ("checkout", git_checkout("repo", "-b").await),
+            ("merge", git_merge("repo", "--abort", false).await),
+            ("branch delete", git_branch("repo", GitBranchAction::Delete, Some("-D"), None, false).await),
+            ("branch base", git_branch("repo", GitBranchAction::Delete, Some("main"), Some("-x"), false).await),
+            ("branch forced base", git_branch("repo", GitBranchAction::Delete, Some("main"), Some("-x"), true).await),
+            ("branch create", git_branch("repo", GitBranchAction::Create, Some("-d"), None, false).await),
+            ("add", git_add("repo", "--all").await),
+            ("rm", git_rm("repo", "-r").await),
+            ("mv", git_mv("repo", "-k", "x").await),
+            ("clone", git_clone(&db, "--upload-pack=id", None).await),
         ];
         for (what, out) in cases {
             assert!(out.starts_with("Denied:"), "{what}: {out}");
         }
+    }
+
+    /// A create or a delete without a name is refused before the directory
+    /// is resolved (the repository need not exist).
+    #[tokio::test]
+    async fn git_branch_needs_a_name_to_create_or_delete() {
+        assert_eq!(
+            git_branch("repo", GitBranchAction::Create, None, None, false).await,
+            "git_branch action=Create requires a name."
+        );
+        assert_eq!(
+            git_branch("repo", GitBranchAction::Delete, None, None, true).await,
+            "git_branch action=Delete requires a name."
+        );
     }
 }
