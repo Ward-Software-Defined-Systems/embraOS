@@ -39,9 +39,21 @@ pub fn embra_tool(attr: TokenStream, item: TokenStream) -> TokenStream {
                     name: #name,
                     description: #description,
                     is_side_effectful: #is_side_effectful,
+                    // The schema is a pure function of the type: computed once
+                    // per process and cloned out (#41), where every manifest
+                    // build, the boot snapshot and the tests used to run the
+                    // reflection and the serialization again. The closure
+                    // captures nothing, so it still coerces to the `fn` pointer
+                    // the descriptor holds.
                     input_schema: || {
-                        ::serde_json::to_value(::schemars::schema_for!(#ident))
-                            .expect("schema_for! must produce valid JSON")
+                        static SCHEMA: ::std::sync::OnceLock<::serde_json::Value> =
+                            ::std::sync::OnceLock::new();
+                        SCHEMA
+                            .get_or_init(|| {
+                                ::serde_json::to_value(::schemars::schema_for!(#ident))
+                                    .expect("schema_for! must produce valid JSON")
+                            })
+                            .clone()
                     },
                     handler: |input, ctx| ::std::boxed::Box::pin(async move {
                         let args: #ident = ::serde_json::from_value(input)
