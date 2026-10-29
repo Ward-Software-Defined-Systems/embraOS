@@ -30,14 +30,29 @@ const SEALED_HASH_WITHOUT_SOUL_ERROR: &str = "Soul document missing but a sealed
 const SOUL_FIELD_MISSING_ERROR: &str =
     "The stored soul document lacks its soul field; the seal cannot be checked";
 
+/// The bounds on the one client (#41): a database that accepts the
+/// connection and never answers used to hold a verification, and with it
+/// the boot, for good.
+const DB_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const DB_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 pub struct SoulVerifier {
     wardsondb_url: String,
     hash_path: std::path::PathBuf,
+    /// One client for the verifier's lifetime (#41): every `VerifySoul`
+    /// and `GetSoulStatus` used to build its own, pool and TLS state
+    /// included, and kept no connection warm.
+    client: reqwest::Client,
 }
 
 impl SoulVerifier {
     pub fn new(wardsondb_url: String, hash_path: std::path::PathBuf) -> Self {
-        Self { wardsondb_url, hash_path }
+        let client = reqwest::Client::builder()
+            .connect_timeout(DB_CONNECT_TIMEOUT)
+            .timeout(DB_REQUEST_TIMEOUT)
+            .build()
+            .expect("a client with timeouts builds");
+        Self { wardsondb_url, hash_path, client }
     }
 
     /// Verify the soul.
@@ -96,10 +111,9 @@ impl SoulVerifier {
 
     /// The soul document, or `None` when the database has no such document.
     async fn read_soul_from_db(&self) -> Result<Option<serde_json::Value>> {
-        let client = reqwest::Client::new();
         let url = format!("{}/soul.invariant/docs/soul", self.wardsondb_url);
 
-        let response = client.get(&url).send().await
+        let response = self.client.get(&url).send().await
             .context("Failed to connect to WardSONDB")?;
 
         if response.status() == reqwest::StatusCode::NOT_FOUND {
