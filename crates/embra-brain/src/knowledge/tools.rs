@@ -1221,7 +1221,13 @@ pub async fn knowledge_graph_stats(db: &WardsonDbClient) -> String {
     // Orphan edges (an endpoint that no longer exists), so nobody has to
     // call knowledge_sweep_orphans to know. Every edge is covered: the check
     // reads the endpoint indexes, not a window of edge documents.
-    out.push_str(&orphan_line(&find_orphan_edges(db, STATS_ORPHAN_LIST_CAP).await));
+    let orphans = orphan_line(&find_orphan_edges(db, STATS_ORPHAN_LIST_CAP).await);
+    if !orphans.is_empty() {
+        out.push_str(&orphans);
+        out.push('\n');
+    }
+    // The promotion nodes no entry points at (#57), checked the same way.
+    out.push_str(&pointerless_line(&find_pointerless_nodes(db).await));
 
     out
 }
@@ -1852,6 +1858,80 @@ struct OrphanScan {
     more: bool,
 }
 
+/// The two collections a promotion writes a node into.
+const PROMOTION_COLLECTIONS: [&str; 2] = ["memory.semantic", "memory.procedural"];
+
+/// What the pointerless-node check found (#57): the promotion nodes no
+/// entry's pointer names, a promotion cut between its node write and its
+/// pointer patch (a crash, or an operator stop from before the write pair
+/// ran as a task of its own).
+#[derive(Debug, Default, PartialEq)]
+struct PointerlessScan {
+    /// Promotion nodes checked: every node of the two collections that
+    /// carries `source_entry_id`.
+    checked: usize,
+    /// `(collection, id)` of each one no pointer names.
+    nodes: Vec<(&'static str, String)>,
+}
+
+/// The promotion nodes no entry points at. The pointed-at ids come from one
+/// `$group` over `promoted_to.id`, which covers every entry; the nodes from
+/// one projected window per collection, refused when the window fills: a
+/// node past it would go unchecked, and a list that may be short must never
+/// drive a delete.
+async fn find_pointerless_nodes(db: &WardsonDbClient) -> Result<PointerlessScan, String> {
+    let rows = db
+        .aggregate("memory.entries", &group_by_pipeline("promoted_to.id"))
+        .await
+        .map_err(|e| format!("grouping memory.entries by promoted_to.id failed: {e}"))?;
+    let pointed: std::collections::HashSet<String> = group_counts(&rows).into_keys().collect();
+    let mut scan = PointerlessScan::default();
+    for collection in PROMOTION_COLLECTIONS {
+        let docs = db
+            .fetch_recent_with_fields(
+                collection,
+                crate::db::MEMORY_FETCH_WINDOW,
+                Some(&["_id", "source_entry_id"]),
+            )
+            .await
+            .map_err(|e| format!("reading the nodes of {collection} failed: {e}"))?;
+        if docs.len() >= crate::db::MEMORY_FETCH_WINDOW {
+            return Err(format!(
+                "the {collection} window of {} is full; a node past it would go unchecked",
+                crate::db::MEMORY_FETCH_WINDOW
+            ));
+        }
+        for doc in &docs {
+            let promoted = doc
+                .get("source_entry_id")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty());
+            if !promoted {
+                continue;
+            }
+            let Some(id) = doc.get("_id").and_then(|v| v.as_str()) else { continue };
+            scan.checked += 1;
+            if !pointed.contains(id) {
+                scan.nodes.push((collection, id.to_string()));
+            }
+        }
+    }
+    Ok(scan)
+}
+
+/// The stats report's line for the pointerless-node check.
+fn pointerless_line(scan: &Result<PointerlessScan, String>) -> String {
+    match scan {
+        Ok(scan) => format!(
+            "Promotion nodes without their entry's pointer: {} of {} checked{}",
+            scan.nodes.len(),
+            scan.checked,
+            if scan.nodes.is_empty() { "" } else { " (run knowledge_sweep_orphans to clean up)" }
+        ),
+        Err(e) => format!("Promotion nodes without their entry's pointer: not checked ({e})"),
+    }
+}
+
 /// Every id an edge names, with how often on each side: the keys of two
 /// `$group` aggregates. `source_id` and `target_id` each carry a
 /// single-field index, so the server answers from the index and reads no
@@ -1986,12 +2066,27 @@ pub async fn knowledge_sweep_orphans(
     limit: usize,
 ) -> String {
     let limit = limit.clamp(1, 1_000_000);
+    // The nodes first (#57): a node taken back leaves its automatic edges
+    // dangling, and the edge check that follows reads the endpoints after
+    // the deletes, so one call takes both.
+    let pointerless = find_pointerless_nodes(db).await;
+    let mut nodes_deleted: u64 = 0;
+    if !dry_run && let Ok(found) = &pointerless {
+        for (collection, id) in &found.nodes {
+            if db.delete(collection, id).await.is_ok() {
+                nodes_deleted += 1;
+            }
+        }
+    }
     let scan = match find_orphan_edges(db, limit).await {
         Ok(scan) => scan,
         Err(e) => {
-            return format!(
-                "knowledge_sweep_orphans: the check could not be completed ({e}). Nothing was deleted."
-            );
+            let nodes = if nodes_deleted == 0 {
+                "Nothing was deleted.".to_string()
+            } else {
+                format!("{nodes_deleted} promotion nodes without a pointer were taken back; no edge was deleted.")
+            };
+            return format!("knowledge_sweep_orphans: the check could not be completed ({e}). {nodes}");
         }
     };
 
@@ -2007,11 +2102,19 @@ pub async fn knowledge_sweep_orphans(
             }
         }
     }
-    sweep_report(&scan, dry_run, deleted, limit)
+    sweep_report(&scan, dry_run, deleted, limit, &pointerless, nodes_deleted)
 }
 
-/// The sweep's reply. Its first four lines keep the shape they always had.
-fn sweep_report(scan: &OrphanScan, dry_run: bool, deleted: u64, limit: usize) -> String {
+/// The sweep's reply. Its first four lines keep the shape they always had;
+/// the pointerless-node lines come before the limit note.
+fn sweep_report(
+    scan: &OrphanScan,
+    dry_run: bool,
+    deleted: u64,
+    limit: usize,
+    pointerless: &Result<PointerlessScan, String>,
+    nodes_deleted: u64,
+) -> String {
     let mut out = format!(
         "knowledge_sweep_orphans{}:\n  scanned: {}\n  orphan_count: {}\n  deleted: {}",
         if dry_run { " (dry_run)" } else { "" },
@@ -2021,6 +2124,14 @@ fn sweep_report(scan: &OrphanScan, dry_run: bool, deleted: u64, limit: usize) ->
     );
     if !scan.dangling.is_empty() {
         out.push_str(&format!("\n  missing_nodes: {}", scan.dangling.len()));
+    }
+    match pointerless {
+        Ok(found) => out.push_str(&format!(
+            "\n  pointerless_nodes: {}\n  nodes_deleted: {}",
+            found.nodes.len(),
+            nodes_deleted
+        )),
+        Err(e) => out.push_str(&format!("\n  pointerless_nodes: not checked ({e})")),
     }
     if scan.more {
         out.push_str(&format!(
@@ -2729,7 +2840,7 @@ impl KnowledgeQueryArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 #[embra_tool(
     name = "knowledge_graph_stats",
-    description = "Return summary statistics of the knowledge graph: node counts by collection, edge counts by type, total density, and orphan-edge count."
+    description = "Return summary statistics of the knowledge graph: node counts by collection, edge counts by type, total density, the orphan-edge count and the count of promotion nodes no entry's pointer names."
 )]
 pub struct KnowledgeGraphStatsArgs {}
 
@@ -2743,7 +2854,7 @@ impl KnowledgeGraphStatsArgs {
 #[embra_tool(
     name = "knowledge_sweep_orphans",
     is_side_effectful = true,
-    description = "Scan memory.edges and remove edges whose source or target doc no longer resolves. Orphans accumulate from pre-cascade forget calls and direct deletes that bypassed knowledge_unlink_node. Use dry_run=true to preview without deleting."
+    description = "Scan memory.edges and remove edges whose source or target doc no longer resolves, and remove the promotion nodes no entry's pointer names (a promotion cut between its two writes). Orphans accumulate from pre-cascade forget calls and direct deletes that bypassed knowledge_unlink_node. Use dry_run=true to preview without deleting."
 )]
 pub struct KnowledgeSweepOrphansArgs {
     /// Preview orphan edges without deleting.
@@ -3028,14 +3139,14 @@ mod orphan_tests {
     #[test]
     fn the_sweep_reply_keeps_its_lines_and_adds_what_is_missing() {
         assert_eq!(
-            sweep_report(&scan(&[], &[], false), true, 0, 10_000),
-            "knowledge_sweep_orphans (dry_run):\n  scanned: 433546\n  orphan_count: 0\n  deleted: 0"
+            sweep_report(&scan(&[], &[], false), true, 0, 10_000, &Ok(PointerlessScan::default()), 0),
+            "knowledge_sweep_orphans (dry_run):\n  scanned: 433546\n  orphan_count: 0\n  deleted: 0\n  pointerless_nodes: 0\n  nodes_deleted: 0"
         );
         assert_eq!(
-            sweep_report(&scan(&["e1", "e2"], &["gone"], false), false, 2, 10_000),
-            "knowledge_sweep_orphans:\n  scanned: 433546\n  orphan_count: 2\n  deleted: 2\n  missing_nodes: 1"
+            sweep_report(&scan(&["e1", "e2"], &["gone"], false), false, 2, 10_000, &Ok(PointerlessScan::default()), 0),
+            "knowledge_sweep_orphans:\n  scanned: 433546\n  orphan_count: 2\n  deleted: 2\n  missing_nodes: 1\n  pointerless_nodes: 0\n  nodes_deleted: 0"
         );
-        let capped = sweep_report(&scan(&["e1", "e2"], &["gone"], true), false, 2, 2);
+        let capped = sweep_report(&scan(&["e1", "e2"], &["gone"], true), false, 2, 2, &Ok(PointerlessScan::default()), 0);
         assert!(capped.ends_with("\n  more orphan edges exist than the limit of 2: run it again"), "{capped}");
     }
 
@@ -3176,14 +3287,71 @@ mod orphan_tests {
         let server = graph_with_one_missing_node().await;
         let db = WardsonDbClient::from_url(&server.uri());
         let out = knowledge_sweep_orphans(&db, false, 10_000).await;
-        assert_eq!(
-            out,
-            "knowledge_sweep_orphans:\n  scanned: 5\n  orphan_count: 3\n  deleted: 3\n  missing_nodes: 1"
+        // The node check reads the count mock as its window and says so.
+        assert!(
+            out.starts_with("knowledge_sweep_orphans:\n  scanned: 5\n  orphan_count: 3\n  deleted: 3\n  missing_nodes: 1\n  pointerless_nodes: not checked ("),
+            "{out}"
         );
         assert_eq!(
             deletes_seen(&server).await,
             ["/memory.edges/docs/x1", "/memory.edges/docs/x2", "/memory.edges/docs/x3"]
         );
+    }
+
+    /// #57: a promotion node no entry points at is reported by the stats
+    /// and taken back by the sweep; a node without a source entry (a seed
+    /// node, a node the model wrote) is not a promotion node.
+    #[tokio::test]
+    async fn a_promotion_node_no_entry_points_at_is_reported_and_swept() {
+        let server = MockServer::start().await;
+        edges_grouped(&server, &[]).await;
+        for collection in ENDPOINT_COLLECTIONS {
+            collection_holds(&server, collection, &[]).await;
+        }
+        // The entries' pointers: one names n1, one names nothing.
+        Mock::given(method("POST"))
+            .and(path("/memory.entries/aggregate"))
+            .and(|req: &Request| body(req)["pipeline"][0]["$group"]["_id"] == "promoted_to.id")
+            .respond_with(data(json!([{"_id": "n1", "count": 1}, {"_id": null, "count": 1}])))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        // The projected windows: n1 pointed at, n2 promoted and pointerless, s1 no promotion.
+        Mock::given(method("POST"))
+            .and(path("/memory.semantic/query"))
+            .and(|req: &Request| body(req)["fields"].is_array())
+            .respond_with(data(json!([
+                {"_id": "n1", "source_entry_id": "e1"},
+                {"_id": "n2", "source_entry_id": "e2"},
+                {"_id": "s1"}
+            ])))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/memory.procedural/query"))
+            .and(|req: &Request| body(req)["fields"].is_array())
+            .respond_with(data(json!([])))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE")).respond_with(data(json!({}))).mount(&server).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+
+        let found = find_pointerless_nodes(&db).await.expect("the check completes");
+        assert_eq!(found.checked, 2);
+        assert_eq!(found.nodes, [("memory.semantic", "n2".to_string())]);
+        assert_eq!(
+            pointerless_line(&Ok(found)),
+            "Promotion nodes without their entry's pointer: 1 of 2 checked (run knowledge_sweep_orphans to clean up)"
+        );
+
+        let out = knowledge_sweep_orphans(&db, true, 10_000).await;
+        assert!(out.contains("\n  pointerless_nodes: 1\n  nodes_deleted: 0"), "{out}");
+        assert!(deletes_seen(&server).await.is_empty());
+        let out = knowledge_sweep_orphans(&db, false, 10_000).await;
+        assert!(out.contains("\n  pointerless_nodes: 1\n  nodes_deleted: 1"), "{out}");
+        assert_eq!(deletes_seen(&server).await, ["/memory.semantic/docs/n2"]);
     }
 
     #[tokio::test]

@@ -241,6 +241,30 @@ async fn write_node(
     source: SourceEntry,
     config: &SystemConfig,
 ) -> Result<NewNode> {
+    // The write sequence runs as a task of its own, awaited through its
+    // handle. The dispatch future that called it is abandoned on an
+    // operator stop (and by the dispatcher's timeout), and a future dropped
+    // between the node write and the pointer patch left a node no entry
+    // pointed at, which the entry's next promotion duplicated (#57). A
+    // dropped handle cancels no task, so a promotion that has started runs
+    // to its end: node, pointer, vector, edge.
+    let db = db.clone();
+    let entry_id = entry_id.to_string();
+    let config = config.clone();
+    tokio::spawn(async move { write_node_to_the_end(&db, &entry_id, draft, source, &config).await })
+        .await
+        .unwrap_or_else(|e| Err(anyhow!("the promotion task ended early: {e}")))
+}
+
+/// The writes of `write_node`, in order; see there for why they run as a
+/// task.
+async fn write_node_to_the_end(
+    db: &WardsonDbClient,
+    entry_id: &str,
+    draft: Draft,
+    source: SourceEntry,
+    config: &SystemConfig,
+) -> Result<NewNode> {
     let Draft { collection, label, doc, provenance, now } = draft;
     let new_id = db.write(collection, &doc).await?;
 
@@ -277,7 +301,9 @@ async fn unpromoted_source(db: &WardsonDbClient, entry_id: &str) -> Result<Sourc
         if let Some((collection, id, _)) = live_node(db, entry_id, &doc).await? {
             return Err(anyhow!("Entry {} already promoted to {}:{}", entry_id, collection, id));
         }
-        let _ = db.patch_document("memory.entries", entry_id, &json!({"promoted_to": null})).await;
+        if let Err(e) = db.patch_document("memory.entries", entry_id, &json!({"promoted_to": null})).await {
+            tracing::warn!("promotion of {entry_id}: the stale pointer could not be cleared: {e}");
+        }
     }
 
     let content = doc.get("content").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -355,7 +381,11 @@ async fn insert_derived_from_edge(
         "metadata": metadata,
         "created_at": created_at,
     });
-    let _ = db.write("memory.edges", &edge).await;
+    if let Err(e) = db.write("memory.edges", &edge).await {
+        tracing::warn!(
+            "promotion of {target_id}: the derived_from edge of {source_collection}:{source_id} was not written: {e}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -505,6 +535,40 @@ mod tests {
             (edge["source_id"].as_str(), edge["target_id"].as_str(), edge["edge_type"].as_str()),
             (Some("n1"), Some("e1"), Some("derived_from"))
         );
+    }
+
+    /// #57: an operator stop drops the dispatch future; the node write and
+    /// the pointer patch run on in a task of their own, so no node is left
+    /// without the pointer that says it exists.
+    #[tokio::test]
+    async fn a_dropped_caller_does_not_cut_the_node_write_from_its_pointer() {
+        let server = server_with_entry(serde_json::Value::Null).await;
+        Mock::given(method("POST"))
+            .and(path("/memory.semantic/docs"))
+            .respond_with(data(json!({"_id": "n1"})).set_delay(std::time::Duration::from_millis(300)))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        pointer_write(&server, data(json!({}))).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+
+        let cut = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            write_semantic_node(&db, "e1", &SemanticCategory::Fact, &test_config()),
+        )
+        .await;
+        assert!(cut.is_err(), "the caller was dropped while the node write was in flight");
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let order: Vec<String> = writes_seen(&server).await.into_iter().map(|w| w.0).collect();
+            if order.iter().any(|w| w == "PATCH /memory.entries/docs/e1") {
+                assert_eq!(order[0], "POST /memory.semantic/docs");
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "the pointer never landed: {order:?}");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
 
     #[tokio::test]
