@@ -157,11 +157,28 @@ pub async fn load_soul(db: &WardsonDbClient) -> Result<Option<serde_json::Value>
         .and_then(|doc| doc.get("soul").cloned()))
 }
 
+/// The sealed soul for a caller that has just read `is_soul_sealed` as
+/// true: the collection is not probed a second time (#38). The operational
+/// turn builds its prompt this way, one probe per turn; a caller that has
+/// not asked takes `load_soul`, whose probe keeps an unsealed system at
+/// `Ok(None)` (a read of a missing collection is an error, not an absence).
+pub async fn load_sealed_soul(db: &WardsonDbClient) -> Result<Option<serde_json::Value>> {
+    Ok(read_soul_doc(db)
+        .await?
+        .and_then(|doc| doc.get("soul").cloned()))
+}
+
 /// Load the soul document, trying direct GET first, falling back to query.
 async fn load_soul_doc(db: &WardsonDbClient) -> Result<Option<serde_json::Value>> {
     if !db.collection_exists("soul.invariant").await? {
         return Ok(None);
     }
+    read_soul_doc(db).await
+}
+
+/// The document of a collection known to exist: by its well-known id, else
+/// the pre-migration query.
+async fn read_soul_doc(db: &WardsonDbClient) -> Result<Option<serde_json::Value>> {
     // Try direct GET by well-known ID. Only a document that is not there
     // falls through to the query (pre-migration data under another id); a
     // failing server is an error, never an absence.
@@ -321,6 +338,35 @@ mod seal_state_tests {
             .mount(&server)
             .await;
         server
+    }
+
+    /// #38: the operational turn reads the seal, then loads the soul it
+    /// knows is there; the load probes the collection no second time, where
+    /// `load_soul` (a caller that has not asked) probes first.
+    #[tokio::test]
+    async fn a_sealed_soul_is_loaded_without_a_second_probe() {
+        let soul = json!({"name": "Embra"});
+        let server = server_with_soul(&soul).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+
+        let loaded = super::load_sealed_soul(&db).await.expect("read").expect("a soul");
+        assert_eq!(loaded, soul);
+        let paths = |reqs: Vec<wiremock::Request>| -> Vec<String> {
+            reqs.iter().map(|r| format!("{} {}", r.method, r.url.path())).collect()
+        };
+        assert_eq!(
+            paths(server.received_requests().await.unwrap_or_default()),
+            ["GET /soul.invariant/docs/soul"],
+            "no probe of the collection"
+        );
+
+        let loaded = super::load_soul(&db).await.expect("read").expect("a soul");
+        assert_eq!(loaded, soul);
+        assert_eq!(
+            paths(server.received_requests().await.unwrap_or_default()),
+            ["GET /soul.invariant/docs/soul", "GET /soul.invariant", "GET /soul.invariant/docs/soul"],
+            "the unasked load probes first"
+        );
     }
 
     fn hash_file(tag: &str, contents: Option<&str>) -> std::path::PathBuf {

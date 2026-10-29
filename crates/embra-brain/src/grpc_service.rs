@@ -1298,8 +1298,9 @@ async fn handle_request(
                 // into the embraOS constitution via brain::render_constitution.
                 // The stored doc is read-only here; never re-serialized into
                 // storage, so the SHA-256 seal and trustd verification are
-                // untouched.
-                let soul = learning::load_soul(db)
+                // untouched. The seal was just read, so the load probes the
+                // collection no second time (#38).
+                let soul = learning::load_sealed_soul(db)
                     .await
                     .ok()
                     .flatten()
