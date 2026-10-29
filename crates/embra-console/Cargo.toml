@@ -6,6 +6,8 @@ license-file.workspace = true
 
 [dependencies]
 embra-common = { workspace = true }
+# The secret-argument mask the mobile chat uses too, and the JSON tokenizer.
+embra-tools-core = { path = "../embra-tools-core" }
 tokio = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }

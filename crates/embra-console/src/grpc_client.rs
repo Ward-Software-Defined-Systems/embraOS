@@ -150,6 +150,8 @@ impl BrainClient {
                                             1 => "text".to_string(),
                                             2 => "selector".to_string(),
                                             3 => "confirm".to_string(),
+                                            // A key or a bearer: shown masked (#20).
+                                            4 => "secret".to_string(),
                                             _ => "text".to_string(),
                                         },
                                         prompt: s.prompt,

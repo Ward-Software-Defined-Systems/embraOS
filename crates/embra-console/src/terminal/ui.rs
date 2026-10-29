@@ -19,7 +19,7 @@ pub fn draw(f: &mut Frame, app: &mut AppState) {
     let input_lines = if app.pasted_lines.is_some() || available_width == 0 || app.input_buffer.is_empty() {
         1
     } else {
-        super::input_layout::layout_input(&app.input_buffer, app.cursor_pos, available_width)
+        super::input_layout::layout_input(&app.input_shown(), app.cursor_pos, available_width)
             .content_rows()
     };
     let input_height = (input_lines as u16 + 2).min(10);
@@ -516,6 +516,30 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
     f.render_widget(paragraph, area);
 }
 
+/// The one line the input box shows for a staged paste. A paste answering
+/// a secret prompt shows its size and nothing of its text (#20).
+fn paste_preview(pasted: &[String], secret: bool) -> String {
+    let total_chars: usize = pasted.iter().map(|l| l.chars().count()).sum::<usize>() + pasted.len().saturating_sub(1);
+    if secret {
+        return format!("[secret: {} lines, {} chars pasted] press Enter to send", pasted.len(), total_chars);
+    }
+    if pasted.len() == 1 && total_chars > 200 {
+        format!("[{} chars pasted] press Enter to send", total_chars)
+    } else if pasted.len() > 2 {
+        let first_two: String = pasted.iter().take(2).map(|l| {
+            if l.chars().count() > 60 {
+                let truncated: String = l.chars().take(57).collect();
+                format!("{}...", truncated)
+            } else {
+                l.clone()
+            }
+        }).collect::<Vec<_>>().join(" | ");
+        format!("{} ... and {} more lines", first_two, pasted.len() - 2)
+    } else {
+        format!("[{} lines pasted] press Enter to send", pasted.len())
+    }
+}
+
 fn draw_input(f: &mut Frame, area: Rect, app: &AppState) {
     if app.selector.is_some() {
         let hint = Paragraph::new("  Use ↑↓ arrows to select, Enter to confirm")
@@ -544,23 +568,7 @@ fn draw_input(f: &mut Frame, area: Rect, app: &AppState) {
     // Pasted-preview and placeholder branches: single synthetic line, no
     // cursor — unchanged rendering.
     if let Some(ref pasted) = app.pasted_lines {
-        let total_chars: usize = pasted.iter().map(|l| l.chars().count()).sum::<usize>() + pasted.len().saturating_sub(1);
-        let preview = if pasted.len() == 1 && total_chars > 200 {
-            format!("[{} chars pasted] press Enter to send", total_chars)
-        } else if pasted.len() > 2 {
-            let first_two: String = pasted.iter().take(2).map(|l| {
-                if l.chars().count() > 60 {
-                    let truncated: String = l.chars().take(57).collect();
-                    format!("{}...", truncated)
-                } else {
-                    l.clone()
-                }
-            }).collect::<Vec<_>>().join(" | ");
-            format!("{} ... and {} more lines", first_two, pasted.len() - 2)
-        } else {
-            format!("[{} lines pasted] press Enter to send", pasted.len())
-        };
-        let input = Paragraph::new(preview)
+        let input = Paragraph::new(paste_preview(pasted, app.secret_prompt))
             .style(Style::default().fg(Color::Yellow))
             .wrap(Wrap { trim: false })
             .block(block);
@@ -584,7 +592,9 @@ fn draw_input(f: &mut Frame, area: Rect, app: &AppState) {
     // input outgrows the box's height cap.
     let inner_width = area.width.saturating_sub(2) as usize; // minus borders
     let visible_rows = area.height.saturating_sub(2) as usize;
-    let layout = super::input_layout::layout_input(&app.input_buffer, app.cursor_pos, inner_width);
+    // What is drawn is the shown text (a secret masked), packed as the
+    // buffer would be: same character count, same rows, same cursor.
+    let layout = super::input_layout::layout_input(&app.input_shown(), app.cursor_pos, inner_width);
     let scroll = super::input_layout::scroll_offset(layout.cursor_row, visible_rows);
     let end = (scroll + visible_rows).min(layout.rows.len());
     let start = scroll.min(end);
@@ -688,6 +698,23 @@ mod conversation_lines_tests {
         assert_eq!(lines[1], "  hello");
         assert_eq!(lines[3], "[history] Embra: ");
         assert_eq!(lines[4], "  hi there");
+    }
+}
+
+#[cfg(test)]
+mod paste_preview_tests {
+    use super::paste_preview;
+
+    /// #20: a paste answering a secret prompt is previewed by its size
+    /// alone; any other paste keeps its preview.
+    #[test]
+    fn a_secret_paste_previews_its_size_and_nothing_of_its_text() {
+        let lines = vec!["sk-line-1".to_string(), "line 2".to_string(), "line 3".to_string()];
+        assert_eq!(paste_preview(&lines, true), "[secret: 3 lines, 23 chars pasted] press Enter to send");
+        assert_eq!(paste_preview(&lines, false), "sk-line-1 | line 2 ... and 1 more lines");
+        let one = vec!["a".repeat(201)];
+        assert_eq!(paste_preview(&one, false), "[201 chars pasted] press Enter to send");
+        assert_eq!(paste_preview(&one, true), "[secret: 1 lines, 201 chars pasted] press Enter to send");
     }
 }
 

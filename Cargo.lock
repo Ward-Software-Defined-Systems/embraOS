@@ -1455,6 +1455,7 @@ dependencies = [
  "chrono-tz",
  "crossterm",
  "embra-common",
+ "embra-tools-core",
  "futures",
  "image",
  "libc",

@@ -362,6 +362,11 @@ pub struct AppState {
     pub should_quit: bool,
     pub selector: Option<Selector>,
     pub setup_default: Option<String>,
+    /// The pending setup prompt asks for a secret (an API key, a bearer):
+    /// the input box draws a mask and the echoed row names the length
+    /// alone, until the answer is sent; a slash command typed meanwhile
+    /// leaves it armed, as the brain keeps its key step through one (#20).
+    pub secret_prompt: bool,
     pub config_name: String,
     pub config_version: String,
     pub config_tz: String,
@@ -450,6 +455,7 @@ impl AppState {
             should_quit: false,
             selector: None,
             setup_default: None,
+            secret_prompt: false,
             config_name: "embraOS".to_string(),
             config_version: env!("CARGO_PKG_VERSION").to_string(),
             config_tz: "UTC".to_string(),
@@ -525,6 +531,23 @@ impl AppState {
         }
     }
 
+    /// The text the input box draws. For a `secret` prompt every character
+    /// of the buffer is a mask character (a line break stays one), unless
+    /// the line is a slash command, the way out of a setup step; a
+    /// credential typed as the argument of one of the secret command forms
+    /// is masked by itself. The character count is the buffer's, so the
+    /// rows and the cursor the layout derives stay right (#20).
+    pub fn input_shown(&self) -> String {
+        if self.secret_prompt && !self.input_buffer.starts_with('/') {
+            self.input_buffer
+                .chars()
+                .map(|c| if c == '\n' { c } else { embra_tools_core::MASK_CHAR })
+                .collect()
+        } else {
+            embra_tools_core::mask_secret_argument_keeping_length(&self.input_buffer)
+        }
+    }
+
     pub fn input_placeholder(&self) -> &str {
         match &self.mode {
             AppMode::Setup(s) => match s.step {
@@ -541,6 +564,12 @@ impl AppState {
             AppMode::Operational { .. } => "Type a message...",
         }
     }
+}
+
+/// The row the transcript shows for a secret the operator sent: its
+/// length and nothing of its value (#20).
+pub fn secret_row_text(input: &str) -> String {
+    format!("[secret: {} characters]", input.chars().count())
 }
 
 #[cfg(test)]

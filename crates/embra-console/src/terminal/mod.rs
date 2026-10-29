@@ -453,8 +453,10 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
         }
         ConsoleEvent::ModeTransition { to_mode, message } => {
             // Mode change resets per-turn UI context — drop any pending
-            // reasoning from the prior phase.
+            // reasoning from the prior phase, and any secret prompt: the
+            // step that asked is over.
             app.clear_live_reasoning();
+            app.secret_prompt = false;
             // Parse name from message (format: "... — Name: <name> — ...")
             if let Some(name_part) = message.split("Name: ").nth(1) {
                 let name = name_part.split(" — ").next().unwrap_or(name_part).trim().to_string();
@@ -507,6 +509,9 @@ fn handle_console_event(event: ConsoleEvent, app: &mut AppState) {
         }
         ConsoleEvent::SetupPrompt { field_type, prompt, options, default_value } => {
             app.messages.push(DisplayMessage::system_with_tz(&prompt, &app.config_tz));
+
+            // Each prompt says whether its answer is a secret (#20).
+            app.secret_prompt = field_type == "secret";
 
             if (field_type == "confirm" || field_type == "selector") && !options.is_empty() {
                 app.selector = Some(Selector::new(options));
@@ -638,8 +643,13 @@ async fn handle_key_event(
                         )),
                     }).await;
                 } else {
-                    // Send pasted content
-                    app.messages.push(DisplayMessage::new_with_tz("user", &content, &app.config_tz));
+                    // Send pasted content; a secret's row names its length.
+                    let shown = if std::mem::take(&mut app.secret_prompt) {
+                        secret_row_text(&content)
+                    } else {
+                        content.clone()
+                    };
+                    app.messages.push(DisplayMessage::new_with_tz("user", &shown, &app.config_tz));
                     app.clear_live_reasoning();
                     let _ = in_tx.send(ConversationRequest {
                         request_type: Some(conversation_request::RequestType::UserMessage(
@@ -685,7 +695,12 @@ async fn handle_key_event(
                                 )),
                             }).await;
                         } else {
-                            app.messages.push(DisplayMessage::new_with_tz("user", &input, &app.config_tz));
+                            let shown = if std::mem::take(&mut app.secret_prompt) {
+                                secret_row_text(&input)
+                            } else {
+                                input.clone()
+                            };
+                            app.messages.push(DisplayMessage::new_with_tz("user", &shown, &app.config_tz));
                             app.clear_live_reasoning();
                             let _ = in_tx.send(ConversationRequest {
                                 request_type: Some(conversation_request::RequestType::UserMessage(
@@ -817,8 +832,16 @@ async fn handle_key_event(
                         }).await;
                     }
                 } else {
-                    // Regular message
-                    app.messages.push(DisplayMessage::new_with_tz("user", &input, &app.config_tz));
+                    // Regular message. An answer to a secret prompt is sent
+                    // as typed and echoed as its length alone; a slash
+                    // command above left the prompt armed, as the brain
+                    // keeps its key step through one (#20).
+                    let shown = if std::mem::take(&mut app.secret_prompt) {
+                        secret_row_text(&input)
+                    } else {
+                        input.clone()
+                    };
+                    app.messages.push(DisplayMessage::new_with_tz("user", &shown, &app.config_tz));
                     app.clear_live_reasoning();
                     let _ = in_tx.send(ConversationRequest {
                         request_type: Some(conversation_request::RequestType::UserMessage(
@@ -1579,6 +1602,93 @@ mod key_tests {
         assert_eq!(app.input_buffer, "");
         assert_eq!(app.cursor_pos, 0);
         assert!(!app.should_quit);
+    }
+
+    /// A submit through the Enter arm, returning what went to the brain.
+    async fn submit(app: &mut AppState) -> Option<ConversationRequest> {
+        let (tx, mut rx) = mpsc::channel::<ConversationRequest>(4);
+        handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), app, &tx)
+            .await
+            .expect("key handling never fails");
+        rx.try_recv().ok()
+    }
+
+    /// #20: while a `secret` prompt is pending the input box draws one
+    /// mask character per character typed, the brain still receives the
+    /// value as typed, the transcript's row names its length alone, and a
+    /// slash command typed meanwhile is shown as typed and leaves the
+    /// prompt armed (the brain keeps its key step through one).
+    #[tokio::test]
+    async fn a_secret_prompt_masks_the_input_and_its_echoed_row() {
+        let mut app = AppState::new();
+        handle_console_event(
+            ConsoleEvent::SetupPrompt {
+                field_type: "secret".to_string(),
+                prompt: "Enter your Anthropic API key:".to_string(),
+                options: vec![],
+                default_value: String::new(),
+            },
+            &mut app,
+        );
+        assert!(app.secret_prompt);
+        for c in "/help".chars() {
+            press(&mut app, KeyCode::Char(c), KeyModifiers::NONE).await;
+        }
+        assert_eq!(app.input_shown(), "/help", "a slash command is shown as typed");
+        submit(&mut app).await;
+        assert!(app.secret_prompt, "a slash command leaves the prompt armed");
+
+        for c in "sk-ant-é1".chars() {
+            press(&mut app, KeyCode::Char(c), KeyModifiers::NONE).await;
+        }
+        assert_eq!(app.input_buffer, "sk-ant-é1");
+        assert_eq!(app.input_shown(), "•••••••••");
+        assert_eq!(app.input_shown().chars().count(), app.input_buffer.chars().count());
+        let sent = submit(&mut app).await.expect("the answer went to the brain");
+        match sent.request_type {
+            Some(conversation_request::RequestType::UserMessage(m)) => assert_eq!(m.content, "sk-ant-é1"),
+            other => panic!("expected the key as a user message, got {other:?}"),
+        }
+        let row = app.messages.last().expect("an echoed row");
+        assert_eq!(row.role, "user");
+        assert_eq!(row.content, "[secret: 9 characters]");
+        assert!(!app.secret_prompt, "sending the answer disarms the prompt");
+
+        // A plain text prompt afterwards is shown as typed.
+        handle_console_event(
+            ConsoleEvent::SetupPrompt {
+                field_type: "text".to_string(),
+                prompt: "What timezone are you in?".to_string(),
+                options: vec![],
+                default_value: String::new(),
+            },
+            &mut app,
+        );
+        app.input_buffer = "Europe/Paris".to_string();
+        assert_eq!(app.input_shown(), "Europe/Paris");
+    }
+
+    /// #20: a credential typed as the argument of one of the five secret
+    /// command forms is masked in the input box while typed, keeping the
+    /// line's character count; `remove` in its place is a command word.
+    #[tokio::test]
+    async fn a_secret_slash_argument_is_masked_while_typed() {
+        let mut app = AppState::new();
+        for (typed, shown) in [
+            ("/github-token ghp_x", "/github-token •••••"),
+            ("/git-token gitlab.example.com glpat-9", "/git-token gitlab.example.com •••••••"),
+            ("/image-provider key AIza", "/image-provider key ••••"),
+            ("/guardian secret host X-Key v", "/guardian secret host X-Key •"),
+            ("/guardian key brave BSA", "/guardian key brave •••"),
+            ("/git-token gitlab.example.com remove", "/git-token gitlab.example.com remove"),
+            ("/guardian secret host remove", "/guardian secret host remove"),
+            ("/help", "/help"),
+            ("hello", "hello"),
+        ] {
+            app.input_buffer = typed.to_string();
+            assert_eq!(app.input_shown(), shown, "{typed}");
+            assert_eq!(app.input_shown().chars().count(), typed.chars().count(), "{typed}");
+        }
     }
 
     #[tokio::test]
