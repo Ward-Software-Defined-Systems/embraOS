@@ -89,10 +89,6 @@ impl EmbraApi for EmbraApiImpl {
         let brain_response_stream = response.into_inner();
 
         // Map brain ConversationResponse → apid ConversationResponse
-        #[expect(
-            clippy::result_large_err,
-            reason = "the stream's item type is Result<_, tonic::Status>, fixed by the service trait"
-        )]
         let output_stream = brain_response_stream.map(|msg| {
             match msg {
                 Ok(brain_resp) => {
@@ -140,10 +136,6 @@ impl EmbraApi for EmbraApiImpl {
             .watch_activity(embra_common::proto::brain::WatchActivityRequest {})
             .await?
             .into_inner();
-        #[expect(
-            clippy::result_large_err,
-            reason = "the stream's item type is Result<_, tonic::Status>, fixed by the service trait"
-        )]
         let output = frames.map(|frame| frame.map(|f| ActivityFrame { payload: f.encode_to_vec() }));
         Ok(Response::new(Box::pin(output)))
     }
@@ -163,10 +155,6 @@ impl EmbraApi for EmbraApiImpl {
             .watch_tool_calls(embra_common::proto::brain::WatchToolCallsRequest {})
             .await?
             .into_inner();
-        #[expect(
-            clippy::result_large_err,
-            reason = "the stream's item type is Result<_, tonic::Status>, fixed by the service trait"
-        )]
         let output = records.map(|rec| rec.map(|r| ToolCallRecord { payload: r.encode_to_vec() }));
         Ok(Response::new(Box::pin(output)))
     }

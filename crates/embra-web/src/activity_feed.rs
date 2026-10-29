@@ -118,8 +118,7 @@ impl ActivityFeed {
                 return false;
             }
         };
-        // The error is only logged, so it travels as text: `tonic::Status` is a
-        // large `Err` for a closure to return (clippy::result_large_err).
+        // The error is only logged, so it travels as text.
         self.consume(frames.map(|item| item.map(|f| f.payload).map_err(|e| e.to_string())), FIRST_SNAPSHOT_WINDOW).await
     }
 

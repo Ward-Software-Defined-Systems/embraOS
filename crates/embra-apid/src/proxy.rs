@@ -25,10 +25,6 @@ impl BackendConnections {
         }
     }
 
-    #[expect(
-        clippy::result_large_err,
-        reason = "handed to tonic as is by every handler; a Box would only add an allocation"
-    )]
     pub async fn brain_client(&self) -> Result<BrainServiceClient<Channel>, tonic::Status> {
         // Try cached connection first
         {
@@ -54,10 +50,6 @@ impl BackendConnections {
         Ok(client)
     }
 
-    #[expect(
-        clippy::result_large_err,
-        reason = "handed to tonic as is by every handler; a Box would only add an allocation"
-    )]
     pub async fn trust_client(&self) -> Result<TrustServiceClient<Channel>, tonic::Status> {
         {
             let guard = self.trust.read().await;
