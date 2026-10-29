@@ -142,10 +142,8 @@ fn bring_up_eth0() {
 
         libc::close(sock);
 
-        // Add default route via 10.0.2.2 (QEMU SLIRP gateway)
-        // This requires a routing socket — use a simpler approach via /proc
-        let route_entry = "10.0.2.2\t0.0.0.0\t0.0.0.0\tUG\t0\t0\t0\teth0\n";
-        // Actually, use the rtentry ioctl
+        // Add default route via 10.0.2.2 (QEMU SLIRP gateway) with the
+        // rtentry ioctl.
         let route_sock = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
         if route_sock >= 0 {
             let mut rt: libc::rtentry = std::mem::zeroed();
@@ -171,7 +169,6 @@ fn bring_up_eth0() {
             libc::close(route_sock);
         }
 
-        let _ = route_entry; // suppress unused warning
     }
 }
 

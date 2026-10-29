@@ -203,8 +203,13 @@ impl Supervisor {
             option_env!("EMBRA_STORAGE_ENGINE").unwrap_or("rocksdb");
         info!("WardSONDB storage engine: {}", storage_engine);
         // 1. WardSONDB — no dependencies
+        // Loopback alone (#32): every in-guest client reaches the database at
+        // 127.0.0.1:8090, the QEMU scripts forward no 8090, and the one
+        // unauthenticated store stays off the wire of a bridged VM or bare
+        // metal. The flag is the fork's (`wardsondb --bind`).
         let mut wardsondb_args = vec![
             "--storage-engine".to_string(), storage_engine.to_string(),
+            "--bind".to_string(), "127.0.0.1".to_string(),
             "--port".to_string(), "8090".to_string(),
             "--data-dir".to_string(), "/embra/data/wardsondb".to_string(),
             "--log-file".to_string(), "/embra/ephemeral/wardsondb.log".to_string(),
@@ -562,21 +567,7 @@ impl Supervisor {
                     // stdout+stderr were redirected to the log file — read its tail
                     // via eprintln! so it lands on the serial console before halt.
                     eprintln!("[embrad] DIAG: {}", msg);
-                    let log_path = format!("/embra/ephemeral/{}.log", name);
-                    match std::fs::read_to_string(&log_path) {
-                        Ok(log_content) if !log_content.is_empty() => {
-                            eprintln!("[embrad] DIAG: {} log tail:", name);
-                            for line in log_content.lines().rev().take(30).collect::<Vec<_>>().into_iter().rev() {
-                                eprintln!("  {}", line);
-                            }
-                        }
-                        Ok(_) => {
-                            eprintln!("[embrad] DIAG: {} log file is empty — service produced no output", name);
-                        }
-                        Err(log_err) => {
-                            eprintln!("[embrad] DIAG: {} could not read log file {}: {}", name, log_path, log_err);
-                        }
-                    }
+                    dump_log_tail(&name, 30);
                     error!("{}", msg);
                     svc.status = ServiceStatus::Failed(msg.clone());
                     svc.child = None;
@@ -595,22 +586,7 @@ impl Supervisor {
             // Use eprintln! for guaranteed serial output (tracing may buffer)
             eprintln!("[embrad] DIAG: {} health check failed: {}", name, e);
 
-            // Dump the service log for debugging
-            let log_path = format!("/embra/ephemeral/{}.log", name);
-            match std::fs::read_to_string(&log_path) {
-                Ok(log_content) if !log_content.is_empty() => {
-                    eprintln!("[embrad] DIAG: {} log tail:", name);
-                    for line in log_content.lines().rev().take(20).collect::<Vec<_>>().into_iter().rev() {
-                        eprintln!("  {}", line);
-                    }
-                }
-                Ok(_) => {
-                    eprintln!("[embrad] DIAG: {} log file is empty — service produced no output", name);
-                }
-                Err(log_err) => {
-                    eprintln!("[embrad] DIAG: {} could not read log file {}: {}", name, log_path, log_err);
-                }
-            }
+            dump_log_tail(&name, 20);
             // Also check if process is still alive
             if let Some(ref mut child) = self.services[index].child {
                 match child.try_wait() {
@@ -831,6 +807,12 @@ impl Supervisor {
         &self.services[index].def.name
     }
 
+    /// The arguments a registered service is started with, for a test.
+    #[cfg(test)]
+    pub(crate) fn service_args(&self, name: &str) -> Option<&[String]> {
+        self.services.iter().find(|s| s.def.name == name).map(|s| s.def.args.as_slice())
+    }
+
     pub fn service_status(&self, index: usize) -> &ServiceStatus {
         &self.services[index].status
     }
@@ -859,6 +841,27 @@ pub(crate) async fn stop_one(child: &mut tokio::process::Child, name: &str, grac
             warn!("{name} did not exit on SIGTERM within {grace:?}; killing it");
             let _ = child.kill().await;
             child.try_wait().ok().flatten()
+        }
+    }
+}
+
+/// The last `lines` of a service's log on the serial console, for the
+/// diagnosis before a halt (#41): the service's stdout and stderr were
+/// redirected to the file, so this is the one place its tail is seen.
+fn dump_log_tail(name: &str, lines: usize) {
+    let log_path = format!("/embra/ephemeral/{}.log", name);
+    match std::fs::read_to_string(&log_path) {
+        Ok(log_content) if !log_content.is_empty() => {
+            eprintln!("[embrad] DIAG: {} log tail:", name);
+            for line in log_content.lines().rev().take(lines).collect::<Vec<_>>().into_iter().rev() {
+                eprintln!("  {}", line);
+            }
+        }
+        Ok(_) => {
+            eprintln!("[embrad] DIAG: {} log file is empty — service produced no output", name);
+        }
+        Err(log_err) => {
+            eprintln!("[embrad] DIAG: {} could not read log file {}: {}", name, log_path, log_err);
         }
     }
 }
@@ -1311,5 +1314,25 @@ mod shutdown_during_restart_tests {
         crate::reconcile::run_until(&mut sup, async move { rx.await.ok(); "the test" }, None).await;
         assert!(started.elapsed() < Duration::from_secs(5), "the backoff held the signal: {:?}", started.elapsed());
         assert_eq!(sup.services[0].restart_count, 1, "the restart had begun");
+    }
+}
+
+#[cfg(test)]
+mod launch_argument_tests {
+    use super::*;
+
+    /// The database is told to listen on loopback alone (#32): every
+    /// in-guest client reaches it at `127.0.0.1:8090`, the QEMU scripts
+    /// forward no 8090, and a bridged VM or bare metal keeps the one
+    /// unauthenticated store off the wire. The pair rides beside the port.
+    #[test]
+    fn the_database_is_told_to_listen_on_loopback_alone() {
+        let mut supervisor = Supervisor::new();
+        supervisor.register_services();
+        let args = supervisor.service_args("wardsondb").expect("the database is registered");
+        let pair = args.windows(2).find(|w| w[0] == "--bind").expect("--bind is passed");
+        assert_eq!(pair[1], "127.0.0.1");
+        let port = args.windows(2).find(|w| w[0] == "--port").expect("--port is passed");
+        assert_eq!(port[1], "8090");
     }
 }
