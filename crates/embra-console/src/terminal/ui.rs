@@ -281,88 +281,98 @@ fn draw_header(f: &mut Frame, area: Rect, app: &AppState) {
 
 /// The transcript's lines, before wrapping: one entry per message, a tool
 /// row by the console's `show_tools` mode, a replayed `assistant` row under
-/// the intelligence's configured name.
+/// the intelligence's configured name. Every message, oldest first: the
+/// frame itself walks from the newest (`frame_rows`); this whole walk is
+/// what the tests compare it with.
+#[cfg(test)]
 fn conversation_lines(app: &AppState) -> Vec<StyledLine> {
+    app.messages.iter().flat_map(|msg| message_lines(app, msg)).collect()
+}
+
+/// One message's lines, its trailing spacer included; a tool row the
+/// `show_tools` mode hides is no line at all. Nothing carries over from one
+/// message to the next, so a message wraps the same wherever the walk
+/// starts.
+fn message_lines(app: &AppState, msg: &super::state::DisplayMessage) -> Vec<StyledLine> {
     let mut styled_lines: Vec<StyledLine> = Vec::new();
-
-    for msg in &app.messages {
-        if msg.role == "tool" {
-            match app.show_tools {
-                ShowTools::Off => continue,
-                ShowTools::Marker if msg.tool.is_some() => {
-                    let row = msg.tool.as_ref().expect("checked above");
-                    let color = if row.is_error { Color::Red } else { Color::DarkGray };
-                    styled_lines.push(vec![StyledSegment::new(
-                        format!("  {}", row.marker_line()),
-                        Style::default().fg(color),
-                    )]);
-                    styled_lines.push(vec![StyledSegment::new(String::new(), Style::default())]);
-                    continue;
-                }
-                // Full, or a tool row without its marker data: the whole
-                // call, as it always rendered.
-                _ => {}
+    if msg.role == "tool" {
+        match app.show_tools {
+            ShowTools::Off => return styled_lines,
+            ShowTools::Marker if msg.tool.is_some() => {
+                let row = msg.tool.as_ref().expect("checked above");
+                let color = if row.is_error { Color::Red } else { Color::DarkGray };
+                styled_lines.push(vec![StyledSegment::new(
+                    format!("  {}", row.marker_line()),
+                    Style::default().fg(color),
+                )]);
+                styled_lines.push(vec![StyledSegment::new(String::new(), Style::default())]);
+                return styled_lines;
             }
+            // Full, or a tool row without its marker data: the whole
+            // call, as it always rendered.
+            _ => {}
         }
-        let (color, prefix) = match msg.role.as_str() {
-            "user" | "You" => (Color::LightBlue, "You"),
-            "system" => (Color::White, ""),
-            "tool" => (Color::Cyan, ""),
-            // A replayed turn of the intelligence: the ModeTransition that
-            // names it arrives after the replay, so the name is read at
-            // draw time.
-            "assistant" => (
-                Color::Green,
-                if app.config_name.is_empty() { "assistant" } else { app.config_name.as_str() },
-            ),
-            _ => (Color::Green, msg.role.as_str()),
-        };
-
-        let base_style = Style::default().fg(color);
-
-        if msg.role == "system" || msg.role == "tool" {
-            let style = Style::default().fg(color);
-            for line in msg.content.lines() {
-                styled_lines.push(render::parse_styled_line(&format!("  {}", line), style));
-            }
-        } else {
-            // Header line
-            let header = format!("[{}] {}: ", msg.timestamp, prefix);
-            styled_lines.push(vec![StyledSegment::new(
-                header,
-                base_style.add_modifier(Modifier::BOLD),
-            )]);
-
-            // Content lines with rich rendering
-            let mut in_json_block = false;
-            for line in msg.content.lines() {
-                let prefixed = format!("  {}", line);
-                if line.trim_start().starts_with("```json") || line.trim_start().starts_with("```JSON") {
-                    in_json_block = true;
-                    styled_lines.push(vec![StyledSegment::new(prefixed, Style::default().fg(Color::Gray))]);
-                    continue;
-                }
-                if line.trim_start().starts_with("```") && in_json_block {
-                    in_json_block = false;
-                    styled_lines.push(vec![StyledSegment::new(prefixed, Style::default().fg(Color::Gray))]);
-                    continue;
-                }
-                if in_json_block {
-                    let mut json_segments = vec![StyledSegment::new("  ".to_string(), base_style)];
-                    json_segments.extend(render::parse_json_line(line));
-                    styled_lines.push(json_segments);
-                } else {
-                    styled_lines.push(render::parse_styled_line(&prefixed, base_style));
-                }
-            }
-        }
-        styled_lines.push(vec![StyledSegment::new(String::new(), Style::default())]);
     }
+    let (color, prefix) = match msg.role.as_str() {
+        "user" | "You" => (Color::LightBlue, "You"),
+        "system" => (Color::White, ""),
+        "tool" => (Color::Cyan, ""),
+        // A replayed turn of the intelligence: the ModeTransition that
+        // names it arrives after the replay, so the name is read at
+        // draw time.
+        "assistant" => (
+            Color::Green,
+            if app.config_name.is_empty() { "assistant" } else { app.config_name.as_str() },
+        ),
+        _ => (Color::Green, msg.role.as_str()),
+    };
+
+    let base_style = Style::default().fg(color);
+
+    if msg.role == "system" || msg.role == "tool" {
+        let style = Style::default().fg(color);
+        for line in msg.content.lines() {
+            styled_lines.push(render::parse_styled_line(&format!("  {}", line), style));
+        }
+    } else {
+        // Header line
+        let header = format!("[{}] {}: ", msg.timestamp, prefix);
+        styled_lines.push(vec![StyledSegment::new(
+            header,
+            base_style.add_modifier(Modifier::BOLD),
+        )]);
+
+        // Content lines with rich rendering
+        let mut in_json_block = false;
+        for line in msg.content.lines() {
+            let prefixed = format!("  {}", line);
+            if line.trim_start().starts_with("```json") || line.trim_start().starts_with("```JSON") {
+                in_json_block = true;
+                styled_lines.push(vec![StyledSegment::new(prefixed, Style::default().fg(Color::Gray))]);
+                continue;
+            }
+            if line.trim_start().starts_with("```") && in_json_block {
+                in_json_block = false;
+                styled_lines.push(vec![StyledSegment::new(prefixed, Style::default().fg(Color::Gray))]);
+                continue;
+            }
+            if in_json_block {
+                let mut json_segments = vec![StyledSegment::new("  ".to_string(), base_style)];
+                json_segments.extend(render::parse_json_line(line));
+                styled_lines.push(json_segments);
+            } else {
+                styled_lines.push(render::parse_styled_line(&prefixed, base_style));
+            }
+        }
+    }
+    styled_lines.push(vec![StyledSegment::new(String::new(), Style::default())]);
     styled_lines
 }
 
-fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
-    let mut styled_lines = conversation_lines(app);
+/// What follows the transcript on the screen: the selector, the thinking
+/// or tool-running indicator, the text being streamed.
+fn tail_lines(app: &AppState) -> Vec<StyledLine> {
+    let mut styled_lines: Vec<StyledLine> = Vec::new();
 
     // Show selector if active
     if let Some(ref selector) = app.selector {
@@ -428,8 +438,118 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
                 .add_modifier(Modifier::SLOW_BLINK),
         )]);
     }
+    styled_lines
+}
 
-    // Manually wrap lines and render from the bottom up
+/// One styled line wrapped by character into rows of at most
+/// `content_width` cells, oldest row first.
+fn wrap_rows(styled_line: &StyledLine, content_width: usize) -> Vec<Vec<Span<'static>>> {
+    let mut visual_rows: Vec<Vec<Span<'static>>> = Vec::new();
+    let total_len: usize = styled_line.iter().map(|s| UnicodeWidthStr::width(s.text.as_str())).sum();
+
+    if total_len == 0 {
+        visual_rows.push(vec![Span::raw("")]);
+    } else if total_len <= content_width {
+        let spans: Vec<Span<'static>> = styled_line
+            .iter()
+            .map(|seg| Span::styled(seg.text.clone(), seg.style))
+            .collect();
+        visual_rows.push(spans);
+    } else {
+        let mut flat_chars: Vec<(char, Style)> = Vec::new();
+        for seg in styled_line {
+            for ch in seg.text.chars() {
+                flat_chars.push((ch, seg.style));
+            }
+        }
+
+        let mut i = 0;
+        while i < flat_chars.len() {
+            let mut row_width = 0usize;
+            let mut row_chars: Vec<(char, Style)> = Vec::new();
+            while i < flat_chars.len() {
+                let (ch, style) = flat_chars[i];
+                let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+                if row_width + char_width > content_width && !row_chars.is_empty() {
+                    break;
+                }
+                row_chars.push((ch, style));
+                row_width += char_width;
+                i += 1;
+            }
+
+            if row_chars.is_empty() {
+                break;
+            }
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            let mut current_text = String::new();
+            let mut current_style = row_chars[0].1;
+            for &(ch, style) in &row_chars {
+                if style == current_style {
+                    current_text.push(ch);
+                } else {
+                    if !current_text.is_empty() {
+                        spans.push(Span::styled(current_text.clone(), current_style));
+                        current_text.clear();
+                    }
+                    current_style = style;
+                    current_text.push(ch);
+                }
+            }
+            if !current_text.is_empty() {
+                spans.push(Span::styled(current_text, current_style));
+            }
+            visual_rows.push(spans);
+        }
+    }
+    visual_rows
+}
+
+/// The rows a frame of `visible_rows` shows with `skip_from_bottom` rows
+/// scrolled past, oldest first, and how many messages were styled for it.
+///
+/// The walk starts at the newest message and stops once the rows below the
+/// window and the window itself exist, so a frame costs the messages it
+/// shows and not the whole transcript (#40). A message wraps the same in
+/// this walk as in the whole one (`conversation_lines`), because nothing
+/// carries from one message into the next; the tests hold the two equal.
+fn frame_rows(
+    app: &AppState,
+    content_width: usize,
+    visible_rows: usize,
+    skip_from_bottom: usize,
+) -> (Vec<Vec<Span<'static>>>, usize) {
+    let needed = skip_from_bottom.saturating_add(visible_rows);
+    // Newest row first while collecting; the window is cut and turned round
+    // at the end.
+    let mut rows_rev: Vec<Vec<Span<'static>>> = Vec::new();
+    let push_rev = |lines: Vec<StyledLine>, rows_rev: &mut Vec<Vec<Span<'static>>>| {
+        for line in lines.iter().rev() {
+            let mut rows = wrap_rows(line, content_width);
+            rows.reverse();
+            rows_rev.extend(rows);
+        }
+    };
+    push_rev(tail_lines(app), &mut rows_rev);
+    let mut visited = 0usize;
+    for msg in app.messages.iter().rev() {
+        if rows_rev.len() >= needed {
+            break;
+        }
+        push_rev(message_lines(app, msg), &mut rows_rev);
+        visited += 1;
+    }
+
+    let total = rows_rev.len();
+    let end = total.saturating_sub(skip_from_bottom);
+    let start = end.saturating_sub(visible_rows);
+    let rows = (start..end).map(|i| rows_rev[total - 1 - i].clone()).collect();
+    (rows, visited)
+}
+
+fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
+    // Wrapped by character and rendered from the bottom up: the newest rows
+    // sit at the bottom of the pane, `scroll_offset` rows scrolled past.
     let content_width = area.width.saturating_sub(2) as usize;
     let visible_rows = area.height as usize;
 
@@ -437,78 +557,8 @@ fn draw_conversation(f: &mut Frame, area: Rect, app: &AppState) {
         return;
     }
 
-    let mut visual_rows: Vec<Vec<Span>> = Vec::new();
-    for styled_line in &styled_lines {
-        let total_len: usize = styled_line.iter().map(|s| UnicodeWidthStr::width(s.text.as_str())).sum();
-
-        if total_len == 0 {
-            visual_rows.push(vec![Span::raw("")]);
-        } else if total_len <= content_width {
-            let spans: Vec<Span> = styled_line
-                .iter()
-                .map(|seg| Span::styled(seg.text.clone(), seg.style))
-                .collect();
-            visual_rows.push(spans);
-        } else {
-            let mut flat_chars: Vec<(char, Style)> = Vec::new();
-            for seg in styled_line {
-                for ch in seg.text.chars() {
-                    flat_chars.push((ch, seg.style));
-                }
-            }
-
-            let mut i = 0;
-            while i < flat_chars.len() {
-                let mut row_width = 0usize;
-                let mut row_chars: Vec<(char, Style)> = Vec::new();
-                while i < flat_chars.len() {
-                    let (ch, style) = flat_chars[i];
-                    let char_width = UnicodeWidthChar::width(ch).unwrap_or(0);
-                    if row_width + char_width > content_width && !row_chars.is_empty() {
-                        break;
-                    }
-                    row_chars.push((ch, style));
-                    row_width += char_width;
-                    i += 1;
-                }
-
-                if row_chars.is_empty() {
-                    break;
-                }
-                let mut spans: Vec<Span> = Vec::new();
-                let mut current_text = String::new();
-                let mut current_style = row_chars[0].1;
-                for &(ch, style) in &row_chars {
-                    if style == current_style {
-                        current_text.push(ch);
-                    } else {
-                        if !current_text.is_empty() {
-                            spans.push(Span::styled(current_text.clone(), current_style));
-                            current_text.clear();
-                        }
-                        current_style = style;
-                        current_text.push(ch);
-                    }
-                }
-                if !current_text.is_empty() {
-                    spans.push(Span::styled(current_text, current_style));
-                }
-                visual_rows.push(spans);
-            }
-        }
-    }
-
-    let total = visual_rows.len();
-    let skip_from_bottom = app.scroll_offset as usize;
-    let end = total.saturating_sub(skip_from_bottom);
-    let start = end.saturating_sub(visible_rows);
-
-    let visible_slice = &visual_rows[start..end];
-
-    let lines: Vec<Line> = visible_slice
-        .iter()
-        .map(|spans| Line::from(spans.clone()))
-        .collect();
+    let (rows, _) = frame_rows(app, content_width, visible_rows, app.scroll_offset as usize);
+    let lines: Vec<Line> = rows.into_iter().map(Line::from).collect();
 
     let paragraph = Paragraph::new(Text::from(lines))
         .block(Block::default().borders(Borders::LEFT | Borders::RIGHT));
@@ -698,6 +748,122 @@ mod conversation_lines_tests {
         assert_eq!(lines[1], "  hello");
         assert_eq!(lines[3], "[history] Embra: ");
         assert_eq!(lines[4], "  hi there");
+    }
+}
+
+#[cfg(test)]
+mod frame_rows_tests {
+    use super::{conversation_lines, frame_rows, tail_lines, wrap_rows};
+    use super::super::state::{AppState, DisplayMessage, ShowTools};
+    use ratatui::text::Span;
+
+    /// The walk the frame used to make: every message styled and wrapped,
+    /// the tail appended, the window sliced out of the whole.
+    fn full_walk_rows(
+        app: &AppState,
+        content_width: usize,
+        visible_rows: usize,
+        skip_from_bottom: usize,
+    ) -> Vec<Vec<Span<'static>>> {
+        let mut styled = conversation_lines(app);
+        styled.extend(tail_lines(app));
+        let visual_rows: Vec<Vec<Span<'static>>> =
+            styled.iter().flat_map(|l| wrap_rows(l, content_width)).collect();
+        let total = visual_rows.len();
+        let end = total.saturating_sub(skip_from_bottom);
+        let start = end.saturating_sub(visible_rows);
+        visual_rows[start..end].to_vec()
+    }
+
+    /// A small deterministic generator, so the histories are the same on
+    /// every run and a failure can be replayed.
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+        fn below(&mut self, n: u64) -> usize {
+            (self.next() % n) as usize
+        }
+    }
+
+    fn random_history(seed: u64, rows: usize) -> AppState {
+        let mut rng = Lcg(seed);
+        let mut app = AppState::new();
+        app.config_name = "Embra".to_string();
+        app.show_tools = ShowTools::Full;
+        let words = ["alpha", "βeta", "日本語", "`code`", "x", "a-much-longer-word-than-most", "{", "}"];
+        for i in 0..rows {
+            let role = match rng.below(5) {
+                0 => "user",
+                1 => "assistant",
+                2 => "system",
+                3 => "tool",
+                _ => "user",
+            };
+            let lines = 1 + rng.below(4);
+            let mut content = String::new();
+            for l in 0..lines {
+                if l > 0 {
+                    content.push('\n');
+                }
+                if rng.below(9) == 0 {
+                    content.push_str("```json\n{\"k\": [1, true, null]}\n```");
+                    continue;
+                }
+                let n = 1 + rng.below(30);
+                let line: Vec<&str> = (0..n).map(|_| words[rng.below(words.len() as u64)]).collect();
+                content.push_str(&line.join(" "));
+            }
+            if role == "tool" {
+                app.messages.push(DisplayMessage::tool_native("file_read", "{}", &content, i % 7 == 0, "UTC"));
+            } else {
+                app.messages.push(DisplayMessage::history(role, content));
+            }
+        }
+        if seed.is_multiple_of(2) {
+            app.streaming_text = Some("streaming `now` 日本".to_string());
+        }
+        app
+    }
+
+    /// The frame's tail walk gives, row for row and span for span, what the
+    /// whole walk gave: for several histories, widths and scroll offsets,
+    /// the tool rows in each `show_tools` mode included.
+    #[test]
+    fn the_tail_walk_renders_the_rows_the_full_walk_rendered() {
+        let mut checked = 0;
+        for seed in 1..=6u64 {
+            let mut app = random_history(seed, 60);
+            for mode in [ShowTools::Full, ShowTools::Marker, ShowTools::Off] {
+                app.show_tools = mode;
+                for width in [20usize, 37, 80] {
+                    for visible in [1usize, 12, 40] {
+                        for skip in [0usize, 3, 50, 10_000] {
+                            let (rows, _) = frame_rows(&app, width, visible, skip);
+                            let reference = full_walk_rows(&app, width, visible, skip);
+                            assert_eq!(rows, reference, "seed {seed} mode {mode:?} width {width} visible {visible} skip {skip}");
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(checked > 500);
+    }
+
+    /// A 2,000-row history on a 40-row screen styles a few dozen messages,
+    /// never the whole transcript; scrolled to the top it styles them all,
+    /// which is what the screen then shows.
+    #[test]
+    fn a_frame_visits_only_the_messages_it_shows() {
+        let app = random_history(7, 2000);
+        let (rows, visited) = frame_rows(&app, 80, 40, 0);
+        assert_eq!(rows.len(), 40);
+        assert!(visited < 60, "visited {visited} of 2000 messages for a 40-row frame");
+        let (_, visited_all) = frame_rows(&app, 80, 40, 1_000_000);
+        assert_eq!(visited_all, 2000, "a scroll past the top styles every message, once");
     }
 }
 
