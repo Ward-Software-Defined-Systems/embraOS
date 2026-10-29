@@ -16,8 +16,12 @@ tower-http = { version = "0.6", features = ["trace", "compression-gzip", "cors"]
 # unprefixed_malloc_on_supported_platforms) makes jemalloc the process-wide C
 # malloc, so RocksDB's C++ allocations bypass glibc's arena retention — without
 # it RSS ratchets ~40 GB/day under sustained ingest+compaction (rig-2, 2026-07-19).
-fjall = "2"
-rust-rocksdb = { version = "0.46", features = ["multi-threaded-cf", "lz4", "zstd", "jemalloc"] }
+# Each engine is a cargo feature; the default builds both and the engine
+# is chosen at run time with --storage-engine. An image that bakes one
+# engine builds with `--no-default-features --features <engine>` and
+# leaves the other's C++ out.
+fjall = { version = "2", optional = true }
+rust-rocksdb = { version = "0.46", features = ["multi-threaded-cf", "lz4", "zstd", "jemalloc"], optional = true }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -54,6 +58,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 clap = { version = "4", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
+
+[features]
+default = ["fjall", "rocksdb"]
+fjall = ["dep:fjall"]
+rocksdb = ["dep:rust-rocksdb"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

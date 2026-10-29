@@ -52,6 +52,30 @@ impl FjallBackend {
     }
 }
 
+/// The fjall handle inside a partition id. The mismatch arm exists only
+/// while the other engine is compiled in: with one engine the id has one
+/// variant, and an `else` on it would be unreachable.
+fn fjall_handle(partition: &PartitionId) -> BackendResult<&fjall::TxPartitionHandle> {
+    match partition {
+        PartitionId::Fjall(handle) => Ok(handle),
+        #[cfg(feature = "rocksdb")]
+        _ => Err(BackendError::Internal(
+            "PartitionId/backend mismatch".into(),
+        )),
+    }
+}
+
+/// The fjall batch inside a batch wrapper; see `fjall_handle`.
+fn fjall_batch(batch: WriteBatchWrapper) -> BackendResult<Batch> {
+    match batch {
+        WriteBatchWrapper::Fjall(b) => Ok(b),
+        #[cfg(feature = "rocksdb")]
+        _ => Err(BackendError::Internal(
+            "WriteBatchWrapper/backend mismatch".into(),
+        )),
+    }
+}
+
 impl StorageBackend for FjallBackend {
     fn create_or_open_partition(&self, name: &str) -> BackendResult<PartitionId> {
         let handle = self
@@ -62,11 +86,7 @@ impl StorageBackend for FjallBackend {
     }
 
     fn get(&self, partition: &PartitionId, key: &[u8]) -> BackendResult<Option<Vec<u8>>> {
-        let PartitionId::Fjall(handle) = partition else {
-            return Err(BackendError::Internal(
-                "PartitionId/backend mismatch".into(),
-            ));
-        };
+        let handle = fjall_handle(partition)?;
         match handle.get(key) {
             Ok(Some(v)) => Ok(Some(v.to_vec())),
             Ok(None) => Ok(None),
@@ -79,11 +99,7 @@ impl StorageBackend for FjallBackend {
         partition: &PartitionId,
         keys: &[&[u8]],
     ) -> BackendResult<Vec<Option<Vec<u8>>>> {
-        let PartitionId::Fjall(handle) = partition else {
-            return Err(BackendError::Internal(
-                "PartitionId/backend mismatch".into(),
-            ));
-        };
+        let handle = fjall_handle(partition)?;
         // fjall has no native multi-get; per-key gets match the read
         // semantics the hydration loops have always had.
         Ok(keys
@@ -101,11 +117,7 @@ impl StorageBackend for FjallBackend {
         prefix: &[u8],
         visit: &mut ScanVisitor<'_>,
     ) -> BackendResult<()> {
-        let PartitionId::Fjall(handle) = partition else {
-            return Err(BackendError::Internal(
-                "PartitionId/backend mismatch".into(),
-            ));
-        };
+        let handle = fjall_handle(partition)?;
         let rtx = self.db.read_tx();
         for item in rtx.prefix(handle, prefix) {
             let (k, v) = item.map_err(|e| BackendError::Internal(e.to_string()))?;
@@ -127,11 +139,7 @@ impl StorageBackend for FjallBackend {
             // fjall's RangeBounds would panic on an inverted range.
             return Ok(());
         }
-        let PartitionId::Fjall(handle) = partition else {
-            return Err(BackendError::Internal(
-                "PartitionId/backend mismatch".into(),
-            ));
-        };
+        let handle = fjall_handle(partition)?;
         let rtx = self.db.read_tx();
         for item in rtx.range(handle, start.to_vec()..end.to_vec()) {
             let (k, v) = item.map_err(|e| BackendError::Internal(e.to_string()))?;
@@ -153,11 +161,7 @@ impl StorageBackend for FjallBackend {
             // fjall's RangeBounds would panic on an inverted range.
             return Ok(());
         }
-        let PartitionId::Fjall(handle) = partition else {
-            return Err(BackendError::Internal(
-                "PartitionId/backend mismatch".into(),
-            ));
-        };
+        let handle = fjall_handle(partition)?;
         let rtx = self.db.read_tx();
         for item in rtx.range(handle, start.to_vec()..end.to_vec()).rev() {
             let (k, v) = item.map_err(|e| BackendError::Internal(e.to_string()))?;
@@ -169,11 +173,7 @@ impl StorageBackend for FjallBackend {
     }
 
     fn scan_full(&self, partition: &PartitionId, visit: &mut ScanVisitor<'_>) -> BackendResult<()> {
-        let PartitionId::Fjall(handle) = partition else {
-            return Err(BackendError::Internal(
-                "PartitionId/backend mismatch".into(),
-            ));
-        };
+        let handle = fjall_handle(partition)?;
         let rtx = self.db.read_tx();
         for item in rtx.iter(handle) {
             let (k, v) = item.map_err(|e| BackendError::Internal(e.to_string()))?;
@@ -214,11 +214,7 @@ impl StorageBackend for FjallBackend {
     }
 
     fn last_key(&self, partition: &PartitionId) -> BackendResult<Option<Vec<u8>>> {
-        let PartitionId::Fjall(handle) = partition else {
-            return Err(BackendError::Internal(
-                "PartitionId/backend mismatch".into(),
-            ));
-        };
+        let handle = fjall_handle(partition)?;
         let rtx = self.db.read_tx();
         match rtx.iter(handle).next_back() {
             Some(Ok((k, _))) => Ok(Some(k.to_vec())),
@@ -237,11 +233,7 @@ impl StorageBackend for FjallBackend {
     }
 
     fn commit_batch(&self, batch: WriteBatchWrapper) -> BackendResult<()> {
-        let WriteBatchWrapper::Fjall(b) = batch else {
-            return Err(BackendError::Internal(
-                "WriteBatchWrapper/backend mismatch".into(),
-            ));
-        };
+        let b = fjall_batch(batch)?;
         self.check_poison(b.commit())
     }
 

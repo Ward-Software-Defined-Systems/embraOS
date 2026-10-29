@@ -46,23 +46,7 @@ impl RocksDbBackend {
             let mut cf_opts = Options::default();
             cf_opts.set_write_buffer_size(memtable_bytes);
             cf_opts.set_max_write_buffer_number(2);
-
-            let mut table_opts = BlockBasedOptions::default();
-            table_opts.set_block_cache(&cache);
-            table_opts.set_cache_index_and_filter_blocks(true);
-            table_opts.set_bloom_filter(10.0, false);
-            table_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
-            cf_opts.set_block_based_table_factory(&table_opts);
-
-            cf_opts.set_compression_per_level(&[
-                DBCompressionType::Lz4,
-                DBCompressionType::Lz4,
-                DBCompressionType::Zstd,
-                DBCompressionType::Zstd,
-                DBCompressionType::Zstd,
-                DBCompressionType::Zstd,
-                DBCompressionType::Zstd,
-            ]);
+            apply_table_and_compression(&mut cf_opts, &cache);
             cf_opts
         };
 
@@ -72,21 +56,7 @@ impl RocksDbBackend {
         db_opts.set_write_buffer_manager(&wbm);
         db_opts.set_max_background_jobs(bg_jobs.max(2));
         // Apply table/compression to default CF as well.
-        let mut table_opts = BlockBasedOptions::default();
-        table_opts.set_block_cache(&cache);
-        table_opts.set_cache_index_and_filter_blocks(true);
-        table_opts.set_bloom_filter(10.0, false);
-        table_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
-        db_opts.set_block_based_table_factory(&table_opts);
-        db_opts.set_compression_per_level(&[
-            DBCompressionType::Lz4,
-            DBCompressionType::Lz4,
-            DBCompressionType::Zstd,
-            DBCompressionType::Zstd,
-            DBCompressionType::Zstd,
-            DBCompressionType::Zstd,
-            DBCompressionType::Zstd,
-        ]);
+        apply_table_and_compression(&mut db_opts, &cache);
 
         // RocksDB requires all existing CFs to be listed on open.
         let existing_cfs = DB::list_cf(&db_opts, path).unwrap_or_default();
@@ -115,36 +85,59 @@ impl RocksDbBackend {
         let mut cf_opts = Options::default();
         cf_opts.set_write_buffer_size(self.memtable_bytes);
         cf_opts.set_max_write_buffer_number(2);
-
-        let mut table_opts = BlockBasedOptions::default();
-        table_opts.set_block_cache(&self.cache);
-        table_opts.set_cache_index_and_filter_blocks(true);
-        table_opts.set_bloom_filter(10.0, false);
-        table_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
-        cf_opts.set_block_based_table_factory(&table_opts);
-
-        cf_opts.set_compression_per_level(&[
-            DBCompressionType::Lz4,
-            DBCompressionType::Lz4,
-            DBCompressionType::Zstd,
-            DBCompressionType::Zstd,
-            DBCompressionType::Zstd,
-            DBCompressionType::Zstd,
-            DBCompressionType::Zstd,
-        ]);
+        apply_table_and_compression(&mut cf_opts, &self.cache);
         cf_opts
     }
+}
+
+/// The table and compression settings every column family shares — the
+/// default one at open, the ones listed at open, and each one created
+/// later: the block cache with its index and filter blocks pinned at L0, a
+/// 10-bit bloom filter, LZ4 for the first two levels and Zstd below. One
+/// place, so a tuning change reaches every column family.
+fn apply_table_and_compression(opts: &mut Options, cache: &Cache) {
+    let mut table_opts = BlockBasedOptions::default();
+    table_opts.set_block_cache(cache);
+    table_opts.set_cache_index_and_filter_blocks(true);
+    table_opts.set_bloom_filter(10.0, false);
+    table_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
+    opts.set_block_based_table_factory(&table_opts);
+
+    opts.set_compression_per_level(&[
+        DBCompressionType::Lz4,
+        DBCompressionType::Lz4,
+        DBCompressionType::Zstd,
+        DBCompressionType::Zstd,
+        DBCompressionType::Zstd,
+        DBCompressionType::Zstd,
+        DBCompressionType::Zstd,
+    ]);
 }
 
 fn rocks_err<E: std::fmt::Display>(e: E) -> BackendError {
     BackendError::Internal(e.to_string())
 }
 
+/// The database and column family inside a partition id. The mismatch arm
+/// exists only while the other engine is compiled in: with one engine the
+/// id has one variant.
 fn unwrap_rocks(partition: &PartitionId) -> BackendResult<(&Arc<DB>, &Arc<str>)> {
     match partition {
         PartitionId::RocksDb { db, cf_name } => Ok((db, cf_name)),
+        #[cfg(feature = "fjall")]
         _ => Err(BackendError::Internal(
             "PartitionId/backend mismatch".into(),
+        )),
+    }
+}
+
+/// The write batch and its database inside a batch wrapper; see `unwrap_rocks`.
+fn unwrap_rocks_batch(batch: WriteBatchWrapper) -> BackendResult<(WriteBatch, Arc<DB>)> {
+    match batch {
+        WriteBatchWrapper::RocksDb { batch, db } => Ok((batch, db)),
+        #[cfg(feature = "fjall")]
+        _ => Err(BackendError::Internal(
+            "WriteBatchWrapper/backend mismatch".into(),
         )),
     }
 }
@@ -344,11 +337,7 @@ impl StorageBackend for RocksDbBackend {
     }
 
     fn commit_batch(&self, batch: WriteBatchWrapper) -> BackendResult<()> {
-        let WriteBatchWrapper::RocksDb { batch, db } = batch else {
-            return Err(BackendError::Internal(
-                "WriteBatchWrapper/backend mismatch".into(),
-            ));
-        };
+        let (batch, db) = unwrap_rocks_batch(batch)?;
         match db.write(&batch) {
             Ok(()) => Ok(()),
             Err(e) => {

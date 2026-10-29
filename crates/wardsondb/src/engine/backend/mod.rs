@@ -5,14 +5,24 @@
 //! that the rest of the codebase talks to. Enum dispatch avoids propagating a
 //! generic parameter through every module while still monomorphizing calls.
 
+#[cfg(feature = "fjall")]
 pub mod fjall_backend;
+#[cfg(feature = "rocksdb")]
 pub mod rocksdb_backend;
+
+#[cfg(not(any(feature = "fjall", feature = "rocksdb")))]
+compile_error!(
+    "wardsondb needs a storage engine: build with the default features (both), \
+     `--no-default-features --features fjall` or `--no-default-features --features rocksdb`"
+);
 
 use std::path::Path;
 
 use crate::error::AppError;
 
+#[cfg(feature = "fjall")]
 pub use fjall_backend::FjallBackend;
+#[cfg(feature = "rocksdb")]
 pub use rocksdb_backend::RocksDbBackend;
 
 /// Tunables passed to a backend on open. Sizes are in bytes.
@@ -76,7 +86,9 @@ pub type ScanVisitor<'a> = dyn FnMut(&[u8], &[u8]) -> std::ops::ControlFlow<()> 
 /// Clone is cheap — both variants wrap an Arc-like internal handle.
 #[derive(Clone)]
 pub enum PartitionId {
+    #[cfg(feature = "fjall")]
     Fjall(::fjall::TxPartitionHandle),
+    #[cfg(feature = "rocksdb")]
     RocksDb {
         db: std::sync::Arc<::rust_rocksdb::DB>,
         cf_name: std::sync::Arc<str>,
@@ -97,7 +109,9 @@ pub enum PartitionId {
 /// bulk_insert_500 +33%, while the name-hash lookups it saved measure in
 /// microseconds per batch. Don't reintroduce staging without a bench win.
 pub enum WriteBatchWrapper {
+    #[cfg(feature = "fjall")]
     Fjall(::fjall::Batch),
+    #[cfg(feature = "rocksdb")]
     RocksDb {
         batch: ::rust_rocksdb::WriteBatch,
         db: std::sync::Arc<::rust_rocksdb::DB>,
@@ -115,10 +129,12 @@ impl WriteBatchWrapper {
         value: &[u8],
     ) -> BackendResult<()> {
         match (self, partition) {
+            #[cfg(feature = "fjall")]
             (WriteBatchWrapper::Fjall(batch), PartitionId::Fjall(handle)) => {
                 batch.insert(handle.inner(), key, value);
                 Ok(())
             }
+            #[cfg(feature = "rocksdb")]
             (WriteBatchWrapper::RocksDb { batch, db }, PartitionId::RocksDb { cf_name, .. }) => {
                 let cf = db.cf_handle(cf_name).ok_or_else(|| {
                     BackendError::Internal(format!(
@@ -128,6 +144,7 @@ impl WriteBatchWrapper {
                 batch.put_cf(&cf, key, value);
                 Ok(())
             }
+            #[cfg(all(feature = "fjall", feature = "rocksdb"))]
             _ => Err(BackendError::Internal(
                 "WriteBatchWrapper / PartitionId backend mismatch".to_string(),
             )),
@@ -136,10 +153,12 @@ impl WriteBatchWrapper {
 
     pub fn remove(&mut self, partition: &PartitionId, key: &[u8]) -> BackendResult<()> {
         match (self, partition) {
+            #[cfg(feature = "fjall")]
             (WriteBatchWrapper::Fjall(batch), PartitionId::Fjall(handle)) => {
                 batch.remove(handle.inner(), key);
                 Ok(())
             }
+            #[cfg(feature = "rocksdb")]
             (WriteBatchWrapper::RocksDb { batch, db }, PartitionId::RocksDb { cf_name, .. }) => {
                 let cf = db.cf_handle(cf_name).ok_or_else(|| {
                     BackendError::Internal(format!(
@@ -149,6 +168,7 @@ impl WriteBatchWrapper {
                 batch.delete_cf(&cf, key);
                 Ok(())
             }
+            #[cfg(all(feature = "fjall", feature = "rocksdb"))]
             _ => Err(BackendError::Internal(
                 "WriteBatchWrapper / PartitionId backend mismatch".to_string(),
             )),
@@ -245,15 +265,23 @@ pub trait StorageBackend: Send + Sync {
 // ─── Engine enum (delegating dispatch) ───────────────────────────────
 
 pub enum Engine {
+    #[cfg(feature = "fjall")]
     Fjall(FjallBackend),
+    #[cfg(feature = "rocksdb")]
     RocksDb(RocksDbBackend),
 }
 
 impl Engine {
     pub fn open(engine_type: &str, path: &Path, config: &EngineConfig) -> BackendResult<Self> {
         match engine_type {
+            #[cfg(feature = "fjall")]
             "fjall" => Ok(Engine::Fjall(FjallBackend::open(path, config)?)),
+            #[cfg(feature = "rocksdb")]
             "rocksdb" => Ok(Engine::RocksDb(RocksDbBackend::open(path, config)?)),
+            #[cfg(not(feature = "fjall"))]
+            "fjall" => Err(not_compiled_in("fjall")),
+            #[cfg(not(feature = "rocksdb"))]
+            "rocksdb" => Err(not_compiled_in("rocksdb")),
             other => Err(BackendError::Internal(format!(
                 "Unknown storage engine '{other}' (expected 'rocksdb' or 'fjall')"
             ))),
@@ -261,16 +289,29 @@ impl Engine {
     }
 }
 
+/// The error for an engine this build left out: it names the cargo
+/// feature that brings it back.
+#[cfg(not(all(feature = "fjall", feature = "rocksdb")))]
+fn not_compiled_in(engine: &str) -> BackendError {
+    BackendError::Internal(format!(
+        "Storage engine '{engine}' is not compiled into this build (cargo feature `{engine}`)"
+    ))
+}
+
 impl StorageBackend for Engine {
     fn create_or_open_partition(&self, name: &str) -> BackendResult<PartitionId> {
         match self {
+            #[cfg(feature = "fjall")]
             Engine::Fjall(b) => b.create_or_open_partition(name),
+            #[cfg(feature = "rocksdb")]
             Engine::RocksDb(b) => b.create_or_open_partition(name),
         }
     }
     fn get(&self, partition: &PartitionId, key: &[u8]) -> BackendResult<Option<Vec<u8>>> {
         match self {
+            #[cfg(feature = "fjall")]
             Engine::Fjall(b) => b.get(partition, key),
+            #[cfg(feature = "rocksdb")]
             Engine::RocksDb(b) => b.get(partition, key),
         }
     }
@@ -280,7 +321,9 @@ impl StorageBackend for Engine {
         keys: &[&[u8]],
     ) -> BackendResult<Vec<Option<Vec<u8>>>> {
         match self {
+            #[cfg(feature = "fjall")]
             Engine::Fjall(b) => b.get_many(partition, keys),
+            #[cfg(feature = "rocksdb")]
             Engine::RocksDb(b) => b.get_many(partition, keys),
         }
     }
@@ -291,7 +334,9 @@ impl StorageBackend for Engine {
         visit: &mut ScanVisitor<'_>,
     ) -> BackendResult<()> {
         match self {
+            #[cfg(feature = "fjall")]
             Engine::Fjall(b) => b.scan_prefix(partition, prefix, visit),
+            #[cfg(feature = "rocksdb")]
             Engine::RocksDb(b) => b.scan_prefix(partition, prefix, visit),
         }
     }
@@ -303,7 +348,9 @@ impl StorageBackend for Engine {
         visit: &mut ScanVisitor<'_>,
     ) -> BackendResult<()> {
         match self {
+            #[cfg(feature = "fjall")]
             Engine::Fjall(b) => b.scan_range(partition, start, end, visit),
+            #[cfg(feature = "rocksdb")]
             Engine::RocksDb(b) => b.scan_range(partition, start, end, visit),
         }
     }
@@ -315,67 +362,89 @@ impl StorageBackend for Engine {
         visit: &mut ScanVisitor<'_>,
     ) -> BackendResult<()> {
         match self {
+            #[cfg(feature = "fjall")]
             Engine::Fjall(b) => b.scan_range_rev(partition, start, end, visit),
+            #[cfg(feature = "rocksdb")]
             Engine::RocksDb(b) => b.scan_range_rev(partition, start, end, visit),
         }
     }
     fn scan_full(&self, partition: &PartitionId, visit: &mut ScanVisitor<'_>) -> BackendResult<()> {
         match self {
+            #[cfg(feature = "fjall")]
             Engine::Fjall(b) => b.scan_full(partition, visit),
+            #[cfg(feature = "rocksdb")]
             Engine::RocksDb(b) => b.scan_full(partition, visit),
         }
     }
     fn count_prefix(&self, partition: &PartitionId, prefix: &[u8]) -> BackendResult<u64> {
         match self {
+            #[cfg(feature = "fjall")]
             Engine::Fjall(b) => b.count_prefix(partition, prefix),
+            #[cfg(feature = "rocksdb")]
             Engine::RocksDb(b) => b.count_prefix(partition, prefix),
         }
     }
     fn count_range(&self, partition: &PartitionId, start: &[u8], end: &[u8]) -> BackendResult<u64> {
         match self {
+            #[cfg(feature = "fjall")]
             Engine::Fjall(b) => b.count_range(partition, start, end),
+            #[cfg(feature = "rocksdb")]
             Engine::RocksDb(b) => b.count_range(partition, start, end),
         }
     }
     fn first_key(&self, partition: &PartitionId) -> BackendResult<Option<Vec<u8>>> {
         match self {
+            #[cfg(feature = "fjall")]
             Engine::Fjall(b) => b.first_key(partition),
+            #[cfg(feature = "rocksdb")]
             Engine::RocksDb(b) => b.first_key(partition),
         }
     }
     fn last_key(&self, partition: &PartitionId) -> BackendResult<Option<Vec<u8>>> {
         match self {
+            #[cfg(feature = "fjall")]
             Engine::Fjall(b) => b.last_key(partition),
+            #[cfg(feature = "rocksdb")]
             Engine::RocksDb(b) => b.last_key(partition),
         }
     }
     fn write_batch(&self) -> WriteBatchWrapper {
         match self {
+            #[cfg(feature = "fjall")]
             Engine::Fjall(b) => b.write_batch(),
+            #[cfg(feature = "rocksdb")]
             Engine::RocksDb(b) => b.write_batch(),
         }
     }
     fn commit_batch(&self, batch: WriteBatchWrapper) -> BackendResult<()> {
         match self {
+            #[cfg(feature = "fjall")]
             Engine::Fjall(b) => b.commit_batch(batch),
+            #[cfg(feature = "rocksdb")]
             Engine::RocksDb(b) => b.commit_batch(batch),
         }
     }
     fn is_poisoned(&self) -> bool {
         match self {
+            #[cfg(feature = "fjall")]
             Engine::Fjall(b) => b.is_poisoned(),
+            #[cfg(feature = "rocksdb")]
             Engine::RocksDb(b) => b.is_poisoned(),
         }
     }
     fn flush(&self) -> BackendResult<()> {
         match self {
+            #[cfg(feature = "fjall")]
             Engine::Fjall(b) => b.flush(),
+            #[cfg(feature = "rocksdb")]
             Engine::RocksDb(b) => b.flush(),
         }
     }
     fn engine_name(&self) -> &'static str {
         match self {
+            #[cfg(feature = "fjall")]
             Engine::Fjall(b) => b.engine_name(),
+            #[cfg(feature = "rocksdb")]
             Engine::RocksDb(b) => b.engine_name(),
         }
     }

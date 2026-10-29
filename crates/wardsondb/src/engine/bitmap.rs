@@ -934,10 +934,12 @@ impl ScanAccelerator {
                 let column = columns.get(field)?;
                 let key = value_to_string_key(value);
                 let bitmaps = column.value_bitmaps.read();
-                let exists = column.exists_bitmap.read().clone();
+                // The difference is a fresh bitmap, so the exists bitmap is
+                // read in place; only the no-such-value arm needs its own
+                // copy (the exists bitmap can be the column's largest).
                 let bitmap = match bitmaps.get(&key) {
-                    Some(eq_bitmap) => &exists - eq_bitmap,
-                    None => exists,
+                    Some(eq_bitmap) => &*column.exists_bitmap.read() - eq_bitmap,
+                    None => column.exists_bitmap.read().clone(),
                 };
                 Some(BitmapScanResult {
                     bitmap,

@@ -58,33 +58,55 @@ pub fn execute_aggregate(
         return Ok(result);
     }
 
-    // Check if the first stage is $match — if so, use the query planner for index lookups
-    let (mut docs, docs_scanned, index_used, skip_first) = {
-        let first = &request.pipeline[0];
-        if let Some(obj) = first.as_object()
-            && obj.len() == 1
-            && let Some(match_spec) = obj.get("$match")
-        {
-            let filter = parse_filter(match_spec)?;
-            let parsed = ParsedQuery {
-                filter: Some(filter),
-                sort: vec![],
-                limit: u64::MAX,
-                offset: 0,
-                fields: None,
-                count_only: false,
-                cursor: None,
-            };
-            let result = execute_query(storage, collection, &parsed)?;
-            (result.docs, result.docs_scanned, result.index_used, true)
-        } else {
-            let all_docs = storage.scan_all_documents(collection)?;
-            let scanned = all_docs.len() as u64;
-            (all_docs, scanned, None, false)
+    // The first stage decides what stays resident: a $match goes through
+    // the query planner (index lookups); a $group streams the scan into its
+    // accumulators, so the groups are the resident set and never the
+    // collection; anything else materializes the collection as before.
+    let (mut docs, docs_scanned, index_used, skip_first, mut groups) = {
+        let (first_name, first_spec) = stage_entry(&request.pipeline[0], 0)?;
+        match first_name {
+            "$match" => {
+                let filter = parse_filter(first_spec)?;
+                let parsed = ParsedQuery {
+                    filter: Some(filter),
+                    sort: vec![],
+                    limit: u64::MAX,
+                    offset: 0,
+                    fields: None,
+                    count_only: false,
+                    cursor: None,
+                };
+                let result = execute_query(storage, collection, &parsed)?;
+                (result.docs, result.docs_scanned, result.index_used, true, 0)
+            }
+            "$group" => {
+                let mut group = GroupAccumulator::new(first_spec, 0)?;
+                let mut scanned = 0u64;
+                let mut group_err: Option<AppError> = None;
+                storage.for_each_document(collection, &mut |doc| {
+                    scanned += 1;
+                    match group.accumulate(&doc) {
+                        Ok(()) => std::ops::ControlFlow::Continue(()),
+                        Err(e) => {
+                            group_err = Some(e);
+                            std::ops::ControlFlow::Break(())
+                        }
+                    }
+                })?;
+                if let Some(e) = group_err {
+                    return Err(e);
+                }
+                let docs = group.finish();
+                let groups = docs.len() as u64;
+                (docs, scanned, None, true, groups)
+            }
+            _ => {
+                let all_docs = storage.scan_all_documents(collection)?;
+                let scanned = all_docs.len() as u64;
+                (all_docs, scanned, None, false, 0)
+            }
         }
     };
-
-    let mut groups: u64 = 0;
 
     let stages = if skip_first {
         &request.pipeline[1..]
@@ -94,19 +116,9 @@ pub fn execute_aggregate(
 
     for (raw_i, stage) in stages.iter().enumerate() {
         let i = if skip_first { raw_i + 1 } else { raw_i };
-        let obj = stage
-            .as_object()
-            .ok_or_else(|| AppError::InvalidPipeline(format!("Stage {i} must be an object")))?;
+        let (stage_name, stage_spec) = stage_entry(stage, i)?;
 
-        if obj.len() != 1 {
-            return Err(AppError::InvalidPipeline(format!(
-                "Stage {i} must have exactly one key"
-            )));
-        }
-
-        let (stage_name, stage_spec) = obj.iter().next().unwrap();
-
-        match stage_name.as_str() {
+        match stage_name {
             "$match" => {
                 let filter = parse_filter(stage_spec)?;
                 docs.retain(|d| filter.matches(d));
@@ -115,30 +127,12 @@ pub fn execute_aggregate(
                 docs = execute_group(stage_spec, &docs, i)?;
                 groups = docs.len() as u64;
             }
-            "$sort" => {
-                let sort_spec = parse_sort_stage(stage_spec, i)?;
-                sort_documents(&mut docs, &sort_spec);
-            }
-            "$limit" => {
-                let limit = stage_spec.as_u64().ok_or_else(|| {
-                    AppError::InvalidPipeline(format!(
-                        "Stage {i}: $limit must be a positive integer"
-                    ))
-                })? as usize;
-                docs.truncate(limit);
-            }
-            "$skip" => {
-                let skip = stage_spec.as_u64().ok_or_else(|| {
-                    AppError::InvalidPipeline(format!(
-                        "Stage {i}: $skip must be a positive integer"
-                    ))
-                })? as usize;
-                docs = docs.into_iter().skip(skip).collect();
-            }
-            other => {
-                return Err(AppError::InvalidPipeline(format!(
-                    "Stage {i}: unknown stage '{other}'"
-                )));
+            name => {
+                if !apply_terminal_stage(name, stage_spec, &mut docs, i)? {
+                    return Err(AppError::InvalidPipeline(format!(
+                        "Stage {i}: unknown stage '{name}'"
+                    )));
+                }
             }
         }
     }
@@ -152,37 +146,108 @@ pub fn execute_aggregate(
     })
 }
 
-fn execute_group(spec: &Value, docs: &[Value], stage_idx: usize) -> Result<Vec<Value>, AppError> {
-    let obj = spec.as_object().ok_or_else(|| {
-        AppError::InvalidPipeline(format!("Stage {stage_idx}: $group must be an object"))
-    })?;
+/// A pipeline stage as `{"$name": spec}`, checked where it stands.
+fn stage_entry(stage: &Value, i: usize) -> Result<(&str, &Value), AppError> {
+    let obj = stage
+        .as_object()
+        .ok_or_else(|| AppError::InvalidPipeline(format!("Stage {i} must be an object")))?;
+    if obj.len() != 1 {
+        return Err(AppError::InvalidPipeline(format!(
+            "Stage {i} must have exactly one key"
+        )));
+    }
+    let (name, spec) = obj.iter().next().unwrap();
+    Ok((name.as_str(), spec))
+}
 
-    let id_spec = obj.get("_id").ok_or_else(|| {
-        AppError::InvalidPipeline(format!("Stage {stage_idx}: $group requires '_id' field"))
-    })?;
-
-    // Parse accumulators (everything except _id)
-    let mut accumulators: Vec<(String, AccumulatorDef)> = Vec::new();
-    for (key, value) in obj {
-        if key == "_id" {
-            continue;
+/// Apply a `$sort`, `$limit` or `$skip` stage to `docs`. `Ok(false)` for
+/// any other stage, which the caller names as unknown where it stands.
+/// The three paths that end on these stages — the document scan, the
+/// index-only and the bitmap aggregates — share it, so a stage behaves the
+/// same whichever served the groups.
+fn apply_terminal_stage(
+    stage_name: &str,
+    stage_spec: &Value,
+    docs: &mut Vec<Value>,
+    i: usize,
+) -> Result<bool, AppError> {
+    match stage_name {
+        "$sort" => {
+            let sort_spec = parse_sort_stage(stage_spec, i)?;
+            sort_documents(docs, &sort_spec);
         }
-        let acc = parse_accumulator(value, stage_idx, key)?;
-        accumulators.push((key.clone(), acc));
+        "$limit" => {
+            let limit = stage_spec.as_u64().ok_or_else(|| {
+                AppError::InvalidPipeline(format!(
+                    "Stage {i}: $limit must be a positive integer"
+                ))
+            })? as usize;
+            docs.truncate(limit);
+        }
+        "$skip" => {
+            let skip = stage_spec.as_u64().ok_or_else(|| {
+                AppError::InvalidPipeline(format!(
+                    "Stage {i}: $skip must be a positive integer"
+                ))
+            })? as usize;
+            // In place: the old `into_iter().skip(n).collect()` reallocated
+            // the whole vector to drop a prefix.
+            docs.drain(..skip.min(docs.len()));
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// A `$group` stage's state while documents stream through it: the parsed
+/// accumulators, one `GroupState` per key seen, the keys in first-seen
+/// order. `execute_group` feeds it a materialized slice; the `$group`-first
+/// path of `execute_aggregate` feeds it the scan.
+struct GroupAccumulator {
+    id_spec: Value,
+    accumulators: Vec<(String, AccumulatorDef)>,
+    group_map: HashMap<String, GroupState>,
+    group_order: Vec<String>,
+}
+
+impl GroupAccumulator {
+    fn new(spec: &Value, stage_idx: usize) -> Result<Self, AppError> {
+        let obj = spec.as_object().ok_or_else(|| {
+            AppError::InvalidPipeline(format!("Stage {stage_idx}: $group must be an object"))
+        })?;
+
+        let id_spec = obj.get("_id").ok_or_else(|| {
+            AppError::InvalidPipeline(format!("Stage {stage_idx}: $group requires '_id' field"))
+        })?;
+
+        // Parse accumulators (everything except _id)
+        let mut accumulators: Vec<(String, AccumulatorDef)> = Vec::new();
+        for (key, value) in obj {
+            if key == "_id" {
+                continue;
+            }
+            let acc = parse_accumulator(value, stage_idx, key)?;
+            accumulators.push((key.clone(), acc));
+        }
+
+        Ok(GroupAccumulator {
+            id_spec: id_spec.clone(),
+            accumulators,
+            group_map: HashMap::new(),
+            group_order: Vec::new(),
+        })
     }
 
-    // Group documents
-    let mut group_map: HashMap<String, GroupState> = HashMap::new();
-    let mut group_order: Vec<String> = Vec::new();
-
-    for doc in docs {
-        let group_key = extract_group_key(id_spec, doc);
+    fn accumulate(&mut self, doc: &Value) -> Result<(), AppError> {
+        let group_key = extract_group_key(&self.id_spec, doc);
         // Serialize failure is practically unreachable for a Value, but "" as a
         // fallback key would silently merge every failing doc into one group.
         let key_str = serde_json::to_string(&group_key)
             .map_err(|e| AppError::Internal(format!("failed to serialize $group key: {e}")))?;
 
-        let state = group_map.entry(key_str.clone()).or_insert_with(|| {
+        let accumulators = &self.accumulators;
+        let group_order = &mut self.group_order;
+        let state = self.group_map.entry(key_str.clone()).or_insert_with(|| {
             group_order.push(key_str.clone());
             GroupState {
                 id_value: group_key,
@@ -196,23 +261,33 @@ fn execute_group(spec: &Value, docs: &[Value], stage_idx: usize) -> Result<Vec<V
         for (idx, (_, def)) in accumulators.iter().enumerate() {
             state.accumulators[idx].accumulate(doc, def)?;
         }
+        Ok(())
     }
 
-    // Build result documents in insertion order
-    let mut result = Vec::with_capacity(group_order.len());
-    for key_str in &group_order {
-        let state = &group_map[key_str];
-        let mut doc = serde_json::Map::new();
-        doc.insert("_id".to_string(), state.id_value.clone());
+    /// The result documents, in insertion order.
+    fn finish(self) -> Vec<Value> {
+        let mut result = Vec::with_capacity(self.group_order.len());
+        for key_str in &self.group_order {
+            let state = &self.group_map[key_str];
+            let mut doc = serde_json::Map::new();
+            doc.insert("_id".to_string(), state.id_value.clone());
 
-        for (idx, (name, _)) in accumulators.iter().enumerate() {
-            doc.insert(name.clone(), state.accumulators[idx].finalize());
+            for (idx, (name, _)) in self.accumulators.iter().enumerate() {
+                doc.insert(name.clone(), state.accumulators[idx].finalize());
+            }
+
+            result.push(Value::Object(doc));
         }
-
-        result.push(Value::Object(doc));
+        result
     }
+}
 
-    Ok(result)
+fn execute_group(spec: &Value, docs: &[Value], stage_idx: usize) -> Result<Vec<Value>, AppError> {
+    let mut group = GroupAccumulator::new(spec, stage_idx)?;
+    for doc in docs {
+        group.accumulate(doc)?;
+    }
+    Ok(group.finish())
 }
 
 fn extract_group_key(id_spec: &Value, doc: &Value) -> Value {
@@ -578,45 +653,7 @@ fn try_index_only_aggregate(
     let groups = docs.len() as u64;
 
     // Apply remaining pipeline stages ($sort, $limit, $skip)
-    for (raw_i, stage) in pipeline[1..].iter().enumerate() {
-        let i = raw_i + 1;
-        let obj = stage
-            .as_object()
-            .ok_or_else(|| AppError::InvalidPipeline(format!("Stage {i} must be an object")))?;
-        if obj.len() != 1 {
-            return Err(AppError::InvalidPipeline(format!(
-                "Stage {i} must have exactly one key"
-            )));
-        }
-        let (stage_name, stage_spec) = obj.iter().next().unwrap();
-        match stage_name.as_str() {
-            "$sort" => {
-                let sort_spec = parse_sort_stage(stage_spec, i)?;
-                sort_documents(&mut docs, &sort_spec);
-            }
-            "$limit" => {
-                let limit = stage_spec.as_u64().ok_or_else(|| {
-                    AppError::InvalidPipeline(format!(
-                        "Stage {i}: $limit must be a positive integer"
-                    ))
-                })? as usize;
-                docs.truncate(limit);
-            }
-            "$skip" => {
-                let skip = stage_spec.as_u64().ok_or_else(|| {
-                    AppError::InvalidPipeline(format!(
-                        "Stage {i}: $skip must be a positive integer"
-                    ))
-                })? as usize;
-                docs = docs.into_iter().skip(skip).collect();
-            }
-            other => {
-                return Err(AppError::InvalidPipeline(format!(
-                    "Stage {i}: unknown stage '{other}'"
-                )));
-            }
-        }
-    }
+    apply_terminal_stages(&pipeline[1..], 1, &mut docs)?;
 
     Ok(Some(AggregateResult {
         docs,
@@ -740,45 +777,7 @@ fn try_bitmap_aggregate(
 
     // Apply remaining pipeline stages ($sort, $limit, $skip)
     let remaining_start = group_stage_idx + 1;
-    for (raw_i, stage) in pipeline[remaining_start..].iter().enumerate() {
-        let i = raw_i + remaining_start;
-        let obj = stage
-            .as_object()
-            .ok_or_else(|| AppError::InvalidPipeline(format!("Stage {i} must be an object")))?;
-        if obj.len() != 1 {
-            return Err(AppError::InvalidPipeline(format!(
-                "Stage {i} must have exactly one key"
-            )));
-        }
-        let (stage_name, stage_spec) = obj.iter().next().unwrap();
-        match stage_name.as_str() {
-            "$sort" => {
-                let sort_spec = parse_sort_stage(stage_spec, i)?;
-                sort_documents(&mut docs, &sort_spec);
-            }
-            "$limit" => {
-                let limit = stage_spec.as_u64().ok_or_else(|| {
-                    AppError::InvalidPipeline(format!(
-                        "Stage {i}: $limit must be a positive integer"
-                    ))
-                })? as usize;
-                docs.truncate(limit);
-            }
-            "$skip" => {
-                let skip = stage_spec.as_u64().ok_or_else(|| {
-                    AppError::InvalidPipeline(format!(
-                        "Stage {i}: $skip must be a positive integer"
-                    ))
-                })? as usize;
-                docs = docs.into_iter().skip(skip).collect();
-            }
-            other => {
-                return Err(AppError::InvalidPipeline(format!(
-                    "Stage {i}: unknown stage '{other}'"
-                )));
-            }
-        }
-    }
+    apply_terminal_stages(&pipeline[remaining_start..], remaining_start, &mut docs)?;
 
     Ok(Some(AggregateResult {
         docs,
@@ -794,10 +793,125 @@ fn try_bitmap_aggregate(
 // number 123 (S2-4), diverging from the doc-scan aggregate path.
 use crate::engine::bitmap::string_key_to_value;
 
+/// The stages after a fast path's `$group`: terminal ones only, each named
+/// by its position in the whole pipeline.
+fn apply_terminal_stages(
+    stages: &[Value],
+    first_index: usize,
+    docs: &mut Vec<Value>,
+) -> Result<(), AppError> {
+    for (raw_i, stage) in stages.iter().enumerate() {
+        let i = raw_i + first_index;
+        let (stage_name, stage_spec) = stage_entry(stage, i)?;
+        if !apply_terminal_stage(stage_name, stage_spec, docs, i)? {
+            return Err(AppError::InvalidPipeline(format!(
+                "Stage {i}: unknown stage '{stage_name}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn parse_sort_stage(
     spec: &Value,
     stage_idx: usize,
 ) -> Result<Vec<super::sort::SortField>, AppError> {
     super::sort::parse_sort_spec(spec)
         .map_err(|e| AppError::InvalidPipeline(format!("Stage {stage_idx}: $sort {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::storage::MemoryConfig;
+    use serde_json::json;
+
+    fn storage_with(docs: usize) -> (tempfile::TempDir, Storage) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let storage =
+            Storage::open_with_config(tmp.path(), "fjall", MemoryConfig::default()).unwrap();
+        storage.create_collection("c").unwrap();
+        let docs: Vec<_> = (0..docs)
+            .map(|i| {
+                let kind = ["a", "b", "c"][i % 3];
+                json!({
+                    "kind": kind,
+                    "n": i,
+                    "tag": format!("t{i}"),
+                })
+            })
+            .collect();
+        storage.bulk_insert_documents("c", docs).unwrap();
+        (tmp, storage)
+    }
+
+    fn aggregate(storage: &Storage, pipeline: Vec<Value>) -> AggregateResult {
+        execute_aggregate(storage, "c", &AggregateRequest { pipeline }).unwrap()
+    }
+
+    /// A `$group`-first pipeline streams the scan into its accumulators; the
+    /// groups, their order, every accumulator (the `$collect` cap included)
+    /// and `docs_scanned` are what the materialized stage gives for the same
+    /// documents — `execute_group` over `scan_all_documents` is the reference.
+    #[test]
+    fn a_group_first_pipeline_streams_and_matches_the_materialized_groups() {
+        let total = 4 * crate::query::cancel::CHECK_EVERY as usize + 700;
+        let (_tmp, storage) = storage_with(total);
+        let spec = json!({
+            "_id": "kind",
+            "count": {"$count": {}},
+            "sum": {"$sum": "n"},
+            "avg": {"$avg": "n"},
+            "min": {"$min": "n"},
+            "max": {"$max": "n"},
+            "tags": {"$collect": "tag"},
+        });
+
+        let streamed = aggregate(&storage, vec![json!({"$group": spec})]);
+        let all_docs = storage.scan_all_documents("c").unwrap();
+        let reference = execute_group(&spec, &all_docs, 0).unwrap();
+
+        assert_eq!(streamed.docs, reference);
+        assert_eq!(streamed.docs_scanned, total as u64);
+        assert_eq!(streamed.groups, 3);
+        assert_eq!(streamed.index_used, None);
+        assert!(streamed.docs[0]["tags"]["_truncated"] == json!(true), "{:?}", streamed.docs[0]);
+
+        // The terminal stages after it read the same way on every path.
+        let sorted = aggregate(
+            &storage,
+            vec![
+                json!({"$group": spec}),
+                json!({"$sort": [{"count": "desc"}, {"_id": "asc"}]}),
+                json!({"$skip": 1}),
+                json!({"$limit": 1}),
+            ],
+        );
+        let mut expected = reference.clone();
+        sort_documents(
+            &mut expected,
+            &super::super::sort::parse_sort_spec(&json!([{"count": "desc"}, {"_id": "asc"}])).unwrap(),
+        );
+        assert_eq!(sorted.docs, vec![expected[1].clone()]);
+        assert_eq!(sorted.groups, 3);
+    }
+
+    /// `$skip` past the end empties the set; an unknown terminal stage is
+    /// named where it stands, whichever path served the groups.
+    #[test]
+    fn terminal_stages_skip_in_place_and_name_an_unknown_stage() {
+        let (_tmp, storage) = storage_with(30);
+        let group = json!({"$group": {"_id": "kind", "count": {"$count": {}}}});
+        let skipped = aggregate(&storage, vec![group.clone(), json!({"$skip": 10})]);
+        assert!(skipped.docs.is_empty());
+        let err = execute_aggregate(
+            &storage,
+            "c",
+            &AggregateRequest {
+                pipeline: vec![group, json!({"$explode": 1})],
+            },
+        )
+        .unwrap_err();
+        assert_eq!(err.to_string(), "Invalid pipeline: Stage 1: unknown stage '$explode'");
+    }
 }
