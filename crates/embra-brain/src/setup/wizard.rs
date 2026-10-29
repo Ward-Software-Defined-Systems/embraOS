@@ -169,7 +169,7 @@ async fn prompt_bearer(
     let _ = tx
         .send(Ok(ConversationResponse {
             response_type: Some(conversation_response::ResponseType::Setup(SetupPrompt {
-                field_type: SetupFieldType::Text as i32,
+                field_type: SetupFieldType::Secret as i32,
                 prompt: format!("Enter your {} bearer token:", preset.label()),
                 options: vec![],
                 default_value: String::new(),
@@ -693,6 +693,42 @@ mod tests {
         assert_eq!(out.bearer.as_deref(), Some("secret-token"));
 
         while resp_rx.try_recv().is_ok() {}
+    }
+
+    /// #20: the bearer is asked for with the `Secret` field type.
+    #[tokio::test]
+    async fn the_bearer_step_asks_with_a_secret_field() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "object": "list",
+                "data": [{"id": "m"}]
+            })))
+            .mount(&server)
+            .await;
+        let (resp_tx, mut resp_rx) = mpsc::channel(32);
+        let (user_tx, mut user_rx) = mpsc::channel(32);
+        user_tx.send(server.uri()).await.unwrap();
+        user_tx.send("Set".to_string()).await.unwrap();
+        user_tx.send("secret-token".to_string()).await.unwrap();
+        user_tx.send("m".to_string()).await.unwrap();
+        run_openai_compat_subflow(OpenAiCompatPreset::Ollama, None, &resp_tx, &mut user_rx)
+            .await
+            .expect("subflow should succeed");
+        drop(resp_tx);
+        let mut bearer_prompt = None;
+        while let Some(Ok(r)) = resp_rx.recv().await {
+            if let Some(conversation_response::ResponseType::Setup(p)) = r.response_type
+                && p.prompt.contains("bearer token:")
+            {
+                bearer_prompt = Some(p);
+            }
+        }
+        let p = bearer_prompt.expect("the bearer was asked for");
+        assert_eq!(p.field_type, SetupFieldType::Secret as i32);
     }
 
     #[tokio::test]

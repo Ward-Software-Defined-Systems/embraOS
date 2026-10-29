@@ -189,11 +189,13 @@ pub(crate) fn operating_mode(m: i32) -> &'static str {
 
 /// Map `brain::SetupFieldType` enum → lowercase string for JSON.
 /// Defaults to "text" for unspecified — matches embra-console's
-/// fallback in `grpc_client.rs`.
+/// fallback in `grpc_client.rs`. `secret` is a text field whose value
+/// the client never shows (#20).
 fn setup_field_type(t: i32) -> &'static str {
     match t {
         2 => "selector",
         3 => "confirm",
+        4 => "secret",
         _ => "text",
     }
 }
@@ -428,6 +430,7 @@ mod frame_tests {
             (SetupFieldType::Text, "text"),
             (SetupFieldType::Selector, "selector"),
             (SetupFieldType::Confirm, "confirm"),
+            (SetupFieldType::Secret, "secret"),
             (SetupFieldType::Unspecified, "text"),
         ] {
             assert_eq!(setup_field_type(field as i32), name, "{field:?}");

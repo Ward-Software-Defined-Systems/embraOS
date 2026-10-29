@@ -255,6 +255,7 @@ enum SetupFieldType {
   SETUP_FIELD_TYPE_TEXT = 1;      // Free text input
   SETUP_FIELD_TYPE_SELECTOR = 2;  // Arrow-key selector
   SETUP_FIELD_TYPE_CONFIRM = 3;   // Yes/no confirmation
+  SETUP_FIELD_TYPE_SECRET = 4;    // Free text whose value is never shown: an API key, a bearer
 }
 
 // --- Operator interrupt ---

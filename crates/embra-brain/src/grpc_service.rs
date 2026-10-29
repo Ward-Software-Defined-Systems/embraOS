@@ -3922,7 +3922,7 @@ async fn handle_provider_command(
             .send(Ok(ConversationResponse {
                 response_type: Some(conversation_response::ResponseType::Setup(
                     SetupPrompt {
-                        field_type: SetupFieldType::Text as i32,
+                        field_type: SetupFieldType::Secret as i32,
                         prompt: prompt_text.to_string(),
                         options: vec![],
                         default_value: String::new(),
@@ -5099,7 +5099,7 @@ async fn handle_pending_openai_compat_step(
                         .send(Ok(ConversationResponse {
                             response_type: Some(conversation_response::ResponseType::Setup(
                                 SetupPrompt {
-                                    field_type: SetupFieldType::Text as i32,
+                                    field_type: SetupFieldType::Secret as i32,
                                     prompt: format!(
                                         "Enter the {} bearer token:",
                                         state.preset.label()
@@ -9694,7 +9694,8 @@ mod setup_reconfigure_tests {
         );
         let (events, _) = run_step(&mut state, BEARER_CHANGE).await;
         let prompt = last_setup_prompt(&events).expect("expected SetupPrompt");
-        assert_eq!(prompt.field_type, SetupFieldType::Text as i32);
+        // #20: a bearer is asked for as a secret, never echoed by a client.
+        assert_eq!(prompt.field_type, SetupFieldType::Secret as i32);
         assert!(matches!(
             state.step,
             OpenAiCompatSetupStep::AwaitingBearerToken { .. }
@@ -11112,6 +11113,49 @@ mod key_setup_model_step_tests {
         assert!(status.is_empty());
         assert_eq!(saved[0]["anthropic_model"], "opus-5.5");
         assert_eq!(left, None);
+    }
+
+    /// #20: `/provider --setup anthropic|gemini` asks for the key with the
+    /// `Secret` field type, so neither client shows what is typed.
+    #[tokio::test]
+    async fn provider_setup_asks_for_the_key_with_a_secret_field() {
+        for (target, arg, word) in [
+            (ProviderKind::Anthropic, "--setup anthropic", "Anthropic"),
+            (ProviderKind::Gemini, "--setup gemini", "Gemini"),
+        ] {
+            let db_server = config_db("gemini").await;
+            let db = Arc::new(WardsonDbClient::from_url(&db_server.uri()));
+            let session_mgr = Arc::new(RwLock::new(SessionManager::new(
+                WardsonDbClient::from_url(&db_server.uri()),
+            )));
+            let in_turn = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let pending_provider = Arc::new(Mutex::new(None));
+            let pending_key_setup = Arc::new(Mutex::new(None));
+            let pending_openai = Arc::new(Mutex::new(None));
+            let (tx, mut rx) = mpsc::channel::<Result<ConversationResponse, Status>>(64);
+            handle_provider_command(
+                arg,
+                &tx,
+                &db,
+                &session_mgr,
+                &in_turn,
+                &pending_provider,
+                &pending_key_setup,
+                &pending_openai,
+            )
+            .await;
+            drop(tx);
+            let mut prompt = None;
+            while let Some(Ok(r)) = rx.recv().await {
+                if let Some(conversation_response::ResponseType::Setup(p)) = r.response_type {
+                    prompt = Some(p);
+                }
+            }
+            let p = prompt.expect("a key prompt");
+            assert!(p.prompt.contains(word) && p.prompt.contains("API key"), "{}", p.prompt);
+            assert_eq!(p.field_type, SetupFieldType::Secret as i32);
+            assert_eq!(*pending_key_setup.lock().await, Some(KeySetupStep::Key(target)));
+        }
     }
 
     #[tokio::test]

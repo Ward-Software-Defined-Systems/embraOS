@@ -990,7 +990,7 @@ pub async fn run_config_wizard_grpc(
                     let _ = tx.send(Ok(ConversationResponse {
                         response_type: Some(conversation_response::ResponseType::Setup(
                             SetupPrompt {
-                                field_type: SetupFieldType::Text as i32,
+                                field_type: SetupFieldType::Secret as i32,
                                 prompt: prompt_text.to_string(),
                                 options: vec![],
                                 default_value: String::new(),
@@ -2202,6 +2202,30 @@ mod wizard_channel_tests {
         let db = WardsonDbClient::from_url("http://127.0.0.1:9");
         let err = run_config_wizard_grpc(&tx, &mut response_rx, &db).await.unwrap_err().to_string();
         assert!(err.contains("setup channel closed during the API key step"), "{err}");
+    }
+
+    /// #20: the key is asked for with the `Secret` field type, so no client
+    /// shows what the operator types or echoes it afterwards.
+    #[tokio::test]
+    async fn the_api_key_step_asks_with_a_secret_field() {
+        let (tx, mut prompts) = mpsc::channel(64);
+        let (answers, mut response_rx) = mpsc::channel::<String>(64);
+        answers.send("Embra".to_string()).await.unwrap();
+        answers.send(crate::setup::wizard::GATEWAY_DIRECT.to_string()).await.unwrap();
+        answers.send(super::PROVIDER_WIZARD_LABELS[0].to_string()).await.unwrap();
+        drop(answers);
+        let db = WardsonDbClient::from_url("http://127.0.0.1:9");
+        let _ = run_config_wizard_grpc(&tx, &mut response_rx, &db).await;
+        drop(tx);
+        let mut last = None;
+        while let Ok(Ok(r)) = prompts.try_recv() {
+            if let Some(conversation_response::ResponseType::Setup(p)) = r.response_type {
+                last = Some(p);
+            }
+        }
+        let key_prompt = last.expect("the wizard asked for the key");
+        assert!(key_prompt.prompt.contains("API key"), "{}", key_prompt.prompt);
+        assert_eq!(key_prompt.field_type, SetupFieldType::Secret as i32);
     }
 
     /// The gateway step and its endpoint step name themselves the same way.
