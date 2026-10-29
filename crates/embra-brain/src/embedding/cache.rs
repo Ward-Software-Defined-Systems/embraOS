@@ -63,6 +63,19 @@ pub enum FailureKind {
     Query,
 }
 
+/// A write-through that landed while a reload was in flight (#57).
+enum Touch {
+    Upsert { vector: Vec<f32>, new_document: bool },
+    Remove,
+}
+
+/// What a reload fetched from disk, taken by `commit_reload`.
+struct Loaded {
+    vecs: HashMap<(String, String), Vec<f32>>,
+    model: String,
+    counts: HashMap<String, u64>,
+}
+
 #[derive(Default)]
 pub struct VectorIndex {
     vecs: HashMap<(String, String), Vec<f32>>,
@@ -77,6 +90,88 @@ pub struct VectorIndex {
     /// a seed reconcile, a TTL reap) and the index needs a reload.
     counts: HashMap<String, u64>,
     loaded: bool,
+    /// A reload is between its counts snapshot and its commit. The fetch
+    /// runs with no lock held, so a write-through can land meanwhile; it is
+    /// recorded in `touched` and merged at the commit, which replaced the
+    /// map wholesale and dropped it before (#57). Outside a reload nothing
+    /// is recorded.
+    reloading: bool,
+    touched: HashMap<(String, String), Touch>,
+}
+
+impl VectorIndex {
+    /// A reload is starting: the write-throughs from here are recorded
+    /// until `commit_reload`.
+    fn begin_reload(&mut self) {
+        self.reloading = true;
+        self.touched.clear();
+    }
+
+    /// The write-through of `upsert`, on the index held.
+    fn apply_upsert(&mut self, collection: &str, id: &str, vector: Vec<f32>, model: &str, new_document: bool) {
+        // Only meaningful once loaded and only for the model in play;
+        // otherwise the next `ensure_current` picks it up from disk anyway.
+        if !(self.loaded && self.model == model) {
+            return;
+        }
+        let key = (collection.to_string(), id.to_string());
+        if self.reloading {
+            self.touched.insert(key.clone(), Touch::Upsert { vector: vector.clone(), new_document });
+        }
+        self.vecs.insert(key, vector);
+        if new_document {
+            *self.counts.entry(collection.to_string()).or_insert(0) += 1;
+        }
+    }
+
+    /// The write-through of `remove`, on the index held.
+    fn apply_remove(&mut self, collection: &str, id: &str) {
+        let key = (collection.to_string(), id.to_string());
+        if self.reloading && (self.vecs.contains_key(&key) || self.touched.contains_key(&key)) {
+            self.touched.insert(key.clone(), Touch::Remove);
+        }
+        if self.vecs.remove(&key).is_some()
+            && let Some(c) = self.counts.get_mut(collection)
+        {
+            *c = c.saturating_sub(1);
+        }
+    }
+
+    /// Take what the reload fetched, with the write-throughs of its window
+    /// on top: a vector embedded meanwhile stays searchable, a node forgotten
+    /// meanwhile stays gone, and the counts move with them. A document
+    /// created before the counts snapshot and embedded after it is counted
+    /// once more than the snapshot holds; the next `ensure_current` reads the
+    /// divergence and reloads, as it does for any count that moved outside
+    /// this process.
+    fn commit_reload(&mut self, loaded: Loaded) {
+        let Loaded { mut vecs, model, mut counts } = loaded;
+        if self.loaded && self.model == model {
+            for (key, touch) in self.touched.drain() {
+                match touch {
+                    Touch::Upsert { vector, new_document } => {
+                        vecs.insert(key.clone(), vector);
+                        if new_document {
+                            *counts.entry(key.0).or_insert(0) += 1;
+                        }
+                    }
+                    Touch::Remove => {
+                        if vecs.remove(&key).is_some()
+                            && let Some(c) = counts.get_mut(&key.0)
+                        {
+                            *c = c.saturating_sub(1);
+                        }
+                    }
+                }
+            }
+        }
+        self.touched.clear();
+        self.reloading = false;
+        self.vecs = vecs;
+        self.model = model;
+        self.counts = counts;
+        self.loaded = true;
+    }
 }
 
 static INDEX: OnceCell<RwLock<VectorIndex>> = OnceCell::const_new();
@@ -106,6 +201,9 @@ pub async fn ensure_current(db: &WardsonDbClient, provider: &dyn EmbeddingProvid
             return;
         }
     }
+    // The fetch below runs with no lock held; the write-throughs that land
+    // meanwhile are recorded from here and merged at the commit (#57).
+    index().await.write().await.begin_reload();
 
     let dim = provider.dimensions();
     let model = provider.model_id().to_string();
@@ -142,7 +240,6 @@ pub async fn ensure_current(db: &WardsonDbClient, provider: &dyn EmbeddingProvid
         }
     }
 
-    let mut idx = index().await.write().await;
     tracing::info!(
         target: "kg::embedding",
         vectors = vecs.len(),
@@ -151,10 +248,7 @@ pub async fn ensure_current(db: &WardsonDbClient, provider: &dyn EmbeddingProvid
         model = %model,
         "vector index loaded"
     );
-    idx.vecs = vecs;
-    idx.model = model;
-    idx.counts = counts;
-    idx.loaded = true;
+    index().await.write().await.commit_reload(Loaded { vecs, model, counts });
 }
 
 /// Cosine search over the whole index. Returns `(collection, id, score)`
@@ -225,15 +319,7 @@ pub async fn neighbors(
 /// original behaviour — desynced the count after every backfill and forced a
 /// full reload on the next turn.
 pub async fn upsert(collection: &str, id: &str, vector: Vec<f32>, model: &str, new_document: bool) {
-    let mut idx = index().await.write().await;
-    // Only meaningful once loaded and only for the model in play; otherwise
-    // the next `ensure_current` picks it up from disk anyway.
-    if idx.loaded && idx.model == model {
-        idx.vecs.insert((collection.to_string(), id.to_string()), vector);
-        if new_document {
-            *idx.counts.entry(collection.to_string()).or_insert(0) += 1;
-        }
-    }
+    index().await.write().await.apply_upsert(collection, id, vector, model, new_document);
 }
 
 /// Count a failed embedding and keep it as the last one seen.
@@ -258,12 +344,7 @@ pub async fn failures() -> EmbeddingFailures {
 
 /// Drop a vector whose node is gone (merge loser, deletion).
 pub async fn remove(collection: &str, id: &str) {
-    let mut idx = index().await.write().await;
-    if idx.vecs.remove(&(collection.to_string(), id.to_string())).is_some()
-        && let Some(c) = idx.counts.get_mut(collection)
-    {
-        *c = c.saturating_sub(1);
-    }
+    index().await.write().await.apply_remove(collection, id);
 }
 
 /// Cosine for a specific set of candidates, for those that have a vector.
@@ -298,6 +379,41 @@ mod tests {
     /// The index is one process-wide static; every test that writes it
     /// holds this lock so two of them never interleave.
     static INDEX_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// #57: a reload fetches with no lock held; a vector embedded and a node
+    /// forgotten in that window survive the commit, and the counts move
+    /// with them. Without a write in the window the fetch is taken as it
+    /// is, and nothing is recorded outside a reload.
+    #[test]
+    fn an_upsert_during_a_reload_survives_the_reload() {
+        let key = |id: &str| ("memory.semantic".to_string(), id.to_string());
+        let fetched = || Loaded {
+            vecs: [(key("a"), vec![1.0]), (key("b"), vec![1.0])].into_iter().collect(),
+            model: "m".into(),
+            counts: [("memory.semantic".to_string(), 2u64)].into_iter().collect(),
+        };
+        let mut idx = VectorIndex { loaded: true, model: "m".into(), ..Default::default() };
+        idx.commit_reload(fetched());
+
+        idx.begin_reload();
+        idx.apply_upsert("memory.semantic", "z", vec![0.5], "m", true);
+        idx.apply_remove("memory.semantic", "b");
+        idx.commit_reload(fetched());
+        assert_eq!(idx.vecs.get(&key("z")), Some(&vec![0.5]));
+        assert!(idx.vecs.contains_key(&key("a")));
+        assert!(!idx.vecs.contains_key(&key("b")));
+        assert_eq!(idx.counts["memory.semantic"], 2, "two fetched, one embedded, one forgotten");
+        assert!(!idx.reloading && idx.touched.is_empty());
+
+        idx.begin_reload();
+        idx.commit_reload(fetched());
+        assert_eq!(idx.vecs.len(), 2);
+        assert_eq!(idx.counts["memory.semantic"], 2);
+
+        idx.apply_upsert("memory.semantic", "q", vec![0.1], "m", true);
+        assert!(idx.touched.is_empty(), "nothing is recorded outside a reload");
+        assert_eq!(idx.counts["memory.semantic"], 3);
+    }
 
     /// `knowledge_unlink_node` and the merge forget the vector of a node they
     /// deleted: the key is gone and the collection's count moves down with
