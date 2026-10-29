@@ -271,7 +271,7 @@ Half of the linked pairs (687 of 1,347) connect two nodes of one session. Those 
 
 ## Auto-enrichment (read path on every user turn)
 
-This is where the KG actually reaches the model. `build_turn_context` (`crates/embra-brain/src/knowledge/enrichment.rs`) is called from `grpc_service.rs` on every user message turn (except resume-briefing turns, which substitute `build_resumption_context`).
+This is where the KG actually reaches the model. `build_turn_context` (`crates/embra-brain/src/knowledge/enrichment.rs`) is called from `grpc_service/turn.rs` on every user message turn (except resume-briefing turns, which substitute `build_resumption_context`).
 
 ### Gates
 
@@ -314,14 +314,14 @@ The wrapper instructs the model to treat injected context as background rather t
 
 ### Per-turn-only invariant
 
-The wrapped message is used for the in-flight provider call only. `grpc_service.rs` persists the raw `msg.content` to session history. On the next turn, the model sees the previous turn's raw user message without the wrapper. Two consequences:
+The wrapped message is used for the in-flight provider call only. `grpc_service/turn.rs` persists the raw `msg.content` to session history. On the next turn, the model sees the previous turn's raw user message without the wrapper. Two consequences:
 
 - The wrapper never appears in conversation history. There is no leakage.
 - The system prompt is never modified by enrichment, so Anthropic ephemeral prompt caching stays warm across turns. The cost of enrichment is the retrieval pipeline itself — a handful of windowed fetches plus indexed edge hops since the 2026-07-04 arm-split/prefetch rework (measured ~2 s worst-case, sub-second typical, against a ~99k-edge production graph) — not a cache invalidation.
 
 ### Resume briefing variant
 
-When a session resumes (`SessionManager.pending_resume_briefing` is set), `build_resumption_context` (`enrichment.rs`) substitutes a different wrapper that instructs the model to recap the prior session in 2-4 sentences. The raw user message in this case is the synthetic `[Session resumed]` marker — not operator-typed input — so it never surfaces back through history. Since the session-ux-fixes wave (2026-07-11), `SessionAttach` sets the flag only when the session has been idle ≥ 30 minutes (`RESUME_BRIEFING_MIN_IDLE_SECS`, vs `meta.last_active`) and no briefing started in the last 120 s — transport reconnects (mobile WS flaps) resume silently; `/switch` sets it unconditionally. (The dispatch sites are `SessionAttach` and `/switch` in `crates/embra-brain/src/grpc_service.rs`; the gate's constants are `RESUME_BRIEFING_MIN_IDLE_SECS` and `RESUME_BRIEFING_ATTEMPT_COOLDOWN_SECS`.)
+When a session resumes (`SessionManager.pending_resume_briefing` is set), `build_resumption_context` (`enrichment.rs`) substitutes a different wrapper that instructs the model to recap the prior session in 2-4 sentences. The raw user message in this case is the synthetic `[Session resumed]` marker — not operator-typed input — so it never surfaces back through history. Since the session-ux-fixes wave (2026-07-11), `SessionAttach` sets the flag only when the session has been idle ≥ 30 minutes (`RESUME_BRIEFING_MIN_IDLE_SECS`, vs `meta.last_active`) and no briefing started in the last 120 s — transport reconnects (mobile WS flaps) resume silently; `/switch` sets it unconditionally. (The dispatch sites are `SessionAttach` and `/switch` in `crates/embra-brain/src/grpc_service/` (`turn.rs`, `slash.rs`); the gate's constants are `RESUME_BRIEFING_MIN_IDLE_SECS` and `RESUME_BRIEFING_ATTEMPT_COOLDOWN_SECS`.)
 
 ---
 

@@ -137,7 +137,7 @@ Operator-verified end-to-end on QEMU (2026-06-06) — including the refuse path 
 |---|---|
 | Verdict call + tolerant JSON parser | `crates/embra-brain/src/guardian/replicant.rs` |
 | Shared gate, `propose` / `approve` / `reject`, gated `define` | `crates/embra-brain/src/guardian/mod.rs` |
-| The judging provider (same backend as the main loop) | `crates/embra-brain/src/grpc_service.rs::build_provider_from_config` |
+| The judging provider (same backend as the main loop) | `crates/embra-brain/src/grpc_service/provider_setup.rs::build_provider_from_config` |
 | `guardian_propose` meta-tool | `crates/embra-brain/src/tools/guardian.rs` |
 | `ToolStatus::Proposed` + `ReplicantRecord` (persisted verdict) | `crates/embra-guardian/src/store.rs` |
 
