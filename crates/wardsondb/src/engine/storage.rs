@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicI64, Ordering};
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, MutexGuard, RwLock};
 
 use tracing::info;
 
@@ -41,6 +41,13 @@ impl Default for MemoryConfig {
         }
     }
 }
+
+/// Shards of the per-document write lock. A writer hashes (collection, id)
+/// to one shard and holds it from the read that decides its write to the
+/// commit, so two writers of one document never both read the same
+/// revision: the second sees the first's commit, and a stale `_rev` is a
+/// conflict instead of a lost update with orphaned index keys (#64).
+pub(crate) const WRITE_SHARDS: usize = 256;
 
 /// Atomic document counters per collection — O(1) doc count reads.
 pub struct DocCounters {
@@ -114,6 +121,11 @@ pub struct Storage {
     /// NEVER dropped — drop_collection/drop_index empty them and reuse them
     /// on re-create (invariant noted at drop_collection).
     pub(crate) partitions: RwLock<HashMap<String, PartitionId>>,
+    /// The per-document write lock, `WRITE_SHARDS` shards. A single-document
+    /// write takes one shard; a bulk mutation takes the shards of its chunk
+    /// in index order, each once (`lock_documents`), so no two holders wait
+    /// on each other in a cycle.
+    pub(crate) write_shards: Vec<Mutex<()>>,
 }
 
 impl Storage {
@@ -168,6 +180,7 @@ impl Storage {
             engine_name,
             collections: RwLock::new(HashSet::new()),
             partitions: RwLock::new(HashMap::new()),
+            write_shards: (0..WRITE_SHARDS).map(|_| Mutex::new(())).collect(),
         };
 
         storage
@@ -208,6 +221,45 @@ impl Storage {
 
     pub fn write_batch(&self) -> WriteBatchWrapper {
         self.engine.write_batch()
+    }
+
+    /// The shard of one document.
+    pub(crate) fn shard_index(collection: &str, id: &str) -> usize {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        collection.hash(&mut hasher);
+        id.hash(&mut hasher);
+        (hasher.finish() % WRITE_SHARDS as u64) as usize
+    }
+
+    /// Take the shard of one document. Held by every single-document write
+    /// from its read to its commit; never taken while another shard is held.
+    pub(crate) fn lock_document(&self, collection: &str, id: &str) -> MutexGuard<'_, ()> {
+        self.write_shards[Self::shard_index(collection, id)].lock()
+    }
+
+    /// Take the shards of many documents, in index order and each once. The
+    /// order is what keeps two bulk mutations from waiting on each other:
+    /// every multi-shard holder climbs the same ladder, and a single-shard
+    /// holder waits on nothing while it holds its shard.
+    pub(crate) fn lock_documents<'a, 'b, I>(
+        &'a self,
+        collection: &str,
+        ids: I,
+    ) -> Vec<MutexGuard<'a, ()>>
+    where
+        I: IntoIterator<Item = &'b str>,
+    {
+        let mut indexes: Vec<usize> = ids
+            .into_iter()
+            .map(|id| Self::shard_index(collection, id))
+            .collect();
+        indexes.sort_unstable();
+        indexes.dedup();
+        indexes
+            .into_iter()
+            .map(|i| self.write_shards[i].lock())
+            .collect()
     }
 
     pub fn commit_batch(&self, batch: WriteBatchWrapper) -> Result<(), AppError> {
@@ -313,6 +365,36 @@ mod tests {
         counters.increment("logs", 1); // no initialize — must not be dropped
         counters.increment("logs", 1);
         assert_eq!(counters.get("logs"), 2);
+    }
+
+    #[test]
+    fn many_documents_lock_their_shards_in_index_order_and_each_once() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let storage =
+            Storage::open_with_config(tmp.path(), "fjall", MemoryConfig::default()).unwrap();
+        // More ids than shards: several share one, and a shard taken twice
+        // by one holder would deadlock it against itself.
+        let ids: Vec<String> = (0..WRITE_SHARDS * 2).map(|i| format!("d{i}")).collect();
+        let guards = storage.lock_documents("c", ids.iter().map(String::as_str));
+        let mut indexes: Vec<usize> = ids
+            .iter()
+            .map(|id| Storage::shard_index("c", id))
+            .collect();
+        indexes.sort_unstable();
+        indexes.dedup();
+        assert_eq!(guards.len(), indexes.len(), "each shard once");
+        assert!(guards.len() <= WRITE_SHARDS);
+        drop(guards);
+        // A single document's shard is on the same ladder, and taken again
+        // after the release.
+        let one = storage.lock_document("c", "d0");
+        drop(one);
+        assert!(Storage::shard_index("c", "d0") < WRITE_SHARDS);
+        assert_eq!(
+            Storage::shard_index("c", "d0"),
+            Storage::shard_index("c", "d0"),
+            "the shard of a document is a function of its name"
+        );
     }
 
     #[test]
