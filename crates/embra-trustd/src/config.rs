@@ -1,3 +1,4 @@
+use embra_common::args::Flags;
 use std::path::PathBuf;
 
 #[derive(Clone)]
@@ -12,31 +13,21 @@ impl TrustdConfig {
         Self::from_args_iter(std::env::args())
     }
 
-    /// The parser behind [`from_args`], over any argument list, so a test
-    /// runs it. The defaults are the literals embrad passes
-    /// (`embrad/src/supervisor.rs`): port 50001, `/embra/state`,
+    /// The parser behind [`from_args`], over any argument list (the program
+    /// name first, as `std::env::args` gives it), so a test runs it; the
+    /// flags come through the one parser of the services
+    /// (`embra_common::args`, #41). The defaults are the literals embrad
+    /// passes (`embrad/src/supervisor.rs`): port 50001, `/embra/state`,
     /// `http://127.0.0.1:8090`. A flag without its value is a configuration
     /// error, and the service stops there rather than guess.
     pub fn from_args_iter<I: IntoIterator<Item = String>>(args: I) -> Self {
-        let args: Vec<String> = args.into_iter().collect();
-        let mut port = 50001u16;
-        let mut state_dir = PathBuf::from("/embra/state");
-        let mut wardsondb_url = "http://127.0.0.1:8090".to_string();
-
-        let mut i = 1;
-        while i < args.len() {
-            let value = |flag: &str| -> &String {
-                args.get(i + 1).unwrap_or_else(|| panic!("{flag} needs a value"))
-            };
-            match args[i].as_str() {
-                "--port" => { port = value("--port").parse().expect("Invalid port"); i += 2; }
-                "--state-dir" => { state_dir = PathBuf::from(value("--state-dir")); i += 2; }
-                "--wardsondb-url" => { wardsondb_url = value("--wardsondb-url").clone(); i += 2; }
-                _ => { i += 1; }
-            }
+        let flags = Flags::parse(args.into_iter().skip(1), &["--port", "--state-dir", "--wardsondb-url"])
+            .unwrap_or_else(|e| panic!("{e}"));
+        Self {
+            port: flags.value("--port").map_or(50001, |v| v.parse().expect("Invalid port")),
+            state_dir: flags.value("--state-dir").map_or_else(|| PathBuf::from("/embra/state"), PathBuf::from),
+            wardsondb_url: flags.value("--wardsondb-url").unwrap_or("http://127.0.0.1:8090").to_string(),
         }
-
-        Self { port, state_dir, wardsondb_url }
     }
 
     pub fn soul_hash_path(&self) -> PathBuf {

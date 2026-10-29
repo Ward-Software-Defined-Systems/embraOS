@@ -74,37 +74,28 @@ fn init_tracing() {
 async fn main() -> anyhow::Result<()> {
     init_tracing();
 
-    // Parse service args
-    let args: Vec<String> = std::env::args().collect();
-    let mut port = 50002u16;
-    let mut wardsondb_url = "http://127.0.0.1:8090".to_string();
-    let mut api_key: Option<String> = None;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--port" => { port = args[i+1].parse().expect("Invalid port"); i += 2; }
-            "--wardsondb-url" => { wardsondb_url = args[i+1].clone(); i += 2; }
-            "--api-key" => { api_key = Some(args[i+1].clone()); i += 2; }
-            "--api-provider" => {
-                // Sprint 4: persist provider selection to a process
-                // env var so handle_request / run_learning_loop can
-                // read it without threading another parameter.
-                let provider = args[i+1].clone();
-                // SAFETY: called once at startup before tokio runtime is multi-threaded
-                unsafe { std::env::set_var("EMBRA_PROVIDER", &provider); }
-                info!("API provider configured: {}", provider);
-                i += 2;
-            }
-            "--github-token" => {
-                let token = args[i+1].clone();
-                // SAFETY: called once at startup before tokio runtime is multi-threaded
-                unsafe { std::env::set_var("GITHUB_TOKEN", &token); }
-                info!("GitHub token configured from --github-token");
-                i += 2;
-            }
-            _ => { i += 1; }
-        }
+    // Parse service args through the one flag parser of the services
+    // (`embra_common::args`, #41); a flag without its value stops the brain.
+    let flags = embra_common::args::Flags::parse(
+        std::env::args().skip(1),
+        &["--port", "--wardsondb-url", "--api-key", "--api-provider", "--github-token"],
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let port: u16 = flags.value("--port").map_or(50002, |v| v.parse().expect("Invalid port"));
+    let wardsondb_url = flags.value("--wardsondb-url").unwrap_or("http://127.0.0.1:8090").to_string();
+    let api_key: Option<String> = flags.value("--api-key").map(str::to_string);
+    if let Some(provider) = flags.value("--api-provider") {
+        // Sprint 4: persist provider selection to a process
+        // env var so handle_request / run_learning_loop can
+        // read it without threading another parameter.
+        // SAFETY: called once at startup before tokio runtime is multi-threaded
+        unsafe { std::env::set_var("EMBRA_PROVIDER", provider); }
+        info!("API provider configured: {}", provider);
+    }
+    if let Some(token) = flags.value("--github-token") {
+        // SAFETY: called once at startup before tokio runtime is multi-threaded
+        unsafe { std::env::set_var("GITHUB_TOKEN", token); }
+        info!("GitHub token configured from --github-token");
     }
 
     // API key: --api-key flag > ANTHROPIC_API_KEY env var > WardSONDB config.

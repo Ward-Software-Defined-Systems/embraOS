@@ -33,22 +33,14 @@ fn fail(code: i32, why: std::fmt::Arguments) -> ! {
 async fn main() {
     println!("[embra-console] starting");
 
-    let args: Vec<String> = std::env::args().collect();
-    let mut apid_addr = "http://127.0.0.1:50000".to_string();
-    let mut device = None;
-    let mut columns: Option<u16> = None;
-    let mut rows: Option<u16> = None;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--apid-addr" => { apid_addr = args[i+1].clone(); i += 2; }
-            "--device" => { device = Some(args[i+1].clone()); i += 2; }
-            "--columns" => { columns = args[i+1].parse().ok(); i += 2; }
-            "--rows" => { rows = args[i+1].parse().ok(); i += 2; }
-            _ => { i += 1; }
-        }
-    }
+    // The flags come through the one parser of the services
+    // (`embra_common::args`, #41); a flag without its value stops the console.
+    let flags = embra_common::args::Flags::parse(std::env::args().skip(1), &["--apid-addr", "--device", "--columns", "--rows"])
+        .unwrap_or_else(|e| panic!("{e}"));
+    let apid_addr = flags.value("--apid-addr").unwrap_or("http://127.0.0.1:50000").to_string();
+    let device = flags.value("--device").map(str::to_string);
+    let columns: Option<u16> = flags.value("--columns").and_then(|v| v.parse().ok());
+    let rows: Option<u16> = flags.value("--rows").and_then(|v| v.parse().ok());
 
     println!("[embra-console] connecting to {}", apid_addr);
     let client = match BrainClient::connect(&apid_addr).await {
