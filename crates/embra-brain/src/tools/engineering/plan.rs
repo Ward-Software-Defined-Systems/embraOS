@@ -9,37 +9,29 @@ use serde::Deserialize;
 use crate::db::WardsonDbClient;
 use crate::tools::registry::DispatchContext;
 
-/// Create or update a plan in WardSONDB.
-pub async fn plan(db: &WardsonDbClient, param: &str) -> String {
-    if param.is_empty() {
-        // List plans
-        let plans = match db.fetch_collection("plans").await {
-            Ok(p) => p,
-            Err(e) => return format!("Failed to load plans from the database: {}", e),
-        };
-
-        if plans.is_empty() {
-            return "No plans found. Create one with: plan <title> | <description>".into();
-        }
-
-        let mut output = format!("=== Plans ({}) ===\n", plans.len());
-        for doc in &plans {
-            let id = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()).unwrap_or("?");
-            let title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled");
-            let status = doc.get("status").and_then(|v| v.as_str()).unwrap_or("draft");
-            output.push_str(&format!("  [{}] {} ({})\n", id, title, status));
-        }
-        return output;
-    }
-
-
-    // Create/update: "title | description"
-    let (title, description) = if let Some(pos) = param.find(" | ") {
-        (&param[..pos], &param[pos + 3..])
-    } else {
-        (param, "")
+/// List the plans.
+pub async fn plan_list(db: &WardsonDbClient) -> String {
+    let plans = match db.fetch_collection("plans").await {
+        Ok(p) => p,
+        Err(e) => return format!("Failed to load plans from the database: {}", e),
     };
 
+    if plans.is_empty() {
+        return "No plans found. Create one with: plan <title> | <description>".into();
+    }
+
+    let mut output = format!("=== Plans ({}) ===\n", plans.len());
+    for doc in &plans {
+        let id = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()).unwrap_or("?");
+        let title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled");
+        let status = doc.get("status").and_then(|v| v.as_str()).unwrap_or("draft");
+        output.push_str(&format!("  [{}] {} ({})\n", id, title, status));
+    }
+    output
+}
+
+/// Create a plan in WardSONDB.
+pub async fn plan_create(db: &WardsonDbClient, title: &str, description: &str) -> String {
     let doc = serde_json::json!({
         "title": title,
         "description": description,
@@ -53,10 +45,10 @@ pub async fn plan(db: &WardsonDbClient, param: &str) -> String {
     }
 }
 
-/// List or manage tasks.
-pub async fn tasks(db: &WardsonDbClient, param: &str) -> String {
-
-    if param.is_empty() {
+/// List the tasks, every one or those `filter` matches by plan id or
+/// title substring.
+pub async fn tasks(db: &WardsonDbClient, filter: &str) -> String {
+    if filter.is_empty() {
         let all_tasks = match db.fetch_collection("tasks").await {
             Ok(t) => t,
             Err(e) => return format!("Failed to load tasks from the database: {}", e),
@@ -77,7 +69,7 @@ pub async fn tasks(db: &WardsonDbClient, param: &str) -> String {
         return output;
     }
 
-    // Filter by plan_id if param looks like an ID
+    // Filter by plan_id if the filter looks like an ID
     let filtered = match db.fetch_collection("tasks").await {
         Ok(t) => t,
         Err(e) => return format!("Failed to load tasks from the database: {}", e),
@@ -88,15 +80,15 @@ pub async fn tasks(db: &WardsonDbClient, param: &str) -> String {
         .filter(|doc| {
             let plan = doc.get("plan_id").and_then(|v| v.as_str()).unwrap_or("");
             let title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("");
-            plan.contains(param) || title.to_lowercase().contains(&param.to_lowercase())
+            plan.contains(filter) || title.to_lowercase().contains(&filter.to_lowercase())
         })
         .collect();
 
     if matching.is_empty() {
-        return format!("No tasks matching '{}'.", param);
+        return format!("No tasks matching '{}'.", filter);
     }
 
-    let mut output = format!("=== Tasks matching '{}' ({}) ===\n", param, matching.len());
+    let mut output = format!("=== Tasks matching '{}' ({}) ===\n", filter, matching.len());
     for doc in &matching {
         let id = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()).unwrap_or("?");
         let title = doc.get("title").and_then(|v| v.as_str()).unwrap_or("Untitled");
@@ -107,18 +99,11 @@ pub async fn tasks(db: &WardsonDbClient, param: &str) -> String {
     output
 }
 
-/// Add a task.
-pub async fn task_add(db: &WardsonDbClient, param: &str) -> String {
-    if param.is_empty() {
-        return "Usage: task_add <title> or task_add <title> | <plan_id>".into();
+/// Add a task, under a plan when `plan_id` names one.
+pub async fn task_add(db: &WardsonDbClient, title: &str, plan_id: Option<&str>) -> String {
+    if title.is_empty() {
+        return "task_add rejected (title is empty)".into();
     }
-
-
-    let (title, plan_id) = if let Some(pos) = param.find(" | ") {
-        (&param[..pos], Some(&param[pos + 3..]))
-    } else {
-        (param, None)
-    };
 
     let mut doc = serde_json::json!({
         "title": title,
@@ -235,14 +220,21 @@ pub struct PlanArgs {
     pub description: Option<String>,
 }
 
+/// What a `plan` call asks for: `None` lists (no title, or an empty one);
+/// a title creates, with the description or none.
+fn plan_request(title: Option<String>, description: Option<String>) -> Option<(String, String)> {
+    match title {
+        Some(title) if !title.is_empty() => Some((title, description.unwrap_or_default())),
+        _ => None,
+    }
+}
+
 impl PlanArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = match (self.title, self.description) {
-            (None, _) => String::new(),
-            (Some(t), None) => t,
-            (Some(t), Some(d)) => format!("{} | {}", t, d),
-        };
-        Ok(plan(ctx.db, &param).await)
+        Ok(match plan_request(self.title, self.description) {
+            None => plan_list(ctx.db).await,
+            Some((title, description)) => plan_create(ctx.db, &title, &description).await,
+        })
     }
 }
 
@@ -276,11 +268,8 @@ pub struct TaskAddArgs {
 
 impl TaskAddArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = match self.plan_id {
-            Some(p) if !p.is_empty() => format!("{} | {}", self.title, p),
-            _ => self.title,
-        };
-        Ok(task_add(ctx.db, &param).await)
+        let plan_id = self.plan_id.as_deref().filter(|p| !p.is_empty());
+        Ok(task_add(ctx.db, &self.title, plan_id).await)
     }
 }
 
@@ -337,6 +326,23 @@ impl PlanDeleteArgs {
 #[cfg(test)]
 mod native_args_tests {
     use super::*;
+
+    /// #37: the fields replace the `title | description` string the tool
+    /// once rebuilt and re-split. No title, or an empty one, lists the
+    /// plans; a title creates one, with the description or none.
+    #[test]
+    fn a_plan_without_a_title_lists_and_one_with_a_title_creates() {
+        assert_eq!(plan_request(None, None), None);
+        assert_eq!(plan_request(None, Some("d".into())), None);
+        assert_eq!(plan_request(Some(String::new()), Some("d".into())), None);
+        assert_eq!(plan_request(Some("t".into()), None), Some(("t".into(), String::new())));
+        assert_eq!(plan_request(Some("t".into()), Some("d".into())), Some(("t".into(), "d".into())));
+        // A title carrying the old delimiter is a title.
+        assert_eq!(
+            plan_request(Some("a | b".into()), None),
+            Some(("a | b".into(), String::new()))
+        );
+    }
 
     #[test]
     fn plan_delete_cascade_tasks_defaults_false() {
