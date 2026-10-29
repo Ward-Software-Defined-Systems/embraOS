@@ -5,7 +5,7 @@ use embra_common::proto::trust::trust_service_client::TrustServiceClient;
 use tonic::transport::Channel;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::info;
 
 #[derive(Clone)]
 pub struct BackendConnections {
@@ -68,12 +68,5 @@ impl BackendConnections {
         *self.trust.write().await = Some(client.clone());
         info!("Connected to embra-trustd at {}", self.trust_addr);
         Ok(client)
-    }
-
-    /// Clear cached connections (e.g., after a backend restart)
-    pub async fn _reset(&self) {
-        *self.brain.write().await = None;
-        *self.trust.write().await = None;
-        warn!("Backend connections reset");
     }
 }
