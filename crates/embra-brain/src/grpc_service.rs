@@ -2520,84 +2520,62 @@ async fn handle_request(
             // on re-runs if the user asks again).
             {
                 let mgr = session_mgr.read().await;
-                let append_outcome = mgr
-                    .append_message(
-                        &session_name,
-                        &Message::user_with_attachments(&msg.content, turn_refs.clone()),
-                    )
-                    .await;
-                if let Err(crate::sessions::SessionError::LegacyReadOnly(ref sess)) =
-                    append_outcome
-                {
-                    warn!(
-                        target: "sessions",
-                        session = %sess,
-                        "legacy session rejected append; surfacing to client"
-                    );
-                    let _ = tx.send(Ok(ConversationResponse {
-                        response_type: Some(conversation_response::ResponseType::System(
-                            SystemMessage {
-                                content: format!(
-                                    "Session '{}' is legacy (pre-native-tools) and is read-only. Create a new session to continue.",
-                                    sess
-                                ),
-                                msg_type: SystemMessageType::Error as i32,
-                            }
-                        )),
-                    })).await;
-                    return Ok(());
-                }
                 let final_text = final_assistant_text(
                     &persisted_segments.joined(),
                     &tool_names_in_turn,
                     current_turn.outcome,
                 );
-                // A failed append is said, never swallowed (#59): the reply
-                // went out, so the operator is told the history does not
-                // carry this turn. The assistant's half is not written after
-                // a failed operator half (a reply without its question).
-                let not_saved = |what: &str, e: &dyn std::fmt::Display| {
-                    format!(
-                        "{what} was not saved to session '{}': {e}. The reply above stands, but the history does not carry it; try again once the database answers.",
-                        session_name
-                    )
-                };
-                let persisted = match append_outcome {
-                    Ok(_) => {
-                        match mgr
-                            .append_message(
-                                &session_name,
-                                &Message::assistant_with_attachments(&final_text, turn_assistant_refs.clone()),
-                            )
-                            .await
-                        {
-                            Ok(_) => true,
-                            Err(e) => {
-                                warn!(target: "sessions", session = %session_name, "the reply was not saved: {e}");
-                                send_system(tx, not_saved("The reply", &e), SystemMessageType::Warning).await;
-                                false
-                            }
-                        }
+                // One write for the turn (#59): the operator's message and
+                // the reply land together or not at all, and the events
+                // watermark rides the meta write that follows the history
+                // write, so what happened during the turn is shown next
+                // time only once the turn is on record.
+                let turn = [
+                    Message::user_with_attachments(&msg.content, turn_refs.clone()),
+                    Message::assistant_with_attachments(&final_text, turn_assistant_refs.clone()),
+                ];
+                match mgr.append_turn(&session_name, &turn, Some(turn_started)).await {
+                    Ok(()) => {}
+                    Err(crate::sessions::SessionError::LegacyReadOnly(sess)) => {
+                        warn!(
+                            target: "sessions",
+                            session = %sess,
+                            "legacy session rejected append; surfacing to client"
+                        );
+                        let _ = tx.send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::System(
+                                SystemMessage {
+                                    content: format!(
+                                        "Session '{}' is legacy (pre-native-tools) and is read-only. Create a new session to continue.",
+                                        sess
+                                    ),
+                                    msg_type: SystemMessageType::Error as i32,
+                                }
+                            )),
+                        })).await;
+                        return Ok(());
                     }
                     Err(e) => {
-                        warn!(target: "sessions", session = %session_name, "the operator's message was not saved: {e}");
-                        send_system(tx, not_saved("This turn", &e), SystemMessageType::Warning).await;
-                        false
+                        // A failed write is said, never swallowed (#59): the
+                        // reply went out, so the operator is told the history
+                        // does not carry this turn.
+                        warn!(target: "sessions", session = %session_name, "the turn was not saved: {e}");
+                        send_system(
+                            tx,
+                            format!(
+                                "This turn was not saved to session '{}': {e}. The reply above stands, but the history does not carry it; try again once the database answers.",
+                                session_name
+                            ),
+                            SystemMessageType::Warning,
+                        )
+                        .await;
                     }
-                };
-                // The events watermark moves to this turn's start, after
-                // both appends (each rewrites the meta from storage), so
-                // what happened during the turn is shown next time.
-                if persisted
-                    && let Err(e) = mgr.stamp_events_seen(&session_name, turn_started).await
-                {
-                    warn!(target: "sessions", session = %session_name, "events watermark not stamped: {e}");
                 }
             }
 
             // Guided-delete execution — AFTER persistence, deliberately:
             // soft_delete stamps `deleted_at` onto the history doc, and
-            // append_message above rewrites that doc from the typed
+            // append_turn above rewrites that doc from the typed
             // SessionHistory struct (which has no deleted_at field), so a
             // pre-persistence stamp would be silently dropped. Fail-closed:
             // only the READY marker deletes; ABORT / no marker / a failed

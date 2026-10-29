@@ -69,7 +69,7 @@ pub struct SessionMeta {
     pub model: Option<String>,
     /// Message count of the session's history (`SessionHistory.turns.len()`),
     /// stamped by `create` and re-stamped on every successful
-    /// `append_message`. `None` on pre-fix docs; `list_with_counts`
+    /// `append_turn`. `None` on pre-fix docs; `list_with_counts`
     /// derives those from the history doc and backfills the meta.
     /// Serde-additive — no schema-version bump (anthropic_model precedent).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -126,7 +126,7 @@ pub struct SessionHistory {
 
 fn default_legacy_format_version() -> u32 {
     // Pre-v7 session docs lack this field; serde fills with 1 (legacy)
-    // so the read-only guard in append_message correctly rejects them.
+    // so the read-only guard in append_turn correctly rejects them.
     1
 }
 
@@ -201,6 +201,13 @@ pub struct SessionManager {
     /// images by the next operator turn. Runtime only, like the images;
     /// the files stay where they are.
     pending_files: std::collections::HashMap<String, Vec<crate::media::text::TextUpload>>,
+    /// One lock per session for every read-modify-write of its documents
+    /// (#59). The store has no compare-and-set: two streams persisting a
+    /// turn of one session at once would each rewrite the whole history
+    /// document from its own read, and the later write would drop the
+    /// earlier turn. Runtime only; the map is touched for a blink, the
+    /// session's lock is held across the round trips.
+    write_locks: std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
 
 /// A trigger turn waiting for its turn: a reminder or a cron job set with
@@ -234,7 +241,16 @@ impl SessionManager {
             briefing_attempts: std::collections::HashMap::new(),
             pending_media: std::collections::HashMap::new(),
             pending_files: std::collections::HashMap::new(),
+            write_locks: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
+    }
+
+    /// The lock every read-modify-write of `name`'s documents is held
+    /// under: `append_turn` and `rewrite_meta` take it; a test may hold it
+    /// to prove they wait.
+    pub(crate) fn write_lock(&self, name: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        let mut locks = self.write_locks.lock().unwrap_or_else(|e| e.into_inner());
+        locks.entry(name.to_string()).or_default().clone()
     }
 
     /// Stage an image for `session`'s next operator turn. Returns the new
@@ -271,13 +287,6 @@ impl SessionManager {
     /// Drain the staged files for `session`.
     pub fn take_staged_files(&mut self, session: &str) -> Vec<crate::media::text::TextUpload> {
         self.pending_files.remove(session).unwrap_or_default()
-    }
-
-    /// Move the session's events watermark to `at`: the next turn's block
-    /// starts there. Called after a turn is saved, so what happened during
-    /// the turn is shown next time.
-    pub async fn stamp_events_seen(&self, name: &str, at: DateTime<Utc>) -> Result<bool> {
-        self.rewrite_meta(name, |m| m.events_seen_at = Some(at)).await
     }
 
     /// True when a resume briefing was started for `name` less than
@@ -404,11 +413,24 @@ impl SessionManager {
         }
     }
 
-    pub async fn append_message(
+    /// Persist one turn: `messages` in order (the operator's message, then
+    /// the reply when the model answered) in ONE write of the history
+    /// document, then one write of the meta document (`last_active`,
+    /// `turn_count`, and the events watermark when the caller passes the
+    /// turn's start, so what happened during the turn is shown next time
+    /// only once the turn is on record). Held under the session's write
+    /// lock, so two streams of one session never rewrite the history from
+    /// stale reads (#59). A history that cannot be written leaves the meta
+    /// as it was, and the caller says the turn was not saved.
+    pub async fn append_turn(
         &self,
         name: &str,
-        message: &Message,
+        messages: &[Message],
+        events_seen_at: Option<DateTime<Utc>>,
     ) -> Result<(), SessionError> {
+        let lock = self.write_lock(name);
+        let _held = lock.lock().await;
+
         let collection = format!("sessions.{}.history", name);
         let results = self
             .db
@@ -416,9 +438,9 @@ impl SessionManager {
             .await
             .map_err(SessionError::Io)?;
 
-        // Stamped after a successful push so the meta update below can
+        // Stamped after a successful push so the meta write below can
         // mirror the history length; stays None when no history doc
-        // exists (the meta rewrite still runs for last_active).
+        // exists (the meta write still runs for last_active).
         let mut appended_turn_count: Option<u32> = None;
 
         if let Some(doc) = results.into_iter().next() {
@@ -436,7 +458,7 @@ impl SessionManager {
             }
 
             let mut history = history;
-            history.turns.push(message.clone());
+            history.turns.extend(messages.iter().cloned());
             appended_turn_count = Some(history.turns.len() as u32);
 
             if let Some(id) = doc.get("_id").or(doc.get("id")).and_then(|v| v.as_str()) {
@@ -448,35 +470,19 @@ impl SessionManager {
             }
         }
 
-        // Update last_active (and the turn-count mirror) on meta. Non-fatal
-        // if it fails — the history write is the source of truth for
-        // append_message's success.
-        let meta_collection = format!("sessions.{}.meta", name);
-        let meta_results = self
-            .db
-            .query(&meta_collection, &history_query_body())
-            .await
-            .map_err(SessionError::Io)?;
-        if let Some(meta_doc) = meta_results.into_iter().next() {
-            let id = meta_doc
-                .get("_id")
-                .or(meta_doc.get("id"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            if let Some(id) = id {
-                let mut meta: SessionMeta = serde_json::from_value(meta_doc)
-                    .map_err(|e| SessionError::Io(e.into()))?;
-                meta.last_active = Utc::now();
-                if let Some(n) = appended_turn_count {
-                    meta.turn_count = Some(n);
-                }
-                self.db
-                    .update(&meta_collection, &id, &serde_json::to_value(&meta)
-                        .map_err(|e| SessionError::Io(e.into()))?)
-                    .await
-                    .map_err(SessionError::Io)?;
+        // last_active, the turn-count mirror and the watermark, in one
+        // write. The history write is the source of truth for the turn.
+        self.rewrite_meta_locked(name, |meta| {
+            meta.last_active = Utc::now();
+            if let Some(n) = appended_turn_count {
+                meta.turn_count = Some(n);
             }
-        }
+            if let Some(at) = events_seen_at {
+                meta.events_seen_at = Some(at);
+            }
+        })
+        .await
+        .map_err(SessionError::Io)?;
 
         Ok(())
     }
@@ -623,7 +629,7 @@ impl SessionManager {
     /// `list()` plus the stored-doc address per meta, so callers that
     /// write back (the `list_with_counts` backfill) can target the
     /// WardSONDB document. The doc id is the server-assigned `_id`
-    /// (falling back to `id` per the append_message pattern) — NOT
+    /// (falling back to `id` per the append_turn pattern) — NOT
     /// `SessionMeta.id`, which is an internal uuid.
     async fn list_docs(&self) -> Result<Vec<(String, Option<String>, SessionMeta)>> {
         let collections = self.db.list_collections().await?;
@@ -656,7 +662,7 @@ impl SessionManager {
     /// metas get the count derived from their history doc, and the derived
     /// value is backfilled onto the stored meta fire-and-forget
     /// (spawn_access_touches precedent; `patch_document` so a concurrent
-    /// `append_message` full-doc update can't be clobbered on other
+    /// `append_turn` full-doc update can't be clobbered on other
     /// fields). A failed derivation displays as 0 but is NOT backfilled —
     /// never persist a guess.
     pub async fn list_with_counts(&self) -> Result<Vec<SessionMeta>> {
@@ -758,6 +764,18 @@ impl SessionManager {
         name: &str,
         f: impl FnOnce(&mut SessionMeta),
     ) -> Result<bool> {
+        let lock = self.write_lock(name);
+        let _held = lock.lock().await;
+        self.rewrite_meta_locked(name, f).await
+    }
+
+    /// The meta read-modify-write itself; the caller holds the session's
+    /// write lock (`rewrite_meta`, `append_turn`).
+    async fn rewrite_meta_locked(
+        &self,
+        name: &str,
+        f: impl FnOnce(&mut SessionMeta),
+    ) -> Result<bool> {
         let meta_collection = format!("sessions.{}.meta", name);
         let results = self
             .db
@@ -790,6 +808,125 @@ pub(crate) fn reattach_refusal(name: &str, meta: &SessionMeta) -> Option<String>
              Restore it with /sessions restore {name}."
         )
     })
+}
+
+#[cfg(test)]
+mod append_turn_tests {
+    //! #59: a turn is one history write and one meta write, under the
+    //! session's lock.
+    use super::*;
+    use serde_json::json;
+    use std::sync::Arc;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn data(v: serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"ok": true, "meta": {}, "data": v}))
+    }
+
+    /// A store holding session `s` with one earlier message, answering
+    /// every PUT.
+    async fn session_store() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/sessions.s.history/query"))
+            .respond_with(data(json!([{
+                "_id": "h1", "session_name": "s", "format_version": 2,
+                "turns": [{"role": "user", "content": "earlier"}]
+            }])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/sessions.s.meta/query"))
+            .respond_with(data(json!([{
+                "_id": "m1", "id": "m1", "name": "s", "state": "Active",
+                "created_at": "2026-10-01T00:00:00Z", "last_active": "2026-10-01T00:00:00Z"
+            }])))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT")).respond_with(data(json!({}))).mount(&server).await;
+        server
+    }
+
+    async fn puts(server: &MockServer) -> Vec<(String, serde_json::Value)> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "PUT")
+            .map(|r| {
+                (
+                    format!("PUT {}", r.url.path()),
+                    serde_json::from_slice(&r.body).unwrap_or(serde_json::Value::Null),
+                )
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_turn_is_one_history_write_and_one_meta_write() {
+        let server = session_store().await;
+        let mgr = SessionManager::new(WardsonDbClient::from_url(&server.uri()));
+        let at = DateTime::parse_from_rfc3339("2026-10-29T10:00:00Z").unwrap().with_timezone(&Utc);
+
+        mgr.append_turn("s", &[Message::user("q"), Message::assistant("a")], Some(at))
+            .await
+            .expect("saved");
+
+        let writes = puts(&server).await;
+        let paths: Vec<&str> = writes.iter().map(|w| w.0.as_str()).collect();
+        assert_eq!(paths, ["PUT /sessions.s.history/docs/h1", "PUT /sessions.s.meta/docs/m1"]);
+        let turns = writes[0].1["turns"].as_array().expect("turns");
+        let rows: Vec<(&str, &str)> = turns
+            .iter()
+            .map(|t| (t["role"].as_str().unwrap(), t["content"].as_str().unwrap()))
+            .collect();
+        assert_eq!(rows, [("user", "earlier"), ("user", "q"), ("assistant", "a")]);
+        assert_eq!(writes[1].1["turn_count"], json!(3));
+        assert_eq!(writes[1].1["events_seen_at"], json!("2026-10-29T10:00:00Z"));
+        assert_eq!(writes[1].1["state"], json!("Active"));
+    }
+
+    #[tokio::test]
+    async fn a_history_that_cannot_be_written_leaves_the_meta_alone() {
+        let server = session_store().await;
+        Mock::given(method("PUT"))
+            .and(path("/sessions.s.history/docs/h1"))
+            .respond_with(ResponseTemplate::new(500))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let mgr = SessionManager::new(WardsonDbClient::from_url(&server.uri()));
+
+        let err = mgr
+            .append_turn("s", &[Message::user("q"), Message::assistant("a")], Some(Utc::now()))
+            .await
+            .expect_err("the history write failed");
+        assert!(matches!(err, SessionError::Io(_)), "{err}");
+        let paths: Vec<String> = puts(&server).await.into_iter().map(|w| w.0).collect();
+        assert_eq!(paths, ["PUT /sessions.s.history/docs/h1"], "no meta write after a failed history write");
+    }
+
+    #[tokio::test]
+    async fn an_append_waits_for_the_sessions_lock() {
+        let server = session_store().await;
+        let mgr = Arc::new(SessionManager::new(WardsonDbClient::from_url(&server.uri())));
+        let lock = mgr.write_lock("s");
+        let held = lock.lock().await;
+
+        let writer = Arc::clone(&mgr);
+        let task = tokio::spawn(async move { writer.append_turn("s", &[Message::user("q")], None).await });
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            server.received_requests().await.unwrap_or_default().is_empty(),
+            "nothing reaches the store while another writer holds the session"
+        );
+
+        drop(held);
+        task.await.unwrap().expect("saved once the lock is free");
+        assert_eq!(puts(&server).await.len(), 2);
+    }
 }
 
 #[cfg(test)]
