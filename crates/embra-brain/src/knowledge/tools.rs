@@ -1998,7 +1998,7 @@ pub(crate) fn next_scan_page(
 
 /// The collections an edge endpoint can live in: every dumpable collection
 /// except the edges. Guard `an_endpoint_can_live_in_every_node_collection`.
-const ENDPOINT_COLLECTIONS: [&str; 4] = [
+pub(crate) const ENDPOINT_COLLECTIONS: [&str; 4] = [
     "memory.entries",
     "memory.semantic",
     "memory.procedural",
@@ -2168,7 +2168,7 @@ async fn edge_endpoints(
 /// and never an answer: a request that fails, and a list with fewer ids
 /// than the collection counted just before it. A collection the server does
 /// not have holds nothing.
-async fn node_ids(db: &WardsonDbClient) -> Result<std::collections::HashSet<String>, String> {
+pub(crate) async fn node_ids(db: &WardsonDbClient) -> Result<std::collections::HashSet<String>, String> {
     let mut ids: std::collections::HashSet<String> = Default::default();
     for collection in ENDPOINT_COLLECTIONS {
         let counted = match db.count(collection).await {
@@ -2620,7 +2620,7 @@ const DUMP_SCAN_PAGE: usize = 20_000;
 /// The dumpable collections as `(short_name, wardsondb_collection)` in
 /// canonical dump order: nodes first (entries, semantic, procedural,
 /// identity), then edges. Short names are the tool-facing vocabulary.
-const DUMP_COLLECTIONS: &[(&str, &str)] = &[
+pub(crate) const DUMP_COLLECTIONS: &[(&str, &str)] = &[
     ("entries", "memory.entries"),
     ("semantic", "memory.semantic"),
     ("procedural", "memory.procedural"),
@@ -2646,7 +2646,7 @@ fn dump_edge_type_filter(edge_types: &[String]) -> serde_json::Value {
 /// Map tool-facing short names to `memory.*` collections in canonical dump
 /// order regardless of input order. `None` selects all five; unknown names
 /// and an empty selection are errors.
-fn resolve_dump_collections(requested: Option<&[String]>) -> Result<Vec<&'static str>, String> {
+pub(crate) fn resolve_dump_collections(requested: Option<&[String]>) -> Result<Vec<&'static str>, String> {
     let Some(requested) = requested else {
         return Ok(DUMP_COLLECTIONS.iter().map(|(_, full)| *full).collect());
     };
@@ -3524,6 +3524,7 @@ mod native_args_tests {
             "knowledge_dump",
             "knowledge_audit",
             "knowledge_merge",
+            "knowledge_restore",
         ] {
             assert!(names.contains(&expected), "{} not registered", expected);
         }

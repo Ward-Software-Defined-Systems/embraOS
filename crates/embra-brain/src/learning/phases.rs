@@ -151,7 +151,8 @@ pub fn phase_label(phase: &LearningPhase) -> &'static str {
 // "0.1.0", for a database that is vendored into an immutable rootfs. The
 // first tool ever REMOVED — the count fell, 116 → 115. `file_offer`
 // (2026-10-08) hands the operator a workspace file as a download: 116;
-// `reminder_list` the same day: 117.
+// `reminder_list` the same day: 117. `knowledge_restore` (2026-10-30), the
+// dump and the removal records back into the graph: 119.
 const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
     ("system", "System", 3),
     ("memory_knowledge", "Memory & Knowledge", 7),
@@ -163,7 +164,7 @@ const CATEGORY_COUNTS: &[(&str, &str, usize)] = &[
     ("filesystem", "Filesystem", 13),
     ("scheduling", "Scheduling", 4),
     ("sessions", "Sessions", 10),
-    ("knowledge_graph", "Knowledge Graph", 12),
+    ("knowledge_graph", "Knowledge Graph", 13),
     ("guardian", "Guardian (dynamic tools)", 3),
     ("media", "Media & Vision", 2),
 ];

@@ -101,6 +101,47 @@ pub async fn forget_node(collection: &str, id: &str) {
     cache::remove(collection, id).await;
 }
 
+/// What became of a restored node's stored vector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoredVector {
+    /// Decoded and placed in the index.
+    Placed,
+    /// The document carries no `embedding`.
+    NoEmbedding,
+    /// `embedding_model` is not the provider's: the backfill re-embeds it.
+    OtherModel,
+    /// The stored bytes are not a vector of the provider's width.
+    Malformed,
+    /// No provider on this instance; the index is not in use.
+    NoProvider,
+}
+
+/// A document's stored vector, decoded at `dim` for `model`.
+pub fn stored_vector(doc: &serde_json::Value, dim: usize, model: &str) -> Result<Vec<f32>, StoredVector> {
+    let Some(encoded) = doc.get("embedding").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) else {
+        return Err(StoredVector::NoEmbedding);
+    };
+    if doc.get("embedding_model").and_then(|v| v.as_str()) != Some(model) {
+        return Err(StoredVector::OtherModel);
+    }
+    super::decode_vector(encoded, dim).ok_or(StoredVector::Malformed)
+}
+
+/// A restored node's stored vector into the index without inference
+/// (`knowledge_restore`): the document's `embedding` decoded at the
+/// provider's dimensions, for the provider's model alone, then
+/// `cache::upsert` as a new document.
+pub async fn adopt_stored_vector(cfg: &SystemConfig, collection: &str, id: &str, doc: &serde_json::Value) -> StoredVector {
+    let Some(provider) = super::provider(cfg).await else { return StoredVector::NoProvider };
+    match stored_vector(doc, provider.dimensions(), provider.model_id()) {
+        Ok(vector) => {
+            cache::upsert(collection, id, vector, provider.model_id(), true).await;
+            StoredVector::Placed
+        }
+        Err(why) => why,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

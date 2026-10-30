@@ -366,6 +366,25 @@ pub(crate) fn resolve_workspace_path(path: &str) -> Result<String, String> {
 /// The resolver behind [`resolve_workspace_path`], against any root, so the
 /// Guardian's workspace sink can run under a temporary directory in a test.
 /// Production callers go through `resolve_workspace_path`.
+/// A file the model names for reading, by its real path: the lexical jail
+/// (`resolve_in`), the canonical check (`real`, so a link that leaves the
+/// workspace is refused), then the read jail on the real path (`denied`,
+/// `read_denied` in production). `knowledge_restore`'s file and
+/// `knowledge_dump`'s source file come through here, as `guardian_call`'s
+/// data file does.
+pub(crate) async fn jailed_read_path(
+    root: &str,
+    raw: &str,
+    denied: fn(&Path) -> Option<&'static str>,
+) -> Result<PathBuf, String> {
+    let resolved = resolve_in(root, raw)?;
+    let real = real(Path::new(root), Path::new(&resolved)).await?.path;
+    if let Some(reason) = denied(&real) {
+        return Err(format!("Denied: '{raw}' is {reason}; nothing is read"));
+    }
+    Ok(real)
+}
+
 pub(crate) fn resolve_in(root: &str, path: &str) -> Result<String, String> {
     super::jail::lexical(root, path)
 }
