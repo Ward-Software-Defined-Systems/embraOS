@@ -480,6 +480,10 @@ fn focus_chat_textarea() {
 /// `/provider --setup` ARE listed: their one-answer-at-a-time prompts
 /// render through `SetupOverlay`. Tapping a row types `"{cmd} "` into the
 /// composer; the operator appends any argument and sends.
+///
+/// Pinned by embra-brain's `slash_catalogue_tests`: every dispatcher arm
+/// has a row here and every row is an arm; the four console-local commands
+/// stay out; the titles follow the sidebar.
 const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
     ("Session", &[
         ("/sessions", "list sessions"),

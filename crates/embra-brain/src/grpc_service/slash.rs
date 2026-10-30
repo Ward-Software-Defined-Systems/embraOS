@@ -1912,3 +1912,138 @@ Acknowledge, then execute Step 1.1.",
         FEEDBACK_LOOP_SPEC_V2
     )
 }
+
+#[cfg(test)]
+mod slash_catalogue_tests {
+    //! The mobile chat's command picker (`embra-web-ui/src/chat.rs`,
+    //! `SLASH_GROUPS`) lists every command this dispatcher handles and only
+    //! those. The console's `/help` lists the same commands plus the four
+    //! console-local ones, which the picker leaves out by design: the chat
+    //! view has a multi-line composer (`/ml`, `/guardian-define`), renders
+    //! images inline (`/media`) and draws tool calls as its own cards
+    //! (`/show-tools`). The picker's groups carry the desktop sidebar's
+    //! titles in the sidebar's order. A command added here without a picker
+    //! row, or a picker row for a command the brain does not handle, fails
+    //! here.
+    use std::collections::BTreeSet;
+    use std::path::Path;
+
+    /// The commands the console handles itself; the brain answers
+    /// "Unknown command" to each.
+    const CONSOLE_LOCAL: [&str; 4] = ["/ml", "/guardian-define", "/media", "/show-tools"];
+
+    fn sibling(rel: &str) -> String {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(rel);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+    }
+
+    /// The quoted literals at the head of a match arm: `"/x" => …`, or
+    /// `"/x" | "/y" => …`.
+    fn dispatcher_commands() -> BTreeSet<String> {
+        let mut out = BTreeSet::new();
+        for line in include_str!("slash.rs").lines() {
+            let t = line.trim_start();
+            if !t.starts_with("\"/") {
+                continue;
+            }
+            let Some((head, _)) = t.split_once("=>") else { continue };
+            for literal in head.split('"').skip(1).step_by(2) {
+                if literal.starts_with('/') {
+                    out.insert(literal.to_string());
+                }
+            }
+        }
+        out
+    }
+
+    /// The block of a `const NAME: … = &[ … ];` table: its lines up to the
+    /// first `];` at column zero.
+    fn table<'a>(src: &'a str, name: &str) -> &'a str {
+        let start = src
+            .find(&format!("const {name}"))
+            .unwrap_or_else(|| panic!("no `const {name}` in the file"));
+        let rest = &src[start..];
+        let end = rest.find("\n];").expect("the table ends at `];`");
+        &rest[..end]
+    }
+
+    /// Of a `(title, &[(command, hint), …])` table: the titles in order and
+    /// the commands' first tokens (`/provider --setup` is `/provider`).
+    fn titles_and_commands(block: &str) -> (Vec<String>, BTreeSet<String>) {
+        let mut titles = Vec::new();
+        let mut commands = BTreeSet::new();
+        for line in block.lines() {
+            let t = line.trim_start();
+            let Some(after) = t.strip_prefix("(\"") else { continue };
+            let Some((literal, _)) = after.split_once('"') else { continue };
+            if let Some(command) = literal.split_whitespace().next()
+                && command.starts_with('/')
+            {
+                commands.insert(command.to_string());
+            } else {
+                titles.push(literal.to_string());
+            }
+        }
+        (titles, commands)
+    }
+
+    /// The console's `/help` text: one command per line, two spaces in.
+    fn console_help_commands() -> BTreeSet<String> {
+        sibling("embra-console/src/terminal/commands.rs")
+            .lines()
+            .filter_map(|l| l.strip_prefix("  /"))
+            .filter_map(|l| l.split_whitespace().next())
+            .map(|c| format!("/{c}"))
+            .collect()
+    }
+
+    fn diff(a: &BTreeSet<String>, b: &BTreeSet<String>) -> Vec<String> {
+        a.difference(b).cloned().collect()
+    }
+
+    #[test]
+    fn the_mobile_picker_lists_every_brain_command_and_only_those() {
+        let brain = dispatcher_commands();
+        assert!(brain.len() >= 20, "the dispatcher's arms were not read: {brain:?}");
+        let chat = sibling("embra-web-ui/src/chat.rs");
+        let (_, picker) = titles_and_commands(table(&chat, "SLASH_GROUPS"));
+        assert!(
+            diff(&brain, &picker).is_empty(),
+            "brain commands without a picker row in chat.rs SLASH_GROUPS: {:?}",
+            diff(&brain, &picker)
+        );
+        assert!(
+            diff(&picker, &brain).is_empty(),
+            "picker rows for commands the brain does not handle: {:?}",
+            diff(&picker, &brain)
+        );
+    }
+
+    #[test]
+    fn the_console_help_is_the_brain_commands_plus_the_four_console_local_ones() {
+        let brain = dispatcher_commands();
+        let help = console_help_commands();
+        let local: BTreeSet<String> = CONSOLE_LOCAL.iter().map(|c| c.to_string()).collect();
+        for c in &local {
+            assert!(help.contains(c), "{c} is console-local and must be in the console's /help");
+            assert!(!brain.contains(c), "{c} is console-local and must not be a dispatcher arm");
+        }
+        let expected: BTreeSet<String> = brain.union(&local).cloned().collect();
+        assert!(
+            diff(&expected, &help).is_empty() && diff(&help, &expected).is_empty(),
+            "console /help differs from the brain's commands plus the four: missing {:?}, extra {:?}",
+            diff(&expected, &help),
+            diff(&help, &expected)
+        );
+    }
+
+    #[test]
+    fn the_picker_groups_carry_the_sidebar_titles_in_order() {
+        let chat = sibling("embra-web-ui/src/chat.rs");
+        let app = sibling("embra-web-ui/src/app.rs");
+        let (picker_titles, _) = titles_and_commands(table(&chat, "SLASH_GROUPS"));
+        let (sidebar_titles, _) = titles_and_commands(table(&app, "GROUPS"));
+        assert!(!sidebar_titles.is_empty(), "the sidebar's GROUPS were not read");
+        assert_eq!(picker_titles, sidebar_titles, "the picker mirrors the sidebar's group titles in order");
+    }
+}
