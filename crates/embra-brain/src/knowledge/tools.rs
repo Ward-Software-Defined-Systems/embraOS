@@ -4,6 +4,7 @@
 
 use serde_json::json;
 
+use super::removal::{self, RemovalSummary};
 use crate::config::SystemConfig;
 use crate::db::WardsonDbClient;
 
@@ -610,7 +611,12 @@ pub async fn knowledge_unlink_edge(params: &str, db: &WardsonDbClient) -> String
 ///
 /// Scoped to `memory.semantic` and `memory.procedural`. Use `forget` for
 /// episodic `memory.entries` cleanup.
-pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String {
+/// `knowledge_unlink_node`: `dry_run` and the directory of its removal
+/// record are parameters, so a test runs it under a temporary one. The
+/// edges are read whole first (`node_edges`); a real run writes the record,
+/// clears the pointers of the entries the node came from, deletes the edges
+/// by id, then the node.
+pub async fn knowledge_unlink_node_at(params: &str, db: &WardsonDbClient, dry_run: bool, dumps_dir: &str) -> String {
     let trimmed = params.trim();
     if trimmed.is_empty() {
         return "Error: usage knowledge_unlink_node <collection>:<id>".into();
@@ -643,47 +649,66 @@ pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String
         .unwrap_or("(no preview)");
     let preview = content_preview(preview_src, 80);
 
-    // Clear promoted_to on any episodic source entries that point at this node.
-    // Done before the edge cascade so a partial failure leaves the system retryable
+    // Every edge that names the node, whole: the record needs them, and the
+    // reply splits them. A read that fails removes nothing.
+    let edges = match removal::node_edges(db, coll, id).await {
+        Ok(edges) => edges,
+        Err(e) => return format!("Error: the edges of {coll}:{id} could not be read ({e}); nothing was removed."),
+    };
+    let summary = RemovalSummary::of(&edges).with_nodes(vec![format!("{coll}:{id}")]);
+    // The entries the node was promoted from: the `derived_from` edges
+    // from the node into `memory.entries`.
+    let source_entries: Vec<String> = edges
+        .iter()
+        .filter(|e| {
+            e.get("edge_type").and_then(|v| v.as_str()) == Some("derived_from")
+                && e.get("source_id").and_then(|v| v.as_str()) == Some(id)
+                && e.get("target_collection").and_then(|v| v.as_str()) == Some("memory.entries")
+        })
+        .filter_map(|e| e.get("target_id").and_then(|v| v.as_str()).map(str::to_string))
+        .collect();
+    if dry_run {
+        return format!(
+            "Would remove node {}:{} (\"{}\"), {} referencing edge(s), and clear promoted_to on {} source entry(ies){}{}",
+            coll,
+            id,
+            preview,
+            edges.len(),
+            source_entries.len(),
+            if source_entries.is_empty() { String::new() } else { format!(": {}", source_entries.join(", ")) },
+            removal::removal_report(&summary, None, true)
+        );
+    }
+    let source = json!({ "tool": "knowledge_unlink_node", "target": format!("{coll}:{id}") });
+    let record = match removal::write_removal_record(dumps_dir, "knowledge_unlink_node", source, &[(coll, &node_doc)], &edges).await {
+        Ok(path) => path,
+        Err(e) => return format!("Error: the removal record could not be written ({e}); nothing was removed."),
+    };
+
+    // Clear promoted_to on the entries that point at this node. Done before
+    // the edge deletes so a partial failure leaves the system retryable
     // rather than with a stale pointer to a missing node.
-    let derived_filter = json!({
-        "filter": {
-            "source_id": id,
-            "source_collection": coll,
-            "edge_type": "derived_from",
-        },
-        "limit": 50,
-    });
     let mut cleared_entries: Vec<String> = Vec::new();
-    if let Ok(derived_edges) = db.query("memory.edges", &derived_filter).await {
-        for edge in derived_edges {
-            let (Some(tgt_id), Some(tgt_coll)) = (
-                edge.get("target_id").and_then(|v| v.as_str()),
-                edge.get("target_collection").and_then(|v| v.as_str()),
-            ) else { continue };
-            if tgt_coll != "memory.entries" { continue; }
-            if db.patch_document("memory.entries", tgt_id, &json!({"promoted_to": null})).await.is_ok() {
-                cleared_entries.push(tgt_id.to_string());
-            }
+    for entry_id in &source_entries {
+        if db.patch_document("memory.entries", entry_id, &json!({"promoted_to": null})).await.is_ok() {
+            cleared_entries.push(entry_id.clone());
         }
     }
 
-    // Cold-path cascade delete: `$or` forces a WardSONDB full scan —
-    // acceptable for an operator-invoked one-off. NEVER copy this shape into
-    // a `query()` hot path; hot paths arm-split for the indexes
-    // (traversal.rs, 2026-07-04).
-    let edge_filter = json!({
-        "$or": [
-            {"source_id": id, "source_collection": coll},
-            {"target_id": id, "target_collection": coll}
-        ]
-    });
-    let edge_count = db.delete_by_query("memory.edges", &edge_filter).await.unwrap_or(0);
+    // One delete per edge, by id: what the record holds, and nothing it
+    // does not (a `delete_by_query` would take an edge written since).
+    let mut edge_count: u64 = 0;
+    for edge in &edges {
+        let Some(edge_id) = edge.get("_id").and_then(|v| v.as_str()) else { continue };
+        if db.delete("memory.edges", edge_id).await.is_ok() {
+            edge_count += 1;
+        }
+    }
 
     if let Err(e) = db.delete(coll, id).await {
         return format!(
-            "Error: cleared {} source entry(ies) and removed {} referencing edge(s) but failed to delete node {}:{}: {}",
-            cleared_entries.len(), edge_count, coll, id, e
+            "Error: cleared {} source entry(ies) and removed {} referencing edge(s) but failed to delete node {}:{}: {} (the record is {})",
+            cleared_entries.len(), edge_count, coll, id, e, record.display()
         );
     }
     // The node is gone — drop its vector, as the merge does for its loser.
@@ -691,8 +716,13 @@ pub async fn knowledge_unlink_node(params: &str, db: &WardsonDbClient) -> String
     // the count divergence reloaded the whole index on the next retrieval
     // (Embra#16).
     crate::embedding::write::forget_node(coll, id).await;
+    removal::log_removal("knowledge_unlink_node", &format!("{coll}:{id}"), &summary, &record);
 
-    unlink_summary(coll, id, &preview, edge_count, &cleared_entries)
+    format!(
+        "{}{}",
+        unlink_summary(coll, id, &preview, edge_count, &cleared_entries),
+        removal::removal_report(&summary, Some(&record), false)
+    )
 }
 
 /// What `knowledge_unlink_node` reports. The entries it left behind are
@@ -729,6 +759,143 @@ mod unlink_summary_tests {
             unlink_summary("memory.semantic", "n1", "x", 0, &[]),
             "Removed node memory.semantic:n1 (\"x\"), 0 referencing edge(s), cleared promoted_to on 0 source entry(ies)"
         );
+    }
+}
+
+#[cfg(test)]
+mod unlink_tests {
+    use super::*;
+    use crate::knowledge::removal::tests::{record_lines, TempDir};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    fn data(v: serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": v, "meta": {}}))
+    }
+
+    fn body(req: &Request) -> serde_json::Value {
+        serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// Node `n1`, promoted from `e1`, with three edges: its provenance edge,
+    /// an automatic one and a link the brain authored.
+    async fn node_with_three_edges() -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/memory.semantic/docs/n1"))
+            .respond_with(data(json!({"_id": "n1", "content": "the cert refresh works", "category": "fact", "embedding": "AAAA"})))
+            .mount(&server)
+            .await;
+        let out_edges = json!([
+            {"_id": "d1", "edge_type": "derived_from", "weight": 1.0, "source_collection": "memory.semantic", "source_id": "n1", "target_collection": "memory.entries", "target_id": "e1"},
+            {"_id": "a1", "edge_type": "tag_overlap", "weight": 0.4, "source_collection": "memory.semantic", "source_id": "n1", "target_collection": "memory.semantic", "target_id": "n2"},
+        ]);
+        let in_edges = json!([
+            {"_id": "c1", "edge_type": "refines", "weight": 0.9, "source_collection": "memory.semantic", "source_id": "n3", "target_collection": "memory.semantic", "target_id": "n1"},
+        ]);
+        Mock::given(method("POST"))
+            .and(path("/memory.edges/query"))
+            .and(|req: &Request| body(req)["filter"]["source_id"] == "n1")
+            .respond_with(data(out_edges))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/memory.edges/query"))
+            .and(|req: &Request| body(req)["filter"]["target_id"] == "n1")
+            .respond_with(data(in_edges))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH")).and(path("/memory.entries/docs/e1")).respond_with(data(json!({}))).mount(&server).await;
+        Mock::given(method("DELETE")).respond_with(data(json!({}))).mount(&server).await;
+        server
+    }
+
+    /// Every request that writes, in order.
+    async fn writes_seen(server: &MockServer) -> Vec<String> {
+        server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .filter(|r| r.method.as_str() == "DELETE" || r.method.as_str() == "PATCH")
+            .map(|r| format!("{} {}", r.method, r.url.path()))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn unlink_writes_the_record_then_clears_the_pointer_and_deletes_by_id() {
+        let server = node_with_three_edges().await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let dir = TempDir::new("unlink");
+        let out = knowledge_unlink_node_at("memory.semantic:n1", &db, false, dir.path()).await;
+        assert!(
+            out.starts_with("Removed node memory.semantic:n1 (\"the cert refresh works\"), 3 referencing edge(s), cleared promoted_to on 1 source entry(ies): e1\n  edges removed: 3 (auto 1, curated 1, other 1)\n  auto: tag_overlap=1\n  curated: refines=1\n    c1 memory.semantic:n3 → memory.semantic:n1 refines 0.90\n  other: derived_from=1\n  nodes removed: memory.semantic:n1\n  record: "),
+            "{out}"
+        );
+        assert_eq!(
+            writes_seen(&server).await,
+            [
+                "PATCH /memory.entries/docs/e1",
+                "DELETE /memory.edges/docs/d1",
+                "DELETE /memory.edges/docs/a1",
+                "DELETE /memory.edges/docs/c1",
+                "DELETE /memory.semantic/docs/n1",
+            ]
+        );
+        let record = std::fs::read_dir(&dir.0).unwrap().map(|e| e.unwrap().path()).next().expect("one record");
+        let lines = record_lines(&record);
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0]["source"], json!({"tool": "knowledge_unlink_node", "target": "memory.semantic:n1"}));
+        assert_eq!(lines[0]["collections"], json!(["memory.semantic", "memory.edges"]));
+        assert_eq!(lines[1]["data"]["content"], "the cert refresh works", "the node's payload is in the record");
+        assert_eq!(lines[4]["_id"], "c1");
+    }
+
+    #[tokio::test]
+    async fn unlink_dry_run_reads_and_writes_nothing() {
+        let server = node_with_three_edges().await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let dir = TempDir::new("unlink-dry");
+        let out = knowledge_unlink_node_at("memory.semantic:n1", &db, true, dir.path()).await;
+        assert_eq!(
+            out,
+            "Would remove node memory.semantic:n1 (\"the cert refresh works\"), 3 referencing edge(s), and clear promoted_to on 1 source entry(ies): e1\n  edges to remove: 3 (auto 1, curated 1, other 1)\n  auto: tag_overlap=1\n  curated: refines=1\n    c1 memory.semantic:n3 → memory.semantic:n1 refines 0.90\n  other: derived_from=1\n  nodes to remove: memory.semantic:n1\n  record: not written (dry_run)"
+        );
+        assert!(writes_seen(&server).await.is_empty());
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_unlink_whose_record_cannot_be_written_removes_nothing() {
+        let server = node_with_three_edges().await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let dir = TempDir::new("unlink-blocked");
+        let blocked = dir.0.join("not-a-directory");
+        std::fs::write(&blocked, b"x").unwrap();
+        let out = knowledge_unlink_node_at("memory.semantic:n1", &db, false, blocked.to_str().unwrap()).await;
+        assert!(out.starts_with("Error: the removal record could not be written ("), "{out}");
+        assert!(out.ends_with("nothing was removed."), "{out}");
+        assert!(writes_seen(&server).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unlink_whose_edges_cannot_be_read_removes_nothing() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/memory.semantic/docs/n1"))
+            .respond_with(data(json!({"_id": "n1", "content": "x"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/memory.edges/query"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("timeout"))
+            .mount(&server)
+            .await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let dir = TempDir::new("unlink-unread");
+        let out = knowledge_unlink_node_at("memory.semantic:n1", &db, false, dir.path()).await;
+        assert!(out.starts_with("Error: the edges of memory.semantic:n1 could not be read ("), "{out}");
+        assert!(writes_seen(&server).await.is_empty());
     }
 }
 
@@ -1244,9 +1411,9 @@ fn orphan_line(scan: &Result<OrphanScan, String>) -> String {
         Ok(scan) => format!(
             "Orphan edges: {}{} of {} scanned{}",
             if scan.more { "at least " } else { "" },
-            scan.orphan_ids.len(),
+            scan.orphans.len(),
             scan.scanned,
-            if scan.orphan_ids.is_empty() { "" } else { " (run knowledge_sweep_orphans to clean up)" }
+            if scan.orphans.is_empty() { "" } else { " (run knowledge_sweep_orphans to clean up)" }
         ),
         Err(e) => format!("Orphan edges: not checked ({e})"),
     }
@@ -1408,7 +1575,7 @@ mod gate_tests {
     //! What the three write tools refuse before they touch the database.
     //! The client points nowhere: a gate that let a call through would
     //! answer "not found", not the refusal asserted here.
-    use super::{knowledge_link, knowledge_unlink_node, knowledge_update};
+    use super::{knowledge_link, knowledge_unlink_node_at, knowledge_update, KG_DUMPS_DIR};
     use crate::config::SystemConfig;
     use crate::db::WardsonDbClient;
 
@@ -1434,7 +1601,7 @@ mod gate_tests {
         let db = nowhere();
         let out = knowledge_update(r#"identity.graph:self | {"content":"x"}"#, &db, &config()).await;
         assert!(out.contains("not supported"), "{out}");
-        let out = knowledge_unlink_node("identity.graph:self", &db).await;
+        let out = knowledge_unlink_node_at("identity.graph:self", &db, false, KG_DUMPS_DIR).await;
         assert!(out.contains("only operates on"), "{out}");
     }
 
@@ -1754,7 +1921,7 @@ mod windowless_stats_tests {
 
 /// Page size when the orphan check reads the edges of a missing node — well
 /// under WardSONDB's `--max-query-limit` (100k) and bounds per-page memory.
-const ORPHAN_SCAN_PAGE: usize = 20_000;
+pub(crate) const ORPHAN_SCAN_PAGE: usize = 20_000;
 
 /// Position of one exhaustive-scan page: classic offset tiling, or a server
 /// resume cursor. Page 1 is always `Offset(0)`; the mode for every later
@@ -1852,10 +2019,18 @@ struct OrphanScan {
     scanned: u64,
     /// Endpoint ids that no node collection holds.
     dangling: Vec<String>,
-    /// The edges that name one of them, up to the caller's cap.
-    orphan_ids: Vec<String>,
+    /// The edges that name one of them, up to the caller's cap: the whole
+    /// documents, for the record the sweep writes before it deletes.
+    orphans: Vec<serde_json::Value>,
     /// The cap was reached and more such edges exist.
     more: bool,
+}
+
+impl OrphanScan {
+    /// The ids of the listed edges, in the order they were read.
+    fn orphan_ids(&self) -> Vec<&str> {
+        self.orphans.iter().filter_map(|e| e.get("_id").and_then(|v| v.as_str())).collect()
+    }
 }
 
 /// The two collections a promotion writes a node into.
@@ -2025,9 +2200,9 @@ async fn edges_naming(
     endpoints: &std::collections::BTreeMap<String, EndpointUse>,
     dangling: &[String],
     cap: usize,
-) -> Result<(Vec<String>, bool), String> {
+) -> Result<(Vec<serde_json::Value>, bool), String> {
     let mut seen: std::collections::HashSet<String> = Default::default();
-    let mut orphan_ids: Vec<String> = Vec::new();
+    let mut orphans: Vec<serde_json::Value> = Vec::new();
     for id in dangling {
         let used = endpoints.get(id).copied().unwrap_or_default();
         for (field, count) in [("source_id", used.as_source), ("target_id", used.as_target)] {
@@ -2042,24 +2217,25 @@ async fn edges_naming(
                     .query_with_meta("memory.edges", &body)
                     .await
                     .map_err(|e| format!("reading the edges of {id} failed: {e}"))?;
-                for edge in &edges {
+                let page_len = edges.len();
+                for edge in edges {
                     let Some(edge_id) = edge.get("_id").and_then(|v| v.as_str()) else { continue };
                     if !seen.insert(edge_id.to_string()) {
                         continue;
                     }
-                    if orphan_ids.len() == cap {
-                        return Ok((orphan_ids, true));
+                    if orphans.len() == cap {
+                        return Ok((orphans, true));
                     }
-                    orphan_ids.push(edge_id.to_string());
+                    orphans.push(edge);
                 }
-                match next_scan_page(&meta, &page, edges.len(), ORPHAN_SCAN_PAGE) {
+                match next_scan_page(&meta, &page, page_len, ORPHAN_SCAN_PAGE) {
                     Some(next) => page = next,
                     None => break,
                 }
             }
         }
     }
-    Ok((orphan_ids, false))
+    Ok((orphans, false))
 }
 
 /// The orphan check: the edges whose source or target no node collection
@@ -2079,8 +2255,8 @@ async fn find_orphan_edges(db: &WardsonDbClient, cap: usize) -> Result<OrphanSca
     let nodes = node_ids(db).await?;
     let dangling: Vec<String> =
         endpoints.keys().filter(|id| !nodes.contains(*id)).cloned().collect();
-    let (orphan_ids, more) = edges_naming(db, &endpoints, &dangling, cap).await?;
-    Ok(OrphanScan { scanned, dangling, orphan_ids, more })
+    let (orphans, more) = edges_naming(db, &endpoints, &dangling, cap).await?;
+    Ok(OrphanScan { scanned, dangling, orphans, more })
 }
 
 /// Remove the edges whose endpoints no longer resolve: what a delete left
@@ -2293,6 +2469,18 @@ pub async fn knowledge_sweep_orphans(
     dry_run: bool,
     limit: usize,
 ) -> String {
+    knowledge_sweep_orphans_at(db, config, dry_run, limit, KG_DUMPS_DIR).await
+}
+
+/// `knowledge_sweep_orphans` with the directory of its removal record as a
+/// parameter, so a test runs it under a temporary one.
+pub(crate) async fn knowledge_sweep_orphans_at(
+    db: &WardsonDbClient,
+    config: &SystemConfig,
+    dry_run: bool,
+    limit: usize,
+    dumps_dir: &str,
+) -> String {
     let limit = limit.clamp(1, SWEEP_LIMIT_MAX);
     // The nodes first. A pointerless node is healed or adopted and never
     // deleted, so nothing here changes what the edge check that follows
@@ -2326,25 +2514,43 @@ pub async fn knowledge_sweep_orphans(
         }
     };
 
-    // One delete per edge, by id. A `delete_by_query` reads the whole
-    // collection whatever its filter — about a second per call at 430,000
-    // edges — so the old chunks of a hundred ids cost more than a hundred
-    // deletes do, and the cost grew with the graph, not with the orphans.
+    // The record first, then one delete per edge, by id. A `delete_by_query`
+    // reads the whole collection whatever its filter — about a second per
+    // call at 430,000 edges — so the old chunks of a hundred ids cost more
+    // than a hundred deletes do, and the cost grew with the graph, not with
+    // the orphans.
+    let summary = RemovalSummary::of(&scan.orphans);
+    let mut record: Option<std::path::PathBuf> = None;
     let mut deleted: u64 = 0;
-    if !dry_run {
-        for id in &scan.orphan_ids {
+    if !dry_run && !scan.orphans.is_empty() {
+        let source = json!({ "tool": "knowledge_sweep_orphans", "target": serde_json::Value::Null, "dangling": scan.dangling });
+        match removal::write_removal_record(dumps_dir, "knowledge_sweep_orphans", source, &[], &scan.orphans).await {
+            Ok(path) => record = Some(path),
+            Err(e) => {
+                let tally = PointerlessTally::of(&cases);
+                return format!(
+                    "knowledge_sweep_orphans: the removal record could not be written ({e}); no edge was deleted ({} healed, {} adopted).",
+                    tally.healed, tally.adopted
+                );
+            }
+        }
+        for id in scan.orphan_ids() {
             if db.delete("memory.edges", id).await.is_ok() {
                 deleted += 1;
             }
         }
+        if let Some(path) = &record {
+            removal::log_removal("knowledge_sweep_orphans", "memory.edges", &summary, path);
+        }
     }
-    sweep_report(&scan, dry_run, deleted, limit, &pointerless, &cases)
+    sweep_report(&scan, dry_run, deleted, limit, &pointerless, &cases, (&summary, record.as_deref()))
 }
 
 /// The sweep's reply. Its first four lines keep the shape they always had;
 /// the missing-node ids, the pointerless nodes with what is done to each,
-/// and their counts come before the limit note. A dry run prints the same
-/// lines with its counts of writes at zero.
+/// their counts, and the removal block (when there are orphan edges) come
+/// before the limit note. A dry run prints the same lines with its counts
+/// of writes at zero and no record.
 fn sweep_report(
     scan: &OrphanScan,
     dry_run: bool,
@@ -2352,12 +2558,14 @@ fn sweep_report(
     limit: usize,
     pointerless: &Result<PointerlessScan, String>,
     cases: &[PointerlessCase],
+    removal: (&RemovalSummary, Option<&std::path::Path>),
 ) -> String {
+    let (summary, record) = removal;
     let mut out = format!(
         "knowledge_sweep_orphans{}:\n  scanned: {}\n  orphan_count: {}\n  deleted: {}",
         if dry_run { " (dry_run)" } else { "" },
         scan.scanned,
-        scan.orphan_ids.len(),
+        scan.orphans.len(),
         deleted
     );
     if !scan.dangling.is_empty() {
@@ -2385,6 +2593,9 @@ fn sweep_report(
         }
         Err(e) => out.push_str(&format!("\n  pointerless_nodes: not checked ({e})")),
     }
+    if !scan.orphans.is_empty() {
+        out.push_str(&removal::removal_report(summary, record, dry_run));
+    }
     if scan.more {
         out.push_str(&format!(
             "\n  more orphan edges exist than the limit of {limit}: run it again"
@@ -2399,7 +2610,7 @@ fn sweep_report(
 /// bind-mounted from DATA at boot) but outside `repos/` — dumps are exports,
 /// not repository content. Full-path const per repo precedent; do not widen
 /// engineering's `WORKSPACE_ROOT` visibility for this.
-const KG_DUMPS_DIR: &str = "/embra/workspace/KG_DUMPS";
+pub(crate) const KG_DUMPS_DIR: &str = "/embra/workspace/KG_DUMPS";
 
 /// Page size for the exhaustive dump scan — same bound rationale as
 /// `ORPHAN_SCAN_PAGE` (well under the server's 100k `--max-query-limit`,
@@ -2482,23 +2693,28 @@ fn validate_dump_edge_types(edge_types: &[String]) -> Result<(), String> {
 /// First line of every dump — provenance for the file itself. Consumers
 /// keyed on `type` (e.g. the kg_scan guardian example) skip it as an
 /// unknown record type.
-fn dump_meta_record(
-    collections: &[&'static str],
+pub(crate) fn dump_meta_record(
+    collections: &[&str],
     edge_types: Option<&[String]>,
     include_payload: bool,
+    source: Option<&serde_json::Value>,
 ) -> serde_json::Value {
-    json!({
+    let mut meta = json!({
         "type": "meta",
         "generated_at": chrono::Utc::now().to_rfc3339(),
         "collections": collections,
         "edge_types": edge_types,
         "include_payload": include_payload,
-    })
+    });
+    if let Some(source) = source {
+        meta["source"] = source.clone();
+    }
+    meta
 }
 
 /// A node line: `type`/`_id`/`collection` lifted top-level for scanners; the
 /// full stored doc rides under `data` unless the dump is slim.
-fn dump_node_record(
+pub(crate) fn dump_node_record(
     doc: &serde_json::Value,
     collection: &str,
     include_payload: bool,
@@ -2518,7 +2734,7 @@ fn dump_node_record(
 /// carry source/target/edge_type/weight — see the `knowledge_link` write
 /// shape) plus the `type` discriminator, which wins over any stored `type`
 /// field.
-fn dump_edge_record(doc: &serde_json::Value) -> serde_json::Value {
+pub(crate) fn dump_edge_record(doc: &serde_json::Value) -> serde_json::Value {
     let mut rec = doc.clone();
     if let Some(obj) = rec.as_object_mut() {
         obj.insert("type".to_string(), json!("edge"));
@@ -2551,7 +2767,7 @@ async fn write_dump_contents(
     let mut bytes: u64 = 0;
     let meta_line = format!(
         "{}\n",
-        dump_meta_record(selected, edge_types, include_payload)
+        dump_meta_record(selected, edge_types, include_payload, None)
     );
     writer
         .write_all(meta_line.as_bytes())
@@ -2832,17 +3048,22 @@ mod dump_shape_tests {
 
     #[test]
     fn dump_meta_record_shape() {
-        let m = dump_meta_record(&["memory.edges"], None, true);
+        let m = dump_meta_record(&["memory.edges"], None, true, None);
         assert_eq!(m["type"], "meta");
+        assert!(m.get("source").is_none(), "the live dump's meta line is what it always was");
         assert!(m["generated_at"].as_str().is_some());
         assert_eq!(m["collections"], json!(["memory.edges"]));
         assert!(m["edge_types"].is_null());
         assert_eq!(m["include_payload"], json!(true));
 
         let types = vec!["enables".to_string()];
-        let m2 = dump_meta_record(&["memory.edges"], Some(&types), false);
+        let m2 = dump_meta_record(&["memory.edges"], Some(&types), false, None);
         assert_eq!(m2["edge_types"], json!(["enables"]));
         assert_eq!(m2["include_payload"], json!(false));
+        let source = json!({"tool": "forget", "target": "memory.entries:e1"});
+        let m3 = dump_meta_record(&["memory.entries", "memory.edges"], None, true, Some(&source));
+        assert_eq!(m3["source"], source);
+        assert_eq!(m3["collections"], json!(["memory.entries", "memory.edges"]));
     }
 }
 
@@ -2986,17 +3207,21 @@ impl KnowledgeUnlinkEdgeArgs {
 #[embra_tool(
     name = "knowledge_unlink_node",
     is_side_effectful = true,
-    description = "Delete a semantic or procedural node and cascade-remove all edges referencing it. The entry it was promoted from stays, without a node, and the result names it. Prefer this over manually deleting edges when the node itself should go. To remove the whole memory, entry included, use forget."
+    description = "Delete a semantic or procedural node and every edge referencing it. The entry it was promoted from stays, without a node, and the result names it. Before anything is deleted the node and its edges are written to a record under /embra/workspace/KG_DUMPS (a dump file), and the reply lists the removed edges by type with every brain-authored link named. dry_run=true shows the same without writing. To remove the whole memory, entry included, use forget."
 )]
 pub struct KnowledgeUnlinkNodeArgs {
     pub collection: String,
     pub id: String,
+    /// Show what the call would remove, the brain-authored links named;
+    /// nothing is written.
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 impl KnowledgeUnlinkNodeArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
         let param = format!("{}:{}", self.collection, self.id);
-        Ok(knowledge_unlink_node(&param, ctx.db).await)
+        Ok(knowledge_unlink_node_at(&param, ctx.db, self.dry_run, KG_DUMPS_DIR).await)
     }
 }
 
@@ -3106,7 +3331,7 @@ impl KnowledgeGraphStatsArgs {
 #[embra_tool(
     name = "knowledge_sweep_orphans",
     is_side_effectful = true,
-    description = "Scan memory.edges and remove edges whose source or target doc no longer resolves. The promotion nodes no entry's pointer names are healed (the entry re-pointed at the node) or adopted (an entry written back for the node), never deleted; a node whose entry already has another node is reported as a pair for knowledge_merge. Orphans accumulate from pre-cascade forget calls and direct deletes that bypassed knowledge_unlink_node. dry_run=true prints the same lines without writing; it describes the graph at call time, so take it right before the real run."
+    description = "Scan memory.edges and remove edges whose source or target doc no longer resolves. The promotion nodes no entry's pointer names are healed (the entry re-pointed at the node) or adopted (an entry written back for the node), never deleted; a node whose entry already has another node is reported as a pair for knowledge_merge. Orphans accumulate from pre-cascade forget calls and direct deletes that bypassed knowledge_unlink_node. Before any edge is deleted the edges are written to a record under /embra/workspace/KG_DUMPS (a dump file), and the reply lists them by type with every brain-authored link named. dry_run=true prints the same lines without writing; it describes the graph at call time, so take it right before the real run."
 )]
 pub struct KnowledgeSweepOrphansArgs {
     /// Preview: the orphan edges, and each pointerless node with what the
@@ -3167,6 +3392,15 @@ impl KnowledgeDumpArgs {
 #[cfg(test)]
 mod native_args_tests {
     use super::*;
+
+    #[test]
+    fn unlink_node_dry_run_defaults_false() {
+        let a: KnowledgeUnlinkNodeArgs = serde_json::from_str(r#"{"collection":"memory.semantic","id":"n1"}"#).unwrap();
+        assert!(!a.dry_run);
+        let b: KnowledgeUnlinkNodeArgs =
+            serde_json::from_str(r#"{"collection":"memory.semantic","id":"n1","dry_run":true}"#).unwrap();
+        assert!(b.dry_run);
+    }
 
     #[test]
     fn knowledge_promote_kind_deserializes() {
@@ -3357,13 +3591,27 @@ mod orphan_tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
+    use crate::knowledge::removal::tests::TempDir;
+
     fn scan(orphans: &[&str], dangling: &[&str], more: bool) -> OrphanScan {
         OrphanScan {
             scanned: 433_546,
             dangling: dangling.iter().map(|s| s.to_string()).collect(),
-            orphan_ids: orphans.iter().map(|s| s.to_string()).collect(),
+            orphans: orphans.iter().map(|s| orphan_edge(s, "same_session", "n1", "gone")).collect(),
             more,
         }
+    }
+
+    fn orphan_edge(id: &str, kind: &str, src: &str, tgt: &str) -> serde_json::Value {
+        json!({
+            "_id": id, "edge_type": kind, "weight": 0.5,
+            "source_collection": "memory.semantic", "source_id": src,
+            "target_collection": "memory.semantic", "target_id": tgt,
+        })
+    }
+
+    fn no_removal() -> RemovalSummary {
+        RemovalSummary::default()
     }
 
     #[test]
@@ -3392,19 +3640,25 @@ mod orphan_tests {
     #[test]
     fn the_sweep_reply_keeps_its_lines_and_adds_what_is_missing() {
         assert_eq!(
-            sweep_report(&scan(&[], &[], false), true, 0, 10_000, &Ok(PointerlessScan::default()), &[]),
+            sweep_report(&scan(&[], &[], false), true, 0, 10_000, &Ok(PointerlessScan::default()), &[], (&no_removal(), None)),
             "knowledge_sweep_orphans (dry_run):\n  scanned: 433546\n  orphan_count: 0\n  deleted: 0\n  pointerless_nodes: 0\n  to_heal: 0\n  to_adopt: 0\n  duplicates: 0\n  healed: 0\n  adopted: 0"
         );
         assert_eq!(
-            sweep_report(&scan(&["e1", "e2"], &["gone"], false), false, 2, 10_000, &Ok(PointerlessScan::default()), &[]),
-            "knowledge_sweep_orphans:\n  scanned: 433546\n  orphan_count: 2\n  deleted: 2\n  missing_nodes: 1\n  missing_node_ids: gone\n  pointerless_nodes: 0\n  to_heal: 0\n  to_adopt: 0\n  duplicates: 0\n  healed: 0\n  adopted: 0"
+            sweep_report(&scan(&["e1", "e2"], &["gone"], false), false, 2, 10_000, &Ok(PointerlessScan::default()), &[], (&no_removal(), None)),
+            "knowledge_sweep_orphans:\n  scanned: 433546\n  orphan_count: 2\n  deleted: 2\n  missing_nodes: 1\n  missing_node_ids: gone\n  pointerless_nodes: 0\n  to_heal: 0\n  to_adopt: 0\n  duplicates: 0\n  healed: 0\n  adopted: 0\n  edges removed: 0 (auto 0, curated 0, other 0)\n  record: not written (nothing to remove)"
         );
-        let capped = sweep_report(&scan(&["e1", "e2"], &["gone"], true), false, 2, 2, &Ok(PointerlessScan::default()), &[]);
+        // With orphan edges the removal block follows the counts: the split,
+        // the curated edges named, the record.
+        let two = scan(&["e1", "e2"], &["gone"], false);
+        let summary = RemovalSummary::of(&two.orphans);
+        let with_record = sweep_report(&two, false, 2, 10_000, &Ok(PointerlessScan::default()), &[], (&summary, Some(std::path::Path::new("/embra/workspace/KG_DUMPS/removed-knowledge_sweep_orphans-x.jsonl"))));
+        assert!(with_record.ends_with("\n  adopted: 0\n  edges removed: 2 (auto 2, curated 0, other 0)\n  auto: same_session=2\n  record: /embra/workspace/KG_DUMPS/removed-knowledge_sweep_orphans-x.jsonl"), "{with_record}");
+        let capped = sweep_report(&scan(&["e1", "e2"], &["gone"], true), false, 2, 2, &Ok(PointerlessScan::default()), &[], (&no_removal(), None));
         assert!(capped.ends_with("\n  more orphan edges exist than the limit of 2: run it again"), "{capped}");
         // Long lists are cut, and say by how much.
         let many: Vec<String> = (0..103).map(|i| format!("gone{i}")).collect();
         let dangling: Vec<&str> = many.iter().map(String::as_str).collect();
-        let cut = sweep_report(&scan(&[], &dangling, false), true, 0, 10_000, &Ok(PointerlessScan::default()), &[]);
+        let cut = sweep_report(&scan(&[], &dangling, false), true, 0, 10_000, &Ok(PointerlessScan::default()), &[], (&no_removal(), None));
         assert!(cut.contains("\n  missing_nodes: 103\n  missing_node_ids: gone0, gone1, "), "{cut}");
         assert!(cut.contains(", gone99 and 3 more\n  pointerless_nodes: 0"), "{cut}");
         assert_eq!(listed_ids(["a", "b"], 2, 10), "a, b");
@@ -3465,15 +3719,28 @@ mod orphan_tests {
             .await;
     }
 
-    /// The edges that name `id` on one side.
-    async fn arm(server: &MockServer, field: &'static str, id: &'static str, edge_ids: &[&str]) {
-        let docs: Vec<serde_json::Value> = edge_ids.iter().map(|e| json!({"_id": e})).collect();
+    /// The edges that name `id` on one side, as whole documents of the
+    /// given types; the other end is `n1`.
+    async fn arm_typed(server: &MockServer, field: &'static str, id: &'static str, edges: &[(&str, &str)]) {
+        let docs: Vec<serde_json::Value> = edges
+            .iter()
+            .map(|(e, kind)| {
+                let (src, tgt) = if field == "source_id" { (id, "n1") } else { ("n1", id) };
+                orphan_edge(e, kind, src, tgt)
+            })
+            .collect();
         Mock::given(method("POST"))
             .and(path("/memory.edges/query"))
             .and(move |req: &Request| body(req)["filter"][field] == id)
             .respond_with(data(json!(docs)))
             .mount(server)
             .await;
+    }
+
+    /// The edges that name `id` on one side, all automatic.
+    async fn arm(server: &MockServer, field: &'static str, id: &'static str, edge_ids: &[&str]) {
+        let typed: Vec<(&str, &str)> = edge_ids.iter().map(|e| (*e, "same_session")).collect();
+        arm_typed(server, field, id, &typed).await;
     }
 
     /// The paths the server was asked to delete, in order.
@@ -3583,8 +3850,8 @@ mod orphan_tests {
         collection_holds(&server, "memory.semantic", &["n1"]).await;
         collection_holds(&server, "memory.procedural", &[]).await;
         collection_holds(&server, "identity.graph", &[]).await;
-        arm(&server, "source_id", "gone", &["x1"]).await;
-        arm(&server, "target_id", "gone", &["x2", "x3"]).await;
+        arm_typed(&server, "source_id", "gone", &[("x1", "same_session")]).await;
+        arm_typed(&server, "target_id", "gone", &[("x2", "related_to"), ("x3", "tag_overlap")]).await;
         Mock::given(method("DELETE")).respond_with(data(json!({}))).mount(&server).await;
         server
     }
@@ -3594,15 +3861,8 @@ mod orphan_tests {
         let server = graph_with_one_missing_node().await;
         let db = WardsonDbClient::from_url(&server.uri());
         let found = find_orphan_edges(&db, 10_000).await.expect("the check completes");
-        assert_eq!(
-            found,
-            OrphanScan {
-                scanned: 5,
-                dangling: vec!["gone".into()],
-                orphan_ids: vec!["x1".into(), "x2".into(), "x3".into()],
-                more: false,
-            }
-        );
+        assert_eq!((found.scanned, found.dangling.as_slice(), found.orphan_ids(), found.more), (5, ["gone".to_string()].as_slice(), vec!["x1", "x2", "x3"], false));
+        assert_eq!(found.orphans[1]["edge_type"], "related_to", "the documents are kept whole for the record");
         // No page of edge documents is read: every edge query names the one
         // missing id, on one side.
         let requests = server.received_requests().await.unwrap_or_default();
@@ -3631,20 +3891,51 @@ mod orphan_tests {
         );
     }
 
+    /// The record is written before the first delete, in the dump format,
+    /// and the reply splits what went: the auto edges counted, the curated
+    /// one named with its ends.
     #[tokio::test]
     async fn the_sweep_removes_what_the_check_lists() {
         let server = graph_with_one_missing_node().await;
         let db = WardsonDbClient::from_url(&server.uri());
-        let out = knowledge_sweep_orphans(&db, &test_config(), false, 10_000).await;
+        let dir = TempDir::new("sweep");
+        let out = knowledge_sweep_orphans_at(&db, &test_config(), false, 10_000, dir.path()).await;
         // The node check reads the count mock as its window and says so.
         assert!(
             out.starts_with("knowledge_sweep_orphans:\n  scanned: 5\n  orphan_count: 3\n  deleted: 3\n  missing_nodes: 1\n  missing_node_ids: gone\n  pointerless_nodes: not checked ("),
+            "{out}"
+        );
+        assert!(
+            out.contains("\n  edges removed: 3 (auto 2, curated 1, other 0)\n  auto: same_session=1, tag_overlap=1\n  curated: related_to=1\n    x2 memory.semantic:n1 → memory.semantic:gone related_to 0.50\n  record: "),
             "{out}"
         );
         assert_eq!(
             deletes_seen(&server).await,
             ["/memory.edges/docs/x1", "/memory.edges/docs/x2", "/memory.edges/docs/x3"]
         );
+        let record = std::fs::read_dir(&dir.0).unwrap().map(|e| e.unwrap().path()).next().expect("one record");
+        assert!(out.ends_with(&format!("\n  record: {}", record.display())), "{out}");
+        let lines = crate::knowledge::removal::tests::record_lines(&record);
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0]["source"], json!({"tool": "knowledge_sweep_orphans", "target": null, "dangling": ["gone"]}));
+        assert_eq!(lines[0]["collections"], json!(["memory.edges"]));
+        let ids: Vec<&str> = lines[1..].iter().map(|l| l["_id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["x1", "x2", "x3"]);
+        assert!(lines[1..].iter().all(|l| l["type"] == "edge"));
+    }
+
+    /// The record gates the deletes: when it cannot be written, no edge goes.
+    #[tokio::test]
+    async fn a_record_that_cannot_be_written_removes_nothing() {
+        let server = graph_with_one_missing_node().await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let dir = TempDir::new("sweep-blocked");
+        let blocked = dir.0.join("not-a-directory");
+        std::fs::write(&blocked, b"x").unwrap();
+        let out = knowledge_sweep_orphans_at(&db, &test_config(), false, 10_000, blocked.to_str().unwrap()).await;
+        assert!(out.starts_with("knowledge_sweep_orphans: the removal record could not be written ("), "{out}");
+        assert!(out.ends_with("no edge was deleted (0 healed, 0 adopted)."), "{out}");
+        assert!(deletes_seen(&server).await.is_empty());
     }
 
     /// A promotion node no entry points at is reported by the stats and
@@ -3846,9 +4137,13 @@ mod orphan_tests {
     async fn a_dry_run_deletes_nothing() {
         let server = graph_with_one_missing_node().await;
         let db = WardsonDbClient::from_url(&server.uri());
-        let out = knowledge_sweep_orphans(&db, &test_config(), true, 10_000).await;
+        let dir = TempDir::new("sweep-dry");
+        let out = knowledge_sweep_orphans_at(&db, &test_config(), true, 10_000, dir.path()).await;
         assert!(out.starts_with("knowledge_sweep_orphans (dry_run):\n  scanned: 5\n  orphan_count: 3\n  deleted: 0"), "{out}");
+        assert!(out.contains("\n  edges to remove: 3 (auto 2, curated 1, other 0)\n"), "{out}");
+        assert!(out.ends_with("\n  record: not written (dry_run)"), "{out}");
         assert!(deletes_seen(&server).await.is_empty());
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0, "a dry run writes no record");
     }
 
     #[tokio::test]
@@ -3856,7 +4151,7 @@ mod orphan_tests {
         let server = graph_with_one_missing_node().await;
         let db = WardsonDbClient::from_url(&server.uri());
         let found = find_orphan_edges(&db, 2).await.expect("the check completes");
-        assert_eq!(found.orphan_ids, ["x1", "x2"]);
+        assert_eq!(found.orphan_ids(), ["x1", "x2"]);
         assert!(found.more);
         // The check itself covered every edge.
         assert_eq!(found.scanned, 5);
@@ -3876,7 +4171,7 @@ mod orphan_tests {
         let db = WardsonDbClient::from_url(&server.uri());
         let found = find_orphan_edges(&db, 10_000).await.expect("the check completes");
         assert_eq!(found.dangling, ["gone_a", "gone_b"]);
-        assert_eq!(found.orphan_ids, ["x1"]);
+        assert_eq!(found.orphan_ids(), ["x1"]);
         assert!(!found.more);
     }
 
@@ -3954,7 +4249,7 @@ mod orphan_tests {
         let db = WardsonDbClient::from_url(&server.uri());
         let found = find_orphan_edges(&db, 10_000).await.expect("a missing collection is an answer");
         assert_eq!(found.dangling, ["old_identity"]);
-        assert_eq!(found.orphan_ids, ["x1", "x2"]);
+        assert_eq!(found.orphan_ids(), ["x1", "x2"]);
     }
 
     #[test]

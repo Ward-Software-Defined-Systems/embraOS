@@ -1018,7 +1018,7 @@ mod id_gate_tests {
             crate::tools::engineering::task_delete(&db, id).await,
             crate::tools::engineering::plan::task_done(&db, id).await,
             crate::tools::engineering::plan::plan_delete(&db, id, false).await,
-            crate::knowledge::tools::knowledge_unlink_node(&format!("memory.semantic:{id}"), &db).await,
+            crate::knowledge::tools::knowledge_unlink_node_at(&format!("memory.semantic:{id}"), &db, false, crate::knowledge::tools::KG_DUMPS_DIR).await,
             crate::knowledge::tools::knowledge_update(&format!("memory.semantic:{id} | {{\"content\": \"x\"}}"), &db, &config()).await,
             crate::knowledge::tools::knowledge_link(&format!("memory.semantic:{id} | related_to | memory.semantic:other | 0.5"), &db).await,
         ];

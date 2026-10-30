@@ -16,6 +16,7 @@ pub mod merge;
 pub(crate) mod neighbors;
 pub(crate) mod node_store;
 pub mod promotion;
+pub(crate) mod removal;
 pub mod retrieval;
 pub mod seed;
 pub(crate) mod supersession;

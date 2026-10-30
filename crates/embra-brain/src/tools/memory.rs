@@ -1078,16 +1078,17 @@ fn node_fate(entry_id: &str, node: Option<&serde_json::Value>, entries: Result<&
 /// operator-invoked one-off. NEVER copy this shape into a `query()` hot
 /// path; hot paths arm-split for the indexes (knowledge/traversal.rs,
 /// 2026-07-04).
-fn forget_edge_filter(entry_id: &str, node: Option<(&str, &str)>) -> serde_json::Value {
-    let mut arms = vec![
-        serde_json::json!({"source_id": entry_id, "source_collection": "memory.entries"}),
-        serde_json::json!({"target_id": entry_id, "target_collection": "memory.entries"}),
-    ];
-    if let Some((collection, node_id)) = node {
-        arms.push(serde_json::json!({"source_id": node_id, "source_collection": collection}));
-        arms.push(serde_json::json!({"target_id": node_id, "target_collection": collection}));
+/// One delete per edge, by id: what the record holds, and nothing it does
+/// not. The count is of the deletes that succeeded.
+async fn delete_edges(db: &WardsonDbClient, edges: &[serde_json::Value]) -> u64 {
+    let mut deleted = 0;
+    for edge in edges {
+        let Some(edge_id) = edge.get("_id").and_then(|v| v.as_str()) else { continue };
+        if db.delete("memory.edges", edge_id).await.is_ok() {
+            deleted += 1;
+        }
     }
-    serde_json::json!({ "$or": arms })
+    deleted
 }
 
 /// Why a node outlived its entry, appended to the entry's removal line.
@@ -1120,21 +1121,27 @@ fn doc_ids(docs: &[serde_json::Value]) -> Vec<String> {
 /// that touches either. The inverse of `remember`. `id` is the entry's id,
 /// or the node's when exactly one entry stands behind it.
 pub(super) async fn forget(db: &WardsonDbClient, id: &str) -> String {
+    forget_at(db, id, crate::knowledge::tools::KG_DUMPS_DIR).await
+}
+
+/// `forget` with the directory of its removal record as a parameter, so a
+/// test runs it under a temporary one.
+pub(crate) async fn forget_at(db: &WardsonDbClient, id: &str, dumps_dir: &str) -> String {
     if id.is_empty() {
         return "Provide the entry ID to forget: forget <id>".into();
     }
     let id = id.trim();
 
     match db.read("memory.entries", id).await {
-        Ok(entry) => forget_entry(db, id, &entry).await,
-        Err(e) if crate::db::error::is_not_found(&e) => forget_by_node(db, id).await,
+        Ok(entry) => forget_entry(db, id, &entry, dumps_dir).await,
+        Err(e) if crate::db::error::is_not_found(&e) => forget_by_node(db, id, dumps_dir).await,
         Err(e) => format!("Failed to remove entry: {}", e),
     }
 }
 
 /// `id` is no entry. When it is a node with one entry behind it, that
 /// memory is forgotten; otherwise the answer says what the id is.
-async fn forget_by_node(db: &WardsonDbClient, id: &str) -> String {
+async fn forget_by_node(db: &WardsonDbClient, id: &str, dumps_dir: &str) -> String {
     for collection in ["memory.semantic", "memory.procedural"] {
         match db.read(collection, id).await {
             Ok(_) => {}
@@ -1156,7 +1163,7 @@ async fn forget_by_node(db: &WardsonDbClient, id: &str) -> String {
                 "{} is a node ({}) with no entry behind it. knowledge_unlink_node removes it.",
                 id, collection
             ),
-            [entry_id] => forget_entry(db, entry_id, &entries[0]).await,
+            [entry_id] => forget_entry(db, entry_id, &entries[0], dumps_dir).await,
             _ => format!(
                 "{} is a node ({}) that {} entries point at ({}). forget one of them to drop that record, or knowledge_unlink_node to remove the node.",
                 id,
@@ -1169,7 +1176,8 @@ async fn forget_by_node(db: &WardsonDbClient, id: &str) -> String {
     format!("No memory entry or node with id {}.", id)
 }
 
-async fn forget_entry(db: &WardsonDbClient, id: &str, entry: &serde_json::Value) -> String {
+async fn forget_entry(db: &WardsonDbClient, id: &str, entry: &serde_json::Value, dumps_dir: &str) -> String {
+    use crate::knowledge::removal::{self, RemovalSummary};
     // The node the entry was promoted to, when it is still there. A read
     // that fails for another reason than "not there" stops the call: what
     // cannot be read is neither removed nor orphaned.
@@ -1198,60 +1206,109 @@ async fn forget_entry(db: &WardsonDbClient, id: &str, entry: &serde_json::Value)
         }
         _ => NodeFate::None,
     };
+    let target = format!("memory.entries:{id}");
 
     if let (NodeFate::Remove, Some((collection, node_id)), Some(doc)) = (&fate, &pointer, &node) {
-        // Edges first, the node next, the entry last: whatever fails, the
-        // entry is still there for a second `forget` to finish from.
-        let edge_count = db
-            .delete_by_query("memory.edges", &forget_edge_filter(id, Some((collection, node_id.as_str()))))
-            .await
-            .unwrap_or(0);
+        // The edges of the node and of the entry, whole, then the record;
+        // then edges first, the node next, the entry last: whatever fails,
+        // the entry is still there for a second `forget` to finish from.
+        let edges = match removal::edges_of_all(db, &[(collection, node_id.as_str()), ("memory.entries", id)]).await {
+            Ok(edges) => edges,
+            Err(e) => {
+                return format!(
+                    "Error: the edges of entry {} and its node {}:{} could not be read ({}); nothing was removed. Run forget again.",
+                    id, collection, node_id, e
+                )
+            }
+        };
+        let summary = RemovalSummary::of(&edges).with_nodes(vec![format!("{collection}:{node_id}")]);
+        let source = serde_json::json!({ "tool": "forget", "target": target, "node": format!("{collection}:{node_id}") });
+        let record = match removal::write_removal_record(
+            dumps_dir,
+            "forget",
+            source,
+            &[(collection, doc), ("memory.entries", entry)],
+            &edges,
+        )
+        .await
+        {
+            Ok(path) => path,
+            Err(e) => return format!("Error: the removal record could not be written ({}); nothing was removed. Run forget again.", e),
+        };
+        let edge_count = delete_edges(db, &edges).await;
         if let Err(e) = db.delete(collection, node_id).await
             && !crate::db::error::is_not_found(&e)
         {
             return format!(
-                "Error: the node {}:{} could not be removed ({}); entry {} was left in place. Run forget again.",
-                collection, node_id, e, id
+                "Error: the node {}:{} could not be removed ({}); entry {} was left in place. Run forget again. The record is {}.",
+                collection,
+                node_id,
+                e,
+                id,
+                record.display()
             );
         }
         // The node is gone — drop its vector, as `knowledge_unlink_node` does.
         crate::embedding::write::forget_node(collection, node_id).await;
         if let Err(e) = db.delete("memory.entries", id).await {
             return format!(
-                "Error: the node {}:{} was removed, and entry {} could not be ({}). Run forget again.",
-                collection, node_id, id, e
+                "Error: the node {}:{} was removed, and entry {} could not be ({}). Run forget again. The record is {}.",
+                collection,
+                node_id,
+                id,
+                e,
+                record.display()
             );
         }
+        removal::log_removal("forget", &target, &summary, &record);
         let preview_src = doc
             .get("content")
             .or_else(|| doc.get("title"))
             .and_then(|v| v.as_str())
             .unwrap_or("(no preview)");
         return format!(
-            "Memory removed: entry {} and its node {}:{} (\"{}\"). {} edge(s) cascaded.",
+            "Memory removed: entry {} and its node {}:{} (\"{}\"). {} edge(s) cascaded.{}",
             id,
             collection,
             node_id,
             knowledge::types::content_preview(preview_src, 80),
-            edge_count
+            edge_count,
+            removal::removal_report(&summary, Some(&record), false)
         );
     }
 
-    // The entry alone: it has no live node, or the node stays.
+    // The entry alone: it has no live node, or the node stays. Its edges
+    // first, then the entry, with the record in front of both.
+    let edges = match removal::node_edges(db, "memory.entries", id).await {
+        Ok(edges) => edges,
+        Err(e) => {
+            return format!(
+                "Error: the edges of entry {} could not be read ({}); nothing was removed. Run forget again.",
+                id, e
+            )
+        }
+    };
+    let summary = RemovalSummary::of(&edges);
+    let source = serde_json::json!({ "tool": "forget", "target": target, "node": serde_json::Value::Null });
+    let record = match removal::write_removal_record(dumps_dir, "forget", source, &[("memory.entries", entry)], &edges).await {
+        Ok(path) => path,
+        Err(e) => return format!("Error: the removal record could not be written ({}); nothing was removed. Run forget again.", e),
+    };
+    let edge_count = delete_edges(db, &edges).await;
     if let Err(e) = db.delete("memory.entries", id).await {
-        return format!("Failed to remove entry: {}", e);
+        return format!("Failed to remove entry: {}. The record is {}.", e, record.display());
     }
-    let edge_count = db
-        .delete_by_query("memory.edges", &forget_edge_filter(id, None))
-        .await
-        .unwrap_or(0);
+    removal::log_removal("forget", &target, &summary, &record);
     let note = match &pointer {
         Some((collection, node_id)) => kept_node_note(collection, node_id, &fate),
         None => String::new(),
     };
     format!(
-        "Memory entry {} removed; {} referencing edge(s) cascaded.{}",
-        id, edge_count, note
+        "Memory entry {} removed; {} referencing edge(s) cascaded.{}{}",
+        id,
+        edge_count,
+        note,
+        removal::removal_report(&summary, Some(&record), false)
     )
 }
 
@@ -1311,21 +1368,6 @@ mod forget_tests {
         assert_eq!(body["limit"], json!(11));
     }
 
-    #[test]
-    fn the_forget_cascade_names_the_entry_and_the_node_on_both_sides() {
-        let entry_only = forget_edge_filter("e1", None);
-        assert_eq!(entry_only["$or"].as_array().unwrap().len(), 2);
-        let both = forget_edge_filter("e1", Some(("memory.semantic", "n1")));
-        assert_eq!(
-            both["$or"],
-            json!([
-                {"source_id": "e1", "source_collection": "memory.entries"},
-                {"target_id": "e1", "target_collection": "memory.entries"},
-                {"source_id": "n1", "source_collection": "memory.semantic"},
-                {"target_id": "n1", "target_collection": "memory.semantic"},
-            ])
-        );
-    }
 
     #[test]
     fn only_a_node_collection_counts_as_a_pointer() {
@@ -1360,22 +1402,49 @@ mod forget_tests {
         })
     }
 
+    use crate::knowledge::removal::tests::{record_lines, TempDir};
+    use wiremock::Request;
+
+    fn body(req: &Request) -> serde_json::Value {
+        serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null)
+    }
+
+    fn edge(id: &str, kind: &str, src: (&str, &str), tgt: (&str, &str), weight: f64) -> serde_json::Value {
+        json!({
+            "_id": id, "edge_type": kind, "weight": weight,
+            "source_collection": src.0, "source_id": src.1, "target_collection": tgt.0, "target_id": tgt.1,
+        })
+    }
+
+    /// The edges that name `id` on one side.
+    async fn edge_arm(server: &MockServer, field: &'static str, id: &'static str, edges: Vec<serde_json::Value>) {
+        Mock::given(method("POST"))
+            .and(path("/memory.edges/query"))
+            .and(move |req: &Request| body(req)["filter"][field] == id)
+            .respond_with(doc(json!(edges)))
+            .mount(server)
+            .await;
+    }
+
     /// One promoted memory: entry `e1`, node `n1`. `node_read` answers the
-    /// node's read; `entries` is what the pointer scan returns.
+    /// node's read; `entries` is what the pointer scan returns. Four edges
+    /// name the pair: the provenance edge `d1` (read from both sides), the
+    /// automatic `x1` and `y1`, and `x2`, a link the brain authored.
     async fn one_memory(node_read: ResponseTemplate, entries: serde_json::Value) -> MockServer {
         let server = MockServer::start().await;
         Mock::given(method("GET")).and(path("/memory.entries/docs/e1")).respond_with(doc(entry_e1())).mount(&server).await;
         Mock::given(method("GET")).and(path("/memory.entries/docs/n1")).respond_with(ResponseTemplate::new(404)).mount(&server).await;
         Mock::given(method("GET")).and(path("/memory.semantic/docs/n1")).respond_with(node_read).mount(&server).await;
         Mock::given(method("POST")).and(path("/memory.entries/query")).respond_with(doc(entries)).mount(&server).await;
-        Mock::given(method("POST"))
-            .and(path("/memory.edges/docs/_delete_by_query"))
-            .respond_with(doc(json!({"deleted": 7})))
-            .mount(&server)
-            .await;
-        for gone in ["/memory.semantic/docs/n1", "/memory.entries/docs/e1"] {
-            Mock::given(method("DELETE")).and(path(gone)).respond_with(doc(json!({}))).mount(&server).await;
-        }
+        let d1 = edge("d1", "derived_from", ("memory.semantic", "n1"), ("memory.entries", "e1"), 1.0);
+        let x1 = edge("x1", "same_session", ("memory.semantic", "n1"), ("memory.semantic", "o1"), 0.5);
+        let x2 = edge("x2", "related_to", ("memory.semantic", "o2"), ("memory.semantic", "n1"), 0.8);
+        let y1 = edge("y1", "same_session", ("memory.entries", "e1"), ("memory.semantic", "o3"), 0.5);
+        edge_arm(&server, "source_id", "n1", vec![d1.clone(), x1]).await;
+        edge_arm(&server, "target_id", "n1", vec![x2]).await;
+        edge_arm(&server, "source_id", "e1", vec![y1]).await;
+        edge_arm(&server, "target_id", "e1", vec![d1]).await;
+        Mock::given(method("DELETE")).respond_with(doc(json!({}))).mount(&server).await;
         server
     }
 
@@ -1390,58 +1459,118 @@ mod forget_tests {
             .await
             .unwrap_or_default()
             .iter()
-            .filter(|r| r.method.as_str() == "DELETE" || r.url.path().ends_with("_delete_by_query"))
+            .filter(|r| r.method.as_str() == "DELETE")
             .map(|r| format!("{} {}", r.method, r.url.path()))
             .collect()
     }
 
+    /// The record first (the entry, the node and every edge of either, in
+    /// the dump format), then the edges by id, the node, the entry; the
+    /// reply splits the edges and names the link the brain authored.
     #[tokio::test]
     async fn forget_removes_the_edges_the_node_and_then_the_entry() {
         let server = one_memory(live_node(), json!([entry_e1()])).await;
         let db = WardsonDbClient::from_url(&server.uri());
-        let out = forget(&db, "e1").await;
-        assert_eq!(
-            out,
-            "Memory removed: entry e1 and its node memory.semantic:n1 (\"the cert refresh works\"). 7 edge(s) cascaded."
+        let dir = TempDir::new("forget");
+        let out = forget_at(&db, "e1", dir.path()).await;
+        assert!(
+            out.starts_with("Memory removed: entry e1 and its node memory.semantic:n1 (\"the cert refresh works\"). 4 edge(s) cascaded.\n  edges removed: 4 (auto 2, curated 1, other 1)\n  auto: same_session=2\n  curated: related_to=1\n    x2 memory.semantic:o2 → memory.semantic:n1 related_to 0.80\n  other: derived_from=1\n  nodes removed: memory.semantic:n1\n  record: "),
+            "{out}"
         );
         assert_eq!(
             writes_seen(&server).await,
             [
-                "POST /memory.edges/docs/_delete_by_query",
+                "DELETE /memory.edges/docs/d1",
+                "DELETE /memory.edges/docs/x1",
+                "DELETE /memory.edges/docs/x2",
+                "DELETE /memory.edges/docs/y1",
                 "DELETE /memory.semantic/docs/n1",
                 "DELETE /memory.entries/docs/e1",
             ]
         );
+        let record = std::fs::read_dir(&dir.0).unwrap().map(|e| e.unwrap().path()).next().expect("one record");
+        assert!(out.ends_with(&format!("\n  record: {}", record.display())), "{out}");
+        let lines = record_lines(&record);
+        assert_eq!(lines.len(), 7);
+        assert_eq!(lines[0]["source"], json!({"tool": "forget", "target": "memory.entries:e1", "node": "memory.semantic:n1"}));
+        assert_eq!(lines[0]["collections"], json!(["memory.semantic", "memory.entries", "memory.edges"]));
+        assert_eq!((lines[1]["collection"].as_str(), lines[1]["data"]["content"].as_str()), (Some("memory.semantic"), Some("the cert refresh works")));
+        assert_eq!((lines[2]["collection"].as_str(), lines[2]["_id"].as_str()), (Some("memory.entries"), Some("e1")));
+        let ids: Vec<&str> = lines[3..].iter().map(|l| l["_id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["d1", "x1", "x2", "y1"], "every edge once, the one read from both sides included once");
     }
 
     #[tokio::test]
     async fn a_node_id_with_one_entry_is_forgotten_as_that_entry() {
         let server = one_memory(live_node(), json!([entry_e1()])).await;
         let db = WardsonDbClient::from_url(&server.uri());
-        let out = forget(&db, "n1").await;
+        let dir = TempDir::new("forget-node-id");
+        let out = forget_at(&db, "n1", dir.path()).await;
         assert!(out.starts_with("Memory removed: entry e1 and its node memory.semantic:n1"), "{out}");
-        assert_eq!(writes_seen(&server).await.len(), 3);
+        assert_eq!(writes_seen(&server).await.len(), 6);
     }
 
+    /// The entry alone: its own edges by id, then the entry; the node stays
+    /// and the reply says why. The record holds the entry and its edges.
     #[tokio::test]
     async fn a_shared_node_outlives_the_entry() {
         let other = json!({"_id": "e2", "promoted_to": {"collection": "memory.semantic", "id": "n1"}});
         let server = one_memory(live_node(), json!([other, entry_e1()])).await;
         let db = WardsonDbClient::from_url(&server.uri());
-        let out = forget(&db, "e1").await;
-        assert!(out.starts_with("Memory entry e1 removed; 7 referencing edge(s) cascaded."), "{out}");
+        let dir = TempDir::new("forget-shared");
+        let out = forget_at(&db, "e1", dir.path()).await;
+        assert!(out.starts_with("Memory entry e1 removed; 2 referencing edge(s) cascaded."), "{out}");
         assert!(out.contains("memory.semantic:n1 stays: 1 other entry point at it (e2)"), "{out}");
+        assert!(out.contains("\n  edges removed: 2 (auto 1, curated 0, other 1)\n  auto: same_session=1\n  other: derived_from=1\n  record: "), "{out}");
         assert_eq!(
             writes_seen(&server).await,
-            ["DELETE /memory.entries/docs/e1", "POST /memory.edges/docs/_delete_by_query"]
+            ["DELETE /memory.edges/docs/y1", "DELETE /memory.edges/docs/d1", "DELETE /memory.entries/docs/e1"]
         );
+        let record = std::fs::read_dir(&dir.0).unwrap().map(|e| e.unwrap().path()).next().expect("one record");
+        let lines = record_lines(&record);
+        assert_eq!(lines[0]["source"], json!({"tool": "forget", "target": "memory.entries:e1", "node": null}));
+        assert_eq!(lines.len(), 4, "the meta line, the entry, two edges");
+    }
+
+    /// The record gates every delete: when it cannot be written, nothing
+    /// goes, and the reply says to run again.
+    #[tokio::test]
+    async fn a_record_that_cannot_be_written_removes_nothing() {
+        let server = one_memory(live_node(), json!([entry_e1()])).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let dir = TempDir::new("forget-blocked");
+        let blocked = dir.0.join("not-a-directory");
+        std::fs::write(&blocked, b"x").unwrap();
+        let out = forget_at(&db, "e1", blocked.to_str().unwrap()).await;
+        assert!(out.starts_with("Error: the removal record could not be written ("), "{out}");
+        assert!(out.ends_with("nothing was removed. Run forget again."), "{out}");
+        assert!(writes_seen(&server).await.is_empty());
+    }
+
+    /// An edge read that fails is no shorter list: nothing is removed.
+    #[tokio::test]
+    async fn edges_that_cannot_be_read_stop_forget_with_nothing_removed() {
+        let server = one_memory(live_node(), json!([entry_e1()])).await;
+        Mock::given(method("POST"))
+            .and(path("/memory.edges/query"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("timeout"))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let dir = TempDir::new("forget-unread");
+        let out = forget_at(&db, "e1", dir.path()).await;
+        assert!(out.starts_with("Error: the edges of entry e1 and its node memory.semantic:n1 could not be read ("), "{out}");
+        assert!(writes_seen(&server).await.is_empty());
+        assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0, "no record of a removal that did not happen");
     }
 
     #[tokio::test]
     async fn a_node_that_cannot_be_read_stops_forget_with_nothing_removed() {
         let server = one_memory(ResponseTemplate::new(500), json!([entry_e1()])).await;
         let db = WardsonDbClient::from_url(&server.uri());
-        let out = forget(&db, "e1").await;
+        let dir = TempDir::new("forget-node-unread");
+        let out = forget_at(&db, "e1", dir.path()).await;
         assert!(out.starts_with("Error: the node memory.semantic:n1 could not be read"), "{out}");
         assert!(out.contains("nothing was removed"), "{out}");
         assert!(writes_seen(&server).await.is_empty());
@@ -1451,7 +1580,10 @@ mod forget_tests {
     async fn an_entry_whose_node_is_gone_is_removed_alone() {
         let server = one_memory(ResponseTemplate::new(404), json!([])).await;
         let db = WardsonDbClient::from_url(&server.uri());
-        assert_eq!(forget(&db, "e1").await, "Memory entry e1 removed; 7 referencing edge(s) cascaded.");
+        let dir = TempDir::new("forget-alone");
+        let out = forget_at(&db, "e1", dir.path()).await;
+        assert!(out.starts_with("Memory entry e1 removed; 2 referencing edge(s) cascaded.\n  edges removed: 2 (auto 1, curated 0, other 1)\n"), "{out}");
+        assert_eq!(writes_seen(&server).await, ["DELETE /memory.edges/docs/y1", "DELETE /memory.edges/docs/d1", "DELETE /memory.entries/docs/e1"]);
     }
 
     #[tokio::test]
@@ -1566,7 +1698,7 @@ impl RememberArgs {
 #[embra_tool(
     name = "forget",
     is_side_effectful = true,
-    description = "Remove a memory: its entry, the node promoted from it, and every edge that touches either. id is the entry id or the node id. The node stays when another entry also points at it or when it comes from a seed pack; the result says so. To remove a node and keep its entry, use knowledge_unlink_node. Destructive; confirm with the user first."
+    description = "Remove a memory: its entry, the node promoted from it, and every edge that touches either. id is the entry id or the node id. The node stays when another entry also points at it or when it comes from a seed pack; the result says so. Before anything is deleted the entry, the node and their edges are written to a record under /embra/workspace/KG_DUMPS (a dump file), and the reply lists the removed edges by type with every brain-authored link named. To remove a node and keep its entry, use knowledge_unlink_node. Destructive; confirm with the user first."
 )]
 pub struct ForgetArgs {
     /// Entry id or node id of the memory to remove.
