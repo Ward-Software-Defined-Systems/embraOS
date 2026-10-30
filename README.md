@@ -24,7 +24,7 @@
 
 **Current Status:** Phase 1 — Stable (code review in progress). Sprint 6, the final Phase 1 sprint, closed with `v0.15.0-phase1` (2026-09-18); the code-review pit stop runs on branch `code-review`, and its releases are `v0.16.0-phase1` through `v0.22.0-phase1` ([docs/CHANGE-LOG.md](docs/CHANGE-LOG.md)).
 
-Phase 2–5 add a full TUI rewrite, a governed module system with an `embractl` management CLI, an image factory targeting bare metal and Kubernetes, and a sovereign-intelligence tier — A/B partitioned rollback, LUKS, mTLS, and fully offline local inference. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
+Phase 2–5 add a full TUI rewrite and an image factory for bare metal with A/B rollback, LUKS and mTLS; a governed module system with an `embractl` management CLI; a custom kernel; and a sovereign-intelligence tier — the embraOS-QNM-Core model option and Kubernetes deployment. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
 > **Pair it with WSDS Local AI Gateway — under evaluation.** embraOS can route every
 > provider request through [WSDS Local AI Gateway](https://github.com/Ward-Software-Defined-Systems/Local-AI-Gateway),
