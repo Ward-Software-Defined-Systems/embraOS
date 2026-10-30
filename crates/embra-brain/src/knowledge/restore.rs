@@ -12,7 +12,7 @@
 //! stored embedding is placed in the vector index without inference.
 
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use serde_json::Value;
 use tokio::io::AsyncBufReadExt;
@@ -23,7 +23,7 @@ use crate::db::WardsonDbClient;
 use crate::embedding::write::{adopt_stored_vector, StoredVector};
 use crate::tools::jail;
 
-use super::tools::{node_ids, resolve_dump_collections, DUMP_COLLECTIONS, KG_DUMPS_DIR};
+use super::tools::{node_ids, resolve_dump_collections, resolve_dump_file, DUMP_COLLECTIONS};
 
 /// The fields the server sets on an insert, stripped from a record before
 /// it is written: the intent is explicit, and `_created_at` is not
@@ -107,22 +107,6 @@ impl Report {
 /// The canonical name of a dump collection, from the record's.
 fn canonical(collection: &str) -> Option<&'static str> {
     DUMP_COLLECTIONS.iter().map(|(_, full)| *full).find(|full| *full == collection)
-}
-
-/// The file to read: a bare name is under `KG_DUMPS`; a path resolves inside
-/// the workspace jail, through its real path, and the read jail applies
-/// (`jail::jailed_read_path`).
-async fn resolve_file(root: &str, file: &str) -> Result<PathBuf, String> {
-    let raw = file.trim();
-    if raw.is_empty() {
-        return Err("file names the dump or removal file to restore".into());
-    }
-    let relative = if raw.contains('/') {
-        raw.to_string()
-    } else {
-        format!("{}/{raw}", Path::new(KG_DUMPS_DIR).strip_prefix(jail::WORKSPACE_ROOT).map(|p| p.display().to_string()).unwrap_or_else(|_| "KG_DUMPS".into()))
-    };
-    jail::jailed_read_path(root, &relative, jail::read_denied).await
 }
 
 /// A record's document as written: the server's fields and the dump's
@@ -291,7 +275,7 @@ pub(crate) async fn run_knowledge_restore(
         .into_iter()
         .filter(|c| *c != IDENTITY_COLLECTION)
         .collect();
-    let path = resolve_file(root, file).await?;
+    let path = resolve_dump_file(root, file).await?;
     let lines = records(&path).await?;
     // The graph's node ids first, when edges are to be placed: an end check
     // that cannot be made places no edge, and that is known before a node

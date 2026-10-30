@@ -763,6 +763,161 @@ mod unlink_summary_tests {
 }
 
 #[cfg(test)]
+mod dump_file_tests {
+    use super::*;
+    use crate::knowledge::removal::tests::{edge, record_lines, TempDir};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+    fn data(v: serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": v, "meta": {}}))
+    }
+
+    fn body(req: &Request) -> serde_json::Value {
+        serde_json::from_slice(&req.body).unwrap_or(serde_json::Value::Null)
+    }
+
+    /// A workspace root whose `KG_DUMPS` holds `name` with `lines`.
+    fn workspace_with(name: &str, lines: &[serde_json::Value]) -> TempDir {
+        let root = TempDir::new("dump");
+        let dir = root.0.join("KG_DUMPS");
+        std::fs::create_dir_all(&dir).unwrap();
+        let text: String = lines.iter().map(|l| l.to_string() + "\n").collect();
+        std::fs::write(dir.join(name), text).unwrap();
+        root
+    }
+
+    fn node(collection: &str, id: &str) -> serde_json::Value {
+        json!({"type": "node", "_id": id, "collection": collection, "data": {"_id": id, "content": "c", "embedding": "AAAA"}})
+    }
+
+    fn edge_record(id: &str, kind: &str) -> serde_json::Value {
+        let mut e = edge(id, kind, "n1", "n2", 0.5);
+        e["type"] = json!("edge");
+        e
+    }
+
+    fn a_source() -> Vec<serde_json::Value> {
+        vec![
+            json!({"type": "meta", "generated_at": "2026-10-30T01:59:12Z", "collections": ["memory.entries", "memory.semantic", "memory.edges"], "edge_types": null, "include_payload": true}),
+            node("memory.entries", "e1"),
+            node("memory.semantic", "n1"),
+            node("memory.semantic", "n2"),
+            edge_record("c1", "related_to"),
+            edge_record("a1", "same_session"),
+            json!({"type": "comment", "text": "kept as is"}),
+        ]
+    }
+
+    async fn no_db() -> WardsonDbClient {
+        let server = MockServer::start().await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        std::mem::forget(server);
+        db
+    }
+
+    #[tokio::test]
+    async fn a_source_file_is_filtered_and_its_meta_names_the_source() {
+        let root = workspace_with("src.jsonl", &a_source());
+        let dumps = root.0.join("KG_DUMPS");
+        let db = no_db().await;
+        let out = run_knowledge_dump_at(
+            &db,
+            Some(vec!["semantic".into(), "edges".into()]),
+            Some(vec!["related_to".into()]),
+            false,
+            Some("src.jsonl".into()),
+            root.path(),
+            dumps.to_str().unwrap(),
+        )
+        .await
+        .expect("reshaped");
+        assert!(out.contains("\n  memory.semantic: 2 written (source count 2)\n  memory.edges: 1 written (source count 2)\n  edge filter: related_to\n  mode: slim (node payloads omitted)\n  other records carried through: 1\n  total: 4 records (+1 meta line), "), "{out}");
+        let written = std::fs::read_dir(&dumps).unwrap().map(|e| e.unwrap().path()).find(|p| p.file_name().unwrap().to_str().unwrap().starts_with("kg-dump-")).expect("the new file");
+        let lines = record_lines(&written);
+        assert_eq!(lines.len(), 5);
+        assert_eq!(lines[0]["source"], json!({"file": dumps.join("src.jsonl").display().to_string(), "generated_at": "2026-10-30T01:59:12Z"}));
+        assert_eq!(lines[0]["collections"], json!(["memory.semantic", "memory.edges"]));
+        assert_eq!(lines[0]["include_payload"], false);
+        assert_eq!(lines[1], json!({"type": "node", "_id": "n1", "collection": "memory.semantic"}), "slim: the data is dropped");
+        assert_eq!(lines[3]["_id"], "c1", "the edge filter kept the one related_to edge");
+        assert_eq!(lines[4], json!({"type": "comment", "text": "kept as is"}), "an unknown record type is carried through verbatim");
+    }
+
+    #[tokio::test]
+    async fn a_slim_source_stays_slim_and_the_reply_says_so() {
+        let slim = vec![
+            json!({"type": "meta", "generated_at": "2026-10-30T02:25:06Z", "collections": ["memory.semantic"], "edge_types": null, "include_payload": false}),
+            json!({"type": "node", "_id": "n1", "collection": "memory.semantic"}),
+        ];
+        let root = workspace_with("slim.jsonl", &slim);
+        let dumps = root.0.join("KG_DUMPS");
+        let db = no_db().await;
+        let out = run_knowledge_dump_at(&db, None, None, true, Some("slim.jsonl".into()), root.path(), dumps.to_str().unwrap()).await.expect("reshaped");
+        assert!(out.contains("\n  mode: slim (the source has no node payloads)\n"), "{out}");
+        let written = std::fs::read_dir(&dumps).unwrap().map(|e| e.unwrap().path()).find(|p| p.file_name().unwrap().to_str().unwrap().starts_with("kg-dump-")).expect("the new file");
+        let lines = record_lines(&written);
+        assert_eq!(lines[0]["include_payload"], false, "the meta says what the file holds");
+        assert!(lines[1].get("data").is_none());
+    }
+
+    #[tokio::test]
+    async fn the_file_path_shares_the_live_validation_and_the_jail() {
+        let root = workspace_with("src.jsonl", &a_source());
+        let dumps = root.0.join("KG_DUMPS");
+        let db = no_db().await;
+        let at = |collections: Option<Vec<String>>, edge_types: Option<Vec<String>>, file: &str| {
+            run_knowledge_dump_at(&db, collections, edge_types, true, Some(file.to_string()), root.path(), dumps.to_str().unwrap())
+        };
+        let bogus = at(Some(vec!["bogus".into()]), None, "src.jsonl").await.expect_err("refused");
+        assert_eq!(bogus, "Unknown collection 'bogus'. Valid: entries, semantic, procedural, identity, edges");
+        let no_edges = at(Some(vec!["semantic".into()]), Some(vec!["enables".into()]), "src.jsonl").await.expect_err("refused");
+        assert_eq!(no_edges, "edge_types was provided but 'edges' is not among the dumped collections");
+        let empty: Vec<String> = vec![];
+        assert_eq!(validate_dump_args(Some(&empty), None).unwrap_err(), resolve_dump_collections(Some(&empty)).unwrap_err());
+        for file in ["../src.jsonl", "/etc/hosts", "KG_DUMPS/../../src.jsonl"] {
+            let why = at(None, None, file).await.expect_err(file);
+            assert!(why.starts_with("Denied:") || why.contains("outside"), "{file}: {why}");
+        }
+        let missing = at(None, None, "nope.jsonl").await.expect_err("missing");
+        assert!(missing.contains("could not be opened") || missing.contains("Denied") || missing.contains("not found"), "{missing}");
+        assert_eq!(std::fs::read_dir(&dumps).unwrap().count(), 1, "a refused dump leaves no file beside the source");
+    }
+
+    /// The live path: `collections` without `edges` is said, and two dumps
+    /// in one second are two files.
+    #[tokio::test]
+    async fn a_live_dump_without_edges_says_so_and_never_truncates_an_earlier_one() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory.semantic/query"))
+            .and(|req: &Request| body(req)["count_only"] == true)
+            .respond_with(data(json!({"count": 1})))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/memory.semantic/query"))
+            .and(|req: &Request| body(req)["offset"] == 0)
+            .respond_with(data(json!([{"_id": "n1", "content": "c"}])))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST")).and(path("/memory.semantic/query")).respond_with(data(json!([]))).mount(&server).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let root = TempDir::new("dump-live");
+        let dumps = root.0.join("KG_DUMPS");
+        let first = run_knowledge_dump_at(&db, Some(vec!["semantic".into()]), None, true, None, root.path(), dumps.to_str().unwrap()).await.expect("dumped");
+        assert!(first.contains("\n  memory.semantic: 1 written (server count 1)\n  note: edges not included (collections omits 'edges')\n  total: 1 records (+1 meta line), "), "{first}");
+        let second = run_knowledge_dump_at(&db, Some(vec!["semantic".into()]), None, true, None, root.path(), dumps.to_str().unwrap()).await.expect("dumped");
+        assert_ne!(first.lines().next(), second.lines().next(), "two dumps, two names");
+        assert_eq!(std::fs::read_dir(&dumps).unwrap().count(), 2);
+        let with_edges = run_knowledge_dump_at(&db, None, None, true, None, root.path(), dumps.to_str().unwrap()).await;
+        assert!(with_edges.is_err() || !with_edges.unwrap().contains("note: edges not included"), "every collection: no note");
+    }
+}
+
+#[cfg(test)]
 mod unlink_tests {
     use super::*;
     use crate::knowledge::removal::tests::{record_lines, TempDir};
@@ -2638,6 +2793,46 @@ fn dump_page_query_body(
     scan_page_query_body(filter, page_limit, page)
 }
 
+/// The arguments every dump checks before it writes: the collections
+/// resolved (`resolve_dump_collections`), the edge types validated, and
+/// `edge_types` refused when `edges` is not among the collections. The live
+/// path and the file path share it, so a file reshaped from a file accepts
+/// exactly what the dump that wrote it accepted.
+pub(crate) fn validate_dump_args(
+    collections: Option<&[String]>,
+    edge_types: Option<&[String]>,
+) -> Result<Vec<&'static str>, String> {
+    let selected = resolve_dump_collections(collections)?;
+    if let Some(types) = edge_types {
+        validate_dump_edge_types(types)?;
+        if !selected.contains(&"memory.edges") {
+            return Err("edge_types was provided but 'edges' is not among the dumped collections".into());
+        }
+    }
+    Ok(selected)
+}
+
+/// A dump or removal file the model names: a bare name is under `KG_DUMPS`;
+/// a path resolves inside the workspace jail, through its real path, and
+/// the read jail applies (`jail::jailed_read_path`). `knowledge_restore`'s
+/// file and `knowledge_dump`'s source file come through here.
+pub(crate) async fn resolve_dump_file(root: &str, file: &str) -> Result<std::path::PathBuf, String> {
+    let raw = file.trim();
+    if raw.is_empty() {
+        return Err("the file names a dump or removal file".into());
+    }
+    let relative = if raw.contains('/') {
+        raw.to_string()
+    } else {
+        let dumps = std::path::Path::new(KG_DUMPS_DIR)
+            .strip_prefix(crate::tools::jail::WORKSPACE_ROOT)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "KG_DUMPS".into());
+        format!("{dumps}/{raw}")
+    };
+    crate::tools::jail::jailed_read_path(root, &relative, crate::tools::jail::read_denied).await
+}
+
 /// Edge-type restriction for the edges pass.
 fn dump_edge_type_filter(edge_types: &[String]) -> serde_json::Value {
     json!({ "edge_type": { "$in": edge_types } })
@@ -2747,8 +2942,11 @@ struct DumpCollectionStat {
     collection: &'static str,
     written: usize,
     /// Authoritative server-side count for the same filter (parity signal;
-    /// `None` when the count call itself failed).
+    /// `None` when the count call itself failed, and for a file source).
     server_count: Option<u64>,
+    /// For a file source: the records of the collection the source holds,
+    /// before the edge filter.
+    source_count: Option<usize>,
 }
 
 /// Write the meta line plus every selected collection into `writer`,
@@ -2827,6 +3025,7 @@ async fn write_dump_contents(
             collection: coll,
             written,
             server_count,
+            source_count: None,
         });
     }
 
@@ -2846,69 +3045,225 @@ pub async fn run_knowledge_dump(
     collections: Option<Vec<String>>,
     edge_types: Option<Vec<String>>,
     include_payload: bool,
+    source_file: Option<String>,
+) -> Result<String, String> {
+    run_knowledge_dump_at(
+        db,
+        collections,
+        edge_types,
+        include_payload,
+        source_file,
+        crate::tools::jail::WORKSPACE_ROOT,
+        KG_DUMPS_DIR,
+    )
+    .await
+}
+
+/// What the file pass learned about its source.
+#[derive(Debug, Default, PartialEq)]
+struct SourceInfo {
+    /// The source meta's `generated_at`, when it has a meta line.
+    generated_at: Option<String>,
+    /// The source holds a node record without `data`: its payloads are
+    /// gone, and a dump reshaped from it stays slim whatever was asked.
+    slim: bool,
+    /// Records of a type the dump does not know, carried through verbatim.
+    other: usize,
+}
+
+/// The records of a dump or removal file, reshaped by the same filters the
+/// live pass applies: a node line kept when its collection is selected
+/// (its `data` dropped when payloads are not wanted), an edge line when
+/// `edges` is selected and its type passes, the source's meta line replaced
+/// by this dump's, any other record carried through verbatim. The source is
+/// read twice: once for what it is (its meta, whether it is slim), then for
+/// the records, since the meta line written first says what follows.
+async fn write_reshaped_contents(
+    source: &std::path::Path,
+    writer: &mut tokio::io::BufWriter<tokio::fs::File>,
+    selected: &[&'static str],
+    edge_types: Option<&[String]>,
+    include_payload: bool,
+) -> Result<(Vec<DumpCollectionStat>, u64, SourceInfo, bool), String> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    let open = || async {
+        tokio::fs::File::open(source)
+            .await
+            .map(|f| tokio::io::BufReader::new(f).lines())
+            .map_err(|e| format!("{} could not be opened: {}", source.display(), e))
+    };
+    let mut info = SourceInfo::default();
+    let mut lines = open().await?;
+    while let Some(line) = lines.next_line().await.map_err(|e| format!("{} could not be read: {}", source.display(), e))? {
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+        match record.get("type").and_then(|v| v.as_str()) {
+            Some("meta") if info.generated_at.is_none() => {
+                info.generated_at = record.get("generated_at").and_then(|v| v.as_str()).map(str::to_string);
+                if record.get("include_payload") == Some(&serde_json::Value::Bool(false)) {
+                    info.slim = true;
+                }
+            }
+            Some("node") if record.get("data").is_none() => info.slim = true,
+            _ => {}
+        }
+    }
+    let effective_payload = include_payload && !info.slim;
+
+    let mut bytes: u64 = 0;
+    let meta_source = json!({ "file": source.display().to_string(), "generated_at": info.generated_at });
+    let meta_line = format!("{}\n", dump_meta_record(selected, edge_types, effective_payload, Some(&meta_source)));
+    writer.write_all(meta_line.as_bytes()).await.map_err(|e| format!("write failed: {}", e))?;
+    bytes += meta_line.len() as u64;
+
+    let mut written: Vec<usize> = vec![0; selected.len()];
+    let mut source_counts: Vec<usize> = vec![0; selected.len()];
+    let mut lines = open().await?;
+    while let Some(line) = lines.next_line().await.map_err(|e| format!("{} could not be read: {}", source.display(), e))? {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(mut record) = serde_json::from_str::<serde_json::Value>(&line) else {
+            return Err(format!("{} holds a line that is not JSON", source.display()));
+        };
+        let kept = match record.get("type").and_then(|v| v.as_str()) {
+            Some("meta") => continue,
+            Some("node") => {
+                let collection = record.get("collection").and_then(|v| v.as_str()).unwrap_or("");
+                let Some(slot) = selected.iter().position(|c| *c == collection) else { continue };
+                source_counts[slot] += 1;
+                if !effective_payload && let Some(obj) = record.as_object_mut() {
+                    obj.remove("data");
+                }
+                written[slot] += 1;
+                record
+            }
+            Some("edge") => {
+                let Some(slot) = selected.iter().position(|c| *c == "memory.edges") else { continue };
+                source_counts[slot] += 1;
+                let kind = record.get("edge_type").and_then(|v| v.as_str()).unwrap_or("");
+                if edge_types.is_some_and(|types| !types.iter().any(|t| t == kind)) {
+                    continue;
+                }
+                written[slot] += 1;
+                record
+            }
+            _ => {
+                info.other += 1;
+                record
+            }
+        };
+        let out = format!("{}\n", kept);
+        writer.write_all(out.as_bytes()).await.map_err(|e| format!("write failed: {}", e))?;
+        bytes += out.len() as u64;
+    }
+    writer.flush().await.map_err(|e| format!("flush failed: {}", e))?;
+    let stats = selected
+        .iter()
+        .enumerate()
+        .map(|(i, coll)| DumpCollectionStat { collection: coll, written: written[i], server_count: None, source_count: Some(source_counts[i]) })
+        .collect();
+    Ok((stats, bytes, info, effective_payload))
+}
+
+/// The dump's reply: the path, one line per collection, the edge filter,
+/// the mode, what a file source carried through, the note when `edges` was
+/// left out, the total.
+fn dump_reply(
+    path: &std::path::Path,
+    stats: &[DumpCollectionStat],
+    edge_types: Option<&[String]>,
+    mode: Option<&str>,
+    other: usize,
+    edges_left_out: bool,
+    size: (u64, f64),
+) -> String {
+    let (bytes, seconds) = size;
+    let mut out = format!("knowledge_dump → {}\n", path.display());
+    for s in stats {
+        let parity = match (s.source_count, s.server_count) {
+            (Some(n), _) => format!("source count {}", n),
+            (None, Some(n)) if n == s.written as u64 => format!("server count {}", n),
+            (None, Some(n)) => format!("server count {} — mismatch, likely concurrent writes", n),
+            (None, None) => "server count unavailable".to_string(),
+        };
+        out.push_str(&format!("  {}: {} written ({})\n", s.collection, s.written, parity));
+    }
+    if let Some(types) = edge_types {
+        out.push_str(&format!("  edge filter: {}\n", types.join(", ")));
+    }
+    if let Some(mode) = mode {
+        out.push_str(&format!("  mode: {mode}\n"));
+    }
+    if other > 0 {
+        out.push_str(&format!("  other records carried through: {other}\n"));
+    }
+    if edges_left_out {
+        out.push_str("  note: edges not included (collections omits 'edges')\n");
+    }
+    let total: usize = stats.iter().map(|s| s.written).sum::<usize>() + other;
+    out.push_str(&format!("  total: {} records (+1 meta line), {} bytes, {:.2}s", total, bytes, seconds));
+    out
+}
+
+/// `run_knowledge_dump` with the workspace root and the dump directory as
+/// parameters, so a test runs it under temporary ones. With `source_file`
+/// the records come from that file instead of the live graph.
+pub(crate) async fn run_knowledge_dump_at(
+    db: &WardsonDbClient,
+    collections: Option<Vec<String>>,
+    edge_types: Option<Vec<String>>,
+    include_payload: bool,
+    source_file: Option<String>,
+    root: &str,
+    dumps_dir: &str,
 ) -> Result<String, String> {
     let started = std::time::Instant::now();
 
-    let selected = resolve_dump_collections(collections.as_deref())?;
-    if let Some(types) = edge_types.as_deref() {
-        validate_dump_edge_types(types)?;
-        if !selected.contains(&"memory.edges") {
-            return Err(
-                "edge_types was provided but 'edges' is not among the dumped collections".into(),
-            );
-        }
-    }
+    let selected = validate_dump_args(collections.as_deref(), edge_types.as_deref())?;
+    let edges_left_out = collections.is_some() && !selected.contains(&"memory.edges");
+    let source = match source_file.as_deref().map(str::trim).filter(|f| !f.is_empty()) {
+        Some(file) => Some(resolve_dump_file(root, file).await?),
+        None => None,
+    };
 
-    tokio::fs::create_dir_all(KG_DUMPS_DIR)
+    tokio::fs::create_dir_all(dumps_dir)
         .await
-        .map_err(|e| format!("Failed to create {}: {}", KG_DUMPS_DIR, e))?;
-    let path = format!(
-        "{}/kg-dump-{}.jsonl",
-        KG_DUMPS_DIR,
-        chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
-    );
-    let file = tokio::fs::File::create(&path)
-        .await
-        .map_err(|e| format!("Failed to create {}: {}", path, e))?;
+        .map_err(|e| format!("Failed to create {}: {}", dumps_dir, e))?;
+    let stem = format!("kg-dump-{}", chrono::Utc::now().format("%Y%m%dT%H%M%SZ"));
+    let (file, path) = removal::open_new_jsonl(dumps_dir, &stem).await?;
     let mut writer = tokio::io::BufWriter::new(file);
 
-    match write_dump_contents(
-        db,
-        &mut writer,
-        &selected,
-        edge_types.as_deref(),
-        include_payload,
-    )
-    .await
-    {
-        Ok((stats, bytes)) => {
-            let mut out = format!("knowledge_dump → {}\n", path);
-            for s in &stats {
-                let parity = match s.server_count {
-                    Some(n) if n == s.written as u64 => format!("server count {}", n),
-                    Some(n) => format!("server count {} — mismatch, likely concurrent writes", n),
-                    None => "server count unavailable".to_string(),
+    let result = match &source {
+        Some(source) => write_reshaped_contents(source, &mut writer, &selected, edge_types.as_deref(), include_payload)
+            .await
+            .map(|(stats, bytes, info, effective_payload)| {
+                let mode = if !effective_payload && include_payload {
+                    Some("slim (the source has no node payloads)")
+                } else if !include_payload {
+                    Some("slim (node payloads omitted)")
+                } else {
+                    None
                 };
-                out.push_str(&format!(
-                    "  {}: {} written ({})\n",
-                    s.collection, s.written, parity
-                ));
-            }
-            if let Some(types) = edge_types.as_deref() {
-                out.push_str(&format!("  edge filter: {}\n", types.join(", ")));
-            }
-            if !include_payload {
-                out.push_str("  mode: slim (node payloads omitted)\n");
-            }
-            let total: usize = stats.iter().map(|s| s.written).sum();
-            out.push_str(&format!(
-                "  total: {} records (+1 meta line), {} bytes, {:.2}s",
-                total,
-                bytes,
-                started.elapsed().as_secs_f64()
-            ));
-            Ok(out)
-        }
+                (stats, bytes, mode.map(str::to_string), info.other)
+            }),
+        None => write_dump_contents(db, &mut writer, &selected, edge_types.as_deref(), include_payload)
+            .await
+            .map(|(stats, bytes)| {
+                let mode = (!include_payload).then(|| "slim (node payloads omitted)".to_string());
+                (stats, bytes, mode, 0)
+            }),
+    };
+    match result {
+        Ok((stats, bytes, mode, other)) => Ok(dump_reply(
+            &path,
+            &stats,
+            edge_types.as_deref(),
+            mode.as_deref(),
+            other,
+            edges_left_out,
+            (bytes, started.elapsed().as_secs_f64()),
+        )),
         Err(e) => {
             drop(writer);
             let _ = tokio::fs::remove_file(&path).await;
@@ -3359,7 +3714,7 @@ impl KnowledgeSweepOrphansArgs {
 #[embra_tool(
     name = "knowledge_dump",
     is_side_effectful = true,
-    description = "Export the knowledge graph as a JSONL dump file under /embra/workspace/KG_DUMPS (first line: meta header; then node lines from memory.entries/semantic/procedural/identity.graph and edge lines from memory.edges). collections optionally restricts to: entries, semantic, procedural, identity, edges (default all five). edge_types optionally filters the edge pass by type. include_payload=false omits node payloads — slim dumps for structural scanning, sized for guardian_call's 2 MiB data_file bridge. Returns the file path plus per-collection written-vs-counted parity, byte total, and elapsed time."
+    description = "Export the knowledge graph as a JSONL dump file under /embra/workspace/KG_DUMPS (first line: meta header; then node lines from memory.entries/semantic/procedural/identity.graph and edge lines from memory.edges). collections optionally restricts to: entries, semantic, procedural, identity, edges (default all five); a dump taken before a change is a backup only when edges is among them, and the reply says when it is not. edge_types optionally filters the edge pass by type. include_payload=false omits node payloads — slim dumps for structural scanning, sized for guardian_call's 2 MiB data_file bridge. source_file reshapes an existing dump or removal file instead of the live graph: the same filters apply to its records, a slim source stays slim, and the new file's meta names the source. Returns the file path plus per-collection written-vs-counted parity (source counts for a file), byte total, and elapsed time."
 )]
 pub struct KnowledgeDumpArgs {
     /// Short collection names: entries | semantic | procedural | identity |
@@ -3375,6 +3730,11 @@ pub struct KnowledgeDumpArgs {
     /// When false, node lines omit the `data` payload (slim structural dump).
     #[serde(default = "default_include_payload")]
     pub include_payload: bool,
+    /// Read the records from this dump or removal file (a name under
+    /// KG_DUMPS, or a path inside the workspace) instead of the live graph;
+    /// the filters apply to it.
+    #[serde(default)]
+    pub source_file: Option<String>,
 }
 
 fn default_include_payload() -> bool {
@@ -3383,7 +3743,7 @@ fn default_include_payload() -> bool {
 
 impl KnowledgeDumpArgs {
     pub async fn run(self, ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        run_knowledge_dump(ctx.db, self.collections, self.edge_types, self.include_payload)
+        run_knowledge_dump(ctx.db, self.collections, self.edge_types, self.include_payload, self.source_file)
             .await
             .map_err(DispatchError::Handler)
     }
@@ -3558,6 +3918,7 @@ mod native_args_tests {
         assert!(a.collections.is_none());
         assert!(a.edge_types.is_none());
         assert!(a.include_payload);
+        assert!(a.source_file.is_none());
     }
 
     #[test]
