@@ -133,7 +133,7 @@ fn procedural_doc(source: &SourceEntry, entry_id: &str, procedure: &Procedure, n
 }
 
 /// The pointer an entry carries once it is promoted.
-fn pointer_patch(collection: &str, id: &str) -> serde_json::Value {
+pub(crate) fn pointer_patch(collection: &str, id: &str) -> serde_json::Value {
     json!({ "promoted_to": { "collection": collection, "id": id } })
 }
 
@@ -362,7 +362,132 @@ pub(crate) async fn node_of_entry(
     live_node(db, entry_id, &entry).await
 }
 
-async fn insert_derived_from_edge(
+/// Where an entry stands, for the node that names it as its source.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum EntryState {
+    /// The entry exists and has no live node: a null pointer, or a pointer
+    /// at a node that answers 404 (stale, the rule of `unpromoted_source`).
+    Unpromoted,
+    /// The entry exists and points at a live node.
+    PointsAt { collection: String, id: String },
+    /// No entry with that id.
+    Missing,
+}
+
+/// The state of an entry. A 404 of the entry is `Missing`; a 404 of the node
+/// its pointer names is `Unpromoted`; any other failure of either read is
+/// returned, since it says nothing about the entry.
+pub(crate) async fn entry_state(db: &WardsonDbClient, entry_id: &str) -> Result<EntryState> {
+    let doc = match db.read("memory.entries", entry_id).await {
+        Ok(doc) => doc,
+        Err(e) if is_not_found(&e) => return Ok(EntryState::Missing),
+        Err(e) => return Err(anyhow!("Entry {} could not be read: {}", entry_id, e)),
+    };
+    Ok(match live_node(db, entry_id, &doc).await? {
+        Some((collection, id, _)) => EntryState::PointsAt { collection, id },
+        None => EntryState::Unpromoted,
+    })
+}
+
+/// What a node still lacks of its promotion: the vector, the `derived_from`
+/// edge. Read by `unfinished`, written by `finish_promotion`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct Unfinished {
+    pub vector: bool,
+    pub edge: bool,
+}
+
+impl Unfinished {
+    /// `", vector, derived_from"`: what the writes add after the pointer,
+    /// for a reply line.
+    pub(crate) fn listed(&self) -> String {
+        let mut out = String::new();
+        if self.vector {
+            out.push_str(", vector");
+        }
+        if self.edge {
+            out.push_str(", derived_from");
+        }
+        out
+    }
+}
+
+/// What `finish_promotion` would write for a node that exists: the vector
+/// when the node carries no `embedding`, the `derived_from` edge when none
+/// joins it to its entry. A read of the edges that fails is an error, never
+/// an absence: a second edge would be written on it.
+pub(crate) async fn unfinished(
+    db: &WardsonDbClient,
+    collection: &str,
+    node_id: &str,
+    entry_id: &str,
+    node: &serde_json::Value,
+) -> Result<Unfinished> {
+    let vector = node.get("embedding").and_then(|v| v.as_str()).is_none_or(|s| s.is_empty());
+    let body = json!({
+        "filter": {
+            "source_id": node_id,
+            "target_id": entry_id,
+            "edge_type": EdgeType::DerivedFrom.as_str(),
+        },
+        "limit": 1,
+    });
+    let found = db
+        .query("memory.edges", &body)
+        .await
+        .map_err(|e| anyhow!("the derived_from edge of {}:{} could not be checked: {}", collection, node_id, e))?;
+    Ok(Unfinished { vector, edge: found.is_empty() })
+}
+
+/// The tail of a promotion for a node that exists and whose entry points at
+/// it: the vector and the `derived_from` edge, each when `missing` says so.
+/// Both are best-effort, as in `write_node_to_the_end`; the edge's
+/// `created_at` is the node's.
+pub(crate) async fn finish_promotion(
+    db: &WardsonDbClient,
+    config: &SystemConfig,
+    collection: &str,
+    node_id: &str,
+    entry_id: &str,
+    node: &serde_json::Value,
+    missing: Unfinished,
+) {
+    if missing.vector {
+        crate::embedding::write::embed_node(db, config, collection, node_id, node, false).await;
+    }
+    if missing.edge {
+        let created_at = node
+            .get("created_at")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| Utc::now().to_rfc3339());
+        insert_derived_from_edge(
+            db,
+            node_id,
+            collection,
+            entry_id,
+            "memory.entries",
+            derived_from_metadata(collection, node),
+            &created_at,
+        )
+        .await;
+    }
+}
+
+/// The metadata of a node's `derived_from` edge, from its collection: the
+/// promotion type, and a semantic node's category.
+pub(crate) fn derived_from_metadata(collection: &str, node: &serde_json::Value) -> serde_json::Value {
+    if collection == "memory.semantic" {
+        json!({
+            "promotion_type": "semantic",
+            "category": node.get("category").cloned().unwrap_or(serde_json::Value::Null),
+        })
+    } else {
+        json!({ "promotion_type": "procedural" })
+    }
+}
+
+pub(crate) async fn insert_derived_from_edge(
     db: &WardsonDbClient,
     source_id: &str,
     source_collection: &str,
@@ -650,5 +775,97 @@ mod tests {
             .expect_err("refused")
             .to_string();
         assert_eq!(why, "Entry nope not found in memory.entries");
+    }
+
+    #[tokio::test]
+    async fn entry_state_tells_missing_unpromoted_and_pointing_apart() {
+        let server = MockServer::start().await;
+        let entry = |pointer: serde_json::Value| data(json!({"_id": "e", "content": "c", "tags": [], "session": "s", "promoted_to": pointer}));
+        Mock::given(method("GET")).and(path("/memory.entries/docs/unpromoted")).respond_with(entry(serde_json::Value::Null)).mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/memory.entries/docs/stale"))
+            .respond_with(entry(json!({"collection": "memory.semantic", "id": "gone"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/memory.entries/docs/live"))
+            .respond_with(entry(json!({"collection": "memory.semantic", "id": "n1"})))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET")).and(path("/memory.semantic/docs/n1")).respond_with(data(json!({"_id": "n1"}))).mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/memory.entries/docs/unreadable"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("timeout"))
+            .mount(&server)
+            .await;
+        let db = WardsonDbClient::from_url(&server.uri());
+
+        assert_eq!(entry_state(&db, "missing").await.unwrap(), EntryState::Missing);
+        assert_eq!(entry_state(&db, "unpromoted").await.unwrap(), EntryState::Unpromoted);
+        assert_eq!(entry_state(&db, "stale").await.unwrap(), EntryState::Unpromoted, "a pointer at a node that is gone");
+        assert_eq!(
+            entry_state(&db, "live").await.unwrap(),
+            EntryState::PointsAt { collection: "memory.semantic".into(), id: "n1".into() }
+        );
+        let why = entry_state(&db, "unreadable").await.expect_err("a failed read is no state").to_string();
+        assert!(why.starts_with("Entry unreadable could not be read"), "{why}");
+    }
+
+    /// The sweep's heal and adopt write what a node still lacks and nothing
+    /// twice: a node with a vector is not embedded again, an existing
+    /// `derived_from` edge is not duplicated, and an edge read that fails
+    /// is an error rather than an absence.
+    #[tokio::test]
+    async fn finish_promotion_writes_only_what_is_missing() {
+        let server = MockServer::start().await;
+        let edge_query = |req: &wiremock::Request| {
+            let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+            body["filter"]["edge_type"] == "derived_from"
+        };
+        Mock::given(method("POST"))
+            .and(path("/memory.edges/query"))
+            .and(move |req: &wiremock::Request| edge_query(req) && {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                body["filter"]["source_id"] == "n2"
+            })
+            .respond_with(data(json!([{"_id": "d2"}])))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/memory.edges/query"))
+            .and(move |req: &wiremock::Request| edge_query(req) && {
+                let body: serde_json::Value = serde_json::from_slice(&req.body).unwrap_or_default();
+                body["filter"]["source_id"] == "n3"
+            })
+            .respond_with(ResponseTemplate::new(500).set_body_string("timeout"))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("POST")).and(path("/memory.edges/query")).respond_with(data(json!([]))).mount(&server).await;
+        Mock::given(method("POST")).and(path("/memory.edges/docs")).respond_with(data(json!({"_id": "edge1"}))).mount(&server).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let bare = json!({"_id": "n1", "content": "one", "category": "fact", "created_at": "2026-05-01T00:00:00Z"});
+        let done = json!({"_id": "n2", "content": "two", "category": "fact", "embedding": "AAAA", "embedding_model": "m"});
+
+        assert_eq!(unfinished(&db, "memory.semantic", "n1", "e1", &bare).await.unwrap(), Unfinished { vector: true, edge: true });
+        assert_eq!(unfinished(&db, "memory.semantic", "n2", "e2", &done).await.unwrap(), Unfinished { vector: false, edge: false });
+        let why = unfinished(&db, "memory.semantic", "n3", "e3", &bare).await.expect_err("unread edges are no absence").to_string();
+        assert!(why.starts_with("the derived_from edge of memory.semantic:n3 could not be checked"), "{why}");
+        assert_eq!(Unfinished { vector: true, edge: true }.listed(), ", vector, derived_from");
+        assert_eq!(Unfinished::default().listed(), "");
+
+        finish_promotion(&db, &test_config(), "memory.semantic", "n1", "e1", &bare, Unfinished { vector: true, edge: true }).await;
+        finish_promotion(&db, &test_config(), "memory.semantic", "n2", "e2", &done, Unfinished::default()).await;
+        let writes = writes_seen(&server).await;
+        let docs: Vec<&(String, serde_json::Value)> = writes.iter().filter(|w| w.0 == "POST /memory.edges/docs").collect();
+        assert_eq!(docs.len(), 1, "one edge, for the node that lacked it: {writes:?}");
+        let edge = &docs[0].1;
+        assert_eq!(
+            (edge["source_id"].as_str(), edge["target_id"].as_str(), edge["edge_type"].as_str(), edge["created_at"].as_str()),
+            (Some("n1"), Some("e1"), Some("derived_from"), Some("2026-05-01T00:00:00Z"))
+        );
+        assert_eq!(edge["metadata"], json!({"promotion_type": "semantic", "category": "fact"}));
+        assert_eq!(derived_from_metadata("memory.procedural", &bare), json!({"promotion_type": "procedural"}));
     }
 }

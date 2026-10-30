@@ -461,6 +461,27 @@ fn entry_doc(text: &str, tags: &[String], session: &str, created_at: &str) -> se
     })
 }
 
+/// The entry `knowledge_sweep_orphans` writes back for a promotion node
+/// whose entry is gone (adopt): `entry_doc`'s five fields with the pointer
+/// set at the node, under the id the node names as its source when
+/// `entry_id` is given, so the node's provenance and its `derived_from`
+/// edge resolve again.
+pub(crate) fn adopted_entry_doc(
+    entry_id: Option<&str>,
+    text: &str,
+    tags: &[String],
+    session: &str,
+    created_at: &str,
+    node: (&str, &str),
+) -> serde_json::Value {
+    let mut doc = entry_doc(text, tags, session, created_at);
+    doc["promoted_to"] = serde_json::json!({ "collection": node.0, "id": node.1 });
+    if let Some(id) = entry_id {
+        doc["_id"] = serde_json::Value::String(id.to_string());
+    }
+    doc
+}
+
 /// The node `remember` gives a memory.
 #[derive(Debug)]
 enum Promotion {
@@ -686,6 +707,23 @@ mod remember_tests {
             })
         );
         assert!(doc.as_object().unwrap().contains_key("promoted_to"), "null, not absent");
+    }
+
+    /// The sweep's adopted entry is an entry: the same five fields, the
+    /// pointer set, and the node's old entry id when it is free.
+    #[test]
+    fn the_adopted_entry_is_an_entry_with_its_pointer_set() {
+        let doc = adopted_entry_doc(Some("e7"), "the text", &["t".to_string()], "ops", "2026-05-01T00:00:00Z", ("memory.semantic", "n7"));
+        assert_eq!(
+            doc,
+            json!({
+                "_id": "e7", "content": "the text", "tags": ["t"], "session": "ops",
+                "promoted_to": {"collection": "memory.semantic", "id": "n7"}, "created_at": "2026-05-01T00:00:00Z",
+            })
+        );
+        let fresh = adopted_entry_doc(None, "the text", &[], "ops", "2026-05-01T00:00:00Z", ("memory.semantic", "n7"));
+        assert!(fresh.get("_id").is_none(), "no id: the server mints one");
+        assert_eq!(fresh.as_object().unwrap().len(), 5);
     }
 
     #[test]
