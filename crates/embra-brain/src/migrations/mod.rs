@@ -439,14 +439,18 @@ fn hot_path_index_specs() -> Vec<(&'static str, serde_json::Value)> {
 /// Re-asserting per boot self-heals across server upgrades; on pre-F2
 /// builds the missing index is harmless (that planner still serves the
 /// lookup from a `source_id`-leading compound).
-/// The collections the plan and task tools write: `plans` and `tasks`.
-pub(crate) const TOOL_COLLECTIONS: [&str; 2] = ["plans", "tasks"];
+/// The collections the plan, task and cron tools write: `plans`, `tasks`
+/// and `crons`.
+pub(crate) const TOOL_COLLECTIONS: [&str; 3] = ["plans", "tasks", "crons"];
 
-/// Create the plan and task collections when they are missing, on every
-/// boot and unversioned like the index assertions: the v1 baseline created
-/// them once per instance, and every `plan`, `tasks` and `task_add` call
-/// probed for them again (#37). A collection that cannot be ensured is
-/// logged; the tool's own write then says what is wrong.
+/// Create the tool collections when they are missing, on every boot and
+/// unversioned like the index assertions: the v1 baseline created `plans`
+/// and `tasks` once per instance, and every `plan`, `tasks` and `task_add`
+/// call probed for them again (#37). `crons` was in no baseline: the cron
+/// tools created it on first use, and the cron tick, which only reads it,
+/// warned at every tick on an instance where no cron tool had ever run
+/// (found on the rebuild of 2026-10-30). A collection that cannot be
+/// ensured is logged; the tool's own write then says what is wrong.
 async fn ensure_tool_collections(db: &WardsonDbClient) {
     for name in TOOL_COLLECTIONS {
         if let Err(e) = ensure_collection(db, name).await {
@@ -839,13 +843,15 @@ mod tool_collection_tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    /// #37: `plans` and `tasks` exist after every boot, so the tools need
-    /// no probe of their own; one that exists is left alone.
+    /// #37: `plans`, `tasks` and `crons` exist after every boot, so the
+    /// tools and the cron tick need no probe of their own; one that exists
+    /// is left alone.
     #[tokio::test]
-    async fn plans_and_tasks_are_ensured_every_boot() {
+    async fn the_tool_collections_are_ensured_every_boot() {
         let server = MockServer::start().await;
         Mock::given(method("GET")).and(path("/plans")).respond_with(ResponseTemplate::new(404)).mount(&server).await;
         Mock::given(method("GET")).and(path("/tasks")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+        Mock::given(method("GET")).and(path("/crons")).respond_with(ResponseTemplate::new(404)).mount(&server).await;
         Mock::given(method("POST"))
             .and(path("/_collections"))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"ok": true, "data": {}, "meta": {}})))
@@ -862,8 +868,8 @@ mod tool_collection_tests {
             .filter_map(|r| serde_json::from_slice::<serde_json::Value>(&r.body).ok())
             .filter_map(|body| body["name"].as_str().map(str::to_string))
             .collect();
-        assert_eq!(created, ["plans"], "the missing one is created, the present one left alone");
-        assert_eq!(TOOL_COLLECTIONS, ["plans", "tasks"]);
+        assert_eq!(created, ["plans", "crons"], "the missing ones are created, the present one left alone");
+        assert_eq!(TOOL_COLLECTIONS, ["plans", "tasks", "crons"]);
     }
 }
 

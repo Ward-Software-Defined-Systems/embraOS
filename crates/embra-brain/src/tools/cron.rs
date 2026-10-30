@@ -285,7 +285,6 @@ pub async fn cron_add(db: &WardsonDbClient, param: &str, config_tz: &str, act: b
         Err(why) => return format!("Cron job not created: {why}"),
     };
 
-    super::ensure_collection(db, "crons").await;
 
     let doc = cron_job_doc(schedule_str, interval_secs, command, &command_name, command_args, &next_run, act);
 
@@ -382,7 +381,6 @@ pub(crate) fn render_cron_list(
 /// List all cron jobs; with `runs` above zero, each job's last `runs`
 /// recorded runs under it.
 pub async fn cron_list(db: &WardsonDbClient, runs: usize, config_tz: &str) -> String {
-    super::ensure_collection(db, "crons").await;
 
     let crons = match db.fetch_collection("crons").await {
         Ok(c) => c,
@@ -476,7 +474,6 @@ pub async fn cron_remove(db: &WardsonDbClient, param: &str) -> String {
     }
 
     let wanted = param.trim();
-    super::ensure_collection(db, "crons").await;
     let crons = match db.fetch_collection("crons").await {
         Ok(docs) => docs,
         Err(e) => return format!("Failed to read cron jobs: {}", e),
