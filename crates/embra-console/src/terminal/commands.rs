@@ -90,7 +90,7 @@ Identity:
 System:
   /help                          Show this help message
   /status                        System status
-  /feedback-loop                 Trigger Phase 3 Continuity Engine self-evaluation (experimental)
+  /feedback-loop                 Trigger Phase 2 Continuity Engine self-evaluation (experimental)
 
 Keyboard:
   Enter              Send message (or newline in /ml mode)
