@@ -46,7 +46,7 @@ Phase 2–5 add a full TUI rewrite and an image factory for bare metal with A/B 
 > no direct endpoint; with the gateway off, such a preset says so.
 > **[Routing the providers through the gateway →](docs/OPERATIONS/LOCAL-AI-GATEWAY.md)**
 
-> **Local inference — model selection matters.** All 118 tools dispatch identically on
+> **Local inference — model selection matters.** All 119 tools dispatch identically on
 > every backend, but a locally-served model has to handle a large tool schema without
 > truncating or hallucinating calls, and plenty of otherwise-capable ones cannot. For
 > MoE models the number that matters is *active* parameters, not total: below ~27–49B
@@ -157,7 +157,7 @@ A minimal setup: name the intelligence, choose your LLM provider (Anthropic Clau
 A six-phase guided setup (`UserConfiguration → IdentityFormation → SoulDefinition → InitialToolset → Confirmation → Complete`, `crates/embra-brain/src/learning/mod.rs:12–19`) walks through user profile, identity, values, and toolset — or, after the user-profile phase, offers importing a pre-built intelligence graph from `Imported_Intelligence/`. On approval the identity and values become a canonical IDENTITY+SOUL graph, serialized with `serde_json::to_string_pretty`, hashed with SHA-256, and the hash is written to `/embra/state/soul.sha256`. Subsequent boots verify the hash via `embra-trustd` and HALT on mismatch.
 
 ### 3. Persistent Terminal
-You're dropped into a conversational session — no shell, no command line. All interaction goes through the brain's 118-tool surface (workspace path-restricted, RFC 1918-restricted for SSH). By default the session is delivered through the **embra-web** console (xterm.js over a PTY→WebSocket bridge); `EMBRA_TUI=1` delivers it on the serial terminal instead.
+You're dropped into a conversational session — no shell, no command line. All interaction goes through the brain's 119-tool surface (workspace path-restricted, RFC 1918-restricted for SSH). By default the session is delivered through the **embra-web** console (xterm.js over a PTY→WebSocket bridge); `EMBRA_TUI=1` delivers it on the serial terminal instead.
 
 Sessions are named, stored in WardSONDB, and survive disconnection. Reconnect and the full history is restored with an auto-generated briefing on what changed while you were away.
 
@@ -174,7 +174,7 @@ embraOS is built on a 7-layer continuity architecture (descended from the OpenCl
 | **Invariant Kernel** | Sealed IDENTITY+SOUL graph — operator-defined values, constraints, purpose as nodes + relations (legacy instances: flat document). SHA-256 verified at every boot. | `soul.invariant` in WardSONDB; hash at `/embra/state/soul.sha256` |
 | **World-State Model** | Active session, current provider, in-flight tool calls, profile context. | `crates/embra-brain/src/brain/`, sessions in WardSONDB |
 | **Continuity Engine** | Health checks, restart policies with exponential backoff, soul verification gate. | `crates/embrad/src/{supervisor,reconcile}.rs` (5-second health checks) |
-| **Influence & Propagation** | Tool dispatch, LLM provider routing, Guardian dynamic-tool gateway. | `crates/embra-brain/src/{tools,provider,guardian}/`; 118 tools, 4 providers |
+| **Influence & Propagation** | Tool dispatch, LLM provider routing, Guardian dynamic-tool gateway. | `crates/embra-brain/src/{tools,provider,guardian}/`; 119 tools, 4 providers |
 | **Action Layer** | Tool calls that touch the world — filesystem, git, HTTP, SSH, cron. | `crates/embra-brain/src/tools/registry.rs` |
 | **Governance & Guardrails** | Soul injection into the system prompt, workspace path restriction, RFC 1918 SSH constraint, Guardian capability broker. | `crates/embra-brain/src/brain/prompts.rs`; tool-layer enforcement |
 | **Memory & Knowledge** | Session history + cross-session knowledge graph (entries / semantic / procedural / typed edges) with auto-enrichment on every turn (score ≥ 0.3 and a relevance floor). | `crates/embra-brain/src/knowledge/` |
@@ -186,13 +186,13 @@ The runtime services that implement those layers:
 | `wardsondb` | 8090 | Rust JSON document database. Holds soul, memory, knowledge graph, sessions, schedules, and Guardian tool definitions. |
 | `embra-trustd` | 50001 | Soul SHA-256 verification + PKI (Root CA 10y, service certs 1y). |
 | `embra-apid` | 50000 / 8443 | gRPC + REST gateway, proxies brain RPCs. |
-| `embra-brain` | 50002 | LLM runtime — provider abstraction, 118 tools, session manager, knowledge graph, Learning Mode. |
+| `embra-brain` | 50002 | LLM runtime — provider abstraction, 119 tools, session manager, knowledge graph, Learning Mode. |
 | `embra-web` | 3345 | HTTPS web console (default UI); wraps embra-console in xterm.js over a PTY→WebSocket bridge. |
 | `embra-console` | — | Conversational TUI (serial; PTY-child of embra-web in default mode). |
 | `embrad` | PID 1 | Init, service supervisor, soul verification gate, 5-second reconciliation loop. |
 | `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for dynamic tools (both authoring paths replicant-checked; intelligence proposals also operator-approved); capability-broker host imports. |
 
-Persistence is [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a Rust JSON document database, vendored into this workspace at `crates/wardsondb` as a deliberate in-tree fork (the upstream project continues independently). Soul, memory, knowledge graph, sessions, schedules, and Guardian dynamic-tool definitions are all WardSONDB collections; there are no separate config files. A pluggable LLM provider abstraction routes the Brain through one of four backends — **Anthropic Claude**, **Google Gemini**, **Ollama**, or **LM Studio** — chosen at first boot and switchable at runtime via `/provider`; all 118 tools work identically across every backend.
+Persistence is [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a Rust JSON document database, vendored into this workspace at `crates/wardsondb` as a deliberate in-tree fork (the upstream project continues independently). Soul, memory, knowledge graph, sessions, schedules, and Guardian dynamic-tool definitions are all WardSONDB collections; there are no separate config files. A pluggable LLM provider abstraction routes the Brain through one of four backends — **Anthropic Claude**, **Google Gemini**, **Ollama**, or **LM Studio** — chosen at first boot and switchable at runtime via `/provider`; all 119 tools work identically across every backend.
 
 Provider wire details, per-family reasoning controls, bearer storage, and the prompt-caching model: **[docs/SYSTEM-DESIGN.md](docs/SYSTEM-DESIGN.md)**.
 
@@ -208,7 +208,7 @@ The session model and keyboard shortcuts live in **[docs/OPERATIONS/OPERATION.md
 
 ## Tools
 
-embraOS ships **118 built-in tools** the intelligence invokes during conversation — spanning system status, memory and the cross-session knowledge graph, sessions, scheduling (reminders and cron jobs whose results the intelligence reads back and can act on), the filesystem (including atomic in-place patching, host-side file/tree copying and handing a file to the operator as a download), engineering / project management (git + GitHub + self-hosted GitLab), security / SSH, media (image and text-file input on every surface, Gemini image generation), and the Guardian dynamic-tool gateway. All 118 work identically across all four LLM providers. That includes reading the OS's own service logs (`system_logs`) — the intelligence can diagnose its own retrieval, memory, and service behavior from inside a session.
+embraOS ships **119 built-in tools** the intelligence invokes during conversation — spanning system status, memory and the cross-session knowledge graph, sessions, scheduling (reminders and cron jobs whose results the intelligence reads back and can act on), the filesystem (including atomic in-place patching, host-side file/tree copying and handing a file to the operator as a download), engineering / project management (git + GitHub + self-hosted GitLab), security / SSH, media (image and text-file input on every surface, Gemini image generation), and the Guardian dynamic-tool gateway. All 119 work identically across all four LLM providers. That includes reading the OS's own service logs (`system_logs`) — the intelligence can diagnose its own retrieval, memory, and service behavior from inside a session.
 
 The full per-tool catalog, plus the workspace-restriction, GitHub, and SSH safety notes: **[docs/OPERATIONS/TOOL-REFERENCE.md](docs/OPERATIONS/TOOL-REFERENCE.md)**.
 
@@ -225,7 +225,7 @@ The full embraOS manual lives in [docs/](docs/).
 | **[Change Log](docs/CHANGE-LOG.md)** | Merge log, anchored on tagged releases |
 | **[Operation](docs/OPERATIONS/OPERATION.md)** | Run lifecycle, the session model, keyboard shortcuts, current limitations |
 | **[Command Reference](docs/OPERATIONS/COMMAND-REFERENCE.md)** | Every slash command |
-| **[Tool Reference](docs/OPERATIONS/TOOL-REFERENCE.md)** | All 118 built-in tools by category, plus workspace / GitHub / SSH safety notes |
+| **[Tool Reference](docs/OPERATIONS/TOOL-REFERENCE.md)** | All 119 built-in tools by category, plus workspace / GitHub / SSH safety notes |
 | **[System Design](docs/SYSTEM-DESIGN.md)** | The 7-layer continuity architecture, the boot chain and disk layout, network exposure and trust boundaries, the four LLM providers, reasoning controls, prompt caching |
 | **[Knowledge Graph](docs/MULTI-GRAPH/KNOWLEDGE-GRAPH.md)** | The cross-session memory graph — promotion at creation, link candidates, auto-derived edges, auto-enrichment, retrieval ranking, in-OS embeddings, the twelve `knowledge_*` tools |
 | **[Identity Graph](docs/MULTI-GRAPH/IDENTITY-GRAPH.md)** | The sealed IDENTITY+SOUL graph — format, the Learning-Mode import, KG projection, prompt rendering, and the re-seal migration ceremony |
