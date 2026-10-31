@@ -244,10 +244,11 @@
   // What the picker, a drop or a paste may upload: an image, a text file
   // by type or by extension, or a file the browser cannot type (the brain
   // then decides). Anything else is said so and skipped.
-  const TEXT_EXT = /\.(md|markdown|txt|csv|json|ya?ml|toml)$/i;
+  const TEXT_EXT = [".md", ".markdown", ".txt", ".csv", ".json", ".jsonl", ".yaml", ".yml", ".toml"];
   function embraAcceptsFile(f) {
+    const name = f.name.toLowerCase();
     return f.type.startsWith("image/") || f.type.startsWith("text/") ||
-      f.type === "application/json" || f.type === "" || TEXT_EXT.test(f.name);
+      f.type === "application/json" || f.type === "" || TEXT_EXT.some((e) => name.endsWith(e));
   }
 
   // Upload one or more files and inject `/attach <id|path>` per success:

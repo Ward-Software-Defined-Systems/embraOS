@@ -348,6 +348,39 @@ mod tests {
         const { assert!(MEDIA_BODY_LIMIT > MEDIA_UPLOAD_MAX) };
         const { assert!(MEDIA_BODY_LIMIT < embra_common::GRPC_MAX_MESSAGE_BYTES) };
     }
+
+    /// The attach list lives in three places of the UI: the picker's
+    /// `accept` (`app::ACCEPT`), the composer's check (`chat.rs`
+    /// `TEXT_EXTENSIONS`) and the terminal's drop handler (`embra-term.js`
+    /// `TEXT_EXT`). A browser leaves these extensions untyped, so a name
+    /// missing from one copy is refused on that surface and taken on the
+    /// others. The three name the same extensions, in the same order.
+    #[test]
+    fn the_three_copies_of_the_attach_list_name_the_same_extensions() {
+        let ui = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../embra-web-ui");
+        let read = |rel: &str| {
+            std::fs::read_to_string(ui.join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
+        };
+        fn line_with<'a>(src: &'a str, needle: &str) -> &'a str {
+            src.lines()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("no line holds {needle}"))
+        }
+        fn quoted(line: &str) -> Vec<String> {
+            line.split('"').skip(1).step_by(2).map(str::to_string).collect()
+        }
+        let accept = quoted(line_with(&read("src/app.rs"), "pub const ACCEPT: &str"));
+        let picker: Vec<String> = accept[0]
+            .split(',')
+            .filter(|s| s.starts_with('.'))
+            .map(str::to_string)
+            .collect();
+        let composer = quoted(line_with(&read("src/chat.rs"), "const TEXT_EXTENSIONS: &[&str]"));
+        let terminal = quoted(line_with(&read("assets/embra-term.js"), "const TEXT_EXT = ["));
+        assert_eq!(picker, composer, "the picker and the composer");
+        assert_eq!(composer, terminal, "the composer and the terminal");
+        assert!(composer.iter().any(|e| e == ".jsonl"), "a knowledge dump part attaches");
+    }
 }
 
 #[cfg(test)]

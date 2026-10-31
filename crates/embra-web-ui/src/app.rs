@@ -135,7 +135,7 @@ const fn sel(label: &'static str, choices: &'static [&'static str], req: bool) -
 /// What the pickers offer: images, text by type, and the text extensions
 /// browsers leave untyped (`.md` comes with an empty type). Mirrored by
 /// `embra-term.js` for drops and pastes and by the chat composer.
-pub const ACCEPT: &str = "image/*,text/*,application/json,.md,.markdown,.txt,.csv,.json,.yaml,.yml,.toml";
+pub const ACCEPT: &str = "image/*,text/*,application/json,.md,.markdown,.txt,.csv,.json,.jsonl,.yaml,.yml,.toml";
 
 const SPECS: &[Spec] = &[
     Spec { cmd: "/new", title: "New session", note: "Creates and switches to it.",

@@ -224,7 +224,7 @@ enum Uploaded {
 
 /// The text extensions browsers leave untyped; with the types in
 /// `app::ACCEPT`, what the picker, a drop or a paste may upload.
-const TEXT_EXTENSIONS: &[&str] = &[".md", ".markdown", ".txt", ".csv", ".json", ".yaml", ".yml", ".toml"];
+const TEXT_EXTENSIONS: &[&str] = &[".md", ".markdown", ".txt", ".csv", ".json", ".jsonl", ".yaml", ".yml", ".toml"];
 
 fn accepts_file(file: &web_sys::File) -> bool {
     let t = file.type_();
