@@ -2793,6 +2793,11 @@ pub(crate) async fn knowledge_sweep_orphans_at(
         Ok(scan) => scan,
         Err(e) => {
             let tally = PointerlessTally::of(&cases);
+            tracing::warn!(
+                target: "kg::sweep", dry_run, error = %e, pointerless = cases.len(),
+                healed = tally.healed, adopted = tally.adopted,
+                "knowledge_sweep_orphans: the check could not be completed; no edge was deleted"
+            );
             if e.starts_with(RECORD_FAILED) {
                 return format!(
                     "knowledge_sweep_orphans: {e}; no edge was deleted ({} healed, {} adopted).",
@@ -2823,10 +2828,20 @@ pub(crate) async fn knowledge_sweep_orphans_at(
                 deleted += 1;
             }
         }
-        if let Some(record) = &scan.record {
-            removal::log_removal("knowledge_sweep_orphans", "memory.edges", &scan.summary, record);
-        }
     }
+    // One line per call, in both modes: what was found and what was done,
+    // so a run that found nothing to remove still leaves its trace.
+    let tally = PointerlessTally::of(&cases);
+    let record = scan.record.as_ref().map_or_else(|| "none".to_string(), PartSet::describe);
+    tracing::info!(
+        target: "kg::sweep", dry_run, scanned = scan.scanned, missing_nodes = scan.dangling.len(),
+        orphan_edges = scan.orphan_ids.len(), more = scan.more, deleted,
+        auto = scan.summary.auto_count(), curated = scan.summary.curated_count(),
+        other = scan.summary.other_count(), pointerless = cases.len(), to_heal = tally.to_heal,
+        to_adopt = tally.to_adopt, duplicates = tally.duplicates, healed = tally.healed,
+        adopted = tally.adopted, record = %record,
+        "knowledge_sweep_orphans ran; the record holds every edge removed"
+    );
     sweep_report(&scan, dry_run, deleted, limit, &pointerless, &cases)
 }
 
@@ -4706,6 +4721,84 @@ mod orphan_tests {
         assert!(out.ends_with("\n  record: not written (dry_run)"), "{out}");
         assert!(deletes_seen(&server).await.is_empty());
         assert_eq!(std::fs::read_dir(&dir.0).unwrap().count(), 0, "a dry run writes no record");
+    }
+
+    #[derive(Clone)]
+    struct Sink(&'static std::sync::Mutex<Vec<u8>>);
+    impl std::io::Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+        type Writer = Sink;
+        fn make_writer(&'a self) -> Sink {
+            self.clone()
+        }
+    }
+
+    /// The `kg::sweep` lines of the test process, written by one global
+    /// subscriber installed on first use. A subscriber scoped to one test
+    /// is not enough: tracing computes a callsite's interest on the thread
+    /// that first hits it, and in a parallel suite that is often another
+    /// test's thread with no subscriber, after which the callsite stays
+    /// off for the scoped one. Each line carries its thread id, so a test
+    /// reads back its own.
+    fn sweep_log() -> &'static std::sync::Mutex<Vec<u8>> {
+        static SINK: std::sync::Mutex<Vec<u8>> = std::sync::Mutex::new(Vec::new());
+        static INSTALLED: std::sync::Once = std::sync::Once::new();
+        INSTALLED.call_once(|| {
+            let subscriber = tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::new("kg::sweep=info"))
+                .with_writer(Sink(&SINK))
+                .with_ansi(false)
+                .with_thread_ids(true)
+                .finish();
+            tracing::subscriber::set_global_default(subscriber)
+                .expect("the test process has no other global subscriber");
+        });
+        &SINK
+    }
+
+    /// Runs a sweep and returns its reply with the `kg::sweep` lines this
+    /// thread logged while it ran.
+    async fn logged<F: std::future::Future<Output = String>>(f: F) -> (String, Vec<String>) {
+        let sink = sweep_log();
+        let start = sink.lock().unwrap().len();
+        let out = f.await;
+        let bytes = sink.lock().unwrap()[start..].to_vec();
+        let me = format!("{:?}", std::thread::current().id());
+        let lines = String::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .filter(|l| l.contains(&me))
+            .map(str::to_string)
+            .collect();
+        (out, lines)
+    }
+
+    /// A call that finds nothing to remove still logs: one `kg::sweep`
+    /// line per call, in both modes, with the counts and the record or
+    /// `none`. William's E2E of 2026-10-31 found no line after a dry run
+    /// and an adopting run on a graph without orphan edges.
+    #[tokio::test]
+    async fn the_sweep_logs_one_line_per_call_even_with_nothing_to_remove() {
+        let server = graph_with_pointerless_nodes(&[]).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let dir = TempDir::new("sweep-log");
+        for dry_run in [true, false] {
+            let (out, lines) =
+                logged(knowledge_sweep_orphans_at(&db, &test_config(), dry_run, 10_000, dir.path())).await;
+            assert!(out.contains("\n  orphan_count: 0\n"), "{out}");
+            assert_eq!(lines.len(), 1, "dry_run={dry_run}: {lines:?}");
+            for field in [format!("dry_run={dry_run}"), "orphan_edges=0".into(), "deleted=0".into(), "record=none".into()] {
+                assert!(lines[0].contains(&field), "{field} missing: {}", lines[0]);
+            }
+        }
     }
 
     #[tokio::test]

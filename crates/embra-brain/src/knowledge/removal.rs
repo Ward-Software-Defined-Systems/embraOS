@@ -488,21 +488,21 @@ pub(crate) async fn write_removal_record(
     sink.finish().await
 }
 
-/// One line in the brain log per removing call, under the tool's target.
+/// One line in the brain log per removing call of `knowledge_unlink_node`
+/// and `forget`, under the tool's target. The sweep logs its own line, on
+/// every call, whether or not it removed anything.
 pub(crate) fn log_removal(tool: &str, target: &str, summary: &RemovalSummary, record: &PartSet) {
     let (edges, auto, curated, other, nodes) =
         (summary.total, summary.auto_count(), summary.curated_count(), summary.other_count(), summary.nodes.len());
     let record = record.describe();
-    match tool {
-        "knowledge_sweep_orphans" => tracing::info!(
-            target: "kg::sweep", tool, target, edges, auto, curated, other, nodes, record, "knowledge removed; the record holds every edge"
-        ),
-        "knowledge_unlink_node" => tracing::info!(
+    if tool == "knowledge_unlink_node" {
+        tracing::info!(
             target: "kg::unlink", tool, target, edges, auto, curated, other, nodes, record, "knowledge removed; the record holds every edge"
-        ),
-        _ => tracing::info!(
+        );
+    } else {
+        tracing::info!(
             target: "kg::forget", tool, target, edges, auto, curated, other, nodes, record, "knowledge removed; the record holds every edge"
-        ),
+        );
     }
 }
 
