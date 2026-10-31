@@ -12,7 +12,6 @@
 //! stored embedding is placed in the vector index without inference.
 
 use std::collections::HashSet;
-use std::path::Path;
 
 use serde_json::Value;
 use tokio::io::AsyncBufReadExt;
@@ -23,7 +22,7 @@ use crate::db::WardsonDbClient;
 use crate::embedding::write::{adopt_stored_vector, StoredVector};
 use crate::tools::jail;
 
-use super::tools::{node_ids, resolve_dump_collections, resolve_dump_file, DUMP_COLLECTIONS};
+use super::tools::{node_ids, resolve_dump_collections, resolve_dump_set, DUMP_COLLECTIONS};
 
 /// The fields the server sets on an insert, stripped from a record before
 /// it is written: the intent is explicit, and `_created_at` is not
@@ -83,7 +82,7 @@ impl Report {
         &mut self.tallies.last_mut().expect("just pushed").1
     }
 
-    fn count(&mut self, collection: Option<&'static str>, line: usize, outcome: Outcome) {
+    fn count(&mut self, collection: Option<&'static str>, line: &str, outcome: Outcome) {
         self.records += 1;
         match outcome {
             Outcome::Inserted => self.tally(collection.unwrap_or("?")).inserted += 1,
@@ -94,11 +93,11 @@ impl Report {
             Outcome::NotSelected => self.not_selected += 1,
             Outcome::Malformed(why) => {
                 self.malformed += 1;
-                self.malformed_first.get_or_insert(format!("line {line}: {why}"));
+                self.malformed_first.get_or_insert(format!("{line}: {why}"));
             }
             Outcome::Failed(why) => {
                 self.failed += 1;
-                self.failed_first.get_or_insert(format!("line {line}: {why}"));
+                self.failed_first.get_or_insert(format!("{line}: {why}"));
             }
         }
     }
@@ -163,7 +162,7 @@ struct Pass<'a> {
 }
 
 impl Pass<'_> {
-    async fn node(&self, record: &Value, known: &mut HashSet<String>, report: &mut Report, line: usize) {
+    async fn node(&self, record: &Value, known: &mut HashSet<String>, report: &mut Report, line: &str) {
         let collection = record.get("collection").and_then(|v| v.as_str());
         let id = record.get("_id").and_then(|v| v.as_str());
         let (Some(collection), Some(id)) = (collection, id) else {
@@ -211,7 +210,7 @@ impl Pass<'_> {
         report.count(Some(collection), line, outcome);
     }
 
-    async fn edge(&self, record: &Value, ends: &HashSet<String>, report: &mut Report, line: usize) {
+    async fn edge(&self, record: &Value, ends: &HashSet<String>, report: &mut Report, line: &str) {
         if !self.selected.contains("memory.edges") {
             report.count(None, line, Outcome::NotSelected);
             return;
@@ -240,19 +239,22 @@ impl Pass<'_> {
     }
 }
 
-/// Every line of the file, parsed, with its number; a line that is not JSON
-/// is `Err`.
-async fn records(path: &Path) -> Result<Vec<(usize, Result<Value, String>)>, String> {
-    let file = tokio::fs::File::open(path).await.map_err(|e| format!("{} could not be opened: {e}", path.display()))?;
-    let mut lines = tokio::io::BufReader::new(file).lines();
+/// Every line of the set's files, in order, parsed, with where it is
+/// (`<file>:<line>`); a line that is not JSON is `Err`.
+async fn records(paths: &[std::path::PathBuf]) -> Result<Vec<(String, Result<Value, String>)>, String> {
     let mut out = Vec::new();
-    let mut n = 0usize;
-    while let Some(line) = lines.next_line().await.map_err(|e| format!("{} could not be read: {e}", path.display()))? {
-        n += 1;
-        if line.trim().is_empty() {
-            continue;
+    for path in paths {
+        let file = tokio::fs::File::open(path).await.map_err(|e| format!("{} could not be opened: {e}", path.display()))?;
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("?").to_string();
+        let mut lines = tokio::io::BufReader::new(file).lines();
+        let mut n = 0usize;
+        while let Some(line) = lines.next_line().await.map_err(|e| format!("{} could not be read: {e}", path.display()))? {
+            n += 1;
+            if line.trim().is_empty() {
+                continue;
+            }
+            out.push((format!("{name}:{n}"), serde_json::from_str::<Value>(&line).map_err(|e| e.to_string())));
         }
-        out.push((n, serde_json::from_str::<Value>(&line).map_err(|e| e.to_string())));
     }
     Ok(out)
 }
@@ -275,8 +277,8 @@ pub(crate) async fn run_knowledge_restore(
         .into_iter()
         .filter(|c| *c != IDENTITY_COLLECTION)
         .collect();
-    let path = resolve_dump_file(root, file).await?;
-    let lines = records(&path).await?;
+    let set = resolve_dump_set(root, file).await?;
+    let lines = records(&set.paths).await?;
     // The graph's node ids first, when edges are to be placed: an end check
     // that cannot be made places no edge, and that is known before a node
     // is written.
@@ -293,16 +295,21 @@ pub(crate) async fn run_knowledge_restore(
         let record = match record {
             Ok(r) => r,
             Err(e) => {
-                report.count(None, *line, Outcome::Malformed(format!("not JSON: {e}")));
+                report.count(None, line, Outcome::Malformed(format!("not JSON: {e}")));
                 continue;
             }
         };
         match record.get("type").and_then(|v| v.as_str()) {
-            Some("meta") => report.source = Some(source_line(record)),
-            Some("node") => pass.node(record, &mut known, &mut report, *line).await,
+            // One source line, from the first meta: a set's parts share it.
+            Some("meta") => {
+                if report.source.is_none() {
+                    report.source = Some(source_line(record));
+                }
+            }
+            Some("node") => pass.node(record, &mut known, &mut report, line).await,
             Some("edge") => {}
-            Some(other) => report.count(None, *line, Outcome::Malformed(format!("unknown record type '{other}'"))),
-            None => report.count(None, *line, Outcome::Malformed("a record without a type".into())),
+            Some(other) => report.count(None, line, Outcome::Malformed(format!("unknown record type '{other}'"))),
+            None => report.count(None, line, Outcome::Malformed("a record without a type".into())),
         }
     }
     ends.extend(known);
@@ -311,13 +318,13 @@ pub(crate) async fn run_knowledge_restore(
         if let Ok(record) = record
             && record.get("type").and_then(|v| v.as_str()) == Some("edge")
         {
-            pass.edge(record, &ends, &mut report, *line).await;
+            pass.edge(record, &ends, &mut report, line).await;
         }
     }
     let inserted: usize = report.tallies.iter().map(|(_, t)| t.inserted).sum();
     tracing::info!(
         target: "kg::restore",
-        file = %path.display(),
+        file = %set.describe(),
         inserted,
         present = report.tallies.iter().map(|(_, t)| t.present).sum::<usize>(),
         end_missing = report.tallies.iter().map(|(_, t)| t.end_missing).sum::<usize>(),
@@ -327,11 +334,11 @@ pub(crate) async fn run_knowledge_restore(
         dry_run,
         "knowledge records restored"
     );
-    Ok(render(&report, &path, dry_run, started.elapsed().as_secs_f64()))
+    Ok(render(&report, &set.describe(), dry_run, started.elapsed().as_secs_f64()))
 }
 
-fn render(report: &Report, path: &Path, dry_run: bool, seconds: f64) -> String {
-    let mut out = format!("knowledge_restore ← {}{}\n", path.display(), if dry_run { " (dry_run)" } else { "" });
+fn render(report: &Report, label: &str, dry_run: bool, seconds: f64) -> String {
+    let mut out = format!("knowledge_restore ← {}{}\n", label, if dry_run { " (dry_run)" } else { "" });
     if let Some(source) = &report.source {
         out.push_str(&format!("  source: {source}\n"));
     }
@@ -402,11 +409,11 @@ use crate::tools::registry::DispatchContext;
 #[embra_tool(
     name = "knowledge_restore",
     is_side_effectful = true,
-    description = "Put the records of a knowledge_dump file or a removal record (the files under /embra/workspace/KG_DUMPS that forget, knowledge_unlink_node and knowledge_sweep_orphans write before they delete) back into the knowledge graph by id. Additive: a record whose id is present is skipped, nodes go before edges, an edge is inserted only when both of its ends exist, identity.graph records and the identity projection's edges are refused (the projection is rebuilt from the sealed soul at boot), and a slim node record (no payload) cannot be restored. A restored node that carries a stored embedding is placed in the vector index without re-embedding. dry_run=true counts what would be inserted and writes nothing."
+    description = "Put the records of a knowledge_dump set or a removal record (the files under /embra/workspace/KG_DUMPS that forget, knowledge_unlink_node and knowledge_sweep_orphans write before they delete) back into the knowledge graph by id. file is one file, or a stem whose -partNNNN.jsonl parts are read in order. Additive: a record whose id is present is skipped, nodes go before edges, an edge is inserted only when both of its ends exist, identity.graph records and the identity projection's edges are refused (the projection is rebuilt from the sealed soul at boot), and a slim node record (no payload) cannot be restored. A restored node that carries a stored embedding is placed in the vector index without re-embedding. dry_run=true counts what would be inserted and writes nothing."
 )]
 pub struct KnowledgeRestoreArgs {
-    /// A file name under /embra/workspace/KG_DUMPS, or a path inside the
-    /// workspace.
+    /// A file name or a stem under /embra/workspace/KG_DUMPS, or a path
+    /// inside the workspace; a stem's parts are read in order.
     pub file: String,
     /// Short names of the collections to restore: entries, semantic,
     /// procedural, edges. Omit for all of them.
@@ -602,7 +609,7 @@ mod tests {
         let server = server_accepting_writes(&[]).await;
         let db = WardsonDbClient::from_url(&server.uri());
         let out = run_knowledge_restore(&db, &test_config(), "m.jsonl", Some(vec!["semantic".into()]), false, root.path()).await.expect("ran");
-        assert!(out.contains("\n  memory.semantic: 1 inserted, 0 present, 1 slim\n  not selected: 1\n  malformed: 4 (first: line 2: not JSON: "), "{out}");
+        assert!(out.contains("\n  memory.semantic: 1 inserted, 0 present, 1 slim\n  not selected: 1\n  malformed: 4 (first: m.jsonl:2: not JSON: "), "{out}");
         assert!(out.contains("\n  total: 1 inserted of 7 records, "), "{out}");
         let writes = writes_seen(&server).await;
         assert_eq!(writes.len(), 1);
@@ -632,7 +639,7 @@ mod tests {
             assert!(why.starts_with("Denied:") || why.contains("outside"), "{file}: {why}");
         }
         let why = run_knowledge_restore(&db, &test_config(), "missing.jsonl", None, true, root.path()).await.expect_err("missing");
-        assert!(why.contains("could not be opened") || why.contains("Denied") || why.contains("not found"), "{why}");
+        assert!(why.starts_with("no dump or removal file named 'missing.jsonl'"), "{why}");
         assert!(server.received_requests().await.unwrap_or_default().is_empty(), "a refused file reads nothing");
     }
 
@@ -649,7 +656,7 @@ mod tests {
         let record = crate::knowledge::removal::write_removal_record(dir.to_str().unwrap(), "knowledge_sweep_orphans", source, &[], &edges)
             .await
             .expect("record");
-        let name = record.file_name().unwrap().to_str().unwrap().to_string();
+        let name = record.first().file_name().unwrap().to_str().unwrap().to_string();
         let server = server_accepting_writes(&["n1", "n2", "n5"]).await;
         let db = WardsonDbClient::from_url(&server.uri());
         let out = run_knowledge_restore(&db, &test_config(), &name, None, false, root.path()).await.expect("restored");
@@ -658,6 +665,26 @@ mod tests {
         let writes = writes_seen(&server).await;
         let restored: Vec<Value> = writes.into_iter().map(|w| w.1).collect();
         assert_eq!(restored, edges, "the edges come back as they were");
+    }
+
+    /// A set restores by its stem, the parts in order: the nodes of part
+    /// one and two, then the edge of part three.
+    #[tokio::test]
+    async fn a_stem_restores_every_part_in_order() {
+        let root = TempDir::new("restore-stem");
+        let dir = root.0.join("KG_DUMPS");
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = |part: u64| json!({"type": "meta", "generated_at": "2026-10-30T12:00:00Z", "collections": ["memory.semantic", "memory.edges"], "edge_types": null, "include_payload": true, "stem": "removed-forget-x", "part": part, "source": {"tool": "forget", "target": "memory.entries:e1"}});
+        std::fs::write(dir.join("removed-forget-x-part0001.jsonl"), format!("{}\n{}\n", meta(1), node("memory.semantic", "n1", "one"))).unwrap();
+        std::fs::write(dir.join("removed-forget-x-part0002.jsonl"), format!("{}\n{}\n", meta(2), node("memory.semantic", "n2", "two"))).unwrap();
+        std::fs::write(dir.join("removed-forget-x-part0003.jsonl"), format!("{}\n{}\n", meta(3), edge_record("c1", "refines", "n1", "n2"))).unwrap();
+        let server = server_accepting_writes(&[]).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let out = run_knowledge_restore(&db, &test_config(), "removed-forget-x", None, false, root.path()).await.expect("restored");
+        assert!(out.starts_with(&format!("knowledge_restore ← {}/KG_DUMPS/removed-forget-x (3 parts)\n  source: removed by forget of memory.entries:e1 (generated 2026-10-30T12:00:00Z)\n  memory.semantic: 2 inserted, 0 present, 0 slim\n  memory.edges: 1 inserted, 0 present, 0 end missing\n", root.path())), "{out}");
+        let writes = writes_seen(&server).await;
+        let order: Vec<&str> = writes.iter().map(|w| w.1["_id"].as_str().unwrap()).collect();
+        assert_eq!(order, ["n1", "n2", "c1"]);
     }
 
     #[test]

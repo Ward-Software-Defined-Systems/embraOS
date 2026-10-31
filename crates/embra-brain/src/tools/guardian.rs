@@ -85,7 +85,7 @@ fn object_input_schema(_: &mut schemars::r#gen::SchemaGenerator) -> schemars::sc
 /// arena with a no-op dealloc, and parsing allocates a multiple of the input;
 /// this gate keeps the bridged data well inside it and the host side of the
 /// bridge sane.
-const GUARDIAN_DATA_FILE_MAX: u64 = 2 * 1024 * 1024;
+pub(crate) const GUARDIAN_DATA_FILE_MAX: u64 = 2 * 1024 * 1024;
 
 /// Pure gate for a data_file request: only action="invoke" may carry one,
 /// and the path must resolve inside the jail under `root` (the shared

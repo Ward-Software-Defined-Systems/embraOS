@@ -204,7 +204,7 @@ fn counts_line(counts: &[(String, usize)]) -> String {
 /// id (capped, the record holding the rest), the nodes, and the record's
 /// path. A dry run prints the same lines with `to remove` for `removed` and
 /// no record.
-pub(crate) fn removal_report(summary: &RemovalSummary, record: Option<&Path>, dry_run: bool) -> String {
+pub(crate) fn removal_report(summary: &RemovalSummary, record: Option<&PartSet>, dry_run: bool) -> String {
     let verb = if dry_run { "to remove" } else { "removed" };
     let mut out = format!(
         "\n  edges {verb}: {} (auto {}, curated {}, other {})",
@@ -235,37 +235,193 @@ pub(crate) fn removal_report(summary: &RemovalSummary, record: Option<&Path>, dr
         out.push_str(&format!("\n  nodes {verb}: {}", summary.nodes.join(", ")));
     }
     match record {
-        Some(path) => out.push_str(&format!("\n  record: {}", path.display())),
+        Some(set) => out.push_str(&format!("\n  record: {}", set.describe())),
         None if dry_run => out.push_str("\n  record: not written (dry_run)"),
         None => out.push_str("\n  record: not written (nothing to remove)"),
     }
     out
 }
 
-/// `<dir>/<stem>.jsonl`, created new; a name already taken gets `-2`, `-3`,
-/// … so a second call in the same second never truncates the first.
-pub(crate) async fn open_new_jsonl(dir: &str, stem: &str) -> Result<(tokio::fs::File, PathBuf), String> {
-    for attempt in 1..=1000u32 {
-        let name = if attempt == 1 { format!("{stem}.jsonl") } else { format!("{stem}-{attempt}.jsonl") };
-        let path = Path::new(dir).join(name);
-        match tokio::fs::OpenOptions::new().write(true).create_new(true).open(&path).await {
-            Ok(file) => return Ok((file, path)),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("Failed to create {}: {}", path.display(), e)),
-        }
-    }
-    Err(format!("Failed to create {stem}.jsonl under {dir}: every name is taken"))
+/// The most bytes in one part of a dump or a removal record: the console's
+/// text upload (`media::text::TEXT_UPLOAD_MAX`) and `guardian_call`'s data
+/// file (`tools::guardian::GUARDIAN_DATA_FILE_MAX`) take at most this, so
+/// every part is usable as either without reshaping (`file_offer` allows
+/// more). A dump of a production graph runs to hundreds of megabytes.
+pub(crate) const DUMP_PART_MAX: u64 = 2 * 1024 * 1024;
+
+/// One written part.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Part {
+    pub path: PathBuf,
+    /// Records in it, the meta line aside.
+    pub records: usize,
+    pub bytes: u64,
 }
 
-/// A removal record being written: `removed-<tool>-<ts>.jsonl` under `dir`,
-/// a dump file — the meta line carrying `source` (the tool and its target),
-/// a node line per `(collection, document)` with its payload, then every
-/// edge as it is handed in (`edge`), so a sweep of a million orphan edges
-/// holds none of their documents. `finish` flushes and syncs before the
-/// first delete runs; `discard` removes the file of a call that failed.
+/// A written set: `<stem>-partNNNN.jsonl` files, or the one `<stem>.jsonl`.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PartSet {
+    pub stem: String,
+    pub parts: Vec<Part>,
+    /// Bytes written, meta lines included.
+    pub bytes: u64,
+    /// The cap each part was held under; 0 for one file.
+    pub part_bytes: u64,
+}
+
+impl PartSet {
+    pub(crate) fn first(&self) -> &Path {
+        &self.parts[0].path
+    }
+
+    /// The path for one part; `<first> … <last> (N parts)` for several.
+    pub(crate) fn describe(&self) -> String {
+        match self.parts.as_slice() {
+            [] => format!("{} (nothing written)", self.stem),
+            [_] => self.first().display().to_string(),
+            [.., last] => format!(
+                "{} … {} ({} parts)",
+                self.first().display(),
+                last.path.file_name().and_then(|n| n.to_str()).unwrap_or("?"),
+                self.parts.len()
+            ),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn records(&self) -> usize {
+        self.parts.iter().map(|p| p.records).sum()
+    }
+}
+
+/// A stem no file under `dir` uses yet: `<stem>`, else `<stem>-2`, `-3`, …
+/// (both the one-file and the part forms are checked), so a second set in
+/// the same second never truncates the first.
+async fn free_stem(dir: &str, stem: &str) -> Result<String, String> {
+    for attempt in 1..=1000u32 {
+        let candidate = if attempt == 1 { stem.to_string() } else { format!("{stem}-{attempt}") };
+        let taken = tokio::fs::try_exists(Path::new(dir).join(format!("{candidate}.jsonl"))).await.unwrap_or(true)
+            || tokio::fs::try_exists(Path::new(dir).join(format!("{candidate}-part0001.jsonl"))).await.unwrap_or(true);
+        if !taken {
+            return Ok(candidate);
+        }
+    }
+    Err(format!("Failed to name {stem} under {dir}: every name is taken"))
+}
+
+/// A dump written as parts under `dir`: `<stem>-partNNNN.jsonl`, each at
+/// most `part_bytes` (0: one file, `<stem>.jsonl`), no record ever split
+/// across two, every part headed by the meta line with `stem` and `part`
+/// added. The dumps, the removal records and a reshaped dump all go
+/// through it; `knowledge_restore` and `source_file` read a set back by
+/// its stem.
+pub(crate) struct PartWriter {
+    dir: String,
+    stem: String,
+    part_bytes: u64,
+    meta: Value,
+    open: Option<(tokio::io::BufWriter<tokio::fs::File>, Part)>,
+    parts: Vec<Part>,
+    bytes: u64,
+}
+
+impl PartWriter {
+    pub(crate) async fn open(dir: &str, stem: &str, meta: Value, part_bytes: u64) -> Result<Self, String> {
+        tokio::fs::create_dir_all(dir).await.map_err(|e| format!("Failed to create {dir}: {e}"))?;
+        let stem = free_stem(dir, stem).await?;
+        let mut writer = Self { dir: dir.to_string(), stem, part_bytes, meta, open: None, parts: Vec::new(), bytes: 0 };
+        writer.next_part().await?;
+        Ok(writer)
+    }
+
+    async fn next_part(&mut self) -> Result<(), String> {
+        let index = self.parts.len() + 1;
+        let name = if self.part_bytes == 0 { self.stem.clone() } else { format!("{}-part{index:04}", self.stem) };
+        let path = Path::new(&self.dir).join(format!("{name}.jsonl"));
+        let file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .await
+            .map_err(|e| format!("Failed to create {}: {}", path.display(), e))?;
+        let mut meta = self.meta.clone();
+        meta["stem"] = Value::String(self.stem.clone());
+        meta["part"] = Value::from(index);
+        let line = format!("{meta}\n");
+        let mut writer = tokio::io::BufWriter::new(file);
+        writer
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+        self.bytes += line.len() as u64;
+        self.open = Some((writer, Part { path, records: 0, bytes: line.len() as u64 }));
+        Ok(())
+    }
+
+    async fn close_part(&mut self) -> Result<(), String> {
+        let Some((mut writer, part)) = self.open.take() else { return Ok(()) };
+        let done = async {
+            writer.flush().await?;
+            writer.get_ref().sync_all().await
+        };
+        done.await.map_err(|e| format!("Failed to write {}: {}", part.path.display(), e))?;
+        self.parts.push(part);
+        Ok(())
+    }
+
+    /// One record. A new part is begun when this one would take the open
+    /// part past the cap and the open part holds a record already, so a
+    /// record larger than the cap has a part of its own.
+    pub(crate) async fn record(&mut self, record: &Value) -> Result<(), String> {
+        let line = format!("{record}\n");
+        if self.part_bytes > 0
+            && let Some((_, part)) = &self.open
+            && part.records > 0
+            && part.bytes + line.len() as u64 > self.part_bytes
+        {
+            self.close_part().await?;
+            self.next_part().await?;
+        }
+        let Some((writer, part)) = self.open.as_mut() else {
+            return Err("the part writer is closed".into());
+        };
+        writer
+            .write_all(line.as_bytes())
+            .await
+            .map_err(|e| format!("Failed to write {}: {}", part.path.display(), e))?;
+        part.records += 1;
+        part.bytes += line.len() as u64;
+        self.bytes += line.len() as u64;
+        Ok(())
+    }
+
+    /// Flush and sync the last part; the set.
+    pub(crate) async fn finish(mut self) -> Result<PartSet, String> {
+        self.close_part().await?;
+        Ok(PartSet { stem: self.stem, parts: self.parts, bytes: self.bytes, part_bytes: self.part_bytes })
+    }
+
+    /// Every file of a call that failed goes.
+    pub(crate) async fn discard(self) {
+        for part in &self.parts {
+            let _ = tokio::fs::remove_file(&part.path).await;
+        }
+        if let Some((_, part)) = &self.open {
+            let _ = tokio::fs::remove_file(&part.path).await;
+        }
+    }
+}
+
+/// A removal record being written: `removed-<tool>-<ts>` under `dir`, a
+/// dump — the meta line carrying `source` (the tool and its target), a node
+/// line per `(collection, document)` with its payload, then every edge as
+/// it is handed in (`edge`), in parts under `DUMP_PART_MAX`, so a sweep of
+/// a million orphan edges holds none of their documents and every part of
+/// its record can be carried out of the OS. `finish` flushes and syncs
+/// before the first delete runs; `discard` removes the files of a call that
+/// failed.
 pub(crate) struct RecordSink {
-    writer: tokio::io::BufWriter<tokio::fs::File>,
-    path: PathBuf,
+    writer: PartWriter,
 }
 
 impl RecordSink {
@@ -276,9 +432,7 @@ impl RecordSink {
         nodes: &[(&str, &Value)],
         with_edges: bool,
     ) -> Result<Self, String> {
-        tokio::fs::create_dir_all(dir).await.map_err(|e| format!("Failed to create {dir}: {e}"))?;
         let stem = format!("removed-{tool}-{}", chrono::Utc::now().format("%Y%m%dT%H%M%SZ"));
-        let (file, path) = open_new_jsonl(dir, &stem).await?;
         let mut collections: Vec<&str> = Vec::new();
         for (collection, _) in nodes {
             if !collections.contains(collection) {
@@ -288,14 +442,10 @@ impl RecordSink {
         if with_edges {
             collections.push("memory.edges");
         }
-        let mut sink = Self { writer: tokio::io::BufWriter::new(file), path };
-        let mut lines = Vec::with_capacity(1 + nodes.len());
-        lines.push(dump_meta_record(&collections, None, true, Some(&source)));
+        let meta = dump_meta_record(&collections, None, true, Some(&source));
+        let mut sink = Self { writer: PartWriter::open(dir, &stem, meta, DUMP_PART_MAX).await? };
         for (collection, doc) in nodes {
-            lines.push(dump_node_record(doc, collection, true));
-        }
-        for line in &lines {
-            if let Err(e) = sink.line(line).await {
+            if let Err(e) = sink.writer.record(&dump_node_record(doc, collection, true)).await {
                 sink.discard().await;
                 return Err(e);
             }
@@ -303,36 +453,19 @@ impl RecordSink {
         Ok(sink)
     }
 
-    async fn line(&mut self, record: &Value) -> Result<(), String> {
-        let write = async {
-            self.writer.write_all(record.to_string().as_bytes()).await?;
-            self.writer.write_all(b"\n").await
-        };
-        write.await.map_err(|e| format!("Failed to write {}: {}", self.path.display(), e))
-    }
-
     /// One edge, as it is read.
     pub(crate) async fn edge(&mut self, edge: &Value) -> Result<(), String> {
-        self.line(&dump_edge_record(edge)).await
+        self.writer.record(&dump_edge_record(edge)).await
     }
 
-    /// Flush and sync; the path of the complete record.
-    pub(crate) async fn finish(mut self) -> Result<PathBuf, String> {
-        let done = async {
-            self.writer.flush().await?;
-            self.writer.get_ref().sync_all().await
-        };
-        if let Err(e) = done.await {
-            let why = format!("Failed to write {}: {}", self.path.display(), e);
-            self.discard().await;
-            return Err(why);
-        }
-        Ok(self.path)
+    /// Flush and sync; the complete record.
+    pub(crate) async fn finish(self) -> Result<PartSet, String> {
+        self.writer.finish().await
     }
 
-    /// The file of a call that failed goes.
+    /// The files of a call that failed go.
     pub(crate) async fn discard(self) {
-        let _ = tokio::fs::remove_file(&self.path).await;
+        self.writer.discard().await
     }
 }
 
@@ -344,7 +477,7 @@ pub(crate) async fn write_removal_record(
     source: Value,
     nodes: &[(&str, &Value)],
     edges: &[Value],
-) -> Result<PathBuf, String> {
+) -> Result<PartSet, String> {
     let mut sink = RecordSink::open(dir, tool, source, nodes, !edges.is_empty()).await?;
     for edge in edges {
         if let Err(e) = sink.edge(edge).await {
@@ -356,10 +489,10 @@ pub(crate) async fn write_removal_record(
 }
 
 /// One line in the brain log per removing call, under the tool's target.
-pub(crate) fn log_removal(tool: &str, target: &str, summary: &RemovalSummary, record: &Path) {
+pub(crate) fn log_removal(tool: &str, target: &str, summary: &RemovalSummary, record: &PartSet) {
     let (edges, auto, curated, other, nodes) =
         (summary.total, summary.auto_count(), summary.curated_count(), summary.other_count(), summary.nodes.len());
-    let record = record.display().to_string();
+    let record = record.describe();
     match tool {
         "knowledge_sweep_orphans" => tracing::info!(
             target: "kg::sweep", tool, target, edges, auto, curated, other, nodes, record, "knowledge removed; the record holds every edge"
@@ -465,7 +598,13 @@ pub(crate) mod tests {
     fn the_curated_list_is_capped_and_says_so() {
         let edges: Vec<Value> = (0..103).map(|i| edge(&format!("c{i:03}"), "related_to", "n1", &format!("n{i}"), 0.5)).collect();
         let summary = RemovalSummary::of(&edges).with_nodes(vec!["memory.semantic:n1".into()]);
-        let block = removal_report(&summary, Some(Path::new("/embra/workspace/KG_DUMPS/removed-forget-x.jsonl")), false);
+        let one = PartSet {
+            stem: "removed-forget-x".into(),
+            parts: vec![Part { path: PathBuf::from("/embra/workspace/KG_DUMPS/removed-forget-x.jsonl"), records: 103, bytes: 1 }],
+            bytes: 1,
+            part_bytes: 0,
+        };
+        let block = removal_report(&summary, Some(&one), false);
         assert!(block.starts_with("\n  edges removed: 103 (auto 0, curated 103, other 0)\n  curated: related_to=103\n    c000 "), "{block}");
         assert!(block.contains("\n    c099 memory.semantic:n1 → memory.semantic:n99 related_to 0.50\n    (100 of 103 shown; the record holds every edge)\n  nodes removed: memory.semantic:n1\n  record: /embra/workspace/KG_DUMPS/removed-forget-x.jsonl"), "{block}");
         assert!(!block.contains("c100 "), "{block}");
@@ -491,28 +630,86 @@ pub(crate) mod tests {
             .await
             .expect("written");
         let second = write_removal_record(dir.path(), "forget", source.clone(), &[], &edges).await.expect("written");
-        assert!(first.file_name().unwrap().to_str().unwrap().starts_with("removed-forget-"), "{first:?}");
-        assert_ne!(first, second, "a second record never truncates the first");
-        assert!(second.to_str().unwrap().ends_with("-2.jsonl") || first.to_str().unwrap() != second.to_str().unwrap());
+        assert_eq!(first.parts.len(), 1);
+        let name = first.first().file_name().unwrap().to_str().unwrap().to_string();
+        assert!(name.starts_with("removed-forget-") && name.ends_with("-part0001.jsonl"), "{name}");
+        assert_ne!(first.first(), second.first(), "a second record never truncates the first");
+        assert!(second.stem.ends_with("-2") || second.stem != first.stem, "{} vs {}", first.stem, second.stem);
+        assert_eq!(first.describe(), first.first().display().to_string());
 
-        let lines = record_lines(&first);
+        let lines = record_lines(first.first());
         assert_eq!(lines.len(), 5);
         assert_eq!(lines[0]["type"], "meta");
         assert_eq!(lines[0]["source"], source);
         assert_eq!(lines[0]["collections"], json!(["memory.semantic", "memory.entries", "memory.edges"]));
         assert_eq!(lines[0]["include_payload"], true);
+        assert_eq!((lines[0]["stem"].as_str(), lines[0]["part"].as_u64()), (Some(first.stem.as_str()), Some(1)));
         assert_eq!(lines[1], json!({"type": "node", "_id": "n1", "collection": "memory.semantic", "data": node}));
         assert_eq!(lines[2]["collection"], "memory.entries");
         assert_eq!(lines[3]["type"], "edge");
         assert_eq!(lines[3]["_id"], "c1");
         assert_eq!(lines[4]["edge_type"], "same_session");
         // A record of edges alone names no node collection.
-        assert_eq!(record_lines(&second)[0]["collections"], json!(["memory.edges"]));
+        assert_eq!(record_lines(second.first())[0]["collections"], json!(["memory.edges"]));
 
         // An unwritable directory is an error and leaves no file.
         let blocked = dir.0.join("file-not-dir");
         std::fs::write(&blocked, b"x").unwrap();
         let why = write_removal_record(blocked.to_str().unwrap(), "forget", source, &[], &edges).await.expect_err("refused");
         assert!(why.starts_with("Failed to create "), "{why}");
+    }
+
+    /// A set is written in parts under the cap, no record split, each part
+    /// headed by the meta line with the stem and its number; `discard`
+    /// removes every part; 0 writes one file; the cap fits the console's
+    /// upload and the Guardian's data file.
+    #[tokio::test]
+    async fn a_set_is_written_in_parts_under_the_cap_and_no_record_is_split() {
+        let dir = TempDir::new("parts");
+        let meta = json!({"type": "meta", "collections": ["memory.edges"], "include_payload": true});
+        let mut writer = PartWriter::open(dir.path(), "kg-dump-x", meta.clone(), 700).await.expect("opened");
+        let records: Vec<Value> = (0..9).map(|i| edge(&format!("e{i}"), "related_to", "n1", "n2", 0.5)).collect();
+        let big = json!({"_id": "big", "type": "edge", "edge_type": "related_to", "pad": "x".repeat(900)});
+        for r in records.iter().chain(std::iter::once(&big)) {
+            writer.record(r).await.expect("written");
+        }
+        let set = writer.finish().await.expect("finished");
+        assert!(set.parts.len() >= 3, "{set:?}");
+        assert_eq!(set.records(), 10);
+        assert_eq!(set.part_bytes, 700);
+        let mut ids = Vec::new();
+        for (i, part) in set.parts.iter().enumerate() {
+            let lines = record_lines(&part.path);
+            assert_eq!((lines[0]["stem"].as_str(), lines[0]["part"].as_u64()), (Some("kg-dump-x"), Some(i as u64 + 1)), "{part:?}");
+            assert_eq!(lines.len() - 1, part.records);
+            assert_eq!(std::fs::metadata(&part.path).unwrap().len(), part.bytes);
+            let name = part.path.file_name().unwrap().to_str().unwrap().to_string();
+            assert_eq!(name, format!("kg-dump-x-part{:04}.jsonl", i + 1));
+            // Under the cap, or one record that is larger than the cap on its own.
+            assert!(part.bytes <= 700 || part.records == 1, "{part:?}");
+            ids.extend(lines[1..].iter().map(|l| l["_id"].as_str().unwrap().to_string()));
+        }
+        let expected: Vec<String> = (0..9).map(|i| format!("e{i}")).chain(std::iter::once("big".to_string())).collect();
+        assert_eq!(ids, expected, "every record once, in order, none split");
+        assert!(set.describe().ends_with(&format!("({} parts)", set.parts.len())), "{}", set.describe());
+
+        // The same stem again in the same second takes a suffix.
+        let again = PartWriter::open(dir.path(), "kg-dump-x", meta.clone(), 700).await.expect("opened");
+        assert_eq!(again.stem, "kg-dump-x-2");
+        again.discard().await;
+        assert!(!dir.0.join("kg-dump-x-2-part0001.jsonl").exists(), "discard removes the open part");
+
+        // Zero: one file, the plain name.
+        let mut one = PartWriter::open(dir.path(), "kg-dump-one", meta, 0).await.expect("opened");
+        for r in &records {
+            one.record(r).await.expect("written");
+        }
+        let set = one.finish().await.expect("finished");
+        assert_eq!(set.parts.len(), 1);
+        assert_eq!(set.first().file_name().unwrap().to_str().unwrap(), "kg-dump-one.jsonl");
+        assert_eq!(set.describe(), set.first().display().to_string());
+
+        const { assert!(DUMP_PART_MAX <= crate::media::text::TEXT_UPLOAD_MAX as u64, "a part is an upload") };
+        const { assert!(DUMP_PART_MAX <= crate::tools::guardian::GUARDIAN_DATA_FILE_MAX, "a part is a data file") };
     }
 }

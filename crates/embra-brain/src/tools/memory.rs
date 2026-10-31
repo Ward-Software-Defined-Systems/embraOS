@@ -1245,7 +1245,7 @@ async fn forget_entry(db: &WardsonDbClient, id: &str, entry: &serde_json::Value,
                 node_id,
                 e,
                 id,
-                record.display()
+                record.describe()
             );
         }
         // The node is gone — drop its vector, as `knowledge_unlink_node` does.
@@ -1257,7 +1257,7 @@ async fn forget_entry(db: &WardsonDbClient, id: &str, entry: &serde_json::Value,
                 node_id,
                 id,
                 e,
-                record.display()
+                record.describe()
             );
         }
         removal::log_removal("forget", &target, &summary, &record);
@@ -1296,7 +1296,7 @@ async fn forget_entry(db: &WardsonDbClient, id: &str, entry: &serde_json::Value,
     };
     let edge_count = delete_edges(db, &edges).await;
     if let Err(e) = db.delete("memory.entries", id).await {
-        return format!("Failed to remove entry: {}. The record is {}.", e, record.display());
+        return format!("Failed to remove entry: {}. The record is {}.", e, record.describe());
     }
     removal::log_removal("forget", &target, &summary, &record);
     let note = match &pointer {
