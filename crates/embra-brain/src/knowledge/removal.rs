@@ -13,8 +13,9 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use tokio::io::AsyncWriteExt as _;
+
 use serde_json::Value;
-use tokio::io::AsyncWriteExt;
 
 use crate::db::WardsonDbClient;
 
@@ -102,62 +103,51 @@ pub(crate) fn bucket_of(edge: &Value) -> Bucket {
 }
 
 /// The removed edges by bucket and type, with every curated edge named.
+/// Built one edge at a time (`add`), so a sweep of a million orphan edges
+/// holds their types and its curated lines, never the documents.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct RemovalSummary {
     pub total: usize,
-    /// `(type, count)`, count-descending then name, as the stats print them.
-    pub auto: Vec<(String, usize)>,
-    pub curated: Vec<(String, usize)>,
-    pub other: Vec<(String, usize)>,
-    /// One line per curated edge: `<id> <source> → <target> <type> <weight>`,
-    /// by type then id.
-    pub curated_lines: Vec<String>,
+    counts: [BTreeMap<String, usize>; 3],
+    /// `(type, id, line)` per curated edge, sorted when read.
+    curated_edges: Vec<(String, String, String)>,
     /// The nodes the call removes, `<collection>:<id>`.
     pub nodes: Vec<String>,
 }
 
 impl RemovalSummary {
     pub(crate) fn of(edges: &[Value]) -> Self {
-        let mut counts: [BTreeMap<String, usize>; 3] = Default::default();
-        let mut curated: Vec<(String, String, String)> = Vec::new();
+        let mut summary = Self::default();
         for edge in edges {
-            let kind = edge.get("edge_type").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()).unwrap_or("(untyped)");
-            let slot = match bucket_of(edge) {
-                Bucket::Auto => 0,
-                Bucket::Curated => 1,
-                Bucket::Other => 2,
-            };
-            *counts[slot].entry(kind.to_string()).or_insert(0) += 1;
-            if slot == 1 {
-                let field = |key: &str| edge.get(key).and_then(|v| v.as_str()).unwrap_or("?");
-                let weight = edge.get("weight").and_then(|v| v.as_f64()).unwrap_or(0.0);
-                let line = format!(
-                    "{} {}:{} → {}:{} {} {:.2}",
-                    field("_id"),
-                    field("source_collection"),
-                    field("source_id"),
-                    field("target_collection"),
-                    field("target_id"),
-                    kind,
-                    weight
-                );
-                curated.push((kind.to_string(), field("_id").to_string(), line));
-            }
+            summary.add(edge);
         }
-        curated.sort();
-        let ordered = |map: BTreeMap<String, usize>| -> Vec<(String, usize)> {
-            let mut v: Vec<(String, usize)> = map.into_iter().collect();
-            v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-            v
+        summary
+    }
+
+    /// Count one edge; a curated one is named.
+    pub(crate) fn add(&mut self, edge: &Value) {
+        self.total += 1;
+        let kind = edge.get("edge_type").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()).unwrap_or("(untyped)");
+        let slot = match bucket_of(edge) {
+            Bucket::Auto => 0,
+            Bucket::Curated => 1,
+            Bucket::Other => 2,
         };
-        let [auto, curated_counts, other] = counts;
-        Self {
-            total: edges.len(),
-            auto: ordered(auto),
-            curated: ordered(curated_counts),
-            other: ordered(other),
-            curated_lines: curated.into_iter().map(|(_, _, line)| line).collect(),
-            nodes: Vec::new(),
+        *self.counts[slot].entry(kind.to_string()).or_insert(0) += 1;
+        if slot == 1 {
+            let field = |key: &str| edge.get(key).and_then(|v| v.as_str()).unwrap_or("?");
+            let weight = edge.get("weight").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let line = format!(
+                "{} {}:{} → {}:{} {} {:.2}",
+                field("_id"),
+                field("source_collection"),
+                field("source_id"),
+                field("target_collection"),
+                field("target_id"),
+                kind,
+                weight
+            );
+            self.curated_edges.push((kind.to_string(), field("_id").to_string(), line));
         }
     }
 
@@ -166,16 +156,43 @@ impl RemovalSummary {
         self
     }
 
+    fn ordered(&self, slot: usize) -> Vec<(String, usize)> {
+        let mut v: Vec<(String, usize)> = self.counts[slot].iter().map(|(k, n)| (k.clone(), *n)).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        v
+    }
+
+    /// `(type, count)`, count-descending then name, as the stats print them.
+    pub(crate) fn auto(&self) -> Vec<(String, usize)> {
+        self.ordered(0)
+    }
+
+    pub(crate) fn curated(&self) -> Vec<(String, usize)> {
+        self.ordered(1)
+    }
+
+    pub(crate) fn other(&self) -> Vec<(String, usize)> {
+        self.ordered(2)
+    }
+
+    /// One line per curated edge: `<id> <source> → <target> <type> <weight>`,
+    /// by type then id.
+    pub(crate) fn curated_lines(&self) -> Vec<String> {
+        let mut edges = self.curated_edges.clone();
+        edges.sort();
+        edges.into_iter().map(|(_, _, line)| line).collect()
+    }
+
     pub(crate) fn auto_count(&self) -> usize {
-        self.auto.iter().map(|(_, n)| n).sum()
+        self.counts[0].values().sum()
     }
 
     pub(crate) fn curated_count(&self) -> usize {
-        self.curated.iter().map(|(_, n)| n).sum()
+        self.counts[1].values().sum()
     }
 
     pub(crate) fn other_count(&self) -> usize {
-        self.other.iter().map(|(_, n)| n).sum()
+        self.counts[2].values().sum()
     }
 }
 
@@ -196,25 +213,23 @@ pub(crate) fn removal_report(summary: &RemovalSummary, record: Option<&Path>, dr
         summary.curated_count(),
         summary.other_count()
     );
-    if !summary.auto.is_empty() {
-        out.push_str(&format!("\n  auto: {}", counts_line(&summary.auto)));
+    let (auto, curated, other) = (summary.auto(), summary.curated(), summary.other());
+    if !auto.is_empty() {
+        out.push_str(&format!("\n  auto: {}", counts_line(&auto)));
     }
-    if !summary.curated.is_empty() {
-        out.push_str(&format!("\n  curated: {}", counts_line(&summary.curated)));
-        for line in summary.curated_lines.iter().take(CURATED_LINES_SHOWN) {
+    if !curated.is_empty() {
+        out.push_str(&format!("\n  curated: {}", counts_line(&curated)));
+        let lines = summary.curated_lines();
+        for line in lines.iter().take(CURATED_LINES_SHOWN) {
             out.push_str("\n    ");
             out.push_str(line);
         }
-        if summary.curated_lines.len() > CURATED_LINES_SHOWN {
-            out.push_str(&format!(
-                "\n    ({} of {} shown; the record holds every edge)",
-                CURATED_LINES_SHOWN,
-                summary.curated_lines.len()
-            ));
+        if lines.len() > CURATED_LINES_SHOWN {
+            out.push_str(&format!("\n    ({} of {} shown; the record holds every edge)", CURATED_LINES_SHOWN, lines.len()));
         }
     }
-    if !summary.other.is_empty() {
-        out.push_str(&format!("\n  other: {}", counts_line(&summary.other)));
+    if !other.is_empty() {
+        out.push_str(&format!("\n  other: {}", counts_line(&other)));
     }
     if !summary.nodes.is_empty() {
         out.push_str(&format!("\n  nodes {verb}: {}", summary.nodes.join(", ")));
@@ -242,11 +257,87 @@ pub(crate) async fn open_new_jsonl(dir: &str, stem: &str) -> Result<(tokio::fs::
     Err(format!("Failed to create {stem}.jsonl under {dir}: every name is taken"))
 }
 
-/// The removal record of one call: `removed-<tool>-<ts>.jsonl` under `dir`,
+/// A removal record being written: `removed-<tool>-<ts>.jsonl` under `dir`,
 /// a dump file — the meta line carrying `source` (the tool and its target),
 /// a node line per `(collection, document)` with its payload, then every
-/// edge. Written whole and synced before the first delete runs; nothing is
-/// removed when it cannot be.
+/// edge as it is handed in (`edge`), so a sweep of a million orphan edges
+/// holds none of their documents. `finish` flushes and syncs before the
+/// first delete runs; `discard` removes the file of a call that failed.
+pub(crate) struct RecordSink {
+    writer: tokio::io::BufWriter<tokio::fs::File>,
+    path: PathBuf,
+}
+
+impl RecordSink {
+    pub(crate) async fn open(
+        dir: &str,
+        tool: &str,
+        source: Value,
+        nodes: &[(&str, &Value)],
+        with_edges: bool,
+    ) -> Result<Self, String> {
+        tokio::fs::create_dir_all(dir).await.map_err(|e| format!("Failed to create {dir}: {e}"))?;
+        let stem = format!("removed-{tool}-{}", chrono::Utc::now().format("%Y%m%dT%H%M%SZ"));
+        let (file, path) = open_new_jsonl(dir, &stem).await?;
+        let mut collections: Vec<&str> = Vec::new();
+        for (collection, _) in nodes {
+            if !collections.contains(collection) {
+                collections.push(collection);
+            }
+        }
+        if with_edges {
+            collections.push("memory.edges");
+        }
+        let mut sink = Self { writer: tokio::io::BufWriter::new(file), path };
+        let mut lines = Vec::with_capacity(1 + nodes.len());
+        lines.push(dump_meta_record(&collections, None, true, Some(&source)));
+        for (collection, doc) in nodes {
+            lines.push(dump_node_record(doc, collection, true));
+        }
+        for line in &lines {
+            if let Err(e) = sink.line(line).await {
+                sink.discard().await;
+                return Err(e);
+            }
+        }
+        Ok(sink)
+    }
+
+    async fn line(&mut self, record: &Value) -> Result<(), String> {
+        let write = async {
+            self.writer.write_all(record.to_string().as_bytes()).await?;
+            self.writer.write_all(b"\n").await
+        };
+        write.await.map_err(|e| format!("Failed to write {}: {}", self.path.display(), e))
+    }
+
+    /// One edge, as it is read.
+    pub(crate) async fn edge(&mut self, edge: &Value) -> Result<(), String> {
+        self.line(&dump_edge_record(edge)).await
+    }
+
+    /// Flush and sync; the path of the complete record.
+    pub(crate) async fn finish(mut self) -> Result<PathBuf, String> {
+        let done = async {
+            self.writer.flush().await?;
+            self.writer.get_ref().sync_all().await
+        };
+        if let Err(e) = done.await {
+            let why = format!("Failed to write {}: {}", self.path.display(), e);
+            self.discard().await;
+            return Err(why);
+        }
+        Ok(self.path)
+    }
+
+    /// The file of a call that failed goes.
+    pub(crate) async fn discard(self) {
+        let _ = tokio::fs::remove_file(&self.path).await;
+    }
+}
+
+/// The removal record of one call whose edges are in hand: a `RecordSink`
+/// opened, every edge written, finished.
 pub(crate) async fn write_removal_record(
     dir: &str,
     tool: &str,
@@ -254,41 +345,14 @@ pub(crate) async fn write_removal_record(
     nodes: &[(&str, &Value)],
     edges: &[Value],
 ) -> Result<PathBuf, String> {
-    tokio::fs::create_dir_all(dir).await.map_err(|e| format!("Failed to create {dir}: {e}"))?;
-    let stem = format!("removed-{tool}-{}", chrono::Utc::now().format("%Y%m%dT%H%M%SZ"));
-    let (file, path) = open_new_jsonl(dir, &stem).await?;
-    let mut collections: Vec<&str> = Vec::new();
-    for (collection, _) in nodes {
-        if !collections.contains(collection) {
-            collections.push(collection);
-        }
-    }
-    if !edges.is_empty() {
-        collections.push("memory.edges");
-    }
-    let mut lines = Vec::with_capacity(1 + nodes.len() + edges.len());
-    lines.push(dump_meta_record(&collections, None, true, Some(&source)));
-    for (collection, doc) in nodes {
-        lines.push(dump_node_record(doc, collection, true));
-    }
+    let mut sink = RecordSink::open(dir, tool, source, nodes, !edges.is_empty()).await?;
     for edge in edges {
-        lines.push(dump_edge_record(edge));
-    }
-    let written = async {
-        let mut writer = tokio::io::BufWriter::new(file);
-        for line in &lines {
-            writer.write_all(line.to_string().as_bytes()).await?;
-            writer.write_all(b"\n").await?;
+        if let Err(e) = sink.edge(edge).await {
+            sink.discard().await;
+            return Err(e);
         }
-        writer.flush().await?;
-        writer.into_inner().sync_all().await
     }
-    .await;
-    if let Err(e) = written {
-        let _ = tokio::fs::remove_file(&path).await;
-        return Err(format!("Failed to write {}: {}", path.display(), e));
-    }
-    Ok(path)
+    sink.finish().await
 }
 
 /// One line in the brain log per removing call, under the tool's target.
@@ -372,14 +436,20 @@ pub(crate) mod tests {
         ];
         let summary = RemovalSummary::of(&edges);
         assert_eq!((summary.total, summary.auto_count(), summary.curated_count(), summary.other_count()), (9, 3, 3, 3));
-        assert_eq!(summary.auto, [("same_session".to_string(), 2), ("tag_overlap".to_string(), 1)]);
-        assert_eq!(summary.curated, [("related_to".to_string(), 2), ("refines".to_string(), 1)]);
+        assert_eq!(summary.auto(), [("same_session".to_string(), 2), ("tag_overlap".to_string(), 1)]);
+        assert_eq!(summary.curated(), [("related_to".to_string(), 2), ("refines".to_string(), 1)]);
         assert_eq!(
-            summary.other,
+            summary.other(),
             [("(untyped)".to_string(), 1), ("derived_from".to_string(), 1), ("has_trait".to_string(), 1)]
         );
+        // One at a time gives the same summary as all at once.
+        let mut incremental = RemovalSummary::default();
+        for edge in &edges {
+            incremental.add(edge);
+        }
+        assert_eq!(incremental, summary);
         assert_eq!(
-            summary.curated_lines,
+            summary.curated_lines(),
             [
                 "c2 memory.semantic:n6 → memory.semantic:n1 refines 0.92",
                 "c1 memory.semantic:n1 → memory.semantic:n5 related_to 0.80",

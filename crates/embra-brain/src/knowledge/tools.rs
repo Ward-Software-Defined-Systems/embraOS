@@ -4,7 +4,7 @@
 
 use serde_json::json;
 
-use super::removal::{self, RemovalSummary};
+use super::removal::{self, RecordSink, RemovalSummary};
 use crate::config::SystemConfig;
 use crate::db::WardsonDbClient;
 
@@ -1543,7 +1543,7 @@ pub async fn knowledge_graph_stats(db: &WardsonDbClient) -> String {
     // Orphan edges (an endpoint that no longer exists), so nobody has to
     // call knowledge_sweep_orphans to know. Every edge is covered: the check
     // reads the endpoint indexes, not a window of edge documents.
-    let orphans = orphan_line(&find_orphan_edges(db, STATS_ORPHAN_LIST_CAP).await);
+    let orphans = orphan_line(&find_orphan_edges(db, STATS_ORPHAN_LIST_CAP, None).await);
     if !orphans.is_empty() {
         out.push_str(&orphans);
         out.push('\n');
@@ -1566,9 +1566,9 @@ fn orphan_line(scan: &Result<OrphanScan, String>) -> String {
         Ok(scan) => format!(
             "Orphan edges: {}{} of {} scanned{}",
             if scan.more { "at least " } else { "" },
-            scan.orphans.len(),
+            scan.orphan_ids.len(),
             scan.scanned,
-            if scan.orphans.is_empty() { "" } else { " (run knowledge_sweep_orphans to clean up)" }
+            if scan.orphan_ids.is_empty() { "" } else { " (run knowledge_sweep_orphans to clean up)" }
         ),
         Err(e) => format!("Orphan edges: not checked ({e})"),
     }
@@ -2174,19 +2174,26 @@ struct OrphanScan {
     scanned: u64,
     /// Endpoint ids that no node collection holds.
     dangling: Vec<String>,
-    /// The edges that name one of them, up to the caller's cap: the whole
-    /// documents, for the record the sweep writes before it deletes.
-    orphans: Vec<serde_json::Value>,
+    /// The ids of the edges that name one of them, up to the caller's cap.
+    orphan_ids: Vec<String>,
     /// The cap was reached and more such edges exist.
     more: bool,
+    /// Those edges by type, every curated one named: the reply's block.
+    summary: RemovalSummary,
+    /// The record of those edges, written as they were read, when the
+    /// caller asked for one (the sweep's real run).
+    record: Option<std::path::PathBuf>,
 }
 
-impl OrphanScan {
-    /// The ids of the listed edges, in the order they were read.
-    fn orphan_ids(&self) -> Vec<&str> {
-        self.orphans.iter().filter_map(|e| e.get("_id").and_then(|v| v.as_str())).collect()
-    }
+/// Where the orphan check writes its record, when it writes one: the
+/// sweep's real run. The sink opens on the first orphan edge, so a run
+/// that finds none leaves no file.
+pub(crate) struct RecordAt<'a> {
+    pub dir: &'a str,
 }
+
+/// The marker a record failure carries out of the check.
+const RECORD_FAILED: &str = "the removal record could not be written";
 
 /// The two collections a promotion writes a node into.
 const PROMOTION_COLLECTIONS: [&str; 2] = ["memory.semantic", "memory.procedural"];
@@ -2355,10 +2362,14 @@ async fn edges_naming(
     endpoints: &std::collections::BTreeMap<String, EndpointUse>,
     dangling: &[String],
     cap: usize,
-) -> Result<(Vec<serde_json::Value>, bool), String> {
+    record_at: Option<RecordAt<'_>>,
+) -> Result<(Vec<String>, bool, RemovalSummary, Option<std::path::PathBuf>), String> {
     let mut seen: std::collections::HashSet<String> = Default::default();
-    let mut orphans: Vec<serde_json::Value> = Vec::new();
-    for id in dangling {
+    let mut orphan_ids: Vec<String> = Vec::new();
+    let mut summary = RemovalSummary::default();
+    let mut sink: Option<RecordSink> = None;
+    let mut more = false;
+    'ids: for id in dangling {
         let used = endpoints.get(id).copied().unwrap_or_default();
         for (field, count) in [("source_id", used.as_source), ("target_id", used.as_target)] {
             if count == 0 {
@@ -2368,20 +2379,48 @@ async fn edges_naming(
             let mut page = ScanPage::Offset(0);
             loop {
                 let body = scan_page_query_body(&filter, ORPHAN_SCAN_PAGE, &page);
-                let (edges, meta) = db
-                    .query_with_meta("memory.edges", &body)
-                    .await
-                    .map_err(|e| format!("reading the edges of {id} failed: {e}"))?;
+                let read = db.query_with_meta("memory.edges", &body).await;
+                let (edges, meta) = match read {
+                    Ok(page) => page,
+                    Err(e) => {
+                        if let Some(sink) = sink.take() {
+                            sink.discard().await;
+                        }
+                        return Err(format!("reading the edges of {id} failed: {e}"));
+                    }
+                };
                 let page_len = edges.len();
-                for edge in edges {
+                for edge in &edges {
                     let Some(edge_id) = edge.get("_id").and_then(|v| v.as_str()) else { continue };
                     if !seen.insert(edge_id.to_string()) {
                         continue;
                     }
-                    if orphans.len() == cap {
-                        return Ok((orphans, true));
+                    if orphan_ids.len() == cap {
+                        more = true;
+                        break 'ids;
                     }
-                    orphans.push(edge);
+                    // The record, as the edges come: a sweep of a million
+                    // holds their ids and the curated lines, not the documents.
+                    if let Some(at) = &record_at {
+                        if sink.is_none() {
+                            let source = json!({ "tool": "knowledge_sweep_orphans", "target": serde_json::Value::Null, "dangling": dangling });
+                            sink = Some(
+                                RecordSink::open(at.dir, "knowledge_sweep_orphans", source, &[], true)
+                                    .await
+                                    .map_err(|e| format!("{RECORD_FAILED} ({e})"))?,
+                            );
+                        }
+                        if let Some(open) = sink.as_mut()
+                            && let Err(e) = open.edge(edge).await
+                        {
+                            if let Some(sink) = sink.take() {
+                                sink.discard().await;
+                            }
+                            return Err(format!("{RECORD_FAILED} ({e})"));
+                        }
+                    }
+                    summary.add(edge);
+                    orphan_ids.push(edge_id.to_string());
                 }
                 match next_scan_page(&meta, &page, page_len, ORPHAN_SCAN_PAGE) {
                     Some(next) => page = next,
@@ -2390,7 +2429,11 @@ async fn edges_naming(
             }
         }
     }
-    Ok((orphans, false))
+    let record = match sink {
+        Some(sink) => Some(sink.finish().await.map_err(|e| format!("{RECORD_FAILED} ({e})"))?),
+        None => None,
+    };
+    Ok((orphan_ids, more, summary, record))
 }
 
 /// The orphan check: the edges whose source or target no node collection
@@ -2400,7 +2443,7 @@ async fn edges_naming(
 /// page from the oldest, and the stats report stopped it at 100,000: what a
 /// merge left at the newest end was never seen (Embra#10). Endpoints are
 /// compared by id; an id is unique across the node collections.
-async fn find_orphan_edges(db: &WardsonDbClient, cap: usize) -> Result<OrphanScan, String> {
+async fn find_orphan_edges(db: &WardsonDbClient, cap: usize, record_at: Option<RecordAt<'_>>) -> Result<OrphanScan, String> {
     // The edges first, the nodes second: an edge is written after its two
     // nodes, so a node that an edge of the first reading names is in the
     // second unless it was deleted. The other order would report the edges
@@ -2410,17 +2453,19 @@ async fn find_orphan_edges(db: &WardsonDbClient, cap: usize) -> Result<OrphanSca
     let nodes = node_ids(db).await?;
     let dangling: Vec<String> =
         endpoints.keys().filter(|id| !nodes.contains(*id)).cloned().collect();
-    let (orphans, more) = edges_naming(db, &endpoints, &dangling, cap).await?;
-    Ok(OrphanScan { scanned, dangling, orphans, more })
+    let (orphan_ids, more, summary, record) = edges_naming(db, &endpoints, &dangling, cap, record_at).await?;
+    Ok(OrphanScan { scanned, dangling, orphan_ids, more, summary, record })
 }
 
 /// Remove the edges whose endpoints no longer resolve: what a delete left
 /// that did not take the node's edges with it, or an edge written while its
 /// node was being removed. `limit` is the most one call removes; the check
 /// itself always covers every edge.
-/// The most orphan edges one call removes. The default is 10,000; the
-/// documents of the edges are held for the reply.
-const SWEEP_LIMIT_MAX: usize = 100_000;
+/// The most orphan edges one call removes; the default is 10,000. Raised
+/// 100k → 1M in 2026-07 for a production graph, with the dispatcher's
+/// duration cap as the real backstop; the record streams, so the call holds
+/// the ids and the curated lines, never the documents.
+const SWEEP_LIMIT_MAX: usize = 1_000_000;
 
 /// Ids and nodes listed in a sweep reply before "and N more".
 const SWEEP_IDS_LISTED: usize = 100;
@@ -2653,10 +2698,19 @@ pub(crate) async fn knowledge_sweep_orphans_at(
             }
         }
     }
-    let scan = match find_orphan_edges(db, limit).await {
+    // The edge check writes the record as it reads, in a real run; a
+    // record that cannot be written stops the call before any delete.
+    let record_at = (!dry_run).then_some(RecordAt { dir: dumps_dir });
+    let scan = match find_orphan_edges(db, limit, record_at).await {
         Ok(scan) => scan,
         Err(e) => {
             let tally = PointerlessTally::of(&cases);
+            if e.starts_with(RECORD_FAILED) {
+                return format!(
+                    "knowledge_sweep_orphans: {e}; no edge was deleted ({} healed, {} adopted).",
+                    tally.healed, tally.adopted
+                );
+            }
             let nodes = if tally.healed + tally.adopted == 0 {
                 "Nothing was deleted.".to_string()
             } else {
@@ -2669,36 +2723,23 @@ pub(crate) async fn knowledge_sweep_orphans_at(
         }
     };
 
-    // The record first, then one delete per edge, by id. A `delete_by_query`
+    // One delete per edge, by id, after the record. A `delete_by_query`
     // reads the whole collection whatever its filter — about a second per
     // call at 430,000 edges — so the old chunks of a hundred ids cost more
     // than a hundred deletes do, and the cost grew with the graph, not with
     // the orphans.
-    let summary = RemovalSummary::of(&scan.orphans);
-    let mut record: Option<std::path::PathBuf> = None;
     let mut deleted: u64 = 0;
-    if !dry_run && !scan.orphans.is_empty() {
-        let source = json!({ "tool": "knowledge_sweep_orphans", "target": serde_json::Value::Null, "dangling": scan.dangling });
-        match removal::write_removal_record(dumps_dir, "knowledge_sweep_orphans", source, &[], &scan.orphans).await {
-            Ok(path) => record = Some(path),
-            Err(e) => {
-                let tally = PointerlessTally::of(&cases);
-                return format!(
-                    "knowledge_sweep_orphans: the removal record could not be written ({e}); no edge was deleted ({} healed, {} adopted).",
-                    tally.healed, tally.adopted
-                );
-            }
-        }
-        for id in scan.orphan_ids() {
+    if !dry_run {
+        for id in &scan.orphan_ids {
             if db.delete("memory.edges", id).await.is_ok() {
                 deleted += 1;
             }
         }
-        if let Some(path) = &record {
-            removal::log_removal("knowledge_sweep_orphans", "memory.edges", &summary, path);
+        if let Some(path) = &scan.record {
+            removal::log_removal("knowledge_sweep_orphans", "memory.edges", &scan.summary, path);
         }
     }
-    sweep_report(&scan, dry_run, deleted, limit, &pointerless, &cases, (&summary, record.as_deref()))
+    sweep_report(&scan, dry_run, deleted, limit, &pointerless, &cases)
 }
 
 /// The sweep's reply. Its first four lines keep the shape they always had;
@@ -2713,14 +2754,12 @@ fn sweep_report(
     limit: usize,
     pointerless: &Result<PointerlessScan, String>,
     cases: &[PointerlessCase],
-    removal: (&RemovalSummary, Option<&std::path::Path>),
 ) -> String {
-    let (summary, record) = removal;
     let mut out = format!(
         "knowledge_sweep_orphans{}:\n  scanned: {}\n  orphan_count: {}\n  deleted: {}",
         if dry_run { " (dry_run)" } else { "" },
         scan.scanned,
-        scan.orphans.len(),
+        scan.orphan_ids.len(),
         deleted
     );
     if !scan.dangling.is_empty() {
@@ -2748,8 +2787,8 @@ fn sweep_report(
         }
         Err(e) => out.push_str(&format!("\n  pointerless_nodes: not checked ({e})")),
     }
-    if !scan.orphans.is_empty() {
-        out.push_str(&removal::removal_report(summary, record, dry_run));
+    if !scan.orphan_ids.is_empty() {
+        out.push_str(&removal::removal_report(&scan.summary, scan.record.as_deref(), dry_run));
     }
     if scan.more {
         out.push_str(&format!(
@@ -3693,7 +3732,7 @@ pub struct KnowledgeSweepOrphansArgs {
     /// real run would do to it; nothing is written.
     #[serde(default)]
     pub dry_run: bool,
-    /// Most orphan edges removed in one call; clamped to [1, 100000].
+    /// Most orphan edges removed in one call; clamped to [1, 1000000].
     /// Every edge is checked on every call, whatever the limit. When more
     /// orphan edges exist than the limit, the result says so.
     #[serde(default = "default_sweep_limit")]
@@ -3959,8 +3998,10 @@ mod orphan_tests {
         OrphanScan {
             scanned: 433_546,
             dangling: dangling.iter().map(|s| s.to_string()).collect(),
-            orphans: orphans.iter().map(|s| orphan_edge(s, "same_session", "n1", "gone")).collect(),
+            orphan_ids: orphans.iter().map(|s| s.to_string()).collect(),
             more,
+            summary: RemovalSummary::default(),
+            record: None,
         }
     }
 
@@ -3972,9 +4013,6 @@ mod orphan_tests {
         })
     }
 
-    fn no_removal() -> RemovalSummary {
-        RemovalSummary::default()
-    }
 
     #[test]
     fn the_stats_line_counts_against_every_edge() {
@@ -4002,25 +4040,26 @@ mod orphan_tests {
     #[test]
     fn the_sweep_reply_keeps_its_lines_and_adds_what_is_missing() {
         assert_eq!(
-            sweep_report(&scan(&[], &[], false), true, 0, 10_000, &Ok(PointerlessScan::default()), &[], (&no_removal(), None)),
+            sweep_report(&scan(&[], &[], false), true, 0, 10_000, &Ok(PointerlessScan::default()), &[]),
             "knowledge_sweep_orphans (dry_run):\n  scanned: 433546\n  orphan_count: 0\n  deleted: 0\n  pointerless_nodes: 0\n  to_heal: 0\n  to_adopt: 0\n  duplicates: 0\n  healed: 0\n  adopted: 0"
         );
         assert_eq!(
-            sweep_report(&scan(&["e1", "e2"], &["gone"], false), false, 2, 10_000, &Ok(PointerlessScan::default()), &[], (&no_removal(), None)),
+            sweep_report(&scan(&["e1", "e2"], &["gone"], false), false, 2, 10_000, &Ok(PointerlessScan::default()), &[]),
             "knowledge_sweep_orphans:\n  scanned: 433546\n  orphan_count: 2\n  deleted: 2\n  missing_nodes: 1\n  missing_node_ids: gone\n  pointerless_nodes: 0\n  to_heal: 0\n  to_adopt: 0\n  duplicates: 0\n  healed: 0\n  adopted: 0\n  edges removed: 0 (auto 0, curated 0, other 0)\n  record: not written (nothing to remove)"
         );
         // With orphan edges the removal block follows the counts: the split,
         // the curated edges named, the record.
-        let two = scan(&["e1", "e2"], &["gone"], false);
-        let summary = RemovalSummary::of(&two.orphans);
-        let with_record = sweep_report(&two, false, 2, 10_000, &Ok(PointerlessScan::default()), &[], (&summary, Some(std::path::Path::new("/embra/workspace/KG_DUMPS/removed-knowledge_sweep_orphans-x.jsonl"))));
+        let mut two = scan(&["e1", "e2"], &["gone"], false);
+        two.summary = RemovalSummary::of(&[orphan_edge("e1", "same_session", "n1", "gone"), orphan_edge("e2", "same_session", "n1", "gone")]);
+        two.record = Some(std::path::PathBuf::from("/embra/workspace/KG_DUMPS/removed-knowledge_sweep_orphans-x.jsonl"));
+        let with_record = sweep_report(&two, false, 2, 10_000, &Ok(PointerlessScan::default()), &[]);
         assert!(with_record.ends_with("\n  adopted: 0\n  edges removed: 2 (auto 2, curated 0, other 0)\n  auto: same_session=2\n  record: /embra/workspace/KG_DUMPS/removed-knowledge_sweep_orphans-x.jsonl"), "{with_record}");
-        let capped = sweep_report(&scan(&["e1", "e2"], &["gone"], true), false, 2, 2, &Ok(PointerlessScan::default()), &[], (&no_removal(), None));
+        let capped = sweep_report(&scan(&["e1", "e2"], &["gone"], true), false, 2, 2, &Ok(PointerlessScan::default()), &[]);
         assert!(capped.ends_with("\n  more orphan edges exist than the limit of 2: run it again"), "{capped}");
         // Long lists are cut, and say by how much.
         let many: Vec<String> = (0..103).map(|i| format!("gone{i}")).collect();
         let dangling: Vec<&str> = many.iter().map(String::as_str).collect();
-        let cut = sweep_report(&scan(&[], &dangling, false), true, 0, 10_000, &Ok(PointerlessScan::default()), &[], (&no_removal(), None));
+        let cut = sweep_report(&scan(&[], &dangling, false), true, 0, 10_000, &Ok(PointerlessScan::default()), &[]);
         assert!(cut.contains("\n  missing_nodes: 103\n  missing_node_ids: gone0, gone1, "), "{cut}");
         assert!(cut.contains(", gone99 and 3 more\n  pointerless_nodes: 0"), "{cut}");
         assert_eq!(listed_ids(["a", "b"], 2, 10), "a, b");
@@ -4222,9 +4261,10 @@ mod orphan_tests {
     async fn the_check_reads_the_endpoints_of_every_edge_and_no_window_of_them() {
         let server = graph_with_one_missing_node().await;
         let db = WardsonDbClient::from_url(&server.uri());
-        let found = find_orphan_edges(&db, 10_000).await.expect("the check completes");
-        assert_eq!((found.scanned, found.dangling.as_slice(), found.orphan_ids(), found.more), (5, ["gone".to_string()].as_slice(), vec!["x1", "x2", "x3"], false));
-        assert_eq!(found.orphans[1]["edge_type"], "related_to", "the documents are kept whole for the record");
+        let found = find_orphan_edges(&db, 10_000, None).await.expect("the check completes");
+        assert_eq!((found.scanned, found.dangling.as_slice(), found.orphan_ids.as_slice(), found.more), (5, ["gone".to_string()].as_slice(), ["x1".to_string(), "x2".to_string(), "x3".to_string()].as_slice(), false));
+        assert_eq!((found.summary.auto_count(), found.summary.curated_count()), (2, 1), "the split is built as the edges are read");
+        assert!(found.record.is_none(), "no record was asked for");
         // No page of edge documents is read: every edge query names the one
         // missing id, on one side.
         let requests = server.received_requests().await.unwrap_or_default();
@@ -4298,6 +4338,33 @@ mod orphan_tests {
         assert!(out.starts_with("knowledge_sweep_orphans: the removal record could not be written ("), "{out}");
         assert!(out.ends_with("no edge was deleted (0 healed, 0 adopted)."), "{out}");
         assert!(deletes_seen(&server).await.is_empty());
+    }
+
+    /// The record streams: a sweep over the cap holds ids, not documents,
+    /// and the record still carries every edge it removes.
+    #[tokio::test]
+    async fn the_sweep_record_is_written_as_the_edges_are_read() {
+        let server = MockServer::start().await;
+        edges_grouped(&server, &[("e1", 2, 2), ("gone", 2, 0)]).await;
+        collection_holds(&server, "memory.entries", &["e1"]).await;
+        for collection in ["memory.semantic", "memory.procedural", "identity.graph"] {
+            collection_holds(&server, collection, &[]).await;
+        }
+        let many: Vec<String> = (0..250).map(|i| format!("x{i:03}")).collect();
+        let typed: Vec<(&str, &str)> = many.iter().map(|id| (id.as_str(), if id.ends_with('7') { "related_to" } else { "temporal" })).collect();
+        arm_typed(&server, "source_id", "gone", &typed).await;
+        Mock::given(method("DELETE")).respond_with(data(json!({}))).mount(&server).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let dir = TempDir::new("sweep-stream");
+        let out = knowledge_sweep_orphans_at(&db, &test_config(), false, 200, dir.path()).await;
+        assert!(out.contains("\n  orphan_count: 200\n  deleted: 200\n"), "{out}");
+        assert!(out.contains("\n  edges removed: 200 (auto 180, curated 20, other 0)\n  auto: temporal=180\n  curated: related_to=20\n    x007 "), "{out}");
+        assert!(out.ends_with("\n  more orphan edges exist than the limit of 200: run it again"), "{out}");
+        let record = std::fs::read_dir(&dir.0).unwrap().map(|e| e.unwrap().path()).next().expect("one record");
+        let lines = crate::knowledge::removal::tests::record_lines(&record);
+        assert_eq!(lines.len(), 201, "the meta line and the 200 edges the call removed, none past the limit");
+        assert_eq!(lines[200]["_id"], "x199");
+        assert_eq!(deletes_seen(&server).await.len(), 200);
     }
 
     /// A promotion node no entry points at is reported by the stats and
@@ -4512,8 +4579,8 @@ mod orphan_tests {
     async fn the_limit_is_what_one_call_removes_and_the_reply_says_more_exist() {
         let server = graph_with_one_missing_node().await;
         let db = WardsonDbClient::from_url(&server.uri());
-        let found = find_orphan_edges(&db, 2).await.expect("the check completes");
-        assert_eq!(found.orphan_ids(), ["x1", "x2"]);
+        let found = find_orphan_edges(&db, 2, None).await.expect("the check completes");
+        assert_eq!(found.orphan_ids, ["x1", "x2"]);
         assert!(found.more);
         // The check itself covered every edge.
         assert_eq!(found.scanned, 5);
@@ -4531,9 +4598,9 @@ mod orphan_tests {
         arm(&server, "source_id", "gone_a", &["x1"]).await;
         arm(&server, "target_id", "gone_b", &["x1"]).await;
         let db = WardsonDbClient::from_url(&server.uri());
-        let found = find_orphan_edges(&db, 10_000).await.expect("the check completes");
+        let found = find_orphan_edges(&db, 10_000, None).await.expect("the check completes");
         assert_eq!(found.dangling, ["gone_a", "gone_b"]);
-        assert_eq!(found.orphan_ids(), ["x1"]);
+        assert_eq!(found.orphan_ids, ["x1"]);
         assert!(!found.more);
     }
 
@@ -4557,7 +4624,7 @@ mod orphan_tests {
             collection_holds(&server, collection, &["n1"]).await;
         }
         let db = WardsonDbClient::from_url(&server.uri());
-        let err = find_orphan_edges(&db, 10_000).await.expect_err("an unread collection is no answer");
+        let err = find_orphan_edges(&db, 10_000, None).await.expect_err("an unread collection is no answer");
         assert!(err.starts_with("listing the nodes of memory.entries failed"), "{err}");
 
         let out = knowledge_sweep_orphans(&db, &test_config(), false, 10_000).await;
@@ -4587,7 +4654,7 @@ mod orphan_tests {
             collection_holds(&server, collection, &[]).await;
         }
         let db = WardsonDbClient::from_url(&server.uri());
-        let err = find_orphan_edges(&db, 10_000).await.expect_err("a short list is no answer");
+        let err = find_orphan_edges(&db, 10_000, None).await.expect_err("a short list is no answer");
         assert_eq!(err, "the node list of memory.entries is incomplete: 1 of 2");
         let out = knowledge_sweep_orphans(&db, &test_config(), false, 10_000).await;
         assert!(out.ends_with("Nothing was deleted."), "{out}");
@@ -4609,9 +4676,9 @@ mod orphan_tests {
         arm(&server, "source_id", "old_identity", &["x1"]).await;
         arm(&server, "target_id", "old_identity", &["x2"]).await;
         let db = WardsonDbClient::from_url(&server.uri());
-        let found = find_orphan_edges(&db, 10_000).await.expect("a missing collection is an answer");
+        let found = find_orphan_edges(&db, 10_000, None).await.expect("a missing collection is an answer");
         assert_eq!(found.dangling, ["old_identity"]);
-        assert_eq!(found.orphan_ids(), ["x1", "x2"]);
+        assert_eq!(found.orphan_ids, ["x1", "x2"]);
     }
 
     #[test]
