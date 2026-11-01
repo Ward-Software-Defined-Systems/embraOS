@@ -322,8 +322,14 @@ async fn grab_banner(host: &str, port: u16) -> Option<String> {
 /// Param format: `<host> [ports]`
 /// Port specs: empty (default 17 common), `80,443,8080`, `8000-8100`,
 /// `8000-8100,443` (mixed), `web`, `db`, `low`, `all`.
-pub async fn port_scan(param: &str) -> String {
-    if param.is_empty() {
+/// The `port_scan` tool: its two fields as the model sent them, never
+/// joined into one string and split again (Embra #25: a space inside
+/// `host` was read as the start of the port spec). A host with a space in
+/// it is not a private address and is refused as such.
+pub async fn port_scan(host: &str, port_spec: &str) -> String {
+    let host = host.trim();
+    let port_spec = port_spec.trim();
+    if host.is_empty() {
         return "Usage: port_scan <host> [ports]\n\
                 Examples:\n  \
                   port_scan localhost              — default 17 common ports\n  \
@@ -338,10 +344,6 @@ pub async fn port_scan(param: &str) -> String {
                 Restricted to private/loopback addresses only."
             .into();
     }
-
-    let parts: Vec<&str> = param.splitn(2, ' ').collect();
-    let host = parts[0];
-    let port_spec = if parts.len() > 1 { parts[1] } else { "" };
 
     if !is_private_address(host) {
         return format!(
@@ -803,7 +805,11 @@ mod private_address_tests {
     #[test]
     fn a_target_with_whitespace_is_refused() {
         // The bypassing shape from the Part 3 log: a space splits off a
-        // second token. The parser refuses any whitespace outright.
+        // second token. The parser refuses any whitespace outright. Every
+        // row reaches it whole through `ssh_session_start` and, since the
+        // typed fields stopped being joined and split (Embra #25), through
+        // `ssh_remote_admin` as well; the one-shot path's own guard is
+        // `a_spaced_target_on_the_one_shot_path_is_refused_before_ssh_runs`.
         for t in [
             "root@192.168.1.10 -oProxyCommand=id",
             "192.168.1.10\t-oProxyCommand=id",
@@ -890,7 +896,7 @@ mod private_address_tests {
 
     #[tokio::test]
     async fn the_ssh_tools_refuse_a_public_address_before_they_connect() {
-        let out = ssh_remote_admin("root@8.8.8.8 uptime").await;
+        let out = ssh_remote_admin("root@8.8.8.8", "uptime").await;
         assert!(out.starts_with("Denied:"), "{out}");
         let out = ssh_session_start("root@8.8.8.8").await;
         assert!(out.starts_with("Denied:"), "{out}");
@@ -903,7 +909,7 @@ mod private_address_tests {
     async fn an_option_shaped_ssh_user_is_refused_before_ssh_runs() {
         let out = ssh_session_start("-oProxyCommand=id@192.168.1.10").await;
         assert!(out.starts_with("Denied: ssh user"), "{out}");
-        let out = ssh_remote_admin("-oProxyCommand=id@192.168.1.10 uptime").await;
+        let out = ssh_remote_admin("-oProxyCommand=id@192.168.1.10", "uptime").await;
         assert!(out.starts_with("Denied: ssh user"), "{out}");
     }
 
@@ -911,8 +917,8 @@ mod private_address_tests {
     /// connect; loopback is the positive control (#56).
     #[tokio::test]
     async fn port_scan_refuses_a_public_host_before_it_connects() {
-        assert!(port_scan("8.8.8.8 80").await.starts_with("Denied:"));
-        assert!(!port_scan("127.0.0.1 1-2").await.starts_with("Denied:"));
+        assert!(port_scan("8.8.8.8", "80").await.starts_with("Denied:"));
+        assert!(!port_scan("127.0.0.1", "1-2").await.starts_with("Denied:"));
     }
 }
 
@@ -1011,20 +1017,19 @@ fn ssh_remote_admin_argv(user: &str, host: &str, port: u16, command: &str) -> Ve
     ]
 }
 
-/// Execute a single command on a remote host via SSH (EXPERIMENTAL).
-/// Param format: `<user@host> <command>` or `<host> <command>`
-pub async fn ssh_remote_admin(param: &str) -> String {
-    if param.is_empty() {
-        return "Usage: ssh_remote_admin <host> <command> or ssh_remote_admin user@host[:port <command>]".into();
+/// Execute a single command on a remote host via SSH (EXPERIMENTAL). The
+/// two fields as the model sent them: `target` is `host`, `user@host` or
+/// `user@host:port`, and reaches `parse_ssh_target` whole, so a space in it
+/// is refused there (Embra #25: the fields used to be joined with a space
+/// and split again on the first one, which moved the rest of a spaced
+/// target into the remote command). `ssh_remote_admin_argv`'s `--` keeps
+/// the remote command a positional either way.
+pub async fn ssh_remote_admin(target: &str, command: &str) -> String {
+    let target = target.trim();
+    if target.is_empty() || command.trim().is_empty() {
+        return "Usage: ssh_remote_admin target=<host | user@host | user@host:port> command=<remote command>".into();
     }
 
-    let parts: Vec<&str> = param.splitn(2, ' ').collect();
-    if parts.len() < 2 {
-        return "Usage: ssh_remote_admin <host> <command>".into();
-    }
-
-    let target = parts[0];
-    let command = parts[1];
     let (user, host, port) = match parse_ssh_target(target) {
         Ok(t) => t,
         Err(e) => return e,
@@ -1395,12 +1400,7 @@ pub struct PortScanArgs {
 
 impl PortScanArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = if self.ports.is_empty() {
-            self.host
-        } else {
-            format!("{} {}", self.host, self.ports)
-        };
-        Ok(port_scan(&param).await)
+        Ok(port_scan(&self.host, &self.ports).await)
     }
 }
 
@@ -1419,8 +1419,7 @@ pub struct SshRemoteAdminArgs {
 
 impl SshRemoteAdminArgs {
     pub async fn run(self, _ctx: DispatchContext<'_>) -> Result<String, DispatchError> {
-        let param = format!("{} {}", self.target, self.command);
-        Ok(ssh_remote_admin(&param).await)
+        Ok(ssh_remote_admin(&self.target, &self.command).await)
     }
 }
 
@@ -1502,6 +1501,51 @@ mod native_args_tests {
         assert!(err.to_string().contains("host"));
     }
 
+    /// Embra #25 (2026-10-31): the two fields used to be joined with a
+    /// space and split again on the first one, so a space inside `target`
+    /// moved the rest of it into the remote command and `parse_ssh_target`
+    /// never saw it. The typed fields reach the parser unjoined: a spaced
+    /// target is refused before ssh runs, the ends are trimmed like
+    /// `ssh_session_start`'s, and a remote command with spaces stays one
+    /// positional after `--`.
+    #[tokio::test]
+    async fn a_spaced_target_on_the_one_shot_path_is_refused_before_ssh_runs() {
+        let db = crate::db::WardsonDbClient::from_url("http://127.0.0.1:1");
+        let cfg = crate::config::tests_support::minimal_cfg();
+        let trace = embra_tools_core::new_turn_trace_handle();
+        let ctx = || DispatchContext {
+            db: &db,
+            config: &cfg,
+            session_name: "main",
+            config_tz: "UTC",
+            trace: &trace,
+            turn_index: 0,
+            deleting_session: None,
+        };
+        let out = SshRemoteAdminArgs {
+            target: "root@192.168.1.10 -oProxyCommand=id".into(),
+            command: "true".into(),
+        }
+        .run(ctx())
+        .await
+        .unwrap();
+        assert!(out.starts_with("Denied: ssh target contains whitespace"), "{out}");
+        let out = SshRemoteAdminArgs { target: " root@8.8.8.8 ".into(), command: "true".into() }
+            .run(ctx())
+            .await
+            .unwrap();
+        assert!(out.starts_with("Denied: '8.8.8.8' is not a private address"), "{out}");
+        let argv = ssh_remote_admin_argv("root", "192.168.1.10", 22, "uname -a");
+        assert_eq!(argv.last().map(String::as_str), Some("uname -a"));
+        // `port_scan` had the same join: a space in `host` is a host that is
+        // not a private address, never the start of a port spec.
+        let out = PortScanArgs { host: "127.0.0.1 1-2".into(), ports: "80".into() }
+            .run(ctx())
+            .await
+            .unwrap();
+        assert!(out.starts_with("Denied: '127.0.0.1 1-2' is not a private address"), "{out}");
+    }
+
     #[test]
     fn ssh_remote_admin_requires_both_fields() {
         let a: SshRemoteAdminArgs = serde_json::from_value(serde_json::json!({
@@ -1574,7 +1618,7 @@ mod scan_budget_tests {
     /// scan completes, counts its one port and is not cut.
     #[tokio::test]
     async fn a_scan_of_one_loopback_port_completes_within_its_budget() {
-        let out = port_scan("127.0.0.1 1").await;
+        let out = port_scan("127.0.0.1", "1").await;
         assert!(out.starts_with("=== Port Scan: 127.0.0.1 (1 ports) ==="), "{out}");
         assert!(out.contains("No open ports found.") || out.contains("open port(s) found"), "{out}");
         assert!(!out.contains("Scan cut"), "{out}");
