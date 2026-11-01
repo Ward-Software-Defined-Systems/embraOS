@@ -78,6 +78,10 @@ enum SkipReason {
     Special(&'static str),
     /// Symlink whose target resolves outside the jail at its NEW location.
     SymlinkOutside(PathBuf),
+    /// Symlink whose target sits in a fenced tree (`.git`, `.ssh`,
+    /// `.config/git`, `.guardian`) at its new location: the fence's own
+    /// sentence (Embra #29).
+    SymlinkFenced(String),
     /// `symlink_metadata` / `read_link` failed.
     Unreadable(String),
 }
@@ -91,6 +95,7 @@ impl SkipReason {
                 WORKSPACE_ROOT,
                 resolved.display()
             ),
+            SkipReason::SymlinkFenced(why) => format!("symlink target fenced: {why}"),
             SkipReason::Unreadable(e) => format!("unreadable: {e}"),
         }
     }
@@ -188,9 +193,12 @@ fn normalize_lexical(p: &Path) -> PathBuf {
 /// the tool (the root must not pre-exist) and the ancestors above it were
 /// canonicalized, so no intermediate component of `link_new` can be a
 /// pre-existing symlink. Component-wise `starts_with`, so `workspace-evil`
-/// does not pass. The caller additionally canonicalizes the resolved target
-/// when it exists (a pre-existing escaping link elsewhere in the workspace).
-fn symlink_target_ok(link_new: &Path, raw: &Path, jail: &Path) -> Result<(), PathBuf> {
+/// does not pass; a target inside the jail but in a fenced tree
+/// (`jail::fence_owned_dirs`: `.git`, `.ssh`, `.config/git`, `.guardian`) is
+/// skipped as well, like `file_symlink` refuses it (Embra #29). The caller
+/// additionally canonicalizes the resolved target when it exists (a
+/// pre-existing escaping link elsewhere in the workspace).
+fn symlink_target_ok(link_new: &Path, raw: &Path, jail: &Path) -> Result<(), SkipReason> {
     let joined = if raw.is_absolute() {
         raw.to_path_buf()
     } else {
@@ -200,11 +208,10 @@ fn symlink_target_ok(link_new: &Path, raw: &Path, jail: &Path) -> Result<(), Pat
             .join(raw)
     };
     let resolved = normalize_lexical(&joined);
-    if resolved.starts_with(jail) {
-        Ok(())
-    } else {
-        Err(resolved)
+    if !resolved.starts_with(jail) {
+        return Err(SkipReason::SymlinkOutside(resolved));
     }
+    super::jail::fence_owned_dirs(jail, &resolved).map_err(SkipReason::SymlinkFenced)
 }
 
 /// `cp -r a a/b` guard — component-wise, so `a-other` is not "inside" `a`.
@@ -673,7 +680,7 @@ async fn plan_tree(src_root: &Path, dst_root: &Path, opts: &CopyOptions) -> Resu
                             _ => plan.symlinks.push((rel, raw)),
                         }
                     }
-                    Err(resolved) => plan.skipped.push((rel, SkipReason::SymlinkOutside(resolved))),
+                    Err(reason) => plan.skipped.push((rel, reason)),
                 }
             } else if ft.is_dir() {
                 plan.dirs.push((rel.clone(), mode_of(&md)));
@@ -1712,7 +1719,7 @@ mod file_copy_tests {
         assert!(symlink_target_ok(link, Path::new("../a.txt"), jail).is_ok());
         assert!(symlink_target_ok(link, Path::new("../../x"), jail).is_ok()); // /embra/workspace/x
         let err = symlink_target_ok(link, Path::new("../../../state/key"), jail).unwrap_err();
-        assert_eq!(err, PathBuf::from("/embra/state/key")); // one level too far
+        assert_eq!(err, SkipReason::SymlinkOutside(PathBuf::from("/embra/state/key"))); // one level too far
     }
 
     #[test]
@@ -1722,8 +1729,28 @@ mod file_copy_tests {
         assert!(symlink_target_ok(link, Path::new("/embra/workspace/repos/x"), jail).is_ok());
         assert_eq!(
             symlink_target_ok(link, Path::new("/etc/passwd"), jail).unwrap_err(),
-            PathBuf::from("/etc/passwd")
+            SkipReason::SymlinkOutside(PathBuf::from("/etc/passwd"))
         );
+    }
+
+    /// Embra #29: a link recreated by a tree copy never points into a fenced
+    /// tree, by an absolute or a relative target; the skip names the fence.
+    #[test]
+    fn u06_symlink_target_into_a_fenced_tree_is_skipped() {
+        let jail = Path::new("/embra/workspace");
+        let link = Path::new("/embra/workspace/copy/link");
+        for (raw, names) in [
+            ("/embra/workspace/.guardian/tools/x", "Guardian build tree"),
+            ("../repo/.git/hooks/pre-commit", ".git directory"),
+            ("../.ssh/config", "SSH directory"),
+            ("/embra/workspace/.config/git/ignore", "git configuration directory"),
+        ] {
+            match symlink_target_ok(link, Path::new(raw), jail) {
+                Err(SkipReason::SymlinkFenced(why)) => assert!(why.contains(names), "{raw}: {why}"),
+                other => panic!("{raw}: {other:?}"),
+            }
+        }
+        assert!(symlink_target_ok(link, Path::new("/embra/workspace/repo/src/x"), jail).is_ok());
     }
 
     #[test]

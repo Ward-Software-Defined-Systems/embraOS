@@ -364,15 +364,26 @@ pub(crate) async fn mkdir_in(root: &str, raw_path: &str) -> String {
 /// The `file_symlink` tool under a root. Workspace restricted (both the
 /// target and the link path must be under `/embra/workspace/`); dangling
 /// targets are allowed — operators can create a forward-reference symlink
-/// and populate the target afterwards. The target keeps the lexical check
-/// alone (a dangling target is allowed, so there may be nothing to
-/// resolve); the link path runs the canonical check, so a link is never
-/// created under a directory that leaves the workspace.
+/// and populate the target afterwards. The link's content is the lexical
+/// target (a dangling target is allowed, so there may be nothing to
+/// resolve); beside it the target takes the write jail's checks like the
+/// link path — the fence on the path as written and on the real path,
+/// through `jailed_write_path`, whose `real` resolves the nearest existing
+/// ancestor and so still passes a dangling target — so a link into
+/// `.guardian`, `.git`, `.ssh` or `.config/git`, or one whose target leads
+/// out through another link, is refused at creation (Embra #29: the link
+/// was created and every writer refused to write through it, so the
+/// protection rested on each writer resolving the real path). The link
+/// path runs the canonical check, so a link is never created under a
+/// directory that leaves the workspace.
 pub(crate) async fn file_symlink_in(root: &str, raw_target: &str, raw_link: &str) -> String {
     let target = match super::jail::lexical(root, raw_target) {
         Ok(p) => p,
         Err(e) => return e,
     };
+    if let Err(e) = jailed_write_path(root, raw_target).await {
+        return e;
+    }
     let link = match jailed_write_path(root, raw_link).await {
         Ok(p) => p,
         Err(e) => return e,
@@ -1405,6 +1416,38 @@ mod write_jail_tests {
         let out = file_write_in(t.root(), "repo/.ssh/config", "Host example\n").await;
         assert!(!out.starts_with("Denied:"), "{out}");
         assert!(t.join("repo/.ssh/config").exists());
+    }
+
+    /// Embra #29: a link whose target sits in a fenced tree (`.guardian`,
+    /// `.git`, `.ssh`, `.config/git`) is refused when it is created, by the
+    /// path as written and by where it leads through another link; every
+    /// writer refused to write through such a link already, so this is the
+    /// same fence applied at creation. A dangling target still links.
+    #[tokio::test]
+    async fn a_symlink_into_a_fenced_tree_is_refused_at_creation() {
+        let t = TempDir::new("symlink-fence");
+        for dir in [".guardian/tools", ".git/hooks", ".ssh", ".config/git"] {
+            std::fs::create_dir_all(t.join(dir)).unwrap();
+        }
+        link(&t.join(".guardian"), &t.join("via-link"));
+        let outside = TempDir::new("symlink-fence-outside");
+        link(&outside.0, &t.join("esc"));
+
+        for (target, names) in [
+            (".guardian/tools/x", "Guardian build tree"),
+            (".git/hooks/pre-commit", ".git directory"),
+            (".ssh/config", "SSH directory"),
+            (".config/git/ignore", "git configuration directory"),
+            ("via-link/tools/x", "Guardian build tree"),
+            ("esc/x", "outside"),
+        ] {
+            let out = file_symlink_in(t.root(), target, "probe-link").await;
+            assert!(out.starts_with("Denied:") && out.contains(names), "{target}: {out}");
+            assert!(std::fs::symlink_metadata(t.join("probe-link")).is_err(), "{target}: no link created");
+        }
+        let out = file_symlink_in(t.root(), "future/dir/file.txt", "forward").await;
+        assert!(out.starts_with("Symlink created:"), "{out}");
+        assert!(std::fs::symlink_metadata(t.join("forward")).unwrap().file_type().is_symlink());
     }
 
     #[tokio::test]
