@@ -26,6 +26,53 @@ fn process_uptime_secs() -> u64 {
     START_TIME.get().map(|t| t.elapsed().as_secs()).unwrap_or(0)
 }
 
+// ── The running kernel ──
+
+/// Where the kernel names its release (`uname -r`). The brain reads it
+/// itself, as `security_check` reads `/proc/mounts`: the read jail is for
+/// paths a tool is given. The QEMU scripts boot with `quiet`, which keeps
+/// the kernel's own `Linux version …` banner (a notice, below the quiet
+/// console level) off the serial console, so `system_status` and
+/// `uptime_report` are where the running kernel is named (2026-10-31).
+const KERNEL_RELEASE_PATH: &str = "/proc/sys/kernel/osrelease";
+
+/// The running kernel's release, or none when it could not be read.
+fn kernel_release() -> Option<String> {
+    std::fs::read_to_string(KERNEL_RELEASE_PATH).ok().and_then(|s| kernel_release_from(&s))
+}
+
+/// The release as `uname -r` prints it: the first line, trimmed; an empty
+/// file is none.
+fn kernel_release_from(contents: &str) -> Option<String> {
+    let release = contents.lines().next().unwrap_or("").trim();
+    (!release.is_empty()).then(|| release.to_string())
+}
+
+#[cfg(test)]
+mod kernel_release_tests {
+    use super::{kernel_release, kernel_release_from};
+
+    #[test]
+    fn the_release_is_the_first_line_trimmed_and_an_empty_file_is_none() {
+        assert_eq!(kernel_release_from("6.18.60\n"), Some("6.18.60".to_string()));
+        assert_eq!(kernel_release_from("6.18.60-dirty\n"), Some("6.18.60-dirty".to_string()));
+        assert_eq!(kernel_release_from(" 6.18.60 \nsecond line"), Some("6.18.60".to_string()));
+        assert_eq!(kernel_release_from(""), None);
+        assert_eq!(kernel_release_from("\n"), None);
+    }
+
+    /// The reader names the kernel this process runs on: what `uname -r`
+    /// prints.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_kernel_release_is_the_running_kernels() {
+        let uname = std::process::Command::new("uname").arg("-r").output().expect("uname runs on every Linux host");
+        let expected = String::from_utf8_lossy(&uname.stdout).trim().to_string();
+        assert!(!expected.is_empty(), "uname -r printed nothing");
+        assert_eq!(kernel_release(), Some(expected));
+    }
+}
+
 // ── Tool Dispatch ──
 //
 // Native tool-use dispatch lives in `tools/registry.rs` — the legacy
@@ -114,6 +161,9 @@ pub struct EmbeddingHealth {
 #[derive(Debug, Serialize)]
 pub struct SystemStatus {
     pub version: String,
+    /// The running kernel's release (`uname -r`, from
+    /// `/proc/sys/kernel/osrelease`); null when it could not be read.
+    pub kernel: Option<String>,
     pub uptime_seconds: u64,
     pub memory_usage_mb: Option<u64>,
     pub soul_status: String,
@@ -200,6 +250,7 @@ pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
     let failures = crate::embedding::cache::failures().await;
     SystemStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
+        kernel: kernel_release(),
         uptime_seconds: process_uptime_secs(),
         memory_usage_mb: get_memory_usage_mb(),
         soul_status: soul_status.into(),
@@ -311,8 +362,13 @@ async fn uptime_report(db: &WardsonDbClient, session_name: &str) -> String {
     // (Embra #26).
     let soul_status = crate::learning::seal_state(db).await.status_word();
 
+    // The running kernel, as `system_status` carries it: the one surface
+    // for it, since the QEMU scripts boot with `quiet`.
+    let kernel = kernel_release().unwrap_or_else(|| "unknown".to_string());
+
     format!(
         "Uptime Report:\n\
+         Kernel: {}\n\
          Process uptime: {}h {}m\n\
          {}\
          WardSONDB: {}\n\
@@ -321,6 +377,7 @@ async fn uptime_report(db: &WardsonDbClient, session_name: &str) -> String {
          Total messages exchanged: {}\n\
          Memory entries stored: {}\n\
          Soul: {}",
+        kernel,
         hours,
         mins,
         session_age_line,
@@ -351,6 +408,22 @@ mod uptime_report_tests {
         let report = uptime_report(&db, "main").await;
         assert!(report.ends_with("Soul: unknown"), "{report}");
         assert!(!report.contains("unsealed"), "{report}");
+    }
+
+    /// The second line names the running kernel, `unknown` when the
+    /// release could not be read. The QEMU scripts boot with `quiet`, so
+    /// the kernel's own banner never reaches the serial console; this
+    /// report and `system_status` are where the kernel is read.
+    #[tokio::test]
+    async fn the_kernel_line_names_the_running_release() {
+        let server = MockServer::start().await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let report = uptime_report(&db, "main").await;
+        let expected = super::kernel_release().unwrap_or_else(|| "unknown".to_string());
+        assert_eq!(report.lines().nth(1), Some(format!("Kernel: {expected}").as_str()), "{report}");
+        if cfg!(target_os = "linux") {
+            assert_ne!(expected, "unknown", "a Linux host names its kernel");
+        }
     }
 }
 
@@ -711,6 +784,7 @@ mod native_args_tests {
         // sit under wardsondb.lifetime so the wardsondb scope is honest.
         let s = SystemStatus {
             version: "test".into(),
+            kernel: Some("6.18.60".into()),
             uptime_seconds: 0,
             memory_usage_mb: None,
             soul_status: "sealed".into(),
@@ -737,6 +811,7 @@ mod native_args_tests {
             embedding: EmbeddingHealth { failures_write: 0, failures_query: 0, last_failure: None },
         };
         let v = serde_json::to_value(&s).unwrap();
+        assert_eq!(v["kernel"], "6.18.60");
         assert!(v.get("provider").is_none(), "no probe yet → no provider block");
         assert!(v.get("provider_gateway").is_none(), "no gateway stored → no block");
         assert_eq!(v["embedding"]["failures_write"], 0);
@@ -759,6 +834,21 @@ mod native_args_tests {
         assert_eq!(v["wardsondb"]["memory_collections"][0]["name"], "memory.entries");
         assert_eq!(v["wardsondb"]["memory_collections"][0]["count"], 42);
         assert_eq!(v["wardsondb"]["memory_collections"][0]["saturated"], false);
+    }
+
+    /// The live builder carries the running kernel's release under
+    /// `kernel`, whatever the database answers (a server with no routes
+    /// here: every read fails and every other field falls back).
+    #[tokio::test]
+    async fn system_status_names_the_running_kernel() {
+        let server = wiremock::MockServer::start().await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let status = system_status(&db).await;
+        assert_eq!(status.kernel, kernel_release());
+        if cfg!(target_os = "linux") {
+            let v = serde_json::to_value(&status).unwrap();
+            assert!(v["kernel"].as_str().is_some_and(|k| !k.is_empty()), "{v}");
+        }
     }
 }
 
