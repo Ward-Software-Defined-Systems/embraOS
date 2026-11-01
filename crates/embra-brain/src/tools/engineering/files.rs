@@ -381,13 +381,15 @@ pub(crate) async fn file_symlink_in(root: &str, raw_target: &str, raw_link: &str
         Ok(p) => p,
         Err(e) => return e,
     };
-    if let Err(e) = jailed_write_path(root, raw_target).await {
-        return e;
-    }
     let link = match jailed_write_path(root, raw_link).await {
         Ok(p) => p,
         Err(e) => return e,
     };
+    // The target's turn, after the link's: a link path that leaves the
+    // workspace is refused by its own name first.
+    if let Err(e) = jailed_write_path(root, raw_target).await {
+        return e;
+    }
 
     if tokio::fs::symlink_metadata(&link).await.is_ok() {
         return format!(
