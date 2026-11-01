@@ -153,7 +153,7 @@ async fn main() -> anyhow::Result<()> {
         start_time: std::time::Instant::now(),
     };
 
-    let addr = format!("0.0.0.0:{}", config.port).parse()?;
+    let addr = format!("{}:{}", config.bind, config.port).parse()?;
     info!("embra-trustd listening on {}", addr);
 
     Server::builder()

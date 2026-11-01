@@ -3,6 +3,11 @@ use std::path::PathBuf;
 
 #[derive(Clone)]
 pub struct TrustdConfig {
+    /// The address the gRPC server binds. Loopback by default: every client
+    /// (apid, embrad, embra-web) dials `127.0.0.1`, and the service mints
+    /// certificates, so it listens to the machine alone like the database
+    /// (the round-2 verification of 2026-10-31, GitHub #10).
+    pub bind: String,
     pub port: u16,
     pub state_dir: PathBuf,
     pub wardsondb_url: String,
@@ -17,13 +22,14 @@ impl TrustdConfig {
     /// name first, as `std::env::args` gives it), so a test runs it; the
     /// flags come through the one parser of the services
     /// (`embra_common::args`, #41). The defaults are the literals embrad
-    /// passes (`embrad/src/supervisor.rs`): port 50001, `/embra/state`,
-    /// `http://127.0.0.1:8090`. A flag without its value is a configuration
-    /// error, and the service stops there rather than guess.
+    /// passes (`embrad/src/supervisor.rs`): bind `127.0.0.1`, port 50001,
+    /// `/embra/state`, `http://127.0.0.1:8090`. A flag without its value is
+    /// a configuration error, and the service stops there rather than guess.
     pub fn from_args_iter<I: IntoIterator<Item = String>>(args: I) -> Self {
-        let flags = Flags::parse(args.into_iter().skip(1), &["--port", "--state-dir", "--wardsondb-url"])
+        let flags = Flags::parse(args.into_iter().skip(1), &["--bind", "--port", "--state-dir", "--wardsondb-url"])
             .unwrap_or_else(|e| panic!("{e}"));
         Self {
+            bind: flags.value("--bind").unwrap_or("127.0.0.1").to_string(),
             port: flags.value("--port").map_or(50001, |v| v.parse().expect("Invalid port")),
             state_dir: flags.value("--state-dir").map_or_else(|| PathBuf::from("/embra/state"), PathBuf::from),
             wardsondb_url: flags.value("--wardsondb-url").unwrap_or("http://127.0.0.1:8090").to_string(),
@@ -55,6 +61,7 @@ mod tests {
     #[test]
     fn the_defaults_and_the_derived_paths_are_the_contract() {
         let cfg = parse(&[]);
+        assert_eq!(cfg.bind, "127.0.0.1");
         assert_eq!(cfg.port, 50001);
         assert_eq!(cfg.state_dir, PathBuf::from("/embra/state"));
         assert_eq!(cfg.wardsondb_url, "http://127.0.0.1:8090");
@@ -71,6 +78,8 @@ mod tests {
         assert_eq!(cfg.wardsondb_url, "http://db:1");
         let cfg = parse(&["--port", "8", "ignored", "--state-dir", "/y"]);
         assert_eq!((cfg.port, cfg.state_dir), (8, PathBuf::from("/y")));
+        let cfg = parse(&["--bind", "0.0.0.0"]);
+        assert_eq!(cfg.bind, "0.0.0.0");
     }
 
     #[test]

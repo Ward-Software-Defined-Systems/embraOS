@@ -72,7 +72,19 @@ impl NodeStore {
         if let Some(doc) = self.get(collection, id) {
             return Some(doc.clone());
         }
-        let doc = db.read(collection, id).await.ok()?;
+        // A document that is not there is an absence; any other failure is
+        // logged, so a redirect target that could not be read never passes
+        // as one that does not exist in silence (the round-2 verification of
+        // 2026-10-31). The caller goes on without it either way.
+        let doc = match db.read(collection, id).await {
+            Ok(doc) => doc,
+            Err(e) => {
+                if !crate::db::error::is_not_found(&e) {
+                    tracing::warn!("point read of {collection}/{id} failed: {e}");
+                }
+                return None;
+            }
+        };
         self.docs.insert((collection.to_string(), id.to_string()), doc.clone());
         Some(doc)
     }

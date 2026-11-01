@@ -11,12 +11,16 @@ use super::git::{normalize_git_host, resolve_git_tokens};
 use crate::db::WardsonDbClient;
 use crate::tools::registry::DispatchContext;
 
-/// The reqwest client for GitLab API calls: `crate::net::client()`, which
-/// carries the stock webpki roots and the operator's CA drop-ins like every
-/// client of the brain, so a self-hosted instance behind a private CA
-/// (e.g. mkcert) verifies.
+/// The reqwest client for GitLab API calls: `crate::net::shared()`, the one
+/// client per process the chat and GitHub paths take (#36), which carries
+/// the stock webpki roots and the operator's CA drop-ins like every client
+/// of the brain, so a self-hosted instance behind a private CA (e.g.
+/// mkcert) verifies. It was built per call "so a seeded operator CA takes
+/// effect without a restart", a reason that was never true: the roots are
+/// read once per process (`net::operator_roots`), so a drop-in seeded
+/// while the brain runs takes effect at the next boot either way.
 fn gitlab_client() -> reqwest::Client {
-    crate::net::client()
+    crate::net::shared()
 }
 
 /// Percent-encode a GitLab project path (`namespace/project`) for use as a

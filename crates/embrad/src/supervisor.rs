@@ -235,6 +235,9 @@ impl Supervisor {
             name: "embra-trustd".to_string(),
             binary: "/usr/bin/embra-trustd".to_string(),
             args: vec![
+                // Loopback alone, like the database: its clients are the
+                // services beside it, and it mints certificates.
+                "--bind".to_string(), "127.0.0.1".to_string(),
                 "--port".to_string(), "50001".to_string(),
                 "--state-dir".to_string(), "/embra/state".to_string(),
                 "--wardsondb-url".to_string(), "http://127.0.0.1:8090".to_string(),
@@ -1334,5 +1337,19 @@ mod launch_argument_tests {
         assert_eq!(pair[1], "127.0.0.1");
         let port = args.windows(2).find(|w| w[0] == "--port").expect("--port is passed");
         assert_eq!(port[1], "8090");
+    }
+
+    /// The certificate-minting service listens to the machine alone as
+    /// well: every client dials loopback (the round-2 verification of
+    /// 2026-10-31, GitHub #10).
+    #[test]
+    fn the_trust_service_is_told_to_listen_on_loopback_alone() {
+        let mut supervisor = Supervisor::new();
+        supervisor.register_services();
+        let args = supervisor.service_args("embra-trustd").expect("trustd is registered");
+        let pair = args.windows(2).find(|w| w[0] == "--bind").expect("--bind is passed");
+        assert_eq!(pair[1], "127.0.0.1");
+        let port = args.windows(2).find(|w| w[0] == "--port").expect("--port is passed");
+        assert_eq!(port[1], "50001");
     }
 }

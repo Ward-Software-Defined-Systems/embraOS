@@ -160,8 +160,10 @@ pub(crate) fn bounded() -> reqwest::ClientBuilder {
 }
 
 /// A client with the redirect policy, the roots and the two bounds (#26).
-/// The GitLab client is this, built per call so a seeded operator CA takes
-/// effect without a restart; the chat and GitHub clients take `shared`.
+/// The chat, GitHub and GitLab clients take `shared`, one per process; this
+/// builds a fresh one for a caller that needs its own. The roots are read
+/// once per process either way (`operator_roots`), so a CA drop-in seeded
+/// while the brain runs takes effect at the next boot.
 pub(crate) fn client() -> reqwest::Client {
     bounded()
         .build()
