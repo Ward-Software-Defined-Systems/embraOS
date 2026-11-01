@@ -143,8 +143,10 @@ pub fn is_private_address(host: &str) -> bool {
     let ip: std::net::IpAddr = match host.parse() {
         Ok(ip) => ip,
         Err(_) => {
-            // Could be a hostname — resolve it and check
-            // For safety, reject hostnames that aren't "localhost"
+            // A name. It is never resolved: a resolved name could be pointed
+            // at a public address between this check and ssh's own lookup.
+            // `localhost` is the one name that passes; `not_private_denial`
+            // tells the operator to give the address.
             return host == "localhost";
         }
     };
