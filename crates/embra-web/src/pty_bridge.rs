@@ -94,7 +94,7 @@ fn restart_delay(early_exits: u32) -> Duration {
     (RESTART_BASE * 2u32.pow(doublings)).min(RESTART_MAX)
 }
 
-/// "code 2 (embra-apid could not be reached)", "killed by Terminated" — for
+/// "code 2: embra-apid could not be reached", "killed by Terminated" — for
 /// the log and for the operator.
 fn describe(status: &ExitStatus) -> String {
     describe_exit(status.exit_code(), status.signal())
@@ -108,11 +108,11 @@ fn describe_exit(code: u32, signal: Option<&str>) -> String {
         return format!("killed by {signal}");
     }
     match code {
-        0 => "code 0 (the console ended of itself)".to_string(),
-        1 => "code 1 (the console could not open its conversation or set up its screen)".to_string(),
-        2 => "code 2 (embra-apid could not be reached)".to_string(),
-        3 => "code 3 (the gateway ended the conversation stream)".to_string(),
-        4 => "code 4 (the conversation stream failed)".to_string(),
+        0 => "code 0: the console ended of itself".to_string(),
+        1 => "code 1: the console could not open its conversation or set up its screen".to_string(),
+        2 => "code 2: embra-apid could not be reached".to_string(),
+        3 => "code 3: the gateway ended the conversation stream".to_string(),
+        4 => "code 4: the conversation stream failed".to_string(),
         n => format!("code {n}"),
     }
 }
@@ -125,11 +125,11 @@ mod exit_line_tests {
     /// and an unknown code is a number.
     #[test]
     fn the_exit_line_names_the_consoles_exit_codes() {
-        assert_eq!(describe_exit(2, None), "code 2 (embra-apid could not be reached)");
-        assert_eq!(describe_exit(3, None), "code 3 (the gateway ended the conversation stream)");
-        assert_eq!(describe_exit(4, None), "code 4 (the conversation stream failed)");
-        assert!(describe_exit(1, None).starts_with("code 1 ("));
-        assert!(describe_exit(0, None).starts_with("code 0 ("));
+        assert_eq!(describe_exit(2, None), "code 2: embra-apid could not be reached");
+        assert_eq!(describe_exit(3, None), "code 3: the gateway ended the conversation stream");
+        assert_eq!(describe_exit(4, None), "code 4: the conversation stream failed");
+        assert!(describe_exit(1, None).starts_with("code 1: "));
+        assert!(describe_exit(0, None).starts_with("code 0: "));
         assert_eq!(describe_exit(7, None), "code 7");
         assert_eq!(describe_exit(0, Some("Terminated")), "killed by Terminated");
     }
@@ -551,7 +551,7 @@ mod tests {
         // A restart reopens at the operator's last size.
         assert_eq!((size.cols, size.rows, size.pixel_width, size.pixel_height), (100, 30, 900, 540));
         assert!(status.success(), "{status:?}");
-        assert_eq!(describe(&status), "code 0");
+        assert_eq!(describe(&status), "code 0: the console ended of itself");
     }
 
     /// A console that gives up says so with its exit code, and the code
@@ -598,9 +598,9 @@ mod tests {
         }
         let status = session.join().expect("session thread").expect("session result");
         assert!(!status.success());
-        assert_eq!(describe(&status), "code 2");
+        assert_eq!(describe(&status), "code 2: embra-apid could not be reached");
         let banner = restart_banner(&describe(&status), restart_delay(3));
-        assert!(banner.contains("embra-console exited (code 2)"), "{banner:?}");
+        assert!(banner.contains("embra-console exited (code 2: embra-apid could not be reached)"), "{banner:?}");
         assert!(banner.contains("restarting in 4 s"), "{banner:?}");
     }
 
