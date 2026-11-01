@@ -312,6 +312,10 @@ pub(crate) fn validate_clone_url(url: &str) -> Result<(), String> {
 /// options. Git refuses these itself ("strange hostname"); the tool
 /// refuses them first, so the guarantee is the OS's and not the installed
 /// binary's. An IPv6 literal in brackets is split at its closing bracket.
+/// A `%` anywhere in the three is refused as well: git decodes a
+/// percent-encoded authority before its own checks, so `%2D` would reach
+/// it as `-` past this one (Embra #27; an IPv6 zone id, `%25eth0`, is
+/// refused with it).
 fn option_shaped_authority(url: &str, authority: &str, with_port: bool) -> Result<(), String> {
     let (user, hostport) = match authority.rsplit_once('@') {
         Some((user, hostport)) => (Some(user), hostport),
@@ -338,8 +342,31 @@ fn option_shaped_authority(url: &str, authority: &str, with_port: bool) -> Resul
                 "Denied: '{url}' names the {what} '{value}', which begins with '-' and would be read as an option"
             ));
         }
+        if let Some(value) = value
+            && value.contains('%')
+        {
+            return Err(format!(
+                "Denied: '{url}' percent-encodes its {what} '{value}'; git decodes it before its own checks, so write it as it is"
+            ));
+        }
     }
     Ok(())
+}
+
+/// The remote of a fetch: a name (`origin`), a positional; or a URL, which
+/// takes the clone tool's validator, the authority check included, so an
+/// option-shaped host in `ssh://-oProxyCommand=…/r` is refused by the OS
+/// and not by git's own "strange hostname" line (Embra #27: `positional`
+/// alone read the URL as a token that begins with `s`). URL-shaped is a
+/// scheme (`://`) or the scp form, a `:` before any `/`.
+fn fetch_remote(remote: &str) -> Result<&str, String> {
+    let scp_form = remote.find(':').is_some_and(|c| c > 0 && !remote[..c].contains('/'));
+    if remote.contains("://") || scp_form {
+        validate_clone_url(remote)?;
+        Ok(remote)
+    } else {
+        positional(remote, "remote")
+    }
 }
 
 /// The flags `git_log` passes on as given: presentation only, nothing that
@@ -699,10 +726,12 @@ pub async fn git_pull(db: &WardsonDbClient, path: &str) -> String {
 }
 
 /// The argv of `git fetch` after `-C <dir>`: the flags, then `--`, then the
-/// remote and the optional branch, each refused when it begins with `-`
-/// (`positional`). A fetch moves the remote-tracking refs (and tags) only;
-/// the working tree and the current branch are untouched, which is what
-/// makes it safe before a merge, a push or a status, and from a cron.
+/// remote and the optional branch. The remote is a name or a URL
+/// (`fetch_remote`: a URL through the clone tool's validator), the branch
+/// is refused when it begins with `-` (`positional`). A fetch moves the
+/// remote-tracking refs (and tags) only; the working tree and the current
+/// branch are untouched, which is what makes it safe before a merge, a push
+/// or a status, and from a cron.
 fn git_fetch_args<'a>(remote: &'a str, branch: Option<&'a str>, prune: bool, tags: bool) -> Result<Vec<&'a str>, String> {
     let mut args = vec!["fetch"];
     if prune {
@@ -712,7 +741,7 @@ fn git_fetch_args<'a>(remote: &'a str, branch: Option<&'a str>, prune: bool, tag
         args.push("--tags");
     }
     args.push("--");
-    args.push(positional(remote, "remote")?);
+    args.push(fetch_remote(remote)?);
     if let Some(b) = branch {
         args.push(positional(b, "branch")?);
     }
@@ -1658,6 +1687,9 @@ mod argument_tests {
 
     /// `git_fetch` places its flags, then `--`, then the remote and the
     /// branch, and refuses an option-shaped remote or branch before git runs.
+    /// A URL as the remote takes the clone validator: an option-shaped host
+    /// is refused by the OS (Embra #27, where git's own check had been the
+    /// only line), a well-formed URL or scp form passes, a name is a name.
     #[test]
     fn git_fetch_puts_the_flags_before_a_double_dash_and_refuses_an_option_shaped_remote_or_branch() {
         assert_eq!(git_fetch_args("origin", None, false, false).unwrap(), vec!["fetch", "--", "origin"]);
@@ -1667,6 +1699,14 @@ mod argument_tests {
         );
         assert!(git_fetch_args("--upload-pack=id", None, false, false).unwrap_err().contains("begins with '-'"));
         assert!(git_fetch_args("origin", Some("-x"), false, false).unwrap_err().contains("begins with '-'"));
+        for ok in ["https://gitlab.example/o/r.git", "ssh://git@h:2222/r.git", "git@h:o/r.git"] {
+            assert_eq!(git_fetch_args(ok, None, false, false).unwrap(), vec!["fetch", "--", ok], "{ok}");
+        }
+        let err = git_fetch_args("ssh://-oProxyCommand=id/r", None, false, false).unwrap_err();
+        assert!(err.contains("names the host '-oProxyCommand=id'"), "{err}");
+        let err = git_fetch_args("ssh://%2DoProxyCommand=id/r", None, false, false).unwrap_err();
+        assert!(err.contains("percent-encodes its host"), "{err}");
+        assert!(git_fetch_args("ext::sh -c id", None, false, false).unwrap_err().contains("remote helper"));
     }
 
     /// `git_log` passes a count, the listed flags and revisions or paths,
@@ -1748,10 +1788,19 @@ mod argument_tests {
             "ssh://h:-1/r",
             "https://-h/r",
             "git@-h:o/r.git",
+            // A percent-encoded dash passes a prefix test and reaches git
+            // decoded (Embra #27): any `%` in the authority is refused.
+            "ssh://%2DoProxyCommand=id/r",
+            "ssh://%2doProxyCommand=id@h/r",
+            "https://h%2D/r",
+            "ssh://h:%2D1/r",
+            "git@h%2D:o/r.git",
         ] {
             let err = validate_clone_url(bad).unwrap_err();
             assert!(err.starts_with("Denied:"), "{bad}: {err}");
         }
+        let err = validate_clone_url("ssh://%2DoProxyCommand=id/r").unwrap_err();
+        assert!(err.contains("percent-encodes its host '%2DoProxyCommand=id'"), "{err}");
         let err = validate_clone_url("ssh://-oProxyCommand=id/r").unwrap_err();
         assert!(err.contains("names the host '-oProxyCommand=id'"), "{err}");
         let err = validate_clone_url("ssh://-oProxyCommand=id@h/r").unwrap_err();
@@ -1776,6 +1825,7 @@ mod argument_tests {
             ("rm", git_rm("repo", "-r").await),
             ("mv", git_mv("repo", "-k", "x").await),
             ("clone", git_clone(&db, "--upload-pack=id", None).await),
+            ("fetch", git_fetch(&db, "repo", "ssh://-oProxyCommand=id/r", None, false, false).await),
         ];
         for (what, out) in cases {
             assert!(out.starts_with("Denied:"), "{what}: {out}");

@@ -176,10 +176,11 @@ where
 }
 
 /// The tools whose input leaves the OS: a GitHub or GitLab request, a
-/// commit message, a push, a clone, a remote command, an image prompt, a
-/// Guardian call. [`dispatch`] refuses an input that carries one of the
-/// operator's stored secrets (`crate::secrets::collect`) before the handler
-/// runs. Guard `every_outbound_tool_is_listed`.
+/// commit message, a push, a clone, a fetch (its remote may be a URL), a
+/// remote command, an image prompt, a Guardian call. The dispatcher refuses
+/// an input that carries one of the operator's stored secrets
+/// (`crate::secrets::collect`) before the handler runs. Guard
+/// `every_outbound_tool_is_listed`.
 pub(crate) const OUTBOUND_TOOLS: &[&str] = &[
     "gh_issue_close", "gh_issue_comment", "gh_issue_create", "gh_issue_reopen", "gh_issue_view",
     "gh_issues", "gh_pr_close", "gh_pr_comment", "gh_pr_create", "gh_pr_merge", "gh_pr_view",
@@ -187,7 +188,7 @@ pub(crate) const OUTBOUND_TOOLS: &[&str] = &[
     "gl_board_view", "gl_boards", "gl_issue_close", "gl_issue_comment", "gl_issue_create",
     "gl_issue_reopen", "gl_issue_view", "gl_issues", "gl_mr_close", "gl_mr_comment",
     "gl_mr_create", "gl_mr_merge", "gl_mr_view", "gl_mrs",
-    "git_clone", "git_commit", "git_push",
+    "git_clone", "git_commit", "git_fetch", "git_push",
     "ssh_remote_admin", "ssh_session_end", "ssh_session_exec", "ssh_session_start",
     "image_generate", "guardian_call",
 ];
@@ -561,7 +562,7 @@ mod outbound_tests {
             let outbound = name.starts_with("gh_")
                 || name.starts_with("gl_")
                 || name.starts_with("ssh_")
-                || matches!(*name, "git_clone" | "git_commit" | "git_push" | "image_generate" | "guardian_call");
+                || matches!(*name, "git_clone" | "git_commit" | "git_fetch" | "git_push" | "image_generate" | "guardian_call");
             assert_eq!(OUTBOUND_TOOLS.contains(name), outbound, "{name}");
         }
         for name in OUTBOUND_TOOLS {
