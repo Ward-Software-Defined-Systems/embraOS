@@ -38,14 +38,15 @@ const MAX_SCHEMA: usize = 8 * 1024;
 pub const GUARDIAN_TEMPLATE: &str = r##"// guardian-tool: example_tool
 // Paste only this shape (+ any private helper fns); the scaffold owns
 // #![no_std], the allocator, the panic handler, the ABI, and the
-// json/host/html_text helpers. The validator rejects: std::*, unsafe,
+// json/host/html_text/inject helpers. The validator rejects: std::*, unsafe,
 // extern/FFI, mod, pub free items, `use` outside core/alloc/json/host/
-// html_text, include!/env!/asm!, third-party crates. vec!/format! are fine;
-// run must never panic (a panic becomes a tool error).
+// html_text/inject, include!/env!/asm! (raw or imported too), third-party
+// crates. vec!/format! are fine; run must never panic (a panic becomes a
+// tool error).
 const GUARDIAN_NAME: &str = "example_tool";  // == marker above; ^[a-z][a-z0-9_]{2,39}$
 const GUARDIAN_DESC: &str = "What this tool does and when to call it.";  // 1..=600 chars
 const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}"#;  // valid JSON, object root, <=8 KiB
-// const GUARDIAN_CAPS: &[&str] = &["http_get"];  // optional; "http_get" and/or "web_search"; omit for pure compute
+// const GUARDIAN_CAPS: &[&str] = &["http_get"];  // optional: "http_get", "http_request" and/or "web_search"; omit for pure compute
 
 fn run(input: &str) -> String {
     // `input` is the JSON args matching GUARDIAN_SCHEMA. Parse defensively,

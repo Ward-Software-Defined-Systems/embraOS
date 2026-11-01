@@ -48,8 +48,10 @@ fi
 # Seed knowledge packs (knowledge.v1): bake the repo's committed
 # Seed_Knowledge/*.knowledge.json packs read-only into the rootfs — the
 # brain's boot reconcile ensures their nodes/edges exist in the live KG on
-# every boot. STATE's seed-knowledge/ wins filename collisions; the
-# folder's README.md is host-side authoring documentation.
+# every boot. A pack the image ships loads from the image; a STATE copy of
+# the same pack is skipped and named (STATE's seed-knowledge/ is for the
+# operator's own packs; `knowledge/seed.rs::scan_dirs`). The folder's
+# README.md is host-side authoring documentation.
 if ls "${REPO_ROOT}/Seed_Knowledge"/*.knowledge.json >/dev/null 2>&1; then
     mkdir -p "${TARGET_DIR}/usr/share/embra/seed-knowledge"
     cp "${REPO_ROOT}/Seed_Knowledge"/*.knowledge.json \

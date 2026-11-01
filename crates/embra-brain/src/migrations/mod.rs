@@ -173,11 +173,13 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
     // healthy boot costs two reads + a count). No-op on legacy flat souls.
     crate::identity_graph::project::ensure_identity_projection(db).await;
 
-    // Seed-knowledge reconcile — every boot, unversioned, ENSURE-PRESENT by
-    // _id only (edits stick; deletions of pack-listed ids resurrect; pack
-    // revisions ship as new ids). Writes memory.semantic/procedural +
-    // memory.edges only — NEVER identity.graph (its reconcile above counts
-    // that collection unfiltered). Warn-don't-fail, no `?`.
+    // Seed-knowledge reconcile — every boot, unversioned: a missing node
+    // is inserted by _id, a node the pack changed is revised in place when
+    // the operator never edited it (an edit sticks; `seed.rs::node_revision`),
+    // a deleted pack-listed node comes back, an edge the pack no longer
+    // lists goes. Writes memory.semantic/procedural + memory.edges only —
+    // NEVER identity.graph (its reconcile above counts that collection
+    // unfiltered). Warn-don't-fail, no `?`.
     crate::knowledge::seed::ensure_seed_knowledge(db).await;
 
     // Shadowed-duplicate healing runs BEFORE the reaped-session sweep so a

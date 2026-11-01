@@ -8,14 +8,14 @@
       "id": "seed_guardian_contract",
       "kind": "semantic",
       "category": "fact",
-      "content": "A Guardian tool draft contains ONLY: a first marker line `// guardian-tool: <name>`, const GUARDIAN_NAME (must equal the marker, ^[a-z][a-z0-9_]{2,39}$, not a built-in or reserved name), const GUARDIAN_DESC (1-600 chars), const GUARDIAN_SCHEMA (valid JSON string literal, object root, max 8 KiB), optional const GUARDIAN_CAPS, exactly one non-pub `fn run(input: &str) -> String`, and private helper fns. The scaffold owns everything else — #![no_std], the allocator, the panic handler, the ABI exports, and the json/host/html_text modules — so writing any of that yourself is a validation failure.",
+      "content": "A Guardian tool draft contains ONLY: a first marker line `// guardian-tool: <name>`, const GUARDIAN_NAME (must equal the marker, ^[a-z][a-z0-9_]{2,39}$, not a built-in or reserved name), const GUARDIAN_DESC (1-600 chars), const GUARDIAN_SCHEMA (valid JSON string literal, object root, max 8 KiB), optional const GUARDIAN_CAPS, exactly one non-pub `fn run(input: &str) -> String`, and private helper fns. The scaffold owns everything else — #![no_std], the allocator, the panic handler, the ABI exports, and the json/host/html_text/inject modules — so writing any of that yourself is a validation failure. The runtime envelope (a 5 s epoch deadline, a 56 MiB bump arena that never frees), the `data`/`data_file` input bridge and the UUIDv7 hex `_id` format are documented in `docs/GUARDIAN/GUARDIAN-KG-SCAN-EXAMPLE.md` of the embraOS repository; the `docs/GUARDIAN/` pages are the authoring reference, to read before drafting.",
       "tags": ["guardian", "authoring", "contract", "tools"]
     },
     {
       "id": "seed_guardian_forbidden",
       "kind": "semantic",
       "category": "fact",
-      "content": "The Guardian validator rejects, with precise line messages: unsafe, extern/FFI, std::* (there is no std in the guest), use of anything outside core/alloc/json/host/html_text, mod declarations, pub free items, include!/env!/asm!-style macros, #[no_mangle]/#[link] attributes, and ALL third-party crates — no serde, no reqwest, no regex, nothing external. vec![] and format! are available. A failed validation lists every violation and appends the known-good template, so fix everything in one redraft.",
+      "content": "The Guardian validator rejects, with precise line messages: unsafe, extern/FFI, std::* (there is no std in the guest), use of anything outside core/alloc/json/host/html_text/inject, mod declarations, pub free items, include!/env!/asm!-style macros, #[no_mangle]/#[link] attributes, and ALL third-party crates — no serde, no reqwest, no regex, nothing external. vec![] and format! are available. A failed validation lists every violation and appends the known-good template, so fix everything in one redraft.",
       "tags": ["guardian", "authoring", "sandbox", "validation"]
     },
     {
@@ -118,7 +118,7 @@
       "title": "Author and ship a Guardian tool",
       "description": "The propose-to-ready path for a dynamic tool, converging in the fewest redrafts.",
       "steps": [
-        "Start from the template embedded in guardian_propose's description — copy its exact shape, never write scaffold-owned items (no_std, allocator, ABI, mod declarations)",
+        "Read the authoring reference first — docs/GUARDIAN/ in the embraOS repository (GUARDIAN-TOOL-EXAMPLES.md, GUARDIAN-KG-SCAN-EXAMPLE.md, GUARDIAN-HTTP-REQUEST-EXAMPLE.md; clone the repository into the workspace if it is not there) — then start from the template embedded in guardian_propose's description: copy its exact shape, never write scaffold-owned items (no_std, allocator, ABI, mod declarations)",
         "Fill the marker line and GUARDIAN_NAME (identical strings), GUARDIAN_DESC, and a GUARDIAN_SCHEMA with object root; declare GUARDIAN_CAPS only for the host:: functions actually called",
         "Write one non-pub fn run(input: &str) -> String plus private helpers; parse input with the vendored json module, never unwrap on input, return a JSON string",
         "Call guardian_propose with the full module; on validation failure, fix EVERY listed error in one redraft (the template is appended to the failure) and re-propose",
@@ -153,6 +153,8 @@
     { "src": "seed_guardian_secrets", "dst": "seed_guardian_http_request", "relation": "refines" },
     { "src": "seed_guardian_secrets", "dst": "seed_guardian_lifecycle", "relation": "related_to" },
     { "_comment": "into the core pack" },
-    { "src": "seed_guardian_contract", "dst": "seed_core_guardian_gate", "relation": "related_to", "weight": 0.8 }
+    { "src": "seed_guardian_contract", "dst": "seed_core_guardian_gate", "relation": "related_to", "weight": 0.8 },
+    { "src": "seed_guardian_authoring_procedure", "dst": "seed_core_docs_map", "relation": "related_to", "weight": 0.8 },
+    { "src": "seed_guardian_contract", "dst": "seed_core_repo", "relation": "related_to" }
   ]
 }

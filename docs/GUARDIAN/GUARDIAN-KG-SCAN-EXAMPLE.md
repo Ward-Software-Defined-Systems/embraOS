@@ -115,9 +115,13 @@ The decode still orders correctly: the first 10 hex chars cover the top
 40 bits of the 48-bit millisecond timestamp, and hex digits map
 monotonically into the module's Crockford table (`0-9` → `0x00-0x09`,
 `a-f` → `0x0A-0x0F`), so decoded values order exactly as the timestamps
-do. The dropped low 8 bits mean pairs within ~256 ms read as equal —
-`temporal_gating` requires strictly newer, so near-simultaneous pairs
-are skipped, never misreported.
+do. The granularity is coarser than the 8 bits the ten digits leave out:
+each hex digit sits in a 5-bit slot, so the final `>> 2` also drops the two
+low bits of the tenth digit, and the decoded value depends on the
+timestamp's top 38 bits alone — pairs within 1024 ms (about a second,
+aligned to multiples of it) read as equal, not ~256 ms as this page said
+until 2026-10-31 (Embra #36). `temporal_gating` requires strictly newer, so
+near-simultaneous pairs are skipped, never misreported.
 
 ## Limits
 
