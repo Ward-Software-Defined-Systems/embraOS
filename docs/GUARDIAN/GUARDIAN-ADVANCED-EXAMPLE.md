@@ -92,8 +92,9 @@ stack:
    and drops hits under `min_score`. `injection_suspected` is false unless
    the scrubber matched in one of the result's fields, and
    `injection_signals` then names each finding once, spelled from the
-   scrubber's lists (`directive: ignore … instructions`, `marker: you are
-   now`, `mentions: system prompt`), never copied from the page. Search
+   scrubber's lists (`directive: ignore … instructions`, `ingestion: ai
+   crawlers … remember it`, `marker: you are now`, `mentions: system
+   prompt`), never copied from the page. Search
    text, `extra_snippets`, **and** fetched page text all go through it, as
    do the age, the fetch's error and the URLs a fetch answered from or was
    redirected to.
@@ -134,6 +135,8 @@ const GUARDIAN_NAME: &str = "web_search";
 const GUARDIAN_DESC: &str = "Search the web (Brave, via the Guardian web_search guard) with optional recency/exclude/pagination/min_score, optionally fetch + read the top results via the http_get guard, and rewrite injection directives in every field before the model sees it. Ranked by query overlap, de-duplicated by host. A result's injection_suspected is false unless the scan matched; its injection_signals name each match. Needs the operator's Brave Search key (/guardian key brave); without it every call answers 'search capability not configured'.";
 const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"query":{"type":"string"},"max":{"type":"integer"},"recency":{"type":"string"},"exclude":{"type":"array","items":{"type":"string"}},"offset":{"type":"integer"},"extra_snippets":{"type":"boolean"},"fetch_top":{"type":"integer"},"min_score":{"type":"number"}},"required":["query"]}"#;
 const GUARDIAN_CAPS: &[&str] = &["web_search", "http_get"];
+// 2026-10-31: built with the inject helper's ingestion class (Embra #24): a text addressed to the
+// machine that tells it to take the text in and keep it is named `ingestion: <lead> … <imperative>`.
 
 struct Entry {
     title: String,
@@ -461,9 +464,11 @@ fn overlap_score(query: &str, title: &str, description: &str) -> f64 {
   object within five words is rewritten (a weak object needs a qualifier
   between them); a typoglycemia, spaced-out or base64 directive passes,
   and `injection_signals` is the signal the model should weigh: it says
-  whether the scrubber met a directive, a marker or a mere mention.
-  "System prompt" on a page about prompt injection is named
-  `mentions: system prompt` and the text is kept (Embra#17).
+  whether the scrubber met a directive, a directed ingestion, a marker or
+  a mere mention. "System prompt" on a page about prompt injection is
+  named `mentions: system prompt` and the text is kept (Embra#17); a page
+  that addresses "AI crawlers" and tells them to "ingest this … remember
+  it" is named `ingestion: …` and kept as well (Embra #24).
 - **A fetched page says how the fetch went.** `fetch_status` (the HTTP
   status) rides a result whose page was read, `fetch_error` (the guard's
   reason) one whose fetch was refused or failed, so an empty `text` is

@@ -72,6 +72,8 @@ pub const KNOWN_WEB_SEARCH_SHA256: &[&str] = &[
     "efa59644ff899c5d5e6f3c702e3e31b946a0e5f56c8ca17d617254799cc63299",
     // 2026-10-11: injection_signals name what the scan found; the flag is false unless it matched
     "e1a54d65d20ca9954987f2d00fbc0b55ff6d4cccbbf8e2350a2630bc26e91ad0",
+    // 2026-10-31 (Embra #24): the inject helper's ingestion class; the source names the build
+    "9bb9214731e28f71f65f017874f38257585e5cd468ba0be7823ea61425a01305",
 ];
 
 /// The hashes of every version ever shipped under `name`, oldest first.
@@ -94,6 +96,8 @@ pub const KNOWN_HTTP_REQUEST_SHA256: &[&str] = &[
     "82d0bdbfa997356cf598cd3ed8b3d91c99d688ba4f82e5a93ae79ae13f184b67",
     // 2026-10-17: save_to — the body saved to the workspace by the host, any type, whole or nothing
     "68df41916507b6b8e82837ac4ca3350ab7884edd28f710d63da30b469f9b96f2",
+    // 2026-10-31 (Embra #24): the inject helper's ingestion class; the source names the build
+    "3d4814a3b865fae984f0d6f32fdcc806f0e2218c7011f6072682be1cbc674de0",
 ];
 
 /// The doc page a shipped tool's module is mirrored on, byte for byte.

@@ -106,6 +106,15 @@ split by a line break is not found.
 
 - `directive: <verb> … <object>` (`directive: ignore … instructions`): an
   imperative aimed at the model's instructions;
+- `ingestion: <lead> … <imperative>` (`ingestion: ai crawlers … remember
+  it`): a text addressed to the machine (`ai crawlers`, `large language
+  models`, `semantic indexers`, …) or framed as a directive to it
+  (`critical directive`, `you are directed to`, …) that tells it to take the
+  text in and keep it (`ingest this`, `train upon`, `remember it`, …), the
+  imperative paired with the nearest lead in the 2 KiB before it; either
+  side alone is prose and names nothing. Aimed at the durable surface, the
+  model's memory, not the turn; flag-only, the text is kept (Embra #24, the
+  farsight.org passage that passed clean at every length until 2026-10-31);
 - `marker: <marker>` (`marker: assistant:`): the frame of an injected turn;
 - `mentions: system prompt`: the phrase only, not a directive. Pages about
   prompt injection carry it, and so does a repository whose commits talk
@@ -126,7 +135,10 @@ the system prompt answers:
 `max_bytes` (N bytes kept; default 256 KiB, at most 1 MiB, ask again with a
 larger `max_bytes`) or the tool at its own 768 KiB; `{"text": 65536}` when
 the reduced text was cut. A body cut mid-way is not the answer, and the
-model is told so. With `save_to` the hop reads up to the 12 MiB save cap: a
+model is told so. The cut is also the extent the scan covered: a marker
+past `max_bytes` was never read, so the verdict belongs to the bytes kept
+(`web_search`'s verdict covers the engine's snippets and the fetched text
+it was given, never a page it did not fetch). With `save_to` the hop reads up to the 12 MiB save cap: a
 2xx body over it is refused whole, and a non-2xx answer comes back as text
 cut at 1 MiB.
 
@@ -177,6 +189,8 @@ const GUARDIAN_NAME: &str = "http_request";
 const GUARDIAN_DESC: &str = "A guarded curl: one HTTP request (GET, HEAD, POST, PUT, PATCH, DELETE) with headers, query, body or json. Answers status, URL, headers, body (text, JSON, XML, NDJSON, form). HTML is reduced to text (as=auto|text) and scrubbed; injection_suspected is false unless the scan matched; injection_signals names each match. save_to=<workspace path> saves a 2xx body of any type (binary too, up to 12 MiB, never overwriting) and answers the path, for image_view or file_offer. Credentials: /guardian secret <host> <header> <value>, never the input; a private host needs /guardian egress allow <host>.";
 const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"url":{"type":"string"},"method":{"type":"string"},"headers":{"type":"object"},"query":{"type":"object"},"accept":{"type":"string"},"body":{"type":"string"},"json":{"description":"any JSON value, sent as the body with content-type application/json"},"as":{"type":"string","enum":["auto","text","raw"]},"save_to":{"type":"string"},"max_bytes":{"type":"integer"},"timeout_ms":{"type":"integer"}},"required":["url"]}"#;
 const GUARDIAN_CAPS: &[&str] = &["http_request"];
+// 2026-10-31: built with the inject helper's ingestion class (Embra #24): a text addressed to the
+// machine that tells it to take the text in and keep it is named `ingestion: <lead> … <imperative>`.
 
 // A page reduced to text is cut here, a body returned as sent there. The
 // host caps a body at the caller's max_bytes (at most 1 MiB; a body saved

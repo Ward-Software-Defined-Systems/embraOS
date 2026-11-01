@@ -3,6 +3,8 @@ const GUARDIAN_NAME: &str = "web_search";
 const GUARDIAN_DESC: &str = "Search the web (Brave, via the Guardian web_search guard) with optional recency/exclude/pagination/min_score, optionally fetch + read the top results via the http_get guard, and rewrite injection directives in every field before the model sees it. Ranked by query overlap, de-duplicated by host. A result's injection_suspected is false unless the scan matched; its injection_signals name each match. Needs the operator's Brave Search key (/guardian key brave); without it every call answers 'search capability not configured'.";
 const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"query":{"type":"string"},"max":{"type":"integer"},"recency":{"type":"string"},"exclude":{"type":"array","items":{"type":"string"}},"offset":{"type":"integer"},"extra_snippets":{"type":"boolean"},"fetch_top":{"type":"integer"},"min_score":{"type":"number"}},"required":["query"]}"#;
 const GUARDIAN_CAPS: &[&str] = &["web_search", "http_get"];
+// 2026-10-31: built with the inject helper's ingestion class (Embra #24): a text addressed to the
+// machine that tells it to take the text in and keep it is named `ingestion: <lead> … <imperative>`.
 
 struct Entry {
     title: String,

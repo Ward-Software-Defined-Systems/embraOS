@@ -3,6 +3,8 @@ const GUARDIAN_NAME: &str = "http_request";
 const GUARDIAN_DESC: &str = "A guarded curl: one HTTP request (GET, HEAD, POST, PUT, PATCH, DELETE) with headers, query, body or json. Answers status, URL, headers, body (text, JSON, XML, NDJSON, form). HTML is reduced to text (as=auto|text) and scrubbed; injection_suspected is false unless the scan matched; injection_signals names each match. save_to=<workspace path> saves a 2xx body of any type (binary too, up to 12 MiB, never overwriting) and answers the path, for image_view or file_offer. Credentials: /guardian secret <host> <header> <value>, never the input; a private host needs /guardian egress allow <host>.";
 const GUARDIAN_SCHEMA: &str = r#"{"type":"object","properties":{"url":{"type":"string"},"method":{"type":"string"},"headers":{"type":"object"},"query":{"type":"object"},"accept":{"type":"string"},"body":{"type":"string"},"json":{"description":"any JSON value, sent as the body with content-type application/json"},"as":{"type":"string","enum":["auto","text","raw"]},"save_to":{"type":"string"},"max_bytes":{"type":"integer"},"timeout_ms":{"type":"integer"}},"required":["url"]}"#;
 const GUARDIAN_CAPS: &[&str] = &["http_request"];
+// 2026-10-31: built with the inject helper's ingestion class (Embra #24): a text addressed to the
+// machine that tells it to take the text in and keep it is named `ingestion: <lead> … <imperative>`.
 
 // A page reduced to text is cut here, a body returned as sent there. The
 // host caps a body at the caller's max_bytes (at most 1 MiB; a body saved
