@@ -221,6 +221,18 @@ pub async fn retrieve_relevant_knowledge(
         })
     };
 
+    // The promoted-node slices are sorted ONCE here, before anything reads
+    // them by position: step 1 mirrors the server's `created_at desc` order,
+    // and step 3 pairs each document with its token set by index. The sets
+    // used to be built before this sort (the round-2 verification of
+    // 2026-10-31): the database returns `_created_at desc`, and a restored
+    // node keeps its own `created_at` under a new `_created_at`, so the two
+    // orders differed and a match was attributed to the neighbour. Guard
+    // `step3_pairs_each_document_with_its_own_tokens_after_the_sort`.
+    for (_, docs) in prefetched.iter_mut() {
+        sort_created_desc(docs);
+    }
+
     // Per-query document frequency (2026-09-08). Counts only the query's own
     // tokens and the context's, so this is a handful of counters regardless
     // of corpus size. The expansion picks context terms by IDF and keeps
@@ -230,10 +242,10 @@ pub async fn retrieve_relevant_knowledge(
     let tag_vocab = tag_vocabulary(
         prefetched.iter().flat_map(|(_, docs)| docs.iter()).chain(all_entries.iter()),
     );
-    // Every prefetched document is tokenized ONCE here (#35): the sets feed
-    // the document frequency and then step 3's content match, which
-    // tokenized the same documents a second time before. The order of each
-    // list is the order of its documents.
+    // Every prefetched document is tokenized ONCE here (#35), after the
+    // sort above: the sets feed the document frequency and then step 3's
+    // content match, which tokenized the same documents a second time
+    // before. The order of each list is the order of its documents.
     let prefetched_tokens: Vec<Vec<HashSet<String>>> = prefetched
         .iter()
         .map(|(coll, docs)| docs.iter().map(|d| content_tokens(&doc_match_text(d, coll))).collect())
@@ -246,11 +258,9 @@ pub async fn retrieve_relevant_knowledge(
     );
 
     // Step 1: Direct tag query on semantic + procedural — in memory over the
-    // prefetch, mirroring the old per-tag `$contains` server queries exactly
-    // (case-sensitive membership, newest 100 per tag per collection).
-    for (_, docs) in prefetched.iter_mut() {
-        sort_created_desc(docs);
-    }
+    // prefetch (sorted above), mirroring the old per-tag `$contains` server
+    // queries exactly (case-sensitive membership, newest 100 per tag per
+    // collection).
     for tag in tags {
         if tag.is_empty() { continue; }
         for (coll, docs) in &prefetched {
@@ -1402,6 +1412,45 @@ mod failed_read_tests {
             .await
             .expect("read");
         assert!(stats.failed_reads.is_empty(), "{:?}", stats.failed_reads);
+    }
+
+    /// The round-2 verification of 2026-10-31 (GitHub #35): the token sets
+    /// were built in database order (`_created_at desc`) and the documents
+    /// then re-sorted by `created_at`, while step 3 zips the two by
+    /// position. A restored node keeps its own `created_at` and takes a new
+    /// `_created_at`, so the two orders differ: the database answers
+    /// [restored, newer], the sort puts the newer first, and the match on the
+    /// restored node's content was attributed to its neighbour.
+    #[tokio::test]
+    async fn step3_pairs_each_document_with_its_own_tokens_after_the_sort() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/memory.semantic/query"))
+            .respond_with(data(json!([
+                {"_id": "restored", "content": "the trustd certificate rotation procedure after a reseal",
+                 "tags": [], "created_at": "2026-01-01T00:00:00Z", "access_count": 0},
+                {"_id": "newer", "content": "a grocery list for the weekend market visit",
+                 "tags": [], "created_at": "2026-02-01T00:00:00Z", "access_count": 0},
+            ])))
+            .mount(&server)
+            .await;
+        for coll in ["memory.procedural", "memory.entries", "memory.edges"] {
+            Mock::given(method("POST"))
+                .and(path(format!("/{coll}/query")))
+                .respond_with(data(json!([])))
+                .mount(&server)
+                .await;
+        }
+        let db = WardsonDbClient::from_url(&server.uri());
+        let mut cfg = crate::config::tests_support::minimal_cfg();
+        cfg.embedding_enabled = Some(false);
+
+        let (results, _) =
+            retrieve_relevant_knowledge(&db, "ops", &[], "trustd certificate rotation", &[], 5, &cfg)
+                .await
+                .expect("read");
+        let ids: Vec<&str> = results.iter().map(|r| r.node.id.as_str()).collect();
+        assert_eq!(ids, ["restored"], "the match belongs to the document whose tokens matched");
     }
 }
 
