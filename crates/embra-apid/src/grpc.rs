@@ -356,7 +356,7 @@ impl EmbraApi for EmbraApiImpl {
             embraos_version: env!("CARGO_PKG_VERSION").to_string(),
             embrad_version: env!("CARGO_PKG_VERSION").to_string(),
             wardsondb_version: "0.1.0".to_string(),
-            kernel_version: String::new(),
+            kernel_version: kernel_release(),
         }))
     }
 
@@ -371,9 +371,40 @@ impl EmbraApi for EmbraApiImpl {
     }
 }
 
+/// The running kernel's release (`uname -r`), from
+/// `/proc/sys/kernel/osrelease`: the first line, trimmed; empty when it
+/// could not be read. The brain's `system_status` and `uptime_report` read
+/// the same file (`embra-brain/src/tools/status.rs::kernel_release`); the
+/// QEMU scripts boot with `quiet`, so the kernel's own banner never reaches
+/// the serial console and these replies are where the kernel is named.
+pub(crate) fn kernel_release() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .ok()
+        .and_then(|s| s.lines().next().map(|l| l.trim().to_string()))
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `GetVersion` names the running kernel, what `uname -r` prints; the
+    /// field was an empty string until 2026-10-31.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_version_reply_names_the_running_kernel() {
+        let backends = BackendConnections::new(
+            "http://127.0.0.1:1".to_string(),
+            "http://127.0.0.1:1".to_string(),
+        );
+        let api = EmbraApiImpl::new(backends);
+        let reply = api.get_version(Request::new(GetVersionRequest {})).await.unwrap().into_inner();
+        let uname = std::process::Command::new("uname").arg("-r").output().expect("uname runs on every Linux host");
+        let expected = String::from_utf8_lossy(&uname.stdout).trim().to_string();
+        assert!(!expected.is_empty(), "uname -r printed nothing");
+        assert_eq!(reply.kernel_version, expected);
+        assert_eq!(reply.embraos_version, env!("CARGO_PKG_VERSION"));
+    }
 
     /// Nothing listens on port 1: the watch fails like every other proxied
     /// call, with the brain's unavailability, instead of hanging.

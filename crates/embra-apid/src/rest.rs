@@ -31,11 +31,14 @@ async fn health() -> Json<Value> {
     }))
 }
 
+/// `GET /version` — apid's version and the running kernel's release
+/// (`kernel`, as `GetVersion` carries it in `kernel_version`).
 async fn version() -> Json<Value> {
     Json(json!({
         "ok": true,
         "data": {
             "embraos_version": env!("CARGO_PKG_VERSION"),
+            "kernel": crate::grpc::kernel_release(),
             "service": "embra-apid"
         }
     }))
@@ -77,6 +80,19 @@ async fn fetch_brain_status(backends: &BackendConnections) -> Result<Value, Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `GET /version` names the running kernel beside apid's version, as
+    /// `GetVersion` does.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_version_route_names_the_running_kernel() {
+        let Json(v) = version().await;
+        let uname = std::process::Command::new("uname").arg("-r").output().expect("uname runs on every Linux host");
+        let expected = String::from_utf8_lossy(&uname.stdout).trim().to_string();
+        assert!(!expected.is_empty(), "uname -r printed nothing");
+        assert_eq!(v["data"]["kernel"], expected.as_str());
+        assert_eq!(v["data"]["embraos_version"], env!("CARGO_PKG_VERSION"));
+    }
 
     #[tokio::test]
     async fn status_answers_503_when_the_brain_is_unreachable() {
