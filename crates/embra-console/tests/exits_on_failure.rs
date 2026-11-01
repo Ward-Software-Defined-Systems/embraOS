@@ -69,6 +69,76 @@ fn run_console(apid_addr: &str) -> Ended {
     }
 }
 
+/// The console on a PTY of 80x24 against `apid_addr`, until it exits: the
+/// screen comes up there, so the event loop runs and an ended conversation
+/// is seen by it (Embra #21). The master side is read until the exit.
+fn run_console_on_a_pty(apid_addr: &str) -> Ended {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let (mut master, mut slave) = (0, 0);
+    let size = libc::winsize { ws_row: 24, ws_col: 80, ws_xpixel: 800, ws_ypixel: 480 };
+    // SAFETY: openpty fills the two descriptors; the winsize is a plain C
+    // struct that outlives the call.
+    let rc = unsafe { libc::openpty(&mut master, &mut slave, std::ptr::null_mut(), std::ptr::null(), &size) };
+    assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
+    // SAFETY: both descriptors were just opened and are owned here.
+    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
+    let mut cmd = Command::new(CONSOLE);
+    cmd.args(["--apid-addr", apid_addr])
+        .env("EMBRA_WEB_PTY", "1")
+        .stdin(slave.try_clone().unwrap())
+        .stdout(slave.try_clone().unwrap())
+        .stderr(slave);
+    // SAFETY: between fork and exec, only async-signal-safe calls: the child
+    // becomes a session leader with the PTY as its terminal.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() < 0 || libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    let mut child = cmd.spawn().expect("start the console on a pty");
+    drop(cmd);
+    let start = Instant::now();
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 4096];
+    let mut read_some = |seen: &mut Vec<u8>| -> bool {
+        let mut fds = [libc::pollfd { fd: master.as_raw_fd(), events: libc::POLLIN, revents: 0 }];
+        // SAFETY: one valid pollfd, a bounded wait.
+        if unsafe { libc::poll(fds.as_mut_ptr(), 1, 50) } <= 0 {
+            return false;
+        }
+        // SAFETY: reads into a buffer of the stated length.
+        let n = unsafe { libc::read(master.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len()) };
+        if n > 0 {
+            seen.extend_from_slice(&buf[..n as usize]);
+            return true;
+        }
+        false
+    };
+    loop {
+        read_some(&mut seen);
+        if let Some(status) = child.try_wait().expect("wait for the console") {
+            // What the console wrote on its way out, still in the PTY.
+            for _ in 0..20 {
+                if !read_some(&mut seen) {
+                    break;
+                }
+            }
+            return Ended { code: status.code(), said: String::from_utf8_lossy(&seen).into_owned() };
+        }
+        if start.elapsed() > DEADLINE {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "the console was still running after {DEADLINE:?}; it wrote:\n{}",
+                String::from_utf8_lossy(&seen).escape_debug()
+            );
+        }
+    }
+}
+
 /// A port on this host that nothing listens on.
 fn closed_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -85,8 +155,11 @@ fn an_unreachable_gateway_is_an_exit_not_a_sleep() {
 }
 
 /// embra-apid as far as the console needs it to get to its screen: the
-/// conversation opens and stays open, and says nothing.
-struct Gateway;
+/// conversation opens and stays open, and says nothing — or ends at once
+/// (`conversation_ends`), the gateway closing it as a restarted apid does.
+struct Gateway {
+    conversation_ends: bool,
+}
 
 fn not_here() -> Status {
     Status::unimplemented("stand-in gateway")
@@ -100,6 +173,9 @@ impl EmbraApi for Gateway {
         &self,
         _request: Request<Streaming<ConversationRequest>>,
     ) -> Result<Response<Self::ConverseStream>, Status> {
+        if self.conversation_ends {
+            return Ok(Response::new(Box::pin(futures::stream::empty())));
+        }
         Ok(Response::new(Box::pin(futures::stream::pending())))
     }
     async fn list_sessions(&self, _: Request<ListSessionsRequest>) -> Result<Response<ListSessionsResponse>, Status> {
@@ -165,6 +241,10 @@ impl EmbraApi for Gateway {
 
 /// The stand-in gateway on a port of its own, for as long as the test runs.
 fn gateway() -> (u16, tokio::runtime::Runtime) {
+    gateway_with(false)
+}
+
+fn gateway_with(conversation_ends: bool) -> (u16, tokio::runtime::Runtime) {
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
@@ -177,11 +257,30 @@ fn gateway() -> (u16, tokio::runtime::Runtime) {
     runtime.spawn(async move {
         let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
         let _ = tonic::transport::Server::builder()
-            .add_service(EmbraApiServer::new(Gateway))
+            .add_service(EmbraApiServer::new(Gateway { conversation_ends }))
             .serve_with_incoming(incoming)
             .await;
     });
     (port, runtime)
+}
+
+/// The gateway ends the conversation stream: on a PTY the screen is up, the
+/// event loop sees the stream close and the console exits with code 3
+/// saying so (Embra #21: it exited 0 for this, and the cause was nowhere).
+#[test]
+fn a_conversation_the_gateway_ends_is_exit_3_with_the_cause() {
+    if !std::path::Path::new("/dev/ptmx").exists() {
+        eprintln!("skipped: this host has no /dev/ptmx");
+        return;
+    }
+    let (port, _runtime) = gateway_with(true);
+    let ended = run_console_on_a_pty(&format!("http://127.0.0.1:{port}"));
+    assert_eq!(ended.code, Some(3), "it said:\n{}", ended.said.escape_debug());
+    assert!(
+        ended.said.contains("[embra-console] the gateway ended the conversation stream"),
+        "{}",
+        ended.said.escape_debug()
+    );
 }
 
 /// The console reaches its gateway, opens its conversation, and then

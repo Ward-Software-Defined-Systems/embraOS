@@ -19,6 +19,13 @@ mod exit_code {
     pub const TUI_FAILED: i32 = 1;
     /// embra-apid could not be reached.
     pub const NO_GATEWAY: i32 = 2;
+    /// The gateway ended the conversation stream: apid or the brain
+    /// restarted, or the connection was reset (Embra #21; the console
+    /// exited 0 for this, with the cause nowhere). embra-web names the
+    /// code in its exit line (`pty_bridge::describe_exit`).
+    pub const CONVERSATION_ENDED: i32 = 3;
+    /// The conversation stream failed with a status.
+    pub const CONVERSATION_FAILED: i32 = 4;
 }
 
 /// Say why, and exit. The supervisor starts the console again.
@@ -60,7 +67,13 @@ async fn main() {
 
     println!("[embra-console] launching TUI...");
     match terminal::run(client, device, columns, rows).await {
-        Ok(()) => println!("[embra-console] exited"),
+        Ok(None) => println!("[embra-console] exited"),
+        Ok(Some(grpc_client::StreamEnd::Closed)) => {
+            fail(exit_code::CONVERSATION_ENDED, format_args!("the gateway ended the conversation stream"))
+        }
+        Ok(Some(grpc_client::StreamEnd::Failed(why))) => {
+            fail(exit_code::CONVERSATION_FAILED, format_args!("the conversation stream failed: {why}"))
+        }
         Err(e) => fail(exit_code::TUI_FAILED, format_args!("TUI error: {e}")),
     }
 }

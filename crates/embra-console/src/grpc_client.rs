@@ -5,6 +5,7 @@ use embra_common::proto::apid::*;
 use embra_common::proto::brain;
 
 use prost::Message;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
@@ -12,6 +13,26 @@ use tracing::{info, error};
 
 pub struct BrainClient {
     client: EmbraApiClient<Channel>,
+    /// How the conversation stream ended, once it has; `main` reads it for
+    /// the exit code.
+    stream_end: Arc<Mutex<Option<StreamEnd>>>,
+}
+
+/// How the conversation stream ended (Embra #21: a stream the gateway
+/// ended left the console exiting 0, and its own `error!` line had no
+/// subscriber, so the cause was nowhere). `main` exits with a code per
+/// variant and says the sentence; embra-web names the code in its exit line.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StreamEnd {
+    /// The gateway closed the stream (`Ok(None)`): apid or the brain
+    /// restarted, or the connection was reset.
+    Closed,
+    /// The stream failed with a status.
+    Failed(String),
+}
+
+fn record_end(end: &Mutex<Option<StreamEnd>>, how: StreamEnd) {
+    *end.lock().unwrap_or_else(|p| p.into_inner()) = Some(how);
 }
 
 /// Events that the TUI consumes (replaces Phase 0's StreamEvent + proactive notifications)
@@ -61,7 +82,14 @@ impl BrainClient {
             // tonic's 4 MiB default would reject them at this hop.
             client: EmbraApiClient::new(channel)
                 .max_decoding_message_size(embra_common::GRPC_MAX_MESSAGE_BYTES),
+            stream_end: Arc::new(Mutex::new(None)),
         })
+    }
+
+    /// The slot the conversation's end is recorded in, for a reader that
+    /// outlives the client (`terminal::run` hands the client to the loop).
+    pub fn stream_end_handle(&self) -> Arc<Mutex<Option<StreamEnd>>> {
+        self.stream_end.clone()
     }
 
     /// A detached handle for background fetches (tonic clients are
@@ -94,6 +122,7 @@ impl BrainClient {
         let in_stream = ReceiverStream::new(in_rx);
         let response = self.client.converse(in_stream).await?;
         let mut resp_stream = response.into_inner();
+        let end = self.stream_end.clone();
 
         // Spawn task to read responses and convert to ConsoleEvents
         tokio::spawn(async move {
@@ -174,9 +203,15 @@ impl BrainClient {
                             }
                         }
                     }
-                    Ok(None) => break, // Stream ended
+                    Ok(None) => {
+                        // The gateway ended the stream; the loop sees the
+                        // closed channel and quits, `main` exits with it.
+                        record_end(&end, StreamEnd::Closed);
+                        break;
+                    }
                     Err(e) => {
                         error!("Stream error: {}", e);
+                        record_end(&end, StreamEnd::Failed(e.to_string()));
                         break;
                     }
                 }

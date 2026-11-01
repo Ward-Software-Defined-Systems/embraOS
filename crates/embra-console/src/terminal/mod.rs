@@ -13,7 +13,7 @@ pub mod state;
 mod ui;
 
 use state::*;
-use crate::grpc_client::{BrainClient, ConsoleEvent};
+use crate::grpc_client::{BrainClient, ConsoleEvent, StreamEnd};
 use embra_common::proto::apid::*;
 
 use anyhow::Result;
@@ -84,7 +84,17 @@ fn open_screen(web_pty: bool, cols: u16, rows: u16) -> Result<Screen> {
 /// `columns` and `rows` are the operator's size override from the command
 /// line (`--columns`, `--rows`), carried as parameters rather than through
 /// the process's own environment (#40).
-pub async fn run(client: BrainClient, device: Option<String>, columns: Option<u16>, rows: Option<u16>) -> Result<()> {
+/// Runs the console until its conversation ends or its screen fails, and
+/// says how the conversation ended, when it did (`StreamEnd`): the loop
+/// quits on the closed event channel, and `main` exits with a code per
+/// cause (Embra #21).
+pub async fn run(
+    client: BrainClient,
+    device: Option<String>,
+    columns: Option<u16>,
+    rows: Option<u16>,
+) -> Result<Option<StreamEnd>> {
+    let stream_end = client.stream_end_handle();
     let outcome = run_tui(client, device, columns, rows).await;
     if std::env::var("EMBRA_WEB_PTY").is_ok() {
         let _ = stdout().execute(DisableBracketedPaste);
@@ -92,7 +102,8 @@ pub async fn run(client: BrainClient, device: Option<String>, columns: Option<u1
     let restored = disable_raw_mode();
     outcome?;
     restored?;
-    Ok(())
+    let ended = stream_end.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    Ok(ended)
 }
 
 async fn run_tui(

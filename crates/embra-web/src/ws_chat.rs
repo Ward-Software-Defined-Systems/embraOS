@@ -70,6 +70,7 @@ async fn handle_chat_socket(socket: WebSocket, st: AppState) {
     let mut resp_stream = match client.converse(req_stream).await {
         Ok(r) => r.into_inner(),
         Err(e) => {
+            tracing::warn!("chat converse open failed: {e}");
             let _ = sender
                 .send(Message::Text(
                     json_err(&format!("converse open failed: {e}")).into(),
@@ -78,6 +79,9 @@ async fn handle_chat_socket(socket: WebSocket, st: AppState) {
             return;
         }
     };
+    // The receipt lines (Embra #21): the chat attached, each message by its
+    // kind and size, the chat detached — never the text.
+    tracing::info!("chat attached");
 
     // gRPC → WS.
     let mut to_client = tokio::spawn(async move {
@@ -116,11 +120,12 @@ async fn handle_chat_socket(socket: WebSocket, st: AppState) {
             match msg {
                 Message::Text(t) => {
                     let Ok(client_msg) = serde_json::from_str::<ClientMsg>(&t) else {
-                        // Malformed JSON from the browser — drop the
-                        // frame silently. The frontend should never
-                        // produce these in practice.
+                        // Malformed JSON from the browser: the frame is
+                        // dropped, and the drop is on record.
+                        tracing::warn!(bytes = t.len(), "chat frame dropped: not a client message");
                         continue;
                     };
+                    tracing::info!(kind = %client_msg.kind(), bytes = t.len(), "chat message received");
                     if req_tx.send(client_msg.into_proto()).await.is_err() {
                         break; // request stream closed
                     }
@@ -133,10 +138,17 @@ async fn handle_chat_socket(socket: WebSocket, st: AppState) {
 
     // Either direction terminating tears down the other — symmetric
     // shutdown.
-    tokio::select! {
-        _ = &mut to_client => from_client.abort(),
-        _ = &mut from_client => to_client.abort(),
-    }
+    let side = tokio::select! {
+        _ = &mut to_client => {
+            from_client.abort();
+            "the gateway's side ended"
+        }
+        _ = &mut from_client => {
+            to_client.abort();
+            "the browser's side ended"
+        }
+    };
+    tracing::info!(reason = side, "chat detached");
 }
 
 /// One apid frame as the browser's text frame: the opaque payload decoded

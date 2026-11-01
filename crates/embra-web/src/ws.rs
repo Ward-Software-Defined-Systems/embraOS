@@ -129,6 +129,9 @@ async fn handle_socket(socket: WebSocket, st: AppState) {
     let (mut sender, mut receiver) = socket.split();
     let mut output = st.bridge.subscribe();
     let (id, mut ctrl_rx) = st.arbiter.connect();
+    // The receipt lines (Embra #21): a browser attaching, taking over and
+    // leaving, with the bytes it typed — counts and roles, never content.
+    tracing::info!(client = id, writer = st.arbiter.is_writer(id), "terminal attached");
     // Fresh-attach repaint — for EVERY role: observers never send resize
     // frames (the client gates them on `writable`, and this handler drops
     // non-writer resizes below), and a writer's same-size resize is a
@@ -179,32 +182,58 @@ async fn handle_socket(socket: WebSocket, st: AppState) {
         }
     });
 
-    // From-client: writer-gated input; takeover from anyone.
+    // From-client: writer-gated input; takeover from anyone. The task
+    // answers how the browser's side ended and how many bytes it typed.
     let arbiter = st.arbiter.clone();
     let bridge = st.bridge.clone();
     let mut from_client = tokio::spawn(async move {
-        while let Some(Ok(msg)) = receiver.next().await {
+        let mut forwarded: usize = 0;
+        let reason = loop {
+            let msg = match receiver.next().await {
+                Some(Ok(msg)) => msg,
+                Some(Err(_)) => break "the socket failed",
+                None => break "the socket ended",
+            };
             let frame = match msg {
                 Message::Binary(b) => TerminalFrame::Binary(b.to_vec()),
                 Message::Text(t) => match serde_json::from_str::<ClientControl>(&t) {
                     Ok(ctrl) => TerminalFrame::Control(ctrl),
-                    Err(_) => continue,
+                    Err(_) => {
+                        tracing::warn!(client = id, bytes = t.len(), "terminal control frame dropped: not a control");
+                        continue;
+                    }
                 },
-                Message::Close(_) => break,
+                Message::Close(_) => break "the browser closed",
                 _ => continue,
             };
             match terminal_action(frame, arbiter.is_writer(id)) {
-                TerminalAction::Write(bytes) => bridge.write_input(bytes).await,
+                TerminalAction::Write(bytes) => {
+                    forwarded += bytes.len();
+                    bridge.write_input(bytes).await
+                }
                 TerminalAction::Resize { cols, rows, xpixel, ypixel } => bridge.resize(cols, rows, xpixel, ypixel).await,
-                TerminalAction::Takeover => arbiter.takeover(id),
+                TerminalAction::Takeover => {
+                    tracing::info!(client = id, "terminal takeover");
+                    arbiter.takeover(id)
+                }
                 TerminalAction::Nothing => {}
             }
-        }
+        };
+        (reason, forwarded)
     });
 
     tokio::select! {
-        _ = &mut to_client => from_client.abort(),
-        _ = &mut from_client => to_client.abort(),
+        _ = &mut to_client => {
+            from_client.abort();
+            tracing::info!(client = id, reason = "the output side closed", "terminal detached");
+        }
+        ended = &mut from_client => {
+            to_client.abort();
+            match ended {
+                Ok((reason, forwarded)) => tracing::info!(client = id, reason, forwarded_bytes = forwarded, "terminal detached"),
+                Err(_) => tracing::warn!(client = id, "terminal detached: the input task failed"),
+            }
+        }
     }
     st.arbiter.disconnect(id);
 }

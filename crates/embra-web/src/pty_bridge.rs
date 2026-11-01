@@ -94,11 +94,44 @@ fn restart_delay(early_exits: u32) -> Duration {
     (RESTART_BASE * 2u32.pow(doublings)).min(RESTART_MAX)
 }
 
-/// "code 2", "killed by Terminated" — for the log and for the operator.
+/// "code 2 (embra-apid could not be reached)", "killed by Terminated" — for
+/// the log and for the operator.
 fn describe(status: &ExitStatus) -> String {
-    match status.signal() {
-        Some(signal) => format!("killed by {signal}"),
-        None => format!("code {}", status.exit_code()),
+    describe_exit(status.exit_code(), status.signal())
+}
+
+/// The console's exit codes by name (`embra-console/src/main.rs`,
+/// `exit_code`), so the exit line says who ended the console and why: a
+/// clean code said nothing of its cause (Embra #21).
+fn describe_exit(code: u32, signal: Option<&str>) -> String {
+    if let Some(signal) = signal {
+        return format!("killed by {signal}");
+    }
+    match code {
+        0 => "code 0 (the console ended of itself)".to_string(),
+        1 => "code 1 (the console could not open its conversation or set up its screen)".to_string(),
+        2 => "code 2 (embra-apid could not be reached)".to_string(),
+        3 => "code 3 (the gateway ended the conversation stream)".to_string(),
+        4 => "code 4 (the conversation stream failed)".to_string(),
+        n => format!("code {n}"),
+    }
+}
+
+#[cfg(test)]
+mod exit_line_tests {
+    use super::describe_exit;
+
+    /// Every code the console exits with is named, a signal is a signal,
+    /// and an unknown code is a number.
+    #[test]
+    fn the_exit_line_names_the_consoles_exit_codes() {
+        assert_eq!(describe_exit(2, None), "code 2 (embra-apid could not be reached)");
+        assert_eq!(describe_exit(3, None), "code 3 (the gateway ended the conversation stream)");
+        assert_eq!(describe_exit(4, None), "code 4 (the conversation stream failed)");
+        assert!(describe_exit(1, None).starts_with("code 1 ("));
+        assert!(describe_exit(0, None).starts_with("code 0 ("));
+        assert_eq!(describe_exit(7, None), "code 7");
+        assert_eq!(describe_exit(0, Some("Terminated")), "killed by Terminated");
     }
 }
 

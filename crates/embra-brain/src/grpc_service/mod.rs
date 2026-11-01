@@ -351,7 +351,10 @@ impl BrainService for BrainGrpcService {
                                 break;
                             }
                             None => {
-                                debug!("Client stream ended");
+                                // The client closed its side (the console
+                                // exiting, a browser tab gone); on record at
+                                // info since Embra #21.
+                                info!("Client stream ended: the client closed its side of the conversation");
                                 break;
                             }
                         }

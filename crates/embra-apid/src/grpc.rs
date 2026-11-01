@@ -17,7 +17,7 @@ use std::pin::Pin;
 use tokio_stream::{Stream, StreamExt};
 use tonic::transport::Channel;
 use tonic::{Request, Response, Status, Streaming};
-use tracing::debug;
+use tracing::info;
 
 pub struct EmbraApiImpl {
     backends: BackendConnections,
@@ -111,7 +111,17 @@ impl EmbraApi for EmbraApiImpl {
         &self,
         request: Request<Streaming<ConversationRequest>>,
     ) -> Result<Response<Self::ConverseStream>, Status> {
-        debug!("Converse stream opened");
+        // The stream's open and close, with the peer (Embra #21): the
+        // console's exit code 3 is this close seen from its side.
+        let peer = request.remote_addr();
+        info!(peer = ?peer, "Converse stream opened");
+        struct CloseLog(Option<std::net::SocketAddr>);
+        impl Drop for CloseLog {
+            fn drop(&mut self) {
+                info!(peer = ?self.0, "Converse stream closed");
+            }
+        }
+        let close = CloseLog(peer);
 
         let mut brain = self.backends.brain_client().await?;
         let incoming = request.into_inner();
@@ -126,7 +136,9 @@ impl EmbraApi for EmbraApiImpl {
         let brain_response_stream = response.into_inner();
 
         // Map brain ConversationResponse → apid ConversationResponse
-        let output_stream = brain_response_stream.map(|msg| {
+        let output_stream = brain_response_stream.map(move |msg| {
+            // Alive for the stream's life; dropped with it, it logs the close.
+            let _alive = &close;
             match msg {
                 Ok(brain_resp) => {
                     // Serialize brain response as pass-through payload

@@ -54,6 +54,21 @@ pub enum ClientMsg {
     },
 }
 
+impl ClientMsg {
+    /// The kind of a message for the receipt line, never its content: a
+    /// slash command is named by its command alone, since its arguments may
+    /// carry a secret (`/github-token <token>`).
+    pub fn kind(&self) -> String {
+        match self {
+            ClientMsg::Msg { attachment_ids, file_paths, .. } => {
+                format!("message (attachments {}, files {})", attachment_ids.len(), file_paths.len())
+            }
+            ClientMsg::Slash { command, .. } => format!("slash {command}"),
+            ClientMsg::Attach { .. } => "attach".to_string(),
+        }
+    }
+}
+
 /// What the bridge sends back to the browser over `/ws/chat`.
 #[derive(Debug, Serialize)]
 #[serde(tag = "t", rename_all = "lowercase")]
