@@ -49,14 +49,15 @@ fn open_screen(web_pty: bool, cols: u16, rows: u16) -> Result<Screen> {
     // answer. Without it Shift+Enter arrives as Enter on every transport.
     enable_raw_mode()?;
 
-    if web_pty {
-        // Web/PTY only: lets crossterm coalesce the embra-web /ml editor's
-        // `\x1b[200~ … \x1b[201~` blob into a single Event::Paste. The
-        // serial Viewport::Fixed path deliberately never enables this, so
-        // it stays bit-identical. Best-effort: if it fails, the wrapper
-        // bytes arrive as ordinary keys — no worse than before.
-        let _ = stdout().execute(EnableBracketedPaste);
-    }
+    // Bracketed paste, on both transports: the terminal wraps a clipboard
+    // paste in `\x1b[200~ … \x1b[201~` and crossterm hands it over as one
+    // Event::Paste, which `apply_paste` stages whole. Without it a paste is
+    // keystrokes, every `\r` an Enter: on the serial line a multi-line
+    // paste reached the brain as one turn per line (Embra #14). xterm.js
+    // learns of the mode through embra-web's `ATTACH_PREAMBLE`; a serial
+    // terminal sees it set here. Best-effort: a terminal that ignores the
+    // request pastes as before.
+    let _ = stdout().execute(EnableBracketedPaste);
 
     let backend = backend::QuietBackend::new(CrosstermBackend::new(stdout()));
     let screen = if web_pty {
@@ -96,9 +97,7 @@ pub async fn run(
 ) -> Result<Option<StreamEnd>> {
     let stream_end = client.stream_end_handle();
     let outcome = run_tui(client, device, columns, rows).await;
-    if std::env::var("EMBRA_WEB_PTY").is_ok() {
-        let _ = stdout().execute(DisableBracketedPaste);
-    }
+    let _ = stdout().execute(DisableBracketedPaste);
     let restored = disable_raw_mode();
     outcome?;
     restored?;
@@ -245,12 +244,11 @@ async fn run_tui(
                             pane.protocol = proto;
                         }
                     }
-                    // Web/PTY: a bracketed-paste blob — the browser's own
-                    // clipboard paste (xterm.js wraps it once it has seen
-                    // the mode set, which embra-web sends on every attach)
-                    // or the /ml editor's injection. Only ever produced
-                    // when bracketed paste was enabled (web_pty-gated
-                    // above), so the serial path is unaffected.
+                    // A bracketed-paste blob: the terminal's clipboard paste
+                    // on either transport (xterm.js wraps it once it has seen
+                    // the mode set, which embra-web sends on every attach; a
+                    // serial terminal once `open_screen` set it) or the web
+                    // editor's injection.
                     Event::Paste(s) => apply_paste(&mut app, &s),
                     _ => {}
                 }
@@ -640,7 +638,11 @@ async fn handle_key_event(
                     )),
                 }).await;
             } else if let Some(pasted) = app.pasted_lines.take() {
-                let content = pasted.join("\n");
+                // The staged text, then what was typed after it
+                // (`apply_paste`); the box is empty afterwards.
+                let tail = std::mem::take(&mut app.input_buffer);
+                app.cursor_pos = 0;
+                let content = pasted.join("\n") + &tail;
                 if app.guardian_capture {
                     // Guardian capture: deliver the pasted module to the
                     // brain's /guardian define path, not a model turn.
@@ -767,7 +769,7 @@ async fn handle_key_event(
                         app.guardian_capture = true;
                         app.multiline_mode = true;
                         app.messages.push(DisplayMessage::system_with_tz(
-                            "Guardian: paste your Rust tool module (marker + GUARDIAN_* + fn run), then send with a lone '.' on its own line (serial) or paste-and-Enter (web). It will be validated and built in the background.",
+                            "Guardian: paste your Rust tool module (marker + GUARDIAN_* + fn run) and press Enter to send it; typed line by line, a lone '.' on its own line sends. It will be validated and built in the background.",
                             &app.config_tz,
                         ));
                     } else if cmd == "/stop" {
@@ -908,12 +910,15 @@ async fn handle_key_event(
             app.scroll_offset = app.scroll_offset.saturating_sub(10);
         }
 
-        // Backspace
+        // Backspace. With nothing before the cursor but a staged paste, it
+        // drops the paste: the one way out of a paste made by mistake.
         (KeyCode::Backspace, _) => {
             if app.cursor_pos > 0 {
                 app.cursor_pos -= 1;
                 let byte_pos = char_to_byte_pos(&app.input_buffer, app.cursor_pos);
                 app.input_buffer.remove(byte_pos);
+            } else if app.pasted_lines.is_some() {
+                app.pasted_lines = None;
             }
         }
 
@@ -1024,6 +1029,9 @@ mod screen_tests {
     const DEADLINE: Duration = Duration::from_secs(10);
     /// "Where is the cursor?" — Device Status Report 6.
     const CURSOR_QUERY: &[u8] = b"\x1b[6n";
+    /// Bracketed paste on: the one request the console makes of its
+    /// terminal, on both transports, and one that needs no answer.
+    const PASTE_MODE_SET: &[u8] = b"\x1b[?2004h";
 
     /// Not a test of its own: what `the_screen_comes_up_*` run on their PTY.
     /// The console's own startup — open, clear, clear, draw — and then what
@@ -1129,6 +1137,12 @@ mod screen_tests {
         assert!(
             !seen.windows(CURSOR_QUERY.len()).any(|w| w == CURSOR_QUERY),
             "{transport}: the console asked the terminal for its cursor:\n{}",
+            text.escape_debug()
+        );
+        // A multi-line paste is one event on both transports (Embra #14).
+        assert!(
+            seen.windows(PASTE_MODE_SET.len()).any(|w| w == PASTE_MODE_SET),
+            "{transport}: the console did not set bracketed paste:\n{}",
             text.escape_debug()
         );
     }
@@ -1382,22 +1396,43 @@ fn paste_lines(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// What a bracketed paste does to the input. A paste with a line break is
-/// staged whole: the next Enter sends `pasted.join("\n")` as one message,
-/// verbatim — no trim, no slash parse — the path the /ml editor and the
-/// Guardian define flow rely on. A paste without one is typed into the
-/// input at the cursor, where it can be edited and sent with what is
-/// around it. In Guardian capture every paste is staged, since the capture
-/// consumes the staged paste.
+/// Whether a paste is one line: no line break, or one at its very end,
+/// which is the copied line's and not the text's.
+fn is_one_line(lines: &[String]) -> bool {
+    match lines {
+        [_] => true,
+        [_, last] => last.is_empty(),
+        _ => false,
+    }
+}
+
+/// What a bracketed paste does to the input. A paste never sends. One
+/// whose only line break is its last is one line (`is_one_line`) and is
+/// typed into the input at the cursor without the break, where it can be
+/// edited and sent with what is around it. One with a line break inside
+/// is staged whole, verbatim — no trim, no slash parse — the path the web
+/// editor and the Guardian define flow rely on; the input box's text goes
+/// with it, before and after the cursor, and the box is emptied, so the
+/// next Enter sends the typed text and the paste as one message, with
+/// whatever is typed after the paste (the Enter arm appends the box). A
+/// further multi-line paste joins the staged text at the cursor. In
+/// Guardian capture every paste is staged, since the capture consumes the
+/// staged text.
 fn apply_paste(app: &mut AppState, s: &str) {
     let lines = paste_lines(s);
-    if lines.len() > 1 || app.guardian_capture {
-        app.pasted_lines = Some(lines);
-    } else {
+    if is_one_line(&lines) && !app.guardian_capture {
         let text = &lines[0];
         let byte_pos = char_to_byte_pos(&app.input_buffer, app.cursor_pos);
         app.input_buffer.insert_str(byte_pos, text);
         app.cursor_pos += text.chars().count();
+    } else {
+        let byte_pos = char_to_byte_pos(&app.input_buffer, app.cursor_pos);
+        let (before, after) = app.input_buffer.split_at(byte_pos);
+        let staged = app.pasted_lines.take().map(|l| l.join("\n")).unwrap_or_default();
+        let whole = format!("{staged}{before}{}{after}", lines.join("\n"));
+        app.pasted_lines = Some(paste_lines(&whole));
+        app.input_buffer.clear();
+        app.cursor_pos = 0;
     }
     app.scroll_offset = 0;
 }
@@ -1516,16 +1551,73 @@ mod paste_tests {
         assert!(app.pasted_lines.is_none());
     }
 
+    /// The one line break a copied line ends with is the copy's, not the
+    /// text's: such a paste is one line, typed at the cursor without it. A
+    /// break inside the text stages the paste, a final one then included.
     #[test]
-    fn a_multi_line_paste_is_staged_whole() {
+    fn a_pastes_final_line_break_is_the_copys_not_the_texts() {
+        for copy in ["text\r", "text\n", "text\r\n"] {
+            let mut app = AppState::new();
+            app.input_buffer = "ab".to_string();
+            app.cursor_pos = 1;
+            apply_paste(&mut app, copy);
+            assert_eq!(app.input_buffer, "atextb", "{copy:?}");
+            assert_eq!(app.cursor_pos, 5, "{copy:?}");
+            assert!(app.pasted_lines.is_none(), "{copy:?}");
+        }
         let mut app = AppState::new();
-        app.input_buffer = "typed".to_string();
+        apply_paste(&mut app, "\r");
+        assert_eq!(app.input_buffer, "", "a bare line break types nothing");
+        assert!(app.pasted_lines.is_none());
+
+        let mut app = AppState::new();
+        apply_paste(&mut app, "a\rb\r");
+        assert_eq!(
+            app.pasted_lines,
+            Some(vec!["a".to_string(), "b".to_string(), String::new()]),
+            "two lines keep their final break, verbatim"
+        );
+        let mut app = AppState::new();
+        apply_paste(&mut app, "a\r\r");
+        assert_eq!(app.pasted_lines, Some(vec!["a".to_string(), String::new(), String::new()]));
+    }
+
+    /// A multi-line paste is staged with the input box's text around it,
+    /// before and after the cursor, and the box is emptied: the next Enter
+    /// sends the typed text and the paste as one message, and nothing is
+    /// left behind. (The staged paste alone used to be sent, the typed text
+    /// coming back into the box after it.)
+    #[test]
+    fn a_multi_line_paste_is_staged_with_the_typed_text_around_it() {
+        let mut app = AppState::new();
+        app.input_buffer = "see  please".to_string();
+        app.cursor_pos = 4; // between the two spaces
         apply_paste(&mut app, "line 1\rline 2");
         assert_eq!(
             app.pasted_lines,
-            Some(vec!["line 1".to_string(), "line 2".to_string()])
+            Some(vec!["see line 1".to_string(), "line 2 please".to_string()])
         );
-        assert_eq!(app.input_buffer, "typed", "the input is left alone");
+        assert_eq!(app.input_buffer, "");
+        assert_eq!(app.cursor_pos, 0);
+    }
+
+    /// Once a paste is staged the box holds the tail typed after it: a
+    /// one-line paste types into the tail, and a further multi-line paste
+    /// joins the staged text at the cursor, the tail around it.
+    #[test]
+    fn a_paste_after_a_staged_one_joins_it() {
+        let mut app = AppState::new();
+        apply_paste(&mut app, "a\rb");
+        apply_paste(&mut app, "x");
+        assert_eq!(app.pasted_lines, Some(vec!["a".to_string(), "b".to_string()]), "a one-line paste types into the tail");
+        assert_eq!((app.input_buffer.as_str(), app.cursor_pos), ("x", 1));
+        app.input_buffer.push_str("yz"); // the cursor stays after the x
+        apply_paste(&mut app, "c\rd");
+        assert_eq!(
+            app.pasted_lines,
+            Some(vec!["a".to_string(), "bxc".to_string(), "dyz".to_string()])
+        );
+        assert_eq!(app.input_buffer, "");
     }
 
     #[test]
@@ -1709,5 +1801,39 @@ mod key_tests {
         press(&mut app, KeyCode::Char('i'), KeyModifiers::NONE).await;
         assert_eq!(app.input_buffer, "hi");
         assert_eq!(app.cursor_pos, 2);
+    }
+
+    /// What is typed after a staged paste is sent after it, in the one
+    /// message, and the box is empty afterwards.
+    #[tokio::test]
+    async fn the_text_typed_after_a_staged_paste_is_sent_after_it() {
+        let mut app = AppState::new();
+        apply_paste(&mut app, "a\rb\r");
+        for c in " c".chars() {
+            press(&mut app, KeyCode::Char(c), KeyModifiers::NONE).await;
+        }
+        let sent = submit(&mut app).await.expect("one message went to the brain");
+        match sent.request_type {
+            Some(conversation_request::RequestType::UserMessage(m)) => assert_eq!(m.content, "a\nb\n c"),
+            other => panic!("expected a user message, got {other:?}"),
+        }
+        assert_eq!(app.messages.last().expect("an echoed row").content, "a\nb\n c");
+        assert!(app.pasted_lines.is_none());
+        assert_eq!((app.input_buffer.as_str(), app.cursor_pos), ("", 0));
+    }
+
+    /// Backspace with nothing typed before the cursor drops the staged
+    /// paste, the one thing before it; with a tail it edits the tail first.
+    #[tokio::test]
+    async fn backspace_on_an_empty_tail_drops_the_staged_paste() {
+        let mut app = AppState::new();
+        apply_paste(&mut app, "a\rb");
+        press(&mut app, KeyCode::Char('x'), KeyModifiers::NONE).await;
+        press(&mut app, KeyCode::Backspace, KeyModifiers::NONE).await;
+        assert!(app.pasted_lines.is_some(), "the tail goes first");
+        assert_eq!(app.input_buffer, "");
+        press(&mut app, KeyCode::Backspace, KeyModifiers::NONE).await;
+        assert!(app.pasted_lines.is_none());
+        assert!(submit(&mut app).await.is_none(), "nothing is sent");
     }
 }

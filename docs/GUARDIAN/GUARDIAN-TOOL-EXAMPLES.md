@@ -12,8 +12,10 @@ so what's here is exactly what the gate accepts.
 ## How it works
 
 1. In the console (serial **or** web) type `/guardian-define`.
-2. Paste a module (the fenced blocks below).
-3. Submit: a lone `.` on its own line (serial) or paste-and-Enter (web).
+2. Paste a module (the fenced blocks below). The console stages it whole,
+   on serial as on the web.
+3. Submit: Enter. A module typed line by line ends with a lone `.` on its
+   own line instead.
 4. It is validated synchronously, then compiled to a `wasm32` sandbox in
    the background. Poll with `/guardian status <name>`.
 5. Once `ready`, just ask the intelligence to use the tool, in plain
