@@ -166,20 +166,34 @@ pub(super) async fn handle_request(
                 return Ok(());
             }
 
-            // Build system prompt
-            let system_prompt = if learning::is_soul_sealed(db).await.unwrap_or(false) {
+            // Build system prompt: from a soul that was read, or the turn is
+            // refused (`learning::soul_for_turn`, Embra #11). A failed seal
+            // probe used to render the Learning Mode placeholder and a
+            // failed soul read "(no soul sealed)" under the SOUL header: a
+            // normal-looking turn with no constitution. The seal is read
+            // once; the load probes the collection no second time (#38).
+            let soul = match learning::soul_for_turn(db).await {
+                learning::SoulForTurn::Refused(text) => {
+                    let _ = tx.send(Ok(ConversationResponse {
+                        response_type: Some(conversation_response::ResponseType::System(
+                            SystemMessage {
+                                content: text,
+                                msg_type: SystemMessageType::Error as i32,
+                            }
+                        )),
+                    })).await;
+                    return Ok(());
+                }
+                learning::SoulForTurn::Learning => None,
+                learning::SoulForTurn::Sealed(soul) => Some(soul),
+            };
+            let system_prompt = if let Some(soul) = soul {
                 // Operational mode — build full system prompt
                 // Pass the soul as a Value — operational_mode renders it
                 // into the embraOS constitution via brain::render_constitution.
                 // The stored doc is read-only here; never re-serialized into
                 // storage, so the SHA-256 seal and trustd verification are
-                // untouched. The seal was just read, so the load probes the
-                // collection no second time (#38).
-                let soul = learning::load_sealed_soul(db)
-                    .await
-                    .ok()
-                    .flatten()
-                    .unwrap_or(serde_json::Value::Null);
+                // untouched.
                 // Pass the profile as a Value — operational_mode renders
                 // it via brain::render_user_profile. Read-only; the profile
                 // is not sealed, so no hash/trustd interaction.

@@ -76,7 +76,10 @@ pub(crate) async fn is_soul_sealed_with(db: &WardsonDbClient, last_known: &Atomi
             Ok(sealed)
         }
         Err(e) => match last_known.load(Ordering::Relaxed) {
-            SEAL_UNKNOWN => Err(e),
+            SEAL_UNKNOWN => {
+                tracing::warn!("soul seal read failed before any read had succeeded: {e}");
+                Err(e)
+            }
             known => {
                 let sealed = known == SEAL_PRESENT;
                 tracing::warn!(
@@ -84,6 +87,65 @@ pub(crate) async fn is_soul_sealed_with(db: &WardsonDbClient, last_known: &Atomi
                     if sealed { "sealed" } else { "unsealed" }
                 );
                 Ok(sealed)
+            }
+        },
+    }
+}
+
+/// Reads the seal once at boot, after the migrations, so the memory of
+/// [`is_soul_sealed`] is warm before the first client attaches: its error
+/// arm then means a database the migrations already failed on, and no
+/// first-probe failure can start a turn in Learning Mode (Embra #11).
+pub async fn prime_seal_memory(db: &WardsonDbClient) {
+    match is_soul_sealed(db).await {
+        Ok(sealed) => tracing::info!("soul seal read at boot: {}", if sealed { "sealed" } else { "unsealed" }),
+        Err(e) => tracing::warn!("soul seal could not be read at boot: {e}"),
+    }
+}
+
+/// What the operational turn builds its system prompt from, decided in one
+/// place (Embra #11; the round-2 verification's `turn.rs:178`): `Learning`
+/// while no soul is sealed; `Sealed` once it is, with the document read;
+/// `Refused` when the question could not be answered — the seal probe
+/// failing before anything was ever read, the document read failing, or a
+/// sealed collection without its document, the state trustd halts a boot
+/// on. The turn sends `Refused` to the operator as an Error frame and calls
+/// no model. It used to render the Learning Mode placeholder on a failed
+/// probe and "(no soul sealed)" under the SOUL header on a failed read: a
+/// normal-looking turn, every tool available, no constitution.
+#[derive(Debug)]
+pub enum SoulForTurn {
+    Learning,
+    Sealed(serde_json::Value),
+    Refused(String),
+}
+
+pub async fn soul_for_turn(db: &WardsonDbClient) -> SoulForTurn {
+    soul_for_turn_with(db, &LAST_KNOWN_SEAL).await
+}
+
+/// [`soul_for_turn`] with the seal memory as a parameter, for a test.
+pub(crate) async fn soul_for_turn_with(db: &WardsonDbClient, last_known: &AtomicU8) -> SoulForTurn {
+    match is_soul_sealed_with(db, last_known).await {
+        Ok(false) => SoulForTurn::Learning,
+        Err(e) => SoulForTurn::Refused(format!(
+            "Could not verify the sealed soul (storage error: {e}). This turn was not sent; retry in a moment."
+        )),
+        Ok(true) => match load_sealed_soul(db).await {
+            Ok(Some(soul)) => SoulForTurn::Sealed(soul),
+            Ok(None) => {
+                tracing::error!("the soul collection is present and its document is not; the turn was refused");
+                SoulForTurn::Refused(
+                    "The sealed soul document could not be read: the collection is there, the document is not. \
+                     This turn was not sent; check the database before the next one."
+                        .to_string(),
+                )
+            }
+            Err(e) => {
+                tracing::warn!("the sealed soul could not be read; the turn was refused: {e}");
+                SoulForTurn::Refused(format!(
+                    "Could not read the sealed soul (storage error: {e}). This turn was not sent; retry in a moment."
+                ))
             }
         },
     }
@@ -330,11 +392,59 @@ mod seal_memory_tests {
 
 #[cfg(test)]
 mod seal_state_tests {
-    use super::{SealState, compute_soul_hash, seal_state_at};
+    use super::{SealState, SoulForTurn, compute_soul_hash, seal_state_at, soul_for_turn_with};
     use crate::db::WardsonDbClient;
     use serde_json::json;
+    use std::sync::atomic::AtomicU8;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Embra #11: the turn's soul is read or the turn is refused. A sealed
+    /// soul reaches the turn; a probe that fails before anything was read,
+    /// a document that cannot be read behind a present collection, and a
+    /// present collection without its document each refuse the turn with a
+    /// sentence for the operator — never the Learning placeholder, never a
+    /// Null soul rendered as "(no soul sealed)".
+    #[tokio::test]
+    async fn the_turn_takes_a_soul_that_was_read_or_is_refused() {
+        let soul = json!({"name": "Embra"});
+        let server = server_with_soul(&soul).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let memory = AtomicU8::new(0);
+        assert!(matches!(soul_for_turn_with(&db, &memory).await, SoulForTurn::Sealed(s) if s == soul));
+
+        let empty = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/soul.invariant")).respond_with(ResponseTemplate::new(404)).mount(&empty).await;
+        let db = WardsonDbClient::from_url(&empty.uri());
+        assert!(matches!(soul_for_turn_with(&db, &AtomicU8::new(0)).await, SoulForTurn::Learning));
+
+        let down = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/soul.invariant")).respond_with(ResponseTemplate::new(500)).mount(&down).await;
+        let db = WardsonDbClient::from_url(&down.uri());
+        match soul_for_turn_with(&db, &AtomicU8::new(0)).await {
+            SoulForTurn::Refused(t) => assert!(t.starts_with("Could not verify the sealed soul") && t.contains("not sent"), "{t}"),
+            other => panic!("{other:?}"),
+        }
+
+        let half = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/soul.invariant")).respond_with(ResponseTemplate::new(200)).mount(&half).await;
+        Mock::given(method("GET")).and(path("/soul.invariant/docs/soul")).respond_with(ResponseTemplate::new(500)).mount(&half).await;
+        let db = WardsonDbClient::from_url(&half.uri());
+        match soul_for_turn_with(&db, &AtomicU8::new(0)).await {
+            SoulForTurn::Refused(t) => assert!(t.starts_with("Could not read the sealed soul"), "{t}"),
+            other => panic!("{other:?}"),
+        }
+
+        let gone = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/soul.invariant")).respond_with(ResponseTemplate::new(200)).mount(&gone).await;
+        Mock::given(method("GET")).and(path("/soul.invariant/docs/soul")).respond_with(ResponseTemplate::new(404)).mount(&gone).await;
+        Mock::given(method("POST")).and(path("/soul.invariant/query")).respond_with(envelope(json!([]))).mount(&gone).await;
+        let db = WardsonDbClient::from_url(&gone.uri());
+        match soul_for_turn_with(&db, &AtomicU8::new(0)).await {
+            SoulForTurn::Refused(t) => assert!(t.contains("the collection is there, the document is not"), "{t}"),
+            other => panic!("{other:?}"),
+        }
+    }
 
     fn envelope(v: serde_json::Value) -> ResponseTemplate {
         ResponseTemplate::new(200).set_body_json(json!({"ok": true, "data": v, "meta": {}}))

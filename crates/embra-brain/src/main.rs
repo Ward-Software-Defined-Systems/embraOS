@@ -152,6 +152,9 @@ async fn main() -> anyhow::Result<()> {
     // Run schema migrations
     migrations::run_migrations(&db).await?;
     info!("Migrations complete");
+    // The seal read once, so `is_soul_sealed`'s memory is warm before the
+    // first client attaches (Embra #11).
+    learning::prime_seal_memory(&db).await;
 
     // Write the native tool-use registry snapshot to tools.registry. Must
     // run after migrations (v7 stamps legacy session format_version) and
