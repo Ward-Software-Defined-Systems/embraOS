@@ -97,7 +97,7 @@ Every slash command available in an embraOS session, grouped as in the web conso
 |---|---|
 | `/soul` | Display the immutable soul — the sealed identity graph as grouped prose + the seal header (legacy flat-soul instances: the raw JSON document) |
 | `/identity` | Display the intelligence's identity — the sealed identity graph it is part of (legacy instances: the separate identity document) |
-| `/mode` | Show current operating mode and soul seal status |
+| `/mode` | Show current operating mode and soul seal status; a seal that could not be read is said as such, never reported as Learning |
 
 ## System
 

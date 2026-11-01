@@ -465,8 +465,16 @@ pub(super) async fn handle_slash_command(
             send_msg(tx, output).await;
         }
         "/mode" => {
-            let sealed = learning::is_soul_sealed(db).await.unwrap_or(false);
-            send_msg(tx, if sealed { "Operational (soul sealed)".to_string() } else { "Learning (soul not sealed)".to_string() }).await;
+            // Three states: a seal that could not be read is said as such,
+            // never reported as Learning (Embra #11, #26). `is_soul_sealed`
+            // answers its last known state after the first read, so the
+            // error arm is a database gone before anything was read.
+            let line = match learning::is_soul_sealed(db).await {
+                Ok(true) => "Operational (soul sealed)".to_string(),
+                Ok(false) => "Learning (soul not sealed)".to_string(),
+                Err(e) => format!("Unknown: the seal could not be read ({e}); the mode is unchanged"),
+            };
+            send_msg(tx, line).await;
         }
         "/github-token" => {
             if args.is_empty() {

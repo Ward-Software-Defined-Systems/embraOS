@@ -103,25 +103,30 @@ pub(crate) fn soul_hash_is_stored(hash_path: &Path) -> std::io::Result<bool> {
 }
 
 /// What the seal looks like now (#15): no soul; a soul whose hash matches
-/// the stored one; or a soul present with a different stored hash or none.
-/// trustd verifies at boot and halts on a mismatch, so the third state is
-/// never a boot that was let through — it is a soul or a hash file changed
-/// since. The status surfaces print it, which is what the issue asked the
-/// display to be able to reveal; the mode still follows the document.
+/// the stored one; a soul present with a different stored hash or none; or
+/// a soul that could not be read. trustd verifies at boot and halts on a
+/// mismatch, so the third state is never a boot that was let through — it
+/// is a soul or a hash file changed since. The fourth is a database that
+/// did not answer (Embra #26, #11: a failed read used to print `unsealed`,
+/// the one word that means the turn should not have run). The status
+/// surfaces print it; the mode still follows the document.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SealState {
     Unsealed,
     Sealed,
     SealedUnverified,
+    Unknown,
 }
 
 impl SealState {
-    /// The word the status surfaces print.
+    /// The word the status surfaces print: `system_status`, `GetMode`,
+    /// `security_check` and `uptime_report`, one word set.
     pub fn status_word(self) -> &'static str {
         match self {
             SealState::Unsealed => "unsealed",
             SealState::Sealed => "sealed",
             SealState::SealedUnverified => "sealed, unverified",
+            SealState::Unknown => "unknown",
         }
     }
 }
@@ -131,14 +136,20 @@ pub async fn seal_state(db: &WardsonDbClient) -> SealState {
     seal_state_at(db, Path::new(SOUL_HASH_PATH)).await
 }
 
-/// `seal_state` against a given hash file (a test's directory). A soul
-/// that cannot be read reads as unsealed here, in the status word;
-/// `is_soul_sealed`, which the mode follows, answers its last known state.
+/// `seal_state` against a given hash file (a test's directory). No soul
+/// document is `Unsealed`; a soul that could not be read (the collection
+/// probe or the document read failing) is `Unknown`, logged, never
+/// `unsealed`. `is_soul_sealed`, which the mode follows, answers its last
+/// known state instead.
 pub(crate) async fn seal_state_at(db: &WardsonDbClient, hash_path: &Path) -> SealState {
-    let Some(soul) = load_soul(db).await.ok().flatten() else {
-        return SealState::Unsealed;
-    };
-    seal_of(&soul, hash_path)
+    match load_soul(db).await {
+        Ok(Some(soul)) => seal_of(&soul, hash_path),
+        Ok(None) => SealState::Unsealed,
+        Err(e) => {
+            tracing::warn!("the seal could not be read for the status surfaces: {e}");
+            SealState::Unknown
+        }
+    }
 }
 
 /// The seal of a soul already loaded, against the hash file: `Sealed` when
@@ -399,8 +410,22 @@ mod seal_state_tests {
         let db = WardsonDbClient::from_url(&empty.uri());
         assert_eq!(seal_state_at(&db, &hash_file("unsealed", Some(&hash))).await, SealState::Unsealed);
 
+        // A database that does not answer is `unknown`, never `unsealed`
+        // (Embra #26, #11): the collection probe failing, or the document
+        // read behind a collection that is there.
+        let down = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/soul.invariant")).respond_with(ResponseTemplate::new(500)).mount(&down).await;
+        let db = WardsonDbClient::from_url(&down.uri());
+        assert_eq!(seal_state_at(&db, &hash_file("down", Some(&hash))).await, SealState::Unknown);
+        let half = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/soul.invariant")).respond_with(ResponseTemplate::new(200)).mount(&half).await;
+        Mock::given(method("GET")).and(path("/soul.invariant/docs/soul")).respond_with(ResponseTemplate::new(500)).mount(&half).await;
+        let db = WardsonDbClient::from_url(&half.uri());
+        assert_eq!(seal_state_at(&db, &hash_file("half", Some(&hash))).await, SealState::Unknown);
+
         assert_eq!(SealState::Sealed.status_word(), "sealed");
         assert_eq!(SealState::SealedUnverified.status_word(), "sealed, unverified");
         assert_eq!(SealState::Unsealed.status_word(), "unsealed");
+        assert_eq!(SealState::Unknown.status_word(), "unknown");
     }
 }

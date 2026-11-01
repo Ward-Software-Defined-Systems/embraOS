@@ -304,7 +304,12 @@ async fn uptime_report(db: &WardsonDbClient, session_name: &str) -> String {
     }
 
     let healthy = db.health().await.unwrap_or(false);
-    let soul_sealed = db.collection_exists("soul.invariant").await.unwrap_or(false);
+    // The seal as every other status surface prints it (`system_status`,
+    // `GetMode`, `security_check`): re-verified against the stored hash, and
+    // `unknown` when it could not be read. This line said "sealed" for any
+    // soul document and "unsealed" for a failed read until 2026-10-31
+    // (Embra #26).
+    let soul_status = crate::learning::seal_state(db).await.status_word();
 
     format!(
         "Uptime Report:\n\
@@ -324,8 +329,29 @@ async fn uptime_report(db: &WardsonDbClient, session_name: &str) -> String {
         session_count,
         total_messages,
         memory_count,
-        if soul_sealed { "sealed" } else { "unsealed" }
+        soul_status
     )
+}
+
+#[cfg(test)]
+mod uptime_report_tests {
+    use super::uptime_report;
+    use crate::db::WardsonDbClient;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Embra #26: the Soul line reads the verified seal like the other
+    /// status surfaces; a database that does not answer prints `unknown`,
+    /// where this line said `unsealed`.
+    #[tokio::test]
+    async fn the_soul_line_says_unknown_when_the_seal_cannot_be_read() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/soul.invariant")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+        let db = WardsonDbClient::from_url(&server.uri());
+        let report = uptime_report(&db, "main").await;
+        assert!(report.ends_with("Soul: unknown"), "{report}");
+        assert!(!report.contains("unsealed"), "{report}");
+    }
 }
 
 /// The entries `changelog` reports, from a newest-first window: those
