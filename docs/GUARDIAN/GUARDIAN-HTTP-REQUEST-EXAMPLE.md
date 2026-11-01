@@ -28,7 +28,12 @@ lives on the host:
    <value>` stores a credential; the host adds it to a hop whose host matches
    and to no other, so a redirect to another host never carries it. A tool
    may not set `Authorization`, `Proxy-Authorization` or `Cookie` itself, and
-   a token never enters a tool's input, the turn trace or the session history.
+   a stored token never enters a tool's input, the turn trace or the session
+   history. A header a tool sets itself is sent as given; the record of the
+   call (the turn trace, the Tools tab, the `ToolExecution` frame) masks the
+   value of a credential-shaped one (`Authorization`, `Cookie`, `X-API-Key`,
+   `Api-Key`, `X-Auth-Token`, `Private-Token`) as `[masked]`, and a stored
+   secret anywhere in an input is replaced by its kind.
 3. **The user agent** — every hop carries `User-Agent: embraOS/<version>`,
    the workspace version (`embraOS/0.22.0-phase1` today), so it moves with
    a release; a `User-Agent` in the request's `headers` is sent instead.

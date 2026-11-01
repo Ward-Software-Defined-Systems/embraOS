@@ -11,6 +11,7 @@ use std::sync::{Arc, OnceLock};
 
 use chrono::{DateTime, Utc};
 use embra_common::proto::brain::ToolCallRecord;
+use embra_tools_core::SecretSet;
 use tokio::sync::{broadcast, mpsc};
 use tonic::Status;
 
@@ -118,6 +119,21 @@ pub fn record(c: Call<'_>) -> ToolCallRecord {
         from_record: false,
         started_at_rfc: c.started_at.to_rfc3339(),
     }
+}
+
+/// The input of a call as every record of it carries it: the Tools-tab
+/// record, the `tools.turn_trace` preview and the `ToolExecution` frame. A
+/// credential header's value is masked (`mask_credential_headers`, Embra
+/// #23: an `X-API-Key` the model passed itself landed in the trace as sent)
+/// and a stored secret is replaced by its kind (`SecretSet::redact`), so an
+/// outbound input the dispatcher refused never records what it carried.
+/// `registry::dispatch_recorded` builds it from the set the refusal and the
+/// output scrub use; the stop arm of the loop builds its own.
+pub fn input_for_record(args: &serde_json::Value, secrets: &SecretSet) -> String {
+    let mut masked = args.clone();
+    embra_tools_core::mask_credential_headers(&mut masked);
+    let text = serde_json::to_string(&masked).unwrap_or_default();
+    secrets.redact(&text).unwrap_or(text)
 }
 
 /// The record of a dispatch the operator stopped: an error that says so.
@@ -232,6 +248,26 @@ mod tests {
             input_json: input,
             result,
         }
+    }
+
+    #[test]
+    fn the_recorded_input_masks_headers_and_redacts_a_stored_secret() {
+        let mut secrets = SecretSet::new();
+        secrets.add("the GitHub token", "ghp_0123456789abcdefghij");
+        let args = serde_json::json!({
+            "action": "invoke", "tool": "http_request",
+            "input": {
+                "url": "https://api.github.com/repos?token=ghp_0123456789abcdefghij",
+                "headers": {"X-API-Key": "k-0123456789", "Accept": "application/json"},
+            },
+        });
+        let text = input_for_record(&args, &secrets);
+        assert!(text.contains(r#""X-API-Key":"[masked]""#), "{text}");
+        assert!(text.contains(r#""Accept":"application/json""#), "{text}");
+        assert!(text.contains("token=[the GitHub token redacted]") && !text.contains("ghp_"), "{text}");
+        // Nothing to mask or redact: the bytes are the arguments' own.
+        let plain = serde_json::json!({"path": "/tmp/a"});
+        assert_eq!(input_for_record(&plain, &SecretSet::new()), r#"{"path":"/tmp/a"}"#);
     }
 
     #[test]

@@ -581,9 +581,9 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<CronFired
         let seq = crate::tool_calls::next_seq();
         let started = std::time::Instant::now();
         let started_at = Utc::now();
-        let (result_text, is_error) = match super::registry::dispatch(&plan.name, plan.args.clone(), ctx)
-        .await
-        {
+        let (dispatched, input_json) =
+            super::registry::dispatch_recorded(&plan.name, plan.args.clone(), ctx).await;
+        let (result_text, is_error) = match dispatched {
             // Cron consumes the text only — a cron-fired media tool's images
             // have no operator stream to land on.
             Ok(out) => (out.text, false),
@@ -605,7 +605,6 @@ pub async fn check_crons(db: &WardsonDbClient, config_tz: &str) -> Vec<CronFired
         // The live record for the web console's Tools tab: a cron-fired
         // call is in the list with its job, and never in a transcript.
         if crate::tool_calls::has_watchers() {
-            let input_json = serde_json::to_string(&plan.args).unwrap_or_default();
             crate::tool_calls::emit(crate::tool_calls::record(crate::tool_calls::Call {
                 seq,
                 tool_use_id: "",

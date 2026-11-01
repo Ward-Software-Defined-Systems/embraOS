@@ -8,6 +8,61 @@
 /// The character a masked secret is drawn with.
 pub const MASK_CHAR: char = '•';
 
+/// Request headers that carry a credential. The Guardian broker refuses a
+/// request that sets one (`embra-guardian/src/caps.rs`: a credential comes
+/// from `/guardian secret`, never from a tool's input), and every record of
+/// a tool call masks their values ([`MASKED_HEADERS`]).
+pub const CREDENTIAL_HEADERS: &[&str] = &["authorization", "proxy-authorization", "cookie"];
+
+/// Header names whose value never reaches a record of a tool call (the
+/// turn trace, the Tools tab, the `ToolExecution` frame): the credential
+/// headers the broker refuses, and the API-key shapes it sends. A key the
+/// model passes in a request is its own to pass; the record is not the
+/// place for the value (Embra #23).
+pub const MASKED_HEADERS: &[&str] = &[
+    "authorization", "proxy-authorization", "cookie", "x-api-key", "api-key", "x-auth-token",
+    "private-token",
+];
+
+/// What a masked header value becomes in a record.
+pub const MASKED_VALUE: &str = "[masked]";
+
+/// Replaces, in place, the value of every [`MASKED_HEADERS`] name inside any
+/// object a `headers` key holds, wherever that key sits in `value`
+/// (`guardian_call`'s `input.headers`, or a top-level `headers`), by
+/// [`MASKED_VALUE`]; names compare ASCII case-insensitively, and a `headers`
+/// that is not an object is left alone. Returns whether anything moved.
+pub fn mask_credential_headers(value: &mut serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut moved = false;
+            for (key, child) in map.iter_mut() {
+                if key.eq_ignore_ascii_case("headers")
+                    && let serde_json::Value::Object(headers) = child
+                {
+                    for (name, v) in headers.iter_mut() {
+                        if MASKED_HEADERS.iter().any(|m| m.eq_ignore_ascii_case(name)) && !v.is_null() {
+                            *v = serde_json::Value::String(MASKED_VALUE.to_string());
+                            moved = true;
+                        }
+                    }
+                } else {
+                    moved |= mask_credential_headers(child);
+                }
+            }
+            moved
+        }
+        serde_json::Value::Array(items) => {
+            let mut moved = false;
+            for item in items.iter_mut() {
+                moved |= mask_credential_headers(item);
+            }
+            moved
+        }
+        _ => false,
+    }
+}
+
 /// The forms: the leading tokens that identify one, then the index of the
 /// token where the secret starts; it runs to the last token of the line.
 /// `remove` in that place is a command word, not a value, and is left as it
@@ -92,6 +147,36 @@ pub fn mask_secret_argument_keeping_length(line: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_header_values_are_masked_wherever_a_headers_object_sits() {
+        let mut v = serde_json::json!({
+            "action": "invoke", "tool": "http_request",
+            "input": {
+                "url": "https://api.example/v1",
+                "headers": {"X-API-Key": "k-0123456789", "Accept": "text/plain", "authorization": "Bearer t-0123456789"},
+            },
+            "headers": {"Cookie": "a=b"},
+        });
+        assert!(mask_credential_headers(&mut v));
+        assert_eq!(v["input"]["headers"]["X-API-Key"], MASKED_VALUE);
+        assert_eq!(v["input"]["headers"]["authorization"], MASKED_VALUE);
+        assert_eq!(v["input"]["headers"]["Accept"], "text/plain");
+        assert_eq!(v["headers"]["Cookie"], MASKED_VALUE);
+        // A header value in prose, or a `headers` that is not an object, is
+        // not a header: nothing moves and the text is as it was.
+        let plain = serde_json::json!({"path": "/x", "headers": "Authorization: Bearer t", "content": "cookie: a=b"});
+        let mut copy = plain.clone();
+        assert!(!mask_credential_headers(&mut copy));
+        assert_eq!(copy, plain);
+    }
+
+    #[test]
+    fn every_credential_header_the_broker_refuses_is_masked() {
+        for h in CREDENTIAL_HEADERS {
+            assert!(MASKED_HEADERS.contains(h), "{h}");
+        }
+    }
 
     #[test]
     fn each_secret_form_is_masked_and_the_rest_of_the_line_kept() {

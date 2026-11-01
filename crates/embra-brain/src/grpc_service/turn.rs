@@ -1013,12 +1013,15 @@ pub(super) async fn handle_request(
                             // Mid-tool operator stop: abandon the dispatch
                             // future (drops it — same subprocess-leak
                             // caveat as the 600s timeout) and skip out.
-                            let outcome = tokio::select! {
-                                outcome = tools::registry::dispatch(
+                            // `input_json` is the input as every record
+                            // carries it: credential headers masked, a
+                            // stored secret by its kind (`input_for_record`).
+                            let (outcome, input_json) = tokio::select! {
+                                dispatched = tools::registry::dispatch_recorded(
                                     name,
                                     args.clone(),
                                     ctx,
-                                ) => outcome,
+                                ) => dispatched,
                                 _ = stop_check.triggered() => {
                                     info!(
                                         target: "dispatch",
@@ -1030,8 +1033,10 @@ pub(super) async fn handle_request(
                                     // and `turn_trace`: a stopped call used
                                     // to leave no trace at all.
                                     let elapsed_ms = started.elapsed().as_millis() as u64;
-                                    let input_json =
-                                        serde_json::to_string(args).unwrap_or_default();
+                                    let input_json = tool_calls::input_for_record(
+                                        args,
+                                        &crate::secrets::collect(Some(&loaded_config)),
+                                    );
                                     if tool_calls::has_watchers() {
                                         tool_calls::emit(tool_calls::stopped_record(tool_calls::Call {
                                             seq,
@@ -1124,8 +1129,6 @@ pub(super) async fn handle_request(
                             // Record in the in-memory turn trace and persist
                             // asynchronously to tools.turn_trace so cross-turn
                             // introspection is available to the model.
-                            let input_json =
-                                serde_json::to_string(args).unwrap_or_default();
                             let input_preview = preview_str(&input_json, TURN_TRACE_PREVIEW_MAX);
                             let result_preview = preview_str(&content, TURN_TRACE_PREVIEW_MAX);
                             let entry = embra_tools_core::TraceEntry {

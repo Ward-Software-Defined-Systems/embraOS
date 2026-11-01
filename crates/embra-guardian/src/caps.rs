@@ -538,8 +538,9 @@ pub const HTTP_HEADERS_MAX: usize = 32;
 pub const HTTP_HEADERS_BYTES_MAX: usize = 8 * 1024;
 
 /// Headers a guest may not set: a credential comes from the operator's
-/// store only, never from a tool's input.
-const CREDENTIAL_HEADERS: &[&str] = &["authorization", "proxy-authorization", "cookie"];
+/// store only, never from a tool's input. The list is the shared crate's,
+/// which every record of a tool call masks as well (`MASKED_HEADERS`).
+use embra_tools_core::CREDENTIAL_HEADERS;
 /// Headers the transport owns; a guest's value is dropped without a word.
 const TRANSPORT_HEADERS: &[&str] = &[
     "host", "content-length", "transfer-encoding", "connection", "expect", "upgrade", "te",
@@ -1892,8 +1893,13 @@ mod request_tests {
 
     #[test]
     fn a_guest_may_not_set_a_credential_header() {
+        // The shared list, in any case: the brain's records mask the same
+        // names, so the two never drift.
         let rec = Recorder::new(vec![]);
-        for h in ["Authorization", "cookie", "Proxy-Authorization"] {
+        for h in embra_tools_core::CREDENTIAL_HEADERS
+            .iter()
+            .flat_map(|h| [h.to_string(), h.to_ascii_uppercase(), "Proxy-Authorization".to_string()])
+        {
             let v = parse(&guarded_http_request(
                 &caps_with(&rec),
                 &format!(r#"{{"url":"https://1.1.1.1/","headers":{{"{h}":"x"}}}}"#),

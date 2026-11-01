@@ -240,12 +240,42 @@ fn scrub_output(
 /// a stored secret ([`OUTBOUND_TOOLS`]), runs the handler with the typed
 /// context under the [`MAX_TOOL_DURATION`] ceiling, redacts a stored
 /// secret from the output ([`scrub_output`]), and applies the 2 MiB text
-/// cap + the image COUNT cap. The gRPC tool loop calls it; `tools/cron.rs`
-/// consumes `.text` only.
-pub async fn dispatch(
+/// cap + the image COUNT cap. The gRPC tool loop and `tools/cron.rs` call
+/// it through [`dispatch_recorded`], which hands the call's record back
+/// beside the result; cron consumes `.text` only. This form, the result
+/// alone, is what the tests of the tools call.
+#[cfg(test)]
+pub(crate) async fn dispatch(
     name: &str,
     input: JsonValue,
     ctx: DispatchContext<'_>,
+) -> Result<ToolOutput, DispatchError> {
+    let secrets = crate::secrets::collect(Some(ctx.config));
+    dispatch_with(name, input, ctx, &secrets).await
+}
+
+/// [`dispatch`], with the call's input as every record of the call carries
+/// it (`tool_calls::input_for_record`: credential headers masked, a stored
+/// secret replaced by its kind), built from the same stored-secret set the
+/// refusal and the output scrub use. The tool loop and the cron tick record
+/// from this string, never from the arguments as the model sent them: an
+/// outbound input the dispatcher refused used to reach the trace, the Tools
+/// tab and the `ToolExecution` frame with the secret it carried (Embra #23).
+pub async fn dispatch_recorded(
+    name: &str,
+    input: JsonValue,
+    ctx: DispatchContext<'_>,
+) -> (Result<ToolOutput, DispatchError>, String) {
+    let secrets = crate::secrets::collect(Some(ctx.config));
+    let recorded = crate::tool_calls::input_for_record(&input, &secrets);
+    (dispatch_with(name, input, ctx, &secrets).await, recorded)
+}
+
+async fn dispatch_with(
+    name: &str,
+    input: JsonValue,
+    ctx: DispatchContext<'_>,
+    secrets: &SecretSet,
 ) -> Result<ToolOutput, DispatchError> {
     let Some(desc) = REGISTRY.get(name) else {
         return Err(DispatchError::Unknown(name.into()));
@@ -255,14 +285,13 @@ pub async fn dispatch(
     // abandons it (`grpc_service.rs`).
     let origin = crate::activity::ToolOrigin::from_session(ctx.session_name);
     let span = crate::activity::ToolSpan::start(name, origin);
-    let secrets = crate::secrets::collect(Some(ctx.config));
-    if let Some(refusal) = outbound_refusal(name, &input, &secrets) {
+    if let Some(refusal) = outbound_refusal(name, &input, secrets) {
         span.finish(true);
         return Err(DispatchError::Handler(refusal));
     }
     let raw = enforce_timeout((desc.handler)(input, ctx), name, MAX_TOOL_DURATION).await;
     span.finish(raw.is_err());
-    Ok(apply_caps(scrub_output(name, raw, &secrets)?))
+    Ok(apply_caps(scrub_output(name, raw, secrets)?))
 }
 
 #[cfg(test)]
@@ -573,6 +602,35 @@ mod outbound_tests {
                 other => panic!("the handler ran: {other:?}"),
             }
         }
+    }
+
+    /// Embra #23 (2026-10-31): the refusal names the kind, and so does the
+    /// record of the call — the input the loop and the cron tick hand to
+    /// the trace, the Tools tab and the `ToolExecution` frame used to be the
+    /// arguments as sent, the stored secret with them.
+    #[tokio::test]
+    async fn a_refused_outbound_input_leaves_its_stored_secret_out_of_the_record() {
+        let config = config_with_token();
+        let db = WardsonDbClient::from_url("http://127.0.0.1:1");
+        let trace = embra_tools_core::new_turn_trace_handle();
+        let ctx = DispatchContext {
+            db: &db,
+            config: &config,
+            session_name: "main",
+            config_tz: "UTC",
+            trace: &trace,
+            turn_index: 0,
+            deleting_session: None,
+        };
+        let (out, recorded) = dispatch_recorded(
+            "gh_issue_comment",
+            serde_json::json!({"repo": "o/r", "number": 1, "body": "here it is: ghp_0123456789abcdefghij"}),
+            ctx,
+        )
+        .await;
+        assert!(matches!(out, Err(DispatchError::Handler(ref m)) if m.starts_with("refused:")), "{out:?}");
+        assert!(recorded.contains(r#""body":"here it is: [the GitHub token redacted]""#), "{recorded}");
+        assert!(!recorded.contains("ghp_"), "{recorded}");
     }
 
     /// The input of the live check of 2026-10-18 (item 7), with the
