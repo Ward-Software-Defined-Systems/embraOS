@@ -526,6 +526,31 @@ pub async fn git_auth_config(db: &WardsonDbClient) -> Vec<(String, String)> {
     pairs
 }
 
+/// The report of a clone that failed: git's stderr as it came, and after an
+/// authentication failure one sentence more. GitHub, and GitLab, answer a
+/// repository that does not exist or is private with the same challenge as
+/// a rejected credential, so the message alone sends a reader to the token
+/// when the URL is the fault (Embra #28: a typo'd URL read as a dead
+/// token). The token rides the configuration environment (`git_auth_config`)
+/// on every clone of its host, so whether one was offered is known here.
+fn clone_failure_text(url: &str, stderr: &str, token_offered: bool) -> String {
+    let auth_failed = stderr.contains("Authentication failed") || stderr.contains("could not read Username");
+    if !auth_failed {
+        return format!("git clone failed: {stderr}");
+    }
+    let token = if token_offered {
+        "a stored token was offered and refused"
+    } else {
+        "no stored token was offered"
+    };
+    format!(
+        "git clone failed: {stderr}\n\
+         A host answers a missing or private repository with the same challenge as a rejected credential: \
+         check that '{url}' exists and is readable first, then the token ({token}; /github-token or \
+         /git-token stores one)."
+    )
+}
+
 /// Clone a git repository into /embra/workspace/.
 /// `subpath` may be a bare dirname (`myrepo`), a relative path under the
 /// workspace (`repos/myrepo`), or an absolute path that lives under
@@ -581,7 +606,7 @@ pub async fn git_clone(db: &WardsonDbClient, url: &str, subpath: Option<&str>) -
     {
         Ok(run) => {
             if !run.status.success() {
-                return format!("git clone failed: {}", run.failure());
+                return clone_failure_text(url, run.failure(), !auth.is_empty());
             }
             format!("Cloned {} into {}", url, dest)
         }
@@ -1684,6 +1709,23 @@ mod git_command_tests {
 #[cfg(test)]
 mod argument_tests {
     use super::*;
+
+    /// Embra #28: GitHub answers a repository that does not exist with the
+    /// same challenge as a rejected token, so an authentication failure names
+    /// the URL as the first suspect and says whether a token was offered;
+    /// any other failure is git's text as it came.
+    #[test]
+    fn an_authentication_failure_names_the_url_as_the_first_suspect() {
+        let stderr = "remote: Invalid username or token. Password authentication is not supported for Git operations.\nfatal: Authentication failed for 'https://github.com/octocat/embra-probe-does-not-exist.git/'";
+        let out = clone_failure_text("https://github.com/octocat/embra-probe-does-not-exist.git", stderr, true);
+        assert!(out.starts_with("git clone failed: remote: Invalid username or token."), "{out}");
+        assert!(out.contains("check that 'https://github.com/octocat/embra-probe-does-not-exist.git' exists"), "{out}");
+        assert!(out.contains("a stored token was offered and refused"), "{out}");
+        let out = clone_failure_text("https://h/r.git", "fatal: could not read Username for 'https://h': terminal prompts disabled", false);
+        assert!(out.contains("no stored token was offered"), "{out}");
+        let plain = clone_failure_text("https://h/r.git", "fatal: repository 'https://h/r.git/' not found", true);
+        assert_eq!(plain, "git clone failed: fatal: repository 'https://h/r.git/' not found");
+    }
 
     /// `git_fetch` places its flags, then `--`, then the remote and the
     /// branch, and refuses an option-shaped remote or branch before git runs.
