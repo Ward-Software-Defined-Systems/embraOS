@@ -24,7 +24,12 @@ const DEADLINE: Duration = Duration::from_secs(30);
 
 struct Ended {
     code: Option<i32>,
+    /// Everything it wrote: stdout then stderr on pipes, the PTY's output
+    /// on a PTY.
     said: String,
+    /// Its stderr alone, on pipes: where its log goes when stderr is not a
+    /// terminal. Empty on a PTY, where stderr is the terminal.
+    logged: String,
 }
 
 /// Run the console against `apid_addr` until it exits. Its standard
@@ -35,6 +40,8 @@ fn run_console(apid_addr: &str) -> Ended {
     let mut cmd = Command::new(CONSOLE);
     cmd.args(["--apid-addr", apid_addr])
         .env("EMBRA_WEB_PTY", "1")
+        // The log's default filter is under test, not this shell's.
+        .env_remove("RUST_LOG")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -53,9 +60,10 @@ fn run_console(apid_addr: &str) -> Ended {
     loop {
         if let Some(status) = child.try_wait().expect("wait for the console") {
             let out = child.wait_with_output().expect("the console's output");
+            let logged = String::from_utf8_lossy(&out.stderr).into_owned();
             let mut said = String::from_utf8_lossy(&out.stdout).into_owned();
-            said.push_str(&String::from_utf8_lossy(&out.stderr));
-            return Ended { code: status.code(), said };
+            said.push_str(&logged);
+            return Ended { code: status.code(), said, logged };
         }
         if start.elapsed() > DEADLINE {
             let _ = child.kill();
@@ -126,7 +134,7 @@ fn run_console_on_a_pty(apid_addr: &str) -> Ended {
                     break;
                 }
             }
-            return Ended { code: status.code(), said: String::from_utf8_lossy(&seen).into_owned() };
+            return Ended { code: status.code(), said: String::from_utf8_lossy(&seen).into_owned(), logged: String::new() };
         }
         if start.elapsed() > DEADLINE {
             let _ = child.kill();
@@ -281,6 +289,35 @@ fn a_conversation_the_gateway_ends_is_exit_3_with_the_cause() {
         "{}",
         ended.said.escape_debug()
     );
+    // stderr is the terminal here, as on the web PTY: no log is installed,
+    // and the pane says the cause once, not as a log line too.
+    assert_eq!(ended.said.matches("the gateway ended the conversation stream").count(), 1, "{}", ended.said.escape_debug());
+    assert!(!ended.said.contains("ERROR embra_console"), "{}", ended.said.escape_debug());
+}
+
+/// When stderr is not a terminal — the serial line, where embrad sends it
+/// to `/embra/ephemeral/embra-console.log` — the console's lines and its
+/// exit cause are written there through `tracing`, each with its time and
+/// level. The file was 0 bytes on every boot before (Embra, 2026-11-01):
+/// the lines went to stdout alone, and the `tracing` calls had no
+/// subscriber.
+#[test]
+fn the_log_carries_the_consoles_lines_and_its_exit_cause_when_stderr_is_a_file() {
+    let ended = run_console(&format!("http://127.0.0.1:{}", closed_port()));
+    assert_eq!(ended.code, Some(2), "it said:\n{}", ended.said);
+    let log = &ended.logged;
+    assert!(log.contains(" INFO embra_console: starting"), "{log}");
+    assert!(log.contains(" INFO embra_console: connecting to http://127.0.0.1:"), "{log}");
+    assert!(log.contains("ERROR embra_console: FATAL: "), "{log}");
+    assert!(log.contains(" code=2"), "{log}");
+    // Every line starts with its time, RFC 3339 in UTC.
+    for line in log.lines() {
+        let b = line.as_bytes();
+        assert!(
+            b.len() > 20 && b[4] == b'-' && b[7] == b'-' && b[10] == b'T' && b[13] == b':' && b[16] == b':' && line.contains("Z "),
+            "{line}"
+        );
+    }
 }
 
 /// The console reaches its gateway, opens its conversation, and then

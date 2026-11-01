@@ -12,6 +12,8 @@ tokio = { workspace = true }
 tonic = { workspace = true }
 prost = { workspace = true }
 tracing = { workspace = true }
+# The console's log, installed when stderr is not a terminal (`install_log`).
+tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }

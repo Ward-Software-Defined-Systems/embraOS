@@ -111,15 +111,15 @@ async fn run_tui(
     override_cols: Option<u16>,
     override_rows: Option<u16>,
 ) -> Result<()> {
-    println!("[TUI] opening conversation...");
+    say!("[TUI]", "opening conversation...");
     let (in_tx, mut out_rx) = client.open_conversation("").await?;
-    println!("[TUI] conversation opened");
+    say!("[TUI]", "conversation opened");
 
     // Determine terminal size: CLI override > TIOCGWINSZ > default 80x24
     let (detected_cols, detected_rows) = terminal::size().unwrap_or((0, 0));
     let cols = override_cols.unwrap_or(if detected_cols > 0 { detected_cols } else { 80 });
     let rows = override_rows.unwrap_or(if detected_rows > 0 { detected_rows } else { 24 });
-    println!("[TUI] size: {}x{} (detected: {}x{})", cols, rows, detected_cols, detected_rows);
+    say!("[TUI]", "size: {}x{} (detected: {}x{})", cols, rows, detected_cols, detected_rows);
 
     // Serial console: TIOCGWINSZ is unreliable over QEMU -nographic, so the
     // viewport is pinned to the cmdline-provided size (Viewport::Fixed).
@@ -136,8 +136,9 @@ async fn run_tui(
     let graphics_env = std::env::var("EMBRA_TUI_GRAPHICS").ok();
     let graphics_mode = graphics::GraphicsMode::resolve(graphics_env.as_deref(), web_pty);
     let mut gfx = graphics::Graphics::init(graphics_mode);
-    println!(
-        "[TUI] graphics: {} (active: {}, font {:?})",
+    say!(
+        "[TUI]",
+        "graphics: {} (active: {}, font {:?})",
         graphics_mode.as_str(),
         gfx.active_protocol(),
         gfx.font_size()

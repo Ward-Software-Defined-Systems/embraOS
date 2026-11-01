@@ -1466,6 +1466,7 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tracing",
+ "tracing-subscriber",
  "unicode-width",
 ]
 
