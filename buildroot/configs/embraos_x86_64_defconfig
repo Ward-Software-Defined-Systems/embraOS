@@ -4,8 +4,17 @@
 BR2_x86_64=y
 BR2_TOOLCHAIN_BUILDROOT_MUSL=y
 
-# Kernel — use Buildroot's default config
+# Kernel — the 6.18 longterm line, pinned (LINUX_KERNEL_VERSION in
+# scripts/lib/image-common.sh names the same version, and the image scripts
+# verify the tarball against scripts/linux-kernel.sha256 before Buildroot
+# unpacks it). Buildroot 2026.02's own "latest" is the 6.19 series, end of
+# life since 2026-04-22. The headers series moves with the first two digits.
 BR2_LINUX_KERNEL=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION=y
+BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE="6.18.60"
+BR2_KERNEL_HEADERS_AS_KERNEL=y
+BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_6_18=y
+# Kernel configuration — Buildroot's x86_64 defconfig plus the fragment
 BR2_LINUX_KERNEL_USE_DEFCONFIG=y
 BR2_LINUX_KERNEL_DEFCONFIG="x86_64"
 

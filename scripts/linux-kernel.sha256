@@ -1,0 +1,10 @@
+# The Linux kernel tarball both image scripts stage for Buildroot, pinned by
+# sha256. Buildroot checks no hash for a custom kernel version
+# (linux/linux.mk exempts the tarball unless the version is its own
+# "latest"), so scripts/lib/image-common.sh verifies the download against
+# this file before Buildroot unpacks it, and never against a checksum
+# fetched beside it. The line is kernel.org's own, from the signed
+# sha256sums.asc of the series (https://cdn.kernel.org/pub/linux/kernel/v6.x/).
+# The pin moves with LINUX_KERNEL_VERSION in scripts/lib/image-common.sh and
+# with the two defconfigs; a version without its line stops the build.
+3c2f44ef6acc021a7ad444d9a2e6ec1ef488ff09368793d0004a6080f69d621e  linux-6.18.60.tar.xz

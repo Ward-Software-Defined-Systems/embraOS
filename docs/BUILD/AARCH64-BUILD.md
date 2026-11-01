@@ -620,6 +620,18 @@ the download against it. If it persists, check network / proxy interception of
 moved without its pins: take the `xz_hash` values from
 `https://static.rust-lang.org/dist/channel-rust-<version>.toml` and add the three lines.
 
+#### `ERROR: linux-6.18.60.tar.xz does not match its pin` / `no pinned sha256 for linux-…`
+
+The kernel is pinned the same way (Step 4, before Buildroot runs, inside the Docker pass on a
+Mac): `LINUX_KERNEL_VERSION` in `scripts/lib/image-common.sh`, the same version in both
+defconfigs (`BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE`, with the headers series
+`BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_<x_y>` of its first two digits), and the hash line in
+`scripts/linux-kernel.sha256`, kernel.org's own from the signed `sha256sums.asc` of the
+series. Buildroot checks no hash for a custom kernel version, so this check is the only one.
+A mismatch removes the tarball from `buildroot-src/dl/linux/` (the named volume) and stops;
+a missing line means the version moved without its pin. `KERNEL_MIRROR` overrides the
+`cdn.kernel.org` base.
+
 #### `ERROR: buildroot-src has local changes; refusing to switch to 2026.02.1`
 
 **Cause:** The first build after this guide's update switches Buildroot

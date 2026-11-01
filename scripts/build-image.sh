@@ -93,6 +93,9 @@ fi
 # What both image scripts share: the pins and the post-Buildroot checks (#43).
 # shellcheck source=scripts/lib/image-common.sh
 source "$(cd "$(dirname "$0")" && pwd)/lib/image-common.sh"
+# The defconfig names the pinned kernel and its headers series, or the build
+# stops here, before anything is compiled.
+assert_kernel_pin_in_defconfig buildroot/configs/embraos_x86_64_defconfig
 
 if [ "$BUILDROOT_ONLY" = false ]; then
     # Musl cross-toolchain. Ubuntu's musl-tools wraps the host gcc and pulls in
@@ -304,6 +307,11 @@ fi
         make "${pkg}-dirclean" 2>/dev/null || true
     done && \
     rm -f output/images/rootfs.squashfs output/images/embraos.img)
+
+# The kernel tarball, verified against its pin before Buildroot runs: Buildroot
+# checks no hash for a custom kernel version (scripts/lib/image-common.sh).
+echo "=== Step 4a: Stage the Linux kernel $LINUX_KERNEL_VERSION (pinned) ==="
+stage_kernel_tarball "$BUILDROOT_DIR"
 
 # Configure and build
 (cd "$BUILDROOT_DIR" && \

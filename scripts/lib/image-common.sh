@@ -21,6 +21,21 @@ RUST_TOOLCHAIN_VERSION="${RUST_TOOLCHAIN_VERSION:-1.98.1}"
 # The pinned sha256 of each toolchain tarball, beside the scripts (#33).
 TOOLCHAIN_PINS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/rust-toolchain.sha256"
 
+# The Linux kernel both defconfigs pin: the 6.18 longterm line (2026-10-31;
+# supported to the end of 2028). Buildroot 2026.02's own "latest" is the
+# 6.19 series, end of life since 2026-04-22 and never fixed for
+# CVE-2026-98432 (ipv4 TCP, CVSS 9.8) or CVE-2026-46300. The version moves
+# on purpose, like the toolchain's, in three places that are checked against
+# each other: this pin, `BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE` in both
+# defconfigs (with the headers series `BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_<x_y>`
+# of its first two digits), and the hash line in scripts/linux-kernel.sha256.
+# Buildroot checks no hash for a custom kernel version (linux/linux.mk exempts
+# the tarball unless the version is its latest), so `stage_kernel_tarball`
+# verifies it here, against the line kernel.org signs in sha256sums.asc.
+LINUX_KERNEL_VERSION="${LINUX_KERNEL_VERSION:-6.18.60}"
+KERNEL_PINS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/linux-kernel.sha256"
+KERNEL_MIRROR="${KERNEL_MIRROR:-https://cdn.kernel.org/pub/linux/kernel}"
+
 # The embedding model (KG-02), pinned by sha256 like CI's Bootlin SDK: the
 # payload is fetched, never committed, and a changed upstream file fails
 # the build instead of silently shipping different weights. Verified
@@ -43,6 +58,52 @@ verify_toolchain_tarball() {
     }
     ( cd "$dir" && printf '%s\n' "$pin" | sha256sum -c - ) \
         || { echo "ERROR: ${tb}.tar.xz does not match its pin in $TOOLCHAIN_PINS" >&2; exit 1; }
+}
+
+# assert_kernel_pin_in_defconfig <defconfig>: the defconfig names the pinned
+# kernel version and the headers series of its first two digits, so the pin
+# and the defconfigs never drift apart.
+assert_kernel_pin_in_defconfig() {
+    local dc="$1" series
+    series="${LINUX_KERNEL_VERSION%.*}"
+    series="${series//./_}"
+    grep -qxF -- "BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE=\"${LINUX_KERNEL_VERSION}\"" "$dc" || {
+        echo "ERROR: $dc does not pin BR2_LINUX_KERNEL_CUSTOM_VERSION_VALUE=\"${LINUX_KERNEL_VERSION}\"" >&2
+        echo "  LINUX_KERNEL_VERSION (scripts/lib/image-common.sh), both defconfigs and scripts/linux-kernel.sha256 move together." >&2
+        exit 1
+    }
+    grep -qxF -- "BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_${series}=y" "$dc" || {
+        echo "ERROR: $dc does not select the kernel headers series BR2_PACKAGE_HOST_LINUX_HEADERS_CUSTOM_${series}=y for ${LINUX_KERNEL_VERSION}" >&2
+        exit 1
+    }
+}
+
+# stage_kernel_tarball <buildroot dir>: the kernel tarball in Buildroot's
+# download directory, verified against the pin — downloaded when absent,
+# verified either way, so Buildroot finds it there and downloads nothing. A
+# file that does not match its pin is removed and the build stops; the
+# expected hash is the pin in the repository, never a checksum fetched
+# beside the download.
+stage_kernel_tarball() {
+    local br="$1" tb="linux-${LINUX_KERNEL_VERSION}.tar.xz" dl pin site
+    dl="$br/dl/linux"
+    site="$KERNEL_MIRROR/v${LINUX_KERNEL_VERSION%%.*}.x"
+    pin="$(grep -F -- "  ${tb}" "$KERNEL_PINS" | head -n1 || true)"
+    [ -n "$pin" ] || {
+        echo "ERROR: no pinned sha256 for ${tb} in $KERNEL_PINS" >&2
+        echo "  The pin moves with LINUX_KERNEL_VERSION: take the line from kernel.org's signed" >&2
+        echo "  sha256sums.asc ($site/sha256sums.asc) and add it." >&2
+        exit 1
+    }
+    mkdir -p "$dl"
+    if [ ! -f "$dl/$tb" ]; then
+        echo "  downloading $tb"
+        curl -fSL --retry 3 -o "$dl/$tb.part" "$site/$tb" \
+            || { rm -f "$dl/$tb.part"; echo "ERROR: download of ${tb} failed" >&2; exit 1; }
+        mv "$dl/$tb.part" "$dl/$tb"
+    fi
+    ( cd "$dl" && printf '%s\n' "$pin" | sha256sum -c - ) \
+        || { rm -f "$dl/$tb"; echo "ERROR: ${tb} does not match its pin in $KERNEL_PINS; the file was removed" >&2; exit 1; }
 }
 
 # A build that fails one of the checks below has produced an image already:
