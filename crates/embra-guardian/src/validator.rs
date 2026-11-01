@@ -377,7 +377,7 @@ impl<'ast> Visit<'ast> for Deny {
     }
     fn visit_macro(&mut self, m: &'ast syn::Macro) {
         if let Some(seg) = m.path.segments.last() {
-            let n = seg.ident.to_string();
+            let n = ident_name(&seg.ident);
             if DENIED_MACROS.contains(&n.as_str()) {
                 self.flag(err_at("macro", format!("`{n}!` is not allowed"), m.span()));
             }
@@ -396,11 +396,36 @@ impl<'ast> Visit<'ast> for Deny {
                 u.span(),
             ));
         }
+        // A denied macro imported under another name is called by that
+        // name, which `visit_macro` cannot know (`use core::include_str as
+        // inc; inc!("/x")`, the verification of 2026-10-31), and a denied
+        // path can be imported as well: every leaf of the tree is checked by
+        // the name it imports, whatever it is renamed to.
+        let mut leaves: Vec<Vec<String>> = vec![];
+        use_leaves(&u.tree, &mut vec![], &mut leaves);
+        for segs in &leaves {
+            if let Some(last) = segs.last()
+                && DENIED_MACROS.contains(&last.as_str())
+            {
+                self.flag(err_at(
+                    "macro",
+                    format!("`{last}` is not allowed, imported or called"),
+                    u.span(),
+                ));
+            }
+            if denied_path(segs) {
+                self.flag(err_at(
+                    "forbidden_path",
+                    format!("path `{}` is not allowed", segs.join("::")),
+                    u.span(),
+                ));
+            }
+        }
         syn::visit::visit_item_use(self, u);
     }
     fn visit_path(&mut self, p: &'ast syn::Path) {
         let segs: Vec<String> =
-            p.segments.iter().map(|s| s.ident.to_string()).collect();
+            p.segments.iter().map(|s| ident_name(&s.ident)).collect();
         if denied_path(&segs) {
             self.flag(err_at(
                 "forbidden_path",
@@ -412,7 +437,7 @@ impl<'ast> Visit<'ast> for Deny {
     }
     fn visit_attribute(&mut self, a: &'ast syn::Attribute) {
         if let Some(seg) = a.path().segments.last() {
-            let n = seg.ident.to_string();
+            let n = ident_name(&seg.ident);
             // `#[unsafe(no_mangle)]` is the edition-2024 spelling of an ABI
             // attribute: the last segment is `unsafe`, not the name inside
             // it, so the wrapper is refused outright (#12).
@@ -479,8 +504,9 @@ impl Deny {
     /// form is checked: the ident `unsafe`; a path `denied_path` refuses;
     /// and a denied macro name followed by `!`, bare or as the last segment
     /// of a path (`core::include_str!`), the segment `visit_macro` reads
-    /// (#12). It does not recognise items, so a declared macro's body is
-    /// kept out by refusing `macro_rules!` itself.
+    /// (#12), every identifier read unraw'd (`ident_name`). It does not
+    /// recognise items, so a declared macro's body is kept out by refusing
+    /// `macro_rules!` itself.
     fn scan_tokens(&mut self, tokens: proc_macro2::TokenStream) {
         use proc_macro2::TokenTree;
         let mut flat = Vec::new();
@@ -492,7 +518,7 @@ impl Deny {
                 i += 1;
                 continue;
             };
-            let name = id.to_string();
+            let name = ident_name(id);
             if name == "unsafe" {
                 self.flag(err_at("unsafe", "`unsafe` inside a macro invocation is not allowed", id.span()));
             }
@@ -502,7 +528,7 @@ impl Deny {
             while is_colon(flat.get(j + 1)) && is_colon(flat.get(j + 2)) {
                 match flat.get(j + 3) {
                     Some(TokenTree::Ident(next)) => {
-                        segs.push(next.to_string());
+                        segs.push(ident_name(next));
                         j += 3;
                     }
                     _ => break,
@@ -531,11 +557,54 @@ impl Deny {
 
 fn use_root(tree: &syn::UseTree) -> Option<String> {
     match tree {
-        syn::UseTree::Path(p) => Some(p.ident.to_string()),
-        syn::UseTree::Name(n) => Some(n.ident.to_string()),
-        syn::UseTree::Rename(r) => Some(r.ident.to_string()),
+        syn::UseTree::Path(p) => Some(ident_name(&p.ident)),
+        syn::UseTree::Name(n) => Some(ident_name(&n.ident)),
+        syn::UseTree::Rename(r) => Some(ident_name(&r.ident)),
         syn::UseTree::Group(g) => g.items.iter().find_map(use_root),
         syn::UseTree::Glob(_) => None,
+    }
+}
+
+/// Every leaf of a `use` tree as the path it imports, the original name
+/// last: a rename imports that name under another, so `use core::{include_str
+/// as inc, fmt::Write as _}` gives `core::include_str` and `core::fmt::Write`.
+/// A glob names no leaf; what it brings in is checked where it is called.
+fn use_leaves(tree: &syn::UseTree, prefix: &mut Vec<String>, out: &mut Vec<Vec<String>>) {
+    match tree {
+        syn::UseTree::Path(p) => {
+            prefix.push(ident_name(&p.ident));
+            use_leaves(&p.tree, prefix, out);
+            prefix.pop();
+        }
+        syn::UseTree::Name(n) => {
+            let mut segs = prefix.clone();
+            segs.push(ident_name(&n.ident));
+            out.push(segs);
+        }
+        syn::UseTree::Rename(r) => {
+            let mut segs = prefix.clone();
+            segs.push(ident_name(&r.ident));
+            out.push(segs);
+        }
+        syn::UseTree::Group(g) => {
+            for item in &g.items {
+                use_leaves(item, prefix, out);
+            }
+        }
+        syn::UseTree::Glob(_) => {}
+    }
+}
+
+/// The name of an identifier with its raw prefix stripped. proc-macro2
+/// prints the raw spelling as `r#include_str`, and the compiler resolves it
+/// as `include_str` (checked with rustc 1.98.1 on 2026-10-31:
+/// `r#include_str!("/etc/hostname")` read the file), so every comparison
+/// with a denylist reads the identifier through this.
+fn ident_name(id: &proc_macro2::Ident) -> String {
+    let s = id.to_string();
+    match s.strip_prefix("r#") {
+        Some(plain) => plain.to_string(),
+        None => s,
     }
 }
 
@@ -685,6 +754,24 @@ fn run(input: &str) -> String {
             // A declared macro's body is never parsed into items; the
             // declaration itself is refused.
             ("macro", "macro_rules! smuggle { () => { extern \"C\" { fn syscall(); } } }\nfn run(input: &str) -> String { smuggle!(); String::new() }"),
+            // A raw-identifier spelling resolves as the plain one and
+            // compiled, reading the file (rustc 1.98.1, 2026-10-31); the
+            // walker compares every name unraw'd.
+            ("macro", "fn run(input: &str) -> String { r#include_str!(\"/etc/hostname\").into() }"),
+            ("macro", "fn run(input: &str) -> String { format!(\"{}\", core::r#include_str!(\"/embra/state/api_key_anthropic\")) }"),
+            ("macro", "fn run(input: &str) -> String { let _ = vec![::core::r#include_bytes!(\"/x\")]; String::new() }"),
+            ("macro", "fn run(input: &str) -> String { r#global_asm!(\"nop\"); String::new() }"),
+            ("forbidden_path", "fn run(input: &str) -> String { r#std::fs::read(\"/x\"); String::new() }"),
+            ("attribute", "#[r#cfg_attr(all(), no_mangle)] fn run(input: &str) -> String { String::new() }"),
+            ("attribute", "#[r#no_mangle] fn run(input: &str) -> String { String::new() }"),
+            // A denied macro imported under another name is called by that
+            // name (`inc!`), so the import itself is refused, at the top
+            // level, in a group and inside a body; a denied path too.
+            ("macro", "use core::include_str as inc;\nfn run(input: &str) -> String { inc!(\"/x\").into() }"),
+            ("macro", "use core::{include_str as inc, fmt::Write as _};\nfn run(input: &str) -> String { inc!(\"/x\").into() }"),
+            ("macro", "fn run(input: &str) -> String { use core::include_bytes as b; let _ = b!(\"/x\"); String::new() }"),
+            ("macro", "use core::r#include_str as inc;\nfn run(input: &str) -> String { inc!(\"/x\").into() }"),
+            ("forbidden_path", "use core::arch as a;\nfn run(input: &str) -> String { String::new() }"),
         ];
         for (rule, body) in cases {
             let src = format!(
@@ -697,14 +784,16 @@ fn run(input: &str) -> String {
     }
 
     /// The token scan refuses what a statement would refuse and nothing
-    /// else: ordinary macro arguments, `alloc` and `core` paths and the
-    /// scaffold's `host` and `json` helpers still pass.
+    /// else: ordinary macro arguments, `alloc` and `core` paths, the
+    /// scaffold's `host` and `json` helpers and a renamed import of an
+    /// ordinary item (`use core::fmt::Write as _`) still pass.
     #[test]
     fn a_macro_with_ordinary_arguments_still_passes() {
         let src = "// guardian-tool: demo\nconst GUARDIAN_NAME: &str=\"demo\";\
                    const GUARDIAN_DESC: &str=\"d\";\
                    const GUARDIAN_SCHEMA: &str=r#\"{\"type\":\"object\"}\"#;\n\
-                   fn run(input: &str) -> String { let v = vec![1, 2]; let s = alloc::format!(\"{} {}\", v.len(), core::cmp::max(1, 2)); format!(\"{s} {input}\") }";
+                   use core::fmt::Write as _;\nuse alloc::{format, string::String as S};\n\
+                   fn run(input: &str) -> String { let v = vec![1, 2]; let s = alloc::format!(\"{} {}\", v.len(), core::cmp::max(1, 2)); let _: S = S::new(); format!(\"{s} {input}\") }";
         let m = validate(src, &[]).expect("ordinary macro arguments pass");
         assert_eq!(m.name, "demo");
     }

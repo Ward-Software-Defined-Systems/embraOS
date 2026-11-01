@@ -56,7 +56,9 @@ of anything outside `core`/`alloc`/`json`/`host`/`html_text`/`inject`; a bare `s
 `std::{process, fs, net, os, env, thread, ffi, arch}`, `core::arch` and `proc_macro`
 paths; the macros `include!`, `include_str!`, `include_bytes!`, `env!`, `option_env!`,
 `asm!`, `global_asm!`, `concat_idents!` and `macro_rules!`, bare or path-qualified
-(`core::include_str!`), as a statement or inside another macro or a list attribute; the
+(`core::include_str!`), as a statement or inside another macro or a list attribute, spelled
+raw (`r#include_str!`, which the compiler resolves as the plain name) or imported under
+another name (`use core::include_str as inc;`); the
 attributes `#[no_mangle]`, `#[export_name]`, `#[link]`, `#[link_section]`,
 `#[panic_handler]`, `#[global_allocator]`, `#![no_std]`, `#![feature]`, the
 edition-2024 `#[unsafe(…)]` wrapper and `#[cfg_attr(…)]`; and any third-party crate
