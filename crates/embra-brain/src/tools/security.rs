@@ -177,6 +177,18 @@ pub fn is_private_address(host: &str) -> bool {
     }
 }
 
+/// The denial every gate prints when `is_private_address` refuses `host`:
+/// the ranges, and that a name is not resolved, so the operator gives the
+/// address. One text for `ssh_remote_admin`, `ssh_session_start`,
+/// `port_scan` and `/ssh-copy-id`; the tests pin its first sentence.
+pub fn not_private_denial(host: &str, tool: &str) -> String {
+    format!(
+        "Denied: '{host}' is not a private address. {tool} connects to RFC 1918 private ranges \
+         (10.x.x.x, 172.16-31.x.x, 192.168.x.x) and loopback (127.x.x.x), given as addresses: \
+         a name is not resolved, so give the host's IP address; `localhost` is the one name that passes."
+    )
+}
+
 /// Default common ports list.
 const COMMON_PORTS: &[(u16, &str)] = &[
     (21, "FTP"),
@@ -346,11 +358,7 @@ pub async fn port_scan(host: &str, port_spec: &str) -> String {
     }
 
     if !is_private_address(host) {
-        return format!(
-            "Denied: '{}' is not a private address. port_scan is restricted to RFC 1918 \
-             private ranges (10.x.x.x, 172.16-31.x.x, 192.168.x.x) and loopback (127.x.x.x).",
-            host
-        );
+        return not_private_denial(host, "port_scan");
     }
 
     let ports = parse_port_spec(port_spec);
@@ -1036,11 +1044,7 @@ pub async fn ssh_remote_admin(target: &str, command: &str) -> String {
     };
 
     if !is_private_address(&host) {
-        return format!(
-            "Denied: '{}' is not a private address. ssh_remote_admin is restricted to RFC 1918 \
-             private ranges (10.x.x.x, 172.16-31.x.x, 192.168.x.x) and loopback (127.x.x.x).",
-            host
-        );
+        return not_private_denial(&host, "ssh_remote_admin");
     }
 
     let host_display = if port == 22 {
@@ -1093,11 +1097,7 @@ pub async fn ssh_session_start(param: &str) -> String {
     };
 
     if !is_private_address(&host) {
-        return format!(
-            "Denied: '{}' is not a private address. SSH sessions are restricted to RFC 1918 \
-             private ranges and loopback.",
-            host
-        );
+        return not_private_denial(&host, "ssh_session_start");
     }
 
     let mut lock = ssh_session_lock().lock().await;
@@ -1544,6 +1544,45 @@ mod native_args_tests {
             .await
             .unwrap();
         assert!(out.starts_with("Denied: '127.0.0.1 1-2' is not a private address"), "{out}");
+    }
+
+    /// A name other than `localhost` is refused by every gate, and the denial
+    /// says why — a name is not resolved, the address is what passes — where
+    /// it read as a verdict on the host (William's live row, 2026-11-01:
+    /// `gitlab.ops.wsds` "is not a private address").
+    #[tokio::test]
+    async fn a_name_is_refused_and_the_denial_says_a_name_is_not_resolved() {
+        let db = crate::db::WardsonDbClient::from_url("http://127.0.0.1:1");
+        let cfg = crate::config::tests_support::minimal_cfg();
+        let trace = embra_tools_core::new_turn_trace_handle();
+        let ctx = || DispatchContext {
+            db: &db,
+            config: &cfg,
+            session_name: "main",
+            config_tz: "UTC",
+            trace: &trace,
+            turn_index: 0,
+            deleting_session: None,
+        };
+        let out = SshRemoteAdminArgs { target: "root@gitlab.ops.wsds".into(), command: "true".into() }
+            .run(ctx())
+            .await
+            .unwrap();
+        assert!(
+            out.starts_with("Denied: 'gitlab.ops.wsds' is not a private address. ssh_remote_admin connects to"),
+            "{out}"
+        );
+        assert!(out.contains("a name is not resolved, so give the host's IP address"), "{out}");
+        let out = PortScanArgs { host: "gitlab.ops.wsds".into(), ports: "80".into() }
+            .run(ctx())
+            .await
+            .unwrap();
+        assert!(out.contains("port_scan connects to") && out.contains("a name is not resolved"), "{out}");
+        for tool in ["ssh_session_start", "/ssh-copy-id"] {
+            let text = super::not_private_denial("gitlab.ops.wsds", tool);
+            assert!(text.starts_with("Denied: 'gitlab.ops.wsds' is not a private address. ") && text.contains(tool), "{text}");
+            assert!(text.contains("`localhost` is the one name that passes"), "{text}");
+        }
     }
 
     #[test]

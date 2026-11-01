@@ -675,10 +675,7 @@ pub(super) async fn handle_slash_command(
             let target = args.trim();
             let host = target.rsplit('@').next().unwrap_or(target);
             if !tools::security::is_private_address(host) {
-                send_msg(tx, format!(
-                    "Denied: '{}' is not a private address. SSH is restricted to RFC 1918 ranges.",
-                    host
-                )).await;
+                send_msg(tx, tools::security::not_private_denial(host, "/ssh-copy-id")).await;
                 return None;
             }
 

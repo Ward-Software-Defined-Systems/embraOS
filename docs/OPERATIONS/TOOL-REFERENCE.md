@@ -166,7 +166,7 @@ For the data model, edge taxonomy, density rationale, promotion path, auto-enric
 | **ssh_session_exec** | Run a command in the open SSH session — each command gets a clean process lifecycle via ControlMaster socket (EXPERIMENTAL) |
 | **ssh_session_end** | Close SSH session and tear down ControlMaster connection (EXPERIMENTAL) |
 
-> **⚠️ SSH Security:** SSH tools are restricted to RFC 1918 private addresses (10.x, 172.16-31.x, 192.168.x) and loopback (127.x, localhost). Public IP targets are denied. Connections use `StrictHostKeyChecking=accept-new` (auto-accepts first-time hosts, rejects changed keys). Password authentication is disabled — key-based auth required (see [QUICK-START.md](../BUILD/QUICK-START.md)). These tools are marked EXPERIMENTAL — use at your own risk.
+> **⚠️ SSH Security:** SSH tools are restricted to RFC 1918 private addresses (10.x, 172.16-31.x, 192.168.x) and loopback (127.x, `localhost`), given as addresses. Public IP targets are denied, and so is any other hostname: a name is not resolved, since a name could be pointed at a public address after the check, so give the host's IP address (the known-hosts entry is then keyed by the address). The denial says so. Connections use `StrictHostKeyChecking=accept-new` (auto-accepts first-time hosts, rejects changed keys). Password authentication is disabled — key-based auth required (see [QUICK-START.md](../BUILD/QUICK-START.md)). These tools are marked EXPERIMENTAL — use at your own risk.
 
 **Guardian — Dynamic Tools** *(embra-guardian-v1 — EXPERIMENTAL)*
 
