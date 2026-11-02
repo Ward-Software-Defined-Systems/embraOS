@@ -24,14 +24,13 @@ use embra_guardian::caps::{
     Capabilities, EgressPolicy, HttpResponse, HttpTransport, SearchProvider, SearchRequest,
     SearchResponse, SearchResult,
 };
-use embra_guardian::host::WasmHost;
+use embra_guardian::host::{DEADLINE_WITH_HTTP, WasmHost};
 use embra_guardian::shipped;
 
 const WASM: &[u8] = include_bytes!("fixtures/web_search.wasm");
 const SOURCE_SHA: &str = include_str!("fixtures/web_search.wasm.source-sha256");
 const INPUTS_SHA: &str = include_str!("fixtures/web_search.wasm.inputs-sha256");
 
-const D: Duration = Duration::from_secs(5);
 const MEM: usize = 64 << 20;
 
 struct MockSearch(Vec<SearchResult>);
@@ -98,6 +97,14 @@ impl HttpTransport for SamePage {
     }
 }
 
+/// One call of the fixture under the deadline the brain gives a tool that
+/// declares `http_get`: `DEADLINE_WITH_HTTP`, the default fetch budget plus
+/// the guest's own five seconds (`guardian/mod.rs`, the invoke arm), as
+/// `http_request_roundtrip` runs its calls. The host's bare `DEFAULT_DEADLINE`
+/// is for a tool without fetches; under it `twenty_fetched_pages_fit_the_arena`
+/// timed out on CI with four cold builds sharing the runner's sixteen cores.
+/// The deadline is wall clock, and the guest's time under load is not what
+/// these tests pin.
 fn run_caps(results: Vec<SearchResult>, input: &str, http: Option<Arc<dyn HttpTransport>>) -> serde_json::Value {
     let host = WasmHost::new().unwrap();
     let m = host.precompile(WASM).unwrap();
@@ -106,7 +113,7 @@ fn run_caps(results: Vec<SearchResult>, input: &str, http: Option<Arc<dyn HttpTr
         caps.http = Some(transport);
         caps.http_policy = EgressPolicy::default();
     }
-    let out = host.call(&m, input, caps, D, MEM).unwrap();
+    let out = host.call(&m, input, caps, DEADLINE_WITH_HTTP, MEM).unwrap();
     serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"))
 }
 
