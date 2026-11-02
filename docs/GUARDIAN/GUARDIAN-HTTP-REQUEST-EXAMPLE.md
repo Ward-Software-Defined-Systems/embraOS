@@ -35,7 +35,7 @@ lives on the host:
    `Api-Key`, `X-Auth-Token`, `Private-Token`) as `[masked]`, and a stored
    secret anywhere in an input is replaced by its kind.
 3. **The user agent** — every hop carries `User-Agent: embraOS/<version>`,
-   the workspace version (`embraOS/0.22.0-phase1` today), so it moves with
+   the workspace version (`embraOS/0.23.0-phase1` today), so it moves with
    a release; a `User-Agent` in the request's `headers` is sent instead.
 4. **Redirects** followed for GET and HEAD only, at most three, every hop
    checked; the other methods get the 3xx back with its target under
