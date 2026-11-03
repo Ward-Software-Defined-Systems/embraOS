@@ -284,7 +284,10 @@ mod tests {
             }
         })
         .await;
-        assert!(matches!(result, Err(AppError::QueryTimeout(1))), "{result:?}");
+        assert!(
+            matches!(result, Err(AppError::QueryTimeout(1))),
+            "{result:?}"
+        );
         assert!(started.elapsed() < Duration::from_secs(5));
         let deadline = Instant::now() + Duration::from_secs(5);
         while !stopped.load(Ordering::SeqCst) && Instant::now() < deadline {

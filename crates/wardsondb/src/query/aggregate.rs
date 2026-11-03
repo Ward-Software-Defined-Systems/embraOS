@@ -178,17 +178,13 @@ fn apply_terminal_stage(
         }
         "$limit" => {
             let limit = stage_spec.as_u64().ok_or_else(|| {
-                AppError::InvalidPipeline(format!(
-                    "Stage {i}: $limit must be a positive integer"
-                ))
+                AppError::InvalidPipeline(format!("Stage {i}: $limit must be a positive integer"))
             })? as usize;
             docs.truncate(limit);
         }
         "$skip" => {
             let skip = stage_spec.as_u64().ok_or_else(|| {
-                AppError::InvalidPipeline(format!(
-                    "Stage {i}: $skip must be a positive integer"
-                ))
+                AppError::InvalidPipeline(format!("Stage {i}: $skip must be a positive integer"))
             })? as usize;
             // In place: the old `into_iter().skip(n).collect()` reallocated
             // the whole vector to drop a prefix.
@@ -875,7 +871,11 @@ mod tests {
         assert_eq!(streamed.docs_scanned, total as u64);
         assert_eq!(streamed.groups, 3);
         assert_eq!(streamed.index_used, None);
-        assert!(streamed.docs[0]["tags"]["_truncated"] == json!(true), "{:?}", streamed.docs[0]);
+        assert!(
+            streamed.docs[0]["tags"]["_truncated"] == json!(true),
+            "{:?}",
+            streamed.docs[0]
+        );
 
         // The terminal stages after it read the same way on every path.
         let sorted = aggregate(
@@ -890,7 +890,8 @@ mod tests {
         let mut expected = reference.clone();
         sort_documents(
             &mut expected,
-            &super::super::sort::parse_sort_spec(&json!([{"count": "desc"}, {"_id": "asc"}])).unwrap(),
+            &super::super::sort::parse_sort_spec(&json!([{"count": "desc"}, {"_id": "asc"}]))
+                .unwrap(),
         );
         assert_eq!(sorted.docs, vec![expected[1].clone()]);
         assert_eq!(sorted.groups, 3);
@@ -912,6 +913,9 @@ mod tests {
             },
         )
         .unwrap_err();
-        assert_eq!(err.to_string(), "Invalid pipeline: Stage 1: unknown stage '$explode'");
+        assert_eq!(
+            err.to_string(),
+            "Invalid pipeline: Stage 1: unknown stage '$explode'"
+        );
     }
 }

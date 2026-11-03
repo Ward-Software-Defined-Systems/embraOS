@@ -1,23 +1,27 @@
 # The vendored fork
 
-`crates/wardsondb` is a vendored fork of [WardSONDB](https://github.com/Ward-Software-Defined-Systems/WardSONDB), the document database embraOS ships. The fork was taken on 2026-07-17 and synced to upstream `main` at `1732213` on 2026-07-24, the base it diverges from. embraOS reaches it over REST on port 8090 and no embraOS crate depends on its library.
+`crates/wardsondb` is a vendored copy of [WardSONDB](https://github.com/Ward-Software-Defined-Systems/WardSONDB), the document database embraOS ships. The fork was taken on 2026-07-17 and synced to upstream `main` at `da13eec` on 2026-11-03, the base it is measured against. embraOS reaches it over REST on port 8090 and no embraOS crate depends on its library.
 
 The crate keeps upstream's Apache-2.0 licence: `LICENSE` beside this file and `license = "Apache-2.0"` in `Cargo.toml`. The embraOS workspace's own `LICENSE` governs the rest of embraOS, not this crate.
 
-## Divergences from `1732213`
+## Divergences from `da13eec`
 
-Each is a decision of the embraOS maintainer, recorded in the commit named, and each is meant to be carried upstream. The port is tracked as [WardSONDB issue #1](https://github.com/Ward-Software-Defined-Systems/WardSONDB/issues/1), filed 2026-11-02.
+None. Every file has upstream's blob hash, except this one and the three upstream files the vendoring leaves out: `Cargo.lock` (the workspace lock governs), `CONTRIBUTING.md` and `.gitlab-ci.yml` (upstream's repository files).
 
-- `Cargo.toml`: `axum-server = "0.8"` where upstream has `"0.7"` (`fe0d63a`, 2026-09-27). It removed `rustls-pemfile`, unmaintained, from the lockfile. At the next sync upstream's line is taken if it moved.
-- `tests/integration_test.rs`: the integration tests keep their bound listener and hand it to tokio with `from_std` (`8c30f2b`, 2026-10-02). A listener dropped and bound again gave a parallel test the window to take the port.
-- `src/engine/ttl.rs`, `src/server/ttl_worker.rs`: `drop_collection` removes `ttl:{name}`, and the worker's `run_one_policy` discards a policy whose collection is gone through `Storage::discard_ttl` (`76509a3`, 2026-10-02). A dropped collection's policy errored on the ghost every tick.
-- `src/engine/storage.rs`, `src/engine/document.rs`: a document's writers hold one of 256 shards of a per-document lock from the read that decides the write to the commit; a bulk mutation takes the shards of a chunk in index order; `partial_update_document` merges and commits on one read (`793c696`, 2026-10-29; the review's #64-1, #64-2 and #42-5).
-- `src/server/routes/system.rs`, `src/server/routes/collections.rs`, `src/engine/ttl.rs`: `/_stats`, `/_metrics` and `/{collection}/storage` fail when a `_meta` read fails, and a stored TTL policy that does not parse is a 500 naming its collection (`a99ae7d`, 2026-10-29; #64-3).
-- `src/engine/document.rs`, `src/server/routes/mod.rs` and the route modules: a path parameter or a custom `_id` that is empty, `.`, `..`, or carries a path separator or a control character is refused with 400 before the engine (`6f4058d`, 2026-10-29; #25).
-- `src/config.rs`, `src/main.rs`, `src/query/cancel.rs` and the scan loops of `src/engine/document.rs`, `src/query/executor.rs`, `src/query/distinct.rs`, `src/query/aggregate.rs`: `--bind <addr>` and its row in `API.md`; the self-signed certificate dated 365 days from its generation; a read past `--query-timeout` stopped at its next checkpoint (`2ab4fde`, 2026-10-29; #32).
-- `src/query/aggregate.rs`, `src/engine/backend/mod.rs`, `src/engine/backend/fjall_backend.rs`, `src/engine/backend/rocksdb_backend.rs`, `src/engine/bitmap.rs`, `Cargo.toml`: a `$group`-first aggregate streams through its accumulators; one terminal-stage helper; one RocksDB table-and-compression helper; `$ne` subtracts without the clone; the engines are the cargo features `fjall` and `rocksdb`, default both, the engine still chosen at run time with `--storage-engine` (`b6272c1`, 2026-10-29; #42).
-- `Cargo.toml`, this file: the `license` field and this record (`60fe4fe`, 2026-10-29; #27).
+A divergence is a decision of the embraOS maintainer, recorded in its commit and carried upstream through an issue on the WardSONDB repository. The previous base was `1732213` (synced 2026-07-24). The nine commits that diverged from it between 2026-09-27 and 2026-10-29 were ported upstream 1:1 as [WardSONDB issue #1](https://github.com/Ward-Software-Defined-Systems/WardSONDB/issues/1), each upstream commit carrying a `Ported-From: embraOS <sha>` trailer, and the sync of 2026-11-03 brought upstream's follow-ups back: `cargo fmt` over the ported hunks, 65,536 write shards in place of 256, the bulk-insert duplicate check through one multi-get, timeout checkpoints in the index scans and the `$or`-union arms, two guard benches, and the changelog, README and `API.md` text for all of it. Upstream's CI gate runs `cargo fmt --check`; a hunk that is not formatted does not port 1:1.
+
+| embraOS | upstream | subject |
+|---|---|---|
+| `fe0d63a` | `6b4441f` | axum-server 0.7 → 0.8 |
+| `76509a3` | `4497a70` | a dropped collection takes its TTL policy with it |
+| `8c30f2b` | `b0c9651` | the integration tests keep their bound port |
+| `793c696` | `4b6ffbf` | a document's writers hold its shard from the read to the commit |
+| `a99ae7d` | `651f6ee` | the observability endpoints report a failed meta read |
+| `6f4058d` | `1df1f89` | a path segment with a separator or a control byte is refused |
+| `2ab4fde` | `52bc0e0` | `--bind`, a certificate dated from today, reads stopped at a timeout |
+| `b6272c1` | `784c008` | `$group`-first pipelines stream; the engines become cargo features |
+| `60fe4fe` | `a48cd32` | `license = "Apache-2.0"` in the manifest (this file was not ported) |
 
 ## Syncing
 
-A sync adopts whole upstream commits: `git -C ../WardSONDB show <sha> -- <files> | git apply --directory=crates/wardsondb`. Hunks of upstream's `Cargo.lock` are never applied: the workspace lock pins fjall 2.11.2, lsm-tree 2.10.4, value-log 1.9.0, rust-rocksdb 0.46.0, rust-librocksdb-sys 0.42.0+10.10.1, roaring 0.10.12 and tikv-jemallocator 0.6.1, the versions upstream tested, and the on-disk format of existing data depends on them. Equal blob hashes against the upstream tree prove the state of every file not listed above.
+A sync adopts whole upstream commits: `git -C ../WardSONDB show <sha> -- <files> | git apply --directory=crates/wardsondb`. Hunks of upstream's `Cargo.lock` are never applied: the workspace lock pins fjall 2.11.2, lsm-tree 2.10.4, value-log 1.9.0, rust-rocksdb 0.46.0, rust-librocksdb-sys 0.42.0+10.10.1, roaring 0.10.12 and tikv-jemallocator 0.6.1, the versions upstream tested, and the on-disk format of existing data depends on them. `CONTRIBUTING.md` and `.gitlab-ci.yml` are not vendored. Equal blob hashes against the upstream tree prove the state of every other file.

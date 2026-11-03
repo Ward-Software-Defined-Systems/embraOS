@@ -10,6 +10,7 @@ use serde_json::Value;
 
 use crate::engine::backend::{Engine, PartitionId, StorageBackend, WriteBatchWrapper};
 use crate::error::AppError;
+use crate::query::cancel;
 use crate::query::filter::resolve_json_path;
 
 /// One backend scan over an index partition, yielding entries in candidate
@@ -21,17 +22,33 @@ pub enum IndexScanShape {
 }
 
 impl IndexScanShape {
+    /// Drive `visit` over the shape's entries. The read's timeout is asked
+    /// every `cancel::CHECK_EVERY` entries (`cancel::checkpoint`), so an
+    /// index read abandoned by its client stops at its next checkpoint
+    /// like the full scans do; a write runs under no token and never stops.
     pub fn scan(
         &self,
         engine: &Engine,
         partition: &PartitionId,
         visit: &mut crate::engine::backend::ScanVisitor<'_>,
     ) -> Result<(), AppError> {
-        match self {
-            IndexScanShape::Prefix(p) => engine.scan_prefix(partition, p, visit)?,
-            IndexScanShape::Range { start, end } => {
-                engine.scan_range(partition, start, end, visit)?
+        let mut seen = 0u64;
+        let mut scan_err: Option<AppError> = None;
+        let mut checked = |k: &[u8], v: &[u8]| -> ControlFlow<()> {
+            if let Err(e) = cancel::checkpoint(&mut seen) {
+                scan_err = Some(e);
+                return ControlFlow::Break(());
             }
+            visit(k, v)
+        };
+        match self {
+            IndexScanShape::Prefix(p) => engine.scan_prefix(partition, p, &mut checked)?,
+            IndexScanShape::Range { start, end } => {
+                engine.scan_range(partition, start, end, &mut checked)?
+            }
+        }
+        if let Some(e) = scan_err {
+            return Err(e);
         }
         Ok(())
     }
@@ -408,7 +425,7 @@ impl IndexManager {
             return Ok(None);
         };
         let mut doc_ids = Vec::new();
-        engine.scan_prefix(&partition, &prefix, &mut |k, _| {
+        IndexScanShape::Prefix(prefix).scan(engine, &partition, &mut |k, _| {
             if let Some(id) = extract_doc_id_from_key(k) {
                 doc_ids.push(id);
             }
@@ -434,7 +451,7 @@ impl IndexManager {
             return Ok(Some(Vec::new()));
         };
         let mut doc_ids = Vec::new();
-        engine.scan_range(&partition, &start, &end, &mut |k, _| {
+        IndexScanShape::Range { start, end }.scan(engine, &partition, &mut |k, _| {
             if let Some(id) = extract_doc_id_from_key(k) {
                 doc_ids.push(id);
             }
@@ -504,8 +521,8 @@ impl IndexManager {
             return Ok(None);
         };
         let mut all_ids = Vec::new();
-        for prefix in &prefixes {
-            engine.scan_prefix(&partition, prefix, &mut |k, _| {
+        for prefix in prefixes {
+            IndexScanShape::Prefix(prefix).scan(engine, &partition, &mut |k, _| {
                 if let Some(id) = extract_doc_id_from_key(k) {
                     all_ids.push(id);
                 }

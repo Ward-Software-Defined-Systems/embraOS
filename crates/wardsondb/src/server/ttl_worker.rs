@@ -9,7 +9,6 @@ use crate::engine::ttl::TtlConfig;
 use crate::error::AppError;
 use crate::server::AppState;
 
-
 /// Atomic timestamp of the last TTL cleanup run (unix seconds).
 pub static LAST_TTL_RUN: AtomicU64 = AtomicU64::new(0);
 
@@ -42,7 +41,6 @@ pub async fn run_ttl_loop(state: Arc<AppState>, interval_secs: u64) {
                 total_deleted += run_one_policy(&st.storage, collection, config);
             }
             total_deleted
-
         })
         .await;
 
@@ -122,7 +120,11 @@ mod tests {
         };
         let mut batch = storage.write_batch();
         batch
-            .insert(&storage.meta, b"ttl:ghost", &serde_json::to_vec(&config).unwrap())
+            .insert(
+                &storage.meta,
+                b"ttl:ghost",
+                &serde_json::to_vec(&config).unwrap(),
+            )
             .unwrap();
         storage.commit_batch(batch).unwrap();
         assert_eq!(storage.get_all_ttl_configs().unwrap().len(), 1);

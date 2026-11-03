@@ -176,7 +176,6 @@ impl Storage {
         let ttl_key = format!("ttl:{name}");
         batch.remove(&self.meta, ttl_key.as_bytes())?;
         // Uncache BEFORE the commit (re-cache if it fails): once the commit
-
         // lands, no writer may slip a doc into the dropped collection via a
         // stale existence hit. NOTE the partition itself is never dropped —
         // only emptied — which is what keeps Storage::partitions and every

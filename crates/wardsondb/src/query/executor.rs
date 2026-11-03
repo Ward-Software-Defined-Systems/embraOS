@@ -88,14 +88,18 @@ fn load_docs_by_ids<S: AsRef<str>>(
 ) -> Result<Vec<Value>, AppError> {
     let key_refs: Vec<&[u8]> = ids.iter().map(|id| id.as_ref().as_bytes()).collect();
     let mut docs = Vec::with_capacity(ids.len());
-    for bytes in storage
-        .engine
-        .get_many(docs_partition, &key_refs)?
-        .into_iter()
-        .flatten()
-    {
-        if let Ok(doc) = serde_json::from_slice::<Value>(&bytes) {
-            docs.push(doc);
+    // Hydrated `cancel::CHECK_EVERY` keys at a time with a checkpoint per
+    // key, so a read abandoned by its timeout stops within one batch
+    // instead of fetching every candidate first.
+    let mut seen = 0u64;
+    for keys in key_refs.chunks(cancel::CHECK_EVERY as usize) {
+        for value in storage.engine.get_many(docs_partition, keys)? {
+            cancel::checkpoint(&mut seen)?;
+            if let Some(bytes) = value
+                && let Ok(doc) = serde_json::from_slice::<Value>(&bytes)
+            {
+                docs.push(doc);
+            }
         }
     }
     Ok(docs)
@@ -490,7 +494,9 @@ fn execute_id_stream<S: AsRef<str>>(
     // Unsorted residual page: per-id hydration, early exit at the probe row.
     let mut sink = UnsortedPage::new(query.offset as usize, query.limit as usize);
     let mut docs_scanned = 0u64;
+    let mut seen = 0u64;
     for doc_id in ids {
+        cancel::checkpoint(&mut seen)?;
         let Ok(Some(bytes)) = storage
             .engine
             .get(&docs_partition, doc_id.as_ref().as_bytes())

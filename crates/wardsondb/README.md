@@ -8,7 +8,7 @@ A lightweight, high-performance JSON document database built in Rust. Designed f
 
 ## Key Features
 
-- **Single self-contained binary** — no JVM, no cluster setup, no external services at runtime. Build-time requires a C/C++ toolchain, `cmake`, `clang`, and `libclang` (RocksDB + zstd use bindgen; aws-lc-sys via rustls uses cmake + cc) — see Quick Start
+- **Single self-contained binary** — no JVM, no cluster setup, no external services at runtime. Build-time requires a C/C++ toolchain, `cmake`, `clang`, and `libclang` for the RocksDB engine (RocksDB + zstd use bindgen; aws-lc-sys via rustls uses cmake + cc); a fjall-only build (`--no-default-features --features fjall`) leaves the RocksDB toolchain out — see Quick Start
 - **High-throughput ingest** — 42,000+ docs/sec bulk over HTTPS end-to-end (measured against the live test rig; see Performance)
 - **Secondary & compound indexes** — sub-millisecond indexed lookups at millions of documents
 - **Bitmap Scan Accelerator** — sub-millisecond aggregation and filtered counts on categorical fields without touching documents
@@ -98,8 +98,18 @@ cargo build --release
 
 The RocksDB backend needs a C/C++ toolchain plus `cmake`, `clang`, and
 `libclang` at build time (bindgen uses libclang to preprocess RocksDB / zstd
-headers). These are still required to build even if you plan to launch with
-`--storage-engine fjall`, because both backends are compiled in:
+headers). The default build compiles both engines, so these are required
+even if you plan to launch with `--storage-engine fjall`. A single-engine
+build leaves the other engine's code and C++ out — the engine is still
+chosen at run time, and the one left out is refused by name at startup:
+
+```bash
+cargo build --release --no-default-features --features fjall    # or: --features rocksdb
+```
+
+Single-engine builds compile and pass clippy; the test suite and the benches
+open both engines by name, so run those on the default build. For the
+RocksDB toolchain:
 
 - **Ubuntu/Debian:** `sudo apt install build-essential clang cmake libclang-dev`
 - **macOS:** `xcode-select --install`
@@ -247,6 +257,7 @@ curl -X PUT http://localhost:8080/events/ttl \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--port` | `8080` | Listen port |
+| `--bind` | `0.0.0.0` | Address to listen on; `127.0.0.1` keeps the server off the network |
 | `--data-dir` | `./data` | Data directory |
 | `--storage-engine` | *required* | Storage backend: `rocksdb` or `fjall`. No default — must be passed on every launch. Locked per data directory via a `.engine` marker file. |
 | `--tls` | `false` | Enable TLS |

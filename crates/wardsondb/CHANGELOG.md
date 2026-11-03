@@ -11,6 +11,35 @@ first tagged version.
 
 Behavior changes an existing client could observe, most significant first.
 
+- **Concurrent writers of one document no longer lose updates.** A write
+  holds the document's shard from the read that decides it to its commit,
+  so two writers of one `_id` serialize: a `_rev` that went stale under a
+  concurrent writer is now `409 DOCUMENT_CONFLICT` instead of a silent
+  overwrite that left the index holding the superseded value's keys, and
+  two inserts of one custom `_id` give one `201` and one `409` (previously
+  both answered `201`, one document surviving). Bulk inserts check their
+  custom ids under the same shards.
+- **`_delete_by_query` / `_update_by_query` commit in chunks of 256
+  documents** (each chunk one batch of documents and index entries under
+  the chunk's write shards) instead of one transaction for the whole
+  match set. Every matched document is re-read and re-matched under its
+  shard, so a document another writer changed since the scan is left
+  alone and the reported count is the documents actually changed at
+  commit. A storage error mid-way answers 5xx with the earlier chunks
+  applied; nothing is ever half-applied within a chunk.
+- **Ids and names with a path separator or a control character are
+  refused.** A collection name, document id or index name that is empty,
+  `.`, `..`, contains `/` or `\`, or carries a control character is
+  `400 INVALID_DOCUMENT` — as a path parameter (checked before any engine
+  call) and as a body `_id`, single or bulk. Documents stored earlier under
+  such ids stay in their collection and remain reachable by query and
+  `_delete_by_query`, but not by path.
+- **`/_stats`, `/_metrics` and `/{collection}/storage` fail when a `_meta`
+  read fails** instead of answering `0 active policies` or a null time
+  window with a `200`; a stored TTL policy that does not parse is a `500`
+  naming its collection.
+- **The TTL worker discards a policy whose collection is gone** (one WARN
+  line) instead of logging an ERROR on every tick forever.
 - **Streaming scans: `total_count` is omitted on early-exited filtered
   pages.** Unsorted filtered pages now stop scanning once the page plus one
   probe row is full, so `meta.total_count` appears only when the scan ran to
@@ -94,6 +123,15 @@ Behavior changes an existing client could observe, most significant first.
 
 ### Added
 
+- **`--bind <ADDR>`** (default `0.0.0.0`): the address to listen on;
+  `127.0.0.1` keeps the server off the network.
+- **Cargo features `fjall` and `rocksdb`** (default: both). The engine stays
+  a run-time choice via `--storage-engine`; `--no-default-features
+  --features fjall` (or `rocksdb`) builds a single-engine binary without the
+  other engine's code and C++ toolchain, and the engine left out is refused
+  by name at startup. Single-engine builds compile and pass clippy but
+  cannot run the test suite, which opens both engines.
+- `license = "Apache-2.0"` in the crate manifest.
 - **Opaque cursor pagination:** `cursor` request field and `meta.next_cursor`,
   fingerprint-bound to the collection and sort spec; exact `has_more`;
   index-seek resume on `index_sorted` plans and no-sort walks.
@@ -114,6 +152,22 @@ Behavior changes an existing client could observe, most significant first.
 
 ### Fixed
 
+- **Dropping a collection removes its TTL policy** in the same write batch.
+  The policy outlived the collection, could not be deleted over the API once
+  the collection was gone, and failed the TTL worker every tick; policies
+  already orphaned on an existing data directory are discarded on the first
+  tick after the upgrade.
+- **The auto-generated self-signed certificate is valid for 365 days from
+  the day it is generated.** Its expiry was the literal date 2027-03-09, so
+  a certificate generated after that date was born expired.
+- **A read that outlives `--query-timeout` stops.** The abandoned
+  `spawn_blocking` read used to run to the end of its scan for a client
+  that had already been answered; every scan loop (full scans, the index
+  family, `$or`-union arms, candidate hydration, index-only distinct and
+  aggregate) now asks a cancellation token every 1,000 entries and stops
+  with the timeout. Writes never carry a token and are never cut short.
+- The integration tests no longer race for their listen ports (a dropped
+  and re-bound port could be handed to a parallel test).
 - **RocksDB deployments no longer accumulate unbounded RSS on Linux.**
   RocksDB's C++ allocations went through glibc malloc (the process-wide
   jemalloc `#[global_allocator]` covers Rust allocations only), hitting
@@ -169,6 +223,22 @@ Behavior changes an existing client could observe, most significant first.
 
 ### Security
 
+- **Dependency refresh clearing the 14 RustSec advisories published since the
+  July audit** (none in code the engine calls directly): `rustls` 0.23.41 →
+  0.23.46 (4 advisories; the `--tls` path), `rustls-webpki` 0.103.13 →
+  0.103.16 and `webpki-roots` 1.0.7 → 1.0.11 (distrusted intermediates),
+  `h2` 0.4.15 → 0.4.20, `libz-sys` 1.1.29 → 1.1.31, `zstd-sys` 2.0.16 →
+  2.1.2 (same bundled zstd 1.5.7), `quinn-proto` 0.11.16 → 0.11.19 (5; in a
+  never-built closure), plus ~120 semver-compatible minors (`aws-lc-rs` 1.19
+  / `aws-lc-sys` 0.47 under rustls among them). The seven storage-engine
+  pins — fjall 2.11.2, lsm-tree 2.10.4, value-log 1.9.0, rust-rocksdb
+  0.46.0, rust-librocksdb-sys 0.42.0+10.10.1, roaring 0.10.12,
+  tikv-jemallocator 0.6.1 — did not move, so on-disk formats are untouched.
+  `cargo audit`: 0 vulnerabilities across 305 crates. The CI `audit` job
+  fails the pipeline again from here on.
+- **axum-server 0.7 → 0.8** drops `rustls-pemfile` (RUSTSEC-2025-0134,
+  unmaintained) from the dependency tree; TLS configuration and the two
+  calls the server makes are unchanged.
 - **Dependency updates resolving all 16 open security advisories** (9 high /
   3 moderate / 4 low): `openssl` 0.10.75 → 0.10.81 (8 advisories; dev-only
   dependency), `rustls-webpki` 0.103.9 → 0.103.13 (4; `--tls` mode),
@@ -179,6 +249,16 @@ Behavior changes an existing client could observe, most significant first.
 
 ### Performance
 
+- A `$group`-first aggregation pipeline streams the collection through its
+  accumulators; the groups are the resident set, not the collection.
+- The bitmap `$ne` arm subtracts in place instead of cloning the column's
+  exists bitmap first.
+- Per-document write locking uses 65,536 shards keyed by (collection, id),
+  so a 256-document mutation chunk or a 500-id bulk insert holds under 1% of
+  the shard space for its commit.
+- Bulk inserts check their custom ids with one multi-get and drop the ones
+  that exist in linear time (was one point read per id and a quadratic
+  retain).
 - `$regex` filters compile once at parse time: the regex-scan benchmark
   dropped 644.8 ms → 27.1 ms (−95.8%).
 - Windowed bare pages: deep-offset index page reads dropped

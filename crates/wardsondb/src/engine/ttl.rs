@@ -75,7 +75,6 @@ impl Storage {
     }
 
     pub fn get_all_ttl_configs(&self) -> Result<Vec<(String, TtlConfig)>, AppError> {
-
         let mut results = Vec::new();
         let mut item_err: Option<AppError> = None;
         self.engine

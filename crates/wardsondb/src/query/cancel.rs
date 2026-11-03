@@ -127,6 +127,84 @@ mod tests {
         });
         assert!(result.is_err());
         let mut seen = CHECK_EVERY - 1;
-        assert!(checkpoint(&mut seen).is_ok(), "an unwound scope left no token");
+        assert!(
+            checkpoint(&mut seen).is_ok(),
+            "an unwound scope left no token"
+        );
+    }
+
+    /// The index family stops at a checkpoint too: an indexed page whose
+    /// residual filter passes nothing for the first 1,000 entries, a bare
+    /// page windowed past 1,000 keys, and a two-arm `$or` union each answer
+    /// the timeout under a cancelled token and the page under a live one.
+    #[test]
+    fn index_scans_stop_at_their_next_checkpoint_too() {
+        use crate::query::executor::execute_query;
+        use crate::query::filter::parse_filter;
+        use crate::query::parser::ParsedQuery;
+
+        let total = 2 * CHECK_EVERY as usize + 500;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let storage =
+            Storage::open_with_config(tmp.path(), "fjall", MemoryConfig::default()).unwrap();
+        storage.create_collection("c").unwrap();
+        storage
+            .create_index("c", "idx_kind", &["kind".to_string()])
+            .unwrap();
+        let docs: Vec<_> = (0..total)
+            .map(|i| json!({"n": i, "kind": if i % 2 == 0 { "a" } else { "b" }}))
+            .collect();
+        storage.bulk_insert_documents("c", docs).unwrap();
+
+        let query = |filter: serde_json::Value, offset: u64, limit: u64| ParsedQuery {
+            filter: Some(parse_filter(&filter).unwrap()),
+            sort: vec![],
+            limit,
+            offset,
+            fields: None,
+            count_only: false,
+            cursor: None,
+        };
+        // (query, what the live run reports — the index for the index family,
+        // the strategy for the union; document pages carry no strategy label —
+        // and the documents it returns)
+        let shapes = [
+            (
+                query(json!({"kind": "a", "n": {"$gte": total - 100}}), 0, 10),
+                Some("idx_kind"),
+                None,
+                10,
+            ),
+            (
+                query(json!({"kind": "a"}), CHECK_EVERY + 100, 5),
+                Some("idx_kind"),
+                None,
+                5,
+            ),
+            (
+                query(json!({"$or": [{"kind": "a"}, {"kind": "b"}]}), 0, 7),
+                None,
+                Some("or_union"),
+                7,
+            ),
+        ];
+        let cancelled = CancelToken::new(9);
+        cancelled.cancel();
+        let live = CancelToken::new(9);
+        for (n, (parsed, index_used, strategy, returned)) in shapes.iter().enumerate() {
+            let err = scoped(&cancelled, || execute_query(&storage, "c", parsed)).unwrap_err();
+            assert!(
+                matches!(err, AppError::QueryTimeout(9)),
+                "shape {n}: {err:?}"
+            );
+            let result = scoped(&live, || execute_query(&storage, "c", parsed)).unwrap();
+            if index_used.is_some() {
+                assert_eq!(result.index_used.as_deref(), *index_used, "shape {n}");
+            }
+            if strategy.is_some() {
+                assert_eq!(result.scan_strategy.as_deref(), *strategy, "shape {n}");
+            }
+            assert_eq!(result.docs.len(), *returned, "shape {n}");
+        }
     }
 }

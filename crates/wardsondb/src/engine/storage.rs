@@ -46,8 +46,17 @@ impl Default for MemoryConfig {
 /// to one shard and holds it from the read that decides its write to the
 /// commit, so two writers of one document never both read the same
 /// revision: the second sees the first's commit, and a stale `_rev` is a
-/// conflict instead of a lost update with orphaned index keys (#64).
-pub(crate) const WRITE_SHARDS: usize = 256;
+/// conflict instead of a lost update with orphaned index keys (embraOS #64).
+///
+/// The space is global across collections, so its size bounds how much of
+/// it one multi-shard holder takes: `n` ids cover `S·(1 − e^(−n/S))` of `S`
+/// shards. At 256, each 256-document chunk of a by-query mutation held 63%
+/// of every writer's shards for the length of its commit — a TTL sweep was
+/// a rolling write stall across unrelated collections — and ~1,570 custom
+/// ids in one bulk insert took all of them. At 65,536 (one byte per
+/// `parking_lot::Mutex`, 64 KiB in all) a chunk covers 0.4%, a 500-id bulk
+/// insert 0.8%, the 10,000-id maximum 14%.
+pub(crate) const WRITE_SHARDS: usize = 65_536;
 
 /// Atomic document counters per collection — O(1) doc count reads.
 pub struct DocCounters {
@@ -376,10 +385,7 @@ mod tests {
         // by one holder would deadlock it against itself.
         let ids: Vec<String> = (0..WRITE_SHARDS * 2).map(|i| format!("d{i}")).collect();
         let guards = storage.lock_documents("c", ids.iter().map(String::as_str));
-        let mut indexes: Vec<usize> = ids
-            .iter()
-            .map(|id| Storage::shard_index("c", id))
-            .collect();
+        let mut indexes: Vec<usize> = ids.iter().map(|id| Storage::shard_index("c", id)).collect();
         indexes.sort_unstable();
         indexes.dedup();
         assert_eq!(guards.len(), indexes.len(), "each shard once");

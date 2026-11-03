@@ -1,9 +1,10 @@
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use wardsondb::engine::storage::{MemoryConfig, Storage};
 use wardsondb::query::executor::execute_query;
+use wardsondb::query::filter::parse_filter;
 use wardsondb::query::parser::{QueryRequest, parse_query};
 
 fn create_siem_event(i: u64) -> Value {
@@ -80,6 +81,49 @@ fn bench_bulk_insert_500(c: &mut Criterion) {
             storage.bulk_insert_documents("events", docs).unwrap();
             i += 500;
         });
+    });
+}
+
+/// `bulk_insert_500` with client-supplied ids: every id takes its write
+/// shard for the duplicate check and the commit (`lock_documents`) — the
+/// shape a client that chooses its own ids sends (epoch-prefixed UUIDv7,
+/// idempotent retries). Guard for the shard path's cost.
+fn bench_bulk_insert_500_custom_ids(c: &mut Criterion) {
+    let tmp = TempDir::new().unwrap();
+    let storage = Storage::open(tmp.path()).unwrap();
+    storage.create_collection("events").unwrap();
+
+    let mut i = 0u64;
+    c.bench_function("bulk_insert_500_custom_ids", |b| {
+        b.iter(|| {
+            let docs: Vec<Value> = (i..i + 500)
+                .map(|n| {
+                    let mut doc = create_siem_event(n);
+                    doc["_id"] = json!(format!("evt-{n:012}"));
+                    doc
+                })
+                .collect();
+            storage.bulk_insert_documents("events", docs).unwrap();
+            i += 500;
+        });
+    });
+}
+
+/// `delete_by_query` over a 10k collection with half of it matching: the
+/// streamed match scan, then the matches re-read and removed in chunks of
+/// 256 under their write shards. The collection is rebuilt outside the
+/// timed section. Guard for the chunked mutation path.
+fn bench_delete_by_query_10k(c: &mut Criterion) {
+    let filter = parse_filter(&json!({"severity": {"$in": ["low", "medium"]}})).unwrap();
+    c.bench_function("delete_by_query_10k", |b| {
+        b.iter_batched(
+            || setup_storage_with_docs(10_000),
+            |(storage, _tmp)| {
+                let deleted = storage.delete_by_query("events", &filter).unwrap();
+                assert_eq!(deleted, 5_000);
+            },
+            BatchSize::PerIteration,
+        );
     });
 }
 
@@ -674,6 +718,8 @@ criterion_group!(
     benches,
     bench_single_insert,
     bench_bulk_insert_500,
+    bench_bulk_insert_500_custom_ids,
+    bench_delete_by_query_10k,
     bench_get_by_id,
     bench_query_10k,
     bench_query_100k,

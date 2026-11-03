@@ -397,7 +397,7 @@ curl -X DELETE http://localhost:8080/events
 
 Insert a JSON document. If the request body includes an `_id` field with a non-empty string value, it is used as the document ID. Otherwise, a UUIDv7 is auto-generated. Other system fields are added automatically: `_rev`, `_created_at`, `_updated_at`, and `_received_at` (server-side ingest timestamp, immutable on updates).
 
-**Custom `_id` rules:** must be a non-empty string, max 512 bytes, must not start with `_`, must not contain null bytes.
+**Custom `_id` rules:** must be a non-empty string, max 512 bytes, must not start with `_`, must not be `.` or `..`, and must not contain a null byte, a path separator (`/` or `\`) or any control character — such an id could not be addressed by path, and the index keys use `0x00`/`0x01` as separators. The same rule applies to every collection name, document id and index name taken from a URL path: a violation is `400 INVALID_DOCUMENT` before any engine call (path parameters are percent-decoded first, so `a%2Fb` is refused as `a/b`).
 
 ```bash
 curl -X POST http://localhost:8080/events/docs \
@@ -1442,7 +1442,7 @@ curl -X POST http://localhost:8080/events/docs/_delete_by_query \
 }
 ```
 
-Uses the same filter DSL as `/query`. All matching documents and their index entries are removed in a single transaction.
+Uses the same filter DSL as `/query`. The match phase is one streamed scan that keeps only the matching ids; the deletes then commit in chunks of 256 documents, each chunk one atomic batch of documents and index entries under the chunk's per-document write shards. Every document is re-read and re-matched under its shard before it is removed, so a document another writer changed since the scan is left alone, and `deleted` counts the documents actually removed at commit. A storage error mid-way answers 5xx with the earlier chunks applied; within a chunk nothing is ever half-applied.
 
 **Errors:**
 - `404 COLLECTION_NOT_FOUND`
@@ -1475,7 +1475,7 @@ curl -X POST http://localhost:8080/events/docs/_update_by_query \
 }
 ```
 
-Each updated document gets `_rev` incremented and `_updated_at` refreshed. Index entries are updated in the same transaction.
+Each updated document gets `_rev` incremented and `_updated_at` refreshed. The update commits in chunks of 256 documents like `_delete_by_query` — each chunk one atomic batch of documents and index entries under the chunk's write shards, every document re-read and re-matched under its shard with the `$set` applied to the stored revision — and `updated` counts the documents changed at commit.
 
 **Errors:**
 - `404 COLLECTION_NOT_FOUND`
