@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use parking_lot::{Mutex, MutexGuard, RwLock};
 
-use tracing::info;
+use tracing::{info, warn};
 
 use uuid::Uuid;
 
@@ -337,6 +337,11 @@ impl Storage {
 
 /// Check that the engine marker matches what the caller asked for.
 /// Hard error on mismatch — never silently switch engines on existing data.
+///
+/// An empty marker names no engine: it is what a machine stopped before the
+/// first write reached the disk left behind (versions before the durable
+/// write below). It reads as absent, and `write_engine_marker` writes it
+/// again with the engine now opening the directory.
 fn check_engine_marker(data_dir: &Path, engine_type: &str) -> Result<(), AppError> {
     let marker = data_dir.join(".engine");
     if !marker.exists() {
@@ -345,6 +350,13 @@ fn check_engine_marker(data_dir: &Path, engine_type: &str) -> Result<(), AppErro
     let existing = std::fs::read_to_string(&marker)
         .map_err(|e| AppError::Internal(format!("Failed to read engine marker: {e}")))?;
     let existing = existing.trim();
+    if existing.is_empty() {
+        warn!(
+            "Engine marker {} is empty (an unclean stop during the first start); it is written again as '{engine_type}'",
+            marker.display()
+        );
+        return Ok(());
+    }
     if existing != engine_type {
         return Err(AppError::Internal(format!(
             "Data directory was created with engine '{existing}' but '{engine_type}' was requested. \
@@ -355,13 +367,36 @@ fn check_engine_marker(data_dir: &Path, engine_type: &str) -> Result<(), AppErro
     Ok(())
 }
 
+/// Write the engine marker so that it is on disk whole or not at all: the
+/// name goes to `.engine.tmp`, which is fsynced and renamed over `.engine`,
+/// and the directory is fsynced after the rename. A plain write left the
+/// file created and empty when the machine stopped within the page cache's
+/// writeback window of the first start, and the next start refused to open
+/// the directory with "engine ''". A marker that already names an engine is
+/// left as it is; `check_engine_marker` has compared it.
 fn write_engine_marker(data_dir: &Path, engine_name: &str) -> Result<(), AppError> {
     let marker = data_dir.join(".engine");
-    if marker.exists() {
-        return Ok(());
+    let internal = |what: &str, e: std::io::Error| {
+        AppError::Internal(format!("Failed to write engine marker ({what}): {e}"))
+    };
+    match std::fs::read_to_string(&marker) {
+        Ok(existing) if !existing.trim().is_empty() => return Ok(()),
+        Ok(_) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(internal("read", e)),
     }
-    std::fs::write(&marker, engine_name)
-        .map_err(|e| AppError::Internal(format!("Failed to write engine marker: {e}")))
+    let tmp = data_dir.join(".engine.tmp");
+    {
+        let mut file = std::fs::File::create(&tmp).map_err(|e| internal("create", e))?;
+        std::io::Write::write_all(&mut file, engine_name.as_bytes())
+            .map_err(|e| internal("write", e))?;
+        file.sync_all().map_err(|e| internal("fsync", e))?;
+    }
+    std::fs::rename(&tmp, &marker).map_err(|e| internal("rename", e))?;
+    std::fs::File::open(data_dir)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| internal("fsync the directory", e))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -374,6 +409,33 @@ mod tests {
         counters.increment("logs", 1); // no initialize — must not be dropped
         counters.increment("logs", 1);
         assert_eq!(counters.get("logs"), 2);
+    }
+
+    #[test]
+    fn the_engine_marker_is_written_whole_and_an_empty_one_is_rewritten() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let marker = tmp.path().join(".engine");
+        // A fresh directory: the marker appears with the name, and nothing
+        // is left beside it.
+        write_engine_marker(tmp.path(), "fjall").unwrap();
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "fjall");
+        assert!(!tmp.path().join(".engine.tmp").exists());
+        check_engine_marker(tmp.path(), "fjall").unwrap();
+        // A marker that names an engine is kept, and another engine is
+        // refused by the check, never by a silent rewrite.
+        write_engine_marker(tmp.path(), "rocksdb").unwrap();
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "fjall");
+        let err = check_engine_marker(tmp.path(), "rocksdb").unwrap_err();
+        assert!(
+            err.to_string().contains("created with engine 'fjall'"),
+            "{err}"
+        );
+        // The trace of an unclean first start, the file created and empty:
+        // the check reads it as absent and the write fills it in.
+        std::fs::write(&marker, "").unwrap();
+        check_engine_marker(tmp.path(), "rocksdb").unwrap();
+        write_engine_marker(tmp.path(), "rocksdb").unwrap();
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "rocksdb");
     }
 
     #[test]
