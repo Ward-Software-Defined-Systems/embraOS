@@ -58,6 +58,17 @@ BR2_LINUX_KERNEL_INSTALL_TARGET=y
 # (target/<triple>/release/embraos-release). post_image.sh ignores it.
 BR2_ROOTFS_POST_SCRIPT_ARGS="$(EMBRAOS_RUST_TARGET)"
 
+# GRUB on the EFI System Partition, EFI only: the loader at EFI/BOOT/<arch>.efi
+# (the removable-media path, so no NVRAM entry), grub.cfg and grubenv beside
+# it (post_image.sh). Every module is built in — the ESP carries no module
+# directory — and grub-mkimage resolves their dependencies; the builtin
+# config stays empty, `normal` loads $prefix/grub.cfg itself. No GRUB tools
+# on the rootfs: the OS writes grubenv through embra-boot.
+BR2_TARGET_GRUB2=y
+BR2_TARGET_GRUB2_ARM64_EFI=y
+BR2_TARGET_GRUB2_BUILTIN_MODULES_EFI="boot linux normal configfile part_gpt fat squash4 xzio gzio echo test true sleep loadenv regexp smbios probe search search_fs_uuid search_label halt reboot efifwsetup minicmd cat ls help terminal efi_gop"
+# BR2_TARGET_GRUB2_INSTALL_TOOLS is not set
+
 # OpenSSL + libcurl with TLS (required for git-remote-https)
 BR2_PACKAGE_OPENSSL=y
 BR2_PACKAGE_CA_CERTIFICATES=y

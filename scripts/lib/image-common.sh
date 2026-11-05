@@ -314,5 +314,26 @@ assert_image_layout() {
         }
         i=$((i + 1))
     done
-    echo "image layout: $EMBRAOS_PARTITION_NAMES, 1 MiB aligned"
+    # The ESP carries the loader, grub.cfg and grubenv, and grubenv names
+    # slot A active: read through mtools at the partition's offset.
+    local esp_start mdir mtype listing f
+    read -r _ esp_start _ <<< "${rows[0]}"
+    mdir="$BUILDROOT_DIR/output/host/bin/mdir"
+    mtype="$BUILDROOT_DIR/output/host/bin/mtype"
+    listing="$("$mdir" -i "${img}@@$((esp_start * 512))" -b ::/EFI/BOOT 2>/dev/null || true)"
+    for f in grub.cfg grubenv; do
+        echo "$listing" | grep -qi "/${f}\$" || {
+            echo "ERROR: the ESP of $img lacks EFI/BOOT/${f}" >&2
+            reject_image
+        }
+    done
+    echo "$listing" | grep -qiE '/boot(x64|aa64)\.efi$' || {
+        echo "ERROR: the ESP of $img lacks a GRUB loader under EFI/BOOT" >&2
+        reject_image
+    }
+    "$mtype" -i "${img}@@$((esp_start * 512))" ::/EFI/BOOT/grubenv 2>/dev/null | grep -qx 'slot_active=a' || {
+        echo "ERROR: grubenv on the ESP of $img does not name slot A active" >&2
+        reject_image
+    }
+    echo "image layout: $EMBRAOS_PARTITION_NAMES, 1 MiB aligned; the ESP carries the loader, grub.cfg and grubenv (slot A active)"
 }

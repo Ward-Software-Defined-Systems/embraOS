@@ -397,12 +397,15 @@ fi
 )
 
 # Clean stale Buildroot package caches so fresh binaries are picked up
-# Includes embraOS packages AND upstream packages whose config may have changed
+# Includes embraOS packages AND upstream packages whose config may have changed.
+# The kernel's target-install stamp goes too: a tree built before
+# BR2_LINUX_KERNEL_INSTALL_TARGET would otherwise keep /boot without the kernel.
 (cd "$BUILDROOT_DIR" && \
     for pkg in embrad embra-apid embra-trustd embra-brain embra-console embra-web wardsondb \
                embra-rust-toolchain embra-embedding-model git openssl libcurl openssh; do
         make "${pkg}-dirclean" 2>/dev/null || true
     done && \
+    rm -f output/build/linux-*/.stamp_target_installed && \
     rm -f output/images/rootfs.squashfs output/images/embraos.img \
           output/images/boot.vfat output/images/esp.vfat)
 

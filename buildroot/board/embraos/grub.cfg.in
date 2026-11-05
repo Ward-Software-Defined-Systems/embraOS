@@ -1,0 +1,189 @@
+# embraOS GRUB configuration (EFI only). post_image.sh renders
+# @KERNEL_IMAGE@ (bzImage | Image) and @SERIAL_CONSOLE@ (ttyS0 | ttyAMA0).
+# Every command here is built into the loader (BR2_TARGET_GRUB2_BUILTIN_MODULES_EFI):
+# the ESP carries no module directory. No `serial`/`terminal_*` setup: under
+# OVMF and AAVMF the EFI console is already split to the serial line and the
+# display, and a second driver on the UART doubles every character.
+#
+# State: $prefix/grubenv, GRUB's 1024-byte environment block (embrad and
+# embra-update write it through embra-boot):
+#   slot_active    a|b     the slot booted by default
+#   slot_try       a|b|""  a slot an update staged; booted while tries_left > 0
+#   tries_left     0..3    boots left for slot_try before it is marked failed
+#   slot_a_status, slot_b_status   ""|ok|pending|failed
+#   menu_timeout   seconds
+# GRUB has no arithmetic: tries_left is a 3-2-1-0 ladder. embrad confirms a
+# trial boot (embra.trial=1 on the kernel line) once every service is
+# healthy: slot_active=<slot>, slot_try="", tries_left=0, status ok.
+
+set timeout_style=menu
+set slot_active=a
+set slot_try=
+set tries_left=0
+set slot_a_status=
+set slot_b_status=
+set menu_timeout=3
+set extra=
+set trial_a=
+set trial_b=
+
+# A missing or garbled block leaves the defaults: slot A, no trial.
+load_env slot_active slot_try tries_left slot_a_status slot_b_status menu_timeout
+
+# The disk this ESP is on: $root is "hd0,gpt1" in the firmware's naming; the
+# slots are partitions 2 and 3 of the same disk (layout.sh).
+regexp --set=1:disk '^([a-z0-9]+),' "$root"
+if [ -z "$disk" ]; then set disk=hd0; fi
+set slot_a_dev="($disk,gpt2)"
+set slot_b_dev="($disk,gpt3)"
+
+# The host's knobs: run-qemu.sh passes ONE SMBIOS type 11 OEM string. Byte 4
+# of a type 11 structure is its string count; with one string that byte
+# reads 1, which --get-string takes as the index of that string. Without
+# the table (a real VM) the command fails quietly and $extra stays empty.
+smbios --type 11 --get-string 4 --set=extra
+
+# A/B: a staged slot is booted while it has tries left; at zero it is marked
+# failed and the active slot boots.
+set boot_slot="$slot_active"
+if [ -n "$slot_try" ]; then
+    if [ "$tries_left" = "0" ]; then
+        if [ "$slot_try" = "a" ]; then set slot_a_status=failed; fi
+        if [ "$slot_try" = "b" ]; then set slot_b_status=failed; fi
+        set slot_try=
+        save_env slot_try slot_a_status slot_b_status
+    else
+        if [ "$tries_left" = "3" ]; then
+            set tries_left=2
+        elif [ "$tries_left" = "2" ]; then
+            set tries_left=1
+        else
+            set tries_left=0
+        fi
+        save_env tries_left
+        set boot_slot="$slot_try"
+        if [ "$boot_slot" = "a" ]; then set trial_a="embra.trial=1"; fi
+        if [ "$boot_slot" = "b" ]; then set trial_b="embra.trial=1"; fi
+    fi
+fi
+
+# Each slot's version from the file its build wrote
+# (/boot/embraos-slot.cfg: `set slot_version="..."`). A slot without it is
+# empty and gets no entry.
+set slot_a_title="(empty)"
+set slot_b_title="(empty)"
+if [ -f "${slot_a_dev}/boot/embraos-slot.cfg" ]; then
+    set slot_version=
+    source "${slot_a_dev}/boot/embraos-slot.cfg"
+    if [ -n "$slot_version" ]; then set slot_a_title="$slot_version"; fi
+fi
+if [ -f "${slot_b_dev}/boot/embraos-slot.cfg" ]; then
+    set slot_version=
+    source "${slot_b_dev}/boot/embraos-slot.cfg"
+    if [ -n "$slot_version" ]; then set slot_b_title="$slot_version"; fi
+fi
+if [ "$slot_a_status" = "failed" ]; then set slot_a_title="${slot_a_title} [failed]"; fi
+if [ "$slot_b_status" = "failed" ]; then set slot_b_title="${slot_b_title} [failed]"; fi
+if [ "$slot_a_status" = "pending" ]; then set slot_a_title="${slot_a_title} [pending]"; fi
+if [ "$slot_b_status" = "pending" ]; then set slot_b_title="${slot_b_title} [pending]"; fi
+if [ "$slot_active" = "a" ]; then set active_dev="$slot_a_dev"; else set active_dev="$slot_b_dev"; fi
+
+# $1 the slot letter, $2 its device, $3 the entry's own knobs. Order on the
+# line: GRUB's defaults, the entry's knobs, the host's string; embrad takes
+# the last occurrence of each embra.* knob.
+function boot_slot {
+    echo "embraOS: booting slot $1 from $2"
+    linux "$2/boot/@KERNEL_IMAGE@" console=@SERIAL_CONSOLE@ quiet embra.slot=$1 embra.web=1 $3 $extra
+    initrd "$2/boot/initramfs.cpio.gz"
+}
+
+set default="slot_${boot_slot}"
+set timeout="$menu_timeout"
+
+if [ "$slot_a_title" != "(empty)" ]; then
+    menuentry "embraOS ${slot_a_title} - slot A" --id slot_a {
+        boot_slot a "$slot_a_dev" "$trial_a"
+    }
+fi
+if [ "$slot_b_title" != "(empty)" ]; then
+    menuentry "embraOS ${slot_b_title} - slot B" --id slot_b {
+        boot_slot b "$slot_b_dev" "$trial_b"
+    }
+fi
+
+submenu "Diagnostics" --id diagnostics {
+    menuentry "Boot the active slot with the serial TUI (embra.tui=1)" {
+        boot_slot "$slot_active" "$active_dev" "embra.tui=1"
+    }
+    menuentry "Boot the active slot with debug logging (embra.loglevel=debug)" {
+        boot_slot "$slot_active" "$active_dev" "embra.loglevel=debug"
+    }
+    menuentry "Boot the active slot with database request logging (embra.dbverbose=1)" {
+        boot_slot "$slot_active" "$active_dev" "embra.dbverbose=1"
+    }
+    if [ "$slot_a_title" != "(empty)" ]; then
+        menuentry "Make slot A the default" {
+            set slot_active=a
+            set slot_try=
+            set tries_left=0
+            save_env slot_active slot_try tries_left
+            configfile "$prefix/grub.cfg"
+        }
+        menuentry "Boot slot A once (the default stays)" {
+            boot_slot a "$slot_a_dev" ""
+        }
+    fi
+    if [ "$slot_b_title" != "(empty)" ]; then
+        menuentry "Make slot B the default" {
+            set slot_active=b
+            set slot_try=
+            set tries_left=0
+            save_env slot_active slot_try tries_left
+            configfile "$prefix/grub.cfg"
+        }
+        menuentry "Boot slot B once (the default stays)" {
+            boot_slot b "$slot_b_dev" ""
+        }
+    fi
+    menuentry "Clear the failed marks" {
+        set slot_a_status=
+        set slot_b_status=
+        save_env slot_a_status slot_b_status
+        configfile "$prefix/grub.cfg"
+    }
+    menuentry "Boot state" {
+        echo "active=$slot_active try=$slot_try tries_left=$tries_left a=$slot_a_status b=$slot_b_status"
+        echo "host knobs: $extra"
+        echo "Press any key to return"
+        sleep --interruptible 60
+    }
+    menuentry "Command-line knobs" {
+        echo "Press e on an entry to edit its kernel line. embrad reads the last occurrence of each:"
+        echo "  embra.tui=1 | embra.web=0   the serial TUI instead of the web console"
+        echo "  embra.web=1                 the web console (this menu's default)"
+        echo "  embra.cols=N embra.rows=N   the serial TUI's size"
+        echo "  embra.loglevel=<spec>       the brain's log filter, e.g. info,kg::traversal=debug"
+        echo "  embra.dbverbose=1           WardSONDB per-request log lines"
+        echo "  embra.graphics=<mode>       serial image protocol: halfblocks|sixel|kitty|iterm2|auto|off"
+        echo "  embra.mode=update|backup|restore   a maintenance boot instead of the services"
+        echo "Press any key to return"
+        sleep --interruptible 60
+    }
+}
+
+menuentry "Update embraOS (slot ${slot_active}, embra.mode=update)" --id update {
+    boot_slot "$slot_active" "$active_dev" "embra.mode=update"
+}
+
+submenu "Backup and restore" --id backup {
+    menuentry "Back up STATE and DATA (embra.mode=backup)" {
+        boot_slot "$slot_active" "$active_dev" "embra.mode=backup"
+    }
+    menuentry "Restore STATE and DATA (embra.mode=restore)" {
+        boot_slot "$slot_active" "$active_dev" "embra.mode=restore"
+    }
+}
+
+menuentry "Reboot" --id reboot { reboot }
+menuentry "Halt" --id halt { halt }
+menuentry "Firmware setup" --id fwsetup { fwsetup }

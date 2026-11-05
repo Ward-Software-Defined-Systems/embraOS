@@ -32,10 +32,47 @@ else
 fi
 echo "kernel: ${KERNEL_IMAGE} (inside each slot's squashfs at /boot)"
 
-# The ESP tree genimage copies whole: GRUB's loader, grub.cfg and grubenv land
-# under EFI/BOOT.
+# The ESP tree genimage copies whole: GRUB's loader (written by Buildroot's
+# grub2 package into efi-part/EFI/BOOT; a dropped symbol is silent, so it is
+# asserted), our grub.cfg over Buildroot's two-line one, and grubenv.
 EFI_PART="${BINARIES_DIR}/efi-part"
 mkdir -p "${EFI_PART}/EFI/BOOT"
+LOADERS=$(find "${EFI_PART}/EFI/BOOT" -maxdepth 1 -iname 'boot*.efi' | wc -l)
+[ "${LOADERS}" -eq 1 ] || {
+    echo "ERROR: expected one GRUB loader under ${EFI_PART}/EFI/BOOT (BR2_TARGET_GRUB2 with its EFI platform), found ${LOADERS}" >&2
+    exit 1
+}
+if grep -q '^BR2_aarch64=y' "${BR2_CONFIG}"; then
+    SERIAL_CONSOLE="ttyAMA0"
+else
+    SERIAL_CONSOLE="ttyS0"
+fi
+sed -e "s/@KERNEL_IMAGE@/${KERNEL_IMAGE}/g" \
+    -e "s/@SERIAL_CONSOLE@/${SERIAL_CONSOLE}/g" \
+    "${BOARD_DIR}/grub.cfg.in" > "${EFI_PART}/EFI/BOOT/grub.cfg"
+if grep -q '@[A-Z_]*@' "${EFI_PART}/EFI/BOOT/grub.cfg"; then
+    echo "ERROR: a placeholder of grub.cfg.in was not rendered:" >&2
+    grep -n '@[A-Z_]*@' "${EFI_PART}/EFI/BOOT/grub.cfg" >&2
+    exit 1
+fi
+for tool in grub-script-check grub-editenv; do
+    [ -x "${HOST_DIR}/bin/${tool}" ] || {
+        echo "ERROR: ${HOST_DIR}/bin/${tool} is missing (host-grub2 builds with the grub2 package)" >&2
+        exit 1
+    }
+done
+"${HOST_DIR}/bin/grub-script-check" "${EFI_PART}/EFI/BOOT/grub.cfg"
+# The environment block, fresh on every build: slot A active and known good,
+# no trial, the menu's timeout.
+rm -f "${EFI_PART}/EFI/BOOT/grubenv"
+"${HOST_DIR}/bin/grub-editenv" "${EFI_PART}/EFI/BOOT/grubenv" create
+"${HOST_DIR}/bin/grub-editenv" "${EFI_PART}/EFI/BOOT/grubenv" set \
+    slot_active=a slot_try= tries_left=0 slot_a_status=ok slot_b_status= menu_timeout=3
+[ "$(stat -c %s "${EFI_PART}/EFI/BOOT/grubenv")" -eq 1024 ] || {
+    echo "ERROR: grubenv is not a 1024-byte GRUB environment block" >&2
+    exit 1
+}
+echo "ESP: $(find "${EFI_PART}/EFI/BOOT" -maxdepth 1 -iname 'boot*.efi' -printf '%f') grub.cfg (console=${SERIAL_CONSOLE}) grubenv"
 
 sed -e "s/@ESP_SIZE@/${EMBRAOS_ESP_SIZE}/" \
     -e "s/@SLOT_SIZE@/${EMBRAOS_SLOT_SIZE}/" \
