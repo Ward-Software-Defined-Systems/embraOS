@@ -11,9 +11,11 @@ pub mod partitions;
 pub mod release;
 pub mod slot;
 pub mod state;
+pub mod status;
 
 pub use cmdline::{BootMode, Cmdline, CmdlineError};
 pub use grubenv::{GrubEnv, GrubEnvError};
 pub use release::{Release, ReleaseError};
 pub use slot::Slot;
 pub use state::{BootState, SlotStatus};
+pub use status::BootStatus;
