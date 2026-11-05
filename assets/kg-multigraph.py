@@ -215,7 +215,7 @@ def draw(ctx):
          "One multigraph in WardSONDB: the sealed identity graph, episodic entries and promoted knowledge "
          "— retrieval by tags, text, in-OS vectors and structure",
          11.5, DIM)
-    badge = "PHASE 1 · STABLE (CODE REVIEW IN PROGRESS)"
+    badge = "PHASE 1 · STABLE · PHASE 2 · IN PROGRESS"
     bw = text_width(ctx, badge, 9.5, True, 1.0) + 24
     rounded_rect(ctx, W - 40 - bw, 30, bw, 22, 11)
     ctx.set_source_rgba(*ORANGE, 0.10)
