@@ -6,6 +6,7 @@
 # Usage: ./scripts/seed-state.sh [<image>] [--image <path>] [--phase0-data <dir>]
 #                                [--soul-hash <hash>] [--import-dir <dir>]
 #                                [--seed-dir <dir>] [--ca-dir <dir>]
+#                                [--update-key <pem>]
 #
 # --import-dir copies *.graph.json intelligence files into STATE's
 # imported-intelligence/ directory so Learning Mode offers them for import
@@ -70,6 +71,8 @@ Options:
   --seed-dir <dir>        Copy *.knowledge.json (your own packs) into STATE/seed-knowledge/;
                           a copy of a pack the OS ships is ignored at boot
   --ca-dir <dir>          Copy *.pem / *.crt into STATE/ca-certificates/
+  --update-key <pem>      Copy an Ed25519 public key (SubjectPublicKeyInfo PEM) to STATE/update-signing.pub:
+                          the operator's own release signing key, trusted beside the image's
   -h, --help              Show this help
 
 --wipe reformats the named partitions (ext4, original labels) before any
@@ -107,6 +110,7 @@ SOUL_HASH=""
 IMPORT_DIR=""
 SEED_DIR=""
 CA_DIR=""
+UPDATE_KEY=""
 WIPE=""
 ASSUME_YES=0
 
@@ -122,6 +126,7 @@ while [ $# -gt 0 ]; do
         --import-dir)  need $# --import-dir;  IMPORT_DIR="$2";  shift 2 ;;
         --seed-dir)    need $# --seed-dir;    SEED_DIR="$2";    shift 2 ;;
         --ca-dir)      need $# --ca-dir;      CA_DIR="$2";      shift 2 ;;
+        --update-key)  need $# --update-key;  UPDATE_KEY="$2";  shift 2 ;;
         -h|--help)     usage; exit 0 ;;
         -*)            echo "Unknown option: $1" >&2; echo >&2; usage >&2; exit 1 ;;
         *)             [ -z "$IMAGE_ARG" ] || die "unexpected extra argument: $1"
@@ -419,6 +424,17 @@ if [ -n "$SEED_DIR" ]; then
 fi
 
 # Seed operator root CA certificates (git/OpenSSL trust for self-hosted servers)
+if [ -n "$UPDATE_KEY" ]; then
+    if [ -f "$UPDATE_KEY" ] && grep -q 'BEGIN PUBLIC KEY' "$UPDATE_KEY"; then
+        echo "Seeding the release signing key into STATE/update-signing.pub..."
+        $SUDO cp "$UPDATE_KEY" "$MOUNT_STATE/update-signing.pub"
+        echo "Done."
+    else
+        echo "ERROR: --update-key '$UPDATE_KEY' is not a PEM public key"
+        exit 1
+    fi
+fi
+
 if [ -n "$CA_DIR" ]; then
     if [ -d "$CA_DIR" ] && { ls "$CA_DIR"/*.pem >/dev/null 2>&1 || ls "$CA_DIR"/*.crt >/dev/null 2>&1; }; then
         echo "Copying operator CA certificates into STATE ca-certificates/..."

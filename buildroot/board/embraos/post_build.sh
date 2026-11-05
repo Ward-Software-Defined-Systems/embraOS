@@ -80,6 +80,11 @@ done
 printf 'set slot_version="%s (%s, %s)"\n' "$VERSION" "$BUILD_ID" "${BUILT%%T*}" \
     > "${TARGET_DIR}/boot/embraos-slot.cfg"
 
+# The release signing keys the updater trusts (scripts/update-signing.pub;
+# the operator's own go to STATE's update-signing.pub). The file may hold
+# no key yet, and then no manifest verifies.
+install -D -m 0644 "${REPO_ROOT}/scripts/update-signing.pub" "${TARGET_DIR}/usr/share/embra/update-signing.pub"
+
 # DNS resolution — QEMU SLIRP provides DNS at 10.0.2.3
 # Required for embra-brain to reach api.anthropic.com
 echo "nameserver 10.0.2.3" > "${TARGET_DIR}/etc/resolv.conf"

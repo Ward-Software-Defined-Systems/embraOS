@@ -276,6 +276,15 @@ assert_rootfs_invariants() {
         echo "ERROR: /usr/bin/embra-update is missing from the rootfs (BR2_PACKAGE_EMBRA_UPDATE)" >&2
         reject_image
     }
+    cmp -s "$tgt/usr/share/embra/update-signing.pub" scripts/update-signing.pub || {
+        echo "ERROR: /usr/share/embra/update-signing.pub in the rootfs is not scripts/update-signing.pub" >&2
+        reject_image
+    }
+    if grep -q 'BEGIN PUBLIC KEY' scripts/update-signing.pub; then
+        echo "release signing keys present in rootfs: $(grep -c 'BEGIN PUBLIC KEY' scripts/update-signing.pub)"
+    else
+        echo "release signing keys: none yet (scripts/update-signing.pub holds no key; the updater refuses every manifest until one is added)"
+    fi
 
     # The squashfs fits its slot with the margin free (layout.sh), and it is
     # xz: GRUB 2.12's squash4 reads gzip, lzo and xz, never zstd.

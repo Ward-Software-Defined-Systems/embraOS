@@ -1,0 +1,14 @@
+# embraOS release signing keys — Ed25519 public keys, SubjectPublicKeyInfo PEM.
+#
+# The OS trusts a release manifest only when it is signed by one of the keys in
+# this file (baked into the rootfs at /usr/share/embra/update-signing.pub) or in
+# the operator's drop-in /embra/state/update-signing.pub. Several PUBLIC KEY
+# blocks are allowed: a new key goes in beside the old one release before the
+# old one stops signing, so an instance on the previous release still verifies
+# the next.
+#
+# No key is present yet: the updater refuses every manifest until one is.
+# The private key is the release operator's, made once with
+#   openssl genpkey -algorithm ed25519 -out update-signing.key
+#   openssl pkey -in update-signing.key -pubout
+# and never committed. scripts/release-update.sh signs with it.
