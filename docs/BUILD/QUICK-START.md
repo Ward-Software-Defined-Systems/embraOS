@@ -162,6 +162,8 @@ The following apply once the image is built. They are not part of the build pipe
 > curl http://localhost:8443/status
 > ```
 
+> **OS updates:** the image carries two OS slots; `/update` fetches a release's signed manifest from the GitHub releases, `/update apply` writes the release into the inactive slot and GRUB tries it at the next boot, falling back if it does not come up ([OPERATIONS/UPDATES-AND-BACKUPS.md](../OPERATIONS/UPDATES-AND-BACKUPS.md)). `scripts/release-update.sh` prepares and signs a release's artifacts; `scripts/update-signing.pub` holds the keys the image trusts (none yet).
+
 > **Backup & Restore:** the OS takes its own backups too — `/backup create` in a session or the boot menu's Backup and restore, snapshots under `/embra/data/backups` that the web console streams to the browser ([OPERATIONS/UPDATES-AND-BACKUPS.md](../OPERATIONS/UPDATES-AND-BACKUPS.md)). The host script below is the path across an image rebuild and off the machine; its copy of DATA leaves `backups/` out. `scripts/embraos-backup.sh` preserves STATE and DATA partitions across image rebuilds. This is a file-level backup — WardSONDB does not need to be running. The VM must be stopped.
 > ```bash
 > # Before rebuilding the image

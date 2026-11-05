@@ -40,4 +40,40 @@ A restore refuses an incomplete entry (a `.partial` directory a crash left, whic
 
 ## Updates
 
-The signed-release update into the inactive slot is the next wave of Phase 2; this section is written with it.
+An OS update is a new slot image written into the inactive slot and tried by GRUB; the running slot is untouched and is where GRUB returns if the new release does not come up. The operator decides: `/update apply` in a session, or Update embraOS in the boot menu. The intelligence has no tool for it.
+
+### What a release publishes
+
+`scripts/release-update.sh --tag <vX.Y.Z-phaseN> --arch <x86_64|aarch64> --engine <fjall|rocksdb> --key <private.pem>` prepares, per architecture and engine, three files under `output/update/` and prints their upload lines (uploading to the GitHub release is the operator's step; the private key never enters the repository or CI):
+
+| File | Content |
+|---|---|
+| `embraos-<tag>-<arch>-<engine>.rootfs.squashfs` | The slot image the build produced: one SquashFS with the kernel and the initramfs under `/boot` and the release stamp at `/etc/embraos-release` |
+| `embraos-<arch>-<engine>.manifest.json` | `update.v1`: the version, tag, build id, architecture, engine, schema version, kernel, the rootfs file's name, size and SHA-256, when it was built, the notes URL. The name carries no version: the OS fetches it from the release marked latest |
+| `embraos-<arch>-<engine>.manifest.json.sig` | A raw Ed25519 signature over the manifest's bytes, base64, made with `openssl pkeyutl -sign -rawin` and the operator's key |
+
+The script refuses a tag that is not the one the tree is at or not the version `CITATION.cff` records, a dirty tree, and a slot image whose stamp names another architecture or engine; it verifies its own signature against `scripts/update-signing.pub` before it prints anything. Every release uploads all four manifests (two architectures, two engines), or an instance of the missing pair reads "no manifest for … is published at this source". `--self-test` signs a fixture with a throwaway key.
+
+### What the OS trusts
+
+The OS verifies a manifest's signature against the keys in `/usr/share/embra/update-signing.pub` (the repository's `scripts/update-signing.pub`, baked into the image) and in the operator's drop-in `/embra/state/update-signing.pub` (`seed-state.sh --update-key <pem>`), before it reads anything of the manifest. The file may hold several keys: a new key goes in beside the old one release before the old one stops signing, so an instance on the previous release still verifies the next. Until a key is present the updater refuses every manifest. The key pair is made once with `openssl genpkey -algorithm ed25519 -out update-signing.key` and `openssl pkey -in update-signing.key -pubout`.
+
+The signature binds the version, the tag, the build id, the architecture, the engine and the image's hash to the operator's key: the URL, a mirror, a DNS answer or a certificate cannot hand the OS an image it will boot. It does not protect against the signing host itself; rotation limits that window. A signed manifest for an older version is a downgrade and refused unless `--allow-downgrade` is given to the updater; one for another architecture or engine is refused before any download; the data's own engine marker is what the manifest is compared with.
+
+### Where the manifest comes from
+
+The default source is the GitHub releases of the public mirror, `https://github.com/Ward-Software-Defined-Systems/embraOS/releases/latest/download` (no API, no token: GitHub answers the fixed name with the latest non-draft, non-prerelease release). `/update source <url>` stores the operator's own base under `/embra/state/update-source` — `https://…`, or `http://` to a private address, such as a GitLab generic package registry behind the operator's CA (the updater trusts the CA drop-ins embrad merges for every service) — and `/update source reset` returns to the default. The image is always fetched from the same base under the name the manifest gives, never from a URL inside the manifest, so a mirror serves the same signed manifest. `embra-update check --tag <v…>` reads one release's own files on GitHub.
+
+### Applying
+
+`/update` reports the running release, the available one with its schema step and notes, and the verdict. `/update apply` runs the updater as a child of the brain, one at a time, its lines in the console:
+
+1. The manifest is fetched and verified again, and the inactive slot must not be the slot GRUB may still fall back to (a staged slot untried, or a trial boot in progress).
+2. The image is streamed into the inactive slot's partition, hashed as it is written, refused past its declared size, synced, read back and hashed again; both digests must equal the signed one. The slot's previous content is gone from the first byte, the one sacrifice of two slots; a half-written slot is simply unmarked and never booted.
+3. `grubenv` is written: the slot staged with three tries. Nothing else moves; the running slot stays the default until the new one confirms.
+
+`/reboot now` boots the staged slot (`embra.trial=1` on its kernel line). Before any service starts, the new release takes a snapshot of STATE and DATA (`pre-<version>`, kept to the newest two), so the previous release has a consistent copy to come back to; a snapshot it cannot take halts, which counts the try. Its brain then migrates the knowledge graph, and once every service is healthy embrad confirms the slot: active from now on. A slot that never confirms is tried three times and then marked failed, and GRUB boots the previous one. `/update status` shows both slots; `/update rollback` makes the other slot the default by hand (`/reboot now` boots it).
+
+A rollback onto a knowledge graph the newer release migrated: the older brain refuses to start — the halt reason names both schemas and the `pre-` snapshot — and the boot menu's Restore entry puts that snapshot back. The Guardian's dynamic tools are rebuilt with `/guardian rebuild --all` when a release moves the in-OS toolchain ([COMMAND-REFERENCE.md](COMMAND-REFERENCE.md)).
+
+From the boot menu, Update embraOS boots the active slot with `embra.mode=update`: embrad brings the network up and runs the updater on the console (`Apply … to slot b? [y/N]`), then reboots into the staged slot, or back to the menu with the reason.
