@@ -97,6 +97,14 @@ function boot_slot {
     initrd "$2/boot/initramfs.cpio.gz"
 }
 
+# A submenu opens a new environment context that holds the exported
+# variables alone (GRUB's grub_env_context_open copies nothing else), so an
+# entry inside one reads an unexported variable as empty: boot_slot would
+# load /boot/@KERNEL_IMAGE@ from the ESP and fail. Everything the Diagnostics
+# and Backup entries read is exported here, once computed. A top-level entry
+# runs in this context and needs none of it.
+export slot_active slot_try tries_left slot_a_status slot_b_status menu_timeout disk slot_a_dev slot_b_dev active_dev slot_a_title slot_b_title extra
+
 set default="slot_${boot_slot}"
 set timeout="$menu_timeout"
 
