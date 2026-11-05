@@ -906,14 +906,16 @@ itself** didn't produce an image — not a config edit you need to make.
 
 #### `mkdosfs: not found`
 
-**Symptom:** genimage fails formatting the VFAT boot partition:
+**Symptom:** genimage fails formatting the EFI System Partition:
 
 ```
 /bin/sh: 1: mkdosfs: not found
-ERROR: vfat(boot.vfat): failed to generate boot.vfat
+ERROR: vfat(esp.vfat): failed to generate esp.vfat
 ```
 
-**Cause:** `dosfstools` isn't installed in the Docker container.
+**Cause:** `dosfstools` isn't installed in the Docker container. Since the Phase 2
+layout both defconfigs build Buildroot's own `mkdosfs`
+(`BR2_PACKAGE_HOST_DOSFSTOOLS=y`), so this failure belongs to a Phase 1 tree.
 
 **Fix:** Ensure `dosfstools` is in the `apt-get install` list (already in the Quick
 Start command).

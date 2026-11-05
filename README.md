@@ -3,14 +3,14 @@
 </p>
 
 <p align="center">
-  <img src="assets/system-architecture.png" alt="embraOS system architecture — from QEMU through the kernel and embrad to the six services and the web and serial UIs" width="100%">
+  <img src="assets/system-architecture.png" alt="embraOS system architecture — from QEMU through the firmware, GRUB and the two OS slots, the kernel and embrad to the six services and the web and serial UIs" width="100%">
 </p>
 
 # embraOS
 
 > *I am not the fire. I am the ember that survives it.*
 
-**embraOS** is a Rust operating system for one AI. The image is immutable. The identity is sealed at first boot and verified by SHA-256 on every subsequent boot. Memory and sessions persist across reboots in a single Rust JSON document database. There is no shell — all interaction goes through the HTTPS web console (the default and primary interface; the URL with this boot's access token is printed at boot) or a serial TUI, functional but preferred for debugging.
+**embraOS** is a Rust operating system for one AI. The image is immutable. The disk boots itself: a GRUB menu, two OS slots with automatic rollback, backups taken from inside the OS, and a signed OS update into the inactive slot. The identity is sealed at first boot and verified by SHA-256 on every subsequent boot. Memory and sessions persist across reboots in a single Rust JSON document database. There is no shell — all interaction goes through the HTTPS web console (the default and primary interface; the URL with this boot's access token is printed at boot) or a serial TUI, functional but preferred for debugging.
 
 [![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.20673525.svg)](https://doi.org/10.5281/zenodo.20673525)
 
@@ -22,9 +22,9 @@
   <img src="assets/kg-multigraph.png" alt="embraOS Knowledge Graph — the sealed identity graph and the memory collections in one multigraph, with the production instance's measured numbers" width="100%">
 </p>
 
-**Current Status:** Phase 1 — Stable (code review in progress). Sprint 6, the final Phase 1 sprint, closed with `v0.15.0-phase1` (2026-09-18); the code-review pit stop runs on branch `code-review`, and its releases are `v0.16.0-phase1` through `v0.23.0-phase1` ([docs/CHANGE-LOG.md](docs/CHANGE-LOG.md)).
+**Current Status:** Phase 1 — Stable, released as `v0.23.0-phase1` (2026-11-01; the code-review pit stop, `v0.16.0-phase1` through `v0.23.0-phase1`, closed on `main`). Phase 2 — In progress on branch `phase2`: the self-booting A/B disk with GRUB's menu, in-OS backups and restores, signed OS updates from GitHub Releases, the drivers other hypervisors present, a display console and DHCP ([docs/ROADMAP.md](docs/ROADMAP.md), [docs/CHANGE-LOG.md](docs/CHANGE-LOG.md)).
 
-Phase 2–5 add a full TUI rewrite and an image factory for bare metal with A/B rollback, LUKS and mTLS; a governed module system with an `embractl` management CLI; a custom kernel; and a sovereign-intelligence tier — the embraOS-QNM-Core model option and Kubernetes deployment. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
+Phase 2–5 add a full TUI rewrite and an image factory for other hypervisors and bare metal (the A/B slots with rollback, the signed update and the hypervisor drivers landed in Phase 2's core wave; LUKS and mTLS follow); a governed module system with an `embractl` management CLI; a custom kernel; and a sovereign-intelligence tier — the embraOS-QNM-Core model option and Kubernetes deployment. The roadmap and per-phase delivery status live in **[docs/ROADMAP.md](docs/ROADMAP.md)**.
 
 > **Pair it with WSDS Local AI Gateway — under evaluation.** embraOS can route every
 > provider request through [WSDS Local AI Gateway](https://github.com/Ward-Software-Defined-Systems/Local-AI-Gateway),
@@ -146,6 +146,8 @@ Build from source: **[docs/BUILD/QUICK-START.md](docs/BUILD/QUICK-START.md)** (A
 
 > **Default UI.** The browser-based **embra-web** console is the default UI and the primary interface, served over HTTPS on **:3345**; embraOS prints the URL with a per-boot access token when the console is ready. Set **`EMBRA_TUI=1`** before `run-qemu.sh` for the serial TUI instead — no image rebuild needed. The serial TUI is functional but is preferred for debugging.
 
+> **The disk boots itself.** `run-qemu.sh` boots the image through UEFI, and GRUB's menu offers slot A or B, Diagnostics, Update embraOS, and Backup and restore. In a session, `/backup` schedules a snapshot or a restore for the next boot and `/update` checks for a signed release and stages it into the inactive slot; the first boots of a staged slot are trials, and GRUB falls back to the previous slot on its own when one does not come up. **[Updates and backups →](docs/OPERATIONS/UPDATES-AND-BACKUPS.md)**
+
 ---
 
 ## What Happens When You Run It
@@ -191,6 +193,7 @@ The runtime services that implement those layers:
 | `embra-console` | — | Conversational TUI (serial; PTY-child of embra-web in default mode). |
 | `embrad` | PID 1 | Init, service supervisor, soul verification gate, 5-second reconciliation loop. |
 | `embra-guardian` | in-process | `syn` validator + `wasmtime` sandbox for dynamic tools (both authoring paths replicant-checked; intelligence proposals also operator-approved); capability-broker host imports. |
+| `embra-update` | — | The OS's backups and updates: snapshots and restores of STATE and DATA, and the signed release fetched, verified and written into the inactive slot. Run by `embrad` in the maintenance boots and by the brain for `/backup` and `/update`. |
 
 Persistence is [WardSONDB](https://github.com/ward-software-defined-systems/wardsondb) — a Rust JSON document database, vendored into this workspace at `crates/wardsondb` as a deliberate in-tree fork (the upstream project continues independently). Soul, memory, knowledge graph, sessions, schedules, and Guardian dynamic-tool definitions are all WardSONDB collections; there are no separate config files. A pluggable LLM provider abstraction routes the Brain through one of four backends — **Anthropic Claude**, **Google Gemini**, **Ollama**, or **LM Studio** — chosen at first boot and switchable at runtime via `/provider`; all 119 tools work identically across every backend.
 
@@ -221,10 +224,11 @@ The full embraOS manual lives in [docs/](docs/).
 | Chapter | What it covers |
 |---|---|
 | **[Quick Start](docs/BUILD/QUICK-START.md)** | Build the QEMU image from source (Ubuntu 24.04 / 26.04); first-boot Config Wizard; operational notes |
-| **[Roadmap](docs/ROADMAP.md)** | Phase 0–5 delivery status, the post-Sprint-5 embra-web / embra-guardian v1 increments, Sprint 6 — the final Phase 1 sprint — and the code-review pit stop |
+| **[Roadmap](docs/ROADMAP.md)** | Phase 0–5 delivery status, the post-Sprint-5 embra-web / embra-guardian v1 increments, Sprint 6 — the final Phase 1 sprint — the code-review pit stop, and Phase 2 |
 | **[Change Log](docs/CHANGE-LOG.md)** | Merge log, anchored on tagged releases |
 | **[Operation](docs/OPERATIONS/OPERATION.md)** | Run lifecycle, the session model, keyboard shortcuts, current limitations |
 | **[Command Reference](docs/OPERATIONS/COMMAND-REFERENCE.md)** | Every slash command |
+| **[Updates and Backups](docs/OPERATIONS/UPDATES-AND-BACKUPS.md)** | The two OS slots and GRUB's A/B state, in-OS backups and restores, the signed OS update |
 | **[Tool Reference](docs/OPERATIONS/TOOL-REFERENCE.md)** | All 119 built-in tools by category, plus workspace / GitHub / SSH safety notes |
 | **[System Design](docs/SYSTEM-DESIGN.md)** | The 7-layer continuity architecture, the boot chain and disk layout, network exposure and trust boundaries, the four LLM providers, reasoning controls, prompt caching |
 | **[Knowledge Graph](docs/MULTI-GRAPH/KNOWLEDGE-GRAPH.md)** | The cross-session memory graph — promotion at creation, link candidates, auto-derived edges, auto-enrichment, retrieval ranking, in-OS embeddings, the twelve `knowledge_*` tools |
