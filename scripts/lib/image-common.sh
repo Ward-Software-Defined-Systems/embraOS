@@ -242,7 +242,9 @@ assert_rootfs_invariants() {
     }
     if [ -n "$triple" ] && [ -f "target/$triple/release/embra-init" ]; then
         local in_image built
-        in_image="$(zcat "$tgt/boot/initramfs.cpio.gz" | cpio -i --quiet --to-stdout ./init 2>/dev/null | sha256sum | cut -d' ' -f1)"
+        # cpio stores the member as `init` (create_initramfs.sh's `find .`
+        # names it `./init`; the archive drops the `./`).
+        in_image="$(zcat "$tgt/boot/initramfs.cpio.gz" | cpio -i --quiet --to-stdout init 2>/dev/null | sha256sum | cut -d' ' -f1)"
         built="$(sha256sum "target/$triple/release/embra-init" | cut -d' ' -f1)"
         [ "$in_image" = "$built" ] || {
             echo "ERROR: the initramfs carries another embra-init than the one built for $triple" >&2
@@ -268,6 +270,12 @@ assert_rootfs_invariants() {
         reject_image
     }
     echo "slot contents present: /boot/$kernel, /boot/initramfs.cpio.gz, /etc/embraos-release ($stamped), /boot/embraos-slot.cfg"
+    # The updater: embrad runs it in a maintenance boot, the brain for the
+    # operator's commands. A dropped package symbol is silent.
+    [ -x "$tgt/usr/bin/embra-update" ] || {
+        echo "ERROR: /usr/bin/embra-update is missing from the rootfs (BR2_PACKAGE_EMBRA_UPDATE)" >&2
+        reject_image
+    }
 
     # The squashfs fits its slot with the margin free (layout.sh), and it is
     # xz: GRUB 2.12's squash4 reads gzip, lzo and xz, never zstd.
