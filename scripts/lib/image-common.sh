@@ -8,6 +8,13 @@
 # The callers set BUILDROOT_DIR before the post-Buildroot checks, and
 # EMBED_MODEL_NAME where they stage the model.
 
+# The disk layout: the sizes genimage.cfg.in is rendered with and the GPT
+# partition names, shared with post_image.sh (and read by embra-boot's test).
+# shellcheck source=buildroot/board/embraos/layout.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/buildroot/board/embraos/layout.sh"
+# shellcheck source=scripts/lib/disk-layout.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/disk-layout.sh"
+
 # embra-guardian-v1 in-OS Rust toolchain pin (musl host + wasm32 std).
 # Staged into vendor/rust-toolchain by Step 3.5 and installed at /opt/rust.
 # Kept at the host compiler's version (rust-toolchain.toml) as a convention,
@@ -106,6 +113,44 @@ stage_kernel_tarball() {
         || { rm -f "$dl/$tb"; echo "ERROR: ${tb} does not match its pin in $KERNEL_PINS; the file was removed" >&2; exit 1; }
 }
 
+# size_to_bytes <genimage size>: 64M, 1024M, 4G → bytes.
+size_to_bytes() {
+    local s="$1" n unit
+    n="${s%[KMGkmg]}"
+    unit="${s#"$n"}"
+    case "$unit" in
+        K|k) echo $((n * 1024)) ;;
+        M|m) echo $((n * 1024 * 1024)) ;;
+        G|g) echo $((n * 1024 * 1024 * 1024)) ;;
+        "")  echo "$n" ;;
+        *)   echo "ERROR: unknown size unit in '$s'" >&2; return 1 ;;
+    esac
+}
+
+# write_release_file <rust triple> <storage engine>: the stamp of this build,
+# written beside the binaries Buildroot picks up; post_build.sh installs it
+# as /etc/embraos-release and derives GRUB's slot line from it. A
+# --buildroot-only run reuses the last full build's file, so the stamp always
+# describes the binaries in the image (the baked engine has the same
+# contract). BUILD_ID is the commit, with -dirty when the tree had changes.
+write_release_file() {
+    local triple="$1" engine="$2" version build_id dirty="" out
+    version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+    [ -n "$version" ] || { echo "ERROR: no workspace version in Cargo.toml" >&2; exit 1; }
+    build_id="$(git rev-parse --short=10 HEAD 2>/dev/null || echo unknown)"
+    git diff-index --quiet HEAD -- 2>/dev/null || dirty="-dirty"
+    out="target/${triple}/release/embraos-release"
+    mkdir -p "$(dirname "$out")"
+    {
+        echo "VERSION=${version}"
+        echo "BUILD_ID=${build_id}${dirty}"
+        echo "ARCH=${triple%%-*}"
+        echo "ENGINE=${engine}"
+        echo "BUILT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } > "$out"
+    echo "release stamp ($out): $(tr '\n' ' ' < "$out")"
+}
+
 # A build that fails one of the checks below has produced an image already:
 # Buildroot wrote it before the checks ran, to the place where run-qemu.sh,
 # seed-state.sh and embraos-backup.sh look first. It is removed, so that a
@@ -119,8 +164,11 @@ reject_image() {
 
 # The post-Buildroot checks of the root filesystem, the same on both
 # architectures: the embedding model, the in-OS toolchain at the pinned
-# version and that version only, and no SSH server.
+# version and that version only, no SSH server, and the slot's contents (the
+# kernel, the initramfs, the release stamp, GRUB's slot line, a squashfs that
+# fits its slot and is xz). Takes the Rust triple of the build.
 assert_rootfs_invariants() {
+    local triple="${1:-}"
     # Post-Buildroot assert. Both ways this package can fail are SILENT: a package
     # whose Config.in is not sourced from buildroot/Config.in has its defconfig
     # symbol dropped without warning, and <PKG>_NAME is a Buildroot-reserved
@@ -172,4 +220,99 @@ assert_rootfs_invariants() {
         fi
     done
     echo "no SSH server in rootfs"
+
+    # The slot's contents. Each OS slot is one squashfs that carries its own
+    # kernel (installed by Buildroot, BR2_LINUX_KERNEL_INSTALL_TARGET) and the
+    # initramfs scripts/create_initramfs.sh wrote; GRUB loads both from the
+    # squashfs. A stale initramfs — an older embra-init under
+    # --buildroot-only — is caught by hashing the archive's init against the
+    # binary that was built.
+    local tgt="$BUILDROOT_DIR/output/target" kernel="" k
+    for k in Image bzImage; do
+        [ -f "$BUILDROOT_DIR/output/images/$k" ] && { kernel="$k"; break; }
+    done
+    [ -n "$kernel" ] || { echo "ERROR: no kernel image in $BUILDROOT_DIR/output/images" >&2; reject_image; }
+    cmp -s "$tgt/boot/$kernel" "$BUILDROOT_DIR/output/images/$kernel" || {
+        echo "ERROR: /boot/$kernel in the rootfs is not the kernel Buildroot built (BR2_LINUX_KERNEL_INSTALL_TARGET)" >&2
+        reject_image
+    }
+    cmp -s "$tgt/boot/initramfs.cpio.gz" initramfs.cpio.gz || {
+        echo "ERROR: /boot/initramfs.cpio.gz in the rootfs is not the repository's initramfs.cpio.gz" >&2
+        reject_image
+    }
+    if [ -n "$triple" ] && [ -f "target/$triple/release/embra-init" ]; then
+        local in_image built
+        in_image="$(zcat "$tgt/boot/initramfs.cpio.gz" | cpio -i --quiet --to-stdout ./init 2>/dev/null | sha256sum | cut -d' ' -f1)"
+        built="$(sha256sum "target/$triple/release/embra-init" | cut -d' ' -f1)"
+        [ "$in_image" = "$built" ] || {
+            echo "ERROR: the initramfs carries another embra-init than the one built for $triple" >&2
+            echo "       Run scripts/create_initramfs.sh (RUST_TARGET=$triple) and build again." >&2
+            reject_image
+        }
+    fi
+    local key stamped want
+    for key in VERSION BUILD_ID ARCH ENGINE BUILT; do
+        grep -q "^${key}=." "$tgt/etc/embraos-release" 2>/dev/null || {
+            echo "ERROR: /etc/embraos-release in the rootfs lacks ${key} (post_build.sh installs write_release_file's stamp)" >&2
+            reject_image
+        }
+    done
+    stamped="$(sed -n 's/^VERSION=//p' "$tgt/etc/embraos-release")"
+    want="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+    [ "$stamped" = "$want" ] || {
+        echo "ERROR: /etc/embraos-release says VERSION=$stamped, the workspace is $want; run a full build" >&2
+        reject_image
+    }
+    grep -q '^set slot_version="' "$tgt/boot/embraos-slot.cfg" 2>/dev/null || {
+        echo "ERROR: /boot/embraos-slot.cfg is missing or malformed in the rootfs" >&2
+        reject_image
+    }
+    echo "slot contents present: /boot/$kernel, /boot/initramfs.cpio.gz, /etc/embraos-release ($stamped), /boot/embraos-slot.cfg"
+
+    # The squashfs fits its slot with the margin free (layout.sh), and it is
+    # xz: GRUB 2.12's squash4 reads gzip, lzo and xz, never zstd.
+    local sq="$BUILDROOT_DIR/output/images/rootfs.squashfs" sq_size slot_bytes limit
+    sq_size="$(stat -c %s "$sq")"
+    slot_bytes="$(size_to_bytes "$EMBRAOS_SLOT_SIZE")"
+    limit=$((slot_bytes * (100 - EMBRAOS_SLOT_MARGIN_PCT) / 100))
+    [ "$sq_size" -le "$limit" ] || {
+        echo "ERROR: rootfs.squashfs is $sq_size bytes; a slot is $slot_bytes bytes and the margin leaves $limit" >&2
+        echo "       Grow EMBRAOS_SLOT_SIZE in buildroot/board/embraos/layout.sh or shrink the rootfs." >&2
+        reject_image
+    }
+    "$BUILDROOT_DIR/output/host/bin/unsquashfs" -s "$sq" 2>/dev/null | grep -q 'Compression xz' || {
+        echo "ERROR: rootfs.squashfs is not xz-compressed; GRUB reads gzip, lzo and xz squashfs only" >&2
+        reject_image
+    }
+    echo "rootfs.squashfs: $sq_size bytes of a $slot_bytes-byte slot, xz"
+}
+
+# assert_image_layout <image>: the partitions carry the names of layout.sh in
+# order, the first starts at sector 2048 and every start is a multiple of
+# 2048 — checked on the final image, not trusted from genimage's `align`.
+assert_image_layout() {
+    local img="$1" expected rows row nr start name i=0
+    read -r -a expected <<< "$EMBRAOS_PARTITION_NAMES"
+    mapfile -t rows < <(partx -g -o NR,START,NAME -- "$img" 2>/dev/null)
+    [ "${#rows[@]}" -eq "${#expected[@]}" ] || {
+        echo "ERROR: $img has ${#rows[@]} partitions, expected ${#expected[@]} ($EMBRAOS_PARTITION_NAMES)" >&2
+        reject_image
+    }
+    for row in "${rows[@]}"; do
+        read -r nr start name <<< "$row"
+        [ "$name" = "${expected[$i]}" ] || {
+            echo "ERROR: partition $nr of $img is named '$name', expected '${expected[$i]}'" >&2
+            reject_image
+        }
+        if [ "$i" -eq 0 ] && [ "$start" -ne 2048 ]; then
+            echo "ERROR: partition 1 of $img starts at sector $start, expected 2048" >&2
+            reject_image
+        fi
+        [ $((start % 2048)) -eq 0 ] || {
+            echo "ERROR: partition $nr ($name) of $img starts at sector $start, not a multiple of 2048" >&2
+            reject_image
+        }
+        i=$((i + 1))
+    done
+    echo "image layout: $EMBRAOS_PARTITION_NAMES, 1 MiB aligned"
 }

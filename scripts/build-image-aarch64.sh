@@ -110,6 +110,13 @@ source "$(cd "$(dirname "$0")" && pwd)/lib/image-common.sh"
 # stops here, before anything is compiled (on a Mac as well: the check is a
 # grep).
 assert_kernel_pin_in_defconfig buildroot/configs/embraos_aarch64_defconfig
+# --buildroot-only reuses the binaries and the release stamp of the last full
+# build; without the stamp post_build.sh would stop inside Buildroot.
+if [ "$BUILDROOT_ONLY" = true ] && [ ! -f "target/$RUST_TARGET/release/embraos-release" ]; then
+    echo "ERROR: --buildroot-only needs the release stamp of a full build:" >&2
+    echo "       target/$RUST_TARGET/release/embraos-release (run with --storage-engine first)" >&2
+    exit 1
+fi
 
 if [ "$BUILDROOT_ONLY" = false ]; then
     # Musl cross-toolchain. On macOS the toolchain comes from Homebrew's
@@ -207,6 +214,9 @@ if [ "$BUILDROOT_ONLY" = false ]; then
     # that no longer matches a manifest stops the build instead of being
     # re-resolved here (the storage pins ride on it).
     cargo build --release --locked --target "$RUST_TARGET"
+    # The release stamp beside the binaries: /etc/embraos-release in the image
+    # and GRUB's slot line come from it (scripts/lib/image-common.sh).
+    write_release_file "$RUST_TARGET" "$STORAGE_ENGINE"
     # wardsondb is a workspace member (crates/wardsondb, vendored 2026-07-17)
     # and builds in Step 1 with the other binaries. The former Step 2
     # sibling-repo build/copy is gone; Buildroot's wardsondb.mk picks the
@@ -393,7 +403,8 @@ fi
                embra-rust-toolchain embra-embedding-model git openssl libcurl openssh; do
         make "${pkg}-dirclean" 2>/dev/null || true
     done && \
-    rm -f output/images/rootfs.squashfs output/images/embraos.img)
+    rm -f output/images/rootfs.squashfs output/images/embraos.img \
+          output/images/boot.vfat output/images/esp.vfat)
 
 # The kernel tarball, verified against its pin before Buildroot runs: Buildroot
 # checks no hash for a custom kernel version (scripts/lib/image-common.sh). On
@@ -409,14 +420,19 @@ stage_kernel_tarball "$BUILDROOT_DIR"
 
 # The post-Buildroot checks, shared with the x86_64 script
 # (scripts/lib/image-common.sh): the embedding model, the in-OS toolchain at
-# the pinned version and that version only, no SSH server. A check that
-# fails removes the image this build produced (reject_image).
-assert_rootfs_invariants
+# the pinned version and that version only, no SSH server, the slot's
+# contents; then the partition layout of the image. A check that fails
+# removes the image this build produced (reject_image).
+assert_rootfs_invariants "$RUST_TARGET"
+assert_image_layout "$BUILDROOT_DIR/output/images/embraos.img"
 
 echo "=== Step 5: Copy outputs ==="
 mkdir -p output/images
 cp "$BUILDROOT_DIR/output/images/embraos.img" output/images/
+# The kernel serves the direct-kernel path of run-qemu-aarch64.sh
+# (EMBRA_BOOT=direct); the squashfs is the slot image an OS update ships.
 cp "$BUILDROOT_DIR/output/images/${KERNEL_NAME}" output/images/
+cp "$BUILDROOT_DIR/output/images/rootfs.squashfs" output/images/
 
 echo ""
 echo "Build complete! (aarch64)"

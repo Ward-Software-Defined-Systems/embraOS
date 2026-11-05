@@ -38,6 +38,13 @@ find . | cpio -o -H newc 2>/dev/null | gzip > "${OLDPWD}/initramfs.cpio.gz"
 cd "${OLDPWD}"
 
 echo "Created initramfs.cpio.gz ($(du -h initramfs.cpio.gz | cut -f1)) [${RUST_TARGET}]"
+# The hash goes to the build log: the image scripts check that the slot
+# carries this archive and that its init is the embra-init that was built.
+if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum initramfs.cpio.gz
+elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 initramfs.cpio.gz
+fi
 
 # Cleanup
 rm -rf "${INITRAMFS_DIR}"

@@ -1,15 +1,23 @@
-/* Template — post_image.sh resolves @KERNEL_IMAGE@ to the kernel
- * filename Buildroot produced (x86_64 -> bzImage, aarch64 -> Image)
- * and renders this to $(BUILD_DIR)/genimage.cfg. Keeps one committed
- * config building both arches with no per-arch sed. */
+/* Template — post_image.sh renders @ESP_SIZE@, @SLOT_SIZE@, @STATE_SIZE@ and
+ * @DATA_SIZE@ from layout.sh into $(BUILD_DIR)/genimage.cfg. One committed
+ * config builds both arches; the kernel is inside each slot's squashfs.
+ *
+ * The layout, 1 MiB aligned (partition 1 starts at sector 2048; post_image.sh
+ * and scripts/lib/image-common.sh check it): the EFI System Partition carries
+ * GRUB and its state and nothing else; each rootfs slot is one squashfs that
+ * carries its own kernel and initramfs under /boot; rootfs_b is a sized hole
+ * at build time, filled by the first OS update. The GPT names are what
+ * embra-init, embra-update and the host scripts look partitions up by;
+ * layout.sh lists them in the same order. */
 
-image boot.vfat {
+image esp.vfat {
     vfat {
-        files = {
-            "@KERNEL_IMAGE@"
+        label = "ESP"
+        file EFI {
+            image = "efi-part/EFI"
         }
     }
-    size = 64M
+    size = @ESP_SIZE@
 }
 
 /* rootfs.squashfs is pre-built by Buildroot — genimage finds it in the images dir */
@@ -19,7 +27,7 @@ image state.ext4 {
         label = "STATE"
         use-mke2fs = true
     }
-    size = 256M
+    size = @STATE_SIZE@
     empty = true
 }
 
@@ -28,29 +36,39 @@ image data.ext4 {
         label = "DATA"
         use-mke2fs = true
     }
-    size = 2G
+    size = @DATA_SIZE@
     empty = true
 }
 
 image embraos.img {
     hdimage {
         partition-table-type = "gpt"
+        align = 1M
     }
 
-    partition boot {
-        partition-type-uuid = C12A7328-F81F-11D2-BA4B-00A0C93EC93B
-        image = boot.vfat
+    partition esp {
+        partition-type-uuid = esp
+        image = esp.vfat
     }
 
-    partition rootfs {
+    partition rootfs_a {
+        partition-type-uuid = linux
         image = rootfs.squashfs
+        size = @SLOT_SIZE@
+    }
+
+    partition rootfs_b {
+        partition-type-uuid = linux
+        size = @SLOT_SIZE@
     }
 
     partition state {
+        partition-type-uuid = linux
         image = state.ext4
     }
 
     partition data {
+        partition-type-uuid = linux
         image = data.ext4
     }
 }

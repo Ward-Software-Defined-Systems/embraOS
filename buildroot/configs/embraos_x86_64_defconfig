@@ -33,16 +33,27 @@ BR2_INIT_NONE=y
 # No default /etc skeleton
 BR2_ROOTFS_SKELETON_DEFAULT=y
 
-# Rootfs overlay (resolv.conf, mount points, workspace dir)
+# Rootfs overlay (resolv.conf)
 BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_EMBRAOS_PATH)/board/embraos/rootfs_overlay"
 
 # Post-build and post-image scripts
 BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_EMBRAOS_PATH)/board/embraos/post_build.sh"
 BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_EMBRAOS_PATH)/board/embraos/post_image.sh"
 
-# Image tools
+# Image tools. mkdosfs for the EFI System Partition comes from Buildroot,
+# not from the build host.
 BR2_PACKAGE_HOST_GENIMAGE=y
 BR2_PACKAGE_HOST_MTOOLS=y
+BR2_PACKAGE_HOST_DOSFSTOOLS=y
+
+# The kernel lands in the rootfs at /boot: each OS slot carries its own kernel
+# and initramfs, and GRUB loads them from the slot's squashfs.
+BR2_LINUX_KERNEL_INSTALL_TARGET=y
+
+# post_build.sh takes the Rust target as its second argument: the release
+# stamp is read from beside the binaries Buildroot picks up
+# (target/<triple>/release/embraos-release). post_image.sh ignores it.
+BR2_ROOTFS_POST_SCRIPT_ARGS="$(EMBRAOS_RUST_TARGET)"
 
 # OpenSSL + libcurl with TLS (required for git-remote-https)
 BR2_PACKAGE_OPENSSL=y

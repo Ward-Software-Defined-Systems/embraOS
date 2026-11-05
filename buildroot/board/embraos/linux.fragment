@@ -9,3 +9,14 @@ CONFIG_DEVTMPFS=y
 CONFIG_DEVTMPFS_MOUNT=y
 CONFIG_EXT4_FS=y
 CONFIG_TMPFS=y
+# UEFI boot through GRUB and the EFI System Partition, pinned here so a
+# Buildroot or base-defconfig change cannot drop them (the base configs of
+# both architectures set them today; CONFIG_EFI_HANDOVER_PROTOCOL is x86-only
+# and stays out of this shared fragment).
+CONFIG_EFI=y
+CONFIG_EFI_STUB=y
+CONFIG_EFI_PARTITION=y
+CONFIG_FAT_FS=y
+CONFIG_VFAT_FS=y
+CONFIG_NLS_CODEPAGE_437=y
+CONFIG_NLS_ISO8859_1=y
