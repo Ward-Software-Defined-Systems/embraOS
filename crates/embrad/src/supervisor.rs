@@ -14,6 +14,10 @@ use tracing::{info, warn, error};
 
 use embra_boot::Cmdline;
 
+/// WardSONDB's data directory on DATA: the `--data-dir` the database is
+/// started with, and where its engine marker lives (`boot::remove_empty_engine_marker`).
+pub(crate) const DATABASE_DIR: &str = "/embra/data/wardsondb";
+
 /// Service definition. There is no dependency list: `register_services`
 /// registers each service after everything it needs, and registration
 /// order is the start order (and, reversed, the stop order).
@@ -152,7 +156,7 @@ impl Supervisor {
             "--storage-engine".to_string(), storage_engine.to_string(),
             "--bind".to_string(), "127.0.0.1".to_string(),
             "--port".to_string(), "8090".to_string(),
-            "--data-dir".to_string(), "/embra/data/wardsondb".to_string(),
+            "--data-dir".to_string(), DATABASE_DIR.to_string(),
             "--log-file".to_string(), "/embra/ephemeral/wardsondb.log".to_string(),
         ];
         // `embra.dbverbose=1`: WardSONDB's per-request log lines are opt-in

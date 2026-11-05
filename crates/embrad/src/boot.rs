@@ -11,9 +11,38 @@
 
 use embra_boot::{BootMode, BootState, Cmdline, Release, esp, partitions, slot};
 use std::fmt;
+use std::io;
+use std::path::Path;
 use tracing::{error, info, warn};
 
 pub const STATUS_PATH: &str = "/run/embra/boot-status";
+
+/// The database's engine marker inside its data directory.
+pub const ENGINE_MARKER: &str = ".engine";
+
+/// Removes an empty engine marker, and says whether it did.
+///
+/// WardSONDB writes `<data dir>/.engine` on the first boot of a DATA
+/// partition with one `fs::write` and no fsync, so a stop before the page
+/// cache reached the disk (the VM killed within half a minute of its first
+/// boot; the first headless boot test of 2026-11-05 did exactly that) leaves
+/// the file created and empty, and the database refuses to open: "created
+/// with engine '' but 'fjall' was requested". An empty marker guards
+/// nothing, so it is removed and the database writes it again. A marker
+/// with content, a missing one and a missing directory are left alone.
+pub fn remove_empty_engine_marker(data_dir: &Path) -> io::Result<bool> {
+    let marker = data_dir.join(ENGINE_MARKER);
+    let meta = match std::fs::metadata(&marker) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    if !meta.is_file() || meta.len() != 0 {
+        return Ok(false);
+    }
+    std::fs::remove_file(&marker)?;
+    Ok(true)
+}
 
 /// Where the confirmation stands.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -82,6 +111,12 @@ pub fn write_status(cmdline: &Cmdline, mode: BootMode, confirmed: &Confirmed, st
 /// other boot with a slot the block is read for the status; a boot without
 /// a slot has nothing to read. The outcome goes to the status file.
 pub fn after_services_healthy(cmdline: &Cmdline, mode: BootMode) -> Confirmed {
+    // What the services wrote while they came up — the first boot's engine
+    // marker, the sealed soul, the configuration — is on disk before the
+    // slot that produced it is confirmed, and before an operator's stop of
+    // the machine can lose it (the page cache holds a write for up to
+    // 30 s). SAFETY: sync(2) takes no arguments and cannot fail.
+    unsafe { libc::sync() };
     let release = Release::read().ok();
     let Some(booted) = cmdline.slot().ok().flatten() else {
         let c = Confirmed::NotNeeded;
@@ -154,6 +189,26 @@ mod tests {
         assert_eq!(text, "slot=-\ntrial=0\nmode=update\nconfirmed=failed: no esp\n");
         assert_eq!(Confirmed::Pending.to_string(), "pending");
         assert_eq!(Confirmed::NotNeeded.to_string(), "not-needed");
+    }
+
+    #[test]
+    fn an_empty_engine_marker_is_removed_and_a_written_one_is_kept() {
+        let dir = std::env::temp_dir().join(format!("embrad-engine-marker-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // No directory, no marker: nothing to do, no error.
+        assert!(!remove_empty_engine_marker(&dir.join("absent")).unwrap());
+        assert!(!remove_empty_engine_marker(&dir).unwrap());
+        // The trace of an unclean first boot: created, empty.
+        let marker = dir.join(ENGINE_MARKER);
+        std::fs::write(&marker, "").unwrap();
+        assert!(remove_empty_engine_marker(&dir).unwrap());
+        assert!(!marker.exists());
+        // A marker the database finished writing stays.
+        std::fs::write(&marker, "fjall").unwrap();
+        assert!(!remove_empty_engine_marker(&dir).unwrap());
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "fjall");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

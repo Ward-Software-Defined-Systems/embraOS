@@ -137,6 +137,19 @@ fn prepare(pid: u32) -> Result<Cmdline> {
         e
     })?;
 
+    // Step 3.5: an empty engine marker on DATA is the trace of a stop before
+    // the first boot's writes reached the disk; it is removed so the
+    // database writes it again instead of refusing to open.
+    let db_dir = std::path::Path::new(supervisor::DATABASE_DIR);
+    match boot::remove_empty_engine_marker(db_dir) {
+        Ok(true) => warn!(
+            "removed the empty engine marker {}/{}: the machine stopped before the first boot's writes reached the disk; the database writes it again",
+            db_dir.display(), boot::ENGINE_MARKER
+        ),
+        Ok(false) => {}
+        Err(e) => warn!("the engine marker under {} could not be checked: {e}", db_dir.display()),
+    }
+
     // Step 4: As PID 1, drop what the kernel handed over in the environment
     // (every `KEY=value` on the boot line that is not a dotted parameter
     // lands there): the line carries `embra.*` knobs and never a provider
