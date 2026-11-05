@@ -35,11 +35,122 @@ pub fn mount_pseudofs() -> Result<()> {
     // Bring up loopback interface (required for 127.0.0.1 connectivity)
     bring_up_loopback();
 
-    // Bring up eth0 for QEMU SLIRP networking (required for port forwarding and outbound)
-    bring_up_eth0();
+    // eth0: a DHCP lease, or the static QEMU user-network address when
+    // none arrives.
+    bring_up_network();
 
     info!("Pseudo-filesystems mounted");
     Ok(())
+}
+
+/// BusyBox's DHCP client and the lease script it runs on every event
+/// (`bound`, `renew`: the address, the route, the resolver file, the lease
+/// file). Absolute paths: PID 1 starts with no PATH in its environment.
+#[cfg(target_os = "linux")]
+const UDHCPC: &str = "/sbin/udhcpc";
+#[cfg(target_os = "linux")]
+const LEASE_SCRIPT: &str = "/usr/share/embra/udhcpc.script";
+/// How long the boot waits for a lease before the static fallback. A server
+/// on the segment answers within a second; udhcpc sends its discovers
+/// `-T 2` seconds apart, `-t 3` of them per round.
+#[cfg(target_os = "linux")]
+const DHCP_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The network at boot: the resolver file with the static default, eth0
+/// up, a DHCP lease asked for with udhcpc, and when no lease arrives in
+/// `DHCP_WAIT` (no server on the segment, a NIC the kernel does not drive)
+/// the static QEMU user-network configuration every boot before ran on:
+/// 10.0.2.15/24 via 10.0.2.2, resolver 10.0.2.3. The client stays running
+/// after its lease, so it renews it; it is a child of PID 1 that nothing
+/// supervises, reaped when it exits. The lease is recorded in
+/// `net_lease::LEASE_PATH` either way.
+#[cfg(target_os = "linux")]
+fn bring_up_network() {
+    use crate::net_lease::{self, Lease, LEASE_PATH, RESOLV_PATH};
+    use std::process::{Command, Stdio};
+    use std::time::Instant;
+
+    // The static resolver first: the lease script overwrites it on a lease,
+    // and a boot without a lease keeps it.
+    let _ = std::fs::remove_file(LEASE_PATH);
+    if let Err(e) = std::fs::write(RESOLV_PATH, format!("nameserver {}\n", net_lease::STATIC_DNS)) {
+        tracing::warn!("{RESOLV_PATH} could not be written: {e}");
+    }
+    if !eth0_up() {
+        tracing::warn!("eth0 not found or not brought up: no network (a NIC the kernel does not drive?)");
+        return;
+    }
+    let child = Command::new(UDHCPC)
+        .args(["-i", "eth0", "-t", "3", "-T", "2", "-x", "hostname:embraos", "-s", LEASE_SCRIPT])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .spawn();
+    let mut child = match child {
+        Ok(c) => Some(c),
+        Err(e) => {
+            tracing::warn!("{UDHCPC} could not be started ({e}); the static address applies");
+            None
+        }
+    };
+    let started = Instant::now();
+    let mut lease: Option<Lease> = None;
+    while let Some(c) = child.as_mut() {
+        if let Some(l) = std::fs::read_to_string(LEASE_PATH).ok().and_then(|t| net_lease::parse(&t)) {
+            lease = Some(l);
+            break;
+        }
+        match c.try_wait() {
+            Ok(Some(status)) => {
+                tracing::warn!("udhcpc exited ({status}) before a lease; the static address applies");
+                break;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("udhcpc could not be waited for ({e}); the static address applies");
+                break;
+            }
+        }
+        if started.elapsed() >= DHCP_WAIT {
+            tracing::warn!("no DHCP lease after {} s; the static address applies", DHCP_WAIT.as_secs());
+            let _ = c.kill();
+            let _ = c.wait();
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    match lease {
+        Some(l) => info!("eth0: DHCP lease {} after {:.1} s; udhcpc keeps renewing it", l.summary(), started.elapsed().as_secs_f32()),
+        None => {
+            configure_eth0_static();
+            let l = Lease::static_fallback();
+            if let Err(e) = std::fs::write(LEASE_PATH, l.to_text()) {
+                tracing::warn!("{LEASE_PATH} could not be written: {e}");
+            }
+            info!("eth0: static {}", l.summary());
+        }
+    }
+}
+
+/// eth0 up (IFF_UP), nothing else: what udhcpc needs to send a discover.
+/// False when the interface does not exist or the flags cannot be set.
+#[cfg(target_os = "linux")]
+fn eth0_up() -> bool {
+    unsafe {
+        let sock = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
+        if sock < 0 {
+            return false;
+        }
+        let mut ifr: libc::ifreq = std::mem::zeroed();
+        let name = b"eth0\0";
+        std::ptr::copy_nonoverlapping(name.as_ptr(), ifr.ifr_name.as_mut_ptr() as *mut u8, name.len());
+        let mut ok = false;
+        if libc::ioctl(sock, libc::SIOCGIFFLAGS as _, &mut ifr) >= 0 {
+            ifr.ifr_ifru.ifru_flags |= libc::IFF_UP as i16;
+            ok = libc::ioctl(sock, libc::SIOCSIFFLAGS as _, &ifr) >= 0;
+        }
+        libc::close(sock);
+        ok
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -97,10 +208,11 @@ fn bring_up_loopback_ioctl() {
     }
 }
 
+/// The static fallback: QEMU's user network assigns 10.0.2.15/24 with the
+/// gateway 10.0.2.2 and the resolver 10.0.2.3, and this is what every boot
+/// ran on before DHCP. Applied by ioctl, no tool needed.
 #[cfg(target_os = "linux")]
-fn bring_up_eth0() {
-    // QEMU SLIRP assigns 10.0.2.15/24 with gateway 10.0.2.2 and DNS 10.0.2.3
-    // We configure this statically since there's no DHCP client in the minimal rootfs
+fn configure_eth0_static() {
     unsafe {
         let sock = libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0);
         if sock < 0 {
@@ -173,8 +285,8 @@ fn bring_up_eth0() {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn bring_up_eth0() {
-    tracing::warn!("eth0 setup: not on Linux, skipping");
+fn bring_up_network() {
+    tracing::warn!("network setup: not on Linux, skipping");
 }
 
 #[cfg(not(target_os = "linux"))]

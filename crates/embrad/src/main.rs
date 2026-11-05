@@ -27,6 +27,7 @@ mod boot;
 mod ca_bundle;
 mod modes;
 mod mount;
+mod net_lease;
 mod reconcile;
 mod supervisor;
 

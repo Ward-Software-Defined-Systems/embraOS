@@ -419,15 +419,24 @@ impl Supervisor {
                     // line to the serial console *before* the redirect —
                     // web mode goes quiet after this and the operator
                     // works from the browser.
+                    use std::fmt::Write as _;
                     use std::io::Write as _;
-                    let mut o = std::io::stdout();
-                    let _ = writeln!(o);
-                    let _ = writeln!(o,
+                    let mut b = String::new();
+                    let _ = writeln!(b);
+                    let _ = writeln!(b,
                         "\x1b[1;32m  \u{2713} embraOS boot complete \u{2014} web console is ready\x1b[0m");
-                    let url = console_url(self.web_token.as_deref().unwrap_or(""));
-                    let _ = writeln!(o,
-                        "    \x1b[1;36m{url}\x1b[0m  \x1b[2m(QEMU hostfwd; accept the embraOS-CA cert)\x1b[0m");
-                    let _ = writeln!(o,
+                    let lease = crate::net_lease::read();
+                    let urls = crate::net_lease::console_urls(self.web_token.as_deref().unwrap_or(""), &lease);
+                    let _ = writeln!(b,
+                        "    \x1b[1;36m{}\x1b[0m  \x1b[2m(QEMU hostfwd; accept the embraOS-CA cert)\x1b[0m", urls[0]);
+                    if let Some(leased) = urls.get(1) {
+                        // A lease of this machine's own: a bridged network, a
+                        // real host. QEMU's user network leases 10.0.2.15,
+                        // which no line names (unreachable from outside).
+                        let _ = writeln!(b,
+                            "    \x1b[1;36m{leased}\x1b[0m  \x1b[2m(the address DHCP leased to this machine, {}/{})\x1b[0m", lease.ip, lease.prefix);
+                    }
+                    let _ = writeln!(b,
                         "    \x1b[2mThis boot's access token is in the URL; the URL is the credential, and it is shown here only.\x1b[0m");
                     if let Ok(release) = embra_boot::Release::read() {
                         let slot = match self.cmdline.slot() {
@@ -435,10 +444,19 @@ impl Supervisor {
                             Ok(Some(s)) => format!(", slot {s}"),
                             _ => String::new(),
                         };
-                        let _ = writeln!(o, "    \x1b[2membraOS {} ({}, {}){slot}\x1b[0m", release.version, release.build_id, release.engine);
+                        let _ = writeln!(b, "    \x1b[2membraOS {} ({}, {}){slot}\x1b[0m", release.version, release.build_id, release.engine);
                     }
-                    let _ = writeln!(o);
+                    let _ = writeln!(b);
+                    let mut o = std::io::stdout();
+                    let _ = o.write_all(b.as_bytes());
                     let _ = o.flush();
+                    // The display console too, when the kernel drives one
+                    // (`console=tty0` on the kernel line puts the boot log
+                    // there; the banner is written to it by hand, since
+                    // stdout is the serial line). Best effort.
+                    if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty0") {
+                        let _ = tty.write_all(b.as_bytes());
+                    }
                 }
                 info!("Redirecting embrad output to log file");
                 if let Ok(log) = std::fs::File::create("/embra/ephemeral/embrad.log") {
@@ -1048,11 +1066,6 @@ fn hex_of(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// The URL the boot banner prints: the console's one address, with this
-/// boot's token.
-fn console_url(token: &str) -> String {
-    format!("https://localhost:3345/embraOS?token={token}")
-}
 
 #[cfg(test)]
 pub(crate) mod test_support {
@@ -1098,7 +1111,7 @@ mod boot_environment_tests {
 
 #[cfg(test)]
 mod web_token_tests {
-    use super::{boot_token, console_url, hex_of};
+    use super::{boot_token, hex_of};
 
     #[test]
     fn a_boot_token_is_thirty_two_lowercase_hex_characters() {
@@ -1112,10 +1125,11 @@ mod web_token_tests {
 
     #[test]
     fn the_console_url_carries_the_token() {
-        assert_eq!(
-            console_url("0123456789abcdef0123456789abcdef"),
-            "https://localhost:3345/embraOS?token=0123456789abcdef0123456789abcdef"
-        );
+        // The banner's first line is the console through QEMU's port forward
+        // with this boot's token; the lease decides whether a second follows
+        // (`net_lease::console_urls`).
+        let urls = crate::net_lease::console_urls("0123456789abcdef0123456789abcdef", &crate::net_lease::Lease::static_fallback());
+        assert_eq!(urls, vec!["https://localhost:3345/embraOS?token=0123456789abcdef0123456789abcdef".to_string()]);
     }
 }
 
