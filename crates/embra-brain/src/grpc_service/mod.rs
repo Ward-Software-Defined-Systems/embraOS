@@ -110,6 +110,9 @@ pub struct BrainGrpcService {
     /// intercept; cancelled by any slash command. See
     /// [`PendingSessionDelete`].
     pending_session_delete: Arc<Mutex<Option<PendingSessionDelete>>>,
+    /// A `/backup restore <name>` waiting for its exact confirmation; the
+    /// next user message answers it, any slash command cancels it.
+    pending_backup_restore: Arc<Mutex<Option<update::PendingBackupRestore>>>,
     /// Operator-stop generation counter (the `onboarding_stage` watch
     /// precedent). The unary `StopTurn` RPC bumps it while `in_turn` is
     /// set; every turn snapshots the value at start and treats "value >
@@ -166,6 +169,7 @@ impl BrainGrpcService {
             pending_key_setup: Arc::new(Mutex::new(None)),
             pending_openai_compat_setup: Arc::new(Mutex::new(None)),
             pending_session_delete: Arc::new(Mutex::new(None)),
+            pending_backup_restore: Arc::new(Mutex::new(None)),
             onboarding_stage: Arc::new(stage_tx),
             stop_generation: Arc::new(watch::channel(0u64).0),
         }
@@ -194,6 +198,7 @@ impl BrainService for BrainGrpcService {
         let pending_key_setup = self.pending_key_setup.clone();
         let pending_openai_compat_setup = self.pending_openai_compat_setup.clone();
         let pending_session_delete = self.pending_session_delete.clone();
+        let pending_backup_restore = self.pending_backup_restore.clone();
         let onboarding_stage = self.onboarding_stage.clone();
         let stop_rx = self.stop_generation.subscribe();
 
@@ -208,6 +213,7 @@ impl BrainService for BrainGrpcService {
                 pending_key_setup: pending_key_setup.clone(),
                 pending_openai_compat_setup: pending_openai_compat_setup.clone(),
                 pending_session_delete: pending_session_delete.clone(),
+                pending_backup_restore: pending_backup_restore.clone(),
             };
 
             // Check for first-run: no config in WardSONDB
@@ -387,10 +393,7 @@ impl BrainService for BrainGrpcService {
                             // A refused trigger is still the notice above,
                             // plus the reason.
                             if let Some(act) = notif.act {
-                                let refusal = trigger_refusal(
-                                    &db, &session_mgr, &in_turn, &pending_key_setup,
-                                    &pending_openai_compat_setup, &pending_session_delete, &mut act_budget,
-                                ).await;
+                                let refusal = trigger_refusal(&ctx, &mut act_budget).await;
                                 match refusal {
                                     Some(why) => {
                                         warn!(target: "proactive", kind = act.kind.as_str(), "trigger turn not run: {}", why);
@@ -901,6 +904,7 @@ struct ServiceCtx {
     pending_key_setup: Arc<Mutex<Option<KeySetupStep>>>,
     pending_openai_compat_setup: Arc<Mutex<Option<OpenAiCompatSetupState>>>,
     pending_session_delete: Arc<Mutex<Option<PendingSessionDelete>>>,
+    pending_backup_restore: Arc<Mutex<Option<update::PendingBackupRestore>>>,
 }
 
 /// The Operational status line the console's status bar parses

@@ -24,6 +24,7 @@ pub(super) async fn handle_request(
         pending_key_setup,
         pending_openai_compat_setup,
         pending_session_delete,
+        pending_backup_restore,
     } = ctx;
     let self_in_turn = in_turn.clone();
     match req.request_type {
@@ -62,6 +63,13 @@ pub(super) async fn handle_request(
                     // here without invoking the regular conversation path.
                     return Ok(());
                 }
+            }
+
+            // A pending `/backup restore`: this message is the answer, the
+            // exact confirmation or anything else; it never reaches the model.
+            if let Some(pending) = pending_backup_restore.lock().await.take() {
+                super::update::handle_restore_answer(&pending, &msg.content, tx).await;
+                return Ok(());
             }
 
             let pending_step = *pending_key_setup.lock().await;
@@ -1630,6 +1638,23 @@ pub(super) async fn handle_request(
                                         "Session delete flow for '{}' cancelled.",
                                         state.name
                                     ),
+                                    msg_type: SystemMessageType::Info as i32,
+                                },
+                            )),
+                        }))
+                        .await;
+                }
+            }
+            // A slash command cancels a pending backup restore as well: the
+            // confirmation is a plain message, and a command is not it.
+            {
+                let cancelled = pending_backup_restore.lock().await.take();
+                if let Some(pending) = cancelled {
+                    let _ = tx
+                        .send(Ok(ConversationResponse {
+                            response_type: Some(conversation_response::ResponseType::System(
+                                SystemMessage {
+                                    content: format!("Restore of '{}' not scheduled (a command arrived instead of the confirmation).", pending.name),
                                     msg_type: SystemMessageType::Info as i32,
                                 },
                             )),

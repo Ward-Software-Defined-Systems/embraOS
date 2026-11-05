@@ -91,15 +91,17 @@ pub(crate) fn trigger_turn_text(act: &crate::proactive::ActTrigger) -> String {
 /// sealed, a session is active, no turn is running on any stream, no
 /// setup or delete flow is waiting for the operator's answer, and the
 /// hourly cap has room.
-pub(super) async fn trigger_refusal(
-    db: &Arc<WardsonDbClient>,
-    session_mgr: &Arc<RwLock<SessionManager>>,
-    in_turn: &Arc<AtomicBool>,
-    pending_key_setup: &Arc<Mutex<Option<KeySetupStep>>>,
-    pending_openai_compat_setup: &Arc<Mutex<Option<OpenAiCompatSetupState>>>,
-    pending_session_delete: &Arc<Mutex<Option<PendingSessionDelete>>>,
-    budget: &mut ActBudget,
-) -> Option<String> {
+pub(super) async fn trigger_refusal(ctx: &ServiceCtx, budget: &mut ActBudget) -> Option<String> {
+    let ServiceCtx {
+        db,
+        session_mgr,
+        in_turn,
+        pending_key_setup,
+        pending_openai_compat_setup,
+        pending_session_delete,
+        pending_backup_restore,
+        ..
+    } = ctx;
     if !matches!(learning::is_soul_sealed(db).await, Ok(true)) {
         return Some("the soul is not sealed yet".to_string());
     }
@@ -114,6 +116,9 @@ pub(super) async fn trigger_refusal(
     }
     if pending_session_delete.lock().await.is_some() {
         return Some("a session delete is waiting for your answer".to_string());
+    }
+    if pending_backup_restore.lock().await.is_some() {
+        return Some("a backup restore is waiting for your answer".to_string());
     }
     if !budget.allow(std::time::Instant::now()) {
         return Some(format!(

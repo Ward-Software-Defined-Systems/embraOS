@@ -63,7 +63,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/soul", "soul"), ("/identity", "identity"), ("/mode", "mode + seal"),
     ]),
     ("System", &[
-        ("/status", "overview"), ("/help", "help"), ("/reboot", "reboot"),
+        ("/status", "overview"), ("/help", "help"), ("/reboot", "reboot"), ("/backup", "backups"),
         ("/feedback-loop", "experimental"),
     ]),
 ];
@@ -148,6 +148,11 @@ const SPECS: &[Spec] = &[
         note: "Blank = show current. 'reset' = restore default.",
         join: " ", guided: false,
         fields: &[t("Max iterations (1–1000) / reset", "blank = show current", false)] },
+    Spec { cmd: "/backup", title: "Backups of STATE and DATA",
+        note: "A snapshot or a restore runs at the next boot, before the database starts. Blank = what is scheduled and how many backups there are; create schedules a snapshot; restore asks for a typed confirmation in the console.",
+        join: " ", guided: false,
+        fields: &[sel("Action", &["(status)", "create", "list", "restore", "delete"], false),
+            t("Label (create) or name (restore, delete)", "blank = manual", false)] },
     Spec { cmd: "/show-reasoning", title: "Reasoning panel",
         note: "Toggle the live-reasoning panel.", join: " ", guided: false,
         fields: &[sel("State", &["(show current)", "on", "off", "reset"], false)] },

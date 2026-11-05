@@ -306,13 +306,17 @@ const STATE_READABLE_FILES: &[&str] = &["halt_reason", "timezone", "api_provider
 /// The places the model's readers do not reach, by canonical path: the
 /// process tables (a service's command line and environment carry keys),
 /// STATE except the operator's drop-ins and four plain files, the
-/// database's own files, and the workspace SSH key. `Some` names the rule.
+/// database's own files, the backups on DATA (each a copy of STATE), and
+/// the workspace SSH key. `Some` names the rule.
 pub(crate) fn read_denied(canonical: &Path) -> Option<&'static str> {
     if canonical.starts_with("/proc") {
         return Some("the process tables");
     }
     if canonical.starts_with("/embra/data/wardsondb") {
         return Some("the database files");
+    }
+    if canonical.starts_with("/embra/data/backups") {
+        return Some("the backups on DATA (they carry the operator's STATE)");
     }
     if canonical == Path::new("/embra/workspace/.ssh/id_ed25519") {
         return Some("the workspace SSH key");
@@ -627,6 +631,8 @@ mod read_tests {
             ("/embra/state/halt_reason/x", "the operator's STATE partition"),
             ("/embra/data/wardsondb", "the database files"),
             ("/embra/data/wardsondb/fjall/journal", "the database files"),
+            ("/embra/data/backups", "the backups on DATA (they carry the operator's STATE)"),
+            ("/embra/data/backups/2026-11-05_101200_manual/backup.tar.gz", "the backups on DATA (they carry the operator's STATE)"),
             ("/embra/workspace/.ssh/id_ed25519", "the workspace SSH key"),
         ] {
             assert_eq!(read_denied(Path::new(path)), Some(reason), "{path}");
