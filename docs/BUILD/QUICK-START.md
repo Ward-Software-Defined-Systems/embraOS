@@ -36,7 +36,7 @@ Phase 1 builds a QEMU-bootable x86_64 disk image with an immutable SquashFS root
 sudo apt-get update && sudo apt-get install -y \
   build-essential gcc g++ unzip xz-utils bc cpio rsync wget curl python3 file git \
   protobuf-compiler musl-tools clang libclang-dev \
-  qemu-system-x86 libcrypt-dev libelf-dev libssl-dev genext2fs
+  qemu-system-x86 ovmf libcrypt-dev libelf-dev libssl-dev genext2fs
 
 # Install musl cross-toolchain (gcc+g++ with a matching musl libstdc++).
 # Ubuntu's musl-tools only wraps the host gcc and drags in a glibc-linked
@@ -84,7 +84,8 @@ EOF
 ./scripts/build-image.sh --storage-engine rocksdb   # Full pipeline: Rust → initramfs → Buildroot → disk image
 
 # Default UI is the embra-web console — open the URL embraOS prints at boot (https://localhost:3345/embraOS?token=…)
-./scripts/run-qemu.sh                                # Boot in QEMU — web console (default)
+./scripts/run-qemu.sh                                # Boot in QEMU — OVMF, GRUB's menu (3 s), slot A, web console (default)
+EMBRA_BOOT=direct ./scripts/run-qemu.sh              # Kernel and initramfs from the host: no firmware, no menu
 
 # Or fall back to the serial TUI on this terminal (no rebuild needed; functional, preferred for debugging)
 EMBRA_TUI=1 ./scripts/run-qemu.sh                    # Boot in QEMU — serial TUI
@@ -97,6 +98,8 @@ EMBRA_TUI=1 EMBRA_GRAPHICS=sixel ./scripts/run-qemu.sh  # serial TUI image pane:
                                                      # sixel | kitty | iterm2 | auto | off → embra.graphics=…
                                                      # (the web console's PTY is always sixel)
 ```
+
+> **The disk boots itself:** the image is a 1 MiB-aligned GPT with the EFI System Partition (GRUB, `grub.cfg`, `grubenv`), two OS slots (`rootfs_a`, `rootfs_b`; each a SquashFS with its own kernel and initramfs under `/boot` — slot B is empty until the first OS update), STATE and DATA (the sizes and names in `buildroot/board/embraos/layout.sh`). `run-qemu.sh` boots it through UEFI by default: the `ovmf` package above provides the firmware (`EMBRA_FW_CODE`/`EMBRA_FW_VARS` name another pair; the variable store is copied per run), GRUB's menu shows on this terminal for three seconds and boots slot A, and the `EMBRA_*` knobs below reach the kernel line as one SMBIOS string the menu appends, so nothing is typed. The menu also offers Diagnostics (the serial TUI, debug logging, database request logging, make a slot the default, boot a slot once, the boot state, the command-line knobs — press `e` on an entry to edit its kernel line; `embra.tui=1` is the in-OS spelling of `EMBRA_TUI=1`), Update embraOS, Backup and restore, Reboot, Halt and Firmware setup. `EMBRA_BOOT=direct` keeps the old path — the kernel and the initramfs from the host, no firmware and no menu — for a kernel or embra-init change without an image rebuild.
 
 > **Storage engine:** The `--storage-engine` flag is required and is baked into the embrad binary at build time. WardSONDB locks the choice into the DATA partition on first boot via a `.engine` marker file — switching engines later requires wiping DATA.
 
@@ -130,7 +133,7 @@ The following apply once the image is built. They are not part of the build pipe
 > 3. `buildroot-src/output/images/embraos.img` (Buildroot output, always freshest)
 > 4. `output/images/embraos.img` (alternative output location)
 >
-> The kernel (`bzImage`) is looked for beside the image first, then in the two default locations. The initramfs is always `./initramfs.cpio.gz`, and the default image and kernel paths are relative to the current directory as well — run the script from the repository root.
+> On the direct path (`EMBRA_BOOT=direct`) the kernel (`bzImage`) is looked for beside the image first, then in the two default locations, and the initramfs is always `./initramfs.cpio.gz`; the UEFI path loads both from the slot inside the image. The default paths are relative to the current directory — run the script from the repository root.
 
 > **Clean First Boot:** To reset and trigger the Config Wizard again (e.g., to change API key):
 > ```bash

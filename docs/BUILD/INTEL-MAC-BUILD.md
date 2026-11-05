@@ -52,7 +52,11 @@ Docker container.
 > on first visit; the token changes at every boot and is shown nowhere else).
 > Set **`EMBRA_TUI=1`** before `run-qemu.sh` to boot the serial TUI on this
 > terminal instead — no image rebuild needed. The serial TUI is functional but is
-> preferred for debugging; the web console is the primary interface.
+> preferred for debugging; the web console is the primary interface. The disk
+> boots itself: the edk2 firmware Homebrew's qemu ships (`edk2-x86_64-code.fd`),
+> then GRUB's menu on the EFI System Partition (`EMBRA_BOOT=uefi`, the default;
+> **TBD** on an Intel Mac until the first run). `EMBRA_BOOT=direct` boots the
+> kernel and the initramfs from the host as before, no firmware and no menu.
 
 > **zsh paste gotcha:** macOS's default `zsh` doesn't treat `#` as a comment in
 > interactive shells — pasting a multi-line code block from this guide makes
@@ -172,6 +176,7 @@ docker run --rm -v "$PWD":/work -v embraos-br-x86_64:/work/buildroot-src \
 ./scripts/run-qemu.sh                  # web console (default) — the URL printed at boot (https://localhost:3345/embraOS?token=…)
 EMBRA_TUI=1 ./scripts/run-qemu.sh      # serial TUI on this terminal: functional, preferred for debugging
 EMBRA_DB_VERBOSE=1 ./scripts/run-qemu.sh   # opt-in per-request WardSONDB log lines
+EMBRA_BOOT=direct ./scripts/run-qemu.sh    # kernel + initramfs from the host: no firmware, no GRUB menu
 ```
 
 Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, the provider gateway or direct, LLM
@@ -305,7 +310,9 @@ banner at the top of this file.
 
 1. **Boot — web console (default).** `./scripts/run-qemu.sh`. Banner shows
    `Acceleration: HVF (macOS)`, `UI mode: web console (default)`, and
-   `3345→3345 (HTTPS web)`. No kernel panic on `ttyS0`.
+   `3345→3345 (HTTPS web)`; GRUB's menu shows on this terminal and boots slot A
+   (the UEFI path on an Intel Mac is **TBD** until this run; `EMBRA_BOOT=direct`
+   is the path validated so far). No kernel panic on `ttyS0`.
 2. **Config Wizard + Learning Mode** in the browser at the URL embraOS printed at
    boot (`https://localhost:3345/embraOS?token=…`; accept the embraOS-CA cert) — name, the provider gateway or direct, LLM
    provider + credentials, timezone; full soul-formation conversation; soul

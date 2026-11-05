@@ -54,7 +54,11 @@ Rust toolchain), Step 3.6 (the embedding model) and Step 4 (Buildroot) run in a
 > visit; the token changes at every boot and is shown nowhere else). Set
 > **`EMBRA_TUI=1`** before `run-qemu-aarch64.sh` to boot the serial TUI on this
 > terminal instead — no image rebuild needed. The serial TUI is functional but is
-> preferred for debugging; the web console is the primary interface.
+> preferred for debugging; the web console is the primary interface. The disk
+> boots itself: the edk2 firmware Homebrew's qemu ships, then GRUB's menu on the
+> EFI System Partition (`EMBRA_BOOT=uefi`, the default; **TBD** on aarch64 until
+> the first run on a Mac). `EMBRA_BOOT=direct` boots the kernel and the
+> initramfs from the host as before, no firmware and no menu.
 
 > **zsh paste gotcha:** macOS's default `zsh` doesn't treat `#` as a comment in
 > interactive shells — pasting a multi-line code block from this guide makes
@@ -130,6 +134,7 @@ docker run --rm -v "$PWD":/work -v embraos-br-aarch64:/work/buildroot-src \
 ./scripts/run-qemu-aarch64.sh                  # web console (default) — the URL printed at boot (https://localhost:3345/embraOS?token=…)
 EMBRA_TUI=1 ./scripts/run-qemu-aarch64.sh      # serial TUI on this terminal: functional, preferred for debugging
 EMBRA_DB_VERBOSE=1 ./scripts/run-qemu-aarch64.sh   # opt-in per-request WardSONDB log lines
+EMBRA_BOOT=direct ./scripts/run-qemu-aarch64.sh    # kernel + initramfs from the host: no firmware, no GRUB menu
 ```
 
 Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, the provider gateway or direct, LLM provider
@@ -284,7 +289,8 @@ Docker command. The Docker `--buildroot-only` pass then runs Steps 3.5, 3.6 and 
   workspace members including `wardsondb` (vendored at `crates/wardsondb` — no
   sibling repo; the former Step 2 is gone).
 - **Step 3 — initramfs.** `create_initramfs.sh` (RUST_TARGET-aware) packs `embra-init`
-  as `/init` into `initramfs.cpio.gz`.
+  as `/init` into `initramfs.cpio.gz`, which `post_build.sh` places in the slot's
+  `/boot` beside the kernel.
 - **Step 3.5 — in-OS Rust toolchain.** See [In-OS Rust toolchain](#in-os-rust-toolchain-embra-guardian-v1)
   below. Unconditional w.r.t. `--buildroot-only`; **skipped on macOS** and run in the
   Docker/Linux pass.
@@ -292,11 +298,13 @@ Docker command. The Docker `--buildroot-only` pass then runs Steps 3.5, 3.6 and 
   `buildroot-src` too — the named-volume mountpoint case), ensures it is at
   `$BUILDROOT_VERSION` (default `2026.02.1`) via the safe-switch, dircleans the embraOS
   + upstream packages, configures `embraos_aarch64_defconfig`, and builds the kernel
-  (`Image`) + SquashFS rootfs + `embraos.img`. On macOS the Docker pass mounts the
+  (`Image`, installed into the rootfs at `/boot`) + GRUB (`BOOTAA64.EFI`) + SquashFS
+  rootfs + `embraos.img`. On macOS the Docker pass mounts the
   named volume `embraos-br-aarch64` at `buildroot-src`, keeping the tree and all build
   output on the Docker VM's native filesystem instead of the bind mount.
-- **Step 5 — copy outputs.** `embraos.img` and `Image` → `output/images/` (copied out
-  of the volume onto the host tree).
+- **Step 5 — copy outputs.** `embraos.img`, `Image` (the direct boot path) and
+  `rootfs.squashfs` (the slot image an OS update ships) → `output/images/` (copied
+  out of the volume onto the host tree).
 
 **Isolated cross-compilation validation (optional).** To validate Rust cross-compilation
 before wiring in the full pipeline, set the env vars the build script sets automatically
@@ -397,8 +405,8 @@ both arches, so there is **no per-arch sed** and nothing to revert.
 | `scripts/create_initramfs.sh` | Respects `RUST_TARGET` env var; defaults to `x86_64-unknown-linux-musl` when unset |
 | `buildroot/external.mk` | Defines `EMBRAOS_RUST_TARGET = $(if $(BR2_aarch64),aarch64-…,x86_64-…)` |
 | `buildroot/package/*/*.mk` (7) | `_SITE` now uses `target/$(EMBRAOS_RUST_TARGET)/release` — arch-neutral |
-| `buildroot/board/embraos/post_image.sh` | Detects the kernel (`Image`/`bzImage`) in `BINARIES_DIR` and renders the template |
-| `buildroot/board/embraos/genimage.cfg` → `…/genimage.cfg.in` | Static config replaced by a template with `@KERNEL_IMAGE@` (resolved per build) |
+| `buildroot/board/embraos/post_image.sh` | Detects the kernel (`Image`/`bzImage`) in `BINARIES_DIR`, stages the ESP (GRUB's loader, `grub.cfg` rendered from `grub.cfg.in` with the kernel name and `console=ttyAMA0`, `grubenv`), renders `genimage.cfg.in` from `layout.sh`, runs genimage and checks the layout |
+| `buildroot/board/embraos/genimage.cfg` → `…/genimage.cfg.in` | Static config replaced by a template: the sizes from `layout.sh` (resolved per build); the kernel lives inside each slot's SquashFS, so the template names no kernel |
 
 #### How the aarch64 pipeline tracks canonical (`f8cad9c`)
 
@@ -430,11 +438,13 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Setting | x86_64 | aarch64 |
 |---|---|---|
 | Binary | `qemu-system-x86_64` | `qemu-system-aarch64` |
-| Machine | (default, i440FX/q35) | `-machine virt` |
+| Machine | `-machine q35` on the UEFI path, QEMU's default `pc` on the direct path | `-machine virt` |
+| Firmware (UEFI path) | OVMF (`/usr/share/OVMF/OVMF_CODE_4M.fd`, the `ovmf` package) or QEMU's `edk2-x86_64-code.fd` | `edk2-aarch64-code.fd` (Homebrew's qemu) or AAVMF (`qemu-efi-aarch64`) — **TBD** until the first run |
+| Loader | `EFI/BOOT/BOOTX64.EFI` | `EFI/BOOT/BOOTAA64.EFI` |
 | Acceleration on macOS | `-accel hvf` (`run-qemu.sh` passes it on every Mac; an x86_64 guest runs under HVF on an Intel Mac only) | `-accel hvf` (native — near-native speed) |
 | CPU | QEMU's default (`run-qemu.sh` passes no `-cpu`) | `-cpu host` under HVF, `-cpu max` otherwise |
 | Kernel image | `bzImage` | `Image` |
-| Serial console | `console=ttyS0` | `console=ttyAMA0` |
+| Serial console | `console=ttyS0` | `console=ttyAMA0` (both rendered into `grub.cfg` by `post_image.sh`, and passed by the direct path) |
 | Default UI | embra-web console; `EMBRA_TUI=1` → serial TUI | identical |
 | Port forwards | 127.0.0.1:50000 / 127.0.0.1:8443 / *:3345 (both UI modes) | identical |
 
@@ -941,7 +951,8 @@ stopped before seeding or restoring.
 ### Serial console (ttyAMA0) — no action needed
 
 ARM64's `-machine virt` uses the PL011 UART (`/dev/ttyAMA0`), not 8250
-(`/dev/ttyS0`); `run-qemu-aarch64.sh` sets `console=ttyAMA0` accordingly.
+(`/dev/ttyS0`); `post_image.sh` renders `console=ttyAMA0` into `grub.cfg`, and
+`run-qemu-aarch64.sh`'s direct path passes it as well.
 
 You will see `--device /dev/ttyS0` if you grep the source (`embrad`'s
 `supervisor.rs` passes it to embra-console). **It is vestigial and harmless** —
@@ -957,8 +968,11 @@ Re-run it as the regression checklist after any canonical-build bump:
 
 1. **Boot — web console (default).** `./scripts/run-qemu-aarch64.sh`. Banner shows
    `UI mode: web console (default)` and `3345→3345 (HTTPS web)`. QEMU launches
-   `qemu-system-aarch64 -machine virt -accel hvf -cpu host`, kernel `Image`,
-   `console=ttyAMA0` — no kernel panic on the PL011 console.
+   `qemu-system-aarch64 -machine virt -accel hvf -cpu host` with the edk2
+   firmware; GRUB's menu shows on this terminal and boots slot A (`Image` from
+   the slot's SquashFS, `console=ttyAMA0`) — no kernel panic on the PL011
+   console. The UEFI path on aarch64 is **TBD** until this run; `EMBRA_BOOT=direct`
+   is the path validated so far.
 2. **Config Wizard + Learning Mode** in the browser at the URL embraOS printed at
    boot (`https://localhost:3345/embraOS?token=…`; accept the embraOS-CA cert) — name, the provider gateway or direct, LLM provider
    + credentials, timezone; full soul-formation conversation; soul sealed.
