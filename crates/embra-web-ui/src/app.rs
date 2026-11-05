@@ -64,6 +64,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
     ]),
     ("System", &[
         ("/status", "overview"), ("/help", "help"), ("/reboot", "reboot"), ("/backup", "backups"),
+        ("/update", "OS update"),
         ("/feedback-loop", "experimental"),
     ]),
 ];
@@ -153,6 +154,11 @@ const SPECS: &[Spec] = &[
         join: " ", guided: false,
         fields: &[sel("Action", &["(status)", "create", "list", "restore", "delete"], false),
             t("Label (create) or name (restore, delete)", "blank = manual", false)] },
+    Spec { cmd: "/update", title: "OS update",
+        note: "Blank = check the release published at the update source against this one (the manifest's signature is verified first). apply writes it into the inactive slot and stages it for the next boot; status shows both slots; rollback makes the other slot the default; source shows, sets or resets your own source.",
+        join: " ", guided: false,
+        fields: &[sel("Action", &["(check)", "apply", "status", "rollback", "source"], false),
+            t("Source URL or 'reset' (source)", "https://… (blank = show)", false)] },
     Spec { cmd: "/show-reasoning", title: "Reasoning panel",
         note: "Toggle the live-reasoning panel.", join: " ", guided: false,
         fields: &[sel("State", &["(show current)", "on", "off", "reset"], false)] },

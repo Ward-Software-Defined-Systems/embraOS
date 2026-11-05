@@ -1410,6 +1410,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "chrono-tz",
+ "embra-boot",
  "embra-common",
  "embra-guardian",
  "embra-tool-macro",

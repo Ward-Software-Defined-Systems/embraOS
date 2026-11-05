@@ -158,9 +158,53 @@ pub struct EmbeddingHealth {
     pub last_failure: Option<crate::embedding::cache::EmbeddingFailure>,
 }
 
+/// The A/B slots as embrad published them at boot (`/run/embra/boot-status`;
+/// `embra_boot::BootStatus`): absent on a boot without a slot (the
+/// direct-kernel path, a development host).
+#[derive(Debug, Serialize)]
+pub struct SlotReport {
+    pub booted: Option<String>,
+    pub trial: bool,
+    pub confirmed: String,
+    pub active: Option<String>,
+    pub pending: Option<String>,
+    pub tries_left: Option<u8>,
+    pub slot_a_status: Option<String>,
+    pub slot_b_status: Option<String>,
+    pub build_id: Option<String>,
+    pub engine: Option<String>,
+    pub summary: String,
+}
+
+impl From<embra_boot::BootStatus> for SlotReport {
+    fn from(b: embra_boot::BootStatus) -> Self {
+        SlotReport {
+            summary: b.summary(),
+            booted: b.slot.map(|s| s.to_string()),
+            trial: b.trial,
+            confirmed: b.confirmed,
+            active: b.active.map(|s| s.to_string()),
+            pending: b.pending.map(|s| s.to_string()),
+            tries_left: b.tries_left,
+            slot_a_status: b.slot_a_status.map(|s| s.as_str().to_string()),
+            slot_b_status: b.slot_b_status.map(|s| s.as_str().to_string()),
+            build_id: b.build_id,
+            engine: b.engine,
+        }
+    }
+}
+
+/// The slot report of this boot, `None` without a status file.
+pub fn slot_report() -> Option<SlotReport> {
+    embra_boot::BootStatus::read().map(SlotReport::from)
+}
+
 #[derive(Debug, Serialize)]
 pub struct SystemStatus {
     pub version: String,
+    /// The A/B slots (`slot_report`); omitted on a boot without a slot.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slot: Option<SlotReport>,
     /// The running kernel's release (`uname -r`, from
     /// `/proc/sys/kernel/osrelease`); null when it could not be read.
     pub kernel: Option<String>,
@@ -250,6 +294,7 @@ pub async fn system_status(db: &WardsonDbClient) -> SystemStatus {
     let failures = crate::embedding::cache::failures().await;
     SystemStatus {
         version: env!("CARGO_PKG_VERSION").to_string(),
+        slot: slot_report(),
         kernel: kernel_release(),
         uptime_seconds: process_uptime_secs(),
         memory_usage_mb: get_memory_usage_mb(),
@@ -784,6 +829,7 @@ mod native_args_tests {
         // sit under wardsondb.lifetime so the wardsondb scope is honest.
         let s = SystemStatus {
             version: "test".into(),
+            slot: None,
             kernel: Some("6.18.60".into()),
             uptime_seconds: 0,
             memory_usage_mb: None,
@@ -918,5 +964,37 @@ mod system_logs_tests {
         assert!(v.get("allOf").is_none());
         assert!(v.get("anyOf").is_none());
         assert_eq!(v.get("type").and_then(|t| t.as_str()), Some("object"));
+    }
+}
+
+#[cfg(test)]
+mod slot_report_tests {
+    use super::*;
+
+    #[test]
+    fn system_status_omits_the_slot_on_a_slotless_boot() {
+        // The host has no /run/embra/boot-status.
+        assert!(slot_report().is_none() || std::path::Path::new(embra_boot::status::STATUS_PATH).exists());
+        let s = SystemStatus {
+            version: "test".into(),
+            slot: None,
+            kernel: None,
+            uptime_seconds: 0,
+            memory_usage_mb: None,
+            soul_status: "unsealed".into(),
+            search_window_saturated: false,
+            wardsondb: WardsondbSection { healthy: true, collections: vec![], storage_poisoned: None, lifetime: None, memory_collections: vec![] },
+            provider: None,
+            provider_gateway: None,
+            embedding: EmbeddingHealth { failures_write: 0, failures_query: 0, last_failure: None },
+        };
+        let json = serde_json::to_value(&s).unwrap();
+        assert!(json.get("slot").is_none(), "no slot key without a boot status");
+        let report = SlotReport::from(embra_boot::BootStatus::parse("slot=a\ntrial=0\nconfirmed=not-needed\nactive=a\ntry=b\ntries_left=3\nslot_b_status=pending\nbuild_id=abc\nengine=fjall\n"));
+        assert_eq!(report.booted.as_deref(), Some("a"));
+        assert_eq!(report.pending.as_deref(), Some("b"));
+        assert_eq!(report.tries_left, Some(3));
+        assert_eq!(report.slot_b_status.as_deref(), Some("pending"));
+        assert_eq!(report.summary, "booted a, active a, b pending (3 tries left)");
     }
 }

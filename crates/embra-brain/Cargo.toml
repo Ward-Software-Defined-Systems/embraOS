@@ -5,6 +5,8 @@ edition.workspace = true
 license-file.workspace = true
 
 [dependencies]
+# The boot status embrad publishes (the A/B slots) for system_status.
+embra-boot = { path = "../embra-boot" }
 embra-common = { workspace = true }
 embra-tool-macro = { path = "../embra-tool-macro" }
 embra-tools-core = { path = "../embra-tools-core" }

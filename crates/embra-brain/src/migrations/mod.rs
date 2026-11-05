@@ -17,6 +17,21 @@ mod supersession;
 /// seed packs), is in the tail below the ladder and has no version.
 const CURRENT_SCHEMA_VERSION: u32 = 14;
 
+/// Where the brain leaves its one-line reason when it refuses to start;
+/// embrad folds it into the halt reason on STATE and prints it on the
+/// console (`supervisor::refusal_of`).
+pub const REFUSAL_PATH: &str = "/embra/ephemeral/embra-brain.refusal";
+
+/// The refusal for a knowledge graph a newer release wrote: this build
+/// reads schema `mine`, the ledger says `found`. Nothing is changed, and
+/// the two ways out are named: boot the newer release, or restore the
+/// snapshot that release took before it first ran.
+pub fn schema_ahead_refusal(found: i32, mine: u32, version: &str) -> String {
+    format!(
+        "the knowledge graph on DATA is at schema {found}, written by a newer embraOS than v{version} (which reads schema {mine}). Nothing was changed. Boot the newer release from the boot menu, or choose Backup and restore → Restore and pick the newest pre- snapshot, taken before that release first ran"
+    )
+}
+
 /// Run all pending migrations. Each migration is idempotent.
 pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
     // Ensure system.migrations collection exists
@@ -26,6 +41,18 @@ pub async fn run_migrations(db: &WardsonDbClient) -> Result<()> {
 
     let current_version = get_schema_version(db).await?;
     info!("Current schema version: {}, target: {}", current_version, CURRENT_SCHEMA_VERSION);
+
+    // A ledger ahead of this build: an older release booted onto data a
+    // newer one migrated (a rollback). No step of the ladder and nothing of
+    // the unversioned tail runs — `ensure_config_version` would patch the
+    // stored version down — and the refusal is left where embrad reads it.
+    if current_version > CURRENT_SCHEMA_VERSION as i32 {
+        let reason = schema_ahead_refusal(current_version, CURRENT_SCHEMA_VERSION, env!("CARGO_PKG_VERSION"));
+        if let Err(e) = std::fs::write(REFUSAL_PATH, &reason) {
+            warn!("the refusal could not be written to {REFUSAL_PATH}: {e}");
+        }
+        anyhow::bail!("embra-brain refused to start: {reason}");
+    }
 
     if current_version < 0 {
         // v0: cleanup phantom data from BUG-001
@@ -630,6 +657,53 @@ mod config_version_tests {
             ensure_config_version(&WardsonDbClient::from_url(&server.uri())).await;
             server.verify().await;
         }
+    }
+}
+
+#[cfg(test)]
+mod schema_ahead_tests {
+    use super::{CURRENT_SCHEMA_VERSION, run_migrations, schema_ahead_refusal};
+    use crate::db::WardsonDbClient;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn the_refusal_names_both_schemas_the_release_and_the_restore_entry() {
+        let r = schema_ahead_refusal(15, 14, "0.23.0-phase1");
+        assert!(r.contains("schema 15"));
+        assert!(r.contains("reads schema 14"));
+        assert!(r.contains("v0.23.0-phase1"));
+        assert!(r.contains("Backup and restore"));
+        assert!(r.contains("pre- snapshot"));
+        assert!(r.contains("Nothing was changed"));
+    }
+
+    /// A ledger ahead of this build stops `run_migrations` at once: no
+    /// write follows the read of the ledger.
+    #[tokio::test]
+    async fn a_schema_ahead_of_this_release_stops_the_boot_before_the_ladder() {
+        let server = MockServer::start().await;
+        let ahead = CURRENT_SCHEMA_VERSION + 1;
+        Mock::given(method("GET"))
+            .and(path("/system.migrations"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true, "meta": {}, "data": {"name": "system.migrations"}})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/system.migrations/query"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "ok": true, "meta": {},
+                "data": [{"_id": "m", "schema_version": ahead, "applied_at": "2026-11-05T00:00:00Z", "embraos_version": "9.9.9"}]
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH")).respond_with(ResponseTemplate::new(200)).expect(0).mount(&server).await;
+        Mock::given(method("PUT")).respond_with(ResponseTemplate::new(200)).expect(0).mount(&server).await;
+        let err = run_migrations(&WardsonDbClient::from_url(&server.uri())).await.unwrap_err().to_string();
+        assert!(err.contains(&format!("schema {ahead}")), "{err}");
+        assert!(err.contains("refused to start"), "{err}");
+        server.verify().await;
     }
 }
 

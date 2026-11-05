@@ -34,6 +34,9 @@ pub(super) fn reboot_decision(args: &str, pid_one_comm: Option<&str>, scheduled:
             "Not running on embraOS: PID 1 is not embrad, so there is nothing to reboot from here.".to_string(),
         );
     }
+    if update_running() {
+        return RebootDecision::Refused("An update is being staged; /update status shows it. Reboot once it says staged.".to_string());
+    }
     let job = scheduled.map(|j| format!(" The next boot first runs {j}.")).unwrap_or_default();
     match args.trim() {
         "now" => RebootDecision::Reboot,
@@ -438,5 +441,231 @@ mod backup_tests {
         assert!(valid_word("nightly", 32));
         assert!(!valid_word("../x", 80));
         assert!(!valid_word("", 80));
+    }
+}
+
+// ── Updates: /update ────────────────────────────────────────────────────
+
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// One `apply` at a time, process-wide (the `REBUILD_BATCH` pattern of the
+/// Guardian). `/reboot` refuses while it is set.
+static UPDATE_RUNNING: AtomicBool = AtomicBool::new(false);
+
+pub(super) fn update_running() -> bool {
+    UPDATE_RUNNING.load(Ordering::SeqCst)
+}
+
+struct ApplyGuard;
+
+impl Drop for ApplyGuard {
+    fn drop(&mut self) {
+        UPDATE_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
+
+/// The operator's update source override on STATE (`/update source`).
+pub(super) const UPDATE_SOURCE_FILE: &str = "/embra/state/update-source";
+
+/// What `/update source <value>` does; pure.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum SourceAction {
+    Show,
+    Reset,
+    Set(String),
+    Refused(String),
+}
+
+pub(super) fn source_action(arg: &str) -> SourceAction {
+    let v = arg.trim().trim_end_matches('/');
+    if v.is_empty() {
+        return SourceAction::Show;
+    }
+    if v == "reset" {
+        return SourceAction::Reset;
+    }
+    if v.starts_with("https://") && v.len() > "https://".len() {
+        return SourceAction::Set(v.to_string());
+    }
+    if let Some(rest) = v.strip_prefix("http://") {
+        let host = rest.split(['/', ':']).next().unwrap_or("");
+        let private = host == "localhost" || host.parse::<std::net::Ipv4Addr>().map(|ip| ip.is_private() || ip.is_loopback()).unwrap_or(false);
+        if private {
+            return SourceAction::Set(v.to_string());
+        }
+        return SourceAction::Refused(format!("http:// is for a private address only, not {host}; use https://"));
+    }
+    SourceAction::Refused(format!("not a source URL: {v} (https://…, or http:// to a private address, or reset)"))
+}
+
+const UPDATE_USAGE: &str = "Usage: /update | apply | status | rollback | source [<url>|reset]\n  /update checks the release published at the source against this one (the manifest's signature is verified first); apply writes the release into the inactive slot, verifies it and stages it for the next boot — /reboot now boots it, and GRUB falls back to this slot if it does not come up; status shows both slots; rollback makes the other slot the default again; source shows, sets or resets the operator's own source (the default is the GitHub releases of the public mirror).";
+
+pub(super) async fn handle_update_command(args: &str, tx: &mpsc::Sender<Result<ConversationResponse, Status>>) {
+    let send = |content: String, kind: SystemMessageType| {
+        let tx = tx.clone();
+        async move {
+            let _ = tx
+                .send(Ok(ConversationResponse {
+                    response_type: Some(conversation_response::ResponseType::System(SystemMessage {
+                        content,
+                        msg_type: kind as i32,
+                    })),
+                }))
+                .await;
+        }
+    };
+    let (sub, rest) = match args.trim().split_once(char::is_whitespace) {
+        Some((s, r)) => (s, r.trim()),
+        None => (args.trim(), ""),
+    };
+    match sub {
+        "" | "check" => match run_updater(&["check"]).await {
+            Ok(run) => {
+                let mut text = run.stdout.trim().to_string();
+                match run.code {
+                    Some(0) => {
+                        text.push_str("\nRun /update apply to stage it into the inactive slot.");
+                        send(text, SystemMessageType::Info).await;
+                    }
+                    Some(3) => send(text, SystemMessageType::Info).await,
+                    _ => {
+                        if !text.is_empty() {
+                            text.push('\n');
+                        }
+                        text.push_str(&run.reason());
+                        send(text, SystemMessageType::Error).await;
+                    }
+                }
+            }
+            Err(e) => send(format!("The update check could not run: {e}"), SystemMessageType::Error).await,
+        },
+        "apply" => {
+            if UPDATE_RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                send("An update is being staged already — /update status shows it.".to_string(), SystemMessageType::Info).await;
+                return;
+            }
+            send("Staging the update: the manifest is checked, then the image is written into the inactive slot and verified; the lines below follow the updater. The session stays usable meanwhile.".to_string(), SystemMessageType::Info).await;
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                let _guard = ApplyGuard;
+                let forward = |content: String, kind: SystemMessageType| {
+                    let tx = tx.clone();
+                    async move {
+                        let _ = tx
+                            .send(Ok(ConversationResponse {
+                                response_type: Some(conversation_response::ResponseType::System(SystemMessage {
+                                    content,
+                                    msg_type: kind as i32,
+                                })),
+                            }))
+                            .await;
+                    }
+                };
+                let mut cmd = crate::tools::subprocess(UPDATER);
+                cmd.args(["apply", "--yes"])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped());
+                let mut child = match cmd.spawn() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        forward(format!("The updater could not be started: {e}"), SystemMessageType::Error).await;
+                        return;
+                    }
+                };
+                let stdout = child.stdout.take();
+                let stderr = child.stderr.take();
+                let reader = async {
+                    if let Some(out) = stdout {
+                        use tokio::io::AsyncBufReadExt as _;
+                        let mut lines = tokio::io::BufReader::new(out).lines();
+                        while let Ok(Some(line)) = lines.next_line().await {
+                            if !line.trim().is_empty() {
+                                forward(line, SystemMessageType::Info).await;
+                            }
+                        }
+                    }
+                };
+                let errs = async {
+                    let mut text = String::new();
+                    if let Some(mut err) = stderr {
+                        use tokio::io::AsyncReadExt as _;
+                        let _ = err.read_to_string(&mut text).await;
+                    }
+                    text
+                };
+                let ((), stderr_text) = tokio::join!(reader, errs);
+                let reason = stderr_text.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no reason given").trim().to_string();
+                match child.wait().await {
+                    Ok(status) if status.code() == Some(0) => {
+                        forward("Staged. /reboot now boots the new release; if it does not come up, GRUB falls back to this one.".to_string(), SystemMessageType::Info).await
+                    }
+                    Ok(status) if status.code() == Some(3) => forward(reason, SystemMessageType::Info).await,
+                    Ok(_) => forward(format!("The update was not staged: {reason}"), SystemMessageType::Error).await,
+                    Err(e) => forward(format!("The updater could not be waited for: {e}"), SystemMessageType::Error).await,
+                }
+            });
+        }
+        "status" => match run_updater(&["status"]).await {
+            Ok(run) if run.code == Some(0) => send(run.stdout.trim().to_string(), SystemMessageType::Info).await,
+            Ok(run) => send(run.reason(), SystemMessageType::Error).await,
+            Err(e) => send(format!("The status could not be read: {e}"), SystemMessageType::Error).await,
+        },
+        "rollback" => match run_updater(&["rollback"]).await {
+            Ok(run) if run.code == Some(0) => send(format!("{}\n/reboot now when ready.", run.stdout.trim()), SystemMessageType::Info).await,
+            Ok(run) => send(run.reason(), SystemMessageType::Error).await,
+            Err(e) => send(format!("The rollback could not run: {e}"), SystemMessageType::Error).await,
+        },
+        "source" => match source_action(rest) {
+            SourceAction::Show => {
+                let text = match std::fs::read_to_string(UPDATE_SOURCE_FILE) {
+                    Ok(t) if !t.trim().is_empty() => format!("Update source: {} (the operator's own; /update source reset returns to the default).", t.trim()),
+                    _ => "Update source: the default, the GitHub releases of the public mirror (https://github.com/Ward-Software-Defined-Systems/embraOS/releases/latest/download). /update source <url> sets your own.".to_string(),
+                };
+                send(text, SystemMessageType::Info).await;
+            }
+            SourceAction::Reset => match tokio::fs::remove_file(UPDATE_SOURCE_FILE).await {
+                Ok(()) => send("Update source reset to the default.".to_string(), SystemMessageType::Info).await,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => send("The default source was in use already.".to_string(), SystemMessageType::Info).await,
+                Err(e) => send(format!("The source could not be reset: {e}"), SystemMessageType::Error).await,
+            },
+            SourceAction::Set(url) => {
+                let tmp = format!("{UPDATE_SOURCE_FILE}.tmp");
+                match tokio::fs::write(&tmp, format!("{url}\n")).await.and_then(|()| std::fs::rename(&tmp, UPDATE_SOURCE_FILE)) {
+                    Ok(()) => send(format!("Update source set: {url}. /update checks it."), SystemMessageType::Info).await,
+                    Err(e) => send(format!("The source could not be stored: {e}"), SystemMessageType::Error).await,
+                }
+            }
+            SourceAction::Refused(why) => send(why, SystemMessageType::Error).await,
+        },
+        _ => send(UPDATE_USAGE.to_string(), SystemMessageType::Error).await,
+    }
+}
+
+#[cfg(test)]
+mod update_tests {
+    use super::*;
+
+    #[test]
+    fn a_source_is_shown_set_or_reset_and_only_https_or_a_private_http_is_stored() {
+        assert_eq!(source_action(""), SourceAction::Show);
+        assert_eq!(source_action("reset"), SourceAction::Reset);
+        assert_eq!(source_action("https://mirror.example/embraos/"), SourceAction::Set("https://mirror.example/embraos".into()));
+        assert_eq!(source_action("http://10.0.0.5:8080/u"), SourceAction::Set("http://10.0.0.5:8080/u".into()));
+        assert!(matches!(source_action("http://example.com/u"), SourceAction::Refused(m) if m.contains("private")));
+        assert!(matches!(source_action("ftp://x"), SourceAction::Refused(_)));
+        assert!(matches!(source_action("https://"), SourceAction::Refused(_)));
+    }
+
+    #[test]
+    fn a_second_apply_is_refused_while_one_is_staging() {
+        assert!(!update_running());
+        assert!(UPDATE_RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_ok());
+        assert!(update_running());
+        assert!(UPDATE_RUNNING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err(), "the second apply is refused");
+        {
+            let _guard = ApplyGuard;
+        }
+        assert!(!update_running(), "the guard releases the flag");
     }
 }

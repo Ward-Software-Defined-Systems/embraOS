@@ -805,6 +805,11 @@ impl BrainService for BrainGrpcService {
         if let Ok(cfg) = config::load_config(&self.db).await {
             services.extend(crate::provider::gateway::status_rows(&cfg));
         }
+        // The A/B slot as embrad published it (absent on a slotless boot).
+        if let Some(b) = embra_boot::BootStatus::read() {
+            services.insert("slot".to_string(), b.slot.map(|s| s.to_string()).unwrap_or_else(|| "-".into()));
+            services.insert("slot.detail".to_string(), b.summary());
+        }
         Ok(Response::new(GetSystemStatusResponse {
             version: env!("CARGO_PKG_VERSION").to_string(),
             uptime_seconds: self.start_time.elapsed().as_secs(),
