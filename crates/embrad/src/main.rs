@@ -7,7 +7,8 @@
 //! 4. Scrub the environment the kernel handed over (PID 1 only), read the
 //!    kernel line once, set the environment every service inherits (one
 //!    thread, no runtime yet)
-//! 5. A maintenance mode (`embra.mode=`) runs its job and reboots; otherwise
+//! 5. A maintenance mode (`embra.mode=`) runs its job and reboots; a job a
+//!    session scheduled (`/embra/state/next-boot`) runs first; otherwise
 //!    start services in dependency order
 //! 6. Verify soul (HALT on failure)
 //! 7. Confirm a trial boot on the ESP, publish the boot status
@@ -63,6 +64,29 @@ fn main() -> Result<()> {
     };
     boot::write_status(&cmdline, mode, &boot::Confirmed::Pending, None, Release::read().ok().as_ref());
 
+    // Step 5: a menu entry's job, or what a session scheduled for this boot
+    // (the marker, taken before it is acted on), before any service and
+    // before the runtime: stdio is still the console here.
+    let scheduled = if mode == BootMode::Normal { modes::take_marker() } else { None };
+    match modes::resolve(mode, scheduled) {
+        modes::Decision::Services => {}
+        modes::Decision::SnapshotThenServices { label } => modes::run_scheduled_snapshot(&label),
+        modes::Decision::RestoreThenReboot { name } => {
+            modes::run_scheduled_restore(&name);
+            if pid == 1 {
+                reboot_system();
+            }
+            return Ok(());
+        }
+        modes::Decision::Maintenance(m) => {
+            modes::run_maintenance(m);
+            if pid == 1 {
+                reboot_system();
+            }
+            return Ok(());
+        }
+    }
+
     // The runtime is built by hand, so a failure is a halt with its reason
     // and not an unwinding panic inside `#[tokio::main]`.
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
@@ -71,11 +95,7 @@ fn main() -> Result<()> {
         Err(e) => return Err(e.into()),
     };
 
-    let outcome = match mode {
-        BootMode::Normal => runtime.block_on(run(&cmdline, mode)),
-        other => runtime.block_on(modes::run(other)),
-    };
-    match outcome {
+    match runtime.block_on(run(&cmdline, mode)) {
         Ok(()) => {}
         Err(e) if pid == 1 => halt_system(&fatal_reason(&e)),
         Err(e) => return Err(e),
