@@ -19,6 +19,7 @@ The operating manual for embraOS. The project landing page is [../README.md](../
 
 - [OPERATIONS/OPERATION.md](OPERATIONS/OPERATION.md) — What running it feels like, the session model, keyboard shortcuts, current limitations.
 - [OPERATIONS/COMMAND-REFERENCE.md](OPERATIONS/COMMAND-REFERENCE.md) — Every slash command.
+- [OPERATIONS/UPDATES-AND-BACKUPS.md](OPERATIONS/UPDATES-AND-BACKUPS.md) — The two OS slots and GRUB's A/B state, the in-OS backups (`/backup`, the boot menu), restoring, and the signed OS update.
 - [OPERATIONS/TOOL-REFERENCE.md](OPERATIONS/TOOL-REFERENCE.md) — All 119 built-in tools by category, plus workspace/GitHub/SSH safety notes.
 - [OPERATIONS/LOCAL-AI-GATEWAY.md](OPERATIONS/LOCAL-AI-GATEWAY.md) — Routing every provider through WSDS Local AI Gateway with `/local-ai-gateway`: what goes through, what stays direct, what the gateway records and blocks; under evaluation for vendoring.
 

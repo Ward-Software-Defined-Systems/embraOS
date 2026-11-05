@@ -162,7 +162,7 @@ The following apply once the image is built. They are not part of the build pipe
 > curl http://localhost:8443/status
 > ```
 
-> **Backup & Restore:** `scripts/embraos-backup.sh` preserves STATE and DATA partitions across image rebuilds. This is a file-level backup — WardSONDB does not need to be running. The VM must be stopped.
+> **Backup & Restore:** the OS takes its own backups too — `/backup create` in a session or the boot menu's Backup and restore, snapshots under `/embra/data/backups` that the web console streams to the browser ([OPERATIONS/UPDATES-AND-BACKUPS.md](../OPERATIONS/UPDATES-AND-BACKUPS.md)). The host script below is the path across an image rebuild and off the machine; its copy of DATA leaves `backups/` out. `scripts/embraos-backup.sh` preserves STATE and DATA partitions across image rebuilds. This is a file-level backup — WardSONDB does not need to be running. The VM must be stopped.
 > ```bash
 > # Before rebuilding the image
 > sudo ./scripts/embraos-backup.sh backup --label pre-rebuild   # or a bare label: backup pre-rebuild
