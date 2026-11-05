@@ -1395,6 +1395,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "embra-boot"
+version = "0.23.0-phase1"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "embra-brain"
 version = "0.23.0-phase1"
 dependencies = [
@@ -1494,6 +1501,7 @@ dependencies = [
 name = "embra-init"
 version = "0.23.0-phase1"
 dependencies = [
+ "embra-boot",
  "nix 0.29.0",
 ]
 

@@ -1,0 +1,11 @@
+[package]
+name = "embra-boot"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+
+# The boot contract embra-init, embrad and embra-update share. No runtime
+# and one dependency: embra-init runs it from the initramfs, before anything
+# else exists.
+[dependencies]
+libc = "0.2"

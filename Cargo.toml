@@ -2,6 +2,8 @@
 resolver = "2"
 members = [
     "crates/embra-init",
+    # The boot contract embra-init, embrad and embra-update share (std + libc).
+    "crates/embra-boot",
     "crates/embrad",
     # The database: a vendored fork of
     # Ward-Software-Defined-Systems/WardSONDB, which continues independently.
