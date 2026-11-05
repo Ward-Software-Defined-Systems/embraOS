@@ -532,7 +532,7 @@ impl Supervisor {
             match child.try_wait() {
                 Ok(Some(status)) => {
                     let name = svc.def.name.clone();
-                    let msg = format!("{} exited immediately with status: {:?}", name, status);
+                    let msg = fold_refusal(format!("{} exited immediately with status: {:?}", name, status), &name, refusal_of(&name).as_deref());
                     // stdout+stderr were redirected to the log file — read its tail
                     // via eprintln! so it lands on the serial console before halt.
                     eprintln!("[embrad] DIAG: {}", msg);
@@ -552,6 +552,7 @@ impl Supervisor {
         // Wait for health check
         if let Err(e) = self.wait_for_health(index).await {
             let name = self.services[index].def.name.clone();
+            let e = anyhow::anyhow!(fold_refusal(e.to_string(), &name, refusal_of(&name).as_deref()));
             // Use eprintln! for guaranteed serial output (tracing may buffer)
             eprintln!("[embrad] DIAG: {} health check failed: {}", name, e);
 
@@ -886,6 +887,26 @@ pub fn prepare_environment() {
     crate::ca_bundle::setup_operator_ca_trust();
 }
 
+/// Where a service that refuses to start leaves its one-line reason
+/// (`/embra/ephemeral/<name>.refusal`): the brain on a knowledge graph
+/// written by a newer release than itself. Folded into the halt reason, so
+/// the operator reads why on STATE and on the console.
+pub(crate) fn refusal_path(name: &str) -> String {
+    format!("/embra/ephemeral/{name}.refusal")
+}
+
+pub(crate) fn refusal_of(name: &str) -> Option<String> {
+    std::fs::read_to_string(refusal_path(name)).ok().map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
+}
+
+/// The failure message with the service's own reason appended, when it left one.
+pub(crate) fn fold_refusal(message: String, name: &str, refusal: Option<&str>) -> String {
+    match refusal {
+        Some(r) => format!("{message}; {name} refused to start: {r}"),
+        None => message,
+    }
+}
+
 /// What PID 1 keeps of the environment the kernel handed it: the three
 /// variables the kernel sets itself. The rest is whatever `KEY=value` the
 /// boot line carried (the kernel passes every undotted one to init), and
@@ -1043,6 +1064,21 @@ pub(crate) mod test_support {
     /// answers `None`), and a zombie of another test counts in the reaper
     /// guard's sweep. Seen as CI job 1794 under the runner's load.
     pub(crate) static CHILDREN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+}
+
+#[cfg(test)]
+mod refusal_tests {
+    use super::{fold_refusal, refusal_path};
+
+    #[test]
+    fn a_refusal_file_is_folded_into_the_halt_reason() {
+        assert_eq!(refusal_path("embra-brain"), "/embra/ephemeral/embra-brain.refusal");
+        assert_eq!(
+            fold_refusal("embra-brain exited immediately with status: ExitStatus(1)".into(), "embra-brain", Some("the knowledge graph is at schema 15")),
+            "embra-brain exited immediately with status: ExitStatus(1); embra-brain refused to start: the knowledge graph is at schema 15"
+        );
+        assert_eq!(fold_refusal("x".into(), "embra-brain", None), "x");
+    }
 }
 
 #[cfg(test)]

@@ -157,6 +157,29 @@ pub fn run_maintenance(mode: BootMode) {
     }
 }
 
+/// The snapshot a trial boot takes before the services (`embra.trial=1`
+/// from GRUB: a staged release's first boots), so a copy of STATE and DATA
+/// exists before the new brain migrates the knowledge graph. Idempotent
+/// across the tries (`--once` on the label). A snapshot that cannot be
+/// taken is the reason the caller halts on: the try is counted and GRUB
+/// falls back.
+pub fn run_trial_snapshot(version: &str) -> Result<(), String> {
+    let label = format!("pre-v{version}");
+    say(&format!("trial boot of v{version}: taking the snapshot \"{label}\" of STATE and DATA before the knowledge graph migrates"));
+    let ran = run_updater(&["snapshot", "--label", &label, "--taken-by", "pending-slot", "--once"]);
+    match ran.code {
+        Some(0) => {
+            info!("trial snapshot {label} done");
+            Ok(())
+        }
+        Some(3) => {
+            info!("trial snapshot {label} exists from an earlier try");
+            Ok(())
+        }
+        _ => Err(ran.reason),
+    }
+}
+
 /// A scheduled snapshot, before the services; the boot continues whatever
 /// the outcome, which is said on the console and in the log.
 pub fn run_scheduled_snapshot(label: &str) {

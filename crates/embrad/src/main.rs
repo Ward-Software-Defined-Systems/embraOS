@@ -10,6 +10,7 @@
 //! 5. A maintenance mode (`embra.mode=`) runs its job and reboots; a job a
 //!    session scheduled (`/embra/state/next-boot`) runs first; otherwise
 //!    start services in dependency order
+//!    A trial boot (`embra.trial=1`) snapshots STATE and DATA first
 //! 6. Verify soul (HALT on failure)
 //! 7. Confirm a trial boot on the ESP, publish the boot status
 //! 8. Enter reconciliation loop
@@ -84,6 +85,19 @@ fn main() -> Result<()> {
                 reboot_system();
             }
             return Ok(());
+        }
+    }
+
+    // Step 5.5: a trial boot snapshots STATE and DATA before any service,
+    // so the previous release has a consistent copy to come back to once
+    // the new brain has migrated the knowledge graph. A snapshot that cannot
+    // be taken halts: the try is counted, GRUB falls back, nothing changed.
+    if cmdline.trial() && pid == 1 {
+        let version = Release::read().map(|r| r.version).unwrap_or_else(|_| "unknown".into());
+        if let Err(reason) = modes::run_trial_snapshot(&version) {
+            halt_system(&format!(
+                "pre-update snapshot failed: {reason}; GRUB counts this try and falls back to the previous release when the tries run out"
+            ));
         }
     }
 
