@@ -90,10 +90,12 @@ if [ "$slot_active" = "a" ]; then set active_dev="$slot_a_dev"; else set active_
 
 # $1 the slot letter, $2 its device, $3 the entry's own knobs. Order on the
 # line: GRUB's defaults, the entry's knobs, the host's string; embrad takes
-# the last occurrence of each embra.* knob.
+# the last occurrence of each embra.* knob. Two consoles: the display
+# (tty0, fbcon on the firmware's framebuffer) and the serial line, which
+# comes last and so owns /dev/console — embrad's stdio, the TUI, the banner.
 function boot_slot {
     echo "embraOS: booting slot $1 from $2"
-    linux "$2/boot/@KERNEL_IMAGE@" console=@SERIAL_CONSOLE@ quiet embra.slot=$1 embra.web=1 $3 $extra
+    linux "$2/boot/@KERNEL_IMAGE@" console=tty0 console=@SERIAL_CONSOLE@ quiet embra.slot=$1 embra.web=1 $3 $extra
     initrd "$2/boot/initramfs.cpio.gz"
 }
 

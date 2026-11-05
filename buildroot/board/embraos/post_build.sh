@@ -85,9 +85,14 @@ printf 'set slot_version="%s (%s, %s)"\n' "$VERSION" "$BUILD_ID" "${BUILT%%T*}" 
 # no key yet, and then no manifest verifies.
 install -D -m 0644 "${REPO_ROOT}/scripts/update-signing.pub" "${TARGET_DIR}/usr/share/embra/update-signing.pub"
 
-# DNS resolution — QEMU SLIRP provides DNS at 10.0.2.3
-# Required for embra-brain to reach api.anthropic.com
-echo "nameserver 10.0.2.3" > "${TARGET_DIR}/etc/resolv.conf"
+# The resolver: /etc/resolv.conf on the read-only root is a link into the
+# ephemeral tmpfs, where embrad writes the static default (QEMU's 10.0.2.3)
+# at boot and the udhcpc lease script (rootfs_overlay/usr/share/embra/
+# udhcpc.script, embrad's bring_up_network) the servers a DHCP lease names.
+rm -f "${TARGET_DIR}/etc/resolv.conf"
+ln -s /embra/ephemeral/resolv.conf "${TARGET_DIR}/etc/resolv.conf"
+[ -x "${TARGET_DIR}/usr/share/embra/udhcpc.script" ] \
+    || { echo "ERROR: the overlay's /usr/share/embra/udhcpc.script is missing or not executable" >&2; exit 1; }
 
 # Workspace mount point (embrad bind-mounts /embra/data/workspace here at boot)
 mkdir -p "${TARGET_DIR}/embra/workspace"

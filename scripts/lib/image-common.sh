@@ -270,6 +270,16 @@ assert_rootfs_invariants() {
         reject_image
     }
     echo "slot contents present: /boot/$kernel, /boot/initramfs.cpio.gz, /etc/embraos-release ($stamped), /boot/embraos-slot.cfg"
+
+    # The network: the resolver is a link into the ephemeral tmpfs (the root
+    # is read-only; embrad and the lease script write there), and the lease
+    # script udhcpc runs is in place and executable.
+    if [ "$(readlink "$tgt/etc/resolv.conf" 2>/dev/null)" != "/embra/ephemeral/resolv.conf" ]; then
+        reject_image "/etc/resolv.conf in the rootfs is not the link to /embra/ephemeral/resolv.conf (post_build.sh)"
+    fi
+    [ -x "$tgt/usr/share/embra/udhcpc.script" ] \
+        || reject_image "/usr/share/embra/udhcpc.script is missing or not executable in the rootfs (the overlay)"
+    echo "network: /etc/resolv.conf -> /embra/ephemeral/resolv.conf, the udhcpc lease script present"
     # The updater: embrad runs it in a maintenance boot, the brain for the
     # operator's commands. A dropped package symbol is silent.
     [ -x "$tgt/usr/bin/embra-update" ] || {

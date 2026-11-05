@@ -1,0 +1,54 @@
+#!/bin/sh
+# embraOS's lease script for BusyBox udhcpc (embrad starts the client at
+# boot: crates/embrad/src/mount.rs, bring_up_network). The root filesystem
+# is read-only, so the resolver and the lease go to the ephemeral tmpfs:
+# /etc/resolv.conf is a link to /embra/ephemeral/resolv.conf, and embrad
+# reads /embra/ephemeral/net-lease for the boot banner. udhcpc calls this
+# with the event in $1 and the lease in its environment (interface, ip,
+# mask = the prefix length, subnet, router, dns).
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+EPHEMERAL=/embra/ephemeral
+
+apply_lease() {
+    # The address, once: a renewal of the same lease leaves the interface
+    # and its connections alone; a new address replaces the old ones.
+    if ! ip -4 addr show dev "$interface" 2>/dev/null | grep -q "inet ${ip}/${mask} "; then
+        ip -4 addr flush dev "$interface" 2>/dev/null
+        ip addr add "${ip}/${mask}" dev "$interface"
+    fi
+    if [ -n "$router" ]; then
+        for gw in $router; do
+            ip route replace default via "$gw" dev "$interface" && break
+        done
+    fi
+    : > "$EPHEMERAL/resolv.conf.tmp"
+    for d in $dns; do
+        echo "nameserver $d" >> "$EPHEMERAL/resolv.conf.tmp"
+    done
+    if [ -s "$EPHEMERAL/resolv.conf.tmp" ]; then
+        mv -f "$EPHEMERAL/resolv.conf.tmp" "$EPHEMERAL/resolv.conf"
+    else
+        rm -f "$EPHEMERAL/resolv.conf.tmp"
+    fi
+    # The lease file last, whole: embrad waits for it at boot.
+    {
+        echo "interface=$interface"
+        echo "ip=$ip"
+        echo "mask=$mask"
+        echo "router=$router"
+        echo "dns=$dns"
+        echo "source=dhcp"
+    } > "$EPHEMERAL/net-lease.tmp"
+    mv -f "$EPHEMERAL/net-lease.tmp" "$EPHEMERAL/net-lease"
+}
+
+case "$1" in
+    bound|renew)
+        apply_lease
+        ;;
+    deconfig|leasefail|nak)
+        # At the client's start, and when a lease is lost or refused: the
+        # address stays as it is; embrad decides on the fallback at boot.
+        ;;
+esac
+exit 0
