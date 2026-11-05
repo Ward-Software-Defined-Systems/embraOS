@@ -28,9 +28,10 @@ fn main() {
         eprintln!("[embra-init] Not running on Linux — this binary is for initramfs only");
         eprintln!("[embra-init] Boot sequence would be:");
         eprintln!("[embra-init]   1. Mount /proc, /sys, /dev");
-        eprintln!("[embra-init]   2. Mount SquashFS rootfs from /dev/vda2 → /mnt/root");
-        eprintln!("[embra-init]   3. Mount STATE from /dev/vda3 → /mnt/root/embra/state");
-        eprintln!("[embra-init]   4. Mount DATA from /dev/vda4 → /mnt/root/embra/data");
+        eprintln!("[embra-init]   2. Mount the SquashFS rootfs of the slot the kernel line names (embra.slot=a|b,");
+        eprintln!("[embra-init]      partition rootfs_a|rootfs_b by GPT name; the Phase 1 name rootfs, then /dev/vda2) → /mnt/root");
+        eprintln!("[embra-init]   3. Mount STATE (GPT name state, then /dev/vda3) → /mnt/root/embra/state");
+        eprintln!("[embra-init]   4. Mount DATA (GPT name data, then /dev/vda4) → /mnt/root/embra/data");
         eprintln!("[embra-init]   5. Mount ephemeral tmpfs → /mnt/root/embra/ephemeral");
         eprintln!("[embra-init]   6. Switch root to /mnt/root (move the mount, chroot; pivot_root fails from an initramfs)");
         eprintln!("[embra-init]   7. exec /sbin/embrad");
@@ -40,6 +41,7 @@ fn main() {
 
 #[cfg(target_os = "linux")]
 fn boot() -> Result<(), Box<dyn std::error::Error>> {
+    use embra_boot::{Cmdline, Slot, slot};
     use nix::mount::{mount, MsFlags};
     use nix::unistd::{chdir, execv};
     use std::ffi::CString;
@@ -59,19 +61,32 @@ fn boot() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all("/dev")?;
     mount(Some("devtmpfs"), "/dev", Some("devtmpfs"), MsFlags::empty(), None::<&str>)?;
 
-    // Step 2: Find and mount the SquashFS rootfs
-    // Disk layout: /dev/vda1 = boot, /dev/vda2 = SquashFS rootfs,
-    //              /dev/vda3 = STATE (ext4), /dev/vda4 = DATA (ext4)
-    eprintln!("[embra-init] Waiting for block devices...");
-    wait_for_device("/dev/vda2", 5)?;
+    // Step 2: Find and mount the SquashFS rootfs. Partitions are found by
+    // their GPT names (embra-boot reads the kernel's uevents, no udev): the
+    // slot GRUB booted is on the kernel line as embra.slot=a|b, and its
+    // partition is rootfs_a or rootfs_b. A line without it (the direct-kernel
+    // path of run-qemu.sh, a Phase 1 disk) tries slot A and then the Phase 1
+    // name `rootfs`; /dev/vda2 is the last resort. A kernel from one slot
+    // never gets the rootfs of another: an invalid slot value is fatal.
+    let cmdline = Cmdline::read();
+    let booted = cmdline.slot()?;
+    let rootfs_names: Vec<&str> = match booted {
+        Some(s) => vec![s.partition_name()],
+        None => vec![Slot::A.partition_name(), slot::LEGACY_ROOTFS_PARTITION],
+    };
+    match booted {
+        Some(s) => eprintln!("[embra-init] Waiting for block devices (slot {s})..."),
+        None => eprintln!("[embra-init] Waiting for block devices (no slot on the kernel line)..."),
+    }
+    let rootfs_dev = resolve_partition(&rootfs_names, "/dev/vda2")?;
 
     std::fs::create_dir_all(NEWROOT)?;
 
     // Read-only, and it stays so: the root filesystem is immutable. What
     // is written at run time lives on STATE, DATA or tmpfs.
-    eprintln!("[embra-init] Mounting SquashFS rootfs from /dev/vda2");
+    eprintln!("[embra-init] Mounting SquashFS rootfs from {}", rootfs_dev.display());
     mount(
-        Some("/dev/vda2"),
+        Some(rootfs_dev.as_path()),
         NEWROOT,
         Some("squashfs"),
         MsFlags::MS_RDONLY,
@@ -89,10 +104,10 @@ fn boot() -> Result<(), Box<dyn std::error::Error>> {
     // pinned to an empty directory under STATE).
     let data_flags = MsFlags::MS_NOSUID | MsFlags::MS_NODEV | MsFlags::MS_NOEXEC;
 
-    eprintln!("[embra-init] Mounting STATE partition from /dev/vda3 (nosuid,nodev,noexec)");
-    wait_for_device("/dev/vda3", 5)?;
+    let state_dev = resolve_partition(&[slot::STATE_PARTITION], "/dev/vda3")?;
+    eprintln!("[embra-init] Mounting STATE partition from {} (nosuid,nodev,noexec)", state_dev.display());
     mount(
-        Some("/dev/vda3"),
+        Some(state_dev.as_path()),
         state_path.as_str(),
         Some("ext4"),
         data_flags,
@@ -103,10 +118,10 @@ fn boot() -> Result<(), Box<dyn std::error::Error>> {
     let data_path = format!("{}/embra/data", NEWROOT);
     std::fs::create_dir_all(&data_path)?;
 
-    eprintln!("[embra-init] Mounting DATA partition from /dev/vda4 (nosuid,nodev,noexec)");
-    wait_for_device("/dev/vda4", 5)?;
+    let data_dev = resolve_partition(&[slot::DATA_PARTITION], "/dev/vda4")?;
+    eprintln!("[embra-init] Mounting DATA partition from {} (nosuid,nodev,noexec)", data_dev.display());
     mount(
-        Some("/dev/vda4"),
+        Some(data_dev.as_path()),
         data_path.as_str(),
         Some("ext4"),
         data_flags,
@@ -160,15 +175,19 @@ fn boot() -> Result<(), Box<dyn std::error::Error>> {
     Err("execv returned unexpectedly".into())
 }
 
+/// The partition of the first of `names` that appears within five seconds,
+/// else `legacy` when that node exists (a disk without GPT names, under a
+/// printed warning), else an error naming what was looked for.
 #[cfg(target_os = "linux")]
-fn wait_for_device(path: &str, timeout_secs: u64) -> Result<(), Box<dyn std::error::Error>> {
-    use std::path::Path;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
-    while std::time::Instant::now() < deadline {
-        if Path::new(path).exists() {
-            return Ok(());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+fn resolve_partition(names: &[&str], legacy: &str) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    const WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+    if let Some((name, path)) = embra_boot::partitions::wait_for_partition(names, WAIT) {
+        eprintln!("[embra-init] partition '{name}' is {}", path.display());
+        return Ok(path);
     }
-    Err(format!("Device {} did not appear within {}s", path, timeout_secs).into())
+    if std::path::Path::new(legacy).exists() {
+        eprintln!("[embra-init] WARNING: no partition named {} within {}s; falling back to {legacy}", names.join(" or "), WAIT.as_secs());
+        return Ok(std::path::PathBuf::from(legacy));
+    }
+    Err(format!("no partition named {} appeared within {}s, and {legacy} does not exist", names.join(" or "), WAIT.as_secs()).into())
 }
