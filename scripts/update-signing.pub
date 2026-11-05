@@ -7,8 +7,11 @@
 # old one stops signing, so an instance on the previous release still verifies
 # the next.
 #
-# No key is present yet: the updater refuses every manifest until one is.
 # The private key is the release operator's, made once with
 #   openssl genpkey -algorithm ed25519 -out update-signing.key
 #   openssl pkey -in update-signing.key -pubout
-# and never committed. scripts/release-update.sh signs with it.
+# and never committed. scripts/release-update.sh signs with it. The key
+# below was made on 2026-11-05 and is the first release signing key.
+-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA2nCn6Qq7uDHkWNVhpaKFXk9b3UISSIVYjoUFU9Q16rg=
+-----END PUBLIC KEY-----
