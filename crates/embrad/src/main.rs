@@ -4,10 +4,14 @@
 //! 1. Install the panic hook (PID 1 only)
 //! 2. Mount pseudo-filesystems
 //! 3. Verify partition mounts
-//! 4. Set the environment every service inherits (one thread, no runtime yet)
-//! 5. Start services in dependency order
+//! 4. Scrub the environment the kernel handed over (PID 1 only), read the
+//!    kernel line once, set the environment every service inherits (one
+//!    thread, no runtime yet)
+//! 5. A maintenance mode (`embra.mode=`) runs its job and reboots; otherwise
+//!    start services in dependency order
 //! 6. Verify soul (HALT on failure)
-//! 7. Enter reconciliation loop
+//! 7. Confirm a trial boot on the ESP, publish the boot status
+//! 8. Enter reconciliation loop
 //!
 //! PID 1 never exits. A fatal boot error and a panic both end in
 //! `supervisor::halt_system`, with the reason written to
@@ -17,12 +21,15 @@
 //! reason lost in the kernel log. In development mode (not PID 1) a fatal
 //! error is returned as before.
 
+mod boot;
 mod ca_bundle;
+mod modes;
 mod mount;
 mod reconcile;
 mod supervisor;
 
 use anyhow::Result;
+use embra_boot::{BootMode, Cmdline, Release};
 use tracing::{error, info, warn};
 
 use supervisor::{halt_system, reboot_system, HALT_REASON_PATH};
@@ -39,11 +46,22 @@ fn main() -> Result<()> {
     // runs here, which is what makes the `set_var` calls in
     // `supervisor::prepare_environment` sound (#29). A failure is a halt
     // with its reason, as below.
-    match prepare(pid) {
-        Ok(()) => {}
+    let cmdline = match prepare(pid) {
+        Ok(c) => c,
         Err(e) if pid == 1 => halt_system(&fatal_reason(&e)),
         Err(e) => return Err(e),
-    }
+    };
+
+    // The boot mode: a menu entry's job, or the services. An unknown value
+    // is a normal boot under an error line, never a halt.
+    let mode = match cmdline.mode() {
+        Ok(m) => m,
+        Err(e) => {
+            error!("{e}; booting normally");
+            BootMode::Normal
+        }
+    };
+    boot::write_status(&cmdline, mode, &boot::Confirmed::Pending, None, Release::read().ok().as_ref());
 
     // The runtime is built by hand, so a failure is a halt with its reason
     // and not an unwinding panic inside `#[tokio::main]`.
@@ -53,7 +71,11 @@ fn main() -> Result<()> {
         Err(e) => return Err(e.into()),
     };
 
-    match runtime.block_on(run()) {
+    let outcome = match mode {
+        BootMode::Normal => runtime.block_on(run(&cmdline, mode)),
+        other => runtime.block_on(modes::run(other)),
+    };
+    match outcome {
         Ok(()) => {}
         Err(e) if pid == 1 => halt_system(&fatal_reason(&e)),
         Err(e) => return Err(e),
@@ -68,8 +90,9 @@ fn main() -> Result<()> {
 }
 
 /// Steps 2 to 4 of the boot, synchronous and before the runtime: the
-/// pseudo-filesystems (PID 1 only), the partition mounts, the environment.
-fn prepare(pid: u32) -> Result<()> {
+/// pseudo-filesystems (PID 1 only), the partition mounts, the scrub of the
+/// inherited environment (PID 1 only), the kernel line, the environment.
+fn prepare(pid: u32) -> Result<Cmdline> {
     info!("embrad starting as PID {}", pid);
 
     if pid != 1 {
@@ -94,18 +117,26 @@ fn prepare(pid: u32) -> Result<()> {
         e
     })?;
 
-    // Step 4: The environment every service inherits (TZ, the operator CA
-    // trust). The ephemeral tmpfs the CA bundle is written to exists now.
+    // Step 4: As PID 1, drop what the kernel handed over in the environment
+    // (every `KEY=value` on the boot line that is not a dotted parameter
+    // lands there): the line carries `embra.*` knobs and never a provider
+    // key. Then the kernel line, read once, and the environment every
+    // service inherits (TZ, the operator CA trust). The ephemeral tmpfs the
+    // CA bundle is written to exists now.
+    if pid == 1 {
+        supervisor::scrub_boot_environment();
+    }
+    let cmdline = Cmdline::read();
     supervisor::prepare_environment();
-    Ok(())
+    Ok(cmdline)
 }
 
 /// The services and the reconciliation loop. An `Err` is fatal: PID 1
 /// halts with it as the reason, development mode returns it.
-async fn run() -> Result<()> {
+async fn run(cmdline: &Cmdline, mode: BootMode) -> Result<()> {
     // Step 5: Start services in dependency order
     info!("Starting services");
-    let mut supervisor = supervisor::Supervisor::new();
+    let mut supervisor = supervisor::Supervisor::with_cmdline(cmdline.clone());
 
     // Define services in dependency order
     supervisor.register_services();
@@ -118,9 +149,13 @@ async fn run() -> Result<()> {
         e
     })?;
 
+    // Step 7: every service is healthy. A trial boot is confirmed on the
+    // ESP now; every boot publishes its status.
+    boot::after_services_healthy(cmdline, mode);
+
     info!("All services started. Entering reconciliation loop.");
 
-    // Step 4: Reconciliation loop (runs forever)
+    // Step 8: Reconciliation loop (runs forever)
     // Note: embrad's stdout/stderr are already redirected to log file
     // (done in supervisor before spawning embra-console)
     reconcile::run(&mut supervisor).await;

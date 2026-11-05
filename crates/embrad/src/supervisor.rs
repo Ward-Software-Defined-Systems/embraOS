@@ -12,77 +12,7 @@ use std::time::{Duration, Instant};
 use tokio::process::{Child, Command};
 use tracing::{info, warn, error};
 
-/// Read embra.cols and embra.rows from /proc/cmdline (set by run-qemu.sh)
-fn read_terminal_size_from_cmdline() -> (u16, u16) {
-    let cmdline = std::fs::read_to_string("/proc/cmdline").unwrap_or_default();
-    let mut cols = 80u16;
-    let mut rows = 24u16;
-    for param in cmdline.split_whitespace() {
-        if let Some(val) = param.strip_prefix("embra.cols=") {
-            cols = val.parse().unwrap_or(80);
-        }
-        if let Some(val) = param.strip_prefix("embra.rows=") {
-            rows = val.parse().unwrap_or(24);
-        }
-    }
-    info!("Terminal size from cmdline: {}x{}", cols, rows);
-    (cols, rows)
-}
-
-/// Web mode: `embra.web=1` on the kernel cmdline (set by run-qemu.sh).
-/// In web mode the operator UI is the browser, so the serial
-/// `embra-console` is NOT spawned (the brain is single-conversation —
-/// `embra-web` runs the sole PTY-hosted console). Same parsing style as
-/// `read_terminal_size_from_cmdline`.
-fn web_mode_enabled() -> bool {
-    std::fs::read_to_string("/proc/cmdline")
-        .unwrap_or_default()
-        .split_whitespace()
-        .any(|p| p == "embra.web=1")
-}
-
-/// WardSONDB verbose request logging: `embra.dbverbose=1` on the kernel
-/// cmdline (set by run-qemu.sh via EMBRA_DB_VERBOSE=1). WardSONDB's
-/// per-request log lines are opt-in (`--verbose`); the default boot keeps
-/// the tmpfs log at lifecycle/warn/error only, and this flag restores
-/// per-request lines for debugging. Only valid on WardSONDB builds with the
-/// opt-in flag — an older build rejects the unknown flag and will not
-/// start. Same parsing style as `web_mode_enabled`.
-/// Brain log filtering: `embra.loglevel=<spec>` on the kernel cmdline (set
-/// by run-qemu.sh via EMBRA_LOG_LEVEL). Forwarded to the brain child as
-/// its `EMBRA_LOG` env — an env-filter-style Targets spec, e.g.
-/// "info,kg::traversal=debug". No spaces (kernel args are space-split);
-/// commas are fine. Absent → the brain's INFO default.
-fn brain_log_spec() -> Option<String> {
-    std::fs::read_to_string("/proc/cmdline")
-        .unwrap_or_default()
-        .split_whitespace()
-        .find_map(|p| p.strip_prefix("embra.loglevel=").map(|s| s.to_string()))
-        .filter(|s| !s.is_empty())
-}
-
-/// Serial-console graphics: `embra.graphics=<auto|sixel|kitty|iterm2|
-/// halfblocks|off>` on the kernel cmdline (set by run-qemu.sh via
-/// EMBRA_GRAPHICS). Forwarded to the serial embra-console as its
-/// `EMBRA_TUI_GRAPHICS` env — the protocol its in-TUI media pane renders
-/// with. Absent → the console's serial default (halfblocks: plain cells,
-/// works in any terminal, no escape protocol on the serial line). The
-/// web PTY console is NOT governed by this — embra-web sets `sixel` on
-/// its own child.
-fn console_graphics_mode() -> Option<String> {
-    std::fs::read_to_string("/proc/cmdline")
-        .unwrap_or_default()
-        .split_whitespace()
-        .find_map(|p| p.strip_prefix("embra.graphics=").map(|s| s.to_string()))
-        .filter(|s| !s.is_empty())
-}
-
-fn db_verbose_enabled() -> bool {
-    std::fs::read_to_string("/proc/cmdline")
-        .unwrap_or_default()
-        .split_whitespace()
-        .any(|p| p == "embra.dbverbose=1")
-}
+use embra_boot::Cmdline;
 
 /// Service definition. There is no dependency list: `register_services`
 /// registers each service after everything it needs, and registration
@@ -180,14 +110,25 @@ pub struct Supervisor {
     boot_stdio: Option<(std::fs::File, std::fs::File)>,
     /// In start order.
     services: Vec<ServiceState>,
+    /// The kernel line, read once: the `embra.*` knobs the services are
+    /// registered with (the last occurrence of each wins).
+    cmdline: Cmdline,
 }
 
 impl Supervisor {
+    /// A supervisor over this machine's kernel line (the tests; `main`
+    /// reads the line once and passes it to `with_cmdline`).
+    #[cfg(test)]
     pub fn new() -> Self {
+        Self::with_cmdline(Cmdline::read())
+    }
+
+    pub fn with_cmdline(cmdline: Cmdline) -> Self {
         Self {
             web_token: None,
             boot_stdio: None,
             services: Vec::new(),
+            cmdline,
         }
     }
 
@@ -214,7 +155,11 @@ impl Supervisor {
             "--data-dir".to_string(), "/embra/data/wardsondb".to_string(),
             "--log-file".to_string(), "/embra/ephemeral/wardsondb.log".to_string(),
         ];
-        if db_verbose_enabled() {
+        // `embra.dbverbose=1`: WardSONDB's per-request log lines are opt-in
+        // (`--verbose`); the default boot keeps the tmpfs log at
+        // lifecycle/warn/error. An older WardSONDB rejects the flag and
+        // does not start.
+        if self.cmdline.db_verbose() {
             info!("WardSONDB verbose request logging enabled (embra.dbverbose=1)");
             wardsondb_args.push("--verbose".to_string());
         }
@@ -344,9 +289,12 @@ impl Supervisor {
         if !lm_studio_bearer.is_empty() {
             brain_env.push(("EMBRA_LM_STUDIO_BEARER".to_string(), lm_studio_bearer));
         }
-        if let Some(spec) = brain_log_spec() {
+        // `embra.loglevel=<spec>`: the brain's `EMBRA_LOG`, an env-filter
+        // Targets spec such as "info,kg::traversal=debug" (no spaces: kernel
+        // arguments are space-split). Absent, the brain's INFO default.
+        if let Some(spec) = self.cmdline.log_level() {
             info!("Brain log filter from cmdline (embra.loglevel): {}", spec);
-            brain_env.push(("EMBRA_LOG".to_string(), spec));
+            brain_env.push(("EMBRA_LOG".to_string(), spec.to_string()));
         }
 
         self.add_service(ServiceDef {
@@ -364,9 +312,10 @@ impl Supervisor {
         // 5. Operator UI — depends on embra-brain.
         // The brain is single-conversation (one shared SessionManager /
         // in_turn gate), so exactly one console→brain client may run.
-        // Web mode: embra-web (it spawns the sole PTY-hosted embra-console
-        // internally). Otherwise: the serial embra-console TUI.
-        if web_mode_enabled() {
+        // Web mode (the last word of `embra.web` and `embra.tui` on the
+        // kernel line): embra-web, which spawns the sole PTY-hosted
+        // embra-console internally. Otherwise the serial embra-console TUI.
+        if self.cmdline.web_console() {
             // The web console's gate: a token for this boot, in embra-web's
             // environment (never an argument: `ps` shows those) and in the
             // URL the banner prints. Without a token there is no gate, and
@@ -404,13 +353,18 @@ impl Supervisor {
                 restart_policy: RestartPolicy::default(),
             });
         } else {
-            // Read terminal size from kernel cmdline (set by run-qemu.sh
-            // from the host terminal).
-            let (term_cols, term_rows) = read_terminal_size_from_cmdline();
+            // The terminal size from the kernel line (`embra.cols`,
+            // `embra.rows`, run-qemu.sh's host terminal), 80×24 without it.
+            let (term_cols, term_rows) = self.cmdline.terminal_size();
+            info!("Terminal size from cmdline: {}x{}", term_cols, term_rows);
+            // `embra.graphics=<mode>`: the serial console's image protocol
+            // (`EMBRA_TUI_GRAPHICS`: halfblocks, sixel, kitty, iterm2, auto,
+            // off); absent, the console's halfblocks default. The web PTY
+            // console is embra-web's own child and not governed by this.
             let mut console_env: Vec<(String, String)> = Vec::new();
-            if let Some(mode) = console_graphics_mode() {
+            if let Some(mode) = self.cmdline.graphics() {
                 info!("Serial console graphics from cmdline (embra.graphics): {}", mode);
-                console_env.push(("EMBRA_TUI_GRAPHICS".to_string(), mode));
+                console_env.push(("EMBRA_TUI_GRAPHICS".to_string(), mode.to_string()));
             }
             self.add_service(ServiceDef {
                 name: "embra-console".to_string(),
@@ -471,6 +425,14 @@ impl Supervisor {
                         "    \x1b[1;36m{url}\x1b[0m  \x1b[2m(QEMU hostfwd; accept the embraOS-CA cert)\x1b[0m");
                     let _ = writeln!(o,
                         "    \x1b[2mThis boot's access token is in the URL; the URL is the credential, and it is shown here only.\x1b[0m");
+                    if let Ok(release) = embra_boot::Release::read() {
+                        let slot = match self.cmdline.slot() {
+                            Ok(Some(s)) if self.cmdline.trial() => format!(", slot {s} (trial boot, confirmed once every service is up)"),
+                            Ok(Some(s)) => format!(", slot {s}"),
+                            _ => String::new(),
+                        };
+                        let _ = writeln!(o, "    \x1b[2membraOS {} ({}, {}){slot}\x1b[0m", release.version, release.build_id, release.engine);
+                    }
                     let _ = writeln!(o);
                     let _ = o.flush();
                 }
@@ -920,6 +882,34 @@ pub fn prepare_environment() {
     crate::ca_bundle::setup_operator_ca_trust();
 }
 
+/// What PID 1 keeps of the environment the kernel handed it: the three
+/// variables the kernel sets itself. The rest is whatever `KEY=value` the
+/// boot line carried (the kernel passes every undotted one to init), and
+/// embrad reads `EMBRA_PROVIDER`, the API keys and the bearers from its
+/// environment: scrubbed, the boot line is a channel for `embra.*` knobs
+/// and nothing else.
+pub(crate) fn kept_at_boot(name: &str) -> bool {
+    matches!(name, "PATH" | "HOME" | "TERM")
+}
+
+/// Drop every inherited variable but the kept ones; the names (never the
+/// values) of what was dropped go to the log. PID 1 only, before the
+/// runtime: one thread runs, which is what makes `remove_var` sound.
+pub fn scrub_boot_environment() {
+    let dropped: Vec<String> = std::env::vars_os()
+        .filter_map(|(k, _)| k.into_string().ok())
+        .filter(|k| !kept_at_boot(k))
+        .collect();
+    for name in &dropped {
+        // SAFETY: one thread runs — `main` calls this before it builds the
+        // runtime — so no other thread reads the environment meanwhile.
+        unsafe { std::env::remove_var(name) };
+    }
+    if !dropped.is_empty() {
+        info!("boot environment scrubbed: {} variable(s) dropped ({})", dropped.len(), dropped.join(", "));
+    }
+}
+
 /// Where a halt leaves its reason, on STATE: a soul verification failure, a
 /// fatal boot error, a panic in PID 1. The intelligence reads it with
 /// `file_read`; the operator by loop-mounting STATE.
@@ -1049,6 +1039,21 @@ pub(crate) mod test_support {
     /// answers `None`), and a zombie of another test counts in the reaper
     /// guard's sweep. Seen as CI job 1794 under the runner's load.
     pub(crate) static CHILDREN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+}
+
+#[cfg(test)]
+mod boot_environment_tests {
+    use super::kept_at_boot;
+
+    #[test]
+    fn pid_one_keeps_path_home_and_term_from_the_boot_line_and_drops_the_rest() {
+        for kept in ["PATH", "HOME", "TERM"] {
+            assert!(kept_at_boot(kept), "{kept} is the kernel's own");
+        }
+        for dropped in ["EMBRA_PROVIDER", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "EMBRA_OLLAMA_BEARER", "EMBRA_CA_DIR", "EMBRA_WEB_TOKEN", "RUST_LOG", "embra"] {
+            assert!(!kept_at_boot(dropped), "{dropped} never reaches a service from the boot line");
+        }
+    }
 }
 
 #[cfg(test)]

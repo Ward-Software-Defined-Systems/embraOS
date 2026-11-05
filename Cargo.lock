@@ -1578,6 +1578,7 @@ name = "embrad"
 version = "0.23.0-phase1"
 dependencies = [
  "anyhow",
+ "embra-boot",
  "embra-common",
  "libc",
  "nix 0.29.0",

@@ -6,6 +6,8 @@ license-file.workspace = true
 
 [dependencies]
 embra-common = { workspace = true }
+# The boot contract: the kernel line's knobs and slot, grubenv on the ESP, the release stamp.
+embra-boot = { path = "../embra-boot" }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
