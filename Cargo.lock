@@ -1549,6 +1549,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "embra-update"
+version = "0.23.0-phase1"
+dependencies = [
+ "anyhow",
+ "embra-boot",
+ "flate2",
+ "hex",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+]
+
+[[package]]
 name = "embra-web"
 version = "0.23.0-phase1"
 dependencies = [

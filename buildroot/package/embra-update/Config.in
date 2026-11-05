@@ -1,0 +1,5 @@
+config BR2_PACKAGE_EMBRA_UPDATE
+	bool "embra-update"
+	help
+	  embraOS backups and updates: snapshots of STATE and DATA, their
+	  restore, and the signed release written into the inactive slot.

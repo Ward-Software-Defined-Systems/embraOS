@@ -1,0 +1,19 @@
+[package]
+name = "embra-update"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+
+# The OS's own backups and updates, run by embrad in a maintenance boot and
+# by the brain for the operator's commands. Everything it links is in the
+# lock already (tar and flate2 came in transitively).
+[dependencies]
+embra-boot = { path = "../embra-boot" }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tar = "0.4"
+flate2 = "1"
+libc = "0.2"

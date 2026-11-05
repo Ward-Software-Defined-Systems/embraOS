@@ -275,7 +275,7 @@ musl-cross:
       cargo build --release --target x86_64-unknown-linux-musl --locked
     - |
       set -eu
-      for bin in embra-init embrad embra-apid embra-trustd embra-brain embra-console embra-web wardsondb; do
+      for bin in embra-init embrad embra-apid embra-trustd embra-brain embra-console embra-web wardsondb embra-update; do
         p="target/x86_64-unknown-linux-musl/release/$bin"
         test -x "$p" || { echo "ERROR: missing binary: $bin" >&2; exit 1; }
         file "$p"
@@ -343,7 +343,7 @@ musl-cross-aarch64:
       cargo build --release --target aarch64-unknown-linux-musl --locked
     - |
       set -eu
-      for bin in embra-init embrad embra-apid embra-trustd embra-brain embra-console embra-web wardsondb; do
+      for bin in embra-init embrad embra-apid embra-trustd embra-brain embra-console embra-web wardsondb embra-update; do
         p="target/aarch64-unknown-linux-musl/release/$bin"
         test -x "$p" || { echo "ERROR: missing binary: $bin" >&2; exit 1; }
         file "$p" | grep -q 'ARM aarch64' || { echo "ERROR: $bin is not an aarch64 binary: $(file "$p")" >&2; exit 1; }

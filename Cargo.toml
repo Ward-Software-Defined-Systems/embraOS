@@ -4,6 +4,8 @@ members = [
     "crates/embra-init",
     # The boot contract embra-init, embrad and embra-update share (std + libc).
     "crates/embra-boot",
+    # The OS's own backups and updates: snapshots, restores, the signed release into the inactive slot.
+    "crates/embra-update",
     "crates/embrad",
     # The database: a vendored fork of
     # Ward-Software-Defined-Systems/WardSONDB, which continues independently.

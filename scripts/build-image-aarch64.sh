@@ -401,7 +401,7 @@ fi
 # The kernel's target-install stamp goes too: a tree built before
 # BR2_LINUX_KERNEL_INSTALL_TARGET would otherwise keep /boot without the kernel.
 (cd "$BUILDROOT_DIR" && \
-    for pkg in embrad embra-apid embra-trustd embra-brain embra-console embra-web wardsondb \
+    for pkg in embrad embra-apid embra-trustd embra-brain embra-console embra-web wardsondb embra-update \
                embra-rust-toolchain embra-embedding-model git openssl libcurl openssh; do
         make "${pkg}-dirclean" 2>/dev/null || true
     done && \
