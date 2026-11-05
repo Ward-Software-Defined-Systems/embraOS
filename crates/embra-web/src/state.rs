@@ -34,6 +34,9 @@ pub struct AppState {
     /// This boot's access token (`access.rs`): every request on `:3345`
     /// carries it, in the query once and in a cookie after.
     pub token: Arc<str>,
+    /// Where the OS keeps its backups (`backups.rs`): `/embra/data/backups`
+    /// in the OS, a temporary directory in a test.
+    pub backups_root: Arc<std::path::Path>,
 }
 
 impl AppState {
@@ -51,6 +54,7 @@ impl AppState {
             activity: ActivityFeed::new(),
             tools: ToolFeed::new(),
             token: Arc::from("0123456789abcdef0123456789abcdef"),
+            backups_root: Arc::from(std::env::temp_dir().as_path()),
         };
         (state, input_rx)
     }

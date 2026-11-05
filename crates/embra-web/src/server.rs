@@ -137,6 +137,10 @@ pub async fn serve(
         .route("/api/media/{id}", get(api_media_get))
         // A workspace file as a download (`file_offer`, `/download`).
         .route("/api/files/{*path}", get(api_file_get))
+        // A backup the OS took, streamed from DATA (`/backup list` names
+        // the route; the archive carries STATE's secrets and never enters
+        // the workspace).
+        .route("/api/backups/{name}", get(crate::backups::api_backup_get))
         .fallback(static_handler)
         // The gate (`access.rs`) over every route and the fallback: the
         // boot's token in the query once, the cookie after, 401 otherwise.

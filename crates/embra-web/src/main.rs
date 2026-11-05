@@ -15,6 +15,7 @@ mod activity_feed;
 mod api_tools;
 mod arbiter;
 mod assets;
+mod backups;
 mod chat_bridge;
 mod files;
 mod media;
@@ -93,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
         // as a backlog and fanned out to every `/ws/tools` socket.
         tools: ToolFeed::spawn(cfg.apid_addr.clone()),
         token,
+        backups_root: Arc::from(std::path::Path::new(backups::BACKUPS_ROOT)),
     };
 
     server::serve(&cfg, state, server_config).await

@@ -143,9 +143,10 @@
     // the DOM renderer rather than a blank terminal.
     try { term.loadAddon(new CanvasAddon.CanvasAddon()); } catch (e) {}
     // Download links. The console prints `web: /api/files/<path>` (a file
-    // card) and `web: /api/media/<id>` (an image card) on a row of its
-    // own; the provider underlines the route and a click fetches it as a
-    // download — same origin, so the `download` attribute is honoured.
+    // card), `web: /api/media/<id>` (an image card) and
+    // `web: /api/backups/<name>` (`/backup list`) on a row of its own; the
+    // provider underlines the route and a click fetches it as a download —
+    // same origin, so the `download` attribute is honoured.
     // Both routes are ASCII (percent-encoded), so column equals index.
     const embraDownload = (url) => {
       const a = document.createElement("a");
@@ -163,7 +164,7 @@
       });
     } catch (e) { console.warn("embra-web: download handler unavailable", e); }
     try {
-      const LINK = /\/api\/(files|media)\/[^\s]+/g;
+      const LINK = /\/api\/(files|media|backups)\/[^\s]+/g;
       term.registerLinkProvider({
         provideLinks(y, cb) {
           const line = term.buffer.active.getLine(y - 1);
