@@ -1,8 +1,8 @@
 //! embra-update — the OS's own backups and updates: snapshots of STATE and
-//! DATA and their restore (this binary's first half; the signed-release
-//! update is the other). Run by embrad in a maintenance boot from the GRUB
-//! menu and by the brain for the operator's slash commands; never a tool of
-//! the model.
+//! DATA and their restore; the signed release checked, written into the
+//! inactive slot and staged for GRUB; the status and the rollback. Run by
+//! embrad in a maintenance boot from the GRUB menu and by the brain for the
+//! operator's slash commands; never a tool of the model.
 //!
 //! Exit codes, read by both callers: 0 done; 1 failed, the last stderr line
 //! is the reason; 2 refused by a precondition, nothing was changed; 3 nothing
@@ -11,10 +11,16 @@
 mod cli;
 mod console;
 mod db;
+mod fetch;
+mod manifest;
 mod paths;
+mod pubkey;
+mod slot;
 mod snapshot;
+mod source;
+mod update;
 
-use std::io::{BufRead, Write};
+use std::io::Write;
 use std::process::ExitCode;
 
 use cli::Command;
@@ -32,6 +38,8 @@ pub enum Outcome {
     Refused(String),
     /// Nothing to do, and why.
     Nothing(String),
+    /// It failed on the way; the reason is the last line.
+    Failed(String),
 }
 
 fn main() -> ExitCode {
@@ -53,6 +61,10 @@ fn main() -> ExitCode {
         Ok(Outcome::Nothing(msg)) => {
             println!("{msg}");
             ExitCode::from(EXIT_NOTHING)
+        }
+        Ok(Outcome::Failed(msg)) => {
+            eprintln!("{msg}");
+            ExitCode::from(EXIT_FAILED)
         }
         Err(e) => {
             eprintln!("{e:#}");
@@ -148,15 +160,11 @@ fn run(cmd: Command) -> anyhow::Result<Outcome> {
             }
             false => Ok(Outcome::Refused(format!("delete: no backup named \"{name}\""))),
         },
-    }
-}
-
-/// Read one line from the console, trimmed; `None` at end of input.
-#[allow(dead_code)]
-pub(crate) fn read_line(input: &mut impl BufRead) -> Option<String> {
-    let mut line = String::new();
-    match input.read_line(&mut line) {
-        Ok(0) | Err(_) => None,
-        Ok(_) => Some(line.trim().to_string()),
+        Command::Check { source, tag } => Ok(update::check_command(source.as_deref(), tag.as_deref(), &mut std::io::stdout())),
+        Command::Apply { source, tag, yes, console, allow_downgrade } => {
+            Ok(update::apply_command(source.as_deref(), tag.as_deref(), yes, console, allow_downgrade, &mut std::io::stdout()))
+        }
+        Command::Status => Ok(update::status_command(&mut std::io::stdout())),
+        Command::Rollback => Ok(update::rollback_command(&mut std::io::stdout())),
     }
 }

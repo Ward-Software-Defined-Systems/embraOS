@@ -9,6 +9,14 @@ license-file.workspace = true
 # lock already (tar and flate2 came in transitively).
 [dependencies]
 embra-boot = { path = "../embra-boot" }
+# USER_AGENT alone (serde, serde_json, thiserror behind it).
+embra-tools-core = { path = "../embra-tools-core" }
+# The one HTTPS client: blocking (one request, one body into a writer);
+# the operator's CA bundle from SSL_CERT_FILE beside the compiled-in roots.
+reqwest = { workspace = true, features = ["blocking"] }
+# Ed25519 verification of a release manifest (in the lock through rustls).
+ring = "0.17"
+base64 = "0.22"
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

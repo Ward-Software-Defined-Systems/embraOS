@@ -1553,10 +1553,14 @@ name = "embra-update"
 version = "0.23.0-phase1"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "embra-boot",
+ "embra-tools-core",
  "flate2",
  "hex",
  "libc",
+ "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "sha2",

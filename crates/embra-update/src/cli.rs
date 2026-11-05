@@ -6,7 +6,11 @@ pub const USAGE: &str = "usage: embra-update <command> [flags]
   snapshot [--label <l>] [--taken-by <who>] [--once] [--force]   a tar.gz of STATE and DATA under /embra/data/backups
   restore [<name>] [--yes] [--console]                           replace STATE and DATA with a backup
   list [--names]                                                 the backups, newest first
-  delete <name>                                                  remove one backup";
+  delete <name>                                                  remove one backup
+  check [--source <url>] [--tag <v…>]                            the release at the source against this one
+  apply [--yes] [--console] [--allow-downgrade] [--source <url>] [--tag <v…>]   write the release into the inactive slot and stage it
+  status                                                         the booted, active and pending slots and what each holds
+  rollback                                                       make the other slot the default again";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -14,6 +18,10 @@ pub enum Command {
     Restore { name: Option<String>, yes: bool, console: bool },
     List { names_only: bool },
     Delete { name: String },
+    Check { source: Option<String>, tag: Option<String> },
+    Apply { source: Option<String>, tag: Option<String>, yes: bool, console: bool, allow_downgrade: bool },
+    Status,
+    Rollback,
 }
 
 /// A label: a word of letters, digits, `_`, `.` and `-`, up to 32 characters.
@@ -46,6 +54,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
     let mut yes = false;
     let mut console = false;
     let mut names = false;
+    let mut source: Option<String> = None;
+    let mut tag: Option<String> = None;
+    let mut allow_downgrade = false;
     let mut i = 0;
     while i < rest.len() {
         let a = rest[i].as_str();
@@ -61,6 +72,9 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             "--yes" => yes = true,
             "--console" => console = true,
             "--names" => names = true,
+            "--source" => source = Some(value("--source")?),
+            "--tag" => tag = Some(value("--tag")?),
+            "--allow-downgrade" => allow_downgrade = true,
             s if s.starts_with("--") => return Err(format!("unknown flag {s}")),
             s => positionals.push(s.to_string()),
         }
@@ -101,6 +115,10 @@ pub fn parse(args: &[String]) -> Result<Command, String> {
             }
             Ok(Command::Delete { name })
         }
+        "check" => Ok(Command::Check { source, tag }),
+        "apply" => Ok(Command::Apply { source, tag, yes, console, allow_downgrade }),
+        "status" => Ok(Command::Status),
+        "rollback" => Ok(Command::Rollback),
         other => Err(format!("unknown command {other:?}")),
     }
 }
@@ -127,6 +145,11 @@ mod tests {
         assert_eq!(p("restore --console"), Ok(Command::Restore { name: None, yes: false, console: true }));
         assert_eq!(p("list --names"), Ok(Command::List { names_only: true }));
         assert_eq!(p("delete 2026-11-05_101200_manual"), Ok(Command::Delete { name: "2026-11-05_101200_manual".into() }));
+        assert_eq!(p("check --source https://m/x --tag v1.2.3"), Ok(Command::Check { source: Some("https://m/x".into()), tag: Some("v1.2.3".into()) }));
+        assert_eq!(p("apply --yes --allow-downgrade"), Ok(Command::Apply { source: None, tag: None, yes: true, console: false, allow_downgrade: true }));
+        assert_eq!(p("status"), Ok(Command::Status));
+        assert_eq!(p("rollback"), Ok(Command::Rollback));
+        assert!(p("check --source").unwrap_err().contains("--source needs a value"));
         assert!(p("snapshot --label").unwrap_err().contains("--label needs a value"));
         assert!(p("snapshot --label ../x").unwrap_err().contains("not a label"));
         assert!(p("restore ../etc").unwrap_err().contains("not a backup name"));
