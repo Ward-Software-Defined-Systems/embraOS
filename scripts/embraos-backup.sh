@@ -21,15 +21,15 @@
 # Prerequisites:
 #   - Must run as root (or with sudo) for loop mount
 #   - VM must be STOPPED (partitions can't be mounted while QEMU has the image open)
-#   - mount, rsync, fdisk, sha256sum
+#   - mount, rsync, partx (util-linux), sha256sum
 #
 # What gets backed up:
-#   STATE partition (/dev/vda3 → /embra/state):
+#   STATE partition (GPT name `state`, /embra/state in the OS):
 #     - soul.sha256 (soul hash)
 #     - pki/ (Root CA, service certs)
 #     - halt_reason (if present)
 #
-#   DATA partition (/dev/vda4 → /embra/data):
+#   DATA partition (GPT name `data`, /embra/data in the OS):
 #     - wardsondb/ (all collections: soul, identity, memory, sessions, config, tools, etc.)
 #       This is the fjall data directory — SST segments, WAL, partition files
 #
@@ -92,10 +92,14 @@ if [ -n "${SUDO_USER:-}" ]; then
     chown "${SUDO_USER}:${SUDO_USER}" "$BACKUP_DIR"
 fi
 
-# Partition numbers in the GPT layout (from genimage.cfg)
-# Partition 1 = boot, 2 = rootfs (SquashFS), 3 = STATE, 4 = DATA
-STATE_PART_NUM=3
-DATA_PART_NUM=4
+# Partitions are found by their GPT names (buildroot/board/embraos/layout.sh;
+# one template builds both arches): STATE is `state`, DATA is `data`. The
+# numbers moved when the two OS slots arrived, the names did not, and a
+# Phase 1 image carries the same two names.
+# shellcheck source=lib/disk-layout.sh
+source "$SCRIPT_DIR/lib/disk-layout.sh"
+STATE_PART=state
+DATA_PART=data
 SECTOR_SIZE=512
 
 # Colors
@@ -149,63 +153,47 @@ check_vm_stopped() {
     fi
 }
 
-# Parse the GPT partition table to get byte offset and size for a partition.
-# losetup --partscan mishandles non-standard GPT layouts (e.g., partitions
-# starting at sector 34 instead of 2048), so we read the table with fdisk
-# and mount directly with -o loop,offset=X,sizelimit=Y.
+# Read the GPT partition table (lib/disk-layout.sh, partx by partition name)
+# for the byte offset and size of a partition, and mount directly with
+# -o loop,offset=X,sizelimit=Y: no `losetup --partscan`, whose /dev/loopNpM
+# nodes depend on udev and are unreliable inside a container.
 #
-# Usage: get_partition_geometry <part_num>
+# Usage: get_partition_geometry <gpt name>
 # Sets: PART_OFFSET (bytes), PART_SIZE (bytes)
 get_partition_geometry() {
-    local part_num=$1
+    local part_name=$1 line start_sector sectors
 
-    # fdisk -l outputs lines like:
-    #   output/images/embraos.img3 158730  683017  524288  256M Linux filesystem
-    # We need the start sector and sector count (columns 2 and 4).
-    # fdisk echoes the device path exactly as given, so match on
-    # "<image path><N> " first — an --image override need not end in .img.
-    local line
-    line=$(fdisk -l "$IMAGE" 2>/dev/null | grep -F -- "${IMAGE}${part_num} " || true)
-
+    line=$(partition_by_name "$IMAGE" "$part_name")
     if [ -z "$line" ]; then
-        line=$(fdisk -l "$IMAGE" 2>/dev/null | grep "\.img${part_num} " || true)
-    fi
-
-    if [ -z "$line" ]; then
-        # Try alternate format without .img prefix
-        line=$(fdisk -l "$IMAGE" 2>/dev/null | grep "${part_num} " | tail -1 || true)
-    fi
-
-    if [ -z "$line" ]; then
-        log_error "Could not find partition $part_num in disk image"
-        fdisk -l "$IMAGE" 2>/dev/null
+        log_error "No partition named '$part_name' in the disk image (not an embraOS image?)"
+        partx -g -o NR,START,SECTORS,NAME -- "$IMAGE" 2>/dev/null || true
         exit 1
     fi
 
-    # Extract start sector and sector count
-    # fdisk GPT output: Device Start End Sectors Size Type
-    local start_sector sectors
-    start_sector=$(echo "$line" | awk '{print $2}')
-    sectors=$(echo "$line" | awk '{print $4}')
+    read -r start_sector sectors <<< "$line" || true
+    if [ -z "$start_sector" ] || [ -z "$sectors" ]; then
+        log_error "Malformed geometry for partition '$part_name': $line"
+        exit 1
+    fi
 
     PART_OFFSET=$((start_sector * SECTOR_SIZE))
     PART_SIZE=$((sectors * SECTOR_SIZE))
 
-    log_info "Partition $part_num: offset=${PART_OFFSET} (sector ${start_sector}), size=${PART_SIZE} (${sectors} sectors)"
+    log_info "Partition '$part_name': offset=${PART_OFFSET} (sector ${start_sector}), size=${PART_SIZE} (${sectors} sectors)"
 }
 
 # Mount a partition from the disk image using calculated offset.
-# Usage: mount_partition <part_num> <mount_point>
+# Usage: mount_partition <gpt name> <mount_point>
 mount_partition() {
-    local part_num=$1
+    local part_name=$1
     local mount_point=$2
 
     mkdir -p "$mount_point"
 
-    get_partition_geometry "$part_num"
+    get_partition_geometry "$part_name"
 
     mount -o loop,offset=${PART_OFFSET},sizelimit=${PART_SIZE} "$IMAGE" "$mount_point"
-    log_info "Mounted partition ${part_num} → ${mount_point}"
+    log_info "Mounted partition '${part_name}' → ${mount_point}"
 }
 
 cleanup_mounts() {
@@ -250,8 +238,8 @@ do_backup() {
     MOUNT_STATE=$(mktemp -d /tmp/embra-state.XXXXXX)
     MOUNT_DATA=$(mktemp -d /tmp/embra-data.XXXXXX)
 
-    mount_partition $STATE_PART_NUM "$MOUNT_STATE"
-    mount_partition $DATA_PART_NUM "$MOUNT_DATA"
+    mount_partition "$STATE_PART" "$MOUNT_STATE"
+    mount_partition "$DATA_PART" "$MOUNT_DATA"
 
     # --- Backup STATE ---
     log_step "Backing up STATE partition..."
@@ -276,9 +264,11 @@ do_backup() {
     fi
 
     # --- Backup DATA (includes workspace/ — /embra/workspace is a bind
-    # mount of /embra/data/workspace, so data/ is the one canonical copy) ---
+    # mount of /embra/data/workspace, so data/ is the one canonical copy).
+    # backups/ holds the snapshots the OS takes itself (embra-update): each
+    # is a copy of STATE and DATA already, so they stay out of a host backup.
     log_step "Backing up DATA partition..."
-    rsync -a --info=progress2 "${MOUNT_DATA}/" "${backup_path}/data/"
+    rsync -a --info=progress2 --exclude 'backups/' "${MOUNT_DATA}/" "${backup_path}/data/"
 
     local data_files=$(find "${backup_path}/data" -type f | wc -l)
     local data_size=$(du -sh "${backup_path}/data" | cut -f1)
@@ -382,8 +372,8 @@ do_restore() {
     MOUNT_STATE=$(mktemp -d /tmp/embra-state.XXXXXX)
     MOUNT_DATA=$(mktemp -d /tmp/embra-data.XXXXXX)
 
-    mount_partition $STATE_PART_NUM "$MOUNT_STATE"
-    mount_partition $DATA_PART_NUM "$MOUNT_DATA"
+    mount_partition "$STATE_PART" "$MOUNT_STATE"
+    mount_partition "$DATA_PART" "$MOUNT_DATA"
 
     # --- Restore STATE ---
     if [ -d "${backup_path}/state" ]; then
@@ -484,8 +474,8 @@ do_verify() {
     MOUNT_STATE=$(mktemp -d /tmp/embra-state.XXXXXX)
     MOUNT_DATA=$(mktemp -d /tmp/embra-data.XXXXXX)
 
-    mount_partition $STATE_PART_NUM "$MOUNT_STATE"
-    mount_partition $DATA_PART_NUM "$MOUNT_DATA"
+    mount_partition "$STATE_PART" "$MOUNT_STATE"
+    mount_partition "$DATA_PART" "$MOUNT_DATA"
 
     local all_ok=true
 

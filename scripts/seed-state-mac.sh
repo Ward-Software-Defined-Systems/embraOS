@@ -142,7 +142,7 @@ if [ -n "$WIPE" ] && ! grep -q -- '--wipe)' "$INNER_SCRIPT" 2>/dev/null; then
   both files must come from the same revision."
 fi
 if ! grep -q -- '--image)' "$INNER_SCRIPT" 2>/dev/null ||
-   ! grep -q 'partx -g -o START,SECTORS' "$INNER_SCRIPT" 2>/dev/null; then
+   ! grep -q 'lib/disk-layout.sh' "$INNER_SCRIPT" 2>/dev/null; then
     die "scripts/seed-state.sh on this host predates the container-safe rewrite.
   It does not understand --image (you would see 'Unknown option: /work/...')
   and mounts via losetup --partscan, which does not work inside a container.

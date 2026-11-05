@@ -159,5 +159,5 @@ fi
 
 docker run "${DOCKER_ARGS[@]}" \
     ubuntu:24.04 \
-    bash -c 'apt-get update -qq && apt-get install -y -qq rsync fdisk python3 && exec /work/scripts/embraos-backup.sh "$@"' \
+    bash -c 'apt-get update -qq && apt-get install -y -qq rsync python3 && exec /work/scripts/embraos-backup.sh "$@"' \
     -- ${INNER_ARGS[@]+"${INNER_ARGS[@]}"} "$@"

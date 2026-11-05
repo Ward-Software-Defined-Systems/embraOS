@@ -41,11 +41,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 EMBRAOS_ROOT="${EMBRAOS_ROOT:-$(dirname "$SCRIPT_DIR")}"
 
-# Partition numbers from buildroot/board/embraos/genimage.cfg.in — one template
-# builds both arches, so this layout is identical on x86_64 and aarch64.
-# 1 = boot (vfat), 2 = rootfs (SquashFS), 3 = STATE, 4 = DATA
-STATE_PART_NUM=3
-DATA_PART_NUM=4
+# Partitions are found by their GPT names (buildroot/board/embraos/layout.sh;
+# one template builds both arches): STATE is `state`, DATA is `data`. The
+# numbers moved when the two OS slots arrived, the names did not, and a
+# Phase 1 image carries the same two names.
+# shellcheck source=lib/disk-layout.sh
+source "$SCRIPT_DIR/lib/disk-layout.sh"
+STATE_PART=state
+DATA_PART=data
 SECTOR_SIZE=512
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -214,56 +217,49 @@ else
 fi
 
 # --- Partition geometry + mounting --------------------------------------
-# Read the GPT directly and mount by byte offset rather than using
-# `losetup --partscan` + ${LOOPDEV}pN. Two reasons: this image's GPT starts at
-# sector 34 rather than 2048, which partscan mishandles (see the same note in
-# embraos-backup.sh), and inside a container the /dev/loopNpM partition nodes
-# depend on udev and are unreliable.
-#
-# Geometry comes from partx, not fdisk as in embraos-backup.sh — deliberate,
-# don't "fix" one into the other. partx prints bare numbers with no device
-# column (immune to spaces in the image path) and lives in util-linux, which is
-# Priority:required, so the Docker wrapper installs no packages at all. fdisk
-# is a separate Ubuntu package.
+# Read the GPT directly (lib/disk-layout.sh, partx by partition name) and
+# mount by byte offset rather than using `losetup --partscan` + ${LOOPDEV}pN:
+# inside a container the /dev/loopNpM partition nodes depend on udev and are
+# unreliable. partx lives in util-linux, Priority:required, so the Docker
+# wrapper installs no packages at all.
 
-get_partition_geometry() {
-    local part_num=$1 line start_sector sectors
+get_partition_geometry() {   # get_partition_geometry <gpt name>
+    local part_name=$1 line start_sector sectors
 
     # partx exits 0 with empty output for a missing partition — test the value.
-    line=$(partx -g -o START,SECTORS --nr "$part_num" "$IMAGE" 2>/dev/null || true)
-    [ -n "$line" ] || die "could not read partition $part_num from $IMAGE (not an embraOS image?)"
+    line=$(partition_by_name "$IMAGE" "$part_name")
+    [ -n "$line" ] || die "no partition named '$part_name' in $IMAGE (not an embraOS image?)"
 
     read -r start_sector sectors <<< "$line" || true
-    [ -n "$start_sector" ] && [ -n "$sectors" ] || die "malformed geometry for partition $part_num: $line"
+    [ -n "$start_sector" ] && [ -n "$sectors" ] || die "malformed geometry for partition '$part_name': $line"
 
     PART_OFFSET=$((start_sector * SECTOR_SIZE))
     PART_SIZE=$((sectors * SECTOR_SIZE))
 }
 
-mount_partition() {
-    local part_num=$1 mount_point=$2
-    get_partition_geometry "$part_num"
+mount_partition() {   # mount_partition <gpt name> <mount point>
+    local part_name=$1 mount_point=$2
+    get_partition_geometry "$part_name"
     # mount(8) allocates the loop device itself with autoclear, so umount detaches it.
     $SUDO mount -o loop,offset=${PART_OFFSET},sizelimit=${PART_SIZE} "$IMAGE" "$mount_point"
-    echo "Mounted partition ${part_num} → ${mount_point} (offset=${PART_OFFSET} size=${PART_SIZE})"
+    echo "Mounted partition '${part_name}' → ${mount_point} (offset=${PART_OFFSET} size=${PART_SIZE})"
 }
 
 # --- Optional wipe ------------------------------------------------------
 # Runs BEFORE anything is mounted — reformatting a mounted filesystem would
 # corrupt it. Replaces the old hand-run QUICK-START recipe, which used
-# `losetup --partscan` + `${LOOPDEV}p3` and so was both fragile on this
-# sector-34 GPT and impossible on macOS.
+# `losetup --partscan` + `${LOOPDEV}p3` and so was impossible on macOS.
 
-wipe_partition() {   # wipe_partition <part_num> <label>
-    local part_num=$1 label=$2
-    get_partition_geometry "$part_num"
+wipe_partition() {   # wipe_partition <gpt name> <label>
+    local part_name=$1 label=$2
+    get_partition_geometry "$part_name"
     # `mke2fs -E offset=` writes ONLY within [offset, offset+size) — no loop
     # device at all, so this behaves identically on a Linux host and inside the
     # Docker wrapper, and cannot leak a loop device. e2fsprogs is Priority:
     # required, so the wrapper's container still installs nothing.
     $SUDO mkfs.ext4 -q -F -E offset="${PART_OFFSET}" -L "$label" \
         "$IMAGE" "$((PART_SIZE / 1024))k"
-    echo "  wiped $label (p${part_num}, $((PART_SIZE / 1048576)) MiB)"
+    echo "  wiped $label ('${part_name}', $((PART_SIZE / 1048576)) MiB)"
 }
 
 if [ -n "$WIPE" ]; then
@@ -292,8 +288,8 @@ if [ -n "$WIPE" ]; then
         [ "$confirm" = "wipe" ] || die "aborted — nothing was written"
     fi
 
-    [ "$wipe_state" -eq 1 ] && wipe_partition "$STATE_PART_NUM" STATE
-    [ "$wipe_data" -eq 1 ]  && wipe_partition "$DATA_PART_NUM" DATA
+    [ "$wipe_state" -eq 1 ] && wipe_partition "$STATE_PART" STATE
+    [ "$wipe_data" -eq 1 ]  && wipe_partition "$DATA_PART" DATA
     echo ""
 fi
 
@@ -315,8 +311,8 @@ trap cleanup EXIT
 MOUNT_STATE=$(mktemp -d)
 MOUNT_DATA=$(mktemp -d)
 
-mount_partition "$STATE_PART_NUM" "$MOUNT_STATE"
-mount_partition "$DATA_PART_NUM" "$MOUNT_DATA"
+mount_partition "$STATE_PART" "$MOUNT_STATE"
+mount_partition "$DATA_PART" "$MOUNT_DATA"
 
 echo "STATE mounted at $MOUNT_STATE"
 echo "DATA mounted at $MOUNT_DATA"
