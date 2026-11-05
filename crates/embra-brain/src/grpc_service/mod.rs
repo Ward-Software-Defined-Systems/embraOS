@@ -7,6 +7,7 @@ mod learning_loop;
 mod provider_setup;
 mod slash;
 mod turn;
+mod update;
 #[cfg(test)]
 mod tests;
 

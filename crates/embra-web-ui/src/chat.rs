@@ -543,6 +543,7 @@ const SLASH_GROUPS: &[(&str, &[(&str, &str)])] = &[
     ("System", &[
         ("/status", "system overview"),
         ("/help", "show command help"),
+        ("/reboot", "reboot embraOS (/reboot now)"),
         ("/feedback-loop", "trigger the feedback loop (experimental)"),
     ]),
 ];

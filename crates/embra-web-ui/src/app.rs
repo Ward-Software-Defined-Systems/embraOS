@@ -63,7 +63,7 @@ const GROUPS: &[(&str, &[(&str, &str)])] = &[
         ("/soul", "soul"), ("/identity", "identity"), ("/mode", "mode + seal"),
     ]),
     ("System", &[
-        ("/status", "overview"), ("/help", "help"),
+        ("/status", "overview"), ("/help", "help"), ("/reboot", "reboot"),
         ("/feedback-loop", "experimental"),
     ]),
 ];

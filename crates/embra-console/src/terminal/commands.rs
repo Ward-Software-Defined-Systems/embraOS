@@ -90,6 +90,7 @@ Identity:
 System:
   /help                          Show this help message
   /status                        System status
+  /reboot                        Say what a reboot does; /reboot now reboots embraOS through the boot menu
   /feedback-loop                 Trigger Phase 2 Continuity Engine self-evaluation (experimental)
 
 Keyboard:
