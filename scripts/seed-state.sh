@@ -279,8 +279,8 @@ if [ -n "$WIPE" ]; then
 
     echo ""
     echo "WIPE — reformats these partitions in $IMAGE:"
-    [ "$wipe_state" -eq 1 ] && echo "  STATE (p3) — soul hash, PKI, API keys, config"
-    [ "$wipe_data" -eq 1 ]  && echo "  DATA  (p4) — WardSONDB: all memory, sessions, workspace"
+    [ "$wipe_state" -eq 1 ] && echo "  STATE ('$STATE_PART') — soul hash, PKI, API keys, config"
+    [ "$wipe_data" -eq 1 ]  && echo "  DATA  ('$DATA_PART') — WardSONDB: all memory, sessions, workspace, and the in-OS backups"
     if [ "$wipe_data" -eq 1 ] && [ "$wipe_state" -eq 0 ]; then
         echo "  and STATE/soul.sha256 (a sealed hash with no soul document halts the boot)"
     fi
