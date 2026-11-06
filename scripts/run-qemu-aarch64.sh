@@ -87,6 +87,25 @@ if [ -n "${EMBRA_GRAPHICS:-}" ]; then
     KNOBS="$KNOBS embra.graphics=${EMBRA_GRAPHICS}"
     echo "  Serial graphics: ${EMBRA_GRAPHICS} (EMBRA_GRAPHICS)"
 fi
+# The two switches take 1 and nothing else; another value (a stray comma:
+# EMBRA_TUI="1,") would be ignored in silence.
+for switch in EMBRA_TUI EMBRA_DB_VERBOSE; do
+    case "${!switch:-}" in
+        ""|0|1) ;;
+        *) echo "WARNING: $switch='${!switch}' is not 1 and is ignored (the switch is $switch=1)" >&2 ;;
+    esac
+done
+
+# The user-mode network: the forwarded ports, and EMBRA_DHCP_START=<address>
+# as the first address QEMU's DHCP server leases (see run-qemu.sh).
+NIC="user,hostfwd=tcp:127.0.0.1:50000-:50000,hostfwd=tcp:127.0.0.1:8443-:8443,hostfwd=tcp::3345-:3345"
+if [ -n "${EMBRA_DHCP_START:-}" ]; then
+    if ! [[ "$EMBRA_DHCP_START" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+        echo "ERROR: EMBRA_DHCP_START must be an IPv4 address, got '$EMBRA_DHCP_START'" >&2; exit 2
+    fi
+    NIC="$NIC,dhcpstart=$EMBRA_DHCP_START"
+    echo "  DHCP: QEMU leases from $EMBRA_DHCP_START (EMBRA_DHCP_START)"
+fi
 
 # find_firmware: FW_CODE and FW_VARS for the UEFI path. The virt machine
 # wants 64 MiB flash images; the edk2 and AAVMF pairs are padded so.
@@ -181,7 +200,7 @@ if [ "$EMBRA_BOOT" = "direct" ]; then
         -append "console=ttyAMA0 ro quiet embra.slot=a $WEB_CMDLINE $KNOBS" \
         -nographic \
         -serial mon:stdio \
-        -nic user,hostfwd=tcp:127.0.0.1:50000-:50000,hostfwd=tcp:127.0.0.1:8443-:8443,hostfwd=tcp::3345-:3345 \
+        -nic "$NIC" \
         -no-reboot
     exit $?
 fi
@@ -209,4 +228,4 @@ qemu-system-aarch64 \
     -smbios "type=11,value=${SMBIOS_VALUE}" \
     -nographic \
     -serial mon:stdio \
-    -nic user,hostfwd=tcp:127.0.0.1:50000-:50000,hostfwd=tcp:127.0.0.1:8443-:8443,hostfwd=tcp::3345-:3345
+    -nic "$NIC"

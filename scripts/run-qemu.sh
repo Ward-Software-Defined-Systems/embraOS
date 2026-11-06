@@ -14,6 +14,15 @@
 # Firmware for the UEFI path: EMBRA_FW_CODE/EMBRA_FW_VARS, else the OVMF or
 # edk2 images of the host (Ubuntu: the ovmf package; macOS: Homebrew's qemu).
 # The variable store is copied per run and removed on exit.
+#
+# Host-side extras (neither reaches the OS):
+#   EMBRA_VNC=1                 the display on a VNC server at 127.0.0.1:5900
+#       (password "embraos": macOS Screen Sharing refuses a server without
+#       one; loopback only, tunnel it with ssh -L). The serial line stays on
+#       this terminal. The UEFI path paints GRUB's menu and the boot banner
+#       there; the direct path's kernel line names only the serial console.
+#   EMBRA_DHCP_START=<address>  the first address QEMU's DHCP server leases
+#       (10.0.2.200 shows the banner's second URL on the leased address).
 
 set -euo pipefail
 
@@ -85,6 +94,36 @@ fi
 if [ -n "${EMBRA_GRAPHICS:-}" ]; then
     KNOBS="$KNOBS embra.graphics=${EMBRA_GRAPHICS}"
     echo "  Serial graphics: ${EMBRA_GRAPHICS} (EMBRA_GRAPHICS)"
+fi
+# The two switches take 1 and nothing else; another value (a stray comma:
+# EMBRA_TUI="1,") would be ignored in silence and the web console would
+# come up as if nothing had been asked.
+for switch in EMBRA_TUI EMBRA_DB_VERBOSE; do
+    case "${!switch:-}" in
+        ""|0|1) ;;
+        *) echo "WARNING: $switch='${!switch}' is not 1 and is ignored (the switch is $switch=1)" >&2 ;;
+    esac
+done
+
+# The user-mode network: the forwarded ports, and the DHCP range's first
+# address when asked for.
+NIC="user,hostfwd=tcp:127.0.0.1:50000-:50000,hostfwd=tcp:127.0.0.1:8443-:8443,hostfwd=tcp::3345-:3345"
+if [ -n "${EMBRA_DHCP_START:-}" ]; then
+    if ! [[ "$EMBRA_DHCP_START" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
+        echo "ERROR: EMBRA_DHCP_START must be an IPv4 address, got '$EMBRA_DHCP_START'" >&2; exit 2
+    fi
+    NIC="$NIC,dhcpstart=$EMBRA_DHCP_START"
+    echo "  DHCP: QEMU leases from $EMBRA_DHCP_START (EMBRA_DHCP_START)"
+fi
+
+# The display: none (the serial line on this terminal), or a VNC server on
+# the loopback beside it.
+DISPLAY_ARGS=(-nographic)
+if [ "${EMBRA_VNC:-}" = "1" ]; then
+    DISPLAY_ARGS=(-display none -object secret,id=vncpw,data=embraos -vga std -vnc 127.0.0.1:0,password-secret=vncpw)
+    echo "  Display: VNC at 127.0.0.1:5900, password embraos (EMBRA_VNC=1; from another machine: ssh -L 5901:127.0.0.1:5900 <this host>, then localhost:5901)"
+elif [ -n "${EMBRA_VNC:-}" ] && [ "$EMBRA_VNC" != "0" ]; then
+    echo "WARNING: EMBRA_VNC='$EMBRA_VNC' is not 1 and is ignored (the switch is EMBRA_VNC=1)" >&2
 fi
 
 # find_firmware: FW_CODE and FW_VARS for the UEFI path. The override pair
@@ -185,9 +224,9 @@ if [ "$EMBRA_BOOT" = "direct" ]; then
         -kernel "$KERNEL" \
         -initrd "$INITRD" \
         -append "console=ttyS0 ro quiet embra.slot=a $WEB_CMDLINE $KNOBS" \
-        -nographic \
+        "${DISPLAY_ARGS[@]}" \
         -serial mon:stdio \
-        -nic user,hostfwd=tcp:127.0.0.1:50000-:50000,hostfwd=tcp:127.0.0.1:8443-:8443,hostfwd=tcp::3345-:3345 \
+        -nic "$NIC" \
         -no-reboot
     exit $?
 fi
@@ -217,6 +256,6 @@ qemu-system-x86_64 \
     -drive if=pflash,format=raw,file="$VARS_SCRATCH" \
     -drive file="$IMAGE",format=raw,if=virtio \
     -smbios "type=11,value=${SMBIOS_VALUE}" \
-    -nographic \
+    "${DISPLAY_ARGS[@]}" \
     -serial mon:stdio \
-    -nic user,hostfwd=tcp:127.0.0.1:50000-:50000,hostfwd=tcp:127.0.0.1:8443-:8443,hostfwd=tcp::3345-:3345
+    -nic "$NIC"
