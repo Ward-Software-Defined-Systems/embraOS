@@ -31,10 +31,12 @@
 #
 #   DATA partition (GPT name `data`, /embra/data in the OS):
 #     - wardsondb/ (all collections: soul, identity, memory, sessions, config, tools, etc.)
-#       This is the fjall data directory — SST segments, WAL, partition files
+#       The storage engine's own directory, copied whole; its `.engine` marker
+#       names the engine (fjall: one directory per collection under partitions/;
+#       rocksdb: the column families inside one directory of .sst files)
 #
 # Ordering: WardSONDB does NOT need to be running. This is a file-level backup.
-# fjall picks up the data directory on next start. The files are crash-consistent
+# The engine picks up the data directory on next start. The files are crash-consistent
 # as long as the VM was shut down cleanly (embrad sends SIGTERM → WardSONDB flushes).
 
 set -euo pipefail
@@ -114,6 +116,61 @@ NC='\033[0m'
 log_info()  { echo -e "${GREEN}[INFO]${NC}  $*"; }
 log_warn()  { echo -e "${YELLOW}[WARN]${NC}  $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $*"; }
+
+# --- WardSONDB by engine ----------------------------------------------------
+# The database directory carries a `.engine` marker naming the engine that
+# wrote it (WardSONDB writes it at its first start and refuses another engine
+# after). fjall keeps one directory per collection under partitions/, named
+# `<collection>#docs`, so the collections can be counted and the key ones
+# checked by name. RocksDB keeps its column families inside one directory of
+# .sst, MANIFEST and OPTIONS files, so from the shell the engine and the
+# segment count are all there is to report. A directory without the marker
+# predates it and is described by its layout alone.
+wardsondb_engine() {   # <wardsondb dir> → fjall | rocksdb | <other text> | ""
+    local marker="$1/.engine"
+    if [ -f "$marker" ]; then tr -d '[:space:]' < "$marker"; fi
+}
+
+# fjall_collection_count <wardsondb dir> → the number of `<collection>#docs`
+# partitions, 0 without a partitions/ directory
+fjall_collection_count() {
+    find "$1/partitions" -maxdepth 1 -type d -name "*#docs" 2>/dev/null | wc -l | tr -d ' '
+}
+
+# rocksdb_sst_count <wardsondb dir> → the number of SST files at the top level
+rocksdb_sst_count() {
+    find "$1" -maxdepth 1 -type f -name "*.sst" 2>/dev/null | wc -l | tr -d ' '
+}
+
+# report_wardsondb <wardsondb dir>: one log line describing the database by
+# its engine, a warning when the marker and the layout disagree. Used after a
+# backup (on the copy) and by verify (on the mounted partition).
+report_wardsondb() {
+    local dir="$1" engine
+    engine=$(wardsondb_engine "$dir")
+    case "$engine" in
+        fjall)
+            if [ -d "$dir/partitions" ]; then
+                log_info "WardSONDB: fjall, $(fjall_collection_count "$dir") collection partitions"
+            else
+                log_warn "WardSONDB: the .engine marker says fjall, but there is no partitions/ directory"
+            fi ;;
+        rocksdb)
+            if [ -f "$dir/CURRENT" ]; then
+                log_info "WardSONDB: rocksdb, $(rocksdb_sst_count "$dir") SST files (the collections are column families inside the one directory)"
+            else
+                log_warn "WardSONDB: the .engine marker says rocksdb, but there is no CURRENT file"
+            fi ;;
+        "")
+            if [ -d "$dir/partitions" ]; then
+                log_info "WardSONDB: no .engine marker (a DATA from before the marker), fjall by its layout, $(fjall_collection_count "$dir") collection partitions"
+            else
+                log_warn "WardSONDB: no .engine marker and no partitions/ directory; the directory was copied as it is"
+            fi ;;
+        *)
+            log_warn "WardSONDB: unknown engine '${engine}' in .engine; the directory was copied as it is" ;;
+    esac
+}
 log_step()  { echo -e "${CYAN}[STEP]${NC}  $*"; }
 
 check_root() {
@@ -274,16 +331,11 @@ do_backup() {
     local data_size=$(du -sh "${backup_path}/data" | cut -f1)
     log_info "DATA: ${data_files} files, ${data_size}"
 
-    # Count WardSONDB collections (fjall stores each as a partition under partitions/)
+    # Describe the database by its engine (the copy is complete either way)
+    local data_engine=""
     if [ -d "${backup_path}/data/wardsondb" ]; then
-        local partitions_dir="${backup_path}/data/wardsondb/partitions"
-        if [ -d "$partitions_dir" ]; then
-            # Count collection partitions (named like "soul.invariant#docs", "memory.entries#docs")
-            local collection_count=$(find "$partitions_dir" -maxdepth 1 -type d -name "*#docs" | wc -l)
-            log_info "WardSONDB: ${collection_count} collection partitions"
-        else
-            log_warn "WardSONDB data directory exists but no partitions/ subdirectory"
-        fi
+        report_wardsondb "${backup_path}/data/wardsondb"
+        data_engine=$(wardsondb_engine "${backup_path}/data/wardsondb")
     else
         log_warn "No WardSONDB data directory found"
     fi
@@ -300,6 +352,7 @@ do_backup() {
     "state_size": "${state_size}",
     "data_files": ${data_files},
     "data_size": "${data_size}",
+    "data_engine": "${data_engine}",
     "hostname": "$(hostname)",
     "created_by": "embraos-backup.sh"
 }
@@ -511,20 +564,23 @@ do_verify() {
     if [ -d "${MOUNT_DATA}/wardsondb" ]; then
         local db_size=$(du -sh "${MOUNT_DATA}/wardsondb" | cut -f1)
         local db_files=$(find "${MOUNT_DATA}/wardsondb" -type f | wc -l)
-        local collection_count=$(find "${MOUNT_DATA}/wardsondb/partitions" -maxdepth 1 -type d -name "*#docs" 2>/dev/null | wc -l)
-        echo -e "  WardSONDB:    ${GREEN}present${NC} (${db_size}, ${db_files} files, ${collection_count} collections)"
+        echo -e "  WardSONDB:    ${GREEN}present${NC} (${db_size}, ${db_files} files)"
+        report_wardsondb "${MOUNT_DATA}/wardsondb"
 
-        # Check for key collection partitions (fjall: partitions/{name}#docs/)
+        # The key collections, by name: a fjall layout only (RocksDB's column
+        # families are not listable from the shell)
         local pdir="${MOUNT_DATA}/wardsondb/partitions"
-        local has_soul=$(find "$pdir" -maxdepth 1 -type d -name "soul.invariant#docs" 2>/dev/null | head -1)
-        local has_sessions=$(find "$pdir" -maxdepth 1 -type d -name "sessions.*#docs" 2>/dev/null | head -1)
-        local has_memory=$(find "$pdir" -maxdepth 1 -type d -name "memory.*#docs" 2>/dev/null | head -1)
-        local has_config=$(find "$pdir" -maxdepth 1 -type d -name "config.*#docs" 2>/dev/null | head -1)
+        if [ -d "$pdir" ]; then
+            local has_soul=$(find "$pdir" -maxdepth 1 -type d -name "soul.invariant#docs" 2>/dev/null | head -1)
+            local has_sessions=$(find "$pdir" -maxdepth 1 -type d -name "sessions.*#docs" 2>/dev/null | head -1)
+            local has_memory=$(find "$pdir" -maxdepth 1 -type d -name "memory.*#docs" 2>/dev/null | head -1)
+            local has_config=$(find "$pdir" -maxdepth 1 -type d -name "config.*#docs" 2>/dev/null | head -1)
 
-        [ -n "$has_soul" ]     && echo -e "    soul.invariant:  ${GREEN}✓${NC}" || echo -e "    soul.invariant:  ${YELLOW}✗${NC}"
-        [ -n "$has_config" ]   && echo -e "    config.system:   ${GREEN}✓${NC}" || echo -e "    config.system:   ${YELLOW}✗${NC}"
-        [ -n "$has_memory" ]   && echo -e "    memory.*:        ${GREEN}✓${NC}" || echo -e "    memory.*:        ${YELLOW}✗${NC}"
-        [ -n "$has_sessions" ] && echo -e "    sessions.*:      ${GREEN}✓${NC}" || echo -e "    sessions.*:      ${YELLOW}✗${NC}"
+            [ -n "$has_soul" ]     && echo -e "    soul.invariant:  ${GREEN}✓${NC}" || echo -e "    soul.invariant:  ${YELLOW}✗${NC}"
+            [ -n "$has_config" ]   && echo -e "    config.system:   ${GREEN}✓${NC}" || echo -e "    config.system:   ${YELLOW}✗${NC}"
+            [ -n "$has_memory" ]   && echo -e "    memory.*:        ${GREEN}✓${NC}" || echo -e "    memory.*:        ${YELLOW}✗${NC}"
+            [ -n "$has_sessions" ] && echo -e "    sessions.*:      ${GREEN}✓${NC}" || echo -e "    sessions.*:      ${YELLOW}✗${NC}"
+        fi
     else
         echo -e "  WardSONDB:    ${RED}missing${NC}"
         all_ok=false
