@@ -423,7 +423,7 @@ if [ -n "$SEED_DIR" ]; then
     fi
 fi
 
-# Seed operator root CA certificates (git/OpenSSL trust for self-hosted servers)
+# Seed the operator's release signing key (trusted beside the image's own)
 if [ -n "$UPDATE_KEY" ]; then
     if [ -f "$UPDATE_KEY" ] && grep -q 'BEGIN PUBLIC KEY' "$UPDATE_KEY"; then
         echo "Seeding the release signing key into STATE/update-signing.pub..."
