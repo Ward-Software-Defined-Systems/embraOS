@@ -166,7 +166,7 @@ cd ~/projects/embraOS
 docker run --rm -v "$PWD":/work -v embraos-br-x86_64:/work/buildroot-src \
   -w /work ubuntu:24.04 bash -c \
   "apt-get update && apt-get install -y build-essential gcc g++ \
-   unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools libelf-dev && \
+   unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools qemu-utils libelf-dev && \
    FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image.sh --buildroot-only"
 ```
 
@@ -223,7 +223,7 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > docker run --rm -e JOBS=2 -v "$PWD":/work \
 >   -v embraos-br-x86_64:/work/buildroot-src -w /work ubuntu:24.04 bash -c \
 >   "apt-get update && apt-get install -y build-essential gcc g++ \
->    unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools libelf-dev && \
+>    unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools qemu-utils libelf-dev && \
 >    FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image.sh --buildroot-only"
 > ```
 > `JOBS` defaults to all cores (unchanged from canonical) — only set it when

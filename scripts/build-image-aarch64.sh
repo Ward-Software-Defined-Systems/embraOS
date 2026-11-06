@@ -27,7 +27,7 @@
 #   docker run --rm -v "$PWD":/work -v embraos-br-aarch64:/work/buildroot-src \
 #     -w /work ubuntu:24.04 bash -c \
 #     "apt-get update && apt-get install -y build-essential gcc g++ \
-#      unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \
+#      unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools qemu-utils && \
 #      FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image-aarch64.sh --buildroot-only"
 #
 #   (Docker defaults to linux/arm64 on Apple Silicon — host tools run natively,
@@ -334,7 +334,7 @@ if [ "$(uname)" = "Darwin" ]; then
     echo "  docker run --rm -v \"\$PWD\":/work -v embraos-br-aarch64:/work/buildroot-src \\"
     echo "    -w /work ubuntu:24.04 bash -c \\"
     echo "    \"apt-get update && apt-get install -y build-essential gcc g++ \\"
-    echo "     unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \\"
+    echo "     unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools qemu-utils && \\"
     echo "     FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image-aarch64.sh --buildroot-only\""
     echo ""
     echo "(Docker defaults to linux/arm64 on Apple Silicon — no Rosetta overhead."
@@ -436,6 +436,10 @@ cp "$BUILDROOT_DIR/output/images/embraos.img" output/images/
 # (EMBRA_BOOT=direct); the squashfs is the slot image an OS update ships.
 cp "$BUILDROOT_DIR/output/images/${KERNEL_NAME}" output/images/
 cp "$BUILDROOT_DIR/output/images/rootfs.squashfs" output/images/
+# The same disk for the other hypervisors: embraos.vmdk, embraos.vhdx and
+# embraos.ova beside the raw image (write_vm_images, scripts/lib/image-common.sh).
+write_vm_images output/images/embraos.img output/images aarch64 \
+    "${STORAGE_ENGINE:-$(sed -n 's/^ENGINE=//p' "target/${RUST_TARGET}/release/embraos-release")}"
 
 echo ""
 echo "Build complete! (aarch64)"

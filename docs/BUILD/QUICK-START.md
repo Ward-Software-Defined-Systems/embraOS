@@ -82,6 +82,10 @@ EOF
 ```bash
 # Build and run — pick a storage engine: rocksdb (battle-tested) or fjall (pure Rust)
 ./scripts/build-image.sh --storage-engine rocksdb   # Full pipeline: Rust → initramfs → Buildroot → disk image
+                                                    # Leaves output/images/embraos.img (QEMU) and the same disk as
+                                                    # embraos.vmdk (Parallels, Fusion, VirtualBox), embraos.vhdx
+                                                    # (Hyper-V gen 2, Secure Boot off), embraos.ova (ESXi, vCenter)
+                                                    # — qemu-img (qemu-utils) converts them; TBD until booted there
 
 # Default UI is the embra-web console — open the URL embraOS prints at boot (https://localhost:3345/embraOS?token=…)
 ./scripts/run-qemu.sh                                # Boot in QEMU — OVMF, GRUB's menu (3 s), slot A, web console (default)

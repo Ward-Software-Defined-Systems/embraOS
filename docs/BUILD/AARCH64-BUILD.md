@@ -124,7 +124,7 @@ cd ~/projects/embraOS
 docker run --rm -v "$PWD":/work -v embraos-br-aarch64:/work/buildroot-src \
   -w /work ubuntu:24.04 bash -c \
   "apt-get update && apt-get install -y build-essential gcc g++ \
-   unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \
+   unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools qemu-utils && \
    FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image-aarch64.sh --buildroot-only"
 ```
 
@@ -179,7 +179,7 @@ backfilled (see `docs/BUILD/QUICK-START.md`).
 > docker run --rm -e JOBS=2 -v "$PWD":/work \
 >   -v embraos-br-aarch64:/work/buildroot-src -w /work ubuntu:24.04 bash -c \
 >   "apt-get update && apt-get install -y build-essential gcc g++ \
->    unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \
+>    unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools qemu-utils && \
 >    FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image-aarch64.sh --buildroot-only"
 > ```
 > On a Linux host (no Docker), just prefix: `JOBS=2 ./scripts/build-image-aarch64.sh
@@ -304,7 +304,11 @@ Docker command. The Docker `--buildroot-only` pass then runs Steps 3.5, 3.6 and 
   output on the Docker VM's native filesystem instead of the bind mount.
 - **Step 5 — copy outputs.** `embraos.img`, `Image` (the direct boot path) and
   `rootfs.squashfs` (the slot image an OS update ships) → `output/images/` (copied
-  out of the volume onto the host tree).
+  out of the volume onto the host tree), then the same disk converted for the other
+  hypervisors with `qemu-img`: `embraos.vmdk` (Parallels, Fusion, VirtualBox),
+  `embraos.vhdx` (Hyper-V generation 2, Secure Boot off) and `embraos.ova` (ESXi,
+  vCenter). Each is checked against the raw image's size; the aarch64 ones are
+  **TBD** until booted on a hypervisor of that architecture.
 
 **Isolated cross-compilation validation (optional).** To validate Rust cross-compilation
 before wiring in the full pipeline, set the env vars the build script sets automatically
@@ -507,7 +511,7 @@ RUST_TARGET=aarch64-unknown-linux-musl ./scripts/create_initramfs.sh
 docker run --rm -v "$PWD":/work -v embraos-br-aarch64:/work/buildroot-src \
   -w /work ubuntu:24.04 bash -c \
   "apt-get update && apt-get install -y build-essential gcc g++ \
-   unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \
+   unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools qemu-utils && \
    FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image-aarch64.sh --buildroot-only"
 
 # 4. Restore into the fresh image
@@ -575,7 +579,7 @@ a rebuild is silently discarded.
 docker run --rm -v "$PWD":/work -v embraos-br-aarch64:/work/buildroot-src \
   -w /work ubuntu:24.04 bash -c \
   "apt-get update && apt-get install -y build-essential gcc g++ \
-   unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \
+   unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools qemu-utils && \
    FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image-aarch64.sh --buildroot-only"
 
 # 2. Seed the freshly built image
@@ -815,7 +819,7 @@ the half-written toolchain dir so it rebuilds cleanly on resume:
 docker run --rm -e JOBS=2 -v "$PWD":/work \
   -v embraos-br-aarch64:/work/buildroot-src -w /work ubuntu:24.04 bash -c \
   "apt-get update && apt-get install -y build-essential gcc g++ \
-   unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools && \
+   unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools qemu-utils && \
    (cd buildroot-src && make musl-dirclean) ; \
    FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image-aarch64.sh --buildroot-only"
 ```

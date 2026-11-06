@@ -1,0 +1,93 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- embraOS OVF descriptor, rendered by write_vm_images (scripts/lib/image-common.sh).
+     One disk (the whole embraOS GPT image as a streamOptimized VMDK), EFI firmware
+     with Secure Boot off (GRUB and the kernel are unsigned), a paravirtual SCSI
+     controller and a VMXNET3 adapter (both drivers are in the kernel). -->
+<Envelope xmlns="http://schemas.dmtf.org/ovf/envelope/1"
+          xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1"
+          xmlns:rasd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData"
+          xmlns:vssd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_VirtualSystemSettingData"
+          xmlns:vmw="http://www.vmware.com/schema/ovf"
+          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <References>
+    <File ovf:id="file1" ovf:href="@DISK_FILE@" ovf:size="@DISK_FILE_SIZE@"/>
+  </References>
+  <DiskSection>
+    <Info>The embraOS disk: ESP, two OS slots, STATE and DATA</Info>
+    <Disk ovf:diskId="vmdisk1" ovf:fileRef="file1" ovf:capacity="@CAPACITY@" ovf:capacityAllocationUnits="byte" ovf:populatedSize="@DISK_FILE_SIZE@" ovf:format="http://www.vmware.com/interfaces/specifications/vmdk.html#streamOptimized"/>
+  </DiskSection>
+  <NetworkSection>
+    <Info>One network: DHCP first, then the static fallback</Info>
+    <Network ovf:name="VM Network">
+      <Description>The adapter embraOS asks a DHCP lease on</Description>
+    </Network>
+  </NetworkSection>
+  <VirtualSystem ovf:id="@NAME@">
+    <Info>embraOS @VERSION@ (@ARCH@, @ENGINE@)</Info>
+    <Name>@NAME@</Name>
+    <OperatingSystemSection ovf:id="101" vmw:osType="otherLinux64Guest">
+      <Info>The guest operating system</Info>
+      <Description>Other Linux (64-bit)</Description>
+    </OperatingSystemSection>
+    <VirtualHardwareSection>
+      <Info>@CPUS@ vCPU, @MEMORY_MB@ MiB, EFI</Info>
+      <System>
+        <vssd:ElementName>Virtual Hardware Family</vssd:ElementName>
+        <vssd:InstanceID>0</vssd:InstanceID>
+        <vssd:VirtualSystemIdentifier>@NAME@</vssd:VirtualSystemIdentifier>
+        <vssd:VirtualSystemType>@SYSTEM_TYPE@</vssd:VirtualSystemType>
+      </System>
+      <Item>
+        <rasd:AllocationUnits>hertz * 10^6</rasd:AllocationUnits>
+        <rasd:Description>Number of Virtual CPUs</rasd:Description>
+        <rasd:ElementName>@CPUS@ virtual CPU(s)</rasd:ElementName>
+        <rasd:InstanceID>1</rasd:InstanceID>
+        <rasd:ResourceType>3</rasd:ResourceType>
+        <rasd:VirtualQuantity>@CPUS@</rasd:VirtualQuantity>
+      </Item>
+      <Item>
+        <rasd:AllocationUnits>byte * 2^20</rasd:AllocationUnits>
+        <rasd:Description>Memory Size</rasd:Description>
+        <rasd:ElementName>@MEMORY_MB@MB of memory</rasd:ElementName>
+        <rasd:InstanceID>2</rasd:InstanceID>
+        <rasd:ResourceType>4</rasd:ResourceType>
+        <rasd:VirtualQuantity>@MEMORY_MB@</rasd:VirtualQuantity>
+      </Item>
+      <Item>
+        <rasd:Address>0</rasd:Address>
+        <rasd:Description>SCSI Controller</rasd:Description>
+        <rasd:ElementName>SCSI Controller 0</rasd:ElementName>
+        <rasd:InstanceID>3</rasd:InstanceID>
+        <rasd:ResourceSubType>VirtualSCSI</rasd:ResourceSubType>
+        <rasd:ResourceType>6</rasd:ResourceType>
+      </Item>
+      <Item>
+        <rasd:AddressOnParent>0</rasd:AddressOnParent>
+        <rasd:ElementName>Hard Disk 1</rasd:ElementName>
+        <rasd:HostResource>ovf:/disk/vmdisk1</rasd:HostResource>
+        <rasd:InstanceID>4</rasd:InstanceID>
+        <rasd:Parent>3</rasd:Parent>
+        <rasd:ResourceType>17</rasd:ResourceType>
+      </Item>
+      <Item>
+        <rasd:AddressOnParent>7</rasd:AddressOnParent>
+        <rasd:AutomaticAllocation>true</rasd:AutomaticAllocation>
+        <rasd:Connection>VM Network</rasd:Connection>
+        <rasd:Description>VMXNET3 ethernet adapter on "VM Network"</rasd:Description>
+        <rasd:ElementName>Ethernet 1</rasd:ElementName>
+        <rasd:InstanceID>5</rasd:InstanceID>
+        <rasd:ResourceSubType>VmxNet3</rasd:ResourceSubType>
+        <rasd:ResourceType>10</rasd:ResourceType>
+      </Item>
+      <vmw:Config ovf:required="false" vmw:key="firmware" vmw:value="efi"/>
+      <vmw:Config ovf:required="false" vmw:key="bootOptions.efiSecureBootEnabled" vmw:value="false"/>
+    </VirtualHardwareSection>
+    <ProductSection>
+      <Info>Product</Info>
+      <Product>embraOS</Product>
+      <Version>@VERSION@</Version>
+      <FullVersion>@VERSION@ (@BUILD_ID@)</FullVersion>
+      <ProductUrl>https://github.com/Ward-Software-Defined-Systems/embraOS</ProductUrl>
+    </ProductSection>
+  </VirtualSystem>
+</Envelope>

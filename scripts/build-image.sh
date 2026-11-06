@@ -18,7 +18,7 @@
 #   docker run --rm -v "$PWD":/work -v embraos-br-x86_64:/work/buildroot-src \
 #     -w /work ubuntu:24.04 bash -c \
 #     "apt-get update && apt-get install -y build-essential gcc g++ \
-#      unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools libelf-dev && \
+#      unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools qemu-utils libelf-dev && \
 #      FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image.sh --buildroot-only"
 #
 #   (The named volume keeps the Buildroot tree on the Docker VM's native
@@ -248,7 +248,7 @@ if [ "$(uname)" = "Darwin" ]; then
     echo "  docker run --rm -v \"\$PWD\":/work -v embraos-br-x86_64:/work/buildroot-src \\"
     echo "    -w /work ubuntu:24.04 bash -c \\"
     echo "    \"apt-get update && apt-get install -y build-essential gcc g++ \\"
-    echo "     unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools libelf-dev && \\"
+    echo "     unzip bc cpio rsync wget curl xz-utils python3 file git dosfstools qemu-utils libelf-dev && \\"
     echo "     FORCE_UNSAFE_CONFIGURE=1 ./scripts/build-image.sh --buildroot-only\""
     echo ""
     echo "(The named volume keeps the Buildroot tree on the Docker VM's filesystem:"
@@ -347,6 +347,10 @@ cp "$BUILDROOT_DIR/output/images/embraos.img" output/images/
 # the squashfs is the slot image an OS update ships (scripts/release-update.sh).
 cp "$BUILDROOT_DIR/output/images/bzImage" output/images/
 cp "$BUILDROOT_DIR/output/images/rootfs.squashfs" output/images/
+# The same disk for the other hypervisors: embraos.vmdk, embraos.vhdx and
+# embraos.ova beside the raw image (write_vm_images, scripts/lib/image-common.sh).
+write_vm_images output/images/embraos.img output/images x86_64 \
+    "${STORAGE_ENGINE:-$(sed -n 's/^ENGINE=//p' target/x86_64-unknown-linux-musl/release/embraos-release)}"
 
 echo ""
 echo "Build complete!"

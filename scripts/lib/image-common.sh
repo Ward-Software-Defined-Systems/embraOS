@@ -364,3 +364,85 @@ assert_image_layout() {
     }
     echo "image layout: $EMBRAOS_PARTITION_NAMES, 1 MiB aligned; the ESP carries the loader, grub.cfg and grubenv (slot A active)"
 }
+
+# write_vm_images <raw image> <out dir> <arch> <engine>: the same disk for the
+# other hypervisors, converted from the raw GPT image after it passed the
+# checks above. embraos.vmdk (monolithicSparse: Parallels, VMware Fusion and
+# Workstation, VirtualBox), embraos.vhdx (dynamic: Hyper-V generation 2 with
+# Secure Boot off) and embraos.ova (the OVF descriptor rendered from
+# embraos.ovf.in beside this file, the disk as a streamOptimized VMDK and the
+# SHA256 manifest, in that order: ESXi, vCenter, Fusion). The zero regions,
+# the empty slot B and the unused DATA, are not stored, so each file is about
+# the size of the data written. Needs qemu-img (Ubuntu: qemu-utils; macOS:
+# Homebrew's qemu). Each converted disk must report the raw image's virtual
+# size; the OVA's member order and manifest are checked after packing. A
+# failure removes the partial file and stops the build.
+write_vm_images() {
+    local raw="$1" out="$2" arch="$3" engine="$4"
+    local name="embraos" template version build_id raw_size
+    command -v qemu-img >/dev/null 2>&1 || {
+        echo "ERROR: qemu-img not found; the VM images need it (Ubuntu: apt-get install qemu-utils; macOS: brew install qemu)" >&2
+        exit 1
+    }
+    template="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/embraos.ovf.in"
+    [ -f "$template" ] || { echo "ERROR: $template is missing" >&2; exit 1; }
+    version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+    build_id="$(git rev-parse --short=10 HEAD 2>/dev/null || echo unknown)"
+    raw_size="$(file_size "$raw")"
+    mkdir -p "$out"
+
+    # convert_checked <qemu format> <-o options or ""> <target>
+    convert_checked() {
+        local fmt="$1" opts="$2" target="$3" vsize
+        rm -f "$target" "$target.partial"
+        if [ -n "$opts" ]; then
+            qemu-img convert -f raw -O "$fmt" -o "$opts" "$raw" "$target.partial"
+        else
+            qemu-img convert -f raw -O "$fmt" "$raw" "$target.partial"
+        fi
+        vsize="$(qemu-img info "$target.partial" | sed -n 's/^virtual size: .*(\([0-9]*\) bytes)$/\1/p')"
+        [ "$vsize" = "$raw_size" ] || {
+            echo "ERROR: $target reports a virtual size of ${vsize:-?} bytes; the raw image has $raw_size" >&2
+            rm -f "$target.partial"
+            exit 1
+        }
+        mv "$target.partial" "$target"
+    }
+
+    convert_checked vmdk "" "$out/${name}.vmdk"
+    convert_checked vhdx "subformat=dynamic" "$out/${name}.vhdx"
+
+    local stage="$out/.ova-stage" disk="${name}-disk1.vmdk" ovf="${name}.ovf" mf="${name}.mf" disk_size
+    rm -rf "$stage" "$out/${name}.ova" "$out/${name}.ova.partial"
+    mkdir -p "$stage"
+    convert_checked vmdk "subformat=streamOptimized" "$stage/$disk"
+    disk_size="$(file_size "$stage/$disk")"
+    sed -e "s|@DISK_FILE@|$disk|g" -e "s|@DISK_FILE_SIZE@|$disk_size|g" \
+        -e "s|@CAPACITY@|$raw_size|g" -e "s|@NAME@|$name|g" \
+        -e "s|@VERSION@|$version|g" -e "s|@BUILD_ID@|$build_id|g" \
+        -e "s|@ARCH@|$arch|g" -e "s|@ENGINE@|$engine|g" \
+        -e "s|@CPUS@|4|g" -e "s|@MEMORY_MB@|4096|g" -e "s|@SYSTEM_TYPE@|vmx-19|g" \
+        "$template" > "$stage/$ovf"
+    grep -q '@[A-Z_]*@' "$stage/$ovf" && { echo "ERROR: an OVF placeholder was not rendered" >&2; exit 1; }
+    (
+        cd "$stage" || exit 1
+        {
+            echo "SHA256($ovf)= $(sha256_of "$ovf")"
+            echo "SHA256($disk)= $(sha256_of "$disk")"
+        } > "$mf"
+        # The OVF spec wants the descriptor first; the manifest after what it covers.
+        tar --format=ustar -cf "../${name}.ova.partial" "$ovf" "$disk" "$mf"
+    )
+    [ "$(tar -tf "$out/${name}.ova.partial" | tr '\n' ' ')" = "$ovf $disk $mf " ] || {
+        echo "ERROR: the OVA's members are not ovf, disk, manifest in that order" >&2
+        rm -rf "$stage" "$out/${name}.ova.partial"
+        exit 1
+    }
+    mv "$out/${name}.ova.partial" "$out/${name}.ova"
+    rm -rf "$stage"
+    echo "VM images in $out: ${name}.vmdk ($(( $(file_size "$out/${name}.vmdk") / 1048576 )) MiB), ${name}.vhdx ($(( $(file_size "$out/${name}.vhdx") / 1048576 )) MiB), ${name}.ova ($(( $(file_size "$out/${name}.ova") / 1048576 )) MiB; virtual size $raw_size bytes)"
+}
+
+# GNU and BSD spellings of two small things the conversion needs.
+file_size() { stat -c %s "$1" 2>/dev/null || stat -f %z "$1"; }
+sha256_of() { (sha256sum "$1" 2>/dev/null || shasum -a 256 "$1") | cut -d' ' -f1; }
