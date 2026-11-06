@@ -37,6 +37,11 @@ CONFIG_HYPERV_BALLOON=y
 CONFIG_HYPERV_UTILS=y
 CONFIG_HYPERV_KEYBOARD=y
 CONFIG_DRM_HYPERV=y
+# DRM itself is named: the arm64 base config builds it as a module, and a
+# driver cannot be built in above its subsystem, so without this line the
+# merge demotes simpledrm, bochs and the Hyper-V driver to modules that
+# nothing in the image loads, and the display stays black after GRUB.
+CONFIG_DRM=y
 CONFIG_SYSFB_SIMPLEFB=y
 CONFIG_DRM_SIMPLEDRM=y
 CONFIG_DRM_BOCHS=y
