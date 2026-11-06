@@ -242,9 +242,9 @@ assert_rootfs_invariants() {
     }
     if [ -n "$triple" ] && [ -f "target/$triple/release/embra-init" ]; then
         local in_image built
-        # cpio stores the member as `init` (create_initramfs.sh's `find .`
-        # names it `./init`; the archive drops the `./`).
-        in_image="$(zcat "$tgt/boot/initramfs.cpio.gz" | cpio -i --quiet --to-stdout init 2>/dev/null | sha256sum | cut -d' ' -f1)"
+        # create_initramfs.sh stores the member as `init`; an archive a BSD
+        # cpio wrote before that (macOS) names it `./init`. Both are read.
+        in_image="$(zcat "$tgt/boot/initramfs.cpio.gz" | cpio -i --quiet --to-stdout init ./init 2>/dev/null | sha256sum | cut -d' ' -f1)"
         built="$(sha256sum "target/$triple/release/embra-init" | cut -d' ' -f1)"
         [ "$in_image" = "$built" ] || {
             echo "ERROR: the initramfs carries another embra-init than the one built for $triple" >&2

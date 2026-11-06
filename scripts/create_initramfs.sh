@@ -34,7 +34,9 @@ mknod -m 666 "${INITRAMFS_DIR}/dev/null" c 1 3 2>/dev/null || true
 
 # Create cpio archive
 cd "${INITRAMFS_DIR}"
-find . | cpio -o -H newc 2>/dev/null | gzip > "${OLDPWD}/initramfs.cpio.gz"
+# The names without their "./" prefix: GNU cpio drops it, BSD cpio (macOS)
+# keeps it, and the build check reads the member `init` by name.
+find . | sed 's|^\./||' | cpio -o -H newc 2>/dev/null | gzip > "${OLDPWD}/initramfs.cpio.gz"
 cd "${OLDPWD}"
 
 echo "Created initramfs.cpio.gz ($(du -h initramfs.cpio.gz | cut -f1)) [${RUST_TARGET}]"
