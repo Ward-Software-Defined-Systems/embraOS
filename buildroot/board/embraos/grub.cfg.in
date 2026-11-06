@@ -172,8 +172,8 @@ submenu "Diagnostics" --id diagnostics {
         }
     fi
     menuentry "Clear the failed marks" {
-        set slot_a_status=
-        set slot_b_status=
+        if [ "$slot_a_status" = "failed" ]; then set slot_a_status=; fi
+        if [ "$slot_b_status" = "failed" ]; then set slot_b_status=; fi
         save_env slot_a_status slot_b_status
         configfile "$prefix/grub.cfg"
     }
