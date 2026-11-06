@@ -53,22 +53,48 @@ fn init_tracing() {
     use tracing_subscriber::Layer;
 
     let spec = std::env::var("EMBRA_LOG").unwrap_or_default();
-    let mut targets = match spec.trim() {
-        "" => tracing_subscriber::filter::Targets::new()
-            .with_default(tracing::level_filters::LevelFilter::INFO),
-        s => s.parse().unwrap_or_else(|e| {
-            eprintln!("[embra-brain] invalid EMBRA_LOG '{s}' ({e}); falling back to info");
-            tracing_subscriber::filter::Targets::new()
-                .with_default(tracing::level_filters::LevelFilter::INFO)
-        }),
-    };
-    if targets.default_level().is_none() {
-        targets = targets.with_default(tracing::level_filters::LevelFilter::INFO);
-    }
+    let (targets, applied) = log_filter_from(&spec);
     tracing_subscriber::registry()
         .with(tracing_subscriber::fmt::layer().with_filter(targets))
         .init();
+    // The one line that says which filter took and where it came from: the
+    // operator's check after `embra.loglevel=` on the kernel line (embrad
+    // forwards it as EMBRA_LOG) is `system_logs`, and this is what it finds.
+    // A spec whose default is above INFO hides the line along with the rest.
+    info!("Log filter: {applied}");
 }
+
+/// The filter for an `EMBRA_LOG` spec and the sentence the startup log
+/// prints about it: the spec itself and its source, or the INFO default and
+/// why it applies (no spec, or one that does not parse).
+fn log_filter_from(spec: &str) -> (tracing_subscriber::filter::Targets, String) {
+    use tracing::level_filters::LevelFilter;
+    use tracing_subscriber::filter::Targets;
+
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return (
+            Targets::new().with_default(LevelFilter::INFO),
+            "info (the default; EMBRA_LOG is not set — embra.loglevel=<spec> on the kernel line sets it)".to_string(),
+        );
+    }
+    match spec.parse::<Targets>() {
+        Ok(mut targets) => {
+            if targets.default_level().is_none() {
+                targets = targets.with_default(LevelFilter::INFO);
+            }
+            (targets, format!("{spec} (EMBRA_LOG, from embra.loglevel on the kernel line)"))
+        }
+        Err(e) => {
+            eprintln!("[embra-brain] invalid EMBRA_LOG '{spec}' ({e}); falling back to info");
+            (
+                Targets::new().with_default(LevelFilter::INFO),
+                format!("info (the default; EMBRA_LOG '{spec}' does not parse: {e})"),
+            )
+        }
+    }
+}
+
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -250,4 +276,37 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod log_filter_tests {
+    use super::log_filter_from;
+    use tracing::level_filters::LevelFilter;
+
+    #[test]
+    fn no_spec_is_the_info_default_and_the_line_says_so() {
+        let (targets, line) = log_filter_from("");
+        assert_eq!(targets.default_level(), Some(LevelFilter::INFO));
+        assert!(line.starts_with("info (the default; EMBRA_LOG is not set"), "{line}");
+    }
+
+    #[test]
+    fn a_spec_is_applied_and_named_with_its_source() {
+        let (targets, line) = log_filter_from("info,kg::traversal=debug");
+        assert_eq!(targets.default_level(), Some(LevelFilter::INFO));
+        assert_eq!(line, "info,kg::traversal=debug (EMBRA_LOG, from embra.loglevel on the kernel line)");
+    }
+
+    #[test]
+    fn a_spec_with_only_targets_keeps_the_info_floor() {
+        let (targets, _) = log_filter_from("kg::traversal=debug");
+        assert_eq!(targets.default_level(), Some(LevelFilter::INFO));
+    }
+
+    #[test]
+    fn a_spec_that_does_not_parse_falls_back_to_info_and_the_line_names_it() {
+        let (targets, line) = log_filter_from("info,kg::traversal=loud");
+        assert_eq!(targets.default_level(), Some(LevelFilter::INFO));
+        assert!(line.starts_with("info (the default; EMBRA_LOG 'info,kg::traversal=loud' does not parse"), "{line}");
+    }
 }
