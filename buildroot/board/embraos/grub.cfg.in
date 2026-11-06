@@ -69,18 +69,21 @@ fi
 
 # Each slot's version from the file its build wrote
 # (/boot/embraos-slot.cfg: `set slot_version="..."`). A slot without it is
-# empty and gets no entry.
+# empty: slot_<x>_present stays 0 and the slot gets no entry, whatever its
+# status mark says (the mark may outlive the slot's content).
 set slot_a_title="(empty)"
 set slot_b_title="(empty)"
+set slot_a_present=0
+set slot_b_present=0
 if [ -f "${slot_a_dev}/boot/embraos-slot.cfg" ]; then
     set slot_version=
     source "${slot_a_dev}/boot/embraos-slot.cfg"
-    if [ -n "$slot_version" ]; then set slot_a_title="$slot_version"; fi
+    if [ -n "$slot_version" ]; then set slot_a_title="$slot_version"; set slot_a_present=1; fi
 fi
 if [ -f "${slot_b_dev}/boot/embraos-slot.cfg" ]; then
     set slot_version=
     source "${slot_b_dev}/boot/embraos-slot.cfg"
-    if [ -n "$slot_version" ]; then set slot_b_title="$slot_version"; fi
+    if [ -n "$slot_version" ]; then set slot_b_title="$slot_version"; set slot_b_present=1; fi
 fi
 if [ "$slot_a_status" = "failed" ]; then set slot_a_title="${slot_a_title} [failed]"; fi
 if [ "$slot_b_status" = "failed" ]; then set slot_b_title="${slot_b_title} [failed]"; fi
@@ -106,7 +109,7 @@ function boot_slot {
 # load /boot/@KERNEL_IMAGE@ from the ESP and fail. Everything the Diagnostics
 # and Backup entries read is exported here, once computed. A top-level entry
 # runs in this context and needs none of it.
-export slot_active slot_try tries_left slot_a_status slot_b_status menu_timeout disk slot_a_dev slot_b_dev active_dev slot_a_title slot_b_title extra
+export slot_active slot_try tries_left slot_a_status slot_b_status menu_timeout disk slot_a_dev slot_b_dev active_dev slot_a_title slot_b_title slot_a_present slot_b_present extra
 
 set default="slot_${boot_slot}"
 set timeout="$menu_timeout"
@@ -119,13 +122,13 @@ set timeout="$menu_timeout"
 # rest to boot_slot inside its third argument, so the knob reaches the kernel
 # line. Nothing typed leaves an empty $*, which expands to no word.
 
-if [ "$slot_a_title" != "(empty)" ]; then
+if [ "$slot_a_present" = "1" ]; then
     menuentry "embraOS ${slot_a_title} - slot A" --id slot_a {
         shift
         boot_slot a "$slot_a_dev" "$trial_a $*"
     }
 fi
-if [ "$slot_b_title" != "(empty)" ]; then
+if [ "$slot_b_present" = "1" ]; then
     menuentry "embraOS ${slot_b_title} - slot B" --id slot_b {
         shift
         boot_slot b "$slot_b_dev" "$trial_b $*"
@@ -145,7 +148,7 @@ submenu "Diagnostics" --id diagnostics {
         shift
         boot_slot "$slot_active" "$active_dev" "embra.dbverbose=1 $*"
     }
-    if [ "$slot_a_title" != "(empty)" ]; then
+    if [ "$slot_a_present" = "1" ]; then
         menuentry "Make slot A the default" {
             set slot_active=a
             set slot_try=
@@ -158,7 +161,7 @@ submenu "Diagnostics" --id diagnostics {
             boot_slot a "$slot_a_dev" "$*"
         }
     fi
-    if [ "$slot_b_title" != "(empty)" ]; then
+    if [ "$slot_b_present" = "1" ]; then
         menuentry "Make slot B the default" {
             set slot_active=b
             set slot_try=
