@@ -25,6 +25,13 @@
 > every rebuild. The End-to-End Validation checklist's date above stands until the
 > checklist is re-run in full.
 >
+> **2026-11-06 — the Phase 2 image on Apple Silicon.** The operator's build and run
+> of 2026-11-06 (branch `phase2`): the build with macOS's BSD cpio, the disk booting
+> itself through the edk2 firmware and GRUB's menu into slot A, the display window
+> (`ramfb`) with the boot log and the console URL, a bridged NIC through
+> `vmnet-bridged` with the leased URL opened from another machine, DHCP, and the
+> backup wrapper on a RocksDB image. Step 1 of the checklist below carries it.
+>
 > **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a named
 > volume over `buildroot-src`: building the Buildroot tree on the bind mount
 > exhausts the Docker runtime's macOS-side file provider (`Too many open files` —
@@ -56,8 +63,8 @@ Rust toolchain), Step 3.6 (the embedding model) and Step 4 (Buildroot) run in a
 > terminal instead — no image rebuild needed. The serial TUI is functional but is
 > preferred for debugging; the web console is the primary interface. The disk
 > boots itself: the edk2 firmware Homebrew's qemu ships, then GRUB's menu on the
-> EFI System Partition (`EMBRA_BOOT=uefi`, the default; **TBD** on aarch64 until
-> the first run on a Mac). `EMBRA_BOOT=direct` boots the kernel and the
+> EFI System Partition (`EMBRA_BOOT=uefi`, the default; validated on Apple Silicon
+> 2026-11-06). `EMBRA_BOOT=direct` boots the kernel and the
 > initramfs from the host as before, no firmware and no menu.
 
 > **zsh paste gotcha:** macOS's default `zsh` doesn't treat `#` as a comment in
@@ -135,7 +142,31 @@ docker run --rm -v "$PWD":/work -v embraos-br-aarch64:/work/buildroot-src \
 EMBRA_TUI=1 ./scripts/run-qemu-aarch64.sh      # serial TUI on this terminal: functional, preferred for debugging
 EMBRA_DB_VERBOSE=1 ./scripts/run-qemu-aarch64.sh   # opt-in per-request WardSONDB log lines
 EMBRA_BOOT=direct ./scripts/run-qemu-aarch64.sh    # kernel + initramfs from the host: no firmware, no GRUB menu
+EMBRA_DHCP_START=10.0.2.200 ./scripts/run-qemu-aarch64.sh   # QEMU's DHCP leases this address: the banner's second URL
 ```
+
+> **Display window and a bridged network (validated 2026-11-06 on Apple Silicon).**
+> `run-qemu-aarch64.sh` has no display switch (the x86_64 launcher's `EMBRA_VNC=1`
+> has no aarch64 counterpart yet). To see the console on a window — GRUB's menu,
+> the boot log and the banner with the URL — run QEMU by hand with a `ramfb`
+> device, which the edk2 firmware drives and the kernel's `simpledrm` takes over:
+> ```bash
+> cp "$(brew --prefix)/share/qemu/edk2-arm-vars.fd" /tmp/embraos-vars.fd
+> qemu-system-aarch64 -machine virt -accel hvf -cpu host -m 4G -smp 4 \
+>   -drive if=pflash,format=raw,readonly=on,file="$(brew --prefix)/share/qemu/edk2-aarch64-code.fd" \
+>   -drive if=pflash,format=raw,file=/tmp/embraos-vars.fd \
+>   -drive file=output/images/embraos.img,format=raw,if=virtio \
+>   -smbios "type=11,value=embra.cols=$(tput cols) embra.rows=$(tput lines)" \
+>   -device ramfb -display cocoa -serial mon:stdio \
+>   -nic user,hostfwd=tcp:127.0.0.1:50000-:50000,hostfwd=tcp:127.0.0.1:8443-:8443,hostfwd=tcp::3345-:3345
+> ```
+> For a lease from the LAN instead of QEMU's user network, replace the `-nic user,…`
+> line with `-nic vmnet-bridged,ifname=en0,model=virtio-net-pci` (`en0`, or the
+> interface `route -n get default` names) and run the command under `sudo`:
+> Apple's vmnet framework wants an entitlement Homebrew's QEMU lacks. There are no
+> port forwards in that mode; the banner's second URL, on the leased address, is the
+> one to open, from this Mac or from another machine on the LAN (the certificate
+> names `localhost`, so the browser warns about the name once).
 
 Press `Ctrl-A X` to exit QEMU. On first boot the Config Wizard runs (name, the provider gateway or direct, LLM provider
 + credentials, timezone), then Learning Mode forms and seals the soul.
@@ -443,7 +474,7 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 |---|---|---|
 | Binary | `qemu-system-x86_64` | `qemu-system-aarch64` |
 | Machine | `-machine q35` on the UEFI path, QEMU's default `pc` on the direct path | `-machine virt` |
-| Firmware (UEFI path) | OVMF (`/usr/share/OVMF/OVMF_CODE_4M.fd`, the `ovmf` package) or QEMU's `edk2-x86_64-code.fd` | `edk2-aarch64-code.fd` (Homebrew's qemu) or AAVMF (`qemu-efi-aarch64`) — **TBD** until the first run |
+| Firmware (UEFI path) | OVMF (`/usr/share/OVMF/OVMF_CODE_4M.fd`, the `ovmf` package) or QEMU's `edk2-x86_64-code.fd` | `edk2-aarch64-code.fd` (Homebrew's qemu) or AAVMF (`qemu-efi-aarch64`) — validated on Apple Silicon 2026-11-06 |
 | Loader | `EFI/BOOT/BOOTX64.EFI` | `EFI/BOOT/BOOTAA64.EFI` |
 | Acceleration on macOS | `-accel hvf` (`run-qemu.sh` passes it on every Mac; an x86_64 guest runs under HVF on an Intel Mac only) | `-accel hvf` (native — near-native speed) |
 | CPU | QEMU's default (`run-qemu.sh` passes no `-cpu`) | `-cpu host` under HVF, `-cpu max` otherwise |
@@ -451,6 +482,8 @@ Only these lines differ — everything else (packages, overlay, filesystem) is i
 | Consoles | `console=tty0 console=ttyS0` | `console=tty0 console=ttyAMA0` (the serial line, last, owns `/dev/console`; both rendered into `grub.cfg` by `post_image.sh`, the serial one alone passed by the direct path) |
 | Default UI | embra-web console; `EMBRA_TUI=1` → serial TUI | identical |
 | Port forwards | 127.0.0.1:50000 / 127.0.0.1:8443 / *:3345 (both UI modes) | identical |
+| Display | `EMBRA_VNC=1` — a VNC server on the host's loopback beside the serial line | no launcher switch; `-device ramfb -display cocoa` by hand ([Boot](#3-boot)) |
+| Network | QEMU's user network; `EMBRA_DHCP_START=<address>` picks the leased address | identical; a bridged NIC through `vmnet-bridged` under `sudo` ([Boot](#3-boot)) |
 
 ### Backup & Restore
 
@@ -493,8 +526,8 @@ The wrapper spins up a privileged `ubuntu:24.04` container with two volume mount
 | `/mnt/image` | Image's directory | Only when `--image`/`EMBRAOS_IMAGE` points outside the project root (read-write — `restore` writes the image) |
 
 `--privileged` gives the container loop device access for `mount -o loop`. The container
-installs `rsync`, `fdisk`, and `python3`, then runs the original `embraos-backup.sh`
-unchanged. The QEMU-running check happens on the host side before Docker starts, since
+installs `rsync` and `python3`, then runs the original `embraos-backup.sh`
+unchanged (partition geometry comes from `partx`, in the base image). The QEMU-running check happens on the host side before Docker starts, since
 the container can't see host processes. Backups made on Ubuntu and Mac are
 interchangeable.
 
@@ -977,8 +1010,8 @@ Re-run it as the regression checklist after any canonical-build bump:
    `qemu-system-aarch64 -machine virt -accel hvf -cpu host` with the edk2
    firmware; GRUB's menu shows on this terminal and boots slot A (`Image` from
    the slot's SquashFS, `console=ttyAMA0`) — no kernel panic on the PL011
-   console. The UEFI path on aarch64 is **TBD** until this run; `EMBRA_BOOT=direct`
-   is the path validated so far.
+   console (validated 2026-11-06; `EMBRA_BOOT=direct` boots the kernel from the
+   host as before, no firmware and no menu).
 2. **Config Wizard + Learning Mode** in the browser at the URL embraOS printed at
    boot (`https://localhost:3345/embraOS?token=…`; accept the embraOS-CA cert) — name, the provider gateway or direct, LLM provider
    + credentials, timezone; full soul-formation conversation; soul sealed.

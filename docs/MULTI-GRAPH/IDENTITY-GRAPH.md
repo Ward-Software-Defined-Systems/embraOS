@@ -165,7 +165,8 @@ loop-mounted partition.
      — the **doc** only (the resume-seed reads it by id).
    - `memory.user` — **deliberately untouched.**
 6. Stop wardsondb cleanly; unmount DATA.
-7. Mount partition 3 (STATE): `rm soul.sha256` — this step is not
+7. Mount STATE the same way (the partition named `state`: the fourth on the
+   Phase 2 layout, the third on a Phase 1 image): `rm soul.sha256` — this step is not
    optional. A stored hash with no soul document is what trustd reports
    as tamper or data loss (`Soul document missing but a sealed hash is
    stored`), and embrad halts on it; the two deletions belong to the same

@@ -152,7 +152,8 @@ The following apply once the image is built. They are not part of the build pipe
 > ```
 > Reformats the named partitions in place as ext4 with their original labels, after a
 > typed confirmation. Wiping STATE destroys the soul hash, PKI and API keys; wiping DATA
-> destroys WardSONDB — all memory, sessions and the workspace. Neither is reversible, and
+> destroys WardSONDB — all memory, sessions, the workspace and the in-OS backups under
+> `/embra/data/backups`. Neither is reversible, and
 > the VM must be stopped. `--wipe data` alone also removes STATE's `soul.sha256`: a sealed
 > hash with no soul document halts the next boot (the tamper check), and a wiped DATA is
 > meant to start over.
@@ -173,7 +174,7 @@ The following apply once the image is built. They are not part of the build pipe
 > curl http://localhost:8443/status
 > ```
 
-> **OS updates:** the image carries two OS slots; `/update` fetches a release's signed manifest from the GitHub releases, `/update apply` writes the release into the inactive slot and GRUB tries it at the next boot, falling back if it does not come up ([OPERATIONS/UPDATES-AND-BACKUPS.md](../OPERATIONS/UPDATES-AND-BACKUPS.md)). `scripts/release-update.sh` prepares and signs a release's artifacts; `scripts/update-signing.pub` holds the keys the image trusts (none yet).
+> **OS updates:** the image carries two OS slots; `/update` fetches a release's signed manifest from the GitHub releases, `/update apply` writes the release into the inactive slot and GRUB tries it at the next boot, falling back if it does not come up ([OPERATIONS/UPDATES-AND-BACKUPS.md](../OPERATIONS/UPDATES-AND-BACKUPS.md)). `scripts/release-update.sh` prepares and signs a release's artifacts; `scripts/update-signing.pub` holds the keys the image trusts (the operator's first release signing key since `98a6573`; several keys may sit there across a rotation).
 
 > **Backup & Restore:** the OS takes its own backups too — `/backup create` in a session or the boot menu's Backup and restore, snapshots under `/embra/data/backups` that the web console streams to the browser ([OPERATIONS/UPDATES-AND-BACKUPS.md](../OPERATIONS/UPDATES-AND-BACKUPS.md)). The host script below is the path across an image rebuild and off the machine; its copy of DATA leaves `backups/` out. `scripts/embraos-backup.sh` preserves STATE and DATA partitions across image rebuilds. This is a file-level backup — WardSONDB does not need to be running. The VM must be stopped.
 > ```bash
@@ -192,7 +193,7 @@ The following apply once the image is built. They are not part of the build pipe
 > # Target a specific image (default: the one run-qemu.sh boots)
 > sudo ./scripts/embraos-backup.sh --image /path/to/embraos.img verify
 > ```
-> Backups are stored in `~/embraOS_BACKUPS/` by default — under `sudo` that is still the invoking user's home, resolved from `$SUDO_USER` (override with `EMBRAOS_BACKUP_DIR`). `restore` prints the backup's metadata, asks `Continue? [y/N]`, then empties the image's STATE and DATA partitions before copying the backup in — a fresh image's seed contents are replaced, not merged. Each backup includes STATE (soul hash, PKI certs), DATA (WardSONDB collections, workspace), and metadata with SHA-256 of the source image. To target another image pass `--image <path>`; `EMBRAOS_IMAGE` works too, but it must come *after* `sudo` (`sudo EMBRAOS_IMAGE=… ./scripts/embraos-backup.sh …`) — sudo's default `env_reset` drops a variable set before it, and the script would silently back up the default image.
+> Backups are stored in `~/embraOS_BACKUPS/` by default — under `sudo` that is still the invoking user's home, resolved from `$SUDO_USER` (override with `EMBRAOS_BACKUP_DIR`). `restore` prints the backup's metadata, asks `Continue? [y/N]`, then empties the image's STATE and DATA partitions before copying the backup in — a fresh image's seed contents are replaced, not merged. Each backup includes STATE (soul hash, PKI certs), DATA (WardSONDB collections, workspace), and metadata with the SHA-256 of the source image and the database engine (`data_engine`). The summary after the copy, and `verify`, describe the database by its `.engine` marker — fjall's collections by name, RocksDB's SST files — and assume neither engine. To target another image pass `--image <path>`; `EMBRAOS_IMAGE` works too, but it must come *after* `sudo` (`sudo EMBRAOS_IMAGE=… ./scripts/embraos-backup.sh …`) — sudo's default `env_reset` drops a variable set before it, and the script would silently back up the default image.
 >
 > **After restoring onto a rebuilt image:** Guardian dynamic tools are compiled inside the OS, and the brain loads one only if it was built by the toolchain the image carries. When a new image has a different in-OS toolchain, the tools come back `NOT LOADED` (`/guardian list`). `/guardian rebuild --all` builds them again from their stored modules; each passes validation and the replicant check before it compiles.
 
