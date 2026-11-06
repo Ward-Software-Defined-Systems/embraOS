@@ -14,7 +14,7 @@ The image is a GPT aligned to 1 MiB with five partitions (`buildroot/board/embra
 | `state` | 256 MiB | STATE: the seal, the CA, the operator's settings and drop-ins |
 | `data` | 4 GiB | DATA: the database, the workspace, and the backups under `backups/` |
 
-GRUB boots the active slot by default and shows its menu for three seconds: each slot, a Diagnostics submenu, Update embraOS, Backup and restore, Reboot, Halt and Firmware setup. `grubenv` holds the A/B state (`slot_active`, a staged `slot_try` with its `tries_left`, a status per slot). A slot an update staged is booted with `embra.trial=1` while it has tries left; embrad confirms it once every service is healthy, and GRUB marks it failed and falls back to the previous slot when the tries run out.
+GRUB boots the active slot by default and shows its menu for three seconds: each slot that holds a release, a Diagnostics submenu, Update embraOS, Backup and restore, Reboot, Halt and Firmware setup. A slot without `/boot/embraos-slot.cfg` has no entry and no "Make slot … the default" or "Boot slot … once" line under Diagnostics: a fresh image lists slot A alone, and slot B appears after the first update. `grubenv` holds the A/B state (`slot_active`, a staged `slot_try` with its `tries_left`, a status per slot). A slot an update staged is booted with `embra.trial=1` while it has tries left; embrad confirms it once every service is healthy, and GRUB marks it failed and falls back to the previous slot when the tries run out.
 
 ## Backups
 
