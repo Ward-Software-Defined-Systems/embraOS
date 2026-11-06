@@ -88,9 +88,10 @@ if [ "$slot_a_status" = "pending" ]; then set slot_a_title="${slot_a_title} [pen
 if [ "$slot_b_status" = "pending" ]; then set slot_b_title="${slot_b_title} [pending]"; fi
 if [ "$slot_active" = "a" ]; then set active_dev="$slot_a_dev"; else set active_dev="$slot_b_dev"; fi
 
-# $1 the slot letter, $2 its device, $3 the entry's own knobs. Order on the
-# line: GRUB's defaults, the entry's knobs, the host's string; embrad takes
-# the last occurrence of each embra.* knob. Two consoles: the display
+# $1 the slot letter, $2 its device, $3 the entry's own knobs with the words
+# the editor added (unquoted on the line, so GRUB splits them into words).
+# Order on the line: GRUB's defaults, the entry's knobs, the host's string;
+# embrad takes the last occurrence of each embra.* knob. Two consoles: the display
 # (tty0, fbcon on the firmware's framebuffer) and the serial line, which
 # comes last and so owns /dev/console — embrad's stdio, the TUI, the banner.
 function boot_slot {
@@ -110,26 +111,39 @@ export slot_active slot_try tries_left slot_a_status slot_b_status menu_timeout 
 set default="slot_${boot_slot}"
 set timeout="$menu_timeout"
 
+# GRUB's editor (`e` on an entry) shows the entry's arguments as its first
+# line, `setparams '<title>'`, and the entry runs with them as its positional
+# parameters, the title as $1 (menuentry.c keeps the title in the argument
+# list; menu.c passes the list whole). A knob typed at the end of that line
+# is $2. Every entry that boots drops the title with `shift` and hands the
+# rest to boot_slot inside its third argument, so the knob reaches the kernel
+# line. Nothing typed leaves an empty $*, which expands to no word.
+
 if [ "$slot_a_title" != "(empty)" ]; then
     menuentry "embraOS ${slot_a_title} - slot A" --id slot_a {
-        boot_slot a "$slot_a_dev" "$trial_a"
+        shift
+        boot_slot a "$slot_a_dev" "$trial_a $*"
     }
 fi
 if [ "$slot_b_title" != "(empty)" ]; then
     menuentry "embraOS ${slot_b_title} - slot B" --id slot_b {
-        boot_slot b "$slot_b_dev" "$trial_b"
+        shift
+        boot_slot b "$slot_b_dev" "$trial_b $*"
     }
 fi
 
 submenu "Diagnostics" --id diagnostics {
     menuentry "Boot the active slot with the serial TUI (embra.tui=1)" {
-        boot_slot "$slot_active" "$active_dev" "embra.tui=1"
+        shift
+        boot_slot "$slot_active" "$active_dev" "embra.tui=1 $*"
     }
     menuentry "Boot the active slot with debug logging (embra.loglevel=debug)" {
-        boot_slot "$slot_active" "$active_dev" "embra.loglevel=debug"
+        shift
+        boot_slot "$slot_active" "$active_dev" "embra.loglevel=debug $*"
     }
     menuentry "Boot the active slot with database request logging (embra.dbverbose=1)" {
-        boot_slot "$slot_active" "$active_dev" "embra.dbverbose=1"
+        shift
+        boot_slot "$slot_active" "$active_dev" "embra.dbverbose=1 $*"
     }
     if [ "$slot_a_title" != "(empty)" ]; then
         menuentry "Make slot A the default" {
@@ -140,7 +154,8 @@ submenu "Diagnostics" --id diagnostics {
             configfile "$prefix/grub.cfg"
         }
         menuentry "Boot slot A once (the default stays)" {
-            boot_slot a "$slot_a_dev" ""
+            shift
+            boot_slot a "$slot_a_dev" "$*"
         }
     fi
     if [ "$slot_b_title" != "(empty)" ]; then
@@ -152,7 +167,8 @@ submenu "Diagnostics" --id diagnostics {
             configfile "$prefix/grub.cfg"
         }
         menuentry "Boot slot B once (the default stays)" {
-            boot_slot b "$slot_b_dev" ""
+            shift
+            boot_slot b "$slot_b_dev" "$*"
         }
     fi
     menuentry "Clear the failed marks" {
@@ -168,7 +184,8 @@ submenu "Diagnostics" --id diagnostics {
         sleep --interruptible 60
     }
     menuentry "Command-line knobs" {
-        echo "Press e on an entry to edit its kernel line. embrad reads the last occurrence of each:"
+        echo "Press e on an entry, add a knob at the end of its first line, then Ctrl-x."
+        echo "embrad reads the last occurrence of each:"
         echo "  embra.tui=1 | embra.web=0   the serial TUI instead of the web console"
         echo "  embra.web=1                 the web console (this menu's default)"
         echo "  embra.cols=N embra.rows=N   the serial TUI's size"
@@ -182,15 +199,18 @@ submenu "Diagnostics" --id diagnostics {
 }
 
 menuentry "Update embraOS (slot ${slot_active}, embra.mode=update)" --id update {
-    boot_slot "$slot_active" "$active_dev" "embra.mode=update"
+    shift
+    boot_slot "$slot_active" "$active_dev" "embra.mode=update $*"
 }
 
 submenu "Backup and restore" --id backup {
     menuentry "Back up STATE and DATA (embra.mode=backup)" {
-        boot_slot "$slot_active" "$active_dev" "embra.mode=backup"
+        shift
+        boot_slot "$slot_active" "$active_dev" "embra.mode=backup $*"
     }
     menuentry "Restore STATE and DATA (embra.mode=restore)" {
-        boot_slot "$slot_active" "$active_dev" "embra.mode=restore"
+        shift
+        boot_slot "$slot_active" "$active_dev" "embra.mode=restore $*"
     }
 }
 
