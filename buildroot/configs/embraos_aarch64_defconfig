@@ -43,11 +43,14 @@ BR2_ROOTFS_OVERLAY="$(BR2_EXTERNAL_EMBRAOS_PATH)/board/embraos/rootfs_overlay"
 BR2_ROOTFS_POST_BUILD_SCRIPT="$(BR2_EXTERNAL_EMBRAOS_PATH)/board/embraos/post_build.sh"
 BR2_ROOTFS_POST_IMAGE_SCRIPT="$(BR2_EXTERNAL_EMBRAOS_PATH)/board/embraos/post_image.sh"
 
-# Image tools. mkdosfs for the EFI System Partition comes from Buildroot,
-# not from the build host.
+# Image tools. genimage, mcopy, mkdosfs for the EFI System Partition and
+# mke2fs for STATE and DATA come from Buildroot, not from the build host:
+# the post-image script runs with host/bin and host/sbin first on its PATH,
+# so every workstation assembles the image with the same tools.
 BR2_PACKAGE_HOST_GENIMAGE=y
 BR2_PACKAGE_HOST_MTOOLS=y
 BR2_PACKAGE_HOST_DOSFSTOOLS=y
+BR2_PACKAGE_HOST_E2FSPROGS=y
 
 # The kernel lands in the rootfs at /boot: each OS slot carries its own kernel
 # and initramfs, and GRUB loads them from the slot's squashfs.
