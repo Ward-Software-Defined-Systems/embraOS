@@ -18,10 +18,16 @@
 > [End-to-End Validation](#end-to-end-validation) checklist after any
 > canonical-build bump and re-stamp this date.
 >
-> The toolchain bump to Rust 1.98.1, Step 3.6 (the embedding model) and the
-> hardened Buildroot hooks (`set -euo pipefail`) landed after that run and are
-> **TBD on macOS** until the next Mac build; the x86_64 Linux build validates
-> them on every rebuild.
+> **2026-11-07 — the Phase 2 image on the Intel Mac.** Verified by William on the
+> Intel MacBook Pro 16" at `5be9bdf` (`--storage-engine rocksdb`): the full build
+> (Step 0.5 through the Docker Buildroot pass, with Rust 1.98.1, Step 3.6's
+> embedding model and the hardened Buildroot hooks, all TBD here since the
+> 2026-07-19 run), the UEFI boot under HVF (Homebrew's `edk2-x86_64-code.fd`,
+> GRUB's menu, slot A), the DHCP lease, the display window with GRUB, the boot log
+> and the console URL, and a bridged NIC through `vmnet-bridged` with the leased
+> URL (the note under [Boot](#4-boot)).
+> The Config Wizard, the soul and the steps after them in the
+> [End-to-End Validation](#end-to-end-validation) were not re-run on this date.
 >
 > **2026-07-19 — named-volume Buildroot flow.** The Docker pass now mounts a
 > named volume over `buildroot-src`: bind-mount Buildroot trees exhaust the
@@ -55,7 +61,7 @@ Docker container.
 > preferred for debugging; the web console is the primary interface. The disk
 > boots itself: the edk2 firmware Homebrew's qemu ships (`edk2-x86_64-code.fd`),
 > then GRUB's menu on the EFI System Partition (`EMBRA_BOOT=uefi`, the default;
-> **TBD** on an Intel Mac until the first run). `EMBRA_BOOT=direct` boots the
+> validated on an Intel Mac 2026-11-07). `EMBRA_BOOT=direct` boots the
 > kernel and the initramfs from the host as before, no firmware and no menu.
 
 > **zsh paste gotcha:** macOS's default `zsh` doesn't treat `#` as a comment in
@@ -77,7 +83,18 @@ source ~/.cargo/env
 rustup target add x86_64-unknown-linux-musl     # this build
 rustup target add wasm32-unknown-unknown        # embra-web frontend (Step 0.5)
 cargo install trunk --locked                    # Step 0.5 aborts if trunk is missing
+which -a cargo                                  # only ~/.cargo/bin/cargo: see the note below
 ```
+
+> **A Homebrew Rust ahead of rustup breaks Step 0.5.** Homebrew installs
+> `/usr/local/bin/cargo`, which on an Intel Mac comes before `~/.cargo/bin` on
+> PATH. `rustup target add wasm32-unknown-unknown` then reports the target
+> `up to date` (it looks at the pinned 1.98.1 toolchain), and Trunk's `cargo`
+> fails a moment later with `can't find crate for core` and
+> `the wasm32-unknown-unknown target may not be installed` (Homebrew's Rust
+> ships only the host's standard library; Step 1's musl target is missing from
+> it as well). `which -a cargo` listing `/usr/local/bin/cargo` first is the
+> tell; `brew uninstall rust` (or `~/.cargo/bin` first on PATH) is the fix.
 
 ```bash
 # QEMU + cross-toolchain + protoc + cmake + GNU coreutils (Homebrew)
@@ -184,6 +201,32 @@ provider + credentials, timezone), then Learning Mode forms and seals the soul.
 Once the soul is sealed, run `/embeddings backfill` once: the seed knowledge packs
 load before the wizard writes a configuration, so their nodes have no vectors until
 backfilled (see `docs/BUILD/QUICK-START.md`).
+
+> **Display window and a bridged network (validated 2026-11-07 on the Intel Mac).**
+> `run-qemu.sh`'s display switch, `EMBRA_VNC=1`, binds a VNC server to
+> `127.0.0.1:5900`, the port macOS Screen Sharing holds on a Mac. To see the
+> console on a window — GRUB's menu, the boot log and the banner with the URL —
+> run QEMU by hand with the standard VGA device (the firmware drives it, the
+> kernel's `bochs` driver takes it over) and a Cocoa display:
+> ```bash
+> cp "$(brew --prefix)/share/qemu/edk2-i386-vars.fd" /tmp/embraos-vars.fd
+> qemu-system-x86_64 -machine q35 -accel hvf -m 4G -smp 4 \
+>   -drive if=pflash,format=raw,readonly=on,file="$(brew --prefix)/share/qemu/edk2-x86_64-code.fd" \
+>   -drive if=pflash,format=raw,file=/tmp/embraos-vars.fd \
+>   -drive file=output/images/embraos.img,format=raw,if=virtio \
+>   -smbios "type=11,value=embra.cols=$(tput cols) embra.rows=$(tput lines)" \
+>   -vga std -display cocoa -serial mon:stdio \
+>   -nic user,hostfwd=tcp:127.0.0.1:50000-:50000,hostfwd=tcp:127.0.0.1:8443-:8443,hostfwd=tcp::3345-:3345
+> ```
+> For a lease from the LAN instead of QEMU's user network, replace the `-nic user,…`
+> line with `-nic vmnet-bridged,ifname=en0,model=virtio-net-pci` (`en0`, or the
+> interface `route -n get default` names) and run the command under `sudo`:
+> Apple's vmnet framework wants an entitlement Homebrew's QEMU lacks. There are no
+> port forwards in that mode; the banner's second URL, on the leased address, is the
+> one to open, from this Mac or from another machine on the LAN (the certificate
+> names `localhost`, so the browser warns about the name once). The same recipe
+> for Apple Silicon, with `ramfb` in place of the VGA device, is in
+> [AARCH64-BUILD.md](AARCH64-BUILD.md).
 
 > **Upgrading from the pre-volume flow? Delete the stale Mac-side
 > `buildroot-src/`.** `run-qemu.sh` prefers `buildroot-src/output/images/` over
@@ -311,8 +354,8 @@ banner at the top of this file.
 1. **Boot — web console (default).** `./scripts/run-qemu.sh`. Banner shows
    `Acceleration: HVF (macOS)`, `UI mode: web console (default)`, and
    `3345→3345 (HTTPS web)`; GRUB's menu shows on this terminal and boots slot A
-   (the UEFI path on an Intel Mac is **TBD** until this run; `EMBRA_BOOT=direct`
-   is the path validated so far). No kernel panic on `ttyS0`.
+   (the UEFI path, validated on an Intel Mac 2026-11-07; `EMBRA_BOOT=direct` is
+   the older path). No kernel panic on `ttyS0`.
 2. **Config Wizard + Learning Mode** in the browser at the URL embraOS printed at
    boot (`https://localhost:3345/embraOS?token=…`; accept the embraOS-CA cert) — name, the provider gateway or direct, LLM
    provider + credentials, timezone; full soul-formation conversation; soul
