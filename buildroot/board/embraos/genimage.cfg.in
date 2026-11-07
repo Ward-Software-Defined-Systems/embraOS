@@ -1,6 +1,7 @@
-/* Template — post_image.sh renders @ESP_SIZE@, @SLOT_SIZE@, @STATE_SIZE@ and
- * @DATA_SIZE@ from layout.sh into $(BUILD_DIR)/genimage.cfg. One committed
- * config builds both arches; the kernel is inside each slot's squashfs.
+/* Template — post_image.sh renders @ESP_SIZE@, @SLOT_SIZE@, @STATE_SIZE@,
+ * @DATA_SIZE@ and @IMAGE_SIZE@ from layout.sh into $(BUILD_DIR)/genimage.cfg.
+ * One committed config builds both arches; the kernel is inside each slot's
+ * squashfs.
  *
  * The layout, 1 MiB aligned (partition 1 starts at sector 2048; post_image.sh
  * and scripts/lib/image-common.sh check it): the EFI System Partition carries
@@ -45,6 +46,9 @@ image embraos.img {
         partition-table-type = "gpt"
         align = 1M
     }
+    /* A whole number of MiB (layout.sh says why); genimage puts the backup
+     * GPT on the last sector of this size, and post_image.sh reads it back. */
+    size = @IMAGE_SIZE@
 
     partition esp {
         partition-type-uuid = esp

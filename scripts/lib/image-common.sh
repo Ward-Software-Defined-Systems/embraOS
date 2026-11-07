@@ -316,7 +316,9 @@ assert_rootfs_invariants() {
 
 # assert_image_layout <image>: the partitions carry the names of layout.sh in
 # order, the first starts at sector 2048 and every start is a multiple of
-# 2048 — checked on the final image, not trusted from genimage's `align`.
+# 2048 — checked on the final image, not trusted from genimage's `align` —
+# and the image is the whole number of MiB layout.sh computes with the backup
+# GPT on its last sector, not trusted from genimage's `size`.
 assert_image_layout() {
     local img="$1" expected rows row nr start name i=0
     read -r -a expected <<< "$EMBRAOS_PARTITION_NAMES"
@@ -341,6 +343,7 @@ assert_image_layout() {
         }
         i=$((i + 1))
     done
+    embraos_check_whole_mib_gpt "$img" || reject_image
     # The ESP carries the loader, grub.cfg and grubenv, and grubenv names
     # slot A active: read through mtools at the partition's offset.
     local esp_start mdir mtype listing f
@@ -362,7 +365,7 @@ assert_image_layout() {
         echo "ERROR: grubenv on the ESP of $img does not name slot A active" >&2
         reject_image
     }
-    echo "image layout: $EMBRAOS_PARTITION_NAMES, 1 MiB aligned; the ESP carries the loader, grub.cfg and grubenv (slot A active)"
+    echo "image layout: $EMBRAOS_PARTITION_NAMES, 1 MiB aligned, $EMBRAOS_IMAGE_SIZE_MIB MiB with the backup GPT on the last sector; the ESP carries the loader, grub.cfg and grubenv (slot A active)"
 }
 
 # write_vm_images <raw image> <out dir> <arch> <engine>: the same disk for the
@@ -375,9 +378,10 @@ assert_image_layout() {
 # the empty slot B and the unused DATA, are not stored, so each file is about
 # the size of the data written. Needs qemu-img (Ubuntu: qemu-utils; macOS:
 # Homebrew's qemu). Each converted disk must report the raw image's virtual
-# size, and a VMDK's embedded descriptor must name the file it is in; the
-# OVA's member order and manifest are checked after packing. A failure
-# removes the staged file and stops the build.
+# size, a VMDK's capacity must be whole 64 KiB grains (VMware's sparse-extent
+# format asks for it; a whole-MiB image gives it) and its embedded descriptor
+# must name the file it is in; the OVA's member order and manifest are checked
+# after packing. A failure removes the staged file and stops the build.
 write_vm_images() {
     local raw="$1" out="$2" arch="$3" engine="$4"
     local name="embraos" template version build_id raw_size
@@ -427,6 +431,11 @@ write_vm_images() {
             exit 1
         }
         if [ "$fmt" = vmdk ]; then
+            [ $((vsize % 65536)) -eq 0 ] || {
+                echo "ERROR: $target has a capacity of $vsize bytes, not whole 64 KiB grains; the raw image is not a whole number of MiB" >&2
+                rm -rf "$staging"
+                exit 1
+            }
             extent="$(vmdk_extent_name "$work")"
             [ "$extent" = "$base" ] || {
                 echo "ERROR: the descriptor inside $target names its extent '${extent:-?}', not '$base'; VMware and Parallels would refuse the disk" >&2

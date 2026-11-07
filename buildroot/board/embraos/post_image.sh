@@ -78,6 +78,7 @@ sed -e "s/@ESP_SIZE@/${EMBRAOS_ESP_SIZE}/" \
     -e "s/@SLOT_SIZE@/${EMBRAOS_SLOT_SIZE}/" \
     -e "s/@STATE_SIZE@/${EMBRAOS_STATE_SIZE}/" \
     -e "s/@DATA_SIZE@/${EMBRAOS_DATA_SIZE}/" \
+    -e "s/@IMAGE_SIZE@/${EMBRAOS_IMAGE_SIZE}/" \
     "${GENIMAGE_CFG_IN}" > "${GENIMAGE_CFG}"
 if grep -q '@[A-Z_]*@' "${GENIMAGE_CFG}"; then
     echo "ERROR: a placeholder of ${GENIMAGE_CFG_IN} was not rendered:" >&2
@@ -98,8 +99,9 @@ genimage \
 
 # The layout check: the partitions genimage wrote carry the names of
 # layout.sh in order, the first starts at sector 2048 (1 MiB) and every start
-# is a multiple of 2048 — what `align = 1M` promises, verified on the image
-# rather than trusted.
+# is a multiple of 2048 — what `align = 1M` promises — and the image is the
+# whole number of MiB layout.sh computes with the backup GPT on its last
+# sector — what `size` promises. Both verified on the image rather than trusted.
 read -r -a EXPECTED <<< "${EMBRAOS_PARTITION_NAMES}"
 mapfile -t ROWS < <(partx -g -o NR,START,NAME -- "${BINARIES_DIR}/embraos.img")
 [ "${#ROWS[@]}" -eq "${#EXPECTED[@]}" ] || {
@@ -123,4 +125,5 @@ for row in "${ROWS[@]}"; do
     }
     i=$((i + 1))
 done
-echo "image layout: ${EMBRAOS_PARTITION_NAMES}, 1 MiB aligned"
+embraos_check_whole_mib_gpt "${BINARIES_DIR}/embraos.img" || exit 1
+echo "image layout: ${EMBRAOS_PARTITION_NAMES}, 1 MiB aligned, ${EMBRAOS_IMAGE_SIZE_MIB} MiB with the backup GPT on the last sector"
