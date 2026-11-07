@@ -375,8 +375,9 @@ assert_image_layout() {
 # the empty slot B and the unused DATA, are not stored, so each file is about
 # the size of the data written. Needs qemu-img (Ubuntu: qemu-utils; macOS:
 # Homebrew's qemu). Each converted disk must report the raw image's virtual
-# size; the OVA's member order and manifest are checked after packing. A
-# failure removes the partial file and stops the build.
+# size, and a VMDK's embedded descriptor must name the file it is in; the
+# OVA's member order and manifest are checked after packing. A failure
+# removes the staged file and stops the build.
 write_vm_images() {
     local raw="$1" out="$2" arch="$3" engine="$4"
     local name="embraos" template version build_id raw_size
@@ -392,21 +393,49 @@ write_vm_images() {
     mkdir -p "$out"
 
     # convert_checked <qemu format> <-o options or ""> <target>
+    # The disk is converted under its final name inside a staging directory
+    # and moved across once it checks out. The name matters: qemu-img writes
+    # the file name it was given into a VMDK's embedded descriptor as the
+    # extent's name, and VMware and Parallels open the extent by that name,
+    # so a disk converted as <name>.partial and renamed is "invalid" to both
+    # (QEMU reads the one-file layouts without the name, which is why the
+    # size check alone did not catch it). vmdk_extent_name reads the name
+    # back, and a VMDK whose descriptor names another file stops the build.
+    local staging="$out/.convert-stage"
+    vmdk_extent_name() {   # <vmdk> → the file the descriptor's first extent line names
+        local names
+        names="$(head -c 65536 "$1" | LC_ALL=C tr -cd '\12\40-\176' \
+            | LC_ALL=C sed -n 's/^RW [0-9][0-9]* SPARSE "\([^"]*\)".*$/\1/p')"
+        printf '%s\n' "${names%%$'\n'*}"
+    }
     convert_checked() {
-        local fmt="$1" opts="$2" target="$3" vsize
-        rm -f "$target" "$target.partial"
+        local fmt="$1" opts="$2" target="$3" base work vsize extent
+        base="$(basename "$target")"
+        work="$staging/$base"
+        rm -rf "$staging"
+        mkdir -p "$staging"
+        rm -f "$target"
         if [ -n "$opts" ]; then
-            qemu-img convert -f raw -O "$fmt" -o "$opts" "$raw" "$target.partial"
+            qemu-img convert -f raw -O "$fmt" -o "$opts" "$raw" "$work"
         else
-            qemu-img convert -f raw -O "$fmt" "$raw" "$target.partial"
+            qemu-img convert -f raw -O "$fmt" "$raw" "$work"
         fi
-        vsize="$(qemu-img info "$target.partial" | sed -n 's/^virtual size: .*(\([0-9]*\) bytes)$/\1/p')"
+        vsize="$(qemu-img info "$work" | sed -n 's/^virtual size: .*(\([0-9]*\) bytes)$/\1/p')"
         [ "$vsize" = "$raw_size" ] || {
             echo "ERROR: $target reports a virtual size of ${vsize:-?} bytes; the raw image has $raw_size" >&2
-            rm -f "$target.partial"
+            rm -rf "$staging"
             exit 1
         }
-        mv "$target.partial" "$target"
+        if [ "$fmt" = vmdk ]; then
+            extent="$(vmdk_extent_name "$work")"
+            [ "$extent" = "$base" ] || {
+                echo "ERROR: the descriptor inside $target names its extent '${extent:-?}', not '$base'; VMware and Parallels would refuse the disk" >&2
+                rm -rf "$staging"
+                exit 1
+            }
+        fi
+        mv "$work" "$target"
+        rm -rf "$staging"
     }
 
     convert_checked vmdk "" "$out/${name}.vmdk"
