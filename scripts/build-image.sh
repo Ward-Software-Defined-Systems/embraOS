@@ -311,15 +311,27 @@ fi
 
 # Clean stale Buildroot package caches so fresh binaries are picked up
 # Includes embraOS packages AND upstream packages whose config may have changed.
-# The kernel's target-install stamp goes too: a tree built before
-# BR2_LINUX_KERNEL_INSTALL_TARGET would otherwise keep /boot without the kernel.
+# Then the target directory is repopulated from this configuration: Buildroot
+# never removes what a deselected package installed and never rebuilds a
+# cached package whose options changed, so a target directory that outlives
+# a configuration ships the files of the configuration before it (the
+# graphical experiment of 2026-05 rode in every image until 2026-11, 145 MiB
+# of it). Removing the directory and the install stamps makes every package
+# of this configuration reinstall from its build directory, with no
+# recompilation (the target stamps alone: gcc-final's copy of libgcc and
+# libstdc++ into the target is a target step of its own; re-running every
+# host install instead re-linked a cached OpenSSL and raced on a symlink).
+# assert_target_is_clean (image-common.sh) checks the result against the marker
+# touched here.
 (cd "$BUILDROOT_DIR" && \
     for pkg in embrad embra-apid embra-trustd embra-brain embra-console embra-web wardsondb embra-update \
                embra-rust-toolchain embra-embedding-model git openssl libcurl openssh; do
         make "${pkg}-dirclean" 2>/dev/null || true
     done && \
-    rm -f output/build/linux-*/.stamp_target_installed && \
-    rm -f output/images/rootfs.squashfs output/images/embraos.img \
+    rm -rf output/target && \
+    find output/build -maxdepth 2 -name .stamp_target_installed -delete && \
+    mkdir -p output/build && touch output/build/.embraos-target-reseeded && \
+    rm -f output/images/rootfs.squashfs output/images/rootfs.tar output/images/embraos.img \
           output/images/boot.vfat output/images/esp.vfat)
 
 # The kernel tarball, verified against its pin before Buildroot runs: Buildroot

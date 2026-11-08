@@ -156,19 +156,64 @@ write_release_file() {
 # seed-state.sh and embraos-backup.sh look first. It is removed, so that a
 # build that failed leaves nothing that boots.
 reject_image() {
+    [ $# -eq 0 ] || echo "ERROR: $1" >&2
     rm -f "$BUILDROOT_DIR/output/images/embraos.img"
     echo "       The image this build produced was removed:" >&2
     echo "       $BUILDROOT_DIR/output/images/embraos.img" >&2
     exit 1
 }
 
+# The target directory holds the files of this configuration and nothing
+# else. Buildroot never removes what a deselected package installed and never
+# rebuilds a cached package whose options changed, so both image scripts
+# remove output/target and every target install stamp before make and touch a
+# marker; every package of the configuration then reinstalls into the fresh
+# directory. This is the check that it happened: the marker is older than
+# every install stamp, the files of the retired graphical experiment are
+# absent by name, one modules directory, udevd exactly with eudev.
+# (Buildroot's per-package .files-list.txt cannot serve here: its "before"
+# snapshot is taken in a step that does not re-run, so a reinstalled package's
+# list is empty.)
+assert_target_is_clean() {
+    local tgt="$BUILDROOT_DIR/output/target" cfg="$BUILDROOT_DIR/.config"
+    local marker="$BUILDROOT_DIR/output/build/.embraos-target-reseeded" mods f stale
+    [ -f "$marker" ] \
+        || reject_image "the target directory was not repopulated before this build (no $marker): the image scripts remove output/target and the install stamps before make"
+    stale="$(find "$BUILDROOT_DIR/output/build" -maxdepth 2 -name .stamp_target_installed ! -newer "$marker" -printf '%h\n' \
+             | sed 's|.*/||' | sort | tr '\n' ' ')"
+    [ -z "$stale" ] \
+        || reject_image "not reinstalled after the target directory was repopulated: ${stale% } (a stale target directory)"
+    # One modules directory, the pinned kernel's: a second one is an earlier
+    # kernel's install that outlived its configuration.
+    mods="$(ls "$tgt/lib/modules" 2>/dev/null | tr '\n' ' ')"
+    [ "$mods" = "$LINUX_KERNEL_VERSION " ] \
+        || reject_image "lib/modules holds '${mods% }' in the rootfs, expected the pinned kernel $LINUX_KERNEL_VERSION alone (a stale target directory)"
+    # udevd exactly when eudev is built (the display console's input).
+    if grep -q '^BR2_PACKAGE_EUDEV=y' "$cfg"; then
+        [ -x "$tgt/sbin/udevd" ] || reject_image "/sbin/udevd is missing from the rootfs though BR2_PACKAGE_EUDEV=y"
+    else
+        [ ! -e "$tgt/sbin/udevd" ] || reject_image "/sbin/udevd is in the rootfs though eudev is not built (a stale target directory)"
+    fi
+    # The retired graphical experiment (2026-05), by name.
+    for f in usr/bin/embra-desktop usr/bin/cage; do
+        [ ! -e "$tgt/$f" ] || reject_image "/$f is in the rootfs: a file of the retired embra-desktop experiment (a stale target directory)"
+    done
+    if ls "$tgt"/usr/lib/libwlroots-* >/dev/null 2>&1; then
+        reject_image "wlroots is in the rootfs: a file of the retired embra-desktop experiment (a stale target directory)"
+    fi
+    echo "target directory clean: repopulated for this build, one modules directory ($LINUX_KERNEL_VERSION)"
+}
+
 # The post-Buildroot checks of the root filesystem, the same on both
-# architectures: the embedding model, the in-OS toolchain at the pinned
+# architectures: the target directory holds this configuration's files and
+# nothing else, the embedding model, the in-OS toolchain at the pinned
 # version and that version only, no SSH server, and the slot's contents (the
-# kernel, the initramfs, the release stamp, GRUB's slot line, a squashfs that
-# fits its slot and is xz). Takes the Rust triple of the build.
+# kernel, the initramfs, the release stamp, GRUB's slot line, exactly those
+# under /boot, a squashfs that fits its slot and is xz). Takes the Rust triple
+# of the build.
 assert_rootfs_invariants() {
     local triple="${1:-}"
+    assert_target_is_clean
     # Post-Buildroot assert. Both ways this package can fail are SILENT: a package
     # whose Config.in is not sourced from buildroot/Config.in has its defconfig
     # symbol dropped without warning, and <PKG>_NAME is a Buildroot-reserved
@@ -269,7 +314,14 @@ assert_rootfs_invariants() {
         echo "ERROR: /boot/embraos-slot.cfg is missing or malformed in the rootfs" >&2
         reject_image
     }
-    echo "slot contents present: /boot/$kernel, /boot/initramfs.cpio.gz, /etc/embraos-release ($stamped), /boot/embraos-slot.cfg"
+    # /boot holds exactly the slot's files: anything else there is a leftover
+    # the squashfs would carry.
+    local boot_files expected_boot
+    boot_files="$(cd "$tgt/boot" && ls -A | sort | tr '\n' ' ')"
+    expected_boot="$(printf '%s\n' "$kernel" embraos-slot.cfg initramfs.cpio.gz | sort | tr '\n' ' ')"
+    [ "$boot_files" = "$expected_boot" ] \
+        || reject_image "/boot holds '${boot_files% }' in the rootfs, expected exactly: ${expected_boot% }"
+    echo "slot contents present: /boot/$kernel, /boot/initramfs.cpio.gz, /etc/embraos-release ($stamped), /boot/embraos-slot.cfg, nothing else under /boot"
 
     # The network: the resolver is a link into the ephemeral tmpfs (the root
     # is read-only; embrad and the lease script write there), and the lease

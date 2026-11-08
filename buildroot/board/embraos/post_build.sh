@@ -134,6 +134,16 @@ rm -f "${TARGET_DIR}/usr/sbin/sshd" \
       "${TARGET_DIR}/usr/libexec/sftp-server" \
       "${TARGET_DIR}/etc/ssh/sshd_config"
 
+# udev's files, for a build that carries it (eudev comes with the display
+# console's input): its network-naming rule would rename eth0, which embrad's
+# bring_up_network names, and its init scripts are for SysV init, which this
+# image has not. Removed on every build, whether or not eudev is built.
+rm -f "${TARGET_DIR}/lib/udev/rules.d/80-net-name-slot.rules" \
+      "${TARGET_DIR}/etc/init.d/S10udevd" \
+      "${TARGET_DIR}/etc/init.d/S30dbus"
+# OpenSSH's install leaves the server's moduli beside the client's config.
+rm -f "${TARGET_DIR}/etc/ssh/moduli"
+
 # Defense-in-depth: lock the root account.
 # The Buildroot skeleton leaves /etc/shadow with an empty root password,
 # which means anyone with shell access can become root without credentials.
