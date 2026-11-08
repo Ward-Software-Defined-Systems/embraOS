@@ -96,8 +96,14 @@ impl Write for Mirror {
     }
 }
 
-/// A writer with a primary and, when it has one, a mirror: what goes to the
-/// primary goes to the mirror too, and the mirror's failures are nobody's.
+/// A writer with a primary and, when it has one, a mirror. The mirror is
+/// written first and whole: the primary is `/dev/console`, and on a machine
+/// without a serial port that is a UART which is not there — the kernel
+/// opens it all the same (`uart_open` takes the startup's "no port" as
+/// success) and answers every write with EIO. A console that refuses a line
+/// is never an error here, the way std treats a closed stdout: the line is
+/// dropped, PID 1 goes on, and nothing upstream gets an error to act on.
+/// The mirror's own failures are nobody's either.
 pub struct Tee<P: Write, M: Write> {
     primary: P,
     mirror: Option<M>,
@@ -111,18 +117,19 @@ impl<P: Write, M: Write> Tee<P, M> {
 
 impl<P: Write, M: Write> Write for Tee<P, M> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let n = self.primary.write(buf)?;
         if let Some(mirror) = self.mirror.as_mut() {
-            let _ = mirror.write_all(&buf[..n]);
+            let _ = mirror.write_all(buf);
         }
-        Ok(n)
+        let _ = self.primary.write_all(buf);
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
         if let Some(mirror) = self.mirror.as_mut() {
             let _ = mirror.flush();
         }
-        self.primary.flush()
+        let _ = self.primary.flush();
+        Ok(())
     }
 }
 
@@ -148,6 +155,32 @@ mod tests {
         }
         assert_eq!(primary, b"Starting services\nafter the redirect\n");
         assert_eq!(mirror, b"Starting services\n", "the mirror saw nothing after the boot phase");
+    }
+
+    /// `/dev/console` on a VM without a serial port: open, and every write EIO.
+    struct DeadConsole;
+
+    impl Write for DeadConsole {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from_raw_os_error(libc::EIO))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_dead_console_does_not_silence_the_display() {
+        let mut display = Vec::new();
+        {
+            let mut tee = Tee::new(DeadConsole, Some(&mut display));
+            writeln!(tee, "embrad starting as PID 1").expect("the display took the line");
+        }
+        assert_eq!(display, b"embrad starting as PID 1\n");
+
+        let mut tee = Tee::new(DeadConsole, None::<&mut Vec<u8>>);
+        assert!(writeln!(tee, "nowhere to go").is_ok(), "a dead console is never an error: PID 1's log writer must not fail");
     }
 
     #[test]

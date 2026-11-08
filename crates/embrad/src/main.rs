@@ -254,6 +254,9 @@ fn init_logging() {
         .with_level(true)
         .with_ansi(false) // No ANSI in kernel log
         .with_writer(console::BootLog)
+        // The subscriber never prints its own complaint to stderr: on PID 1
+        // a print to a console that refuses it would be a panic.
+        .log_internal_errors(false)
         .try_init();
 }
 
