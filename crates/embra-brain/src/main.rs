@@ -54,8 +54,10 @@ fn init_tracing() {
 
     let spec = std::env::var("EMBRA_LOG").unwrap_or_default();
     let (targets, applied) = log_filter_from(&spec);
+    // A layer's default leaves the subscriber's own eprintln! complaint off
+    // (the builder's turns it on); said here so it stays off.
     tracing_subscriber::registry()
-        .with(tracing_subscriber::fmt::layer().with_filter(targets))
+        .with(tracing_subscriber::fmt::layer().log_internal_errors(false).with_filter(targets))
         .init();
     // The one line that says which filter took and where it came from: the
     // operator's check after `embra.loglevel=` on the kernel line (embrad

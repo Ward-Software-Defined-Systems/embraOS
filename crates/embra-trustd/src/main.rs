@@ -150,7 +150,9 @@ fn log_filter_from(rust_log: Option<&str>) -> tracing_subscriber::EnvFilter {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_env_filter(log_filter()).with_ansi(false).init();
+    // The subscriber never prints its own complaint: that is an eprintln!, a
+    // panic when the log stream refuses a write (a full tmpfs, a dead console).
+    tracing_subscriber::fmt().with_env_filter(log_filter()).with_ansi(false).log_internal_errors(false).init();
     let config = TrustdConfig::from_args();
 
     info!("embra-trustd starting on port {}", config.port);

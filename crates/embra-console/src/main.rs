@@ -41,6 +41,9 @@ fn install_log() {
         .with_env_filter(log_filter_from(std::env::var("RUST_LOG").ok().as_deref()))
         .with_writer(std::io::stderr)
         .with_ansi(false)
+        // Never the subscriber's own eprintln! complaint: a panic when the log
+        // file refuses a write.
+        .log_internal_errors(false)
         .init();
 }
 

@@ -51,6 +51,9 @@ async fn main() -> anyhow::Result<()> {
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "embra_web=info".into()),
         )
+        // Never the subscriber's own eprintln! complaint: a panic when the log
+        // file refuses a write.
+        .log_internal_errors(false)
         .init();
 
     let cfg = WebConfig::from_args();
