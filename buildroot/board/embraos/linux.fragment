@@ -21,15 +21,25 @@ CONFIG_VFAT_FS=y
 CONFIG_NLS_CODEPAGE_437=y
 CONFIG_NLS_ISO8859_1=y
 # Phase 2: the storage and network devices other hypervisors present (NVMe,
-# VMware's vmxnet3 and pvscsi, Hyper-V's synthetic storage, network, video
-# and keyboard; the x86-only symbols are dropped from the aarch64 kernel by
-# the merge with a notice), the display console (the firmware's framebuffer
-# through sysfb and simpledrm, QEMU's standard VGA through bochs, fbcon on
-# the kernel line as console=tty0 beside the serial line), and nf_tables for
-# the packet filter to come (built, unused until then).
+# VMware's vmxnet3, pvscsi and its two LSI Logic controllers, Hyper-V's
+# synthetic storage, network, video and keyboard; the x86-only symbols are
+# dropped from the aarch64 kernel by the merge with a notice), the display
+# console (the firmware's framebuffer through sysfb and simpledrm, QEMU's
+# standard VGA through bochs, fbcon on the kernel line as console=tty0 beside
+# the serial line), and nf_tables for the packet filter to come (built,
+# unused until then).
 CONFIG_BLK_DEV_NVME=y
 CONFIG_VMXNET3=y
 CONFIG_VMWARE_PVSCSI=y
+# VMware's LSI Logic Parallel (LSI 53C1030) and LSI Logic SAS (SAS1068)
+# controllers, ESXi's defaults for most guest types and the pick when a
+# controller list is blank: the Fusion MPT drivers mptspi and mptsas, under
+# the family's switch (PCI and I/O ports; both architectures have them).
+# Without them a disk on either controller is invisible to the kernel and
+# embra-init halts on a blank display.
+CONFIG_FUSION=y
+CONFIG_FUSION_SPI=y
+CONFIG_FUSION_SAS=y
 CONFIG_HYPERV=y
 CONFIG_HYPERV_STORAGE=y
 CONFIG_HYPERV_NET=y

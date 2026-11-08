@@ -459,7 +459,7 @@ write_vm_images() {
         -e "s|@CAPACITY@|$raw_size|g" -e "s|@NAME@|$name|g" \
         -e "s|@VERSION@|$version|g" -e "s|@BUILD_ID@|$build_id|g" \
         -e "s|@ARCH@|$arch|g" -e "s|@ENGINE@|$engine|g" \
-        -e "s|@CPUS@|4|g" -e "s|@MEMORY_MB@|4096|g" -e "s|@SYSTEM_TYPE@|vmx-19|g" \
+        -e "s|@CPUS@|4|g" -e "s|@MEMORY_MB@|4096|g" -e "s|@SYSTEM_TYPE@|vmx-20|g" \
         "$template" > "$stage/$ovf"
     grep -q '@[A-Z_]*@' "$stage/$ovf" && { echo "ERROR: an OVF placeholder was not rendered" >&2; exit 1; }
     (

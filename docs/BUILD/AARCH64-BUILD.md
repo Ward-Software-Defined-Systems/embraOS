@@ -337,8 +337,9 @@ Docker command. The Docker `--buildroot-only` pass then runs Steps 3.5, 3.6 and 
   `rootfs.squashfs` (the slot image an OS update ships) → `output/images/` (copied
   out of the volume onto the host tree), then the same disk converted for the other
   hypervisors with `qemu-img`: `embraos.vmdk` (Parallels, Fusion, VirtualBox),
-  `embraos.vhdx` (Hyper-V generation 2, Secure Boot off) and `embraos.ova` (ESXi,
-  vCenter). Each is checked against the raw image's size; the aarch64 ones are
+  `embraos.vhdx` (Hyper-V generation 2, Secure Boot off) and `embraos.ova` (ESXi
+  8.0 or later, vCenter; hardware version 20, guest type "Other 6.x or later Linux
+  (64-bit)"). Each is checked against the raw image's size; the aarch64 ones are
   **TBD** until booted on a hypervisor of that architecture.
 
 **Isolated cross-compilation validation (optional).** To validate Rust cross-compilation

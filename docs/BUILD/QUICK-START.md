@@ -84,7 +84,8 @@ EOF
 ./scripts/build-image.sh --storage-engine rocksdb   # Full pipeline: Rust → initramfs → Buildroot → disk image
                                                     # Leaves output/images/embraos.img (QEMU) and the same disk as
                                                     # embraos.vmdk (Parallels, Fusion, VirtualBox), embraos.vhdx
-                                                    # (Hyper-V gen 2, Secure Boot off), embraos.ova (ESXi, vCenter)
+                                                    # (Hyper-V gen 2, Secure Boot off), embraos.ova (ESXi 8.0+, vCenter:
+                                                    # hardware version 20, guest "Other 6.x or later Linux (64-bit)")
                                                     # — qemu-img (qemu-utils) converts them; TBD until booted there
 
 # Default UI is the embra-web console — open the URL embraOS prints at boot (https://localhost:3345/embraOS?token=…)

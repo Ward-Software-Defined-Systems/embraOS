@@ -2,7 +2,13 @@
 <!-- embraOS OVF descriptor, rendered by write_vm_images (scripts/lib/image-common.sh).
      One disk (the whole embraOS GPT image as a streamOptimized VMDK), EFI firmware
      with Secure Boot off (GRUB and the kernel are unsigned), a paravirtual SCSI
-     controller and a VMXNET3 adapter (both drivers are in the kernel). -->
+     controller and a VMXNET3 adapter (both drivers are in the kernel), at virtual
+     hardware version 20 (ESXi 8.0, Fusion 13, Workstation 17). The guest type is
+     "Other 6.x or later Linux (64-bit)", vSphere 8.0's name for a kernel like the
+     6.18 here: ESXi offers a VM the devices its guest type lists, and the legacy
+     "Other Linux (64-bit)" lists neither the paravirtual controller nor VMXNET3,
+     so the imported devices showed as blank selections and every edit of the VM
+     was refused as invalid. The CIM id 101 is "Linux 64-Bit". -->
 <Envelope xmlns="http://schemas.dmtf.org/ovf/envelope/1"
           xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1"
           xmlns:rasd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData"
@@ -25,9 +31,9 @@
   <VirtualSystem ovf:id="@NAME@">
     <Info>embraOS @VERSION@ (@ARCH@, @ENGINE@)</Info>
     <Name>@NAME@</Name>
-    <OperatingSystemSection ovf:id="101" vmw:osType="otherLinux64Guest">
+    <OperatingSystemSection ovf:id="101" vmw:osType="other6xLinux64Guest">
       <Info>The guest operating system</Info>
-      <Description>Other Linux (64-bit)</Description>
+      <Description>Other 6.x or later Linux (64-bit)</Description>
     </OperatingSystemSection>
     <VirtualHardwareSection>
       <Info>@CPUS@ vCPU, @MEMORY_MB@ MiB, EFI</Info>
